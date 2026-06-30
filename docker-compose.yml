@@ -1,0 +1,104 @@
+# Full ReliPay stack — postgres + redis + api + panel + portal.
+#
+# Usage:
+#   cp .env.example .env  (then edit secrets)
+#   docker compose up --build
+#
+# After first boot, run migrations:
+#   docker compose exec api node node_modules/prisma/build/index.js \
+#     migrate deploy --schema /app/prisma/schema.prisma
+#
+# Drop the `api`/`panel`/`portal` services if you only want the local-dev
+# infra (postgres + redis) and run the apps from your shell.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: relipay
+      POSTGRES_PASSWORD: relipay
+      POSTGRES_DB: relipay
+    ports:
+      - "5432:5432"
+    volumes:
+      - relipay_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relipay -d relipay"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - relipay_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    profiles: ["full"]    # only starts with `docker compose --profile full up`
+    build:
+      context: .
+      target: api-runtime
+    image: relipay-api:local
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://relipay:relipay@postgres:5432/relipay?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET:        ${JWT_SECRET:-change-me-in-prod}
+      SESSION_SECRET:    ${SESSION_SECRET:-change-me-in-prod}
+      ENCRYPTION_KEY:    ${ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
+      SUPER_ADMIN_KEY:   ${SUPER_ADMIN_KEY:-change-me-in-prod}
+      API_URL:           http://api:3030
+      # Local hosted-portal origin — auto-allowed for publishable-key calls.
+      PUBLIC_PORTAL_URL: http://localhost:3050
+    ports:
+      - "3030:3030"
+
+  panel:
+    profiles: ["full"]
+    build:
+      context: .
+      target: panel-runtime
+    image: relipay-panel:local
+    depends_on:
+      - api
+    environment:
+      NODE_ENV: production
+      RELIPAY_URL: http://api:3030
+      PANEL_URL:   http://localhost:3031
+    ports:
+      - "3031:3031"
+
+  # Hosted multi-app customer portal (Portal V2). ONE deployment serves every
+  # opted-in Application at /<slug> — no per-app secret key. Enable an app's
+  # portal in Panel → Application → Billing → Portal, then visit
+  # http://localhost:3050/<slug>. See docs/portal.md.
+  portal:
+    profiles: ["full"]
+    build:
+      context: .
+      target: portal-runtime
+    image: relipay-portal:local
+    depends_on:
+      - api
+    environment:
+      NODE_ENV: production
+      RELIPAY_URL: http://api:3030
+      PORTAL_BASE_URL: http://localhost:3050
+    ports:
+      - "3050:3050"
+
+volumes:
+  relipay_postgres:
+  relipay_redis:

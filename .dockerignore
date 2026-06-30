@@ -1,0 +1,30 @@
+# Keep the build context lean + never leak local artifacts/secrets into images.
+# The deps stage runs `pnpm install` (so node_modules must NOT be copied over
+# the installed one); builds regenerate dist/.next inside the image.
+
+**/node_modules
+**/.next
+**/.turbo
+**/dist
+**/*.tsbuildinfo
+
+# Secrets / local env — must never enter an image layer.
+**/.env
+**/.env.*
+!**/.env.example
+
+# VCS + CI + tooling
+.git
+.github
+.claude
+.husky
+
+# demo is a workspace member but not deployed — keep its package.json (needed for
+# the workspace install graph), drop its source from the build context.
+apps/demo/*
+!apps/demo/package.json
+
+# Misc
+**/*.log
+**/.DS_Store
+**/coverage

@@ -1,0 +1,251 @@
+# Billing
+
+The billing surface in ReliPay is intentionally provider-agnostic. Stripe, PayPal, and Razorpay all sit behind one `BillingProvider` interface; an Application picks one in its `billingConfig.provider`.
+
+> **Status (today)**: all three providers are real — `RealStripeProvider` (stripe SDK), `RealPaypalProvider` (REST), `RealRazorpayProvider` (razorpay SDK). Inbound webhook ingestion is live for Stripe and PayPal (signature-verified, with a durable `WebhookEvent` idempotency table) and drives the subscription state machine end-to-end. The deterministic stub providers run only under `NODE_ENV=test` / `RELIPAY_BILLING_FORCE_STUB=true`, or — for Stripe — when no BYO credentials are configured; PayPal / Razorpay require credentials (else `BILLING_PROVIDER_NOT_CONFIGURED`).
+
+## Concepts
+
+```
+Application
+  ├── many Plan          ("pro_monthly", "team_annual"; admin-managed)
+  └── many Subscription  (one active per (Application, EndUser, Plan))
+           └── many Payment
+```
+
+- **Plan** — pricing entry. `{ slug, name, amount, currency, interval, active }`. `amount` is the **smallest currency unit** (cents/paise/sen) — never a float.
+- **Subscription** — links an `EndUser` to a `Plan` with a status: `PENDING → ACTIVE → (PAST_DUE | CANCELED | EXPIRED)`. `currentPeriodEnd`, `cancelAt`, `canceledAt` track the lifecycle.
+- **Payment** — every charge attempt. Status: `PENDING → SUCCEEDED | FAILED | REFUNDED`.
+
+## Money rule
+
+Always integers. `$9.99` is `999`. `₹499` is `49900`. `¥100` is `100`. **Never floats.** Format on display, not in storage.
+
+## The provider abstraction
+
+```ts
+// apps/api/src/modules/billing/providers/types.ts
+interface BillingProvider {
+  readonly name: string;                                                 // "stripe" | "paypal" | "razorpay"
+  ensurePlanRegistered(plan: Plan): Promise<{ providerPlanId: string }>;  // Stripe Product+Price, PayPal Plan, …
+  createCheckoutSession(input: CheckoutSessionInput): Promise<{ url: string; sessionId: string }>;
+  cancelSubscription(input: CancelSubscriptionInput): Promise<void>;
+}
+```
+
+The interface expresses the **intersection** of capabilities. Provider-specific data (Stripe `tax_behavior`, PayPal `setup_fee`, …) lives in `metadata: Json` on `Plan` / `Subscription` / `Payment`. **Resist surfacing provider-only concepts at the top level.** That's the seam.
+
+`getProviderForApplication(application)` is the only call site that picks a provider. Don't `new StripeStubProvider()` anywhere else — go through the registry in `modules/billing/providers/index.ts`.
+
+## Admin endpoints
+
+All gated by `SUPER_ADMIN_KEY`. Owned by the `plans` module.
+
+```
+GET    /api/v1/admin/applications/:id/plans?includeInactive=true
+POST   /api/v1/admin/applications/:id/plans
+PATCH  /api/v1/admin/applications/:id/plans/:slug         { active: boolean }
+```
+
+Creating a plan triggers `BillingProvider.ensurePlanRegistered()` synchronously; the returned provider id is persisted into `Plan.metadata.{provider}`.
+
+There is **no delete endpoint by design**. Plans referenced by historical Subscriptions need to live forever for accounting. Use `setActive(false)` to retire — that's the only way out.
+
+## Public endpoints
+
+API key required (`Authorization: Bearer rp_live_…`). Some additionally require the user JWT.
+
+```
+GET   /api/v1/billing/plans                                  — Application key only (pricing pages)
+GET   /api/v1/billing/subscription                           — Application key + user JWT
+POST  /api/v1/billing/checkout    { planSlug, successUrl, cancelUrl }
+```
+
+`POST /checkout` upserts a `PENDING` Subscription locally (so we can correlate the eventual webhook), then asks the provider to create a hosted-checkout session. Returns the URL to redirect to and the local Subscription row. **Subscription activation happens via the provider's webhook — not synchronously here.**
+
+If the user already started checkout for the same plan and bailed, repeated calls **reuse the existing PENDING row** rather than creating parallel ones. The unique constraint is `(applicationId, endUserId, planId)`.
+
+## SDK usage
+
+```ts
+// Pricing page (server-side render)
+const plans = await relipay.billing.getPlans();
+// → [{ slug: "pro_monthly", amount: 999, currency: "USD", interval: "MONTH", ... }]
+
+// User clicks "Subscribe"
+const { url } = await relipay.billing.createCheckout(userAccessToken, {
+  planSlug: 'pro_monthly',
+  successUrl: 'https://yourapp.com/billing?status=ok',
+  cancelUrl:  'https://yourapp.com/billing?status=cancel',
+});
+res.redirect(url);
+
+// Account page
+const sub = await relipay.billing.getSubscription(userAccessToken);
+if (sub === null) {
+  // user hasn't subscribed — show upsell
+} else if (sub.status === 'ACTIVE') {
+  // gate features on sub.planId
+}
+```
+
+## Subscription state machine
+
+```
+              checkout            provider webhook            provider event
+PENDING ─────────────────────────> ACTIVE ──cancel──> CANCELED
+                                     │
+                                     ├──payment-fail──> PAST_DUE ──retry-ok──> ACTIVE
+                                     │                       │
+                                     │                       └──end-of-period──> EXPIRED
+                                     │
+                                     └──end-of-period──> EXPIRED
+```
+
+All of these transitions are live. Checkout creates the `PENDING` row; the signed provider webhook path (see below) is what flips it to `ACTIVE` and drives every later transition (`PAST_DUE`, `CANCELED`, `EXPIRED`).
+
+## Dunning — failed-payment recovery
+
+When a subscription transitions to `PAST_DUE`, ReliPay opens a **dunning case** (`DunningCase` row) that tracks the recovery and notifies the end-user. One case per PAST_DUE trip; at most one OPEN case per subscription.
+
+**What's provider-driven vs what ReliPay automates — read this first:**
+
+- **The provider owns the actual card retries.** Stripe Smart Retries re-attempts the charge on Stripe's own schedule (each attempt arrives at ReliPay as another `invoice.payment_failed` or, on success, `invoice.paid`); PayPal retries a `SUSPENDED` subscription similarly. ReliPay **never re-charges a payment method itself** — there is no retry policy to configure here.
+- **ReliPay owns the state machine, the reminder emails, and the events.** The case is the operator's single source of truth for "who is in recovery, since when, how many failures, what happens next."
+
+**Schedule** (all offsets relative to the case's `openedAt`):
+
+| When | Action |
+|---|---|
+| Day 0 (case opens) | Reminder email #1 to the end-user + `dunning.case_opened` outbound event |
+| Day 3 | Reminder email #2 |
+| Day 7 | Reminder email #3 |
+| Day 14, no recovery | Case → `EXHAUSTED`; subscription is set `CANCELED` locally, a provider-side cancel is attempted where a provider subscription exists, and `subscription.canceled` + `dunning.case_exhausted` are emitted |
+
+Reminder emails go through the **per-Application email system** (event key `billing_payment_failed_reminder` — customizable in Panel → Application → Email like any other transactional template). No transport configured → the send is logged as `no_transport` and the schedule still advances; the case, not the inbox, is the source of truth.
+
+**Recovery & closure:** a later successful payment (`invoice.paid` / `PAYMENT.SALE.COMPLETED`) or a provider reactivation closes the case as `RECOVERED` and emits `dunning.case_recovered`. If the subscription is canceled while in dunning (end-user portal cancel, provider cancel), the case closes as `CANCELED` silently — the accompanying `subscription.canceled` event already announced it.
+
+**EXHAUSTED behavior:** exhaustion is terminal. The subscription is canceled both locally and (best-effort) provider-side via the same `BillingProvider.cancelSubscription` path the portal uses; a provider API error does not block the local cancel — the provider has already failed to collect for 14 days. Re-subscribing means a fresh checkout.
+
+**Scheduling/ops:** a 10-minute in-process poller (`processDueDunningCases`, registered in `app.ts` like the webhook retry poller) advances OPEN cases whose `nextActionAt` has passed. Each case is claimed with an atomic guarded update, so running multiple API replicas never double-sends a reminder or double-exhausts.
+
+**Operator visibility:** `GET /api/v1/tenant/applications/:id/dunning` (filter `?status=`, paginated/sortable like `/payments`), plus the Billing → Dunning tab and the "Dunning" tile on the revenue overview in the panel.
+
+## Webhooks — two directions, don't conflate them
+
+ReliPay is in the middle of **two separate webhook flows**, and they have nothing in common beyond the word "webhook":
+
+| | Sender → Receiver | Who verifies the signature | Who configures it | Events |
+|---|---|---|---|---|
+| **(a) Outbound** | ReliPay → **your app** | **You**, with `verifyWebhookSignature` from `@relipay/node` | You: Panel → Application → Webhooks (or `POST /api/v1/tenant/applications/:id/webhooks`) | `user.created`, `user.updated`, `user.deleted`, `session.revoked`, `mfa.enabled`, `mfa.disabled`, `password.changed`, `email.verified`, `subscription.activated`, `subscription.canceled`, `subscription.past_due`, `payment.succeeded`, `payment.failed`, `dunning.case_opened`, `dunning.case_recovered`, `dunning.case_exhausted` |
+| **(b) Provider** | Stripe/PayPal → **ReliPay** | **ReliPay**, against the per-Application provider webhook secret | Operator: provider dashboard endpoint + secret pasted into Panel → Application → Billing | Provider events (`checkout.session.completed`, `invoice.paid`, …) that drive the subscription state machine |
+
+`verifyWebhookSignature` is **only** for direction (a). Your application code never receives or verifies a Stripe/PayPal webhook — that traffic terminates at ReliPay.
+
+### (a) Webhooks ReliPay sends to YOUR app
+
+Register an endpoint (URL + event list, `"*"` for all) in the panel or via `POST /api/v1/tenant/applications/:id/webhooks`. The response includes the endpoint's signing `secret` exactly once — store it (e.g. as `RELIPAY_WEBHOOK_SECRET`).
+
+Every delivery is a JSON envelope `{ eventId, occurredAt, type, applicationId, data }`, signed with a `t=<unix-ts>,v1=<hmac-sha256-hex>` header named `X-Relipay-Signature`. Verify it against the **raw body bytes** before trusting anything:
+
+```ts
+import { verifyWebhookSignature } from '@relipay/node';
+
+// Fastify shown; any framework works as long as you keep the RAW body.
+app.post('/webhooks/relipay', { config: { rawBody: true } }, async (req, reply) => {
+  const ok = verifyWebhookSignature({
+    header: req.headers['x-relipay-signature'] as string,
+    payload: req.rawBody!,            // raw bytes — reserialized JSON breaks the HMAC
+    secret: process.env.RELIPAY_WEBHOOK_SECRET!,
+  });
+  if (!ok) return reply.status(401).send();
+
+  const event = req.body as { eventId: string; type: string; data: Record<string, unknown> };
+  // Failed deliveries are retried with backoff and REUSE the same eventId —
+  // dedupe on it (one cheap upsert) before acting.
+  await handleOnce(event.eventId, () => applyEvent(event));
+  return reply.status(200).send();
+});
+```
+
+Failed deliveries retry with exponential backoff (30s → 2m → 10m → 1h → 4h, ~5h total); the panel shows delivery history per endpoint, and you can force a retry from there (or via `POST /api/v1/tenant/applications/:id/webhooks/:endpointId/deliveries/:deliveryId/retry`).
+
+The canonical event list ships in code as `WEBHOOK_EVENTS` (an array of `{ name, description }`) and `KNOWN_WEBHOOK_EVENTS` (just the names) from `@relipay/node` / `@relipay/shared-types`, with the `WebhookEventType` union and `WebhookEventEnvelope<TData>` envelope type — use them to autocomplete an endpoint's `events` array or render an event picker.
+
+> The outbound registry covers the auth/user lifecycle **and** the billing lifecycle: `subscription.activated` / `subscription.canceled` / `subscription.past_due` fire when a provider webhook actually transitions the local Subscription's status, and `payment.succeeded` / `payment.failed` fire when a Payment row is recorded. Payloads carry the ids, plan slug, and amount/currency/status under `data.subscription` / `data.payment`. Events are emitted only on a real state change — a replayed provider event that changes nothing emits nothing — but a provider retry after a 5xx on ReliPay's side may re-emit, so **dedupe on the envelope's `eventId`** (which retried deliveries reuse) before acting.
+
+### (b) Provider webhooks (Stripe/PayPal) that RELIPAY receives
+
+This is the flow that activates subscriptions. **Your application code plays no part in it** — you never write a handler for these and never see the payloads. As an operator you configure it once per Application: register the endpoint URL in the provider's dashboard and paste the signing secret into the panel (or let ReliPay auto-register it where supported); ReliPay does all verification and processing.
+
+`POST /api/v1/billing/webhook/stripe/<app-slug>` is live. It is **per-Application only** — there is no deployment-wide endpoint or shared `STRIPE_WEBHOOK_SECRET` (a shared signing secret would be a cross-tenant trust boundary; see decisions.md 2026-05-27). PayPal works the same way (`/webhook/paypal/<app-slug>`).
+
+```
+Stripe ──signed event──> ReliPay  (POST /webhook/stripe/<app-slug>)
+                            │
+                            ├─ resolve Application by slug; load its BYO webhook secret (none → 503)
+                            ├─ verify HMAC against THAT app's webhook secret (bad → 401)
+                            ├─ insert WebhookEvent row (P2002 = dup, skip)
+                            ├─ dispatch by event type (stripe.handler.ts)
+                            └─ persist processed_at OR processing_error
+                            ▼
+                       always returns 200 (after sig check)
+```
+
+The signature is the auth — no `Authorization` header on this route. The raw body is preserved by `fastify-raw-body` (HMAC verification breaks if you reserialize the JSON).
+
+**Application identification.** The app is identified by the URL slug, and the slug is trusted because the signing secret that validated the request is that app's own — a Stripe account can't sign payloads for another app's endpoint. (The dispatch handler still reads `metadata.applicationId` to scope its DB writes; ReliPay-created checkout sessions embed it and subscription/invoice events inherit it.)
+
+**Today's coverage:**
+
+| Event | Effect |
+|---|---|
+| `checkout.session.completed` | Local PENDING Subscription matched on `metadata.checkoutSessionId` → ACTIVE; persists `providerSubId` |
+| `customer.subscription.updated` | Mirrors status, currentPeriodEnd, cancelAt, canceledAt |
+| `customer.subscription.deleted` | → CANCELED |
+| `invoice.paid` / `invoice.payment_succeeded` | Inserts SUCCEEDED Payment + ensures Subscription ACTIVE |
+| `invoice.payment_failed` | Inserts FAILED Payment + sets Subscription PAST_DUE |
+| anything else | Logged + recorded as processed (no-op) |
+
+See [`apps/api/src/modules/billing/webhooks/AGENTS.md`](../apps/api/src/modules/billing/webhooks/AGENTS.md) for the full module rules.
+
+## Caching entitlements
+
+`billing.getEntitlements(accessToken)` resolves feature flags + limits + the live credit balance from active subscriptions. Hitting it on every request adds a network round-trip to every page load, but caching it forever serves stale plans after an upgrade. The recommended middle:
+
+- **Cache per subject with a ~5-minute TTL** — key on `(endUserId)` or `(endUserId, organizationId)` when the user has an active org. Five minutes bounds how long a plan change can be invisible while absorbing nearly all of the read traffic.
+- **Serve stale-while-revalidate** — answer from cache immediately and refresh in the background when the entry is past TTL. Entitlement checks are on the hot path; a synchronous re-fetch on expiry shows up as p99 latency.
+- **Bust the cache on checkout success** — when the user lands on your `successUrl`, drop the cache entry and re-fetch so the just-purchased plan is visible on the very next render. (Activation arrives via the provider webhook a moment after redirect, so if the first re-fetch still shows the old plan, retry for a few seconds.) For a push-based invalidation, subscribe to the outbound `subscription.activated` / `subscription.canceled` / `subscription.past_due` events and drop the entry when one arrives.
+- **Don't cache `creditBalance` for spend decisions** — the credits API is its own atomic guard (`CREDITS_INSUFFICIENT` on overdraw); use the cached balance for display only.
+
+```ts
+const TTL_MS = 5 * 60 * 1000;
+const cache = new Map<string, { value: EntitlementsDto; fetchedAt: number }>();
+
+async function entitlementsFor(userId: string, accessToken: string, orgId?: string) {
+  const key = orgId ? `${userId}:${orgId}` : userId;
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.fetchedAt < TTL_MS) return hit.value;
+
+  const fresh = relipay.billing
+    .getEntitlements(accessToken, orgId ? { organizationId: orgId } : undefined)
+    .then((value) => (cache.set(key, { value, fetchedAt: Date.now() }), value));
+
+  // SWR: serve the stale value if we have one; otherwise wait.
+  return hit ? (void fresh, hit.value) : fresh;
+}
+
+// On the checkout success route:
+cache.delete(cacheKeyFor(userId, orgId)); // then re-fetch / retry until the new plan shows
+```
+
+(Use your shared cache — Redis with `EX 300` — instead of an in-process `Map` when you run multiple replicas.)
+
+## What's deliberately not here yet
+
+- **Provider-side overage billing.** Usage is metered + hard-capped in-house (record-time enforcement; 402 `USAGE_QUOTA_EXCEEDED` past the included quota), but charging consumption *past* the quota back through a provider invoice-item / usage push is a later `BillingProvider` method.
+- **`PlanPrice` / tiered pricing.** Multiple prices per plan + tiered metered overage — see `BILLING_MODEL.md`.
+- **Refunds, proration, mid-cycle plan changes.** Wrap provider behavior; don't reinvent.
+- **Tax computation.** Provider-handled (Stripe Tax) or external (TaxJar). Not our scope.
+- **PCI card vault.** Provider-handled. ReliPay never sees card numbers.

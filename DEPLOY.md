@@ -1,0 +1,91 @@
+# Deploying ReliPay (Dokploy)
+
+Deploys **api.relipay.dev** (API) + **panel.relipay.dev** (operator panel) +
+**admin.relipay.dev** (super-admin dashboard, read-only) +
+**portal.relipay.dev** (customer self-service
+billing portal) from `docker-compose.prod.yml`. Postgres + Redis
+are bundled in the compose.
+
+## 0. Prerequisites (you)
+- **DNS** — A records → the Dokploy host IP, before deploying (Let's Encrypt needs them):
+  - `api.relipay.dev`, `panel.relipay.dev`, `admin.relipay.dev`, `portal.relipay.dev`.
+- **Git source** — connect `EtherLabZ/ReliPay` to Dokploy (GitHub App or deploy key) if private.
+- **Secrets** — generate values for `.env.production` (see `.env.production.example`):
+  ```sh
+  echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)"
+  echo "JWT_SECRET=$(openssl rand -hex 32)"
+  echo "SESSION_SECRET=$(openssl rand -hex 32)"
+  echo "ENCRYPTION_KEY=$(openssl rand -hex 32)"
+  echo "SUPER_ADMIN_KEY=$(openssl rand -hex 32)"
+  ```
+
+## 1. Create the Dokploy project + compose service
+- Project: **ReliPay** (production environment).
+- Add a **Compose** service:
+  - Source: the `EtherLabZ/ReliPay` repo, branch `main`.
+  - Compose path: `docker-compose.prod.yml`.
+- Paste the generated secrets into the service **Environment**.
+
+## 2. Domains
+On the Compose service, add domains (Dokploy wires Traefik):
+| Host | Service | Port |
+|---|---|---|
+| `api.relipay.dev` | `api` | 3030 |
+| `panel.relipay.dev` | `panel` | 3031 |
+| `admin.relipay.dev` | `admin` | 3034 |
+| `portal.relipay.dev` | `portal` | 3050 |
+HTTPS on, Let's Encrypt. (The compose also carries Traefik labels as a fallback.)
+
+The `portal` service needs no per-app secret — it's the hosted multi-app portal
+(see "Customer portal" below).
+
+## 3. Deploy + migrate
+- **Deploy.** Migrations run automatically — the `api` container runs
+  `prisma migrate deploy` on start (idempotent), so a fresh database is migrated
+  on first boot. No manual step needed.
+- Bootstrap the first tenant via `/api/v1/admin/*` using `SUPER_ADMIN_KEY`, or sign up at the panel.
+
+## 4. Verify
+- `https://api.relipay.dev/docs` → Swagger.
+- `https://panel.relipay.dev` → panel login.
+- `https://admin.relipay.dev` → super-admin login (paste `SUPER_ADMIN_KEY`).
+- `https://portal.relipay.dev/<slug>` → customer portal for an opted-in
+  Application (see "Customer portal" below).
+- Provider webhooks auto-register at `https://api.relipay.dev/api/v1/billing/webhook/<provider>/<appSlug>` (PUBLIC_WEBHOOK_BASE_URL is already set to the prod API origin).
+
+## Super-admin dashboard (admin.relipay.dev)
+- Read-only — surfaces tenants, applications, end-users, orgs, subscriptions,
+  payments, MRR, webhook health, services, audit log, request log.
+- Auth: paste `SUPER_ADMIN_KEY` on the login form. The container compares
+  via `timingSafeEqual` and mints a 12-hour sliding opaque session id; the
+  cookie carries only the id, never the key.
+- Brute-force throttled at 5 attempts / 5 min / IP (in-memory).
+- The admin container needs the same `SUPER_ADMIN_KEY` env value as the api
+  service (set once in Dokploy → service → Environment).
+
+## Customer portal (portal.relipay.dev)
+Lives at `apps/portal` — the **hosted, multi-app** customer billing portal where
+the end-users of **any opted-in** Application sign in to manage their
+subscription. Builds via the `portal-runtime` Dockerfile target and ships in
+`docker-compose.prod.yml` as the `portal` service (port 3050).
+
+**One deployment, every Application.** The portal holds **no per-app secret
+key**. Each app is reached at `portal.relipay.dev/<slug>`; the portal fetches
+that app's public config (`GET /api/v1/portal/config/:slug` → publishable key +
+branding) and authorizes each customer with their own session token. Its only
+env is `RELIPAY_URL` (private API URL) + `PORTAL_BASE_URL`.
+
+Operators turn it on per-Application in **Panel → Application → Billing →
+Portal** — no deploy, no key wiring. Nothing to set in Dokploy for a new app.
+
+> The API needs `PUBLIC_PORTAL_URL=https://portal.relipay.dev` (set in the `api`
+> service env) so publishable-key calls from the portal origin are allowed.
+
+Operators who want to **self-host** their own single-app portal can use the
+reference at `examples/portal` (secret-key, one app per deploy). See
+`docs/portal.md`.
+
+## SDK publish
+`@relipay/node` (+ `@relipay/shared-types`) publish to npm on a GitHub Release
+via `.github/workflows/release.yml`. Add an `NPM_TOKEN` repo secret (npm org
+`relipay`, automation token) and publish a release tagged `sdk-vX.Y.Z`.

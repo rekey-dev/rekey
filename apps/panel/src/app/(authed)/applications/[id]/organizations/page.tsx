@@ -1,0 +1,284 @@
+import * as React from 'react';
+import Link from 'next/link';
+import { redirect } from 'next/navigation';
+import { revalidatePath } from 'next/cache';
+import {
+  api,
+  PanelApiError,
+  type ApplicationRow,
+  type OrganizationRow,
+  type EndUserRow,
+} from '@/lib/api';
+import { ConfirmButton } from '@/components/ConfirmButton';
+import { SubmitButton } from '@/components/SubmitButton';
+import { SavedBanner } from '@/components/SavedBanner';
+import { Field } from '@/components/Field';
+import { formatDate } from '@/lib/date';
+import { Modal } from '@/components/Modal';
+import { Pager, readPageSize } from '@/components/Pager';
+import { SectionHeader } from '@/components/Card';
+import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
+import { Badge } from '@/components/Badge';
+import { EmptyState } from '@/components/EmptyState';
+
+// ─── Actions ─────────────────────────────────────────────────────────
+
+async function createOrg(applicationId: string, formData: FormData): Promise<void> {
+  'use server';
+  const name = String(formData.get('name') ?? '').trim();
+  const slug = String(formData.get('slug') ?? '').trim();
+  const ownerEndUserId = String(formData.get('ownerEndUserId') ?? '').trim();
+  if (!name || !slug) {
+    redirect(`/applications/${applicationId}/organizations?error=missing&newOrg=1`);
+  }
+  try {
+    await api({
+      method: 'POST',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/organizations`,
+      body: { name, slug, ...(ownerEndUserId ? { ownerEndUserId } : {}) },
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`/applications/${applicationId}/organizations?error=${encodeURIComponent(err.code)}&newOrg=1`);
+    }
+    throw err;
+  }
+  revalidatePath(`/applications/${applicationId}/organizations`);
+  redirect(`/applications/${applicationId}/organizations?created=${encodeURIComponent(slug)}`);
+}
+
+async function deleteOrg(applicationId: string, orgId: string): Promise<void> {
+  'use server';
+  try {
+    await api({
+      method: 'DELETE',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/organizations/${encodeURIComponent(orgId)}`,
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`/applications/${applicationId}/organizations?error=${encodeURIComponent(err.code)}`);
+    }
+    throw err;
+  }
+  revalidatePath(`/applications/${applicationId}/organizations`);
+  redirect(`/applications/${applicationId}/organizations?deleted=1`);
+}
+
+// ─── Errors ──────────────────────────────────────────────────────────
+
+const ERR: Record<string, string> = {
+  missing: 'Name and slug are required.',
+  ORGANIZATION_SLUG_INVALID: 'Slug must be 1–40 chars of [a-z0-9-], starting and ending alphanumeric.',
+  ORGANIZATION_SLUG_TAKEN: 'An organization with that slug already exists in this application.',
+  END_USER_NOT_FOUND: 'The chosen owner is not an end-user of this application.',
+  ORGANIZATION_NOT_FOUND: 'Organization not found — it may have already been deleted.',
+  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage organizations.',
+};
+
+// ─── Page ────────────────────────────────────────────────────────────
+
+export default async function OrganizationsPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}): Promise<React.JSX.Element> {
+  const { id } = await params;
+  const sp = await searchParams;
+  const error = typeof sp.error === 'string' ? sp.error : undefined;
+  const newOrgError = sp.newOrg === '1' ? error : undefined;
+  const created = typeof sp.created === 'string' ? sp.created : undefined;
+  const PAGE_SIZE = readPageSize(sp);
+  const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
+
+  const [app, orgs, endUsers] = await Promise.all([
+    api<ApplicationRow>({
+      method: 'GET',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
+    }),
+    api<OrganizationRow[]>({
+      method: 'GET',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/organizations?limit=${PAGE_SIZE}&offset=${offset}`,
+    }),
+    api<EndUserRow[]>({
+      method: 'GET',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users?limit=100`,
+    }),
+  ]);
+
+  const enabled = app.authConfig.organizationsEnabled === true;
+
+  return (
+    <div className="space-y-5">
+      <section className="space-y-3">
+        <SectionHeader
+          title="Organizations"
+          count={`(${orgs.length})`}
+          description={
+            <>
+              Group end-users into companies/teams — use this if you bill organizations rather than
+              individuals. Optional, and distinct from your workspace members. End-users create +
+              manage these from your app via the SDK
+              (<code className="font-mono text-xs">relipay.organizations.*</code>); you can also
+              provision and curate them here.
+            </>
+          }
+          action={<NewOrgModal applicationId={id} endUsers={endUsers} error={newOrgError} />}
+        />
+
+        {!enabled && (
+          <div className="rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
+            Organizations are <strong>disabled</strong> for this application — the SDK org endpoints
+            return <code className="font-mono text-xs">ORGANIZATIONS_NOT_ENABLED</code> for end-users
+            (operator management here still works). Enable it under{' '}
+            <Link href={`/applications/${id}/auth`} className="underline hover:no-underline">
+              Auth
+            </Link>
+            .
+          </div>
+        )}
+
+        {created && <SavedBanner params={['created']} message={`Organization ${created} created.`} />}
+        {error && !newOrgError && (
+          <p
+            role="alert"
+            className="rounded-lg border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300"
+          >
+            {ERR[error] ?? error}
+          </p>
+        )}
+
+        {orgs.length === 0 ? (
+          <EmptyState
+            title="No organizations yet"
+            description={
+              <>
+                Create one if you bill companies/teams rather than individuals — use “+ New
+                organization”, or let end-users create teams from your app with
+                <code className="font-mono text-xs"> relipay.organizations.create()</code>.
+              </>
+            }
+          />
+        ) : (
+          <Table minWidth="min-w-[48rem]">
+            <THead>
+              <TR>
+                <TH>Name</TH>
+                <TH>Slug</TH>
+                <TH>Members</TH>
+                <TH>Pending invites</TH>
+                <TH>Created</TH>
+                <TH align="right"> </TH>
+              </TR>
+            </THead>
+            <TBody>
+              {orgs.map((o) => (
+                <TR key={o.id} hover>
+                  <TD className="font-medium">{o.name}</TD>
+                  <TD>
+                    <Badge tone="neutral" mono>{o.slug}</Badge>
+                  </TD>
+                  <TD muted className="text-xs">{o.memberCount}</TD>
+                  <TD muted className="text-xs">
+                    {o.pendingInvitationCount > 0 ? o.pendingInvitationCount : '—'}
+                  </TD>
+                  <TD muted className="text-xs">
+                    {formatDate(o.createdAt)}
+                  </TD>
+                  <TD align="right">
+                    <div className="flex items-center justify-end gap-3">
+                      <Link
+                        href={`/applications/${id}/organizations/${o.id}`}
+                        className="text-xs font-medium text-[var(--color-fg)] hover:underline"
+                      >
+                        Manage
+                      </Link>
+                      <form action={deleteOrg.bind(null, id, o.id)} className="inline">
+                        <ConfirmButton
+                          confirm={`Delete organization "${o.name}"? This removes all ${o.memberCount} membership${o.memberCount === 1 ? '' : 's'} and any pending invitations. End-user accounts themselves are not deleted.`}
+                        >
+                          Delete
+                        </ConfirmButton>
+                      </form>
+                    </div>
+                  </TD>
+                </TR>
+              ))}
+            </TBody>
+          </Table>
+        )}
+
+        <Pager basePath={`/applications/${id}/organizations`} offset={offset} pageSize={PAGE_SIZE} count={orgs.length} />
+      </section>
+    </div>
+  );
+}
+
+// ─── Modal ───────────────────────────────────────────────────────────
+
+const inputCls =
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+
+function NewOrgModal({
+  applicationId,
+  endUsers,
+  error,
+}: {
+  applicationId: string;
+  endUsers: EndUserRow[];
+  error?: string;
+}): React.JSX.Element {
+  const slugError =
+    error === 'ORGANIZATION_SLUG_TAKEN' || error === 'ORGANIZATION_SLUG_INVALID'
+      ? ERR[error]
+      : undefined;
+  return (
+    <Modal
+      modalKey="newOrg"
+      title="Create organization"
+      description="Provision a team inside this application. Optionally seed an initial OWNER from an existing end-user; you can add more members afterwards."
+      trigger="+ New organization"
+    >
+      <form action={createOrg.bind(null, applicationId)} className="space-y-3">
+        {error && !slugError && (
+          <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+            {ERR[error] ?? error}
+          </p>
+        )}
+        <label className="block space-y-1">
+          <span className="text-xs font-medium">Name<span className="text-[var(--color-primary)] ml-0.5">*</span></span>
+          <input type="text" name="name" required autoFocus placeholder="Acme Inc" className={inputCls} />
+        </label>
+        <Field
+          label="Slug"
+          required
+          error={slugError}
+          hint="Unique per application. Lowercase letters, digits, hyphens."
+        >
+          <input
+            type="text"
+            name="slug"
+            required
+            pattern="^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$"
+            placeholder="acme"
+            className={`${inputCls} font-mono`}
+          />
+        </Field>
+        <label className="block space-y-1">
+          <span className="text-xs font-medium">Initial owner (optional)</span>
+          <select name="ownerEndUserId" defaultValue="" className={inputCls}>
+            <option value="">— No owner yet —</option>
+            {endUsers.map((u) => (
+              <option key={u.id} value={u.id}>{u.email}</option>
+            ))}
+          </select>
+          <span className="block text-xs text-[var(--color-muted-fg)]">
+            Assigned the OWNER role. Leave blank to create an empty org and add members later.
+          </span>
+        </label>
+        <SubmitButton pendingLabel="Creating organization…">Create organization</SubmitButton>
+      </form>
+    </Modal>
+  );
+}

@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & typecheck
+    runs-on: ubuntu-latest
+    # Headroom for the growing suite; test runtime is also cut by cheap Argon2
+    # params under vitest (see lib/passwords.ts). Was 10 — the suite crossed it.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Generate Prisma client before tsc — apps/api imports @prisma/client
+      # types that only exist after generate.
+      - name: Generate Prisma client
+        run: pnpm exec prisma generate --schema prisma/schema.prisma
+
+      - name: Build all packages (also typechecks)
+        env:
+          # marketing app validates NEXT_PUBLIC_* at build time (t3-env).
+          NEXT_PUBLIC_API_URL: https://api.relipay.dev
+          NEXT_PUBLIC_APP_URL: https://relipay.dev
+          SKIP_ENV_VALIDATION: "true"
+          # The nextjs-saas example's server-only module reads these on import;
+          # without them `next build`'s page-data collection blows up while
+          # rendering /_not-found. Values are stubs — the runtime never uses
+          # them (the example isn't deployed from CI).
+          RELIPAY_URL: https://api.relipay.dev
+          RELIPAY_SECRET: rp_live_ci_build_stub_not_used_at_runtime
+        # Exclude the demo: it's an example app whose server components fetch a
+        # live ReliPay backend during `next build`, so it can't be statically
+        # built in CI. It's typechecked (no backend needed) in the next step.
+        run: pnpm -r --workspace-concurrency=1 --filter='!relipay-demo' build
+
+      - name: Typecheck the demo app
+        run: pnpm --filter relipay-demo typecheck
+
+      - name: Typecheck the QR-SaaS example
+        run: pnpm --filter qr-saas typecheck
+
+      - name: Start Postgres
+        run: |
+          docker run -d --name pg \
+            -e POSTGRES_USER=relipay -e POSTGRES_PASSWORD=relipay -e POSTGRES_DB=relipay \
+            -p 5432:5432 postgres:16-alpine
+          # pg_isready returns OK once the socket binds, but the POSTGRES_DB
+          # init can still be running. Poll the actual DB until psql succeeds.
+          for i in {1..30}; do
+            if docker exec pg psql -U relipay -d relipay -c 'SELECT 1' >/dev/null 2>&1; then
+              echo "postgres ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          docker exec pg psql -U relipay -d relipay -c "CREATE DATABASE relipay_test;"
+
+      - name: Verify migrations apply
+        run: |
+          DATABASE_URL=postgresql://relipay:relipay@localhost:5432/relipay?schema=public \
+            pnpm exec prisma migrate deploy --schema prisma/schema.prisma
+
+      - name: Run tests (all workspaces)
+        env:
+          TEST_DATABASE_URL: postgresql://relipay:relipay@localhost:5432/relipay_test?schema=public
+          # Vitest's global-setup applies migrations against TEST_DATABASE_URL; the
+          # admin/me/auth suites read these values from the environment.
+          SUPER_ADMIN_KEY: test-admin-key-test-admin-key-test-admin-key
+          JWT_SECRET: test-jwt-secret-test-jwt-secret-test-jwt-secret
+        run: pnpm -r --workspace-concurrency=1 test

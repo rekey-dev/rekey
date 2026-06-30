@@ -1,0 +1,53 @@
+{
+  "name": "@relipay/react",
+  "version": "1.0.0-rc.1",
+  "license": "MIT",
+  "description": "ReliPay React hooks + components — useUser, SignedIn/SignedOut, sign-in / sign-up forms.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "AGENTS.md",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo \"(eslint not yet wired)\"",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "react",
+    "hooks",
+    "auth",
+    "billing",
+    "relipay"
+  ],
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "dependencies": {
+    "@relipay/shared-types": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "@testing-library/react": "^16.1.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
+  }
+}

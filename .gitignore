@@ -1,0 +1,25 @@
+node_modules
+dist
+.turbo
+.next
+coverage
+
+.env
+.env.local
+.env.*.local
+.env.dokploy
+!.env.example
+
+*.log
+.DS_Store
+.vscode
+.idea
+
+# TypeScript incremental build cache — machine-local, never commit.
+*.tsbuildinfo
+
+# Backups only — DO NOT add a blanket *.sql here, it silently drops
+# prisma migrations. Learned that the hard way.
+backups/
+*.dump
+dump.rdb

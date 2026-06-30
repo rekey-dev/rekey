@@ -1,0 +1,207 @@
+import * as React from 'react';
+import { formatDateTime } from '@/lib/date';
+import { api, type SecurityEventRow } from '@/lib/api';
+import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
+import { PageHeader } from '@/components/PageHeader';
+import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
+import { Badge } from '@/components/Badge';
+import { EmptyState } from '@/components/EmptyState';
+
+const TYPE_LABEL: Record<string, string> = {
+  'operator.sign_in': 'Operator sign-in',
+  'operator.session_revoked': 'Operator session revoked',
+  'operator.sign_out_everywhere': 'Operator signed out everywhere',
+  'app.sessions_rotated': 'App sessions rotated (kill-switch)',
+  'app.api_key.created': 'API key created',
+  'app.api_key.revoked': 'API key revoked',
+  'app.access_updated': 'Access controls updated',
+  'app.ip_blocked': 'Request blocked by IP allowlist',
+  'user.signed_up': 'End-user signed up',
+  'user.signed_in': 'End-user signed in',
+};
+
+const ACTOR_TYPES = ['operator', 'end_user', 'system'] as const;
+
+const inputCls =
+  'rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+
+export default async function AuditLogPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}): Promise<React.JSX.Element> {
+  const sp = await searchParams;
+  const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
+  const PAGE_SIZE = readPageSize(sp);
+
+  const type = typeof sp.type === 'string' && sp.type in TYPE_LABEL ? sp.type : '';
+  const actorType =
+    typeof sp.actorType === 'string' &&
+    (ACTOR_TYPES as readonly string[]).includes(sp.actorType)
+      ? sp.actorType
+      : '';
+  const from = typeof sp.from === 'string' && sp.from ? sp.from : ''; // yyyy-mm-dd
+  const to = typeof sp.to === 'string' && sp.to ? sp.to : '';
+  const filtered = Boolean(type || actorType || from || to);
+
+  // Shared filter params for the list fetch AND the CSV export link. Date
+  // inputs are day-granular; make the window inclusive of both ends.
+  const filterQs = new URLSearchParams();
+  if (type) filterQs.set('type', type);
+  if (actorType) filterQs.set('actorType', actorType);
+  if (from) filterQs.set('from', `${from}T00:00:00.000Z`);
+  if (to) filterQs.set('to', `${to}T23:59:59.999Z`);
+
+  const sorted = readSort(sp, ['createdAt', 'type'] as const);
+  const qs = new URLSearchParams(filterQs);
+  if (sorted) {
+    qs.set('sort', sorted.sort);
+    qs.set('order', sorted.order);
+  }
+  qs.set('limit', String(PAGE_SIZE));
+  if (offset) qs.set('offset', String(offset));
+  const { events } = await api<{ events: SecurityEventRow[] }>({
+    method: 'GET',
+    path: `/api/v1/tenant/security-events?${qs.toString()}`,
+  });
+
+  const filterQsStr = filterQs.toString();
+  const exportHref = `/audit-log/export${filterQsStr ? `?${filterQsStr}` : ''}`;
+  const filterParams: Record<string, string> = {};
+  if (type) filterParams.type = type;
+  if (actorType) filterParams.actorType = actorType;
+  if (from) filterParams.from = from;
+  if (to) filterParams.to = to;
+  // Pager links carry the active sort; sort links carry filters + page size
+  // (offset resets when re-sorting).
+  const extraParams: Record<string, string> = {
+    ...filterParams,
+    ...(sorted ? { sort: sorted.sort, order: sorted.order } : {}),
+  };
+  const sortTH = (column: 'createdAt' | 'type') =>
+    sortToggleHref({
+      basePath: '/audit-log',
+      column,
+      current: sorted,
+      extraParams: {
+        ...filterParams,
+        ...(PAGE_SIZE !== DEFAULT_PAGE_SIZE ? { ps: String(PAGE_SIZE) } : {}),
+      },
+    });
+
+  return (
+    <section className="mx-auto max-w-7xl space-y-6 px-6 py-8 lg:px-8">
+      <PageHeader
+        title="Audit log"
+        description="Security-relevant events for this workspace — sign-ins, API-key lifecycle, session kill-switch, access-control changes. Newest first."
+        action={
+          <a
+            href={exportHref}
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-surface-muted)] whitespace-nowrap"
+            title="Download the filtered log as CSV (capped at 5000 rows, newest first)"
+          >
+            Export CSV
+          </a>
+        }
+      />
+
+      <form className="flex flex-wrap items-end gap-2">
+        <label className="block space-y-1">
+          <span className="block text-xs font-medium text-[var(--color-fg)]">Event type</span>
+          <select name="type" defaultValue={type} className={inputCls}>
+            <option value="">All types</option>
+            {Object.entries(TYPE_LABEL).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block space-y-1">
+          <span className="block text-xs font-medium text-[var(--color-fg)]">Actor</span>
+          <select name="actorType" defaultValue={actorType} className={inputCls}>
+            <option value="">All actors</option>
+            {ACTOR_TYPES.map((a) => (
+              <option key={a} value={a}>
+                {a}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block space-y-1">
+          <span className="block text-xs font-medium text-[var(--color-fg)]">From</span>
+          <input type="date" name="from" defaultValue={from} className={inputCls} />
+        </label>
+        <label className="block space-y-1">
+          <span className="block text-xs font-medium text-[var(--color-fg)]">To</span>
+          <input type="date" name="to" defaultValue={to} className={inputCls} />
+        </label>
+        <button
+          type="submit"
+          className="rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-[var(--color-surface-muted)]"
+        >
+          Apply
+        </button>
+        {filtered && (
+          <a
+            href="/audit-log"
+            className="px-1 py-2 text-sm text-[var(--color-muted-fg)] hover:text-[var(--color-fg)]"
+          >
+            filtered — clear
+          </a>
+        )}
+      </form>
+
+      {events.length === 0 ? (
+        <EmptyState
+          variant="inline"
+          title={filtered ? 'No events match these filters' : 'No security events yet'}
+          description={filtered ? 'Try widening the date range or clearing a filter.' : undefined}
+        />
+      ) : (
+        <Table minWidth="min-w-[44rem]">
+          <THead>
+            <TR>
+              <TH sort={sortTH('type')}>Event</TH>
+              <TH>Actor</TH>
+              <TH>IP</TH>
+              <TH sort={sortTH('createdAt')}>When</TH>
+            </TR>
+          </THead>
+          <TBody>
+            {events.map((e) => (
+              <TR key={e.id} hover>
+                <TD>
+                  <div className="font-medium text-[var(--color-fg)]">{TYPE_LABEL[e.type] ?? e.type}</div>
+                  <div className="font-mono text-xs text-[var(--color-muted-fg)]">{e.type}</div>
+                </TD>
+                <TD>
+                  <Badge tone="neutral">{e.actorType}</Badge>
+                  {e.actorId && (
+                    <div title={e.actorId} className="mt-1 max-w-[12rem] truncate font-mono text-xs text-[var(--color-muted-fg)]">
+                      {e.actorId}
+                    </div>
+                  )}
+                </TD>
+                <TD mono muted>
+                  {e.ip ?? '—'}
+                </TD>
+                <TD muted className="whitespace-nowrap text-xs">
+                  {formatDateTime(e.createdAt)}
+                </TD>
+              </TR>
+            ))}
+          </TBody>
+        </Table>
+      )}
+
+      <Pager
+        basePath="/audit-log"
+        offset={offset}
+        pageSize={PAGE_SIZE}
+        count={events.length}
+        extraParams={Object.keys(extraParams).length ? extraParams : undefined}
+      />
+    </section>
+  );
+}

@@ -1,0 +1,2103 @@
+// ReliPay — multi-tenant Auth + Billing.
+//
+// Two tenant levels:
+//   Tenant      = the company/dev who self-hosts or signs up.
+//   Application = a project under that tenant ("MyApp-prod", "MyApp-staging").
+//   EndUser     = the actual signup inside the customer's application.
+//
+// Every domain row carries `applicationId`. Single shared DB, no schema-per-tenant.
+
+generator client {
+  provider = "prisma-client-js"
+  // Match LeadSaaS targets. Linux ARM and Debian OpenSSL 3 cover prod containers.
+  binaryTargets = ["native", "linux-arm64-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// Tenants & Applications
+// ============================================================================
+
+model Tenant {
+  id           String        @id @default(cuid())
+  name         String
+  // Kept for backward-compat with the bootstrap admin path. The canonical
+  // owner relationship now lives in TenantMembership.
+  ownerEmail   String        @map("owner_email")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+
+  applications Application[]
+  memberships  TenantMembership[]
+  invitations  TenantInvitation[]
+  emailLogs    EmailLog[]
+  apiTokens    TenantApiToken[]
+
+  @@map("tenants")
+}
+
+// ============================================================================
+// Operator accounts (humans who log into the ReliPay panel).
+//
+// Distinct from EndUser — operators are "users of ReliPay itself" while
+// EndUser is "users of one of the operator's customer-facing applications."
+// They share the auth primitives (argon2, JWT, refresh, reset) via the same
+// libs but live in their own tables and carry an extra `tid` claim in their
+// JWT (the active workspace).
+//
+// Slack-style multi-tenancy: one operator can belong to many Tenants. The
+// active tenant is encoded in the JWT, not the row — switching workspaces
+// reissues tokens with a different `tid`.
+// ============================================================================
+
+enum TenantRole {
+  OWNER   // Full control — invite/remove anyone, delete the workspace
+  ADMIN   // Manage Applications + members (cannot remove other admins or owners)
+  MEMBER  // Read-only by default; can be granted resource-specific perms later
+}
+
+model TenantUser {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  passwordHash  String?  @map("password_hash")
+  emailVerified Boolean  @default(false) @map("email_verified")
+  // Display name for member lists / UI. Optional at sign-up.
+  name          String?
+  // DEPRECATED / unused. Operator lockout moved to the Redis brute-force
+  // limiter (lib/brute-force.ts) — counters no longer live here, so the hot
+  // auth path doesn't write Postgres. Columns retained to avoid a destructive
+  // migration; safe to drop in a later cleanup once confirmed unused in prod.
+  failedSignInAttempts Int       @default(0) @map("failed_sign_in_attempts")
+  lockedUntil          DateTime? @map("locked_until")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  memberships         TenantMembership[]
+  invitationsAccepted TenantInvitation[]         @relation("acceptedBy")
+  refreshTokens       TenantRefreshToken[]
+  resetTokens         TenantPasswordResetToken[]
+  magicLinkTokens     TenantMagicLinkToken[]
+  mfaCredential       TenantMfaCredential?
+  webauthnCredentials TenantWebAuthnCredential[]
+  apiTokens           TenantApiToken[]
+  operatorInvitesUsed OperatorInvite[]          @relation("operatorInviteUsedBy")
+
+  @@map("tenant_users")
+}
+
+/**
+ * Operator-side WebAuthn credentials. Distinct from the per-Application
+ * WebAuthnCredential table because the relying party here is the panel
+ * itself (single RP across all tenants) — `rpId` is read from env, not
+ * from any per-Application config.
+ */
+model TenantWebAuthnCredential {
+  id           String   @id @default(cuid())
+  tenantUserId String   @map("tenant_user_id")
+  credentialId String   @unique @map("credential_id")
+  publicKey    String   @map("public_key")
+  counter      BigInt   @default(0)
+  transports   String[] @default([])
+  deviceName   String?  @map("device_name")
+  lastUsedAt   DateTime? @map("last_used_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
+
+  @@index([tenantUserId])
+  @@map("tenant_webauthn_credentials")
+}
+
+model TenantMembership {
+  id           String     @id @default(cuid())
+  tenantUserId String     @map("tenant_user_id")
+  tenantId     String     @map("tenant_id")
+  role         TenantRole
+  createdAt    DateTime   @default(now()) @map("created_at")
+
+  tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Per-application access grants. Only consulted when role = MEMBER —
+  // OWNER/ADMIN keep implicit full access to every Application. See
+  // ApplicationGrant for the exact semantics (including the zero-grants
+  // legacy read-only mode).
+  applicationGrants ApplicationGrant[]
+
+  // One membership per (user, tenant). Updating role re-uses the same row.
+  @@unique([tenantUserId, tenantId])
+  @@index([tenantId])
+  @@map("tenant_memberships")
+}
+
+// Per-application role a workspace MEMBER can be granted (roadmap #8).
+enum ApplicationRole {
+  APP_ADMIN   // Full read/write on the granted Application
+  APP_BILLING // Read (auth config redacted) + write on billing/plans/coupons/credits only
+  APP_VIEWER  // Read-only on the granted Application
+}
+
+// Per-application team permissions for workspace MEMBERs.
+//
+// Semantics (enforced in apps/api/src/lib/app-access.ts):
+//   - Workspace OWNER/ADMIN never consult this table — they keep implicit
+//     full access to every Application in the workspace (unchanged).
+//   - A MEMBER with ZERO grants keeps the legacy behavior: read-only
+//     access to every Application in the workspace (back-compat for
+//     memberships created before grants existed).
+//   - The moment a MEMBER holds ≥1 grant, grants become authoritative:
+//     Applications without a grant return 404 APPLICATION_NOT_FOUND, and
+//     the granted role caps what they can do on granted ones.
+model ApplicationGrant {
+  id                 String          @id @default(cuid())
+  tenantMembershipId String          @map("tenant_membership_id")
+  applicationId      String          @map("application_id")
+  role               ApplicationRole
+  createdAt          DateTime        @default(now()) @map("created_at")
+
+  membership  TenantMembership @relation(fields: [tenantMembershipId], references: [id], onDelete: Cascade)
+  application Application      @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  // One grant per (member, application). Updating the role re-uses the row.
+  @@unique([tenantMembershipId, applicationId])
+  @@index([applicationId])
+  @@map("application_grants")
+}
+
+model TenantInvitation {
+  id           String     @id @default(cuid())
+  tenantId     String     @map("tenant_id")
+  // Lowercased on insert. Informational only — the recipient is whoever
+  // holds the link. Used to display "invited X" in the UI and as a hint
+  // when the invitee signs up.
+  email        String
+  role         TenantRole
+  // SHA-256(rawToken). The raw token is shown to the inviter exactly once,
+  // encoded into the share link they pass to the recipient.
+  tokenHash    String     @unique @map("token_hash")
+  expiresAt    DateTime   @map("expires_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  acceptedAt   DateTime?  @map("accepted_at")
+  acceptedById String?    @map("accepted_by_id")
+  revokedAt    DateTime?  @map("revoked_at")
+  invitedById  String     @map("invited_by_id")
+
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  acceptedBy TenantUser? @relation("acceptedBy", fields: [acceptedById], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([expiresAt])
+  @@map("tenant_invitations")
+}
+
+// Deploy-time operator-registration control (OPERATOR_SIGNUP_MODE='invite').
+//
+// A single-use key minted by the super-admin via POST
+// /api/v1/admin/operator-invites. Unlike TenantInvitation (which joins an
+// existing workspace), an OperatorInvite authorizes the creation of a brand
+// new operator + workspace when self-serve sign-up is gated.
+//
+// Hash-only: the raw key is shown to the super-admin exactly once at mint and
+// never stored. Consumption is atomic — `usedAt`/`usedByTenantUserId` are set
+// inside the same transaction that creates the operator, under a
+// `WHERE usedAt IS NULL AND revokedAt IS NULL` guard, so a key can mint at
+// most one operator even under a race.
+model OperatorInvite {
+  id                 String    @id @default(cuid())
+  // First chars of the raw key — for the admin list display only, never the
+  // secret itself.
+  tokenPrefix        String    @map("token_prefix")
+  // SHA-256(rawKey), hex. Unique so a duplicate mint can't collide.
+  tokenHash          String    @unique @map("token_hash")
+  // Marker that this key was minted by a super-admin (the only current path).
+  createdByAdmin     Boolean   @default(true) @map("created_by_admin")
+  // Optional human label, e.g. "for jane@acme.com".
+  note               String?
+  // Optional expiry. Null = non-expiring (still single-use + revocable).
+  expiresAt          DateTime? @map("expires_at")
+  // Single-use consumption marker. Null until redeemed at sign-up.
+  usedAt             DateTime? @map("used_at")
+  usedByTenantUserId String?   @map("used_by_tenant_user_id")
+  // Set when the super-admin revokes the key before it is used.
+  revokedAt          DateTime? @map("revoked_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  usedBy TenantUser? @relation("operatorInviteUsedBy", fields: [usedByTenantUserId], references: [id], onDelete: SetNull)
+
+  @@index([expiresAt])
+  @@map("operator_invites")
+}
+
+model TenantRefreshToken {
+  id           String    @id @default(cuid())
+  tenantUserId String    @map("tenant_user_id")
+  tokenHash    String    @unique @map("token_hash")
+  expiresAt    DateTime  @map("expires_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  revokedAt    DateTime? @map("revoked_at")
+  replacedById String?   @map("replaced_by_id")
+  // See RefreshToken.userAgent / ip for the same semantics — used by the
+  // operator-side sessions list in the panel.
+  userAgent    String?   @map("user_agent")
+  ip           String?   @map("ip")
+
+  tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
+
+  @@index([tenantUserId])
+  @@index([expiresAt])
+  // Mirror of refresh_tokens.created_at — same retention query for operators.
+  @@index([createdAt])
+  @@map("tenant_refresh_tokens")
+}
+
+model TenantPasswordResetToken {
+  id           String    @id @default(cuid())
+  tenantUserId String    @map("tenant_user_id")
+  tokenHash    String    @unique @map("token_hash")
+  expiresAt    DateTime  @map("expires_at")
+  consumedAt   DateTime? @map("consumed_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
+
+  @@index([tenantUserId])
+  @@map("tenant_password_reset_tokens")
+}
+
+// Operator passwordless sign-in tokens (magic link). Single-use, short-lived
+// (15 min), hash-only — same shape as tenant_password_reset_tokens but minted
+// by /tenant/auth/magic-link/request and consumed by /verify, which then mints
+// a session. ReliPay doesn't send operator email; the raw token is returned to
+// the caller (panel) to forward, mirroring the reset flow.
+model TenantMagicLinkToken {
+  id           String    @id @default(cuid())
+  tenantUserId String    @map("tenant_user_id")
+  tokenHash    String    @unique @map("token_hash")
+  expiresAt    DateTime  @map("expires_at")
+  consumedAt   DateTime? @map("consumed_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
+
+  @@index([tenantUserId])
+  @@map("tenant_magic_link_tokens")
+}
+
+// Operator personal-access-tokens (PATs). A long-lived, revocable, SCOPED
+// credential that lets an operator (or an AI agent acting as them) call
+// tenant-scoped routes without a short-lived session JWT — replacing reliance
+// on the single global SUPER_ADMIN_KEY for "act as this operator" automation.
+//
+// Hash-only at rest (SHA-256 via lib/keys.hashKey), exactly like ApiKey and the
+// other tenant tokens. The raw token (`rp_op_…`) is shown to the operator
+// exactly once at mint and is unrecoverable after. The unique `token_hash`
+// index makes verification a direct lookup (no scan, no timing oracle).
+//
+// `scopes` are default-deny: an empty/absent scope grants read only. Writes
+// require an explicit scope ('applications:write', 'keys:mint'). The PAT is
+// bound to BOTH the operator (tenantUserId) and the workspace it acts in
+// (tenantId) — a PAT can only ever operate inside the one tenant it was minted
+// for, never the operator's other workspaces.
+model TenantApiToken {
+  id           String    @id @default(cuid())
+  tenantUserId String    @map("tenant_user_id")
+  // The workspace this PAT acts in. Bound at mint; a PAT never spans tenants.
+  tenantId     String    @map("tenant_id")
+  name         String
+  // First chars shown in UI: "rp_op_abcd…". Display only — never the raw token.
+  tokenPrefix  String    @map("token_prefix")
+  // SHA-256(rawToken) — never store plaintext.
+  tokenHash    String    @unique @map("token_hash")
+  // Default-deny. ['read'] when none given. Allowed: 'read',
+  // 'applications:write', 'keys:mint'.
+  scopes       String[]
+  expiresAt    DateTime? @map("expires_at")
+  lastUsedAt   DateTime? @map("last_used_at")
+  revokedAt    DateTime? @map("revoked_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantUserId])
+  @@index([tenantId])
+  @@index([tokenHash])
+  @@map("tenant_api_tokens")
+}
+
+model Application {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  name            String
+  // Used as the public identifier in API keys, e.g. "myapp-prod".
+  slug            String   @unique
+  // Public, browser-safe key. Format: "rp_pub_<slug>_<random>". A real
+  // credential for the public-bootstrap routes (sign-in/up, magic-link,
+  // passkey-authenticate, license verify, plan listing) — see
+  // requirePublishableOrSecretKey. Identity, not authorization: it names the
+  // app and asserts "legit public client", grants nothing on its own.
+  publicKey       String   @unique @map("public_key")
+  // Rotation grace-window fields. The public key is baked into shipped client
+  // bundles you can't force-update, so rotation is dual-key: rotating moves the
+  // old key here with a deadline, and BOTH keys verify until it passes. Null
+  // when the key has never been rotated. See applicationsService.rotatePublicKey.
+  previousPublicKey           String?   @unique @map("previous_public_key")
+  previousPublicKeyValidUntil DateTime? @map("previous_public_key_valid_until")
+  // Per-application config — which auth methods, which billing provider, redirect URLs, theme.
+  // Schema lives in packages/shared-types so SDK and API agree.
+  authConfig      Json     @map("auth_config")
+  billingConfig   Json     @map("billing_config")
+  // Encrypted blob holding the customer's own provider credentials
+  // (Stripe API key + webhook secret, PayPal merchant id+secret, …).
+  // AES-256-GCM via lib/secrets.ts. Null until set via PUT
+  // /tenant/applications/:id/billing-credentials.
+  billingCredentialsCiphertext String? @map("billing_credentials_ciphertext")
+  // Per-application OAuth provider config. Map of provider name → public
+  // config (clientId, redirectUri, scopes). Per-provider clientSecrets
+  // live in `oauthCredentialsCiphertext`, encrypted.
+  oauthConfig                  Json    @default("{}") @map("oauth_config")
+  oauthCredentialsCiphertext   String? @map("oauth_credentials_ciphertext")
+  // Per-application email-delivery config — `from` address/name, reply-to,
+  // etc. Schema in shared-types as `EmailConfigSchema`. Empty object
+  // means "use ReliPay defaults" (hosted Resend pool with our from address).
+  emailConfig                  Json    @default("{}") @map("email_config")
+  // Encrypted per-Application transport credentials. AES-256-GCM via
+  // lib/secrets.ts. Shape: `{ resend: { apiKey } }`. Null = no BYO; we
+  // fall back to RESEND_DEFAULT_API_KEY if set, otherwise we return the
+  // raw token to the caller (legacy "ReliPay does not send email" mode).
+  emailCredentialsCiphertext   String? @map("email_credentials_ciphertext")
+  // End-user session generation. End-user JWTs are signed with a key derived
+  // from JWT_SECRET + this counter (see lib/jwt.ts). Bumping it instantly
+  // invalidates every previously-issued access/MFA-challenge token for this
+  // Application — the per-app "log everyone out now" kill-switch. Not a secret;
+  // a plain monotonic counter.
+  tokenGeneration Int      @default(1) @map("token_generation")
+  // Per-Application network access controls.
+  // ipAllowlist: CIDRs / bare IPs (v4+v6). When non-empty, server-side secret
+  // key (rp_live_/rp_test_) requests must originate from an allowed IP — enforced
+  // in requireApiKey. Empty = allow all (default). Browsers/public keys are not
+  // gated (dynamic IPs).
+  ipAllowlist     String[] @default([]) @map("ip_allowlist")
+  // corsOrigins: browser origins this Application's SDK calls from. Folded into
+  // the API's CORS allowlist (union across all apps; see lib/cors-origins.ts) so
+  // each tenant manages their own origins instead of a single global env list.
+  corsOrigins     String[] @default([]) @map("cors_origins")
+  // Hosted customer portal (Portal V2). When enabled, ReliPay serves a
+  // self-service billing portal for this app's end-users at
+  // portal.relipay.dev/<slug> (and the optional custom domain below), driven by
+  // the publishable key + the end-user's own token. See docs/specs/hosted-portal.md.
+  hostedPortalEnabled    Boolean  @default(false) @map("hosted_portal_enabled")
+  // Optional custom domain for the hosted portal (e.g. billing.theirsaas.com).
+  // Unique → a domain maps to exactly one Application (no cross-tenant routing).
+  // Activated only after DNS verification (portalDomainVerifiedAt set).
+  portalDomain           String?  @unique @map("portal_domain")
+  portalDomainVerifiedAt DateTime? @map("portal_domain_verified_at")
+  // Portal branding (logo URL, colors) — reuses the tokens-based theming shape.
+  portalBranding         Json     @default("{}") @map("portal_branding")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  apiKeys        ApiKey[]
+  endUsers       EndUser[]
+  webhookEvents  WebhookEvent[]
+  refreshTokens       RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
+  magicLinkTokens     MagicLinkToken[]
+  webauthnCredentials WebAuthnCredential[]
+  plans               Plan[]
+  subscriptions       Subscription[]
+  payments            Payment[]
+  coupons             Coupon[]
+  oauthIdentities     OAuthIdentity[]
+  licenses            License[]
+  usageMeters         UsageMeter[]
+  billingCredentials  BillingCredentials[]
+  endUserRoles        EndUserRole[]
+  emailTemplates      EmailTemplate[]
+  emailLogs           EmailLog[]
+  webhookEndpoints    WebhookEndpoint[]
+  organizations       Organization[]
+  creditBalances      CreditBalance[]
+  creditLedger        CreditLedger[]
+  oauthClients        OAuthClient[]
+  oauthAuthCodes      OAuthAuthCode[]
+  dunningCases        DunningCase[]
+  applicationGrants   ApplicationGrant[]
+
+  @@index([tenantId])
+  @@map("applications")
+}
+
+// ============================================================================
+// Email templates — per-Application overrides for built-in transactional emails.
+//
+// Built-in defaults live in code (`modules/email/defaults/`). An EmailTemplate
+// row is an override for one (Application, eventKey) pair. Deleting the row
+// reverts the Application to the default for that event.
+//
+// `designJson` is the source of truth (Unlayer builder design or raw MJML
+// depending on `kind`). `bodyHtml` is the compiled HTML cached at save
+// time so send-time doesn't re-run the compiler. `bodyText` is the
+// plain-text alternative; auto-generated from HTML when not provided.
+//
+// `eventKey` is a free-form string so we can add events without a
+// migration. The service layer validates against the registry in
+// `modules/email/events.ts`.
+// ============================================================================
+
+model EmailTemplate {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  eventKey      String   @map("event_key")
+  subject       String
+  designJson    Json     @map("design_json")
+  bodyHtml      String   @map("body_html")
+  bodyText      String?  @map("body_text")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, eventKey])
+  @@index([applicationId])
+  @@map("email_templates")
+}
+
+// ============================================================================
+// Email send log — one row per outbound email attempt (transactional auth
+// mail + operator/workspace system mail). Recorded at the transport boundary
+// (lib/email-transport.ts) so EVERY send is captured regardless of caller.
+//
+// Surfaced read-only in the panel, scoped two ways:
+//   - per Application (operator views one app's deliverability)
+//   - per Tenant (workspace-wide, across all the tenant's apps + system mail)
+//
+// `applicationId` is null for tenant/system mail (workspace invites, operator
+// MFA) which has no Application. `tenantId` is denormalised so the per-tenant
+// view is a single indexed query and survives even system sends.
+//
+// We deliberately store ONLY metadata — recipient, subject, transport,
+// status, provider message id, error — never the rendered body. Access is
+// tenant-scoped at the route layer.
+// ============================================================================
+
+model EmailLog {
+  id            String   @id @default(cuid())
+  tenantId      String?  @map("tenant_id")
+  applicationId String?  @map("application_id")
+  /** Recipient address (lowercased). */
+  toAddress     String   @map("to_address")
+  subject       String
+  /** Email event key (e.g. "verify_email"); null for ad-hoc / test sends. */
+  eventKey      String?  @map("event_key")
+  /** Transport used: byo_resend | default_resend | byo_smtp | none. */
+  via           String
+  /** Outcome: sent | error | no_transport. */
+  status        String
+  /** Provider message id when status=sent (nullable — some providers omit). */
+  messageId     String?  @map("message_id")
+  /** Error message when status=error. */
+  error         String?
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  application Application? @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  tenant      Tenant?      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId, createdAt])
+  @@index([tenantId, createdAt])
+  @@index([status])
+  @@map("email_logs")
+}
+
+// ============================================================================
+// Email verification tokens — short-lived, single-use, hash-only.
+// Same lifecycle shape as PasswordResetToken (lib/email-verification.ts).
+// Issued by /auth/send-verification, consumed by /auth/verify-email.
+// 24-hour lifetime.
+// ============================================================================
+
+model EmailVerificationToken {
+  id            String    @id @default(cuid())
+  applicationId String    @map("application_id")
+  endUserId     String    @map("end_user_id")
+  tokenHash     String    @unique @map("token_hash")
+  // The email this token verifies. Captured at issue time so a later
+  // email-change doesn't accidentally promote a stale verification.
+  email         String
+  expiresAt     DateTime  @map("expires_at")
+  consumedAt    DateTime? @map("consumed_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser     EndUser     @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+  @@index([endUserId])
+  @@index([expiresAt])
+  @@map("email_verification_tokens")
+}
+
+// ============================================================================
+// Magic-link sign-in tokens — single-use, hash-only, 15-minute lifetime.
+//
+// Issued by /auth/magic-link/request, consumed by /auth/magic-link/verify.
+// Shorter lifetime than email verification (15 min vs 24 h) because this is
+// a *sign-in credential*, not a confirmation: anyone holding the raw token
+// can sign in as the linked user. Single-use via `consumedAt`.
+//
+// `email` captured at issue time mirrors the email-verification pattern: if
+// the user changes their address between request and verify, the stale token
+// is refused. New-user magic-links carry `endUserId = null` until they're
+// consumed — the verify path then creates the EndUser (when sign-up is
+// enabled on the Application).
+// ============================================================================
+
+// ============================================================================
+// WebAuthn / Passkey credentials.
+//
+// One row per registered credential (a user may register N passkeys —
+// device-bound or syncable). Stored fields are the WebAuthn-required
+// minimum to authenticate a future assertion:
+//
+//   - `credentialId`  : opaque bytes identifying the credential, base64url.
+//                       UNIQUE globally (the credential ID space is
+//                       collision-free by design).
+//   - `publicKey`     : COSE-encoded public key bytes, base64url.
+//   - `counter`       : signature counter; must increase monotonically on
+//                       each successful authentication. We persist after
+//                       every verify to detect cloned authenticators.
+//   - `transports`    : optional hints for the authenticator (usb, nfc,
+//                       ble, internal, hybrid). Sent back at auth time so
+//                       the browser knows which carrier to surface first.
+//   - `deviceName`    : operator-friendly label captured at registration
+//                       time ("Alex's MacBook Pro Touch ID") via
+//                       `registrationInfo.aaguid` lookup or a free-text
+//                       fallback prompt.
+//
+// `applicationId` denormalised so the unique-credentialId lookup AND the
+// per-application listing are both cheap.
+//
+// Lifecycle: rows are immutable after creation EXCEPT `counter` +
+// `lastUsedAt`, which advance on every successful authentication.
+// ============================================================================
+
+// ============================================================================
+// End-user organizations / teams.
+//
+// Multi-user workspaces *inside* an Application — distinct from the
+// operator-side `Tenant` (which models ReliPay's own customers). An
+// EndUser may belong to many Organizations; an Organization belongs to
+// exactly one Application. Mirrors Clerk's contract closely so existing
+// customer-side code that targets Clerk's `Organization` model lifts
+// with minimal change.
+//
+// Three roles today: OWNER (manage org + members + ownership transfer),
+// ADMIN (manage members below OWNER), MEMBER (read-only). The role-name
+// space is fixed for now — opening it to per-Application catalog
+// (mirroring `EndUserRole`) is a follow-up if customers need it.
+//
+// Gated by `authConfig.organizationsEnabled`. When disabled, all org
+// routes refuse with `ORGANIZATIONS_NOT_ENABLED`.
+// ============================================================================
+
+enum OrganizationRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+model Organization {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  name          String
+  /** URL-friendly identifier, unique per Application. */
+  slug          String
+  /** Free-form metadata the customer's app can stash on the org. */
+  metadata      Json?
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  memberships OrganizationMembership[]
+  invitations OrganizationInvitation[]
+  // Billing-as-beneficiary (ORG_BILLING.md): subscriptions whose benefits
+  // flow to this org, and the org's shared credit pool.
+  subscriptionsAsBeneficiary Subscription[] @relation("SubscriptionBeneficiary")
+  creditBalances             CreditBalance[]
+  creditLedger               CreditLedger[]
+  usageRecords               UsageRecord[]
+  licenses                   License[]
+  activeInRefreshTokens      RefreshToken[]
+
+  @@unique([applicationId, slug])
+  @@index([applicationId])
+  @@map("organizations")
+}
+
+model OrganizationMembership {
+  id             String           @id @default(cuid())
+  organizationId String           @map("organization_id")
+  endUserId      String           @map("end_user_id")
+  role           OrganizationRole
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  endUser      EndUser      @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, endUserId])
+  @@index([endUserId])
+  @@map("organization_memberships")
+}
+
+model OrganizationInvitation {
+  id             String           @id @default(cuid())
+  organizationId String           @map("organization_id")
+  /** Operator-supplied invitee email. Lowercased on storage. */
+  email          String
+  role           OrganizationRole
+  /** Hash-only storage; raw shown once. SHA-256. */
+  tokenHash      String           @unique @map("token_hash")
+  expiresAt      DateTime         @map("expires_at")
+  acceptedAt     DateTime?        @map("accepted_at")
+  acceptedById   String?          @map("accepted_by_id")
+  revokedAt      DateTime?        @map("revoked_at")
+  invitedById    String           @map("invited_by_id")
+  createdAt      DateTime         @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([email])
+  @@map("organization_invitations")
+}
+
+// ============================================================================
+// Impersonation audit log.
+//
+// When an operator (TenantUser) invokes /tenant/applications/:id/end-users/:userId/impersonate
+// we mint a short-lived (5-min) end-user access token carrying an extra
+// `imp` claim = operator id. Every minting creates a row here so the
+// trail is durable independent of the JWT lifetime.
+//
+// `endedAt` is set when the operator calls the explicit end-impersonation
+// endpoint, when the token is rotated via refresh (a refresh of an `imp`
+// token rejects), or never — short-lived tokens age out on their own.
+// The row stays forever for audit.
+// ============================================================================
+
+model ImpersonationAudit {
+  id              String   @id @default(cuid())
+  applicationId   String   @map("application_id")
+  tenantId        String   @map("tenant_id")
+  /** Operator who initiated the impersonation. */
+  operatorUserId  String   @map("operator_user_id")
+  /** End-user being impersonated. */
+  endUserId       String   @map("end_user_id")
+  /** Short freeform reason captured at impersonation start ("debugging ticket #123"). */
+  reason          String?
+  startedAt       DateTime @default(now()) @map("started_at")
+  endedAt         DateTime? @map("ended_at")
+  /** UA / IP captured at start — same surface as session rows. */
+  userAgent       String?  @map("user_agent")
+  ip              String?  @map("ip")
+
+  @@index([applicationId])
+  @@index([operatorUserId])
+  @@index([endUserId])
+  @@index([startedAt])
+  @@map("impersonation_audits")
+}
+
+model WebAuthnCredential {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  endUserId     String   @map("end_user_id")
+  credentialId  String   @unique @map("credential_id")
+  publicKey     String   @map("public_key")
+  counter       BigInt   @default(0)
+  transports    String[] @default([])
+  deviceName    String?  @map("device_name")
+  /** Last time this credential successfully completed an assertion. */
+  lastUsedAt    DateTime? @map("last_used_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser     EndUser     @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+  @@index([endUserId])
+  @@map("webauthn_credentials")
+}
+
+model MagicLinkToken {
+  id            String    @id @default(cuid())
+  applicationId String    @map("application_id")
+  // Null when the magic link is for an email that didn't have an account
+  // yet at request time. The verify path creates the EndUser atomically
+  // when consumed (subject to authConfig.signupEnabled).
+  endUserId     String?   @map("end_user_id")
+  tokenHash     String    @unique @map("token_hash")
+  email         String
+  expiresAt     DateTime  @map("expires_at")
+  consumedAt    DateTime? @map("consumed_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser     EndUser?    @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+  @@index([endUserId])
+  @@index([expiresAt])
+  @@map("magic_link_tokens")
+}
+
+// Per-Application RBAC role catalog. EndUser.role is validated against this
+// list on every write so operators can't accidentally introduce typos
+// ("admin" vs "Admin") and apps relying on role checks don't miss matches.
+//
+// One row per (applicationId, name). One row per Application has
+// `isDefault = true` — that's the role assigned to public sign-ups. The
+// service layer enforces the "exactly one default" invariant.
+//
+// Names are free-form strings (no enum) — the SaaS pattern is "give the
+// app its own vocabulary": editor / viewer / superadmin / billing-only
+// etc. We just guarantee uniqueness within the Application.
+model EndUserRole {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  name          String
+  description   String?
+  isDefault     Boolean  @default(false) @map("is_default")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, name])
+  @@index([applicationId])
+  @@map("end_user_roles")
+}
+
+// Per-Application, per-provider billing credentials. One row per (app, provider).
+// Phase 6 multi-provider: each Application can have any subset of {stripe, paypal,
+// razorpay} configured concurrently. End-users pick one at checkout, or we route
+// by country via `countries[]` + `priority`.
+//
+// `ciphertext` holds the same provider-shaped JSON as before (StripeCredentials |
+// PaypalCredentials | RazorpayCredentials), AES-256-GCM via lib/secrets.ts. The
+// outer wrapper { provider, data } is redundant now that `provider` is a column,
+// so new rows store just the inner `data` shape — still encrypted.
+//
+// `countries`: ISO 3166-1 alpha-2 codes this provider should serve. Empty list
+// = global / fallback. `priority`: lower = picked first for ties (e.g. two
+// providers both list "IN" — pick the lower priority).
+//
+// `enabled = false` keeps the credentials around but excludes the provider from
+// the checkout picker — useful for temporary disable without re-entering keys.
+model BillingCredentials {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  provider      String   // 'stripe' | 'paypal' | 'razorpay'
+  // 'test' = sandbox/dev keys (no real money). 'live' = production. Inferred
+  // from key prefix when possible (sk_test_/sk_live_ for Stripe, rzp_test_/rzp_live_
+  // for Razorpay) but always stored explicitly so the operator's intent is
+  // unambiguous and we can route PayPal (which uses different base URLs per mode).
+  mode          String   @default("test")
+  enabled       Boolean  @default(true)
+  ciphertext    String
+  countries     String[] @default([])
+  priority      Int      @default(100)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, provider])
+  @@index([applicationId, enabled])
+  @@map("billing_credentials")
+}
+
+model ApiKey {
+  id            String    @id @default(cuid())
+  applicationId String    @map("application_id")
+  name          String
+  // First 12 chars shown in UI: "rp_live_abcd…"
+  keyPrefix     String    @map("key_prefix")
+  // SHA-256(rawKey) — never store plaintext.
+  keyHash       String    @unique @map("key_hash")
+  // ["auth:read", "auth:write", "billing:read", "billing:write", "*"]
+  scopes        String[]
+  lastUsedAt    DateTime? @map("last_used_at")
+  expiresAt     DateTime? @map("expires_at")
+  revokedAt     DateTime? @map("revoked_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+  @@index([keyHash])
+  @@map("api_keys")
+}
+
+// ============================================================================
+// End-users (the signups inside each Application)
+// ============================================================================
+
+// Test/live data isolation (roadmap §7 v1). Stamped at row creation from the
+// calling API key's mode (`rp_test_*` → TEST, `rp_live_*` → LIVE); operator-
+// created rows and everything that predates the feature default to LIVE.
+// TEST rows are invisible to live keys and vice versa on the end-user-scoped
+// public API; operator/tenant surfaces see both and carry the `mode` field.
+enum DataMode {
+  TEST
+  LIVE
+}
+
+model EndUser {
+  id            String    @id @default(cuid())
+  applicationId String    @map("application_id")
+  email         String
+  emailVerified Boolean   @default(false) @map("email_verified")
+  // Password hash is null for OAuth-only users. Argon2id, never bcrypt.
+  passwordHash  String?   @map("password_hash")
+  // Per-application RBAC role. Free-form string so apps can introduce
+  // domain-specific roles ("editor", "viewer") without a schema change.
+  // Default "user" is the no-special-role baseline. Operators can set
+  // anything; downstream apps interpret. Indexed for fast role-scoped
+  // listings (e.g. "all admins").
+  role          String    @default("user")
+  // Free-form per-app metadata (display name, avatar, custom fields).
+  // The customer's app reads/writes this via the SDK; ReliPay never
+  // interprets it, just stores it.
+  metadata      Json?
+  // Per-user failed-sign-in counter + lockout. Incremented on each
+  // INVALID_CREDENTIALS during password sign-in; reset on success; rolls
+  // into `lockedUntil = now + LOCK_DURATION` after `LOCK_THRESHOLD`
+  // failures. Honoured by `authService.signIn` to throw
+  // `TOO_MANY_FAILED_ATTEMPTS` instead of running argon2.verify during
+  // the lockout window. `lockedUntil` is checked against `now` on every
+  // sign-in attempt; expired locks are cleared lazily.
+  failedSignInAttempts Int       @default(0) @map("failed_sign_in_attempts")
+  lockedUntil          DateTime? @map("locked_until")
+  // Test/live isolation: which "universe" this user lives in. Stamped from
+  // the calling key's mode at sign-up; immutable in practice. Note email is
+  // still unique per (application, email) ACROSS modes — the same address
+  // cannot exist as both a test and a live user.
+  mode          DataMode  @default(LIVE)
+  // GDPR erasure (roadmap §10). When set, this EndUser is a TOMBSTONE: its
+  // PII/auth material has been hard-deleted (email tombstoned to
+  // erased+<id>@deleted.invalid, name/metadata nulled, passwordHash cleared,
+  // OAuth/sessions/MFA/passkeys/magic-links deleted), while its financial rows
+  // (Subscription/Payment/License/CreditLedger/UsageRecord) are RETAINED for
+  // accounting/legal-retention obligations — PII-scrubbed, FK-intact. A
+  // tombstoned user can NEVER authenticate again (auth paths reject with
+  // END_USER_ERASED). The row is kept (not deleted) precisely to preserve FK
+  // integrity for those retained financial rows. See docs/data-erasure.md.
+  erasedAt      DateTime? @map("erased_at")
+  // The operator (TenantUser id) who processed the erasure, for the audit trail.
+  erasedBy      String?   @map("erased_by")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  application             Application              @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  refreshTokens           RefreshToken[]
+  passwordResetTokens     PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
+  magicLinkTokens         MagicLinkToken[]
+  webauthnCredentials     WebAuthnCredential[]
+  organizationMemberships OrganizationMembership[]
+  subscriptions           Subscription[]
+  oauthIdentities         OAuthIdentity[]
+  mfaCredential           MfaCredential?
+  licenses                License[]
+  creditBalance           CreditBalance[]
+  creditLedger            CreditLedger[]
+
+  @@unique([applicationId, email])
+  @@index([applicationId])
+  @@index([applicationId, role])
+  @@index([applicationId, mode])
+  @@map("end_users")
+}
+
+// ============================================================================
+// OAuth identity link — connects an EndUser to an external provider account.
+// One row per (provider, providerAccountId) globally; one EndUser may link
+// many providers (Google + GitHub + …). Created on first successful OAuth
+// callback; reused on subsequent sign-ins.
+// ============================================================================
+
+model OAuthIdentity {
+  id                String   @id @default(cuid())
+  applicationId     String   @map("application_id")
+  endUserId         String   @map("end_user_id")
+  provider          String                          // "google", "github", …
+  providerAccountId String   @map("provider_account_id")
+  email             String?                         // What the provider returned at link time. Informational.
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser     EndUser     @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([applicationId])
+  @@index([endUserId])
+  @@map("oauth_identities")
+}
+
+// ============================================================================
+// MFA — TOTP (RFC 6238) + backup codes.
+//
+// One row per user. `secretCiphertext` is the AES-256-GCM-encrypted TOTP
+// shared secret. `backupCodesCiphertext` is an encrypted JSON array of
+// SHA-256 hashes of one-time backup codes. Codes are consumed by removing
+// the matching hash from the array.
+//
+// Two parallel tables: one for end-users, one for operators. Same shape;
+// shared lib (lib/mfa.ts).
+// ============================================================================
+
+model MfaCredential {
+  id                  String    @id @default(cuid())
+  endUserId           String    @unique @map("end_user_id")
+  secretCiphertext    String    @map("secret_ciphertext")
+  backupCodesCiphertext String  @map("backup_codes_ciphertext")
+  // Verified at /mfa/setup-confirm. Sign-in challenges only fire when this is true.
+  enrolledAt          DateTime? @map("enrolled_at")
+  // DEPRECATED / unused. MFA throttle moved to the Redis brute-force limiter
+  // (lib/brute-force.ts, scope `eu:mfa:<id>`). Columns retained to avoid a
+  // destructive migration; safe to drop in a later cleanup.
+  failedAttempts      Int       @default(0) @map("failed_attempts")
+  lockedUntil         DateTime? @map("locked_until")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  endUser EndUser @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+
+  @@map("mfa_credentials")
+}
+
+model TenantMfaCredential {
+  id                  String    @id @default(cuid())
+  tenantUserId        String    @unique @map("tenant_user_id")
+  secretCiphertext    String    @map("secret_ciphertext")
+  backupCodesCiphertext String  @map("backup_codes_ciphertext")
+  enrolledAt          DateTime? @map("enrolled_at")
+  // DEPRECATED / unused — see MfaCredential. Throttle moved to Redis
+  // (lib/brute-force.ts, scope `op:mfa:<id>`).
+  failedAttempts      Int       @default(0) @map("failed_attempts")
+  lockedUntil         DateTime? @map("locked_until")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
+
+  @@map("tenant_mfa_credentials")
+}
+
+// ============================================================================
+// Licenses — for software products (vs. recurring subscriptions / SaaS access).
+//
+// A License is a signed, validatable token issued to one EndUser for one
+// Application. The customer's software calls /api/v1/licenses/verify with
+// the key + a machine fingerprint to gate features.
+//
+// Lifetime model:
+//   - PERPETUAL: never expires (single purchase, lifetime access)
+//   - TIMED:     expires at `expiresAt` (e.g. annual subscription rendered as a license)
+//   - SEATS:     `seatsAllowed`/`seatsUsed` for shared multi-seat licenses
+//
+// `keyHash` is the SHA-256 of the issued key. Raw key shown once at issue.
+// ============================================================================
+
+enum LicenseKind {
+  PERPETUAL
+  TIMED
+  SEATS
+}
+
+enum LicenseStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+model License {
+  id            String        @id @default(cuid())
+  applicationId String        @map("application_id")
+  // Owner the license is issued to (payer/holder), always set. When the issuing
+  // subscription names an org beneficiary, `organizationId` pools the seats to
+  // that team (owner+beneficiary, ORG_BILLING §3); else it's null (personal).
+  endUserId     String        @map("end_user_id")
+  organizationId String?      @map("organization_id")
+  // Optional link to the Plan that issued this license — for billing reconciliation.
+  planId        String?       @map("plan_id")
+  kind          LicenseKind
+  status        LicenseStatus @default(ACTIVE)
+  // Display prefix shown in lists, e.g. "rl_lic_AbCd…"
+  keyPrefix     String        @map("key_prefix")
+  keyHash       String        @unique @map("key_hash")
+  expiresAt     DateTime?     @map("expires_at")
+  seatsAllowed  Int?          @map("seats_allowed")
+  // Notes the customer keeps about this license. Not user-facing.
+  metadata      Json          @default("{}")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+  revokedAt     DateTime?     @map("revoked_at")
+
+  application  Application       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser      EndUser           @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+  organization Organization?     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan         Plan?             @relation(fields: [planId], references: [id], onDelete: SetNull)
+  activations  LicenseActivation[]
+
+  @@index([applicationId])
+  @@index([endUserId])
+  @@index([organizationId])
+  @@index([keyHash])
+  @@map("licenses")
+}
+
+model LicenseActivation {
+  id                 String   @id @default(cuid())
+  licenseId          String   @map("license_id")
+  // Customer-provided device/machine fingerprint (their format, opaque to us).
+  machineFingerprint String   @map("machine_fingerprint")
+  firstSeenAt        DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt         DateTime @default(now()) @map("last_seen_at")
+  // Human-readable hint from the activator (hostname, app version, etc.).
+  label              String?
+
+  license License @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+
+  @@unique([licenseId, machineFingerprint])
+  @@index([licenseId])
+  @@map("license_activations")
+}
+
+// ============================================================================
+// Usage tracking — meters + records.
+//
+// A UsageMeter is a named counter scoped to an Application (e.g.
+// "api_calls", "storage_gb_hours"). The customer's app reports increments
+// via POST /api/v1/usage/record. We aggregate on read.
+//
+// `unit` is informational ("calls", "GB-hours", "MB"). Aggregation is a
+// straight SUM over UsageRecord.quantity; window is taken from the
+// query.
+// ============================================================================
+
+model UsageMeter {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  // Stable identifier the customer's app reports against ("api_calls").
+  slug          String
+  name          String
+  unit          String
+  active        Boolean  @default(true)
+  metadata      Json     @default("{}")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  application Application   @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  records     UsageRecord[]
+
+  @@unique([applicationId, slug])
+  @@index([applicationId])
+  @@map("usage_meters")
+}
+
+model UsageRecord {
+  id        String   @id @default(cuid())
+  meterId   String   @map("meter_id")
+  // Billing subject this usage is attributed to: an end-user, an org pool, or
+  // neither (app-level usage). Org pooling = owner+beneficiary (ORG_BILLING.md).
+  endUserId String?  @map("end_user_id")
+  organizationId String? @map("organization_id")
+  // Increment or decrement (negative for refunds / corrections).
+  quantity  Int
+  // Reported timestamp from the caller. Defaults to now if omitted.
+  occurredAt DateTime @default(now()) @map("occurred_at")
+  // OPTIONAL caller-supplied idempotency key. When set, a retried record with
+  // the same (meterId, idempotencyKey) returns the original row instead of
+  // double-counting usage / wrongly tripping a quota. Omitted (null) → today's
+  // behavior: every call counts (nulls are not unique-constrained in Postgres).
+  idempotencyKey String? @map("idempotency_key")
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  meter        UsageMeter    @relation(fields: [meterId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([meterId, idempotencyKey])
+  @@index([meterId, occurredAt])
+  @@index([endUserId])
+  @@index([organizationId])
+  @@map("usage_records")
+}
+
+// ============================================================================
+// Refresh tokens — long-lived, hashed-in-DB, rotated on use.
+//
+// Lifecycle:
+//   - Issued alongside an access token at sign-up / sign-in.
+//   - Caller exchanges the refresh token for a new access + refresh pair via
+//     POST /api/v1/auth/refresh. The presented token is revoked the moment
+//     it is consumed; the new one takes its place.
+//   - `replacedById` chains rotations together so an audit can walk the
+//     history (and so we can detect replay — a presented-but-revoked token
+//     means someone is using a stolen one). Replay handling lands when we
+//     have telemetry to tune it; for now we just refuse the call.
+// ============================================================================
+
+model RefreshToken {
+  id            String    @id @default(cuid())
+  applicationId String    @map("application_id")
+  endUserId     String    @map("end_user_id")
+  // SHA-256(rawToken). High-entropy random, hash-only storage like ApiKey.
+  tokenHash     String    @unique @map("token_hash")
+  expiresAt     DateTime  @map("expires_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  revokedAt     DateTime? @map("revoked_at")
+  // Surface this token belongs to: "session" (SDK /auth/refresh) or "mcp" (the
+  // per-app OAuth token endpoint). Each grant only accepts its own kind, so a
+  // session refresh token can't be redeemed at the public MCP token endpoint
+  // (and vice-versa). MCP tokens also bind to the OAuth `clientId`.
+  kind          String    @default("session")
+  clientId      String?   @map("client_id")
+  // Active organization for this session (the `oid` access-token claim). Set by
+  // POST /users/me/organizations/:id/switch; carried forward across rotations so
+  // the active org survives refresh. SetNull if the org is deleted. Per-session
+  // (not per-user) so different devices can have different active orgs.
+  activeOrganizationId String? @map("active_organization_id")
+  // Set when this token is rotated — points at the new token issued in its place.
+  replacedById  String?   @map("replaced_by_id")
+  // Device fingerprint captured at issue time. Used by /me/sessions to
+  // render "iPhone 15 Pro" / "Chrome on macOS" / etc. Truncated client UA
+  // string; for richer detection do it client-side. `ip` is the inbound
+  // request IP at issue (CF-Connecting-IP / X-Forwarded-For if behind a
+  // proxy with trustProxy=true). Both nullable — older rows + non-browser
+  // callers may lack them.
+  userAgent     String?   @map("user_agent")
+  ip            String?   @map("ip")
+
+  application        Application   @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser            EndUser       @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+  activeOrganization Organization? @relation(fields: [activeOrganizationId], references: [id], onDelete: SetNull)
+
+  @@index([applicationId])
+  @@index([endUserId])
+  @@index([expiresAt])
+  @@index([activeOrganizationId])
+  // The super-admin retention dashboard counts distinct end-users with a
+  // refresh-token created inside a 24h/7d/30d window (groupBy endUserId).
+  // Without this index the query is a sequential scan over the full token
+  // history — grows with sign-in + rotation volume.
+  @@index([createdAt])
+  @@map("refresh_tokens")
+}
+
+// ============================================================================
+// Password reset tokens — short-lived, hashed-in-DB, single-use.
+//
+// Issued by `requestPasswordReset(email)` — we generate a 32-byte CSPRNG
+// token, store its SHA-256 hash, and return the raw value to the caller.
+// **ReliPay does not send email.** The customer's app receives the token
+// and emails (or SMSes, or pushes) it via their own provider. This keeps
+// us out of the email-deliverability business and lets each customer keep
+// their own from-address branding.
+//
+// Lifetime: 1 hour. Single-use — `consumedAt` set on first successful
+// reset. Re-using a consumed token is a no-op + logs (treated as a
+// possible compromise signal).
+// ============================================================================
+
+model PasswordResetToken {
+  id            String    @id @default(cuid())
+  applicationId String    @map("application_id")
+  endUserId     String    @map("end_user_id")
+  tokenHash     String    @unique @map("token_hash")
+  expiresAt     DateTime  @map("expires_at")
+  consumedAt    DateTime? @map("consumed_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser     EndUser     @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+  @@index([endUserId])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+// ============================================================================
+// Billing — Plan, Subscription, Payment.
+//
+// Provider-agnostic top-level columns + provider-specific data in
+// `metadata: Json`. The BillingProvider interface (modules/billing/providers)
+// is the seam between our shape and the provider's; resist the urge to
+// surface Stripe-only concepts here.
+// ============================================================================
+
+enum PlanInterval {
+  MONTH
+  YEAR
+}
+
+enum SubscriptionStatus {
+  PENDING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  EXPIRED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+enum CouponDiscountType {
+  PERCENT  // amountOff is in basis-points-ish: 1500 = 15.00%
+  AMOUNT   // amountOff is in smallest currency unit (cents/paise/sen)
+}
+
+// What the customer is buying when they check out against this plan.
+//   SUBSCRIPTION: classic recurring access — Subscription row stays ACTIVE
+//                 while the provider keeps charging.
+//   LICENSE:      one purchase auto-issues a License to the end-user. Use
+//                 for software keys / seat packs / perpetual access.
+//                 Bound configuration: licenseKind + (expiry/seats).
+//   USAGE:        metered — Subscription billed on consumption recorded
+//                 against `meterSlug` at `pricePerUnitCents` per unit.
+//                 Real provider hookup is scaffolded; see decisions.md.
+//   CREDIT:       prepaid balance / "lead pack" — one purchase grants
+//                 `creditsAmount` credits to the buyer's CreditBalance on
+//                 payment success. The customer's app draws them down via
+//                 POST /api/v1/credits/consume.
+enum PlanKind {
+  SUBSCRIPTION
+  LICENSE
+  USAGE
+  CREDIT
+}
+
+model Plan {
+  id            String       @id @default(cuid())
+  applicationId String       @map("application_id")
+  // Stable identifier the customer's app refers to ("pro_monthly").
+  slug          String
+  name          String
+  kind          PlanKind     @default(SUBSCRIPTION)
+  // Smallest currency unit (cents for USD/EUR, paise for INR, …) — never floats.
+  // For SUBSCRIPTION + LICENSE plans, this is the headline price. For USAGE
+  // plans, it's the base/recurring fee (often 0); per-unit pricing lives in
+  // `pricePerUnitCents`.
+  amount        Int
+  currency      String       @default("USD")
+  interval      PlanInterval @default(MONTH)
+  active        Boolean      @default(true)
+  // ── LICENSE-kind config ─────────────────────────────────────────
+  // Set when kind = LICENSE. Mirrors LicenseKind on `licenses` — webhook
+  // handler reads these to construct the auto-issued License on payment.
+  licenseKind        LicenseKind? @map("license_kind")
+  licenseSeatsAllowed Int?        @map("license_seats_allowed")
+  // For TIMED licenses, lifetime in days. Webhook adds this to NOW() at
+  // issue time. (Absolute expiresAt isn't useful here — pre-purchases
+  // would already be expired.)
+  licenseDurationDays Int?        @map("license_duration_days")
+  // ── USAGE-kind config ───────────────────────────────────────────
+  // Set when kind = USAGE. The meter must exist in the same Application's
+  // catalog. We don't enforce a FK here because meters can be archived
+  // independently — service-layer validation handles it.
+  meterSlug          String?     @map("meter_slug")
+  pricePerUnitCents  Int?        @map("price_per_unit_cents")
+  // ── CREDIT-kind config ──────────────────────────────────────────
+  // Set when kind = CREDIT. Credits granted to the buyer's CreditBalance
+  // on successful payment (one-off prepaid "lead pack" / top-up).
+  creditsAmount      Int?        @map("credits_amount")
+  // Provider-specific ids, e.g. { stripe: { priceId: "price_..." } }.
+  metadata      Json         @default("{}")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  application   Application    @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  subscriptions Subscription[]
+  licenses      License[]
+  entitlements  PlanEntitlement[]
+
+  @@unique([applicationId, slug])
+  @@index([applicationId])
+  @@map("plans")
+}
+
+// ============================================================================
+// Plan entitlements — the bundle of benefits one plan grants.
+//
+// A Plan has many PlanEntitlement rows, so a single subscription can deliver
+// e.g. "5 seats + 500 credits/period + advanced_reporting=on". Replaces the
+// single-`Plan.kind` shorthand (which still works as a fallback — a plan with
+// no entitlement rows is provisioned from its legacy kind fields).
+//
+// Hybrid model (see BILLING_MODEL.md): three STATEFUL kinds map to ReliPay's
+// in-house subsystems via the provisioner (CREDIT → CreditLedger/Balance,
+// LICENSE → License, USAGE → metered allowance), and a generic FEATURE kind
+// carries a Lago-style typed value (BOOL/INT/STRING) for arbitrary access
+// flags + numeric limits read at request time — no deploy to add one.
+// Per-subscription overrides live on `Subscription.entitlementOverrides`.
+// ============================================================================
+
+enum PlanEntitlementKind {
+  FEATURE // boolean/numeric access flag or limit, resolved by read
+  CREDIT  // grant N credits to the beneficiary per period
+  LICENSE // issue a license (optionally SEATS) to the beneficiary
+  USAGE   // included quota for a meter (enforcement: phase B)
+}
+
+enum EntitlementValueType {
+  BOOL
+  INT
+  STRING
+}
+
+model PlanEntitlement {
+  id          String              @id @default(cuid())
+  planId      String              @map("plan_id")
+  kind        PlanEntitlementKind
+  /** FEATURE: flag/limit code ("advanced_reporting","max_projects"); USAGE: meter slug. Empty for the single CREDIT/LICENSE grant. */
+  key         String              @default("")
+  /** FEATURE only — how to read `value`. */
+  valueType   EntitlementValueType? @map("value_type")
+  /** FEATURE only — the flag/limit value, stringified per `valueType`. */
+  value       String?
+  /** CREDIT: amount/period · LICENSE: seats · USAGE: included units. */
+  quantity    Int?
+  /** LICENSE only. */
+  licenseKind LicenseKind?        @map("license_kind")
+  /** CREDIT only — carry unused balance into the next period. */
+  rollover    Boolean             @default(false)
+  metadata    Json                @default("{}")
+  createdAt   DateTime            @default(now()) @map("created_at")
+  updatedAt   DateTime            @updatedAt @map("updated_at")
+
+  plan Plan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@unique([planId, kind, key])
+  @@index([planId])
+  @@map("plan_entitlements")
+}
+
+model Subscription {
+  id            String             @id @default(cuid())
+  applicationId String             @map("application_id")
+  endUserId     String             @map("end_user_id")
+  planId        String             @map("plan_id")
+  // Which billing provider issued this subscription. Bound at checkout and
+  // immutable for the sub's lifetime: switching providers means cancel +
+  // create a new sub. Null only for legacy rows from before multi-provider.
+  provider      String?
+  status        SubscriptionStatus @default(PENDING)
+  // When the current period ends. Null until the provider tells us.
+  currentPeriodEnd DateTime?       @map("current_period_end")
+  cancelAt         DateTime?       @map("cancel_at")
+  canceledAt       DateTime?       @map("canceled_at")
+  // Provider's id for this subscription (sub_..., I-...., etc.).
+  providerSubId String?            @unique @map("provider_sub_id")
+  /** Beneficiary org (owner+beneficiary model, ORG_BILLING.md). When set, the
+   *  subscription's entitlements are materialized onto this org (shared pool /
+   *  feature access for its members); `endUserId` stays the owner (pays +
+   *  manages). Null = the owner is the sole beneficiary (today's behavior). */
+  beneficiaryOrgId String?          @map("beneficiary_org_id")
+  /** Sparse per-subscription entitlement overrides, merged over the plan's
+   *  entitlements at provision/read time. Shape: {"KIND:key": value|quantity}
+   *  e.g. {"LICENSE:": 50} for a negotiated 50-seat deal. */
+  entitlementOverrides Json?       @map("entitlement_overrides")
+  // Test/live isolation: stamped from the calling key's mode at checkout
+  // (always equals the owning end-user's mode). LIVE for legacy rows.
+  mode          DataMode           @default(LIVE)
+  metadata      Json               @default("{}")
+  createdAt     DateTime           @default(now()) @map("created_at")
+  updatedAt     DateTime           @updatedAt @map("updated_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser     EndUser     @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+  plan        Plan        @relation(fields: [planId], references: [id])
+  beneficiaryOrg Organization? @relation("SubscriptionBeneficiary", fields: [beneficiaryOrgId], references: [id], onDelete: SetNull)
+  payments    Payment[]
+  dunningCases DunningCase[]
+
+  // One active subscription per (application, end-user). Status PENDING
+  // shouldn't conflict with ACTIVE in the same row — handled in service.
+  @@unique([applicationId, endUserId, planId])
+  @@index([applicationId])
+  @@index([applicationId, mode])
+  @@index([endUserId])
+  @@index([beneficiaryOrgId])
+  @@index([status])
+  @@map("subscriptions")
+}
+
+model Payment {
+  id              String        @id @default(cuid())
+  applicationId   String        @map("application_id")
+  endUserId       String?       @map("end_user_id")
+  subscriptionId  String?       @map("subscription_id")
+  amount          Int
+  currency        String        @default("USD")
+  status          PaymentStatus @default(PENDING)
+  providerPaymentId String?     @unique @map("provider_payment_id")
+  description     String?
+  // Test/live isolation: inherited from the subscription (or LIVE when the
+  // payment isn't attributable to a mode-stamped subscription).
+  mode            DataMode      @default(LIVE)
+  metadata        Json          @default("{}")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  application  Application   @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  @@index([applicationId])
+  @@index([applicationId, mode])
+  @@index([endUserId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("payments")
+}
+
+// ============================================================================
+// Dunning — failed-payment recovery cases (docs/billing.md → Dunning).
+//
+// One case tracks one subscription's trip through PAST_DUE: opened on the
+// transition, reminder emails at day 0/3/7, EXHAUSTED (subscription canceled)
+// at day 14 without recovery. The actual card retries are the PROVIDER's job
+// (Stripe Smart Retries / PayPal suspension retries) — ReliPay tracks state,
+// notifies the end-user, and emits `dunning.*` outbound webhook events.
+//
+// Invariant: at most ONE OPEN case per subscription. Enforced at the service
+// layer (`dunning.service.ts` opens via find-then-create keyed on the OPEN
+// status; inbound provider events are already deduped upstream) — Prisma can't
+// express the partial unique index without hand-managed migration drift.
+// ============================================================================
+
+enum DunningCaseStatus {
+  OPEN      // subscription is PAST_DUE; reminders in flight
+  RECOVERED // a later successful payment / reactivation closed it
+  EXHAUSTED // day-14 deadline passed → subscription canceled
+  CANCELED  // subscription was canceled (user/provider) while in dunning
+}
+
+model DunningCase {
+  id             String            @id @default(cuid())
+  applicationId  String            @map("application_id")
+  subscriptionId String            @map("subscription_id")
+  // Denormalized from the Subscription at open time (plain columns like
+  // Payment.endUserId — no FK so user deletion semantics stay independent).
+  endUserId      String?           @map("end_user_id")
+  organizationId String?           @map("organization_id")
+  status         DunningCaseStatus @default(OPEN)
+  // Failed payment attempts observed while the case is open (provider-driven
+  // retries land as repeat invoice.payment_failed / PAYMENT.SALE.DENIED).
+  failedAttempts Int               @default(0) @map("failed_attempts")
+  lastFailureAt  DateTime?         @map("last_failure_at")
+  // When the scheduler should act next (reminder or exhaustion). Null once
+  // closed. Doubles as the atomic-claim guard for multi-replica safety.
+  nextActionAt   DateTime?         @map("next_action_at")
+  remindersSent  Int               @default(0) @map("reminders_sent")
+  openedAt       DateTime          @default(now()) @map("opened_at")
+  closedAt       DateTime?         @map("closed_at")
+  metadata       Json              @default("{}")
+  createdAt      DateTime          @default(now()) @map("created_at")
+  updatedAt      DateTime          @updatedAt @map("updated_at")
+
+  application  Application  @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId, status])
+  @@index([status, nextActionAt])
+  @@index([subscriptionId, status])
+  @@map("dunning_cases")
+}
+
+// ============================================================================
+// Credits — prepaid balance per end-user (the "lead pack" / pay-as-you-go
+// drawdown model). Two tables:
+//
+//   CreditBalance — one row per (Application, EndUser); the materialized
+//                   current balance. Fast reads; mutated only inside the
+//                   same transaction that appends a ledger row.
+//   CreditLedger  — append-only journal. Every grant/consume/refund/adjust
+//                   writes one row with the post-mutation `balanceAfter`, so
+//                   the balance is always reconstructable + auditable.
+//
+// Idempotency: `(applicationId, idempotencyKey)` is unique. Purchase grants
+// use "purchase:<paymentId>"; consume calls pass a client-supplied key (e.g.
+// the lead id) so a retried drawdown never double-charges. NULL keys are
+// allowed to repeat (manual operator adjustments without a key).
+// ============================================================================
+
+enum CreditReason {
+  PURCHASE  // granted from a paid CREDIT-kind plan checkout (via webhook)
+  GRANT     // operator-issued manual top-up / promo
+  CONSUME   // drawn down by the customer's app
+  REFUND    // credits returned (e.g. payment reversed, lead disputed)
+  ADJUST    // manual correction (can be + or -)
+}
+
+model CreditBalance {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  // Exactly one of endUserId / organizationId is set (the billing subject).
+  // `subjectKey` ("u:<id>" | "o:<id>") is the always-non-null lookup key —
+  // avoids Prisma's nullable-compound-unique limitations.
+  endUserId     String?  @map("end_user_id")
+  organizationId String? @map("organization_id")
+  subjectKey    String   @map("subject_key")
+  balance       Int      @default(0)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  application  Application   @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser      EndUser?      @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, subjectKey])
+  @@index([applicationId])
+  @@map("credit_balances")
+}
+
+model CreditLedger {
+  id             String       @id @default(cuid())
+  applicationId  String       @map("application_id")
+  // Billing subject — exactly one of endUserId / organizationId; `subjectKey`
+  // ("u:<id>" | "o:<id>") is the non-null grouping key.
+  endUserId      String?      @map("end_user_id")
+  organizationId String?      @map("organization_id")
+  subjectKey     String       @map("subject_key")
+  // Positive = added (purchase/grant/refund), negative = consumed.
+  delta          Int
+  reason         CreditReason
+  // Materialized balance immediately after applying `delta`.
+  balanceAfter   Int          @map("balance_after")
+  // Dedups replays. "purchase:<paymentId>" for grants; client key for consume.
+  // NULL allowed to repeat (keyless operator adjustments).
+  idempotencyKey String?      @map("idempotency_key")
+  description    String?
+  metadata       Json         @default("{}")
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  application  Application   @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser      EndUser?      @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, idempotencyKey])
+  @@index([applicationId, subjectKey])
+  @@index([createdAt])
+  @@map("credit_ledger")
+}
+
+// ============================================================================
+// Coupons — discount codes that can be applied at checkout.
+//
+// `code` is the customer-facing string ("LAUNCH50"). It's case-insensitive
+// at lookup (we lowercase on storage and on validation). Per-Application
+// uniqueness; same code can exist in multiple Applications.
+//
+// Two discount kinds: PERCENT (basis-points, 1500 = 15.00%) and AMOUNT
+// (smallest currency unit). One per coupon — never both.
+//
+// `maxRedemptions` and `maxRedemptionsPerUser` are enforced when computing
+// validity; redemption is recorded as a CouponRedemption row, with optional
+// link to the Subscription / Payment that consumed it (filled when the
+// downstream webhook lands).
+// ============================================================================
+
+model Coupon {
+  id                    String             @id @default(cuid())
+  applicationId         String             @map("application_id")
+  code                  String             // Stored lowercase; unique per app.
+  discountType          CouponDiscountType @map("discount_type")
+  amountOff             Int                @map("amount_off") // see enum comment
+  // Optional currency restriction for AMOUNT coupons. Null = any currency.
+  currency              String?
+  // Optional restriction to specific plan slugs. Null/empty = any plan.
+  planSlugs             String[]           @map("plan_slugs")
+  active                Boolean            @default(true)
+  startsAt              DateTime?          @map("starts_at")
+  endsAt                DateTime?          @map("ends_at")
+  maxRedemptions        Int?               @map("max_redemptions")
+  maxRedemptionsPerUser Int?               @map("max_redemptions_per_user")
+  metadata              Json               @default("{}")
+  createdAt             DateTime           @default(now()) @map("created_at")
+  updatedAt             DateTime           @updatedAt @map("updated_at")
+
+  application Application        @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  redemptions CouponRedemption[]
+
+  @@unique([applicationId, code])
+  @@index([applicationId])
+  @@map("coupons")
+}
+
+model CouponRedemption {
+  id             String   @id @default(cuid())
+  couponId       String   @map("coupon_id")
+  applicationId  String   @map("application_id")
+  endUserId      String   @map("end_user_id")
+  // Link to the artifact that consumed the coupon. Both nullable because
+  // coupons can be applied at checkout (subscription) OR one-off (payment).
+  subscriptionId String?  @map("subscription_id")
+  paymentId      String?  @map("payment_id")
+  redeemedAt     DateTime @default(now()) @map("redeemed_at")
+
+  coupon Coupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
+
+  @@index([couponId])
+  @@index([applicationId, endUserId])
+  // Webhook-replay idempotency: a coupon may only be recorded once per
+  // successful payment. The Stripe handler's catch-on-P2002 relies on
+  // this — without it, a webhook replay double-counts the redemption
+  // toward the per-user / global limits.
+  @@unique([couponId, paymentId])
+  @@map("coupon_redemptions")
+}
+
+// ============================================================================
+// Webhook events — durable idempotency for inbound provider webhooks.
+//
+// (provider, providerEventId) is the source of truth. Redis is only a
+// fast-path cache. Insert-first, process-second; unique violation = duplicate.
+// ============================================================================
+
+model WebhookEvent {
+  id              String    @id @default(cuid())
+  applicationId   String    @map("application_id")
+  // "stripe", "paypal", "razorpay"
+  provider        String
+  providerEventId String    @map("provider_event_id")
+  eventType       String    @map("event_type")
+  payload         Json
+  receivedAt      DateTime  @default(now()) @map("received_at")
+  processedAt     DateTime? @map("processed_at")
+  processingError String?   @map("processing_error")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerEventId])
+  @@index([applicationId])
+  @@index([provider, eventType])
+  @@index([receivedAt])
+  @@map("webhook_events")
+}
+
+// ============================================================================
+// Outbound webhook endpoints — customer-registered URLs that ReliPay POSTs
+// user-lifecycle events to. Distinct from `WebhookEvent` above (that one is
+// INBOUND from billing providers).
+//
+// Per-Application, multiple endpoints supported (e.g. separate URLs for
+// staging vs production environments running off the same Application).
+// `secret` is the HMAC-SHA256 signing key included in each delivery's
+// `X-Relipay-Signature` header so customers can verify authenticity.
+// Stored in plaintext because it's *the* shared secret — encrypting it
+// at rest with our own key would just shift the trust anchor, not raise
+// the bar against a DB-leak attacker.
+//
+// `events` is the subscribed list (e.g. ['user.created', 'mfa.enabled']);
+// `["*"]` subscribes to all. New event types are additive — customers
+// using `["*"]` start receiving new types automatically on release.
+// ============================================================================
+
+model WebhookEndpoint {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  url           String
+  // Subscribed event types. ["*"] = all. See modules/webhooks/events.ts.
+  events        String[]
+  // Random secret (32 bytes hex). Used to HMAC-SHA256 the payload bytes;
+  // customers verify via `X-Relipay-Signature: sha256=<hex>`.
+  secret        String
+  enabled       Boolean  @default(true)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  application Application       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  deliveries  WebhookDelivery[]
+
+  @@index([applicationId, enabled])
+  @@map("webhook_endpoints")
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+// Per-attempt record of an outbound webhook delivery. We keep the most
+// recent N for each endpoint so the panel can render "last 50 deliveries
+// + payload + response" without unbounded growth (the actual eviction
+// happens via a periodic cleanup; the schema doesn't enforce it).
+//
+// `attempts` increments on each retry; `nextAttemptAt` is the scheduled
+// next try when status=PENDING. `responseStatus` is the HTTP code; null
+// means we never got a response (network error / timeout).
+model WebhookDelivery {
+  id             String                @id @default(cuid())
+  endpointId     String                @map("endpoint_id")
+  applicationId  String                @map("application_id")
+  // Stable event id (cuid) — included in the payload + the `X-Relipay-Event-Id`
+  // header. Customers should treat as the idempotency key.
+  eventId        String                @map("event_id")
+  eventType      String                @map("event_type")
+  payload        Json
+  status         WebhookDeliveryStatus @default(PENDING)
+  attempts       Int                   @default(0)
+  nextAttemptAt  DateTime?             @map("next_attempt_at")
+  responseStatus Int?                  @map("response_status")
+  responseBody   String?               @map("response_body")
+  error          String?
+  createdAt      DateTime              @default(now()) @map("created_at")
+  updatedAt      DateTime              @updatedAt @map("updated_at")
+
+  endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@index([endpointId, createdAt])
+  @@index([applicationId, eventType])
+  @@index([status, nextAttemptAt])
+  @@map("webhook_deliveries")
+}
+
+// ============================================================================
+// WebAuthn challenge store — anti-replay for passkey ceremonies.
+//
+// The challenge generated at `/start` is persisted here and looked up +
+// atomically consumed at `/complete`. This is the load-bearing anti-replay
+// control: WebAuthn assertions are only fresh if the relying party verifies
+// them against a challenge IT issued and has not seen before. Previously the
+// challenge round-trip was delegated to the client (the `expectedChallenge`
+// posted to `/complete` was trusted verbatim), which let a captured assertion
+// be replayed indefinitely. Now the posted challenge is validated against this
+// table and burned on first use.
+//
+// Rows are short-lived (5-minute TTL). `consumedAt` enforces single-use via an
+// atomic guarded update. Bindings:
+//   - `ceremony`      'registration' | 'authentication'
+//   - `scope`         'tenant' (operator passkey) | 'end_user' (app passkey)
+//   - `applicationId` set for end_user scope; null for tenant scope
+//   - `subjectId`     the tenantUserId / endUserId for registration ceremonies
+//                     (so a challenge minted for user A can't be consumed by B);
+//                     null for usernameless authentication ceremonies
+//
+// No FKs — rows expire in minutes and are swept; soft references keep the
+// table independent of cascade behaviour.
+// ============================================================================
+model WebAuthnChallenge {
+  id            String    @id @default(cuid())
+  // The base64url challenge value SimpleWebAuthn generated. Unique so it
+  // doubles as its own lookup key when `/complete` posts it back.
+  challenge     String    @unique
+  ceremony      String
+  scope         String
+  applicationId String?   @map("application_id")
+  subjectId     String?   @map("subject_id")
+  expiresAt     DateTime  @map("expires_at")
+  consumedAt    DateTime? @map("consumed_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  @@index([expiresAt])
+  @@map("webauthn_challenges")
+}
+
+// ============================================================================
+// Deployment-wide RS256 signing keys for end-user access tokens (JWKS).
+//
+// Used only by Applications that opt in via `authConfig.tokenAlg = "RS256"`.
+// The private key is AES-256-GCM encrypted at rest via lib/secrets.ts
+// (ENCRYPTION_KEY); the public half is published at /.well-known/jwks.json.
+// `kid` is the RFC 7638 JWK thumbprint of the public key and appears in the
+// JWT header of every token the key signs.
+//
+// Rotation story: mint a new row (becomes active by newest `createdAt` with
+// `rotatedAt = null`), stamp `rotatedAt` on the old one. Rotated keys STAY in
+// the JWKS so outstanding (≤15 min) tokens keep verifying; they just stop
+// signing. Deliberately FK-free — deployment-level key material, not tenant
+// data. When env `JWT_RS256_PRIVATE_KEY` is set it takes precedence over DB
+// rows as the active signer (see lib/signing-keys.ts).
+// ============================================================================
+model SigningKey {
+  id                   String    @id @default(cuid())
+  /** RFC 7638 thumbprint of the public key — the JWT header `kid`. */
+  kid                  String    @unique
+  alg                  String    @default("RS256")
+  /** PKCS#8 private key PEM, encrypted via lib/secrets.ts (encryptJson). */
+  privatePemCiphertext String    @map("private_pem_ciphertext")
+  /** SPKI public key PEM — served (as a JWK) at /.well-known/jwks.json. */
+  publicPem            String    @map("public_pem")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  /** Null = eligible to sign. Set when rotated out (still published in JWKS). */
+  rotatedAt            DateTime? @map("rotated_at")
+
+  @@index([rotatedAt, createdAt])
+  @@map("signing_keys")
+}
+
+// ============================================================================
+// Security audit log — append-only record of security-relevant events for
+// incident forensics ("who rotated sessions, when, from where").
+//
+// Deliberately FK-free: rows must survive deletion of the tenant/app/user they
+// reference (an audit trail you can erase by deleting the actor is no audit
+// trail). `tenantId` scopes operator + app events to a workspace's log;
+// `applicationId` is set for app-scoped events. `type` is a dotted name
+// (e.g. "operator.sign_in", "app.sessions_rotated", "app.api_key.revoked").
+// Best-effort writes (see lib/security-events.ts) — never block the action.
+// ============================================================================
+model SecurityEvent {
+  id            String   @id @default(cuid())
+  tenantId      String?  @map("tenant_id")
+  applicationId String?  @map("application_id")
+  // 'operator' | 'end_user' | 'system'
+  actorType     String   @map("actor_type")
+  actorId       String?  @map("actor_id")
+  type          String
+  ip            String?
+  userAgent     String?  @map("user_agent")
+  metadata      Json     @default("{}")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, createdAt])
+  @@index([applicationId, createdAt])
+  @@index([type])
+  @@map("security_events")
+}
+
+// ============================================================================
+// Per-request access log. Written fire-and-forget from a global onResponse
+// hook (see lib/request-log.ts) — NEVER on the synchronous request path, and
+// NEVER pruned per-insert. A periodic job caps each app/operator to the last
+// N rows. The authoritative log is structured stdout; this table is a bounded
+// convenience tail the panel renders. Scalar id columns only (no FK relations)
+// so a logging write can't contend with or block the request it records, and
+// pruning is a plain DELETE with no cascade.
+// ============================================================================
+model ApiRequestLog {
+  id             String   @id @default(cuid())
+  method         String
+  routePath      String   @map("route_path")
+  statusCode     Int      @map("status_code")
+  durationMs     Int      @map("duration_ms")
+  // Identity is populated only AFTER per-route auth middleware runs:
+  //   applicationId  ← req.application (API-key routes)
+  //   tenantId       ← req.tenantId, else req.application.tenantId
+  //   operatorUserId ← req.tenantUser (operator/panel routes)
+  // Unauthenticated routes log all three null (anonymous) — acceptable.
+  applicationId  String?  @map("application_id")
+  tenantId       String?  @map("tenant_id")
+  operatorUserId String?  @map("operator_user_id")
+  ip             String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([applicationId, createdAt])
+  @@index([tenantId, createdAt])
+  @@index([operatorUserId, createdAt])
+  @@map("api_request_logs")
+}
+
+// ============================================================================
+// Generic Idempotency-Key support (middleware/idempotency.ts).
+//
+// One row per (principal scope, key). `scopeKey` is the non-null scope
+// discriminator — "app:<applicationId>" for API-key callers, "tenant:<tenantId>"
+// for operator sessions — used in the unique constraint (same trick as
+// CreditBalance.subjectKey: a nullable compound unique would treat NULLs as
+// distinct in Postgres, silently allowing duplicates). The nullable scalar id
+// columns exist for inspection/joins only.
+//
+// Uniqueness is (scopeKey, key) — NOT (scope, key, route). A key identifies
+// ONE logical operation per principal; method + path + requestHash form the
+// request fingerprint, and presenting the same key with a different
+// fingerprint is a 409 IDEMPOTENCY_KEY_REUSED, never a second cached slot.
+//
+// `responseStatus`/`responseBody` are NULL while the first request is still
+// executing — that reservation row is what makes concurrent duplicates
+// deterministic (the loser of the unique-insert race gets a 409 IN_FLIGHT).
+// Scalar ids only (no FK relations), mirroring ApiRequestLog: rows are
+// ephemeral (24 h TTL, swept by the app.ts prune timer) and must never
+// contend with the request they protect.
+// ============================================================================
+model IdempotencyKey {
+  id             String   @id @default(cuid())
+  // "app:<applicationId>" | "tenant:<tenantId>" — see header comment.
+  scopeKey       String   @map("scope_key")
+  // The client-supplied Idempotency-Key header value (1–200 chars).
+  key            String
+  applicationId  String?  @map("application_id")
+  tenantId       String?  @map("tenant_id")
+  method         String
+  // Request path including query string — part of the request fingerprint.
+  path           String
+  // sha256 hex of the JSON-serialized request body.
+  requestHash    String   @map("request_hash")
+  // NULL while the first request is in flight; set on completion (2xx/4xx only).
+  responseStatus Int?     @map("response_status")
+  responseBody   Json?    @map("response_body")
+  createdAt      DateTime @default(now()) @map("created_at")
+  expiresAt      DateTime @map("expires_at")
+
+  @@unique([scopeKey, key])
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
+
+// ============================================================================
+// MCP / OAuth 2.1 authorization server (per-Application, gated by
+// authConfig.mcpEnabled). ReliPay acts as the OAuth AS that MCP clients
+// (Claude Code, Claude Desktop) authenticate end-users against, then connect
+// to the hosted MCP server at /api/v1/mcp/<slug>.
+// ============================================================================
+
+// A dynamically-registered (RFC 7591) OAuth client. MCP clients are PUBLIC
+// clients — they use PKCE and hold no secret (token_endpoint_auth_method
+// "none"), so no client_secret is stored.
+model OAuthClient {
+  id            String   @id @default(cuid()) // = client_id
+  applicationId String   @map("application_id")
+  clientName    String?  @map("client_name")
+  // Exact-match redirect URI allowlist captured at registration.
+  redirectUris  String[] @map("redirect_uris")
+  metadata      Json     @default("{}")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+  @@map("oauth_clients")
+}
+
+// Short-lived (≈60s) single-use authorization code, hashed at rest. Binds the
+// authenticated end-user to a client + redirect_uri + PKCE challenge + scope;
+// exchanged once at /oauth/token. `endUserId` / `clientId` are soft references.
+model OAuthAuthCode {
+  id            String    @id @default(cuid())
+  codeHash      String    @unique @map("code_hash")
+  applicationId String    @map("application_id")
+  clientId      String    @map("client_id")
+  endUserId     String    @map("end_user_id")
+  redirectUri   String    @map("redirect_uri")
+  // PKCE S256 challenge the client proves with its verifier at /token.
+  codeChallenge String    @map("code_challenge")
+  scope         String
+  expiresAt     DateTime  @map("expires_at")
+  consumedAt    DateTime? @map("consumed_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+  @@index([expiresAt])
+  @@map("oauth_auth_codes")
+}
+
+// ============================================================================
+// Operator MCP OAuth — RFC 8414/9728/7591/6749 + RFC 7636 PKCE.
+//
+// Mounted at `/api/v1/tenant/mcp/oauth/*`. Mirrors the per-Application MCP
+// OAuth shape (`OAuthClient` / `OAuthAuthCode` above) but binds tokens to a
+// (tenantUserId, tenantId) pair instead of (applicationId, endUserId), so an
+// operator's Claude Desktop / Cursor MCP client can drive the browser flow
+// without pasting a PAT.
+//
+// Public clients only (PKCE, no secret). Codes single-use + 60s TTL. Refresh
+// tokens hash-only + atomically rotated on redeem; reuse = revocation.
+// ============================================================================
+
+/**
+ * RFC 7591 dynamically-registered OAuth client for the operator MCP server.
+ *
+ * Not bound to any specific operator at register time — anybody can register
+ * (the rate limiter caps it). The (tenantUserId, tenantId) binding happens at
+ * /oauth/authorize when an operator signs in + picks a workspace.
+ */
+model TenantOAuthClient {
+  id            String   @id @default(cuid()) // = client_id
+  clientName    String?  @map("client_name")
+  /** Exact-match redirect URI allowlist captured at registration. */
+  redirectUris  String[] @map("redirect_uris")
+  metadata      Json     @default("{}")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  authCodes     TenantOAuthAuthCode[]
+
+  @@map("tenant_oauth_clients")
+}
+
+/**
+ * Short-lived (60s) single-use authorization code for the operator MCP OAuth
+ * AS. Records which workspace the operator picked at consent — the token
+ * minted in exchange will be bound to that (tenantUserId, tenantId).
+ */
+model TenantOAuthAuthCode {
+  id            String    @id @default(cuid())
+  codeHash      String    @unique @map("code_hash")
+  clientId      String    @map("client_id")
+  tenantUserId  String    @map("tenant_user_id")
+  /** Workspace the operator picked at consent. Bound for the token's lifetime. */
+  tenantId      String    @map("tenant_id")
+  redirectUri   String    @map("redirect_uri")
+  /** PKCE S256 challenge the client proves with its verifier at /token. */
+  codeChallenge String    @map("code_challenge")
+  scope         String
+  expiresAt     DateTime  @map("expires_at")
+  consumedAt    DateTime? @map("consumed_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  client TenantOAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId])
+  @@index([expiresAt])
+  @@map("tenant_oauth_auth_codes")
+}
+
+/**
+ * Refresh tokens for the operator MCP surface. Distinct from the panel
+ * session refresh tokens (`TenantRefreshToken`) — bound to a single
+ * (tenantUserId, tenantId, clientId) triplet and only redeemable at
+ * /api/v1/tenant/mcp/oauth/token.
+ *
+ * Hash-only at rest (SHA-256 of the raw token), atomically rotated on
+ * redeem (`replacedById` records the chain). A presented-but-revoked
+ * token is refused — possible reuse, possible compromise. Best-effort
+ * `userAgent` / `ip` captured at issue time for the panel's MCP-sessions
+ * view (when that lands).
+ */
+model TenantMcpRefreshToken {
+  id           String    @id @default(cuid())
+  /** SHA-256(rawToken). High-entropy random, hash-only storage. */
+  tokenHash    String    @unique @map("token_hash")
+  tenantUserId String    @map("tenant_user_id")
+  tenantId     String    @map("tenant_id")
+  /** Which TenantOAuthClient redeemed this token — refused if the wrong one tries. */
+  clientId     String    @map("client_id")
+  expiresAt    DateTime  @map("expires_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  revokedAt    DateTime? @map("revoked_at")
+  /** Set when this token is rotated — points at the new token issued in its place. */
+  replacedById String?   @map("replaced_by_id")
+  userAgent    String?   @map("user_agent")
+  ip           String?
+
+  @@index([tenantUserId])
+  @@index([tenantId])
+  @@index([clientId])
+  @@index([expiresAt])
+  @@map("tenant_mcp_refresh_tokens")
+}

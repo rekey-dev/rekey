@@ -1,0 +1,118 @@
+import * as React from 'react';
+import Link from 'next/link';
+import { redirect } from 'next/navigation';
+import {
+  publicPost,
+  setSessionCookies,
+  PanelApiError,
+  type AuthResponse,
+} from '@/lib/api';
+import { SubmitButton } from '@/components/SubmitButton';
+
+/**
+ * MFA challenge step for operator sign-in.
+ *
+ * Reached only when /api/v1/tenant/auth/sign-in returned
+ * `mfaRequired: true` and `/login` redirected here with the challenge
+ * token in the query string. The token is single-use, 5-minute-lifetime,
+ * and only valid for the operator that just passed the primary factor.
+ */
+async function verify(formData: FormData): Promise<void> {
+  'use server';
+  const challenge = String(formData.get('challenge') ?? '').trim();
+  const code = String(formData.get('code') ?? '').trim();
+  if (!challenge || !code) redirect('/mfa-verify?error=missing');
+
+  let result: AuthResponse;
+  try {
+    result = await publicPost<AuthResponse>('/api/v1/tenant/auth/mfa-verify', {
+      mfaChallengeToken: challenge,
+      code,
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      // Preserve the challenge so the user can retry without a fresh sign-in.
+      redirect(
+        `/mfa-verify?challenge=${encodeURIComponent(challenge)}&error=${encodeURIComponent(err.code)}`,
+      );
+    }
+    throw err;
+  }
+
+  await setSessionCookies({
+    accessToken: result.accessToken,
+    refreshToken: result.refreshToken,
+  });
+  redirect('/applications?e=login_mfa');
+}
+
+const ERROR_MESSAGES: Record<string, string> = {
+  missing: 'Authenticator code is required.',
+  MFA_CODE_INVALID: 'That code didn\'t verify. Try the current 6-digit code or a backup code.',
+  MFA_CHALLENGE_INVALID:
+    'The challenge expired or was already used. Sign in again to start over.',
+};
+
+export default async function MfaVerifyPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}): Promise<React.JSX.Element> {
+  const params = await searchParams;
+  const challenge =
+    typeof params.challenge === 'string' ? params.challenge : '';
+  const error = typeof params.error === 'string' ? params.error : undefined;
+
+  if (!challenge) redirect('/login');
+
+  return (
+    <main className="min-h-screen grid place-items-center px-6 bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-950 dark:to-neutral-900">
+      <form
+        action={verify}
+        className="w-full max-w-md space-y-5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-8 shadow-sm"
+      >
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold">Two-factor authentication</h1>
+          <p className="text-sm text-[var(--color-muted-fg)]">
+            Enter the current 6-digit code from your authenticator app, or one
+            of the backup codes you saved at enrollment.
+          </p>
+        </div>
+
+        {error && (
+          <p role="alert" className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+            {ERROR_MESSAGES[error] ?? error}
+          </p>
+        )}
+
+        <input type="hidden" name="challenge" value={challenge} />
+        <label className="block space-y-1.5">
+          <span className="text-sm font-medium">Code</span>
+          <input
+            type="text"
+            name="code"
+            required
+            autoFocus
+            inputMode="numeric"
+            pattern="[A-Za-z0-9\-]+"
+            autoComplete="one-time-code"
+            placeholder="123456"
+            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm tracking-widest focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]"
+          />
+        </label>
+        <SubmitButton
+          pendingLabel="Verifying…"
+          className="w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+        >
+          Verify
+        </SubmitButton>
+
+        <div className="flex items-center justify-end text-sm text-[var(--color-muted-fg)] pt-2 border-t border-[var(--color-border)]">
+          <Link href="/login" className="hover:text-[var(--color-fg)]">
+            Back to sign-in
+          </Link>
+        </div>
+      </form>
+    </main>
+  );
+}

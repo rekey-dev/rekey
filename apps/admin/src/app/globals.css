@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design tokens — kept in lockstep with apps/panel/src/app/globals.css so the
+   admin surface reads as the same product. See /design.md. */
+
+:root {
+  color-scheme: light;
+
+  --color-primary: #0d9488;
+  --color-primary-hover: #0f766e;
+  --color-primary-fg: #ffffff;
+  --color-primary-soft: #ccfbf1;
+  --color-primary-soft-fg: #115e59;
+
+  --color-bg: #f9f5f3;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f3ede7;
+  --color-border: #e8e0d9;
+
+  --color-fg: #1d1e22;
+  --color-muted-fg: #6f6a66;
+  --color-faint-fg: #a59f99;
+
+  --color-danger: #b91c1c;
+  --color-danger-soft: #fee2e2;
+  --color-success: #047857;
+  --color-success-soft: #d1fae5;
+  --color-warning: #b45309;
+  --color-warning-soft: #fef3c7;
+}
+
+.dark {
+  color-scheme: dark;
+  --color-bg: #0a0a0a;
+  --color-surface: #111111;
+  --color-surface-muted: #1c1c1c;
+  --color-border: #2a2a2a;
+  --color-fg: #f5f5f5;
+  --color-muted-fg: #a3a3a3;
+  --color-faint-fg: #6b6b6b;
+  --color-primary: #14b8a6;
+  --color-primary-hover: #2dd4bf;
+  --color-primary-soft: #0f2e2a;
+  --color-primary-soft-fg: #5eead4;
+  --color-danger: #f87171;
+  --color-danger-soft: #3b0d0d;
+  --color-success: #4ade80;
+  --color-success-soft: #052e1a;
+  --color-warning: #fbbf24;
+  --color-warning-soft: #3a2a05;
+}
+
+body {
+  font-family: var(--font-akkurat), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-fg);
+}
+
+:root {
+  accent-color: var(--color-primary);
+}

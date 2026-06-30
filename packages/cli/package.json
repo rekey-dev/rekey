@@ -1,0 +1,49 @@
+{
+  "name": "@relipay/cli",
+  "version": "1.0.0-rc.1",
+  "license": "MIT",
+  "description": "ReliPay command-line interface — designed for both human developers and AI agents.",
+  "type": "module",
+  "bin": {
+    "relipay": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "AGENTS.md",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo \"(eslint not yet wired)\"",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "relipay",
+    "cli",
+    "auth",
+    "billing"
+  ],
+  "dependencies": {
+    "@relipay/node": "workspace:*",
+    "@relipay/shared-types": "workspace:*",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
+  }
+}

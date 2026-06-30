@@ -1,0 +1,49 @@
+{
+  "name": "@relipay/mcp",
+  "version": "1.0.0-rc.1",
+  "license": "MIT",
+  "description": "Model Context Protocol server for ReliPay — lets Claude Desktop / Cursor / Claude Code introspect a deployment.",
+  "type": "module",
+  "bin": {
+    "relipay-mcp": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "AGENTS.md",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo \"(eslint not yet wired)\"",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "relipay",
+    "mcp",
+    "model-context-protocol",
+    "ai"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@relipay/shared-types": "workspace:*",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
+  }
+}
