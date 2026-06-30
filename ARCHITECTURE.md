@@ -347,17 +347,22 @@ prisma/
 
 ## 8. Configuration (env)
 
-| Variable | Purpose | Required where |
+Required to boot: `DATABASE_URL`, `JWT_SECRET`, `SUPER_ADMIN_KEY`, and a
+reachable Redis. Everything else is optional or has a default.
+
+| Variable | Purpose | Required? |
 |---|---|---|
-| `DATABASE_URL` | Postgres connection | always |
-| `REDIS_URL` | rate-limit / lockout state | recommended |
-| `JWT_SECRET` | signs end-user + operator + MFA-challenge JWTs | always |
-| `ENCRYPTION_KEY` | AES-256-GCM for secrets at rest | production |
-| `SUPER_ADMIN_KEY` | bootstrap admin path | always |
-| `STRIPE_API_KEY` | falls back to a stub provider when unset | accepting Stripe |
-| `RESEND_DEFAULT_API_KEY` + `RESEND_DEFAULT_FROM` | shared Resend pool for tenants without a BYO key | hosted email |
-| `CORS_ALLOWED_ORIGINS` | comma-separated allowlist for browser callers | always (dev permits localhost) |
-| `WEBHOOK_ALLOW_PRIVATE_TARGETS` | opt out of the outbound-webhook SSRF guard for intra-VPC URLs | self-hosters only |
+| `DATABASE_URL` | Postgres connection | **required** |
+| `JWT_SECRET` | signs end-user + operator + MFA-challenge JWTs (≥32 chars) | **required** |
+| `SUPER_ADMIN_KEY` | bootstrap admin path (≥32 chars) | **required** |
+| `REDIS_URL` | outbound-webhook delivery queue + rate-limit/lockout state | **required infra** — the API refuses to boot if Redis is unreachable; the URL itself defaults to `localhost` |
+| `ENCRYPTION_KEY` | AES-256-GCM for secrets at rest (64 hex chars) | **required in production** (boot fails without it) |
+| `CORS_ALLOWED_ORIGINS` | allowlist for browser callers | **required in production** (dev permits localhost) |
+| `STRIPE_API_KEY` | use real Stripe; a deterministic **stub provider** is used when unset | optional |
+| `RESEND_DEFAULT_API_KEY` + `RESEND_DEFAULT_FROM` | shared Resend pool; without it the API returns raw tokens to the caller | optional |
+| `WEBHOOK_ALLOW_PRIVATE_TARGETS` | opt out of the outbound-webhook SSRF guard for intra-VPC URLs | optional (self-host) |
+
+See [.env.example](.env.example) for the complete, commented list.
 
 See [DEPLOY.md](DEPLOY.md) for a full self-host runbook and [docs/](docs/) for
 per-feature guides (auth, billing, API keys, MCP, portal, …).
