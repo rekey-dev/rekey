@@ -1,0 +1,235 @@
+# `@relipay/node`
+
+The server SDK for [ReliPay](https://relipay.dev) — auth, billing, usage, credits, licenses, and teams for your application, from any server-side TypeScript runtime (Node, Bun, Deno, Express, Fastify, Nest, Hono).
+
+> **For AI coding agents:** start at [AGENTS.md](./AGENTS.md) — it has the do-this-first rules.
+
+```bash
+npm i @relipay/node
+# or: pnpm add @relipay/node / yarn add @relipay/node
+```
+
+## Setup
+
+One client instance per Application, constructed with that Application's **secret key**:
+
+| Key | Format | Where to get it |
+| --- | --- | --- |
+| Secret key | `rp_live_…` (production) or `rp_test_…` (sandbox) | Panel → Application → API Keys |
+| API URL | `https://api.relipay.dev` or `http://localhost:3030` | Your ReliPay deployment |
+
+Convention: read both from the environment — never hardcode.
+
+```bash
+RELIPAY_URL=https://api.relipay.dev
+RELIPAY_SECRET=rp_live_…   # the Application secret key
+```
+
+> **Never ship the secret key to the browser.** It authenticates as the whole
+> Application — anyone holding it can act on every end-user. Browser code must
+> use the Application's **public** key (`rp_pub_…`) via [`@relipay/react`](../sdk-react)
+> or [`@relipay/nextjs`](../sdk-nextjs) instead. The flow is always:
+> browser → your backend → ReliPay.
+
+## Quickstart
+
+```ts
+import { ReliPay } from '@relipay/node';
+
+// Module-level singleton — don't construct one per request.
+const relipay = new ReliPay({
+  apiUrl: process.env.RELIPAY_URL!,
+  secretKey: process.env.RELIPAY_SECRET!,
+});
+
+// 1. Smoke test: verifies your credentials and returns the Application.
+const me = await relipay.applications.me();
+console.log(`Connected to "${me.name}" (${me.slug})`);
+
+// 2. Create an end-user. Returns the user + a session token pair.
+const { endUser, accessToken } = await relipay.auth.signUp({
+  email: 'alice@example.com',
+  password: 'correct-horse-battery-staple',
+});
+
+// 3. Gate features on the user's resolved entitlements (server-side).
+const { features, creditBalance } = await relipay.billing.getEntitlements(accessToken);
+if (features.advanced_reporting) renderReportingTab();
+```
+
+### The two-credential model
+
+Per-user calls require **two** credentials together:
+
+1. The **Application secret key** — proves *which Application*. Set once at construction; sent as `Authorization: Bearer …` automatically.
+2. The **user JWT** (returned by `signUp` / `signIn`) — proves *which end-user*. You pass it as the first argument to per-user methods; the SDK puts it in `X-Relipay-User-Token`.
+
+A JWT issued by Application A presented through Application B's secret key is refused with `USER_TOKEN_WRONG_APPLICATION` (401), by design.
+
+## Core API
+
+Everything hangs off namespaces on the client. `amount` fields are always integers in the smallest currency unit (cents/paise/sen) — never floats.
+
+### `relipay.applications`
+| Method | Description |
+| --- | --- |
+| `me()` | Verify credentials + fetch the calling Application (your smoke test). |
+
+### `relipay.auth`
+| Method | Description |
+| --- | --- |
+| `signUp({ email, password, metadata? })` | Create an end-user; returns user + token pair. |
+| `signIn({ email, password })` | Authenticate. Returns a `SignInOutcome` — **branch on `mfaRequired`** before reading `accessToken`. |
+| `mfaVerify({ mfaChallengeToken, code })` | Exchange an MFA challenge for a real session. |
+| `getCurrentUser(accessToken)` | Resolve the end-user behind a token (+ `activeOrganizationId`). |
+| `refresh(refreshToken)` | Rotate the token pair. Single-use — store the new refresh immediately. |
+| `signOut(refreshToken)` / `signOutEverywhere(accessToken)` | Revoke one / all refresh tokens. |
+| `requestPasswordReset({ email, resetUrl? })` / `resetPassword({ token, newPassword })` | Reset flow. **Branch on `emailSent`** — see [Email-sending methods](#email-sending-methods-branch-on-emailsent). |
+| `changePassword(accessToken, { currentPassword, newPassword })` | Authenticated change; kills other sessions. |
+| `requestMagicLink({ email, signInUrl? })` / `verifyMagicLink(...)` | Passwordless sign-in. Same `emailSent` contract as password reset. |
+| `sendVerificationEmail(...)` / `verifyEmail(...)` | Email verification. Same `emailSent` contract (no `delivered` field — the caller is already authenticated). |
+| `listSessions(accessToken)` / `revokeSession(...)` | Active-session management. |
+| `mfaStatus` / `mfaSetup` / `confirmMfaSetup` / `mfaChallenge` / `disableMfa` | TOTP enrollment + step-up. |
+| `startPasskeyAuthentication` / `verifyPasskeyAuthentication` / `startPasskeyRegistration` / `verifyPasskeyRegistration` / `listPasskeys` / `deletePasskey` | WebAuthn / passkeys. |
+| `startOAuth` / `completeOAuth` / `listOAuthIdentities` / `startOAuthLink` / `completeOAuthLink` / `unlinkOAuth` | Social sign-in + account linking. |
+
+#### Email-sending methods: branch on `emailSent`
+
+`requestPasswordReset` and `requestMagicLink` return a different shape depending on whether the Application has an email transport configured (BYO Resend creds, or `RESEND_DEFAULT_*` on the deployment). They never throw for an unknown email — enumeration-safe by design.
+
+| Case | `delivered` | `emailSent` | token (`resetToken` / `magicLinkToken`) | Your job |
+| --- | --- | --- | --- | --- |
+| Transport configured, user exists | `true` | `true` | `null` | Nothing — ReliPay sent the email. |
+| No transport (or send failed), user exists | `true` | `false` | the raw token | **You** email the link via your own provider. |
+| Unknown email | `false` | `false` | `null` | Nothing. Render the same neutral UI — never reveal. |
+
+```ts
+const r = await relipay.auth.requestPasswordReset({
+  email,
+  resetUrl: 'https://yourapp.com/reset?token={token}', // {token} substituted into the email
+});
+if (!r.emailSent && r.resetToken) {
+  await mailer.send({ to: email, text: `Reset: https://yourapp.com/reset?token=${encodeURIComponent(r.resetToken)}` });
+}
+// Always show "if that address exists, we sent a link" — even when delivered === false.
+```
+
+`sendVerificationEmail` follows the same contract with `{ emailSent, verificationToken }` (no `delivered` — the caller is already authenticated, so there's nothing to hide).
+
+### `relipay.billing`
+| Method | Description |
+| --- | --- |
+| `getPlans()` | List the Application's active plans (public — render pricing pages). |
+| `getSubscription(accessToken)` | The user's active subscription, or `null`. |
+| `createCheckout(accessToken, { planSlug, successUrl, cancelUrl, couponCode?, organizationId? })` | Start hosted checkout; returns the redirect URL + a PENDING subscription. Activation happens via the provider webhook. |
+| `validateCoupon(accessToken, { code, planSlug })` | Price-check a coupon without applying it. |
+| `getProviders(country?)` | The geo-routed list of enabled billing providers. |
+| `getEntitlements(accessToken, { organizationId? })` | Resolve feature flags + limits + live credit balance. **Gate your app on this.** Cache it with a ~5-min TTL / stale-while-revalidate and bust on checkout success — see ["Caching entitlements" in docs/billing.md](../../docs/billing.md#caching-entitlements). |
+
+### `relipay.organizations` (teams)
+| Method | Description |
+| --- | --- |
+| `create(accessToken, { name, slug })` | Create an org; caller becomes OWNER. |
+| `listMine(accessToken, page?)` | Orgs the user belongs to (paginated — see Gotchas). |
+| `get` / `update` / `listMembers(…, page?)` | Read / update org + list members (paginated). |
+| `invite` / `revokeInvitation` / `acceptInvitation` | Invitation flow (raw token surfaced once). |
+| `setMemberRole` / `removeMember` / `leave` | Membership management (last-OWNER guarded). |
+| `switch(accessToken, orgId)` / `clearActive(accessToken)` | Set / clear the session's active org. **Returns a fresh token pair — store both.** |
+
+### `relipay.usage`
+| Method | Description |
+| --- | --- |
+| `record({ meterSlug, quantity, endUserId? \| organizationId? })` | Record a metering event (quantity may be negative). |
+| `aggregate({ meterSlug, from?, to?, endUserId?, organizationId? })` | Sum a meter over a window / subject. |
+
+### `relipay.credits` (prepaid / pay-as-you-go)
+| Method | Description |
+| --- | --- |
+| `getBalance(subject)` | Spendable balance for `{ endUserId }` or `{ organizationId }`. |
+| `consume(subject & { amount, idempotencyKey? })` | Idempotent drawdown. Throws `CREDITS_INSUFFICIENT` (402) when too low. |
+| `listLedger(subject, limit?, offset?)` | Ledger entries, newest first (default 50, max 200). |
+
+#### `idempotencyKey` scoping & retry semantics
+
+The key is unique per **Application** — `(applicationId, idempotencyKey)` on the append-only ledger — **not** per subject. Two consumes with the same key but different `endUserId`s collide: the second silently replays the first entry and **does not charge the second user**. So always embed the subject and the operation in the key:
+
+```ts
+// Recommended format: `${subjectId}:${operationId}` — stable per logical operation.
+const result = await relipay.credits.consume({
+  endUserId: user.id,
+  amount: 1,
+  idempotencyKey: `${user.id}:enrich-lead:${leadId}`, // ≤ 200 chars
+});
+if (!result.applied) {
+  // Replay: this exact operation was already charged. `result.balance` and
+  // `result.entryId` are from the ORIGINAL entry — safe to treat as success.
+}
+```
+
+Retry semantics: a repeat with the same key (timeout retry, queue redelivery, double-click) is a no-op that returns the original result with `applied: false` — never a double charge and never an error. Keys never expire (the ledger is append-only for the life of the subject), so derive them from the operation, not from a timestamp or a random UUID minted per attempt — a fresh UUID per retry defeats the whole mechanism.
+
+### `relipay.licenses`
+| Method | Description |
+| --- | --- |
+| `verify({ key, machineFingerprint, label? })` | Verify a license key + record an activation. Always 200 — branch on `result.ok`. |
+
+### `relipay.mcp` (bring-your-own MCP server)
+| Method | Description |
+| --- | --- |
+| `introspect(token)` | Validate an inbound ReliPay-issued MCP access token (RFC 7662). |
+| `metadata()` | Fetch this Application's OAuth authorization-server metadata (RFC 8414). |
+
+### Top-level exports
+| Export | Description |
+| --- | --- |
+| `verifyWebhookSignature({ header, payload, secret, toleranceSeconds? })` | Verify the HMAC on a webhook **ReliPay sends to your app** (user-lifecycle + billing events) against the **raw body bytes** + the `X-Relipay-Signature` header. Not for Stripe/PayPal webhooks — those go to ReliPay, never to you (see [docs/billing.md](../../docs/billing.md)). |
+| `verifyAccessToken(token, { jwksUrl \| jwks })` | Verify an end-user access token **offline** (no API round-trip) against your deployment's `GET /.well-known/jwks.json`. RS256 only — the Application must opt in via `authConfig.tokenAlg: "RS256"`; default HS256 tokens still need `auth.getCurrentUser`. Fetches + caches the JWKS for 5 minutes, checks `kid`/signature/`exp`/`typ`, and returns the claims (`sub`, `applicationId`, `oid?`, …). Check `claims.applicationId` against your own app id. See [docs/jwks.md](../../docs/jwks.md). |
+| `WEBHOOK_EVENTS` / `KNOWN_WEBHOOK_EVENTS` / `isKnownWebhookEvent` | The full outbound-event registry — `{ name, description }` pairs (and just the names) for the 13 events ReliPay can send: `user.created/updated/deleted`, `session.revoked`, `mfa.enabled/disabled`, `password.changed`, `email.verified`, `subscription.activated/canceled/past_due`, `payment.succeeded/failed`. Mirrors the API exactly; use it for event pickers / autocompleting an endpoint's `events` array. |
+| `WebhookEventType` / `WebhookEventEnvelope<TData>` | Types for the event-name union and the delivery envelope (`{ eventId, occurredAt, type, applicationId, data }`). Dedupe on `eventId` — retries reuse it. |
+| `RelipayError` | The canonical error class — `instanceof`-consistent across SDK packages. |
+
+### Pagination
+
+All list pagination is `{ limit, offset }`. Per-endpoint windows (server-enforced — passing a larger `limit` is clamped or rejected):
+
+| Method | Default `limit` | Max `limit` |
+| --- | --- | --- |
+| `organizations.listMine(accessToken, page?)` | 50 | 100 |
+| `organizations.listMembers(accessToken, orgId, page?)` | 50 | 100 |
+| `credits.listLedger(subject, limit?, offset?)` | 50 | 200 |
+| `auth.listSessions` / `listPasskeys` / `listOAuthIdentities` | — (returns the full set; these are small, bounded lists) | — |
+| `billing.getPlans()` | — (all active plans) | — |
+
+## Errors
+
+Every failure is a `RelipayError` with `code`, `message`, and usually a concrete `fix` (plus optional `docs`, `statusCode`, `requestId`). **Read `error.fix` first.**
+
+```ts
+import { RelipayError } from '@relipay/node';
+
+try {
+  await relipay.billing.createCheckout(accessToken, { /* … */ });
+} catch (err) {
+  if (err instanceof RelipayError) console.error(err.code, err.fix);
+  throw err;
+}
+```
+
+## Gotchas
+
+- **Entitlements are resolved server-side.** Never gate features from client state — always read `relipay.billing.getEntitlements(...)` on the server.
+- **`billingSubject: 'org'` needs an `organizationId`.** When the Application bills per-team (Panel → Application → Billing → Subject), an individual can't hold a subscription — pass `organizationId` (a team the user owns/admins) to `createCheckout`. Omitting it throws `BILLING_ORGANIZATION_REQUIRED`. Read the live config via `relipay.applications.me()` (`billingConfig.billingSubject`) and drive your UI from it.
+- **Checkout is async.** `createCheckout` returns a *PENDING* subscription + a redirect URL; the subscription flips to ACTIVE only when the **provider's webhook to ReliPay** lands (Stripe/PayPal → ReliPay — configured by the operator in the panel; your code never receives or verifies it). To react to activation, re-fetch `getSubscription` / `getEntitlements` when the user returns to your `successUrl`. `verifyWebhookSignature` is for the *other* direction — webhooks ReliPay sends to your app (user-lifecycle events); see [docs/billing.md](../../docs/billing.md).
+- **Switching active org returns new tokens.** `organizations.switch` / `clearActive` return a fresh `{ accessToken, refreshToken }` pair — persist both, or later reads use the stale org view.
+- **Pagination is `{ limit, offset }`.** Defaults to 50 everywhere; max is 100 for org lists and 200 for the credit ledger — see the [Pagination](#pagination) table.
+- **Retrying a timed-out mutation? Send an `Idempotency-Key` header.** High-value mutating routes (checkout, subscription cancel, credits consume, and the operator create/mint/issue/grant endpoints) accept the header (max 200 chars, scoped to your Application): a retry with the same key replays the first response (`Idempotency-Replayed: true`) instead of executing twice; the same key with a *different* body is a `409 IDEMPOTENCY_KEY_REUSED`. Keys live 24 h; 5xx responses are never cached, so retries after server errors really re-execute. The body-level `idempotencyKey` on `credits.consume` still works — it dedupes the ledger entry itself. See [docs/concepts.md → Idempotent requests](../../docs/concepts.md#idempotent-requests).
+- **One client per Application.** Construct a module-level singleton; don't `new ReliPay()` per request. Never log the secret key.
+
+## Links
+
+- Docs: [/docs](https://relipay.dev/docs) · [SDK guide](https://relipay.dev/docs/sdk) · [API reference](https://relipay.dev/docs/api) · [agent prompt](https://relipay.dev/docs/prompt)
+- Examples: [`examples/qr-saas`](../../examples/qr-saas) (end-to-end server integration) · [`examples/nextjs-saas`](../../examples/nextjs-saas)
+
+## License
+
+MIT

@@ -1,0 +1,39 @@
+{
+  "name": "relipay",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Auth + Billing + Admin-as-a-Service for multiple applications",
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20.10.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "db:generate": "pnpm --filter @relipay/api db:generate",
+    "db:migrate": "pnpm --filter @relipay/api db:migrate",
+    "db:migrate:deploy": "pnpm --filter @relipay/api db:migrate:deploy",
+    "db:studio": "pnpm --filter @relipay/api db:studio"
+  },
+  "devDependencies": {
+    "@prisma/client": "6.10.1",
+    "playwright": "^1.60.0",
+    "prisma": "6.10.1",
+    "turbo": "^2.3.0",
+    "typescript": "^5.6.3"
+  },
+  "pnpm": {
+    "overrides": {
+      "fast-uri@>=3.0.0 <3.1.2": ">=3.1.2",
+      "postcss@>=8.0.0 <8.5.10": ">=8.5.10",
+      "hono@>=4.0.0 <4.12.18": ">=4.12.18",
+      "ip-address@>=10.0.0 <=10.1.0": ">=10.1.1",
+      "brace-expansion@>=5.0.0 <5.0.6": ">=5.0.6",
+      "qs@>=6.11.1 <=6.15.1": ">=6.15.2"
+    }
+  }
+}

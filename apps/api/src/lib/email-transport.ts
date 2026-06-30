@@ -1,0 +1,329 @@
+/**
+ * Email delivery transport.
+ *
+ * Per-Application transport is chosen at send time:
+ *
+ *   1. BYO credentials on `Application.emailCredentialsCiphertext` →
+ *      send via the Application's own provider (Resend API or SMTP) using
+ *      the operator-configured `from` address from `emailConfig`.
+ *
+ *   2. `RESEND_DEFAULT_API_KEY` env set → send via the ReliPay-managed
+ *      Resend pool using `RESEND_DEFAULT_FROM`. Hosted ReliPay turns this
+ *      on; self-hosters leave it off.
+ *
+ *   3. Neither → return `{ kind: 'no_transport' }`. The auth flows that
+ *      consume this (forgot-password, verify-email) fall back to the
+ *      legacy "return the raw token to the API caller" behaviour.
+ *
+ * Every send — success, error, or no_transport — is recorded in `EmailLog`
+ * at this boundary (see `recordLog`) so the panel's per-app / per-tenant
+ * log views capture all mail regardless of which caller invoked us. Logging
+ * never throws into the send path.
+ *
+ * Providers: Resend (HTTP API) and SMTP (nodemailer). SMTP covers SES /
+ * Postmark / SendGrid / Mailgun / Gmail / custom relays via their SMTP
+ * endpoints. The decrypted credential shape is a discriminated union keyed
+ * by `provider`; a legacy ciphertext of `{ resend: { apiKey } }` (no
+ * discriminator) is normalised to `{ provider: 'resend', apiKey }`.
+ */
+
+import type { Application } from '@prisma/client';
+import { Resend } from 'resend';
+import nodemailer from 'nodemailer';
+import { env } from '../config/env.js';
+import { decryptJson } from './secrets.js';
+import { prisma } from './prisma.js';
+
+export type EmailProvider = 'resend' | 'smtp';
+
+export interface EmailConfig {
+  fromAddress?: string;
+  fromName?: string;
+  replyTo?: string;
+}
+
+/**
+ * Decrypted BYO credentials, discriminated by `provider`. Stored encrypted in
+ * `Application.emailCredentialsCiphertext`.
+ */
+export type EmailCredentials =
+  | { provider: 'resend'; apiKey: string }
+  | {
+      provider: 'smtp';
+      host: string;
+      port: number;
+      /** true = implicit TLS (465); false = STARTTLS (587). */
+      secure: boolean;
+      user: string;
+      pass: string;
+    };
+
+export type SentVia = 'byo_resend' | 'byo_smtp' | 'default_resend';
+
+export type SendOutcome =
+  | { kind: 'sent'; messageId: string | null; via: SentVia }
+  | { kind: 'no_transport' }
+  | { kind: 'error'; message: string };
+
+export interface SendInput {
+  to: string;
+  subject: string;
+  html: string;
+  text?: string;
+}
+
+/** Optional metadata threaded into the EmailLog row. */
+export interface SendLogMeta {
+  /** Email event key (e.g. "verify_email"); null/omitted for ad-hoc sends. */
+  eventKey?: string | null;
+}
+
+/**
+ * Coerce a decrypted credential blob into the discriminated `EmailCredentials`
+ * shape. Accepts both the new discriminated form and the legacy
+ * `{ resend: { apiKey } }`. Returns `null` when nothing usable is present.
+ */
+export function normalizeCredentials(raw: unknown): EmailCredentials | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+
+  if (typeof o.provider === 'string') {
+    if (o.provider === 'resend' && typeof o.apiKey === 'string' && o.apiKey.length > 0) {
+      return { provider: 'resend', apiKey: o.apiKey };
+    }
+    if (
+      o.provider === 'smtp' &&
+      typeof o.host === 'string' &&
+      typeof o.port === 'number' &&
+      typeof o.user === 'string' &&
+      typeof o.pass === 'string'
+    ) {
+      return {
+        provider: 'smtp',
+        host: o.host,
+        port: o.port,
+        secure: o.secure !== false, // default to implicit TLS unless explicitly false
+        user: o.user,
+        pass: o.pass,
+      };
+    }
+    return null;
+  }
+
+  // Legacy shape: { resend: { apiKey } }.
+  const legacy = o.resend as { apiKey?: unknown } | undefined;
+  if (legacy && typeof legacy.apiKey === 'string' && legacy.apiKey.length > 0) {
+    return { provider: 'resend', apiKey: legacy.apiKey };
+  }
+  return null;
+}
+
+function resolveCredentials(application: Application): EmailCredentials | null {
+  if (!application.emailCredentialsCiphertext) return null;
+  try {
+    return normalizeCredentials(decryptJson<unknown>(application.emailCredentialsCiphertext));
+  } catch {
+    // Malformed ciphertext is treated the same as no creds — fall back to
+    // default transport. Decryption errors surface in logs when the operator
+    // next inspects the panel.
+    return null;
+  }
+}
+
+function emailConfig(application: Application): EmailConfig {
+  return (application.emailConfig ?? {}) as EmailConfig;
+}
+
+function fromHeader(address: string, name: string | undefined): string {
+  if (!name) return address;
+  return `${name} <${address}>`;
+}
+
+interface FromIdentity {
+  address: string;
+  name?: string;
+  replyTo?: string;
+}
+
+/** Send via a resolved BYO credential set. */
+async function sendVia(
+  creds: EmailCredentials,
+  input: SendInput,
+  from: FromIdentity,
+): Promise<SendOutcome> {
+  if (creds.provider === 'resend') {
+    try {
+      const client = new Resend(creds.apiKey);
+      const res = await client.emails.send({
+        from: fromHeader(from.address, from.name),
+        to: input.to,
+        subject: input.subject,
+        html: input.html,
+        ...(input.text !== undefined && { text: input.text }),
+        ...(from.replyTo !== undefined && { replyTo: from.replyTo }),
+      });
+      if (res.error) return { kind: 'error', message: res.error.message };
+      return { kind: 'sent', messageId: res.data?.id ?? null, via: 'byo_resend' };
+    } catch (e) {
+      return { kind: 'error', message: (e as Error).message };
+    }
+  }
+
+  // SMTP (nodemailer). Covers SES/Postmark/SendGrid/Mailgun/custom relays.
+  try {
+    const transport = nodemailer.createTransport({
+      host: creds.host,
+      port: creds.port,
+      secure: creds.secure,
+      auth: { user: creds.user, pass: creds.pass },
+    });
+    const info = await transport.sendMail({
+      from: fromHeader(from.address, from.name),
+      to: input.to,
+      subject: input.subject,
+      html: input.html,
+      ...(input.text !== undefined && { text: input.text }),
+      ...(from.replyTo !== undefined && { replyTo: from.replyTo }),
+    });
+    return { kind: 'sent', messageId: info.messageId ?? null, via: 'byo_smtp' };
+  } catch (e) {
+    return { kind: 'error', message: (e as Error).message };
+  }
+}
+
+/** Send via the ReliPay-managed default Resend pool. */
+async function sendDefaultResend(input: SendInput): Promise<SendOutcome> {
+  if (!env.RESEND_DEFAULT_API_KEY || !env.RESEND_DEFAULT_FROM) {
+    return { kind: 'no_transport' };
+  }
+  try {
+    const client = new Resend(env.RESEND_DEFAULT_API_KEY);
+    const res = await client.emails.send({
+      from: fromHeader(env.RESEND_DEFAULT_FROM, env.RESEND_DEFAULT_FROM_NAME),
+      to: input.to,
+      subject: input.subject,
+      html: input.html,
+      ...(input.text !== undefined && { text: input.text }),
+    });
+    if (res.error) return { kind: 'error', message: res.error.message };
+    return { kind: 'sent', messageId: res.data?.id ?? null, via: 'default_resend' };
+  } catch (e) {
+    return { kind: 'error', message: (e as Error).message };
+  }
+}
+
+/** Persist one EmailLog row. Never throws into the send path. */
+async function recordLog(args: {
+  tenantId: string | null;
+  applicationId: string | null;
+  to: string;
+  subject: string;
+  eventKey: string | null;
+  outcome: SendOutcome;
+}): Promise<void> {
+  const via = args.outcome.kind === 'sent' ? args.outcome.via : 'none';
+  const status = args.outcome.kind; // 'sent' | 'no_transport' | 'error'
+  const messageId = args.outcome.kind === 'sent' ? args.outcome.messageId : null;
+  const error = args.outcome.kind === 'error' ? args.outcome.message : null;
+  try {
+    await prisma.emailLog.create({
+      data: {
+        tenantId: args.tenantId,
+        applicationId: args.applicationId,
+        toAddress: args.to.toLowerCase(),
+        subject: args.subject,
+        eventKey: args.eventKey,
+        via,
+        status,
+        messageId,
+        error,
+      },
+    });
+  } catch {
+    // Swallow — a log write failure must never break delivery.
+  }
+}
+
+/**
+ * Decide which transport an Application would use, without sending. Used by
+ * the panel's "email status" surface and by tests.
+ */
+export function describeTransport(application: Application): {
+  via: SentVia | 'none';
+  provider: EmailProvider | 'default' | 'none';
+  fromAddress: string | null;
+} {
+  const creds = resolveCredentials(application);
+  const cfg = emailConfig(application);
+
+  if (creds) {
+    return {
+      via: creds.provider === 'resend' ? 'byo_resend' : 'byo_smtp',
+      provider: creds.provider,
+      fromAddress: cfg.fromAddress ?? null,
+    };
+  }
+  if (env.RESEND_DEFAULT_API_KEY && env.RESEND_DEFAULT_FROM) {
+    return { via: 'default_resend', provider: 'default', fromAddress: env.RESEND_DEFAULT_FROM };
+  }
+  return { via: 'none', provider: 'none', fromAddress: null };
+}
+
+/**
+ * System-level send — tenant-scoped flows (workspace invitations, operator
+ * MFA) with no `Application`. Default Resend pool only. Pass `tenantId` so the
+ * send shows in that tenant's email-log view.
+ */
+export async function sendEmailSystem(
+  input: SendInput,
+  meta?: { eventKey?: string | null; tenantId?: string | null },
+): Promise<SendOutcome> {
+  const outcome = await sendDefaultResend(input);
+  await recordLog({
+    tenantId: meta?.tenantId ?? null,
+    applicationId: null,
+    to: input.to,
+    subject: input.subject,
+    eventKey: meta?.eventKey ?? null,
+    outcome,
+  });
+  return outcome;
+}
+
+export async function sendEmail(
+  application: Application,
+  input: SendInput,
+  meta?: SendLogMeta,
+): Promise<SendOutcome> {
+  const creds = resolveCredentials(application);
+  const cfg = emailConfig(application);
+
+  let outcome: SendOutcome;
+  if (creds) {
+    if (!cfg.fromAddress) {
+      outcome = {
+        kind: 'error',
+        message:
+          'Application has BYO email credentials but no `fromAddress` in emailConfig. Set it via Panel → Application → Email.',
+      };
+    } else {
+      outcome = await sendVia(creds, input, {
+        address: cfg.fromAddress,
+        ...(cfg.fromName !== undefined && { name: cfg.fromName }),
+        ...(cfg.replyTo !== undefined && { replyTo: cfg.replyTo }),
+      });
+    }
+  } else {
+    outcome = await sendDefaultResend(input);
+  }
+
+  await recordLog({
+    tenantId: application.tenantId,
+    applicationId: application.id,
+    to: input.to,
+    subject: input.subject,
+    eventKey: meta?.eventKey ?? null,
+    outcome,
+  });
+  return outcome;
+}

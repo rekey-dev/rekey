@@ -1,0 +1,49 @@
+{
+  "name": "@relipay/node",
+  "version": "1.0.0-rc.1",
+  "license": "MIT",
+  "description": "ReliPay server SDK for Node — auth + billing for your application.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "AGENTS.md",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo \"(eslint not yet wired)\"",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "auth",
+    "billing",
+    "stripe",
+    "paypal",
+    "clerk-alternative",
+    "self-hosted",
+    "saas",
+    "subscription"
+  ],
+  "dependencies": {
+    "@relipay/shared-types": "workspace:*",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
+  }
+}
