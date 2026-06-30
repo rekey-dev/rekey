@@ -9,7 +9,7 @@ parallel auth pillars: *operators* (humans using the ReliPay panel) and
 
 This document is the single source of truth for the system's shape. For
 the running journal of decisions and why each one was made, see
-[`decisions.md`](decisions.md).
+the project decision log (kept in the private repo).
 
 ---
 
@@ -423,7 +423,7 @@ prisma/
 ## 9. Decision index
 
 Every architectural / product / security decision lives in
-[`decisions.md`](decisions.md) as a chronologically-appended log.
+the project decision log (kept in the private repo) as a chronologically-appended log.
 The index below points at the load-bearing ones.
 
 **Foundational (Phase 0)**:
