@@ -1,15 +1,16 @@
 # Full ReliPay stack — postgres + redis + api + panel + portal.
 #
+# The api/panel/portal services are behind the `full` profile, so:
+#   - `docker compose up -d`                  → just postgres + redis (local dev:
+#                                                run the apps from your shell)
+#   - `docker compose --profile full up -d`   → the whole stack
+#
 # Usage:
-#   cp .env.example .env  (then edit secrets)
-#   docker compose up --build
+#   cp .env.example .env   (then edit secrets — JWT_SECRET, ENCRYPTION_KEY, …)
+#   docker compose --profile full up -d --build
 #
-# After first boot, run migrations:
-#   docker compose exec api node node_modules/prisma/build/index.js \
-#     migrate deploy --schema /app/prisma/schema.prisma
-#
-# Drop the `api`/`panel`/`portal` services if you only want the local-dev
-# infra (postgres + redis) and run the apps from your shell.
+# Database migrations run automatically on api boot (the api-runtime image runs
+# `prisma migrate deploy` before starting the server) — no manual step needed.
 
 services:
   postgres:
@@ -32,6 +33,10 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # AOF persistence so BullMQ webhook-delivery jobs (delayed retries) survive a
+    # Redis restart. The DB retry poller backstops any gap; durable queue state
+    # avoids needless re-deliveries on a bounce.
+    command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6379:6379"
     volumes:
@@ -60,8 +65,22 @@ services:
       ENCRYPTION_KEY:    ${ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
       SUPER_ADMIN_KEY:   ${SUPER_ADMIN_KEY:-change-me-in-prod}
       API_URL:           http://api:3030
+      # Public panel origin — the operator MCP OAuth authorize endpoint
+      # redirects here (/mcp-consent). MUST be the public panel URL in a real
+      # deploy or operator-MCP sign-in redirects to the wrong host.
+      PANEL_URL:         ${PANEL_URL:-http://localhost:3031}
+      # Browser origins allowed to call the API with cookies (the panel).
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3031}
+      # Public, internet-reachable API origin for provider webhook URLs. Set in
+      # a real deploy (e.g. https://api.yourdomain.com); empty falls back to API_URL.
+      PUBLIC_WEBHOOK_BASE_URL: ${PUBLIC_WEBHOOK_BASE_URL:-}
       # Local hosted-portal origin — auto-allowed for publishable-key calls.
-      PUBLIC_PORTAL_URL: http://localhost:3050
+      PUBLIC_PORTAL_URL: ${PUBLIC_PORTAL_URL:-http://localhost:3050}
+      # Who can create operator (admin) accounts: open | invite | closed.
+      # Default open for first-boot; switch to invite/closed on a private deploy.
+      OPERATOR_SIGNUP_MODE: ${OPERATOR_SIGNUP_MODE:-open}
+      # Operator MCP server (agent read + operate). On by default; false to disable.
+      OPERATOR_MCP_ENABLED: ${OPERATOR_MCP_ENABLED:-true}
     ports:
       - "3030:3030"
 
@@ -75,8 +94,12 @@ services:
       - api
     environment:
       NODE_ENV: production
+      # In-cluster API address the panel calls server-side.
       RELIPAY_URL: http://api:3030
-      PANEL_URL:   http://localhost:3031
+      # Public API origin shown in the UI (e.g. the webhook URL operators paste
+      # into Stripe). MUST be the public origin, not the in-cluster RELIPAY_URL.
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3030}
+      PANEL_URL:   ${PANEL_URL:-http://localhost:3031}
     ports:
       - "3031:3031"
 

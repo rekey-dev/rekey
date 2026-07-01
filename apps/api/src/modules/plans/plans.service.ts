@@ -209,4 +209,57 @@ export const plansService = {
     const plan = await this.getBySlug(applicationId, slug);
     return prisma.plan.update({ where: { id: plan.id }, data: { active } });
   },
+
+  /**
+   * Edit a plan's ENTITLEMENTS in place — the things it grants, which live
+   * entirely on the ReliPay side and don't touch the provider-registered Price:
+   * display name, LICENSE seats/duration, CREDIT amount, and free-form metadata
+   * (feature flags etc.).
+   *
+   * Price fields (`amount`, `currency`, `interval`, `pricePerUnitCents`) are
+   * DELIBERATELY not editable: a Stripe Price (and its PayPal/Razorpay analogs)
+   * is immutable once created, so changing the price means archiving this plan
+   * (`setActive(false)`) and creating a replacement. This method never
+   * re-registers with the provider.
+   *
+   * Metadata is shallow-MERGED, and the provider-reserved keys
+   * (`stripe`/`paypal`/`razorpay`) are stripped from the incoming patch so an
+   * entitlement edit can never clobber the stored provider price/product ids.
+   */
+  async updateEntitlements(
+    applicationId: string,
+    slug: string,
+    patch: {
+      name?: string;
+      licenseSeatsAllowed?: number | null;
+      licenseDurationDays?: number | null;
+      creditsAmount?: number | null;
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<Plan> {
+    const plan = await this.getBySlug(applicationId, slug);
+
+    let metadata: Record<string, unknown> | undefined;
+    if (patch.metadata !== undefined) {
+      const incoming = { ...patch.metadata };
+      for (const reserved of ['stripe', 'paypal', 'razorpay']) delete incoming[reserved];
+      const current = (plan.metadata ?? {}) as Record<string, unknown>;
+      metadata = { ...current, ...incoming };
+    }
+
+    return prisma.plan.update({
+      where: { id: plan.id },
+      data: {
+        ...(patch.name !== undefined && { name: patch.name }),
+        ...(patch.licenseSeatsAllowed !== undefined && {
+          licenseSeatsAllowed: patch.licenseSeatsAllowed,
+        }),
+        ...(patch.licenseDurationDays !== undefined && {
+          licenseDurationDays: patch.licenseDurationDays,
+        }),
+        ...(patch.creditsAmount !== undefined && { creditsAmount: patch.creditsAmount }),
+        ...(metadata !== undefined && { metadata: metadata as object }),
+      },
+    });
+  },
 };

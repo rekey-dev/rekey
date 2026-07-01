@@ -12,6 +12,7 @@
 
 import * as React from 'react';
 import { startAuthentication } from '@simplewebauthn/browser';
+import { isRedirectError } from '@/lib/redirect-error';
 
 type OptionsJSON = Parameters<typeof startAuthentication>[0]['optionsJSON'];
 
@@ -49,6 +50,10 @@ export function PasskeyLoginButton({ start, complete }: Props): React.JSX.Elemen
       // /login?error=… which the page renders.
       await complete(fd);
     } catch (e: unknown) {
+      // Success (and the server-side error path) redirect — Next surfaces that
+      // as a NEXT_REDIRECT error here. Re-throw so navigation proceeds instead
+      // of flashing "NEXT_REDIRECT" in the inline error box.
+      if (isRedirectError(e)) throw e;
       const msg =
         e instanceof Error && e.message
           ? e.message

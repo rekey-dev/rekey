@@ -373,6 +373,68 @@ export const billingService = {
   },
 
   /**
+   * Operator-facing cancel of a SPECIFIC subscription by id (e.g. via the
+   * operator MCP `cancel_subscription` tool). Mirrors `cancelCurrentSubscription`
+   * but targets one row instead of the end-user's "current" one — so it's
+   * unambiguous when a user has more than one subscription. The subscription
+   * MUST belong to `application` (the caller resolves the application within
+   * the operator's tenant first), so this can't reach across workspaces.
+   */
+  async cancelSubscriptionById(
+    application: Application,
+    subscriptionId: string,
+    opts?: { atPeriodEnd?: boolean },
+  ): Promise<Subscription> {
+    const sub = await prisma.subscription.findFirst({
+      where: { id: subscriptionId, applicationId: application.id },
+    });
+    if (!sub) {
+      throw new RelipayError({
+        statusCode: 404,
+        code: 'SUBSCRIPTION_NOT_FOUND',
+        message: `Subscription "${subscriptionId}" not found in this application.`,
+        fix: 'List subscriptions and use an id this application owns.',
+      });
+    }
+    if (sub.status === 'CANCELED' || sub.status === 'EXPIRED') return sub;
+
+    const providerBacked = Boolean(sub.provider && sub.providerSubId);
+    const atPeriodEnd =
+      opts?.atPeriodEnd !== false &&
+      providerBacked &&
+      sub.status === 'ACTIVE' &&
+      sub.currentPeriodEnd !== null;
+
+    // Idempotent: already scheduled to cancel at period end.
+    if (atPeriodEnd && sub.cancelAt !== null) return sub;
+
+    if (providerBacked) {
+      const provider = await getProviderForApplication(
+        application,
+        sub.provider as BillingProviderName,
+      );
+      await provider.cancelSubscription({ subscription: sub, atPeriodEnd });
+    }
+
+    if (atPeriodEnd) {
+      return prisma.subscription.update({
+        where: { id: sub.id },
+        data: { cancelAt: sub.currentPeriodEnd },
+      });
+    }
+
+    const now = new Date();
+    const updated = await prisma.subscription.update({
+      where: { id: sub.id },
+      data: { status: 'CANCELED', canceledAt: now, cancelAt: now },
+    });
+    emitSubscriptionEvent('subscription.canceled', updated.id);
+    const { dunningService } = await import('./dunning.service.js');
+    await dunningService.closeForCanceledSubscription(updated.id);
+    return updated;
+  },
+
+  /**
    * Cancel every still-billing provider subscription belonging to an end-user.
    * Used by the operator end-user delete / GDPR-erasure paths so the provider
    * (Stripe/PayPal/Razorpay) stops billing a row we are about to remove or

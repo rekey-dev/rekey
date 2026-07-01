@@ -2087,6 +2087,9 @@ model TenantMcpRefreshToken {
   tenantId     String    @map("tenant_id")
   /** Which TenantOAuthClient redeemed this token — refused if the wrong one tries. */
   clientId     String    @map("client_id")
+  /** Scopes granted to this token chain (space-separated, RFC 6749). Carried
+   *  across rotations so a refresh can't silently widen or drop the grant. */
+  scope        String    @default("mcp:operator:read")
   expiresAt    DateTime  @map("expires_at")
   createdAt    DateTime  @default(now()) @map("created_at")
   revokedAt    DateTime? @map("revoked_at")

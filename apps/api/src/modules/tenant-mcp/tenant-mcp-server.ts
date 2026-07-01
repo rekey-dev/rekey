@@ -7,10 +7,41 @@
  * the HTTP/auth layer lives in `tenant-mcp.routes.ts`.
  */
 
-import { operatorTools, type OperatorToolContext } from './operator-tools.js';
+import type { TenantRole } from '@prisma/client';
+import { operatorTools, type OperatorTool, type OperatorToolContext } from './operator-tools.js';
+import { operatorWriteTools } from './operator-write-tools.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const SERVER_INFO = { name: 'relipay-operator', version: '1.0.0' };
+
+/** All operator tools — read tools first, then the phase-1 write tools. */
+const allTools: OperatorTool[] = [...operatorTools, ...operatorWriteTools];
+
+/** OWNER > ADMIN > MEMBER. A higher rank clears a lower `minRole` threshold. */
+const ROLE_RANK: Record<TenantRole, number> = { OWNER: 3, ADMIN: 2, MEMBER: 1 } as Record<
+  TenantRole,
+  number
+>;
+
+function roleAllows(role: TenantRole, minRole: TenantRole): boolean {
+  return (ROLE_RANK[role] ?? 0) >= (ROLE_RANK[minRole] ?? 0);
+}
+
+/**
+ * Can this caller use this tool? Read tools are always available; write tools
+ * require the token to carry write scope AND the operator's role to clear the
+ * tool's `minRole` (default ADMIN). Single source of truth for both
+ * `tools/list` (filter) and `tools/call` (gate) so the surfaced set and the
+ * callable set can never drift apart.
+ */
+function toolAllowed(ctx: OperatorToolContext, tool: OperatorTool): boolean {
+  // Admin tools (destructive/financial/secret) need admin scope + role.
+  if (tool.admin) return ctx.canAdmin && roleAllows(ctx.role, tool.minRole ?? 'ADMIN');
+  // Write tools need write scope + role.
+  if (tool.write) return ctx.canWrite && roleAllows(ctx.role, tool.minRole ?? 'ADMIN');
+  // Read tools are always available.
+  return true;
+}
 
 export interface JsonRpcMessage {
   jsonrpc?: string;
@@ -56,18 +87,41 @@ export async function handleOperatorMcpMessage(
       return result(id, {});
 
     case 'tools/list':
+      // Surface only the tools this token+role can actually call — a read-only
+      // token never sees the write tools, so the client won't offer them.
       return result(id, {
-        tools: operatorTools.map((t) => ({
-          name: t.name,
-          description: t.description,
-          inputSchema: t.inputSchema,
-        })),
+        tools: allTools
+          .filter((t) => toolAllowed(ctx, t))
+          .map((t) => ({
+            name: t.name,
+            description: t.description,
+            inputSchema: t.inputSchema,
+          })),
       });
 
     case 'tools/call': {
       const name = msg.params?.name;
-      const tool = operatorTools.find((t) => t.name === name);
+      const tool = allTools.find((t) => t.name === name);
       if (!tool) return error(id, -32602, `Unknown tool: ${String(name)}`);
+      // Re-gate at call time. A client that calls a write tool without write
+      // scope (or with an insufficient role) gets an explicit, non-leaky
+      // refusal rather than the tool silently running.
+      if (!toolAllowed(ctx, tool)) {
+        let reason: string;
+        if (tool.admin && !ctx.canAdmin) {
+          reason =
+            'This tool requires admin access (destructive/financial). Re-authorize the connector with the "mcp:operator:admin" scope.';
+        } else if (tool.write && !ctx.canWrite) {
+          reason =
+            'This tool requires write access. Re-authorize the connector with the "mcp:operator:write" scope (or use a PAT with the "applications:write" scope).';
+        } else {
+          reason = `This tool requires at least the ${tool.minRole ?? 'ADMIN'} role in this workspace.`;
+        }
+        return result(id, {
+          content: [{ type: 'text', text: JSON.stringify({ error: reason }) }],
+          isError: true,
+        });
+      }
       const args =
         (msg.params?.arguments as Record<string, unknown> | undefined) ?? {};
       try {

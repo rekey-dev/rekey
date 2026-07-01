@@ -196,9 +196,8 @@ export function Sidebar({
           href="/applications"
           className="mb-3 inline-flex items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
         >
-          <span className="grid h-6 w-6 place-items-center rounded-md bg-[var(--color-primary)] text-xs font-bold text-white">
-            R
-          </span>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/logo-mark.png" alt="" className="h-6 w-auto" />
           <span className="text-sm font-semibold text-[var(--color-fg)]">ReliPay</span>
         </Link>
         <WorkspaceSwitcher

@@ -106,7 +106,7 @@ export default async function AuthMethodsPage({
   const redirectUrls = app.authConfig.redirectUrls ?? [];
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
+    <div className="space-y-6">
       <PageHeader
         title="Auth methods"
         description="How end-users sign up and sign in to this application, and the security policy enforced on their accounts."

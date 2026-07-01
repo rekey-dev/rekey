@@ -1,8 +1,8 @@
 # relipay-demo
 
-Reference Next.js 15 app demonstrating end-to-end auth via [`@relipay/node`](../ReliPay/packages/sdk-node).
+Reference Next.js 15 app demonstrating end-to-end auth via [`@relipay/node`](../../packages/sdk-node).
 
-> **Not** a published package — it pulls `@relipay/node` from the sibling `ReliPay/packages/sdk-node` checkout via a `file:` dependency, so it stays in sync with whatever is built locally.
+> **Not** a published package — it consumes `@relipay/node` as a `workspace:*` dependency, so it tracks whatever is built locally in this monorepo.
 
 ## What it demonstrates
 
@@ -22,10 +22,12 @@ Two httpOnly cookies — `relipay_access` (15 min) and `relipay_refresh` (30 day
 ## Run locally
 
 Prerequisites:
-- ReliPay running at `http://localhost:3030` (postgres + API + panel)
-- An Application secret key configured at `RELIPAY_SECRET` in `.env.local`
+- ReliPay API running (postgres + API + panel)
+- Copy `.env.example` → `.env.local` and set `RELIPAY_URL` (the API base) and
+  `RELIPAY_SECRET` (an Application secret key, `rp_live_…` / `rp_test_…`)
 
 ```bash
+cp .env.example .env.local   # then fill in RELIPAY_SECRET
 pnpm install
 pnpm dev
 # → http://localhost:3032

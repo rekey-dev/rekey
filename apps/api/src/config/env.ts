@@ -20,6 +20,12 @@ export const env = createEnv({
     RATE_LIMIT_USAGE_MAX: z.coerce.number().int().positive().default(1000),
 
     DATABASE_URL: z.string().url(),
+    // Required infrastructure (not just rate-limiting): the outbound-webhook
+    // delivery queue runs on BullMQ/Redis, and the server refuses to start if
+    // Redis is unreachable at boot (no in-process fallback — delivery must go
+    // through the shared queue so retries survive a crash and distribute across
+    // replicas). The localhost default is a dev convenience; prod sets it
+    // explicitly. Only NODE_ENV=test skips the queue (single-process suite).
     REDIS_URL: z.string().url().default('redis://localhost:6379'),
 
     JWT_SECRET: z.string().min(32),
@@ -51,6 +57,12 @@ export const env = createEnv({
     // apps (so operators don't hand-add it to corsOrigins) and folded into the
     // CORS union. Default is the production host.
     PUBLIC_PORTAL_URL: z.string().url().default('https://portal.relipay.dev'),
+
+    // Public base URL of the operator panel. The operator MCP OAuth authorize
+    // endpoint redirects here (`/mcp-consent`) so the operator signs in through
+    // the real panel login (session reuse, passkeys, MFA, magic-link) instead
+    // of a bespoke password form on the API. Default is the production host.
+    PANEL_URL: z.string().url().default('https://panel.relipay.dev'),
 
     // Bootstrap admin credential. Required to create the first Tenant and
     // Application via /api/v1/admin/*. Once the panel ships, normal tenant

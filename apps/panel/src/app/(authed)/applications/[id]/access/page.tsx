@@ -81,7 +81,7 @@ export default async function AccessPage({
   const corsOrigins = (app.corsOrigins ?? []).join('\n');
 
   return (
-    <div className="mx-auto max-w-3xl space-y-5">
+    <div className="space-y-5">
       <PageHeader
         title="Access controls"
         description="Restrict which IPs your server-side secret keys may call from, which browser origins may call the API, and force every end-user to re-authenticate."

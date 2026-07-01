@@ -71,6 +71,13 @@ export default async function AuthedLayout({
   const jar = await cookies();
   if (!jar.get(ACCESS_COOKIE)?.value) redirect('/login');
 
+  // Operator MCP consent resumes here. The /mcp-consent page (outside this
+  // group) bounces an unauthenticated operator to /login after stashing the
+  // OAuth params in `mcp_consent_pending`. Every login factor lands in this
+  // authed group, so this single check resumes the consent flow regardless of
+  // how they signed in. /mcp-consent reads the params back out of the cookie.
+  if (jar.get('mcp_consent_pending')?.value) redirect('/mcp-consent/review');
+
   const me = await api<MeDto>({ method: 'GET', path: '/api/v1/tenant/auth/me' });
   const active = me.memberships.find((m) => m.tenantId === me.activeTenantId);
 

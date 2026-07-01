@@ -17,11 +17,22 @@
  * impossible.
  */
 
+import type { TenantRole } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
+import { tenantWorkspacesService } from '../tenant-workspaces/tenant-workspaces.service.js';
 
 export interface OperatorToolContext {
   tenantUserId: string;
   tenantId: string;
+  /** The operator's live role in `tenantId`, re-checked by the auth guard. */
+  role: TenantRole;
+  /** Whether this token carries write scope (`mcp:operator:write` / PAT `applications:write`). */
+  canWrite: boolean;
+  /** Whether this token carries admin scope (`mcp:operator:admin`) — destructive/financial ops. */
+  canAdmin: boolean;
+  /** Inbound request context, threaded through for the security audit log. */
+  ip?: string | null;
+  userAgent?: string | null;
 }
 
 export interface OperatorTool {
@@ -34,6 +45,23 @@ export interface OperatorTool {
     additionalProperties: boolean;
     required?: string[];
   };
+  /**
+   * A mutating tool. Listed + dispatchable only when the caller's token carries
+   * write scope AND their role is allowed (see `minRole`). Defaults to false —
+   * a plain read tool.
+   */
+  write?: boolean;
+  /**
+   * A destructive / financial / secret-handling tool. Requires the token to
+   * carry admin scope (`mcp:operator:admin`) AND the role to clear `minRole`.
+   * `admin` implies `write` for gating purposes. Defaults to false.
+   */
+  admin?: boolean;
+  /**
+   * Minimum tenant role allowed to call a write/admin tool. Defaults to `ADMIN`
+   * (so OWNER + ADMIN may call; MEMBER may not). Ignored for read tools.
+   */
+  minRole?: TenantRole;
   handler: (ctx: OperatorToolContext, args: Record<string, unknown>) => Promise<unknown>;
 }
 
@@ -175,22 +203,44 @@ export const operatorTools: OperatorTool[] = [
     },
   },
   {
+    name: 'list_invitations',
+    description:
+      'List workspace invitations and their status (pending / accepted / expired / revoked). ' +
+      'Use an id here with revoke_invitation. No invite tokens are returned.',
+    inputSchema: NO_ARGS,
+    handler: async (ctx) => {
+      const rows = await tenantWorkspacesService.listInvitations(ctx.tenantId);
+      return {
+        invitations: rows.map((r) => ({
+          id: r.id,
+          email: r.email,
+          role: r.role,
+          status: r.status,
+          expiresAt: r.expiresAt.toISOString(),
+          createdAt: r.createdAt.toISOString(),
+        })),
+      };
+    },
+  },
+  {
     name: 'recent_payments',
     description:
       "Recent Payment rows across the workspace's Applications — by default " +
       'the last 25, max 200. Filter optionally by `status` (SUCCEEDED / FAILED / ' +
-      'PENDING / REFUNDED).',
+      'PENDING / REFUNDED) and by `mode` (TEST / LIVE). Each row reports its mode.',
     inputSchema: {
       type: 'object',
       properties: {
         limit: { type: 'integer', minimum: 1, maximum: 200, default: 25 },
         status: { type: 'string', enum: ['SUCCEEDED', 'FAILED', 'PENDING', 'REFUNDED'] },
+        mode: { type: 'string', enum: ['TEST', 'LIVE'] },
       },
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
       const limit = clampLimit(args.limit);
       const status = typeof args.status === 'string' ? args.status : undefined;
+      const mode = args.mode === 'TEST' || args.mode === 'LIVE' ? args.mode : undefined;
       const apps = await prisma.application.findMany({
         where: { tenantId: ctx.tenantId },
         select: { id: true },
@@ -201,6 +251,7 @@ export const operatorTools: OperatorTool[] = [
         where: {
           applicationId: { in: appIds },
           ...(status ? { status: status as 'SUCCEEDED' | 'FAILED' | 'PENDING' | 'REFUNDED' } : {}),
+          ...(mode ? { mode: mode as 'TEST' | 'LIVE' } : {}),
         },
         orderBy: { createdAt: 'desc' },
         take: limit,
@@ -214,6 +265,7 @@ export const operatorTools: OperatorTool[] = [
           amountMinor: r.amount,
           currency: r.currency,
           status: r.status,
+          mode: r.mode,
           createdAt: r.createdAt.toISOString(),
         })),
       };
@@ -223,7 +275,9 @@ export const operatorTools: OperatorTool[] = [
     name: 'recent_subscriptions',
     description:
       'Recent Subscription rows across the workspace — by default the last 25, max ' +
-      '200. Filter optionally by `status` (PENDING / ACTIVE / PAST_DUE / CANCELED / EXPIRED).',
+      '200. Filter optionally by `status` (PENDING / ACTIVE / PAST_DUE / CANCELED / EXPIRED) ' +
+      'and by `mode` (TEST / LIVE). Each row reports its mode and id (use the id with ' +
+      'cancel_subscription).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -232,12 +286,14 @@ export const operatorTools: OperatorTool[] = [
           type: 'string',
           enum: ['PENDING', 'ACTIVE', 'PAST_DUE', 'CANCELED', 'EXPIRED'],
         },
+        mode: { type: 'string', enum: ['TEST', 'LIVE'] },
       },
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
       const limit = clampLimit(args.limit);
       const status = typeof args.status === 'string' ? args.status : undefined;
+      const mode = args.mode === 'TEST' || args.mode === 'LIVE' ? args.mode : undefined;
       const apps = await prisma.application.findMany({
         where: { tenantId: ctx.tenantId },
         select: { id: true },
@@ -250,6 +306,7 @@ export const operatorTools: OperatorTool[] = [
           ...(status
             ? { status: status as 'PENDING' | 'ACTIVE' | 'PAST_DUE' | 'CANCELED' | 'EXPIRED' }
             : {}),
+          ...(mode ? { mode: mode as 'TEST' | 'LIVE' } : {}),
         },
         orderBy: { createdAt: 'desc' },
         take: limit,
@@ -266,6 +323,7 @@ export const operatorTools: OperatorTool[] = [
           planSlug: r.plan.slug,
           planName: r.plan.name,
           status: r.status,
+          mode: r.mode,
           amountMinor: r.plan.amount,
           currency: r.plan.currency,
           interval: r.plan.interval,
@@ -453,6 +511,74 @@ export const operatorTools: OperatorTool[] = [
       );
       out.sort((a, b) => b.totalFailures - a.totalFailures);
       return { applications: out };
+    },
+  },
+  {
+    name: 'get_end_user',
+    description:
+      'Look up one end-user in an application by email OR id. Returns profile, role, ' +
+      'verification + mode, and their current subscription (if any). Provide `applicationId` ' +
+      'plus exactly one of `email` or `endUserId`. Read-only; no password or token data.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        applicationId: { type: 'string', minLength: 1 },
+        email: { type: 'string' },
+        endUserId: { type: 'string' },
+      },
+      required: ['applicationId'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      // Scope to the operator's workspace: the application must belong to it,
+      // otherwise an arbitrary applicationId could read another tenant's users.
+      const app = await prisma.application.findFirst({
+        where: { id: String(args.applicationId), tenantId: ctx.tenantId },
+        select: { id: true },
+      });
+      if (!app) {
+        return { found: false, reason: 'application_not_found_in_workspace' };
+      }
+      const email = typeof args.email === 'string' ? args.email.trim().toLowerCase() : undefined;
+      const endUserId = typeof args.endUserId === 'string' ? args.endUserId.trim() : undefined;
+      if (!email && !endUserId) {
+        return { found: false, reason: 'provide_email_or_endUserId' };
+      }
+      const user = email
+        ? await prisma.endUser.findUnique({
+            where: { applicationId_email: { applicationId: app.id, email } },
+          })
+        : await prisma.endUser.findFirst({
+            where: { id: endUserId as string, applicationId: app.id },
+          });
+      if (!user) return { found: false };
+
+      const subscription = await prisma.subscription.findFirst({
+        where: { applicationId: app.id, endUserId: user.id, status: { in: ['ACTIVE', 'PAST_DUE'] } },
+        orderBy: { createdAt: 'desc' },
+        include: { plan: { select: { slug: true, name: true } } },
+      });
+
+      return {
+        found: true,
+        endUser: {
+          id: user.id,
+          email: user.email,
+          role: user.role,
+          emailVerified: user.emailVerified,
+          mode: user.mode,
+          createdAt: user.createdAt.toISOString(),
+        },
+        currentSubscription: subscription
+          ? {
+              id: subscription.id,
+              status: subscription.status,
+              planSlug: subscription.plan?.slug ?? null,
+              planName: subscription.plan?.name ?? null,
+              mode: subscription.mode,
+            }
+          : null,
+      };
     },
   },
 ];

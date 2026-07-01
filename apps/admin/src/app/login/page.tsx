@@ -73,9 +73,8 @@ export default async function LoginPage({
     <main className="min-h-screen grid place-items-center px-6 bg-gradient-to-br from-[var(--color-bg)] to-[var(--color-surface-muted)]">
       <div className="w-full max-w-md space-y-5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-8 shadow-sm">
         <div className="flex items-center gap-2">
-          <span className="grid h-8 w-8 place-items-center rounded-md bg-[var(--color-primary)] text-sm font-bold text-white">
-            R
-          </span>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/logo-mark.png" alt="" className="h-8 w-auto" />
           <div>
             <p className="text-xs uppercase tracking-wider text-[var(--color-faint-fg)]">ReliPay</p>
             <h1 className="text-lg font-semibold leading-none">Super Admin</h1>

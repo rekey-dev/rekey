@@ -85,11 +85,19 @@ export async function setSessionCookies(args: {
 }): Promise<void> {
   const jar = await cookies();
   const secure = process.env.NODE_ENV === 'production';
+  // `lax`, not `strict`: an operator can legitimately ARRIVE at the panel via a
+  // top-level cross-site navigation — most importantly the MCP OAuth consent
+  // flow, which enters /mcp-consent through a redirect that originated at the
+  // MCP client (claude). `strict` withholds the session on any cross-site-
+  // initiated navigation, so the operator looked logged-out and was forced to
+  // re-login on every connect attempt. `lax` sends the session on top-level GET
+  // navigations while still withholding it on cross-site POST/subresource
+  // requests (the CSRF surface). Next server actions carry their own origin check.
   jar.set(ACCESS_COOKIE, args.accessToken, {
-    httpOnly: true, sameSite: 'strict', secure, path: '/', maxAge: 60 * 15,
+    httpOnly: true, sameSite: 'lax', secure, path: '/', maxAge: 60 * 15,
   });
   jar.set(REFRESH_COOKIE, args.refreshToken, {
-    httpOnly: true, sameSite: 'strict', secure, path: '/', maxAge: ONE_DAY * 30,
+    httpOnly: true, sameSite: 'lax', secure, path: '/', maxAge: ONE_DAY * 30,
   });
 }
 
