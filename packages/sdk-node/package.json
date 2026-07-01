@@ -1,6 +1,6 @@
 {
   "name": "@relipay/node",
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0",
   "license": "MIT",
   "description": "ReliPay server SDK for Node — auth + billing for your application.",
   "type": "module",

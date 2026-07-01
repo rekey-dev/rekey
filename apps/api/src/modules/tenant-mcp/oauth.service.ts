@@ -3,19 +3,20 @@
  *
  * Mirrors the per-Application MCP OAuth shape (modules/mcp/oauth.service.ts)
  * but binds tokens to a (tenantUserId, tenantId) pair the operator picks at
- * the consent page. Operators sign in with their normal panel email +
- * password (`argon2.verify`) — no second credential to issue.
+ * the panel consent page. The operator authenticates through the REAL panel
+ * login (modules/tenant-auth) — this service never checks a password. The
+ * panel calls `POST /oauth/grant` once the operator is authenticated; the
+ * only identity check here is `memberRole` (is this operator a member of the
+ * chosen workspace?).
  *
  * Standards: RFC 8414 / RFC 9728 (metadata), RFC 7591 (dynamic registration),
  * RFC 6749 / RFC 7636 (authorization code + PKCE), RFC 7662 (introspection).
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import jwt from 'jsonwebtoken';
 import { prisma } from '../../lib/prisma.js';
 import { RelipayError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
-import { verifyPassword } from '../../lib/passwords.js';
 import {
   issueOperatorMcpAccessToken,
   verifyOperatorMcpAccessToken,
@@ -23,14 +24,56 @@ import {
 } from '../../lib/operator-mcp-jwt.js';
 import type { TenantRole } from '@prisma/client';
 
-/** The only scope Phase 2 grants — read access across the operator's workspace. */
-export const OPERATOR_MCP_SCOPE = 'mcp:operator:read';
+/** Read access across the operator's workspace. Always granted. */
+export const OPERATOR_MCP_READ_SCOPE = 'mcp:operator:read';
+/** Write access — create/edit applications, plans, webhook endpoints, auth-config. */
+export const OPERATOR_MCP_WRITE_SCOPE = 'mcp:operator:write';
+/**
+ * Admin access — destructive / financial / secret-handling operations:
+ * configuring provider credentials, cancelling subscriptions, (later) refunds
+ * and deletes. Strictly above write so a client must request it explicitly and
+ * the operator must approve it on the consent screen, separately from write.
+ */
+export const OPERATOR_MCP_ADMIN_SCOPE = 'mcp:operator:admin';
+/** Back-compat alias (read). Several call sites still import this name. */
+export const OPERATOR_MCP_SCOPE = OPERATOR_MCP_READ_SCOPE;
+/** Every scope this AS recognises, in metadata-advertised order. */
+export const OPERATOR_MCP_SCOPES_SUPPORTED = [
+  OPERATOR_MCP_READ_SCOPE,
+  OPERATOR_MCP_WRITE_SCOPE,
+  OPERATOR_MCP_ADMIN_SCOPE,
+] as const;
+
+/**
+ * Resolve the scopes actually granted from a client's `scope` request.
+ *
+ * Read is always granted (the floor). Write and admin are granted only when
+ * explicitly requested AND recognised. Admin IMPLIES write (an admin grant can
+ * also do everything write can). Anything unrecognised is dropped silently — a
+ * client can't talk itself into a scope this AS doesn't define. Returns a
+ * normalised, deduped, space-separated string with read first.
+ */
+export function grantScopes(requested: string | undefined): string {
+  const asked = new Set((requested ?? '').split(/\s+/).filter(Boolean));
+  const granted = [OPERATOR_MCP_READ_SCOPE];
+  const admin = asked.has(OPERATOR_MCP_ADMIN_SCOPE);
+  if (admin || asked.has(OPERATOR_MCP_WRITE_SCOPE)) granted.push(OPERATOR_MCP_WRITE_SCOPE);
+  if (admin) granted.push(OPERATOR_MCP_ADMIN_SCOPE);
+  return granted.join(' ');
+}
+
+/** Does a granted-scope string carry write capability? */
+export function scopeHasWrite(scope: string | undefined): boolean {
+  return (scope ?? '').split(/\s+/).includes(OPERATOR_MCP_WRITE_SCOPE);
+}
+
+/** Does a granted-scope string carry admin capability? */
+export function scopeHasAdmin(scope: string | undefined): boolean {
+  return (scope ?? '').split(/\s+/).includes(OPERATOR_MCP_ADMIN_SCOPE);
+}
 
 const AUTH_CODE_TTL_MS = 60 * 1000; // 60s, single-use
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30d
-// Consent flow step-1 → step-2 carry-through token. Long enough to pick a
-// workspace, short enough to be useless if it leaks from a saved page.
-const CONSENT_TOKEN_TTL_SECONDS = 5 * 60;
 
 /**
  * OAuth error (RFC 6749 §5.2). Carried distinctly from RelipayError because
@@ -80,7 +123,7 @@ export function operatorAuthServerMetadata(): Record<string, unknown> {
     token_endpoint: `${issuer}/oauth/token`,
     registration_endpoint: `${issuer}/oauth/register`,
     introspection_endpoint: `${issuer}/oauth/introspect`,
-    scopes_supported: [OPERATOR_MCP_SCOPE],
+    scopes_supported: [...OPERATOR_MCP_SCOPES_SUPPORTED],
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256'],
@@ -93,7 +136,7 @@ export function operatorProtectedResourceMetadata(): Record<string, unknown> {
   return {
     resource: issuer,
     authorization_servers: [issuer],
-    scopes_supported: [OPERATOR_MCP_SCOPE],
+    scopes_supported: [...OPERATOR_MCP_SCOPES_SUPPORTED],
     bearer_methods_supported: ['header'],
   };
 }
@@ -180,91 +223,19 @@ export const operatorMcpOAuthService = {
   },
 
   /**
-   * Sign-in by email + password. Validates the operator exists, hasn't been
-   * disabled by the brute-force lockout layer (we deliberately don't gate on
-   * email verification — operators with unverified mailboxes can still mint
-   * MCP tokens, mirroring the panel sign-in behaviour). Returns the operator
-   * id + their workspace memberships for the consent page to choose from.
+   * The operator's role in a workspace, or null if they aren't a member.
+   *
+   * This is the ONLY identity check the grant path makes: the panel has
+   * already authenticated the operator (full login — MFA + lockout) and
+   * `requireTenantSession` proved who they are; here we confirm they actually
+   * belong to the workspace they're consenting for. Re-read live so a revoked
+   * membership can't be consented to.
    */
-  async signInForConsent(
-    email: string,
-    password: string,
-  ): Promise<{
-    tenantUserId: string;
-    name: string | null;
-    memberships: Array<{ tenantId: string; tenantName: string; role: TenantRole }>;
-  } | null> {
-    const user = await prisma.tenantUser.findUnique({
-      where: { email: email.toLowerCase() },
-      include: {
-        memberships: { include: { tenant: { select: { name: true } } } },
-      },
+  async memberRole(tenantUserId: string, tenantId: string): Promise<TenantRole | null> {
+    const membership = await prisma.tenantMembership.findUnique({
+      where: { tenantUserId_tenantId: { tenantUserId, tenantId } },
     });
-    if (!user) return null;
-    if (!user.passwordHash) return null;
-    const ok = await verifyPassword(user.passwordHash, password);
-    if (!ok) return null;
-    return {
-      tenantUserId: user.id,
-      name: user.name,
-      memberships: user.memberships.map((m) => ({
-        tenantId: m.tenantId,
-        tenantName: m.tenant.name,
-        role: m.role,
-      })),
-    };
-  },
-
-  /**
-   * Mint the short-lived token that carries "this operator passed the
-   * password check" from the login step to the workspace-pick/consent step
-   * of /oauth/authorize. Previously the form round-tripped the raw password
-   * in a hidden field — echoing a credential back into HTML (page saves,
-   * extensions, proxies with response logging). Bound to the OAuth client
-   * so a token minted for one authorize flow can't drive another client's.
-   * Same posture as the end-user MFA challenge token (lib/jwt.ts): signed,
-   * 5-minute TTL, not a session.
-   */
-  issueConsentToken(tenantUserId: string, clientId: string): string {
-    return jwt.sign(
-      { typ: 'op_mcp_consent' as const, sub: tenantUserId, cid: clientId },
-      env.JWT_SECRET,
-      { expiresIn: CONSENT_TOKEN_TTL_SECONDS, algorithm: 'HS256' },
-    );
-  },
-
-  /** Verify a consent carry-through token. Returns the tenantUserId or null. */
-  verifyConsentToken(token: string, clientId: string): string | null {
-    try {
-      const decoded = jwt.verify(token, env.JWT_SECRET, { algorithms: ['HS256'] });
-      if (
-        typeof decoded !== 'object' ||
-        decoded === null ||
-        (decoded as Record<string, unknown>).typ !== 'op_mcp_consent' ||
-        (decoded as Record<string, unknown>).cid !== clientId ||
-        typeof (decoded as Record<string, unknown>).sub !== 'string'
-      ) {
-        return null;
-      }
-      return (decoded as Record<string, unknown>).sub as string;
-    } catch {
-      return null;
-    }
-  },
-
-  /** Workspace memberships for the consent page (step 2 re-reads them by id). */
-  async membershipsForConsent(
-    tenantUserId: string,
-  ): Promise<Array<{ tenantId: string; tenantName: string; role: TenantRole }>> {
-    const memberships = await prisma.tenantMembership.findMany({
-      where: { tenantUserId },
-      include: { tenant: { select: { name: true } } },
-    });
-    return memberships.map((m) => ({
-      tenantId: m.tenantId,
-      tenantName: m.tenant.name,
-      role: m.role,
-    }));
+    return membership?.role ?? null;
   },
 
   /**
@@ -393,7 +364,8 @@ export const operatorMcpOAuthService = {
       tenantUserId: row!.tenantUserId,
       tenantId: row!.tenantId,
       clientId: args.clientId,
-      scope: OPERATOR_MCP_SCOPE,
+      // Carry the grant forward verbatim — a refresh never widens or drops scope.
+      scope: row!.scope,
       userAgent: args.userAgent,
       ip: args.ip,
     });
@@ -433,6 +405,7 @@ export const operatorMcpOAuthService = {
         tenantUserId: args.tenantUserId,
         tenantId: args.tenantId,
         clientId: args.clientId,
+        scope: args.scope,
         expiresAt: new Date(Date.now() + REFRESH_TTL_MS),
         userAgent: args.userAgent ?? null,
         ip: args.ip ?? null,

@@ -39,6 +39,10 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # AOF persistence so BullMQ webhook-delivery jobs (delayed retries) survive a
+    # Redis restart. The DB retry poller backstops any gap; durable queue state
+    # avoids needless re-deliveries on a bounce.
+    command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - relipay_redis:/data
     healthcheck:

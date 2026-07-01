@@ -92,6 +92,17 @@ export function Modal({
   const titleId = `${baseId}-title`;
   const descId = `${baseId}-desc`;
 
+  // Lock background scroll while the dialog is open. The native <dialog>
+  // renders the rest of the page inert but does NOT stop it scrolling, so the
+  // content behind the overlay could still scroll under the modal. Toggle
+  // `overflow: hidden` on <html> for the duration.
+  function lockScroll(): void {
+    document.documentElement.style.overflow = 'hidden';
+  }
+  function unlockScroll(): void {
+    document.documentElement.style.overflow = '';
+  }
+
   // Reopen on error: if the URL has ?modalKey=1, force the dialog open.
   React.useEffect(() => {
     if (modalKey && search.get(modalKey) === '1' && ref.current && !ref.current.open) {
@@ -100,15 +111,20 @@ export function Modal({
       // instance becoming a no-op is preferable to crashing the page.
       try {
         ref.current.showModal();
+        lockScroll();
       } catch {
         /* already-open or detached — safe to ignore */
       }
     }
   }, [modalKey, search]);
 
+  // Always release the scroll lock if the component unmounts while open.
+  React.useEffect(() => () => unlockScroll(), []);
+
   function open(): void {
     try {
       ref.current?.showModal();
+      lockScroll();
     } catch {
       /* see above */
     }
@@ -116,6 +132,17 @@ export function Modal({
 
   function close(): void {
     ref.current?.close();
+    // `dialog.close()` fires the native `close` event → handleClose() runs and
+    // releases the lock. Unlock here too so the lock is never left stuck even
+    // if a browser skips the event for a programmatic close. Idempotent.
+    unlockScroll();
+  }
+
+  // Fires for every close path (X button, backdrop click, native Esc — all of
+  // which end in the dialog's `close` event).
+  function handleClose(): void {
+    unlockScroll();
+    stripModalParam();
   }
 
   // When the dialog closes (X button, backdrop click, or native Esc — all fire
@@ -153,7 +180,7 @@ export function Modal({
         aria-labelledby={titleId}
         aria-describedby={description ? descId : undefined}
         className={`rounded-xl p-0 text-left backdrop:bg-black/50 backdrop:backdrop-blur-sm bg-[var(--color-surface)] text-[var(--color-fg)] ${SIZE_CLS[size]} w-[90vw] shadow-2xl border border-[var(--color-border)]`}
-        onClose={stripModalParam}
+        onClose={handleClose}
         onClick={(e) => {
           // Click on backdrop → close. Safari is unreliable comparing
           // `e.target === ref.current`, so we additionally check that the

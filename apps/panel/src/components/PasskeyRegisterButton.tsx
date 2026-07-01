@@ -11,6 +11,7 @@
 
 import * as React from 'react';
 import { startRegistration } from '@simplewebauthn/browser';
+import { isRedirectError } from '@/lib/redirect-error';
 
 type OptionsJSON = Parameters<typeof startRegistration>[0]['optionsJSON'];
 
@@ -47,6 +48,9 @@ export function PasskeyRegisterButton({ start, complete }: Props): React.JSX.Ele
       if (label.trim()) fd.set('deviceName', label.trim());
       await complete(fd);
     } catch (e: unknown) {
+      // A redirect (e.g. revalidate + navigate on success) surfaces as a
+      // NEXT_REDIRECT error — re-throw so it isn't shown as a failure.
+      if (isRedirectError(e)) throw e;
       const msg =
         e instanceof Error && e.message
           ? e.message

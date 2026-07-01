@@ -16,6 +16,7 @@ import type { AddressInfo } from 'node:net';
 import { verifyWebhookSignature } from '../src/lib/webhook-signing.js';
 import {
   processDueWebhookDeliveries,
+  setDeliveryScheduler,
   webhookService,
 } from '../src/modules/webhooks/webhook.service.js';
 
@@ -472,6 +473,38 @@ describe('Outbound webhooks', () => {
       data: {},
     });
     expect(ids).toHaveLength(0);
+  });
+
+  it('scheduler seam: emit routes the first attempt through the active scheduler (BullMQ swap point)', async () => {
+    const b = await bootstrap('seam');
+    await app.inject({
+      method: 'POST',
+      url: `/api/v1/tenant/applications/${b.applicationId}/webhooks`,
+      headers: { authorization: `Bearer ${b.tenantAccess}` },
+      payload: { url: 'https://example.invalid/hook', events: ['user.created'] },
+    });
+
+    // Stand in for the BullMQ scheduler installed at boot: capture every
+    // (deliveryId, delayMs, attempts) handed to it instead of running the
+    // attempt. This is exactly the seam webhook.queue.ts swaps in.
+    const calls: Array<{ deliveryId: string; delayMs: number; attempts: number }> = [];
+    setDeliveryScheduler((deliveryId, delayMs, attempts) => {
+      calls.push({ deliveryId, delayMs, attempts });
+    });
+    try {
+      const ids = await webhookService.emit({
+        applicationId: b.applicationId,
+        type: 'user.created',
+        data: {},
+      });
+      expect(ids).toHaveLength(1);
+      // The first attempt is enqueued at zero delay, attempt count 0 — no real
+      // HTTP fired because our scheduler intercepted it.
+      expect(calls).toEqual([{ deliveryId: ids[0], delayMs: 0, attempts: 0 }]);
+    } finally {
+      // Restore the in-process scheduler for the remaining suite.
+      setDeliveryScheduler(null);
+    }
   });
 
   afterAll(async () => {

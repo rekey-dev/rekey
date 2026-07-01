@@ -1,5 +1,6 @@
 export { webhookService } from './webhook.service.js';
 export { tenantWebhookRoutes } from './webhook.routes.js';
+export { startWebhookWorker, stopWebhookWorker } from './webhook.queue.js';
 export {
   KNOWN_WEBHOOK_EVENTS,
   isKnownWebhookEvent,

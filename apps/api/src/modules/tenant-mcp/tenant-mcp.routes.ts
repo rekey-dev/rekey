@@ -19,11 +19,15 @@
  * Security:
  *   - No new auth surface. Every request must already present a valid
  *     operator PAT; the JSON-RPC layer never authenticates by itself.
- *   - Tools are READ-ONLY. The handler never calls a Prisma method that
- *     mutates state; a future write tool would need its own scope check.
- *   - PAT scope is honored: this surface requires `read` (the default
- *     scope every PAT has). Write tools, if/when added, MUST guard
- *     themselves with `requireOperatorScope('…:write')`.
+ *   - Read tools are always available. WRITE tools (phase 1: create/edit
+ *     applications, plans, auth-config, webhook endpoints) are gated by the
+ *     dispatcher: the token must carry write capability (`mcp:operator:write`
+ *     for OAuth, `applications:write` for a PAT) AND the operator's role must
+ *     clear the tool's minimum (default ADMIN). The gate filters `tools/list`
+ *     and re-checks at `tools/call`, and every write handler re-scopes by
+ *     tenant. Destructive / financial ops are intentionally NOT exposed yet.
+ *   - PAT scope is honored: this surface requires `read` to authenticate; a
+ *     PAT additionally needs `applications:write` to reach the write tools.
  *   - Workspace scoping is structural: the PAT is bound to one workspace
  *     (`TenantApiToken.tenantId`), so the tools' (tenantUserId, tenantId)
  *     context is the only thing they can ever see.
@@ -31,8 +35,9 @@
 
 import type { FastifyInstance } from 'fastify';
 import { RelipayError } from '../../lib/error.js';
+import { requestContext } from '../../lib/security-events.js';
 import { resolveOperatorMcpBearer } from './bearer-auth.js';
-import { operatorMcpIssuer } from './oauth.service.js';
+import { operatorMcpIssuer, scopeHasWrite, scopeHasAdmin } from './oauth.service.js';
 import { handleOperatorMcpMessage, type JsonRpcMessage } from './tenant-mcp-server.js';
 
 export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
@@ -75,9 +80,31 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
       // so clients can run the discovery cascade — but only on success replies
       // since an unauthed call already 401s before this handler. Skipped here.
       reply.header('WWW-Authenticate', `Bearer resource_metadata="${operatorMcpIssuer()}/.well-known/oauth-protected-resource"`);
+      // Write capability is whichever the resolved credential carries:
+      //   - OAuth JWT: the granted `scope` string includes `mcp:operator:write`.
+      //   - PAT: the token's scopes include `applications:write`.
+      // Role is the LIVE membership role the auth guard re-checked this request.
+      const canWrite = req.operatorMcpClaims
+        ? scopeHasWrite(req.operatorMcpClaims.scope)
+        : (req.operatorTokenScopes ?? []).includes('applications:write');
+      // Admin (destructive/financial) is OAuth-scope-only — a PAT never carries
+      // it. An operator must run the OAuth consent flow and grant
+      // `mcp:operator:admin` explicitly for these tools to be reachable.
+      const canAdmin = req.operatorMcpClaims
+        ? scopeHasAdmin(req.operatorMcpClaims.scope)
+        : false;
+      const { ip, userAgent } = requestContext(req);
       const msg = (req.body ?? {}) as JsonRpcMessage;
       const response = await handleOperatorMcpMessage(
-        { tenantUserId: req.tenantUser.id, tenantId: req.tenantId },
+        {
+          tenantUserId: req.tenantUser.id,
+          tenantId: req.tenantId,
+          role: req.tenantRole ?? 'MEMBER',
+          canWrite,
+          canAdmin,
+          ip,
+          userAgent,
+        },
         msg,
       );
       // JSON-RPC notifications get no reply (no `id`). 204 communicates

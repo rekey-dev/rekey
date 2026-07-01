@@ -15,21 +15,25 @@
  * service kicks the HTTP call off with `void` and lets the delivery
  * worker (this same module) retry on failure.
  *
- * Retries are scheduled two ways:
- *   - an in-process `setTimeout` for the fast path, and
- *   - a periodic poller (`processDueWebhookDeliveries`, registered in
- *     app.ts like the other interval jobs) that re-attempts PENDING rows
- *     whose `nextAttemptAt` has passed — so retries survive a restart
- *     instead of being lost with the timer.
- * Both paths funnel through an atomic claim (a guarded `updateMany` that
- * pushes `nextAttemptAt` forward) so a timer and the poller can never
- * double-send the same delivery. For horizontal scale, swap the scheduler
- * for BullMQ (or similar) — the persistence layer is already
- * worker-friendly.
+ * Scheduling goes through a pluggable seam (`scheduleAttempt`). In every real
+ * runtime the BullMQ worker (webhook.queue.ts) installs a Redis-backed enqueue
+ * at boot — required, no process-local fallback — so delayed retries live in
+ * Redis (survive a crash) and distribute across replicas for microservice
+ * deployments. The default scheduler is an in-process `setTimeout` that runs
+ * ONLY under `NODE_ENV=test` (single-process suite, no external Redis); in any
+ * other runtime it throws, so a delivery can never be silently pinned to one
+ * process. A periodic poller (`processDueWebhookDeliveries`, registered in
+ * app.ts) re-attempts PENDING rows whose `nextAttemptAt` has passed — the crash
+ * backstop for a row orphaned by a Redis flush or a job that never landed.
+ * Every path funnels through an atomic claim (a guarded `updateMany` that
+ * pushes `nextAttemptAt` forward) so a queue worker, the poller, and other
+ * replicas can never double-send the same delivery.
  */
 
 import type { WebhookEndpoint, WebhookDelivery } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
+import { RelipayError } from '../../lib/error.js';
+import { env } from '../../config/env.js';
 import { signWebhook, generateWebhookSecret } from '../../lib/webhook-signing.js';
 import { assertSafeUrl } from '../../lib/ssrf-guard.js';
 import {
@@ -162,7 +166,53 @@ async function safeUpdate(
   }
 }
 
-async function attemptDelivery(deliveryId: string): Promise<void> {
+/**
+ * How the next delivery attempt is scheduled. `delayMs` is the backoff
+ * (0 = as soon as possible); `attempts` is the delivery's attempt count, used
+ * by the BullMQ scheduler to derive an idempotent per-attempt jobId so a
+ * self-reschedule racing the poller collapses to one job. Defaults to an
+ * in-process timer; webhook.queue.ts swaps in a Redis-backed enqueue at boot.
+ */
+export type DeliveryScheduler = (deliveryId: string, delayMs: number, attempts: number) => void;
+
+// Default scheduler. Under test it's an in-process timer (single-process suite,
+// no external Redis — mirrors the rate-limiter's test convention). In any real
+// runtime the BullMQ worker MUST install a Redis-backed scheduler at boot
+// (startWebhookWorker), so reaching this default outside test means the queue
+// failed to start — throw loudly rather than silently pin retries to one
+// process and break multi-replica delivery. Errors in the test timer are
+// swallowed: a fire-and-forget attempt must not surface as an unhandled rejection.
+const defaultScheduler: DeliveryScheduler = (deliveryId, delayMs) => {
+  if (env.NODE_ENV !== 'test') {
+    throw new Error(
+      '[webhooks] no delivery scheduler installed — the BullMQ worker is required ' +
+        'but not running (Redis unreachable at boot?). Refusing to schedule via an ' +
+        'in-process timer, which would not survive a crash or distribute across replicas.',
+    );
+  }
+  setTimeout(() => {
+    void attemptDelivery(deliveryId).catch(() => undefined);
+  }, delayMs).unref();
+};
+
+let scheduleAttempt: DeliveryScheduler = defaultScheduler;
+
+/**
+ * Install the delivery scheduler. The BullMQ worker calls this at boot with a
+ * Redis-backed enqueue. Passing `null` restores the default (test-only timer;
+ * throws in any other runtime).
+ */
+export function setDeliveryScheduler(fn: DeliveryScheduler | null): void {
+  scheduleAttempt = fn ?? defaultScheduler;
+}
+
+/**
+ * Run exactly one delivery attempt: atomically claim the row, POST, then
+ * persist the outcome and — on a retryable failure — hand the next attempt to
+ * the active scheduler. This is the unit of work both the in-process timer and
+ * the BullMQ worker invoke. Exported for the worker processor.
+ */
+export async function attemptDelivery(deliveryId: string): Promise<void> {
   // Atomic claim: only one caller (in-process timer OR the periodic poller)
   // may attempt a due delivery. The guarded update pushes `nextAttemptAt`
   // into the future, so a concurrent claimer's WHERE no longer matches and
@@ -230,12 +280,11 @@ async function attemptDelivery(deliveryId: string): Promise<void> {
     nextAttemptAt: nextAt,
     error: result.error,
   });
-  // In-process retry for the fast path. If the process restarts before the
-  // timer fires, the periodic poller (processDueWebhookDeliveries) picks the
-  // row up off `nextAttemptAt` — the claim above stops both from double-sending.
-  setTimeout(() => {
-    void attemptDelivery(deliveryId).catch(() => undefined);
-  }, delaySeconds * 1000).unref();
+  // Schedule the next attempt through the active scheduler — a Redis-backed
+  // delayed job in every real runtime (survives a crash, distributes across
+  // replicas). The poller picks the row up off `nextAttemptAt` if the queued
+  // job is ever lost — the claim above stops any two from double-sending.
+  scheduleAttempt(deliveryId, delaySeconds * 1000, attempts);
 }
 
 /**
@@ -300,14 +349,12 @@ export const webhookService = {
         }),
       ),
     );
-    // Kick off the first attempt immediately, in the background. Swallow
-    // errors — a transient DB error on a fire-and-forget attempt must never
-    // surface as an unhandled rejection; the poller re-attempts off
-    // `nextAttemptAt` anyway.
+    // Kick off the first attempt immediately, in the background, via the active
+    // scheduler (in-process timer or BullMQ enqueue). The rows are already
+    // PENDING with nextAttemptAt=now, so the poller re-attempts off
+    // `nextAttemptAt` if the kickoff is lost (e.g. crash before the job lands).
     for (const d of deliveries) {
-      setImmediate(() => {
-        void attemptDelivery(d.id).catch(() => undefined);
-      });
+      scheduleAttempt(d.id, 0, 0);
     }
     return deliveries.map((d) => d.id);
   },
@@ -346,14 +393,33 @@ export const webhookService = {
     events?: string[];
     enabled?: boolean;
   }): Promise<WebhookEndpoint> {
-    return prisma.webhookEndpoint.update({
-      where: { id: args.endpointId },
+    // Scope the write by (id, applicationId) — like deleteEndpoint/rotateSecret
+    // — so an endpointId from another application can never be mutated by
+    // passing a different applicationId. `update` keyed on id alone would let
+    // a caller who only owns `applicationId` edit any endpoint by id.
+    const { count } = await prisma.webhookEndpoint.updateMany({
+      where: { id: args.endpointId, applicationId: args.applicationId },
       data: {
         ...(args.url !== undefined && { url: args.url }),
         ...(args.events !== undefined && { events: args.events }),
         ...(args.enabled !== undefined && { enabled: args.enabled }),
       },
     });
+    const endpoint =
+      count === 1
+        ? await prisma.webhookEndpoint.findFirst({
+            where: { id: args.endpointId, applicationId: args.applicationId },
+          })
+        : null;
+    if (!endpoint) {
+      throw new RelipayError({
+        statusCode: 404,
+        code: 'WEBHOOK_ENDPOINT_NOT_FOUND',
+        message: `Webhook endpoint "${args.endpointId}" not found for this application.`,
+        fix: 'List endpoints for the application and use an id it actually owns.',
+      });
+    }
+    return endpoint;
   },
 
   async deleteEndpoint(applicationId: string, endpointId: string): Promise<void> {
@@ -402,9 +468,14 @@ export const webhookService = {
       data: { status: 'PENDING', nextAttemptAt: new Date() },
     });
     if (updated.count !== 1) return false;
-    setImmediate(() => {
-      void attemptDelivery(deliveryId).catch(() => undefined);
+    // Read the (unchanged) attempt count so the scheduler builds the same
+    // per-attempt jobId the row would use anyway — keeps the manual kick from
+    // duplicating a delayed job already queued for this attempt.
+    const row = await prisma.webhookDelivery.findUnique({
+      where: { id: deliveryId },
+      select: { attempts: true },
     });
+    scheduleAttempt(deliveryId, 0, row?.attempts ?? 0);
     return true;
   },
 };

@@ -38,9 +38,6 @@ COPY apps/api/package.json apps/api/
 COPY apps/panel/package.json apps/panel/
 COPY apps/portal/package.json apps/portal/
 COPY apps/admin/package.json apps/admin/
-# demo is a workspace member (not deployed), but its package.json must be present
-# so the frozen-lockfile install resolves the full workspace graph.
-COPY apps/demo/package.json apps/demo/
 COPY packages/shared-types/package.json packages/shared-types/
 COPY packages/sdk-node/package.json packages/sdk-node/
 COPY packages/sdk-react/package.json packages/sdk-react/
@@ -83,9 +80,6 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY prisma ./prisma
 COPY apps/api/package.json apps/api/
 COPY packages/shared-types/package.json packages/shared-types/
-# demo is a workspace member; its package.json must exist for the frozen-lockfile
-# install to resolve the workspace graph (its source isn't needed here).
-COPY apps/demo/package.json apps/demo/
 # Install deps, generate the Prisma client, and prune dev-only tooling — all in
 # ONE layer. Reasons:
 #   * No --prod / NODE_ENV unset here so pnpm keeps `prisma` (a devDependency),

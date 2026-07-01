@@ -14,6 +14,7 @@ import sensible from '@fastify/sensible';
 import formbody from '@fastify/formbody';
 import rawBody from 'fastify-raw-body';
 import { getRedis, closeRedis } from './lib/redis.js';
+import { isQueueEnabled } from './lib/queue.js';
 import { primeCorsOrigins, isRegisteredAppOrigin } from './lib/cors-origins.js';
 
 import { env, corsAllowedOrigins } from './config/env.js';
@@ -61,7 +62,7 @@ import { portalConfigRoutes } from './modules/portal/index.js';
 import { usagePublicRoutes } from './modules/usage/index.js';
 import { creditsPublicRoutes } from './modules/credits/index.js';
 import { tenantEmailRoutes } from './modules/email/index.js';
-import { tenantWebhookRoutes } from './modules/webhooks/index.js';
+import { tenantWebhookRoutes, startWebhookWorker, stopWebhookWorker } from './modules/webhooks/index.js';
 import {
   organizationsAuthenticatedRoutes,
   organizationsAcceptInvitationRoutes,
@@ -70,7 +71,11 @@ import { securityEventsRoutes } from './modules/security-events/index.js';
 import { mcpRoutes, mcpWellKnownRoutes } from './modules/mcp/index.js';
 import { adminMetricsRoutes } from './modules/admin-metrics/index.js';
 import { operatorInvitesRoutes } from './modules/operator-invites/index.js';
-import { tenantMcpRoutes, operatorMcpOAuthRoutes } from './modules/tenant-mcp/index.js';
+import {
+  tenantMcpRoutes,
+  operatorMcpOAuthRoutes,
+  operatorMcpWellKnownRoutes,
+} from './modules/tenant-mcp/index.js';
 
 export interface BuildAppOptions {
   /** Override the default logger config (e.g. silence in tests). */
@@ -259,10 +264,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }, PRUNE_INTERVAL_MS);
     pruneTimer.unref();
 
-    // Outbound-webhook retry poller. The fast path retries via in-process
-    // setTimeout (webhook.service.ts); this poller re-attempts PENDING
-    // deliveries whose nextAttemptAt has passed so retries survive a restart.
-    // Per-row atomic claims make timer + poller overlap safe.
+    // Outbound-webhook retry poller. Primary scheduling is BullMQ when Redis is
+    // configured (delayed jobs survive a crash), or in-process setTimeout
+    // otherwise (webhook.service.ts). Either way this poller re-attempts PENDING
+    // deliveries whose nextAttemptAt has passed — the backstop for a row
+    // orphaned by a Redis flush or a lost timer. Per-row atomic claims make the
+    // poller, the queue worker, and the timer safe to overlap.
     const WEBHOOK_RETRY_POLL_INTERVAL_MS = 60 * 1000;
     const webhookRetryTimer = setInterval(() => {
       void processDueWebhookDeliveries().catch((err) =>
@@ -283,11 +290,21 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }, DUNNING_POLL_INTERVAL_MS);
     dunningTimer.unref();
 
+    // BullMQ webhook-delivery worker — REQUIRED outside test. Installs the
+    // Redis-backed scheduler so delayed retries survive a crash and distribute
+    // across replicas (microservice-compatible). startWebhookWorker THROWS if
+    // Redis is unreachable, failing buildApp() so the server refuses to boot
+    // without a working queue. The DB poller above stays as the crash backstop.
+    if (isQueueEnabled()) {
+      await startWebhookWorker(app.log);
+    }
+
     app.addHook('onClose', async () => {
       clearInterval(flushTimer);
       clearInterval(pruneTimer);
       clearInterval(webhookRetryTimer);
       clearInterval(dunningTimer);
+      await stopWebhookWorker();
     });
   }
 
@@ -362,6 +379,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   if (env.OPERATOR_MCP_ENABLED) {
     await app.register(operatorMcpOAuthRoutes, { prefix: '/api/v1/tenant/mcp' });
     await app.register(tenantMcpRoutes, { prefix: '/api/v1/tenant/mcp' });
+    // Root-level path-insertion OAuth metadata discovery (RFC 8414 / 9728) for
+    // the operator MCP — mirrors `mcpWellKnownRoutes` for the per-app server.
+    // A strict connector (Claude) constructs the metadata URL by inserting the
+    // well-known segment right after the origin and re-appending the issuer
+    // path (`/.well-known/oauth-authorization-server/api/v1/tenant/mcp`), which
+    // the suffix-form routes above 404. Registered with NO prefix so the
+    // well-known segment sits directly under the origin.
+    await app.register(operatorMcpWellKnownRoutes);
   }
   await app.register(tenantEmailRoutes, { prefix: '/api/v1/tenant/applications' });
   await app.register(tenantWebhookRoutes, { prefix: '/api/v1/tenant/applications' });

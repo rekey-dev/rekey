@@ -91,7 +91,7 @@ export default async function McpPage({
 }`;
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
+    <div className="space-y-6">
       <PageHeader
         title="MCP server"
         description="Expose a hosted Model Context Protocol server for this application. End-users authenticate with their account (OAuth 2.1 + PKCE) and connect MCP clients like Claude Code, Claude Desktop, and Cursor to read their own data."

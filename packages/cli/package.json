@@ -1,6 +1,6 @@
 {
   "name": "@relipay/cli",
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0",
   "license": "MIT",
   "description": "ReliPay command-line interface — designed for both human developers and AI agents.",
   "type": "module",

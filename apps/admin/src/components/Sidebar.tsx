@@ -152,7 +152,8 @@ export function Sidebar(): React.JSX.Element {
         <div className="flex items-start justify-between px-4 pt-4 pb-3">
           <div>
             <Link href="/" className="mb-2 inline-flex items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/40">
-              <span className="grid h-6 w-6 place-items-center rounded-md bg-[var(--color-primary)] text-xs font-bold text-white">R</span>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/logo-mark.png" alt="" className="h-6 w-auto" />
               <span className="text-sm font-semibold text-[var(--color-fg)]">ReliPay</span>
             </Link>
             <p className="text-[10px] font-medium uppercase tracking-wider text-[var(--color-faint-fg)]">Super Admin</p>

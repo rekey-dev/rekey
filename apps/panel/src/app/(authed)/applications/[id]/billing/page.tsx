@@ -295,11 +295,16 @@ export default async function BillingPage({
   const billingEnabled = app.billingConfig.enabled;
   const dunningEnabled = app.billingConfig.dunningEnabled ?? false;
 
-  // When RELIPAY_URL is unset the constructed webhook URL would be a relative
-  // path — Stripe rejects those silently and the webhook then fails forever
-  // (UX-AUDIT MEDIUM #24). Pass `null` to the row + render a "configure
-  // RELIPAY_URL" warning so the operator catches this before pasting.
-  const apiBase = process.env.RELIPAY_URL?.replace(/\/$/, '');
+  // This URL is PASTED INTO the provider dashboard, so it must be the PUBLIC
+  // API origin the provider can reach — not the in-cluster RELIPAY_URL
+  // (e.g. `http://api:3030`), which would show an unreachable `api:3030`-style
+  // host. Prefer NEXT_PUBLIC_API_URL (the public origin); fall back to
+  // RELIPAY_URL only for local dev where they're the same. When neither is a
+  // public URL the row renders a "configure NEXT_PUBLIC_API_URL" warning so the
+  // operator catches it before pasting (Stripe silently rejects relative/bad
+  // hosts and the webhook then fails forever — UX-AUDIT MEDIUM #24).
+  const publicApiBase = process.env.NEXT_PUBLIC_API_URL ?? process.env.RELIPAY_URL;
+  const apiBase = publicApiBase?.replace(/\/$/, '');
   const stripeWebhookUrl = apiBase
     ? `${apiBase}/api/v1/billing/webhook/stripe/${app.slug}`
     : null;
@@ -709,8 +714,10 @@ function WebhookSetup({
           Webhook endpoint unavailable
         </p>
         <p className="mt-1 text-xs text-amber-800 dark:text-amber-300/90">
-          <code className="font-mono">RELIPAY_URL</code> isn’t set on the panel deployment, so the{' '}
-          {label} webhook URL can’t be built. Ask your admin to set it and redeploy, then return here.
+          <code className="font-mono">NEXT_PUBLIC_API_URL</code> (the public API origin) isn’t set on
+          the panel deployment, so the {label} webhook URL can’t be built. Ask your admin to set it to
+          your public API origin (e.g. <code className="font-mono">https://api.yourdomain.com</code>)
+          and redeploy, then return here.
         </p>
       </div>
     );
@@ -845,6 +852,7 @@ function ProviderEditModal({
 
   return (
     <Modal
+      size="lg"
       modalKey={`edit_${provider}`}
       title={`${existing ? 'Edit' : 'Configure'} ${label}`}
       description={
