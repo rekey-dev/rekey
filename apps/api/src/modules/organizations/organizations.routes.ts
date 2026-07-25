@@ -1,6 +1,15 @@
 /**
- * End-user organization routes. All authenticated (Application secret
- * key + end-user JWT).
+ * End-user organization routes. Two plugins, registered under different
+ * prefixes in `app.ts`:
+ *
+ *   - `organizationsAuthenticatedRoutes` (the 13 routes listed below, under
+ *     `/api/v1/users/me/organizations`)
+ *   - `organizationsAcceptInvitationRoutes` (under `/api/v1/auth/organizations`)
+ *
+ * Both accept the **publishable OR secret** key plus the end-user JWT, so a
+ * browser-only portal can manage teams and accept invitations with no secret
+ * key. The JWT is the authorizer: it is bound to the Application and carries
+ * the test/live mode check.
  *
  *   POST   /api/v1/users/me/organizations                            create
  *   GET    /api/v1/users/me/organizations                            list-mine
@@ -23,7 +32,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { organizationsService } from './organizations.service.js';
 import { authService } from '../auth/auth.service.js';
-import { requireApiKey, requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
+import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { PaginationQuery, parsePagination, paginationJsonSchema } from '../../lib/pagination.js';
 
@@ -58,8 +67,9 @@ const OrgMemberParam = z.object({ id: z.string().min(1), euid: z.string().min(1)
 const OrgInvParam = z.object({ id: z.string().min(1), invId: z.string().min(1) });
 
 /**
- * Routes mounted under `/api/v1/users/me/organizations` — require an
- * authenticated EndUser session.
+ * Routes mounted under `/api/v1/users/me/organizations`. Credential:
+ * **publishable OR secret** key in `Authorization: Bearer`, AND the end-user
+ * JWT in `X-Relipay-User-Token` — both, always.
  */
 export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Promise<void> {
   // End-user self-service team management — list/create orgs, members, invites,
@@ -86,7 +96,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
             metadata: { type: 'object' },
           },
         },
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
       },
     },
     async (req, reply) => {
@@ -108,7 +118,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
       schema: {
         tags: ['Public · Organizations'],
         summary: 'List the caller\'s organizations (with their role in each)',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
       },
     },
@@ -133,7 +143,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
       schema: {
         tags: ['Public · Organizations'],
         summary: 'Fetch one organization the caller belongs to',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
       },
     },
     async (req) => {
@@ -160,7 +170,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
             metadata: { type: 'object' },
           },
         },
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
       },
     },
     async (req) => {
@@ -183,7 +193,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
       schema: {
         tags: ['Public · Organizations'],
         summary: 'List members of an org the caller belongs to',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
       },
     },
@@ -225,7 +235,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
             role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
           },
         },
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
       },
     },
     async (req, reply) => {
@@ -263,7 +273,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
       schema: {
         tags: ['Public · Organizations'],
         summary: 'Revoke a pending invitation (OWNER + ADMIN)',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
       },
     },
     async (req) => {
@@ -289,7 +299,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           required: ['role'],
           properties: { role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] } },
         },
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
       },
     },
     async (req) => {
@@ -320,7 +330,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
       schema: {
         tags: ['Public · Organizations'],
         summary: 'Remove a member (or self). Refuses removing the last OWNER.',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
       },
     },
     async (req) => {
@@ -341,7 +351,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
       schema: {
         tags: ['Public · Organizations'],
         summary: 'Self-leave. OWNERs cannot leave (billing is tied to them) — transfer ownership first.',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
       },
     },
     async (req) => {
@@ -368,7 +378,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           'Read endpoints (e.g. GET /billing/entitlements) then default to this org\'s view + pool ' +
           'without an explicit `organizationId`. The active org survives refresh until you switch ' +
           'again, clear it, or leave the org.',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
       },
     },
     async (req) => {
@@ -394,7 +404,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
       schema: {
         tags: ['Public · Organizations'],
         summary: 'Clear the active org (back to the personal pool); re-mints the token pair',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
       },
     },
     async (req) => {
@@ -413,9 +423,17 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
  * Accept-invitation requires authentication (we need the caller's EndUser
  * id for the membership row) but is logically separate from the
  * "authenticated org admin" surface above — mounted under /auth/organizations.
+ *
+ * Same credential as the plugin above: publishable or secret key, plus the
+ * invitee's own end-user JWT. Two bearer secrets have to line up — the session
+ * proves who is accepting, and the invitation token proves they were asked.
  */
 export async function organizationsAcceptInvitationRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireApiKey);
+  // Accepts the publishable key, like the create/list invite siblings above:
+  // `requireUserSession` is the real gate (the invitee's own JWT, bound to this
+  // Application) and the invitation token is a second bearer secret. Without
+  // this a browser portal could create and list invites but never accept one.
+  app.addHook('onRequest', requirePublishableOrSecretKey);
   app.addHook('onRequest', requireScope('auth:write'));
   app.addHook('onRequest', requireUserSession);
 
@@ -425,12 +443,20 @@ export async function organizationsAcceptInvitationRoutes(app: FastifyInstance):
       schema: {
         tags: ['Public · Organizations'],
         summary: 'Accept an organization invitation. Creates the membership.',
+        description:
+          'Callable from a browser with the publishable key plus the invitee\'s own ' +
+          'end-user token. Creating an invitation already accepted the publishable ' +
+          'key, so requiring a secret key here left the flow dead-ended: a portal ' +
+          'could invite someone but never let them accept.',
         body: {
           type: 'object',
           required: ['token'],
           properties: { token: { type: 'string', minLength: 1, maxLength: 512 } },
         },
-        security: [{ apiKey: [] }],
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
       },
     },
     async (req) => {

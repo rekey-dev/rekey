@@ -49,10 +49,16 @@ export function WorkspaceSwitcher({
   // Same trick for the modal's create form trigger.
   const newModalTriggerRef = React.useRef<HTMLButtonElement | null>(null);
 
+  // Pending feedback: the switch is a full server round-trip, so without this
+  // the picked item just sits inert until navigation lands. The component
+  // remounts on success, so the flag never needs resetting.
+  const [switching, setSwitching] = React.useState(false);
+
   function switchTo(tenantId: string): void {
-    if (tenantId === activeTenantId) return;
+    if (tenantId === activeTenantId || switching) return;
     if (tenantIdInputRef.current && formRef.current) {
       tenantIdInputRef.current.value = tenantId;
+      setSwitching(true);
       formRef.current.requestSubmit();
     }
   }
@@ -72,9 +78,11 @@ export function WorkspaceSwitcher({
           <button
             type="button"
             title={triggerLabel}
-            className="flex w-full items-center justify-between gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm hover:bg-[var(--color-surface-muted)] transition-colors"
+            disabled={switching}
+            aria-busy={switching}
+            className="flex w-full items-center justify-between gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm hover:bg-[var(--color-surface-muted)] transition-colors disabled:opacity-60"
           >
-            <span className="truncate">{triggerLabel}</span>
+            <span className="truncate">{switching ? 'Switching…' : triggerLabel}</span>
             <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-[var(--color-faint-fg)]">
               <polyline points="6 9 12 15 18 9" />
             </svg>
@@ -125,7 +133,7 @@ export function WorkspaceSwitcher({
               minLength={2}
               maxLength={80}
               placeholder="Side project"
-              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]"
+              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
             />
             <span className="block text-xs text-[var(--color-muted-fg)]">
               You'll be the OWNER. Invite teammates from the Team page after.

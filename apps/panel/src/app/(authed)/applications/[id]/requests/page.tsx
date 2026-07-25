@@ -1,6 +1,8 @@
 import * as React from 'react';
+import Link from 'next/link';
 import { api, type ApiRequestLogRow } from '@/lib/api';
 import { RequestLogTable } from '@/components/RequestLogTable';
+import { EmptyState } from '@/components/EmptyState';
 import { Pager, readPageSize } from '@/components/Pager';
 
 /**
@@ -42,11 +44,25 @@ export default async function RequestsPage({
       </div>
 
       {requests.length === 0 ? (
-        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-8 text-center text-sm text-neutral-600 dark:text-neutral-500">
-          No API requests recorded yet. Calls made with this app&apos;s secret key
-          (<code className="font-mono">rp_live_…</code> / <code className="font-mono">rp_test_…</code>)
-          appear here.
-        </div>
+        <EmptyState
+          variant="inline"
+          title="No API requests recorded yet"
+          description={
+            <>
+              Calls made with this app&apos;s secret key
+              (<code className="font-mono">rp_live_…</code> / <code className="font-mono">rp_test_…</code>)
+              appear here.
+            </>
+          }
+          action={
+            <Link
+              href={`/applications/${id}/api-keys`}
+              className="text-sm font-medium text-[var(--color-primary)] hover:underline"
+            >
+              View API keys →
+            </Link>
+          }
+        />
       ) : (
         <RequestLogTable rows={requests} />
       )}

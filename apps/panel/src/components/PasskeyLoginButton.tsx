@@ -25,9 +25,14 @@ interface Props {
   start: () => Promise<StartResult>;
   /** Server action: verifies the assertion, mints the session, redirects. */
   complete: (formData: FormData) => Promise<void>;
+  /**
+   * Post-auth `next` target from the login page URL. Passed through to
+   * `complete`, which re-validates it server-side (safeNext) before following.
+   */
+  next?: string;
 }
 
-export function PasskeyLoginButton({ start, complete }: Props): React.JSX.Element {
+export function PasskeyLoginButton({ start, complete, next }: Props): React.JSX.Element {
   const [pending, setPending] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
 
@@ -46,6 +51,7 @@ export function PasskeyLoginButton({ start, complete }: Props): React.JSX.Elemen
       const fd = new FormData();
       fd.set('response', JSON.stringify(response));
       fd.set('expectedChallenge', started.expectedChallenge);
+      if (next) fd.set('next', next);
       // Redirects on success; on a server-side failure it redirects back to
       // /login?error=… which the page renders.
       await complete(fd);

@@ -1721,8 +1721,8 @@ packages:
   '@types/serve-static@1.15.10':
     resolution: {integrity: sha512-tRs1dB+g8Itk72rlSI2ZrW6vZg0YrLI81iQSTkMmOqnqCaNr/8Ek4VwWcN5vZgCYWbg/JJSGBlUaYGAOP73qBw==}
 
-  '@unlayer/types@1.446.0':
-    resolution: {integrity: sha512-syHaW4Wrz/oPGWAcNSedq8H0atsBiRK8XQJccOARofYg1zqcLrsnoxGdHeOHCiZj7d/OiR/cClokr6MjgaIJXA==}
+  '@unlayer/types@1.460.0':
+    resolution: {integrity: sha512-ytaxDBU40apAzgHEKI28D9B56hsp+VcfZCh2hhludW1PWtX+ay8z2GTcduosTin2xZ9zPPNquueLL7MjbWHthA==}
 
   '@vitejs/plugin-react@4.7.0':
     resolution: {integrity: sha512-gUu9hwfWvvEDBBmgtAowQCojwZmJ5mcLn3aufeCsitijs3+f2NsrPtlAWIR6OPiqljl96GVCUbLe0HyqIpVaoA==}
@@ -4649,7 +4649,7 @@ snapshots:
       '@types/node': 22.19.17
       '@types/send': 0.17.6
 
-  '@unlayer/types@1.446.0': {}
+  '@unlayer/types@1.460.0': {}
 
   '@vitejs/plugin-react@4.7.0(vite@5.4.21(@types/node@24.12.4)(lightningcss@1.32.0))':
     dependencies:
@@ -6001,7 +6001,7 @@ snapshots:
 
   react-email-editor@1.8.0(react@19.2.5):
     dependencies:
-      '@unlayer/types': 1.446.0
+      '@unlayer/types': 1.460.0
       react: 19.2.5
 
   react-is@17.0.2: {}

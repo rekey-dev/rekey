@@ -1,17 +1,30 @@
 import * as React from 'react';
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { publicPost } from '@/lib/api';
+import { publicPost, PanelApiError } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
+import { AuthCard } from '@/components/AuthCard';
+import { Banner } from '@/components/Banner';
+
+export const metadata: Metadata = { title: 'Reset your password · ReliPay' };
 
 async function request(formData: FormData): Promise<void> {
   'use server';
   const email = String(formData.get('email') ?? '').trim();
   if (!email) redirect('/forgot-password?error=missing');
-  const result = await publicPost<{ delivered: boolean; resetToken: string | null }>(
-    '/api/v1/tenant/auth/forgot-password',
-    { email },
-  );
+  let result: { delivered: boolean; resetToken: string | null };
+  try {
+    result = await publicPost<{ delivered: boolean; resetToken: string | null }>(
+      '/api/v1/tenant/auth/forgot-password',
+      { email },
+    );
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`/forgot-password?error=${encodeURIComponent(err.code)}`);
+    }
+    throw err;
+  }
   // Demo behavior: surface the token via querystring so the operator can
   // click through without an email integration. In a real deploy, your
   // mailer hands it to the user instead.
@@ -21,6 +34,12 @@ async function request(formData: FormData): Promise<void> {
   redirect('/forgot-password?sent=1');
 }
 
+const ERR: Record<string, string> = {
+  missing: 'Enter the email address on your account.',
+  RATE_LIMITED: 'Too many attempts. Please wait a minute and try again.',
+  INTERNAL_ERROR: 'Something went wrong sending the link. Please try again.',
+};
+
 export default async function ForgotPasswordPage({
   searchParams,
 }: {
@@ -29,19 +48,16 @@ export default async function ForgotPasswordPage({
   const params = await searchParams;
   const sent = params.sent === '1';
   const demoToken = typeof params.demoToken === 'string' ? params.demoToken : null;
-  const error = typeof params.error === 'string' ? params.error : undefined;
+  // Only codes we have copy for render a banner — an unrecognized `?error=`
+  // value shows nothing rather than an unexplained "something went wrong".
+  const error = typeof params.error === 'string' ? ERR[params.error] : undefined;
 
   return (
-    <main className="min-h-screen grid place-items-center px-6 bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-950 dark:to-neutral-900">
-      <form action={request} className="w-full max-w-md space-y-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-8 shadow-sm">
-        <h1 className="text-2xl font-semibold">Reset password</h1>
-
-        {error === 'missing' && (
-          <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">Email required.</p>
-        )}
+    <AuthCard action={request} title="Reset password" spacing="sm">
+        {error && <Banner tone="error">{error}</Banner>}
         {sent && (
-          <div className="rounded border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950 px-3 py-2 text-sm space-y-2">
-            <p className="text-emerald-800 dark:text-emerald-300">If that email is registered, a reset link is on its way.</p>
+          <Banner tone="success" className="space-y-2">
+            <p>If that email is registered, a reset link is on its way.</p>
             {demoToken && (
               <p className="text-xs">
                 <span className="font-medium">Demo:</span>{' '}
@@ -50,11 +66,14 @@ export default async function ForgotPasswordPage({
                 </Link>
               </p>
             )}
-          </div>
+          </Banner>
         )}
 
-        <input type="email" name="email" required autoFocus autoComplete="email" placeholder="you@example.com"
-          className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm" />
+        <label className="block space-y-1.5">
+          <span className="text-sm font-medium">Email</span>
+          <input type="email" name="email" required autoFocus autoComplete="email" placeholder="you@example.com"
+            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm" />
+        </label>
         <SubmitButton
           pendingLabel="Sending link…"
           className="w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-60 disabled:cursor-not-allowed"
@@ -65,7 +84,6 @@ export default async function ForgotPasswordPage({
         <p className="text-sm text-[var(--color-muted-fg)] text-center pt-2 border-t border-[var(--color-border)]">
           <Link href="/login" className="underline">Back to sign in</Link>
         </p>
-      </form>
-    </main>
+    </AuthCard>
   );
 }

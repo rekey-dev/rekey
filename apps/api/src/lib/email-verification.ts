@@ -58,7 +58,7 @@ export async function lookupVerificationToken(raw: string): Promise<Verification
   });
   if (!token) return { kind: 'unknown' };
   if (token.consumedAt !== null) return { kind: 'consumed', token };
-  if (token.expiresAt < new Date()) return { kind: 'expired', token };
+  if (token.expiresAt <= new Date()) return { kind: 'expired', token };
   return { kind: 'ok', token };
 }
 

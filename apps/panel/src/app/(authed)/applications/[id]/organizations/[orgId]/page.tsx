@@ -2,20 +2,23 @@ import * as React from 'react';
 import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
+import { cookies } from 'next/headers';
 import { api, PanelApiError, type OrganizationDetail, type EndUserRow, type OrgBillingDto } from '@/lib/api';
 import { Modal } from '@/components/Modal';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { CopyButton } from '@/components/CopyButton';
 import { Card, SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
-import { Badge } from '@/components/Badge';
+import { Badge, type BadgeTone } from '@/components/Badge';
+import { EmptyState } from '@/components/EmptyState';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
+import { Banner } from '@/components/Banner';
 
 const ROLES = ['OWNER', 'ADMIN', 'MEMBER'] as const;
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 const ERR: Record<string, string> = {
   missing: 'Required fields are empty.',
@@ -30,17 +33,26 @@ const ERR: Record<string, string> = {
 };
 
 function RoleBadge({ role }: { role: 'OWNER' | 'ADMIN' | 'MEMBER' }): React.JSX.Element {
-  const tone =
-    role === 'OWNER'
-      ? 'bg-[var(--color-primary)]/10 text-[var(--color-primary)]'
-      : role === 'ADMIN'
-        ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400'
-        : 'bg-[var(--color-surface-muted)] text-[var(--color-muted-fg)]';
+  const tone: BadgeTone = role === 'OWNER' ? 'brand' : role === 'ADMIN' ? 'info' : 'neutral';
   return (
-    <span className={`inline-flex items-center px-1.5 py-0.5 rounded font-mono text-[11px] ${tone}`}>
+    <Badge tone={tone} mono>
       {role}
-    </span>
+    </Badge>
   );
+}
+
+/** Same tone mapping as end-users/[euid] — keep subscription states consistent. */
+const STATUS_TONE: Record<string, BadgeTone> = {
+  ACTIVE: 'success',
+  PENDING: 'warning',
+  PAST_DUE: 'warning',
+  CANCELED: 'neutral',
+  CANCELLED: 'neutral',
+  EXPIRED: 'neutral',
+  SUSPENDED: 'danger',
+};
+function statusTone(s: string): BadgeTone {
+  return STATUS_TONE[s] ?? 'neutral';
 }
 
 // ─── Actions ─────────────────────────────────────────────────────────
@@ -148,10 +160,18 @@ async function revealOrgLicenseKey(
       method: 'POST',
       path: `${orgBase(applicationId, orgId)}/licenses/${encodeURIComponent(licenseId)}/rotate-key`,
     });
+    // One-time key via a short-lived httpOnly cookie, not the URL (keys in the
+    // URL leak into history, the referer header, and access logs).
+    const jar = await cookies();
+    jar.set('relipay_reveal_org_license', result.rawKey, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      path: pageUrl(applicationId, orgId),
+      maxAge: 120,
+    });
     revalidatePath(pageUrl(applicationId, orgId));
-    redirect(
-      `${pageUrl(applicationId, orgId)}?reveal=${encodeURIComponent(result.rawKey)}&reset=${result.activationsReset}`,
-    );
+    redirect(`${pageUrl(applicationId, orgId)}?revealed=1&reset=${result.activationsReset}`);
   } catch (err) {
     if (err instanceof PanelApiError) {
       redirect(`${pageUrl(applicationId, orgId)}?error=${encodeURIComponent(err.code)}`);
@@ -174,7 +194,7 @@ export default async function OrganizationDetailPage({
   const error = typeof sp.error === 'string' ? sp.error : undefined;
   const addMemberError = sp.addMember === '1' ? error : undefined;
   const editOrgError = sp.editOrg === '1' ? error : undefined;
-  const reveal = typeof sp.reveal === 'string' ? sp.reveal : undefined;
+  const reveal = (await cookies()).get('relipay_reveal_org_license')?.value;
   const revealReset = typeof sp.reset === 'string' ? Number(sp.reset) : 0;
 
   let detail: OrganizationDetail;
@@ -204,7 +224,7 @@ export default async function OrganizationDetailPage({
       <header className="space-y-1.5">
         <Link
           href={`/applications/${id}/organizations`}
-          className="inline-flex items-center gap-1 rounded text-xs text-[var(--color-muted-fg)] transition-colors hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
+          className="inline-flex items-center gap-1 rounded text-xs text-[var(--color-muted-fg)] transition-colors hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
         >
           ← All organizations
         </Link>
@@ -220,9 +240,9 @@ export default async function OrganizationDetailPage({
       </header>
 
       {error && !addMemberError && !editOrgError && (
-        <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+        <Banner tone="error">
           {ERR[error] ?? error}
-        </p>
+        </Banner>
       )}
 
       {reveal && (
@@ -253,6 +273,13 @@ export default async function OrganizationDetailPage({
           count={`(${members.length})`}
           action={<AddMemberModal applicationId={id} orgId={orgId} candidates={candidates} error={addMemberError} />}
         />
+        {members.length === 0 ? (
+          <EmptyState
+            variant="inline"
+            title="No members"
+            description="Add one with “+ Add member”."
+          />
+        ) : (
         <Table minWidth="min-w-[40rem]">
           <THead>
             <TR>
@@ -263,19 +290,12 @@ export default async function OrganizationDetailPage({
             </TR>
           </THead>
           <TBody>
-            {members.length === 0 ? (
-              <TR>
-                <TD colSpan={4} align="center" muted className="py-6 text-xs">
-                  No members. Add one with “+ Add member”.
-                </TD>
-              </TR>
-            ) : (
-              members.map((m) => (
+            {members.map((m) => (
                 <TR key={m.id} hover>
                   <TD>{m.email}</TD>
                   <TD>
                     <form action={setMemberRole.bind(null, id, orgId, m.endUserId)} className="flex items-center gap-2">
-                      <select name="role" defaultValue={m.role} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30">
+                      <select name="role" defaultValue={m.role} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)]">
                         {ROLES.map((r) => (
                           <option key={r} value={r}>{r}</option>
                         ))}
@@ -294,10 +314,10 @@ export default async function OrganizationDetailPage({
                     </form>
                   </TD>
                 </TR>
-              ))
-            )}
+              ))}
           </TBody>
         </Table>
+        )}
         <p className="text-xs text-[var(--color-muted-fg)]">
           <RoleBadge role="OWNER" /> manage org + members · <RoleBadge role="ADMIN" /> manage members ·{' '}
           <RoleBadge role="MEMBER" /> read-only. Operator changes here bypass the org role hierarchy.
@@ -308,7 +328,7 @@ export default async function OrganizationDetailPage({
       <section className="space-y-3">
         <SectionHeader title="Pending invitations" count={`(${invitations.length})`} />
         {invitations.length === 0 ? (
-          <p className="text-xs text-[var(--color-muted-fg)]">No pending invitations.</p>
+          <EmptyState variant="inline" title="No pending invitations" />
         ) : (
           <Table minWidth="min-w-[36rem]">
             <THead>
@@ -384,7 +404,9 @@ export default async function OrganizationDetailPage({
                 {billing.subscriptions.map((s) => (
                   <TR key={s.id} hover>
                     <TD>{s.planName} <span className="font-mono text-[11px] text-[var(--color-muted-fg)]">{s.planSlug}</span></TD>
-                    <TD className="text-xs">{s.status}</TD>
+                    <TD>
+                      <Badge tone={statusTone(s.status)} dot>{s.status.toLowerCase()}</Badge>
+                    </TD>
                     <TD>
                       <Link href={`/applications/${id}/end-users/${s.ownerEndUserId}`} title={s.ownerEndUserId} className="inline-block max-w-[12rem] truncate align-bottom font-mono text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline">
                         {s.ownerEndUserId}
@@ -491,9 +513,9 @@ function AddMemberModal({
     >
       <form action={addMember.bind(null, applicationId, orgId)} className="space-y-3">
         {error && (
-          <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+          <Banner tone="error">
             {ERR[error] ?? error}
-          </p>
+          </Banner>
         )}
         {candidates.length === 0 ? (
           <p className="text-sm text-[var(--color-muted-fg)]">
@@ -551,9 +573,9 @@ function EditOrgModal({
     >
       <form action={updateOrg.bind(null, applicationId, orgId)} className="space-y-3">
         {error && (
-          <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+          <Banner tone="error">
             {ERR[error] ?? error}
-          </p>
+          </Banner>
         )}
         <label className="block space-y-1">
           <span className="text-xs font-medium">Name<span className="text-[var(--color-primary)] ml-0.5">*</span></span>

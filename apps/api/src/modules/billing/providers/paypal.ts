@@ -9,7 +9,8 @@
  * Mode (`test` → sandbox, `live` → production) selects the API base URL.
  *
  * Webhook verification is delegated to the operator's hosted webhook ID (we
- * call `/v1/notifications/verify-webhook-signature`) — see webhooks/paypal.handler.ts.
+ * call `/v1/notifications/verify-webhook-signature`) — see
+ * modules/paypal/index.ts (the ProviderModule).
  *
  * Stub remains importable for tests (NODE_ENV=test, RELIPAY_BILLING_FORCE_STUB).
  */

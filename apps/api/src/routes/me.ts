@@ -3,11 +3,16 @@
  *
  * The first endpoint a fresh `@relipay/node` client should call to verify
  * its credentials. Returns the Application the presented secret key resolves
- * to — `id`, `slug`, `name`, `publicKey`, and the public-safe slices of
- * `authConfig` and `billingConfig`.
+ * to: `id`, `tenantId`, `name`, `slug`, `publicKey`, `createdAt`, and the
+ * `authConfig` / `billingConfig` objects **whole** — not a filtered subset.
  *
- * No secrets are returned. The caller already has the secret key in hand;
- * we don't need to echo more sensitive data back.
+ * That is deliberate and safe here, because this route requires an Application
+ * secret key (`requireApiKey` rejects the publishable key), so the caller
+ * already holds full server-side authority over this Application. But it is not
+ * a "public-safe slice": do not proxy this response to a browser assuming it has
+ * been redacted. Provider credentials and webhook secrets live in separate
+ * encrypted columns and are never part of these two config objects, so no
+ * secret material is returned — everything else in them is.
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -48,8 +53,12 @@ export async function meRoutes(app: FastifyInstance): Promise<void> {
         tags: ['Public · Me'],
         summary: 'Inspect the Application this credential resolves to',
         description:
-          'Use this as the SDK smoke test — if it returns 200, your secret key is good. ' +
-          'No secrets are returned in the response.',
+          'Use this as the SDK smoke test — if it returns 200, your secret key is good.\n\n' +
+          'Requires an Application **secret** key with the `auth:read` scope; the publishable ' +
+          'key is rejected. Returns the whole `authConfig` and `billingConfig` objects, not a ' +
+          'filtered view — safe for the secret-key holder, but do not forward this response to ' +
+          'a browser assuming it has been redacted. Provider, OAuth and email credentials live ' +
+          'in separate encrypted columns and are never included.',
         security: [{ apiKey: [] }],
       },
     },

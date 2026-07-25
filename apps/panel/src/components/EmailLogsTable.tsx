@@ -26,12 +26,19 @@ function StatusBadge({ status }: { status: string }): React.JSX.Element {
 export function EmailLogsTable({
   rows,
   showApp = false,
+  filtered = false,
 }: {
   rows: EmailLogWithApp[];
   showApp?: boolean;
+  /** True when a status filter is active — distinguishes "no matches" from "no sends at all". */
+  filtered?: boolean;
 }): React.JSX.Element {
   if (rows.length === 0) {
-    return <EmptyState title="No email sends recorded yet" />;
+    return (
+      <EmptyState
+        title={filtered ? 'No emails match this filter' : 'No email sends recorded yet'}
+      />
+    );
   }
   return (
     <Table minWidth="min-w-[56rem]">
@@ -132,7 +139,7 @@ export function EmailLogStatusFilter({
             className={
               'text-xs px-2.5 py-1 rounded-md border ' +
               (isActive
-                ? 'border-[var(--color-primary)] text-[var(--color-primary)] bg-[var(--color-primary)]/5'
+                ? 'border-[var(--color-primary)] text-[var(--color-primary)] bg-[color-mix(in_srgb,var(--color-primary)_5%,transparent)]'
                 : 'border-[var(--color-border)] text-[var(--color-muted-fg)] hover:bg-[var(--color-surface-muted)]')
             }
           >

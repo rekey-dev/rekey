@@ -43,7 +43,7 @@ export async function licensesPublicRoutes(app: FastifyInstance): Promise<void> 
         description:
           'Returns { ok, license?, reason? }. `ok=false` is intentional for invalid licenses — ' +
           'the customer\'s software loops on this and we want a deterministic body, not an HTTP error.',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [] }, { publishableKey: [] }],
         body: {
           type: 'object',
           required: ['key', 'machineFingerprint'],

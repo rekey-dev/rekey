@@ -21,7 +21,7 @@ const TONES: Record<BadgeTone, string> = {
   warning: 'bg-amber-500/10 text-amber-700 dark:text-amber-400',
   danger: 'bg-red-500/10 text-red-700 dark:text-red-400',
   info: 'bg-sky-500/10 text-sky-700 dark:text-sky-400',
-  brand: 'bg-[var(--color-primary)]/10 text-[var(--color-primary)]',
+  brand: 'bg-[color-mix(in_srgb,var(--color-primary)_10%,transparent)] text-[var(--color-primary)]',
 };
 
 const DOT_TONES: Record<BadgeTone, string> = {

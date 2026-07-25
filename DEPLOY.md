@@ -13,6 +13,7 @@ are bundled in the compose.
 - **Secrets** — generate values for `.env.production` (see `.env.production.example`):
   ```sh
   echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)"
+  echo "REDIS_PASSWORD=$(openssl rand -hex 24)"
   echo "JWT_SECRET=$(openssl rand -hex 32)"
   echo "SESSION_SECRET=$(openssl rand -hex 32)"
   echo "ENCRYPTION_KEY=$(openssl rand -hex 32)"
@@ -89,3 +90,52 @@ reference at `examples/portal` (secret-key, one app per deploy). See
 `@relipay/node` (+ `@relipay/shared-types`) publish to npm on a GitHub Release
 via `.github/workflows/release.yml`. Add an `NPM_TOKEN` repo secret (npm org
 `relipay`, automation token) and publish a release tagged `sdk-vX.Y.Z`.
+
+## Upgrading an existing deployment: required datastore passwords
+
+`docker-compose.yml` used to default Postgres to `POSTGRES_PASSWORD: relipay`
+and publish both Postgres and Redis on `0.0.0.0`. That put a known-credential
+database on the public internet for anyone running on a VPS without a host
+firewall. Both are now bound to `127.0.0.1`, `POSTGRES_PASSWORD` and
+`REDIS_PASSWORD` are **required with no fallback**, and Redis runs with
+`requirepass`.
+
+If you already have a running deployment, read this before upgrading — it is
+not a drop-in.
+
+**Redis** needs nothing but the new variable: it has no persistent auth state,
+so setting `REDIS_PASSWORD` and updating `REDIS_URL` (note the leading colon,
+`redis://:PASSWORD@host:6379` — Redis AUTH has no username) is enough. In-flight
+webhook-retry jobs survive via the AOF volume; the DB poller backstops any gap.
+
+**Postgres will not pick up a new password on its own.** The official image only
+applies `POSTGRES_PASSWORD` when it *initialises* an empty data directory, so
+your existing volume keeps the old `relipay` password and compose will start
+while the API fails to authenticate. Change it inside the database instead — no
+dump/restore, no downtime beyond a restart:
+
+```bash
+# 1. Generate and record the new password in .env (POSTGRES_PASSWORD),
+#    and update DATABASE_URL to match.
+NEW_PW=$(openssl rand -hex 24)
+
+# 2. Rotate it in the running database, using the OLD credentials.
+docker compose exec postgres \
+  psql -U relipay -d relipay -c "ALTER USER relipay WITH PASSWORD '$NEW_PW';"
+
+# 3. Put $NEW_PW into POSTGRES_PASSWORD and DATABASE_URL in .env, then:
+docker compose --profile full up -d
+```
+
+Verify with `curl -sf localhost:3030/health` — it is now dependency-aware and
+returns 503 naming the unreachable dependency if either credential is wrong,
+instead of the old unconditional `{"status":"ok"}`.
+
+**Health endpoints changed.** Point container/liveness probes at
+`/health/live` (never touches a dependency — restarting the API cannot fix a
+database outage) and load-balancer checks at `/health` or `/health/ready`.
+
+**Behind a reverse proxy?** `X-Forwarded-For` is no longer trusted by default.
+Set `TRUSTED_PROXIES` to a hop count or an IP/CIDR allowlist, or `request.ip`
+— and everything keyed off it, including rate limits and lockout — will see
+your proxy instead of the real client.

@@ -14,11 +14,18 @@ import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
+import { Banner } from '@/components/Banner';
 
 const LICENSE_STATUS: Record<LicenseRow['status'], { tone: BadgeTone; label: string }> = {
   ACTIVE: { tone: 'success', label: 'active' },
   REVOKED: { tone: 'danger', label: 'revoked' },
   EXPIRED: { tone: 'neutral', label: 'expired' },
+};
+
+const LICENSE_KIND: Record<LicenseRow['kind'], string> = {
+  PERPETUAL: 'Perpetual',
+  TIMED: 'Timed',
+  SEATS: 'Seats',
 };
 
 interface LicenseRow {
@@ -193,9 +200,9 @@ export default async function LicensesPage({
             ) : (
               <form action={issueLicense.bind(null, id)} className="space-y-3">
                 {error && (
-                  <p role="alert" className="rounded-md border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+                  <Banner tone="error">
                     {ERR[error] ?? error}
-                  </p>
+                  </Banner>
                 )}
               <Field
                 label="End-user"
@@ -280,7 +287,7 @@ export default async function LicensesPage({
                 <TR key={l.id} hover>
                   <TD mono>{l.keyPrefix}…</TD>
                   <TD className="text-xs">{user?.email ?? l.endUserId}</TD>
-                  <TD className="text-xs">{l.kind}</TD>
+                  <TD className="text-xs">{LICENSE_KIND[l.kind]}</TD>
                   <TD muted className="text-xs">
                     {l.expiresAt ? formatDate(l.expiresAt) : '—'}
                   </TD>
@@ -312,7 +319,7 @@ export default async function LicensesPage({
 }
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 function Field({
   label,

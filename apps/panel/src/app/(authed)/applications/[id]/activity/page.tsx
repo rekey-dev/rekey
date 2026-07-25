@@ -5,6 +5,7 @@ import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
+import { Pager, readOffset, readPageSize } from '@/components/Pager';
 
 /**
  * Per-application Activity log. End-user-scoped events (sign-ups, sign-ins,
@@ -33,13 +34,26 @@ function viaLabel(metadata: unknown): string | null {
 
 export default async function ActivityPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }): Promise<React.JSX.Element> {
   const { id } = await params;
+  const sp = await searchParams;
+  const offset = readOffset(sp);
+  const PAGE_SIZE = readPageSize(sp);
+
+  const qs = new URLSearchParams({
+    applicationId: id,
+    actorType: 'end_user',
+    limit: String(PAGE_SIZE),
+  });
+  if (offset) qs.set('offset', String(offset));
+
   const { events } = await api<{ events: SecurityEventRow[] }>({
     method: 'GET',
-    path: `/api/v1/tenant/security-events?applicationId=${encodeURIComponent(id)}&actorType=end_user&limit=200`,
+    path: `/api/v1/tenant/security-events?${qs.toString()}`,
   });
 
   return (
@@ -102,6 +116,13 @@ export default async function ActivityPage({
           </TBody>
         </Table>
       )}
+
+      <Pager
+        basePath={`/applications/${id}/activity`}
+        offset={offset}
+        pageSize={PAGE_SIZE}
+        count={events.length}
+      />
     </div>
   );
 }

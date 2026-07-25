@@ -13,6 +13,7 @@ import { redirect } from 'next/navigation';
 import { api, PanelApiError } from '@/lib/api';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { FlashBanner } from '@/components/FlashBanner';
+import { Banner } from '@/components/Banner';
 import { PasskeyRegisterButton } from '@/components/PasskeyRegisterButton';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, SectionHeader } from '@/components/Card';
@@ -134,7 +135,7 @@ export default async function PasskeysPage({
         eyebrow={
           <Link
             href="/account/security"
-            className="inline-flex items-center gap-1 rounded text-xs text-[var(--color-muted-fg)] transition-colors hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
+            className="inline-flex items-center gap-1 rounded text-xs text-[var(--color-muted-fg)] transition-colors hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
           >
             ← Security
           </Link>
@@ -145,12 +146,9 @@ export default async function PasskeysPage({
 
       {flash && <FlashBanner flash={flash} />}
       {error && (
-        <p
-          role="alert"
-          className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300"
-        >
-          {ERRORS[error] ?? error}
-        </p>
+        <Banner tone="error">
+          {ERRORS[error] ?? 'Something went wrong. Please try again.'}
+        </Banner>
       )}
 
       <Card className="space-y-3">

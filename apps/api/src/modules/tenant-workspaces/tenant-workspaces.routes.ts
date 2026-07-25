@@ -41,7 +41,13 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
 
   app.get(
     '/',
-    { schema: { tags: ['Tenant · Workspace'], summary: 'Get the active workspace' } },
+    {
+      schema: {
+        tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
+        summary: 'Get the active workspace',
+      },
+    },
     async (req) => ({
       success: true,
       data: await tenantWorkspacesService.getWorkspace(req.tenantId!),
@@ -53,6 +59,7 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
     {
       schema: {
         tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
         summary: 'Create a new workspace for the current operator (becomes OWNER)',
         description:
           'Lets a signed-in user spin up an additional Tenant without registering a new account. ' +
@@ -81,7 +88,10 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
         summary: 'Rename the active workspace',
+        description:
+          'Requires the **OWNER or ADMIN** workspace role.',
         body: {
           type: 'object',
           required: ['name'],
@@ -103,7 +113,13 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
 
   app.get(
     '/members',
-    { schema: { tags: ['Tenant · Workspace'], summary: 'List members of the active workspace' } },
+    {
+      schema: {
+        tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
+        summary: 'List members of the active workspace',
+      },
+    },
     async (req) => ({
       success: true,
       data: await tenantWorkspacesService.listMembers(req.tenantId!),
@@ -116,7 +132,10 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
         summary: 'Remove a member from the workspace',
+        description:
+          'Requires the **OWNER or ADMIN** workspace role.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       },
     },
@@ -138,7 +157,10 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
         summary: "Change a member's role",
+        description:
+          'Requires the **OWNER or ADMIN** workspace role.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         body: {
           type: 'object',
@@ -174,7 +196,10 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
         summary: "List a member's per-application grants",
+        description:
+          'Requires the **OWNER or ADMIN** workspace role.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       },
     },
@@ -196,8 +221,10 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
         summary: 'Grant (or change) a MEMBER\'s role on one Application',
         description:
+          'Requires the **OWNER or ADMIN** workspace role.\n\n' +
           'Upserts the (member, application) grant: APP_ADMIN (full app read/write), ' +
           'APP_BILLING (read + billing/plans/coupons writes only), or APP_VIEWER ' +
           '(read-only). Only valid on MEMBER memberships — OWNER/ADMIN already have ' +
@@ -242,8 +269,10 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
         summary: "Remove a member's grant on one Application",
         description:
+          'Requires the **OWNER or ADMIN** workspace role.\n\n' +
           'Careful with the LAST grant: removing it returns the member to legacy ' +
           'workspace-wide read-only access (zero grants = pre-grants behavior), it ' +
           'does NOT lock them out.',
@@ -277,7 +306,11 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
   app.get(
     '/invitations',
     {
-      schema: { tags: ['Tenant · Workspace'], summary: 'List invitations for this workspace' },
+      schema: {
+        tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
+        summary: 'List invitations for this workspace',
+      },
     },
     async (req) => ({
       success: true,
@@ -291,7 +324,10 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
         summary: 'Create an invitation. Returns a one-time-show token to share via the link.',
+        description:
+          'Requires the **OWNER or ADMIN** workspace role.',
         body: {
           type: 'object',
           required: ['email', 'role'],
@@ -334,7 +370,10 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
         summary: 'Revoke a pending invitation',
+        description:
+          'Requires the **OWNER or ADMIN** workspace role.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       },
     },
@@ -356,6 +395,7 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
     {
       schema: {
         tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
         summary: 'List recent SYSTEM email send-logs for the workspace (operator/invite mail, not per-app)',
         description:
           'System mail only — operator magic-link/password-reset + workspace invitations (sends not ' +
@@ -402,6 +442,7 @@ export async function tenantInvitationPublicRoutes(app: FastifyInstance): Promis
     {
       schema: {
         tags: ['Tenant · Workspace'],
+        security: [],
         summary: 'Preview an invitation by token (unauthenticated)',
         querystring: {
           type: 'object',
@@ -426,6 +467,7 @@ export async function tenantInvitationAuthRoutes(app: FastifyInstance): Promise<
     {
       schema: {
         tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
         summary: 'Accept an invitation. Returns a session scoped to the joined workspace.',
         body: {
           type: 'object',

@@ -145,24 +145,54 @@ export async function requireApiKey(
 }
 
 /**
- * Auth for **public-bootstrap** routes (sign-in/up, magic-link, passkey
- * authenticate, license verify, plan listing). Accepts EITHER:
+ * Auth for routes a **browser client** must be able to reach. Accepts EITHER:
  *
  *   - a server-side secret key (`rp_live_*`/`rp_test_*`) — delegates to
  *     `requireApiKey`, identical behaviour (scopes, IP allowlist, dataMode); or
  *   - a browser **publishable** key (`rp_pub_*`) — a real credential here.
  *
  * The publishable key is **identity, not authorization**: it names the
- * Application and asserts "legit public client". It grants nothing by itself —
- * sign-in still requires the user's password/passkey, license verify still
- * requires the license key. Safety rests on (a) these operations being
- * inherently public, (b) the per-route rate limits already on them, and (c) the
- * per-app CORS origin allowlist enforced below.
+ * Application and asserts "legit public client". It grants nothing by itself.
+ * Two families of route use it, and each carries its own real authorizer:
  *
- * Only attach this to routes that are safe for an anonymous public client.
- * NEVER attach it to money/privileged-write routes — those keep `requireApiKey`,
- * which rejects `rp_pub_*` outright, so a publishable request can structurally
- * never reach them.
+ *   1. **Public-bootstrap** (sign-in/up, magic-link, passkey authenticate,
+ *      license verify, plan listing) — no user exists yet, so the per-route
+ *      credential is the gate: password, passkey assertion, emailed token,
+ *      license key.
+ *   2. **End-user self-service** (MFA enrollment, passkey/session management,
+ *      change-password, OAuth linking, org/team management, coupon validate) —
+ *      gated by `requireUserSession`, which verifies the end-user JWT against
+ *      *this* Application and enforces test/live isolation. That session is
+ *      strictly stronger than the secret key here: it names the single user the
+ *      route may act on. Demanding a secret key on top adds no authorization,
+ *      it only forbids the credential a browser is allowed to hold — which
+ *      makes the flow unreachable from `@relipay/react`.
+ *
+ * Beyond that, safety rests on the per-route rate limits and the per-app CORS
+ * origin allowlist enforced below (the browser analogue of the secret key's IP
+ * allowlist).
+ *
+ * NEVER attach this where the Application credential is the ONLY gate and the
+ * route can move money or read across users — no user session, no per-request
+ * secret. Those keep `requireApiKey`, which rejects `rp_pub_*` outright, so a
+ * publishable request can structurally never reach them.
+ */
+/**
+ * IMPORTANT — the origin allowlist is NOT the browser equivalent of the IP
+ * allowlist, and it must not be described as one.
+ *
+ * `ipAllowlist` (secret-key path) constrains a NETWORK POSITION: a request from
+ * the wrong host is refused no matter what it carries. `corsOrigins`
+ * (publishable path) constrains only HONEST BROWSERS — `Origin` is a request
+ * header, so any non-browser client sets it freely. It defends against a
+ * third-party SITE misusing your publishable key; it does not defend against
+ * replay of a stolen end-user token from an arbitrary host.
+ *
+ * Both default to empty = open. So moving a route from secret-only to
+ * publishable-or-secret genuinely WIDENS reach for apps that were relying on
+ * `ipAllowlist`; it does not swap one equivalent control for another. Treat any
+ * such move as a breaking change and reason about what a stolen end-user access
+ * token can now reach.
  */
 export async function requirePublishableOrSecretKey(
   request: FastifyRequest,

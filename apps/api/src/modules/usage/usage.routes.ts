@@ -82,15 +82,18 @@ const AggregateQuery = z.object({
 });
 
 export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
+  // Server-side only: `requireApiKey` rejects the publishable key outright, so
+  // usage can never be recorded (or read) from browser code.
   app.addHook('onRequest', requireApiKey);
   app.addHook('onRequest', requireBillingEnabled);
-  // Usage records feed metered billing — write scope; aggregation reads
-  // also live in this plugin but require the same key family in practice.
-  app.addHook('onRequest', requireScope('billing:write'));
+  // Scope is per-route: recording usage feeds metered billing (`billing:write`),
+  // but `/aggregate` only reads, so a deliberately-narrow `billing:read` key can
+  // call it. `billing:write` implies `billing:read`, so write keys still work.
 
   app.post(
     '/record',
     {
+      onRequest: requireScope('billing:write'),
       // Higher per-API-key cap for ingestion — keyed per key via the global
       // keyGenerator, so one customer's high scan volume doesn't starve others.
       config: {
@@ -99,6 +102,9 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         tags: ['Public · Usage'],
         summary: 'Record a usage event against a named meter',
+        description:
+          'Requires an Application **secret** key with the `billing:write` scope (or the ' +
+          'legacy `*`). The publishable key is rejected — call this from your server.',
         security: [{ apiKey: [] }],
         body: {
           type: 'object',
@@ -142,9 +148,14 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/aggregate',
     {
+      onRequest: requireScope('billing:read'),
       schema: {
         tags: ['Public · Usage'],
         summary: 'Sum recorded quantity for a meter (with optional time window + end-user filter)',
+        description:
+          'Accepts a narrow `billing:read` key, since this only reads. A `billing:write` key ' +
+          'also works, because write implies read. Secret key only; the publishable key is ' +
+          'rejected.',
         querystring: {
           type: 'object',
           required: ['meterSlug'],

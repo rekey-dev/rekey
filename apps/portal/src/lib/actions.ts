@@ -10,7 +10,7 @@ import { redirect } from 'next/navigation';
 import { RelipayError } from '@relipay/react';
 import { portalClientFor, setSession, clearSession, getRefreshToken, getAccessToken } from './session';
 import { getPortalConfig } from './config';
-import { portalBaseUrl } from './env';
+import { portalBaseUrl, relipayApiUrl } from './env';
 
 export async function signInAction(slug: string, formData: FormData): Promise<void> {
   const email = String(formData.get('email') ?? '').trim();
@@ -20,8 +20,9 @@ export async function signInAction(slug: string, formData: FormData): Promise<vo
   try {
     const out = await client.signIn({ email, password });
     if (out.mfaRequired) {
-      // Portal v2.1 punts on MFA (same as v1) — surface a clear message.
-      redirect(`/${slug}/login?error=MFA_REQUIRED`);
+      // MFA-enrolled user: hand the single-use, short-lived challenge token to
+      // the code step (same pattern the operator panel uses).
+      redirect(`/${slug}/login?mfa=${encodeURIComponent(out.mfaChallengeToken)}`);
     }
     await setSession(slug, out.accessToken, out.refreshToken);
   } catch (err) {
@@ -31,6 +32,81 @@ export async function signInAction(slug: string, formData: FormData): Promise<vo
     throw err;
   }
   redirect(`/${slug}`);
+}
+
+export async function mfaVerifyAction(slug: string, formData: FormData): Promise<void> {
+  const challenge = String(formData.get('challenge') ?? '').trim();
+  const code = String(formData.get('code') ?? '').trim();
+  const client = await portalClientFor(slug);
+  if (!client) redirect(`/${slug}`);
+  if (!challenge || !code) redirect(`/${slug}/login`);
+  try {
+    const out = await client.mfaVerify({ mfaChallengeToken: challenge, code });
+    await setSession(slug, out.accessToken, out.refreshToken);
+  } catch (err) {
+    if (err instanceof RelipayError) {
+      // Keep the challenge so a mistyped code doesn't force a fresh sign-in.
+      redirect(
+        `/${slug}/login?mfa=${encodeURIComponent(challenge)}&error=${encodeURIComponent(err.code)}`,
+      );
+    }
+    throw err;
+  }
+  redirect(`/${slug}`);
+}
+
+/**
+ * The browser SDK has no password-reset methods yet, but the API's
+ * /forgot-password + /reset-password routes accept the publishable key —
+ * call them directly with the same Bearer credential the SDK uses.
+ */
+async function publishablePost(
+  slug: string,
+  path: string,
+  body: Record<string, unknown>,
+): Promise<{ ok: boolean; code?: string }> {
+  const config = await getPortalConfig(slug);
+  if (!config) return { ok: false, code: 'PORTAL_NOT_FOUND' };
+  const res = await fetch(`${relipayApiUrl()}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.publishableKey}`,
+    },
+    body: JSON.stringify(body),
+    cache: 'no-store',
+  });
+  if (res.ok) return { ok: true };
+  const json = (await res.json().catch(() => null)) as { error?: { code?: string } } | null;
+  return { ok: false, code: json?.error?.code ?? `HTTP_${res.status}` };
+}
+
+export async function forgotPasswordAction(slug: string, formData: FormData): Promise<void> {
+  const email = String(formData.get('email') ?? '').trim();
+  if (!email) redirect(`/${slug}/forgot-password?error=missing`);
+  // Enumeration-safe on the API side — always confirm the same way. resetUrl
+  // points the emailed link back at this portal's reset page.
+  await publishablePost(slug, '/api/v1/auth/forgot-password', {
+    email,
+    resetUrl: `${portalBaseUrl()}/${slug}/reset-password`,
+  });
+  redirect(`/${slug}/forgot-password?sent=1`);
+}
+
+export async function resetPasswordAction(slug: string, formData: FormData): Promise<void> {
+  const token = String(formData.get('token') ?? '').trim();
+  const newPassword = String(formData.get('newPassword') ?? '');
+  if (!token || !newPassword) redirect(`/${slug}/login`);
+  const result = await publishablePost(slug, '/api/v1/auth/reset-password', {
+    token,
+    newPassword,
+  });
+  if (!result.ok) {
+    redirect(
+      `/${slug}/reset-password?token=${encodeURIComponent(token)}&error=${encodeURIComponent(result.code ?? 'UNKNOWN')}`,
+    );
+  }
+  redirect(`/${slug}/login?reason=reset`);
 }
 
 export async function signOutAction(slug: string): Promise<void> {

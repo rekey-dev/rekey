@@ -1,9 +1,10 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { getPortalConfig } from '@/lib/config';
+import { getPortalConfig, supportLink } from '@/lib/config';
 import { getPortalUser, portalClientFor } from '@/lib/session';
 import { cancelSubscriptionAction, checkoutAction } from '@/lib/actions';
 import { Banner } from '@/components/banner';
+import { Card } from '@/components/card';
 import { StatusBadge } from '@/components/status-badge';
 import { ConfirmSubmit } from '@/components/confirm-submit';
 import { ProviderRadios } from '@/components/provider-radios';
@@ -45,13 +46,17 @@ export default async function DashboardPage({
   }
   const orgId = billingOrg?.id ?? null;
 
-  const [subscription, plans, providers] = await Promise.all([
+  const [subscription, plans, providers, payments] = await Promise.all([
     client!.getSubscription(session.accessToken, orgId ? { organizationId: orgId } : undefined),
     config!.billingEnabled ? client!.getPlans() : Promise.resolve([]),
     // Powers the "Pay with…" picker. Public (publishable key, no token). A hiccup
     // here must never break the dashboard — fall back to the auto-routed flow.
     config!.billingEnabled
       ? client!.listBillingProviders().then((r) => r.providers).catch(() => [])
+      : Promise.resolve([]),
+    // Billing history. Non-critical — never let it break the dashboard.
+    config!.billingEnabled
+      ? client!.listPayments(session.accessToken, 12).catch(() => [])
       : Promise.resolve([]),
   ]);
   const currentPlan = subscription ? plans.find((p) => p.id === subscription.planId) : undefined;
@@ -66,6 +71,7 @@ export default async function DashboardPage({
   const error = typeof sp.error === 'string' ? sp.error : undefined;
   const notice = typeof sp.e === 'string' ? sp.e : undefined;
   const checkout = typeof sp.checkout === 'string' ? sp.checkout : undefined;
+  const supportHref = supportLink(config!.branding);
 
   return (
     <div className="space-y-6">
@@ -74,11 +80,22 @@ export default async function DashboardPage({
       {notice === 'canceled' && <Banner tone="info">Your subscription will end at the close of the current period.</Banner>}
       {error && (
         <Banner tone="error">
-          Something went wrong. Please try again, or contact support if it keeps happening.
+          Something went wrong. Please try again
+          {supportHref ? (
+            <>
+              , or{' '}
+              <a href={supportHref} className="underline" target="_blank" rel="noopener noreferrer">
+                contact support
+              </a>{' '}
+              if it keeps happening.
+            </>
+          ) : (
+            ', or contact support if it keeps happening.'
+          )}
         </Banner>
       )}
 
-      <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
+      <Card>
         <div className="mb-3 flex items-center justify-between gap-2">
           <h2 className="text-sm font-semibold text-[var(--color-fg)]">Subscription</h2>
           {billingOrg && (
@@ -116,17 +133,17 @@ export default async function DashboardPage({
             {billingOrg ? 'This team has no active subscription.' : "You don't have an active subscription."}
           </p>
         )}
-      </section>
+      </Card>
 
       {config!.billingEnabled && plans.length === 0 && (
-        <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
+        <Card>
           <h2 className="mb-3 text-sm font-semibold text-[var(--color-fg)]">Plans</h2>
           <p className="text-sm text-[var(--color-muted-fg)]">No plans are available right now. Please check back soon.</p>
-        </section>
+        </Card>
       )}
 
       {config!.billingEnabled && plans.length > 0 && (
-        <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
+        <Card>
           <h2 className="mb-3 text-sm font-semibold text-[var(--color-fg)]">Plans</h2>
           {!canCheckout && (
             <p className="mb-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-muted-fg)]">
@@ -165,7 +182,43 @@ export default async function DashboardPage({
               );
             })}
           </ul>
-        </section>
+        </Card>
+      )}
+
+      {config!.billingEnabled && payments.length > 0 && (
+        <Card>
+          <h2 className="mb-3 text-sm font-semibold text-[var(--color-fg)]">Billing history</h2>
+          <ul className="divide-y divide-[var(--color-border)] text-sm">
+            {payments.map((p) => (
+              <li key={p.id} className="flex items-center justify-between gap-3 py-2">
+                <div className="min-w-0">
+                  <span className="text-[var(--color-fg)]">
+                    {new Date(p.createdAt).toLocaleDateString()}
+                  </span>{' '}
+                  <span className="truncate text-[var(--color-muted-fg)]">
+                    {p.description ?? p.planSlug ?? ''}
+                  </span>
+                </div>
+                <div className="flex shrink-0 items-center gap-3">
+                  <span className="font-medium text-[var(--color-fg)]">
+                    {money(p.amount, p.currency)}
+                  </span>
+                  <StatusBadge status={p.status} />
+                  {p.receiptUrl && (
+                    <a
+                      href={p.receiptUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs underline text-[var(--color-muted-fg)] hover:text-[var(--color-fg)]"
+                    >
+                      Receipt
+                    </a>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </Card>
       )}
     </div>
   );

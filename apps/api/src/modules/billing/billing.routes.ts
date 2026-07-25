@@ -4,8 +4,9 @@ import { billingService } from './billing.service.js';
 import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { requireBillingEnabled } from '../../middleware/billing-enabled.js';
-import { billingCredentialsService } from './credentials.service.js';
+import { billingCredentialsService, type BillingProviderName } from './credentials.service.js';
 import { countryFromRequest } from './providers/index.js';
+import { getModule, providerNameSchema } from './providers/registry.js';
 import { entitlementsService } from './entitlements.service.js';
 import { organizationsService } from '../organizations/organizations.service.js';
 
@@ -14,7 +15,9 @@ const CheckoutBody = z.object({
   successUrl: z.string().url(),
   cancelUrl: z.string().url(),
   couponCode: z.string().min(1).max(40).optional(),
-  provider: z.enum(['stripe', 'paypal', 'razorpay']).optional(),
+  // Registry-derived (P4): adding a provider module extends checkout's
+  // accepted values without touching this file.
+  provider: providerNameSchema.optional(),
   country: z.string().length(2).optional(),
   /** Buy for an org (owner+beneficiary). Caller must be OWNER/ADMIN of it. */
   organizationId: z.string().min(1).optional(),
@@ -45,7 +48,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         summary: 'List active plans for the calling application',
         description:
           'Returns the public plan catalogue. End-users typically reach this via your pricing page.',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [] }, { publishableKey: [] }],
       },
     },
     async (req) => ({
@@ -66,7 +69,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           '(key → typed value), the live credit balance, and the raw resolved entitlement list. ' +
           'Default = the user view (own subs + subs of orgs they belong to). Pass ' +
           '`?organizationId=` (member-only) for that org\'s view + shared pool. Requires the user JWT.',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         querystring: { type: 'object', properties: { organizationId: { type: 'string' } } },
       },
     },
@@ -114,7 +117,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           'Returns null when there is no active/pending/past-due subscription. Pass ' +
           '`?organizationId=` (member-only) to read an organization\'s subscription on an ' +
           'org-billed app. Requires the user JWT in X-Relipay-User-Token.',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         querystring: { type: 'object', properties: { organizationId: { type: 'string' } } },
       },
     },
@@ -152,7 +155,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           'Payment history for the authenticated end-user only — newest first, default 50 ' +
           '(max 100 via ?limit=). Each row carries a `receiptUrl` when the provider receipt ' +
           'link is known, else null. Requires the user JWT in X-Relipay-User-Token.',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         querystring: {
           type: 'object',
           properties: { limit: { type: 'integer', minimum: 1, maximum: 100 } },
@@ -187,7 +190,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           '`{"atPeriodEnd": false}` to cancel immediately. PENDING checkouts and ' +
           'subscriptions with no provider-side record are canceled locally right away. ' +
           'Requires the user JWT in X-Relipay-User-Token.',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         body: {
           type: 'object',
           properties: {
@@ -236,7 +239,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Creates (or reuses) a PENDING Subscription locally and returns a provider-hosted ' +
           'checkout URL. Activation happens via the provider\'s webhook — not synchronously here.',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         body: {
           type: 'object',
           required: ['planSlug', 'successUrl', 'cancelUrl'],
@@ -275,7 +278,9 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         successUrl: body.successUrl,
         cancelUrl: body.cancelUrl,
         ...(body.couponCode !== undefined && { couponCode: body.couponCode }),
-        ...(body.provider !== undefined && { provider: body.provider }),
+        // providerNameSchema guarantees a REGISTERED name; the credentials
+        // service's literal union is exactly the registered set today.
+        ...(body.provider !== undefined && { provider: body.provider as BillingProviderName }),
         ...(country !== undefined && { country }),
         ...(body.organizationId !== undefined && { beneficiaryOrgId: body.organizationId }),
         // Test/live isolation: TEST checkouts only select sandbox credentials
@@ -309,7 +314,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Returns providers configured + enabled for this Application, in the order ' +
           'the geo router would prefer them given the request country (CF-IPCountry header).',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [] }, { publishableKey: [] }],
       },
     },
     async (req) => {
@@ -323,7 +328,22 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         success: true,
         data: {
           country: country ?? null,
-          providers: visible.map((p) => ({ provider: p.provider, priority: p.priority, countries: p.countries })),
+          // P4 discovery additions (label/docsUrl/capabilities) are ADDITIVE —
+          // the original three fields and the geo-router ordering are pinned
+          // by SDK + portal consumers and must not change.
+          providers: visible.map((p) => {
+            const m = getModule(p.provider);
+            return {
+              provider: p.provider,
+              priority: p.priority,
+              countries: p.countries,
+              ...(m !== undefined && {
+                label: m.display.label,
+                docsUrl: m.display.docsUrl,
+                capabilities: m.capabilities,
+              }),
+            };
+          }),
         },
       };
     },

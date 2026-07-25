@@ -5,7 +5,9 @@ import { revalidatePath } from 'next/cache';
 import { api, PanelApiError } from '@/lib/api';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SavedBanner } from '@/components/SavedBanner';
+import { Table, TBody, TR, TD } from '@/components/Table';
 import { EmailCredentialsForm } from './EmailCredentialsForm';
+import { Banner } from '@/components/Banner';
 
 type Transport = 'byo_resend' | 'byo_smtp' | 'default_resend' | 'none';
 
@@ -148,9 +150,9 @@ export default async function EmailPage({
         />
       )}
       {error && (
-        <p role="alert" className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+        <Banner tone="error">
           {ERR[error] ?? error}
-        </p>
+        </Banner>
       )}
 
       <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 space-y-3">
@@ -228,40 +230,38 @@ export default async function EmailPage({
             </p>
           </div>
         </header>
-        <div className="-mx-5 -mb-5 border-t border-[var(--color-border)]">
-          <table className="w-full text-sm">
-            <tbody>
-              {events.map((e) => (
-                <tr key={e.key} className="border-b border-[var(--color-border)] last:border-b-0">
-                  <td className="px-5 py-3 align-middle">
-                    <div className="font-medium">{e.label}</div>
-                    <div className="text-xs font-mono text-[var(--color-muted-fg)]">{e.key}</div>
-                  </td>
-                  <td className="px-5 py-3 align-middle">
-                    <span
-                      className={
-                        'text-xs px-2 py-0.5 rounded-full border ' +
-                        (e.customised
-                          ? 'bg-emerald-50 border-emerald-200 text-emerald-800 dark:bg-emerald-950 dark:border-emerald-800 dark:text-emerald-300'
-                          : 'bg-neutral-50 border-neutral-200 text-neutral-700 dark:bg-neutral-900 dark:border-neutral-800 dark:text-neutral-300')
-                      }
-                    >
-                      {e.customised ? 'Customized' : 'Default'}
-                    </span>
-                  </td>
-                  <td className="px-5 py-3 align-middle text-right">
-                    <Link
-                      href={`/applications/${id}/email/${encodeURIComponent(e.key)}`}
-                      className="text-sm font-medium text-[var(--color-primary)] hover:underline"
-                    >
-                      Edit →
-                    </Link>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Table>
+          <TBody>
+            {events.map((e) => (
+              <TR key={e.key} hover>
+                <TD>
+                  <div className="font-medium">{e.label}</div>
+                  <div className="text-xs font-mono text-[var(--color-muted-fg)]">{e.key}</div>
+                </TD>
+                <TD>
+                  <span
+                    className={
+                      'text-xs px-2 py-0.5 rounded-full border ' +
+                      (e.customised
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800 dark:bg-emerald-950 dark:border-emerald-800 dark:text-emerald-300'
+                        : 'bg-neutral-50 border-neutral-200 text-neutral-700 dark:bg-neutral-900 dark:border-neutral-800 dark:text-neutral-300')
+                    }
+                  >
+                    {e.customised ? 'Customized' : 'Default'}
+                  </span>
+                </TD>
+                <TD align="right">
+                  <Link
+                    href={`/applications/${id}/email/${encodeURIComponent(e.key)}`}
+                    className="text-sm font-medium text-[var(--color-primary)] hover:underline"
+                  >
+                    Edit →
+                  </Link>
+                </TD>
+              </TR>
+            ))}
+          </TBody>
+        </Table>
       </section>
     </div>
   );

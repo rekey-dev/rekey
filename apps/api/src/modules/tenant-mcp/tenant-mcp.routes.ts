@@ -1,14 +1,20 @@
 /**
  * Operator-side MCP routes mounted at `/api/v1/tenant/mcp`.
  *
- * Auth (Phase 1): Bearer operator personal-access-token (`rp_op_…`). The
- * existing `resolveOperatorToken` middleware verifies the token, decorates
- * `req.tenantUser` / `req.tenantId` / `req.tenantRole`, and re-checks the
- * operator's membership against the DB on every request — so a PAT minted
- * while an operator was a workspace member stops working the moment they're
- * removed. Phase 2 will layer an OAuth 2.1 + PKCE authorization server on
- * top so an MCP client can drive the browser flow; the JSON-RPC dispatch
- * + tool surface stay identical.
+ * Auth: `resolveOperatorMcpBearer` (see `bearer-auth.ts`) accepts EITHER
+ * credential on `Authorization: Bearer` —
+ *
+ *   1. an operator personal-access-token (`rp_op_…`) carrying the `read` scope
+ *      (Phase 1), or
+ *   2. an OAuth-issued access JWT (`typ: 'op_mcp_access'`) minted by this
+ *      deployment's operator-MCP authorization server (Phase 2, already live —
+ *      see `oauth.routes.ts` in this directory).
+ *
+ * One bearer at a time; credentials are never chained. Both paths decorate
+ * `req.tenantUser` / `req.tenantId` / `req.tenantRole` identically, re-check the
+ * operator's membership against the DB on every request — so a credential
+ * minted while an operator was a workspace member stops working the moment
+ * they're removed — and 401 uniformly on any failure.
  *
  * The MCP endpoint accepts a single JSON-RPC 2.0 message (object body) per
  * POST and responds with `application/json` — the Streamable HTTP transport
@@ -17,8 +23,9 @@
  * silent 404.
  *
  * Security:
- *   - No new auth surface. Every request must already present a valid
- *     operator PAT; the JSON-RPC layer never authenticates by itself.
+ *   - No new auth surface. Every request must already present a valid operator
+ *     PAT **or** OAuth access token; the JSON-RPC layer never authenticates by
+ *     itself.
  *   - Read tools are always available. WRITE tools (phase 1: create/edit
  *     applications, plans, auth-config, webhook endpoints) are gated by the
  *     dispatcher: the token must carry write capability (`mcp:operator:write`
@@ -58,10 +65,23 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['MCP · Operator'],
+        security: [{ mcpAccessToken: [] }],
         summary: 'Operator MCP JSON-RPC endpoint',
         description:
-          'Single JSON-RPC 2.0 POST. Requires Authorization: Bearer rp_op_… ' +
-          '(operator PAT). Tools are scoped to the PAT\'s bound workspace.',
+          'Single JSON-RPC 2.0 POST. `Authorization: Bearer` accepts **either** credential:\n\n' +
+          '- an operator personal-access-token (`rp_op_…`) that carries the `read` scope, or\n' +
+          '- an OAuth-issued access JWT (`typ: op_mcp_access`) from this deployment’s ' +
+          'operator-MCP authorization server (start at `GET /api/v1/tenant/mcp/oauth/authorize`).\n\n' +
+          'One bearer at a time; credentials are never chained. Either way, the operator’s ' +
+          'workspace membership is re-checked against the database on every request, and the ' +
+          'tools can only ever see that one workspace.\n\n' +
+          '**Read tools** need nothing beyond authenticating. **Write tools** additionally ' +
+          'require write capability on the presented credential — `mcp:operator:write` in the ' +
+          'OAuth scope, or the `applications:write` scope on a PAT — AND an operator role that ' +
+          'clears the tool’s floor (ADMIN by default). The gate filters `tools/list` as well as ' +
+          '`tools/call`, so an under-privileged credential does not even see them. ' +
+          'Destructive / financial tools are gated further on `mcp:operator:admin`, which only ' +
+          'the OAuth path can carry — a PAT can never reach them.',
       },
     },
     async (req, reply) => {
@@ -117,19 +137,32 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
   // GET-on-MCP-URL is a common typing mistake; return 405 with the
   // expected method so the operator sees the obvious fix rather than
   // a generic 404 or "Method not allowed" from Fastify's default.
-  app.get('/', async (_req, reply) => {
-    reply
-      .code(405)
-      .header('Allow', 'POST')
-      .send({
-        success: false,
-        error: {
-          code: 'METHOD_NOT_ALLOWED',
-          message:
-            'The MCP endpoint accepts JSON-RPC 2.0 over POST only. ' +
-            'GET is rejected so curl-typers see the violation explicitly.',
-          fix: 'POST a JSON-RPC body with Authorization: Bearer rp_op_… instead.',
-        },
-      });
-  });
+  app.get(
+    '/',
+    {
+      schema: {
+        tags: ['MCP · Operator'],
+        security: [{ mcpAccessToken: [] }],
+        summary: 'Operator MCP endpoint — use POST (JSON-RPC)',
+        description:
+          'Always 405 with `Allow: POST`. Still authenticated: the plugin-level Bearer hook ' +
+          'runs first, so an unauthenticated GET gets 401 rather than this 405.',
+      },
+    },
+    async (_req, reply) => {
+      reply
+        .code(405)
+        .header('Allow', 'POST')
+        .send({
+          success: false,
+          error: {
+            code: 'METHOD_NOT_ALLOWED',
+            message:
+              'The MCP endpoint accepts JSON-RPC 2.0 over POST only. ' +
+              'GET is rejected so curl-typers see the violation explicitly.',
+            fix: 'POST a JSON-RPC body with Authorization: Bearer rp_op_… instead.',
+          },
+        });
+    },
+  );
 }

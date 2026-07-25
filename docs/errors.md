@@ -10,14 +10,18 @@ Every error from a ReliPay API or SDK has the same shape:
     "message": "Tenant \"ckxxx\" not found.",
     "fix": "List tenants with GET /api/v1/admin/tenants to see valid ids.",
     "docs": "https://relipay.dev/errors/TENANT_NOT_FOUND",
-    "requestId": "req-1a2b3c"
+    "requestId": "9f1c0a3e-8b47-4d21-9f0e-2c5a7b13d840"
   }
 }
 ```
 
 **Read `error.fix` first.** It is the most actionable field. We treat the absence of a `fix` on any new error as a bug.
 
-Every response also carries an `X-Request-Id` header (and `error.requestId`) — share it with support to find the matching server backtrace. 429 responses additionally carry a `Retry-After` header (and `error.retryAfterSeconds`); honour it before retrying.
+Every response also carries an `X-Request-Id` header (and, on errors, `error.requestId`) — grep the server logs for it to find the matching backtrace. It is a UUID, unique per request across restarts and replicas. If you send your own `X-Request-Id`, ReliPay echoes it back so a trace spans your proxy and the API; the value is clamped to 64 characters of `[A-Za-z0-9._:@+=/-]` first, so anything longer or stranger comes back trimmed.
+
+Retryable errors carry a `Retry-After` header **and** `error.retryAfterSeconds` (same value, in seconds): `RATE_LIMITED` (429), `TOO_MANY_FAILED_ATTEMPTS` / `MFA_TOO_MANY_ATTEMPTS` (429), `IDEMPOTENCY_KEY_IN_FLIGHT` (409), and `DEPENDENCY_UNAVAILABLE` (503). Honour it before retrying; nothing else in this document is worth retrying without a code change.
+
+`error.code` is always one of the codes listed below. Fastify's internal `FST_ERR_*` identifiers are normalised away before the response is written (`FST_ERR_VALIDATION` and `FST_ERR_CTP_INVALID_JSON_BODY` → `BAD_REQUEST`, `FST_ERR_CTP_INVALID_MEDIA_TYPE` → `UNSUPPORTED_MEDIA_TYPE`, and so on) — if you ever see one, that's a bug.
 
 ## How errors propagate
 
@@ -59,11 +63,18 @@ The complete list of codes the API emits today, grouped by domain. This list is 
 
 | Code | HTTP | When | How to handle |
 |---|---|---|---|
-| `INTERNAL_ERROR` | 500 | Unhandled server-side exception (message is opaque to clients in production). | Don't retry blindly. Share `requestId` with support / grep server logs for it. |
+| `INTERNAL_ERROR` | 500 | Unhandled server-side exception (message is opaque to clients in production). | Don't retry blindly. Grep the server logs for `requestId`. |
+| `DEPENDENCY_UNAVAILABLE` | 503 | A backing service this deployment owns is unreachable — the `message` names which (PostgreSQL or Redis). Never carries a host, port, or connection string. | `GET /health/ready` reports `db` and `redis` separately; restore the failed one. Honour `Retry-After`. |
 | `ROUTE_NOT_FOUND` | 404 | No route matches the method + path. | Check the path against `/docs` (OpenAPI). Usually a typo or a missing trailing segment. |
-| `BAD_REQUEST` | 400 | Fastify schema validation failed (also any Fastify-native 4xx without its own code). | Compare the request body/query against the route schema in `/docs`. |
+| `METHOD_NOT_ALLOWED` | 405 | The path exists but not for this verb (e.g. `GET` on an MCP JSON-RPC endpoint). | Read the `Allow` header. |
+| `BAD_REQUEST` | 400 | Schema validation failed, or the JSON body didn't parse. Also the catch-all for any Fastify-native 4xx without a code of its own. | Compare the request body/query against the route schema in `/docs`. |
+| `UNSUPPORTED_MEDIA_TYPE` | 415 | The request body's `Content-Type` isn't JSON on an endpoint that only takes JSON. Form-encoded bodies are accepted **only** on the MCP OAuth endpoints, where RFC 6749/7662 require them. | Send `Content-Type: application/json`. A form-encoded body used to parse and then fail validation as a missing field — this is that mistake, reported honestly. |
+| `PAYLOAD_TOO_LARGE` | 413 | Request body over the 1 MiB limit. | Split the request. |
 | `SSRF_BLOCKED` | 400 | A server-side fetch target (e.g. a webhook URL) resolved to a private/loopback address. | Use a publicly routable URL. |
-| `TOO_MANY_FAILED_ATTEMPTS` | 429 | Brute-force lockout on sign-in (end-user or operator). | Wait for `Retry-After` seconds, then retry. Don't loop. |
+| `RATE_LIMITED` | 429 | A **request-rate** limiter tripped — the deployment-wide limiter (`RATE_LIMIT_MAX` per `RATE_LIMIT_WINDOW_MS`, keyed per API key), the tighter per-identity cap on auth endpoints, or the per-Application ceiling across auth endpoints. | Back off for `Retry-After` seconds. `x-ratelimit-limit` / `-remaining` / `-reset` are on every response — pace ahead of the limit rather than discovering it. |
+| `TOO_MANY_FAILED_ATTEMPTS` | 429 | **Credential lockout**, not request-rate: 10 failed password sign-ins for one (Application, email) inside 15 minutes locks that account for 15 minutes — end-user and operator sign-in both. Even the correct password is refused for the window. | Wait for `Retry-After` seconds, then retry. Don't loop. A successful sign-in clears the counter. |
+
+The two 429s are different systems and you handle them differently. `RATE_LIMITED` means *you* are sending too fast — back off and continue. `TOO_MANY_FAILED_ATTEMPTS` means one **account** has too many failed passwords — retrying with the same credentials won't help until the window ends, and if it wasn't your user typing, someone is guessing at that account.
 
 ### Idempotency (generic `Idempotency-Key` header)
 
@@ -98,6 +109,8 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `API_KEY_NOT_FOUND` | 404 | Key id doesn't exist or belongs to a different Application. | List the Application's keys to find the right id. |
 | `API_KEY_EXPIRY_IN_PAST` | 400 | `expiresAt` on key creation is already in the past. | Pass a future timestamp or omit it. |
 | `DATA_MODE_MISMATCH` | 403 | A valid end-user JWT was presented through a secret key of the other test/live mode (test and live data are isolated — see [api-keys.md → Test mode](api-keys.md#test-mode)). | Use a key whose mode matches the user (`rp_test_…` for test users, `rp_live_…` for live users). |
+| `SIGNUP_REQUIRES_SECRET_KEY` | 403 | Sign-up was called with a publishable key on an Application whose signup posture is `secret_only`. | Call sign-up server-side with a secret key; keep the publishable key for browser sign-in. |
+| `TEST_API_KEYS_DISABLED` | 400 | Minting a test-mode API key while test keys are disabled on the deployment. | Mint a live key (`rp_live_…`). Billing test mode is configured separately. |
 
 ### Applications
 
@@ -106,6 +119,8 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `APPLICATION_NOT_FOUND` | 404 | Application id or slug doesn't exist (or isn't in your workspace). | Verify the id/slug; list applications for your tenant. |
 | `APPLICATION_SLUG_INVALID` | 400 | Slug fails the URL-safe regex. | Lowercase alphanumerics and hyphens. |
 | `APPLICATION_SLUG_TAKEN` | 409 | Slug already exists. | Pick another slug. |
+| `PORTAL_NOT_FOUND` | 404 | Hosted-portal config lookup for a slug/domain with no portal enabled. | Enable the portal in Panel → Application → Portal, or check the URL. |
+| `PORTAL_DOMAIN_TAKEN` | 409 | The custom portal hostname is already claimed by another Application. | Pick a different hostname. |
 
 ### Auth — end-user sessions & passwords
 
@@ -117,6 +132,7 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `PASSWORD_BREACHED` | 400 | Password appears in known breach corpora (k-anonymity check). | Ask the user for a different password. |
 | `EMAIL_ALREADY_EXISTS` | 409 | Sign-up hit the `(applicationId, email)` unique constraint (also operator sign-up). | Route the user to sign-in / password reset instead. |
 | `INVALID_CREDENTIALS` | 401 | Sign-in failed (wrong email *or* wrong password — never disclosed which), or wrong `currentPassword` on change. | Show a generic "email or password is incorrect". |
+| `END_USER_ERASED` | 410 | The account was permanently erased on a GDPR data-subject request and can no longer authenticate. | Not recoverable — create a fresh account if the person returns. |
 | `END_USER_NOT_FOUND` | 404 | EndUser id unknown, or belongs to a different Application than the calling secret key. | Verify the id and that you're using the right Application's key. |
 | `USER_TOKEN_MISSING` | 401 | Per-user endpoint called without the `X-Relipay-User-Token` header. | Pass the user's access JWT as the per-user argument in the SDK. |
 | `USER_TOKEN_INVALID` | 401 | User JWT malformed, expired, or signed with a different secret. | Refresh the session (`auth.refresh`) and retry once. |
@@ -135,7 +151,7 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `PASSWORD_RESET_TOKEN_EXPIRED` | 401 | Reset token past its 1-hour window. | Issue a fresh reset. |
 | `PASSWORD_RESET_TOKEN_WRONG_APPLICATION` | 401 | Reset token from a different Application. | Fix the credential mix-up. |
 | `EMAIL_ALREADY_VERIFIED` | 400 | `sendVerificationEmail` for an already-verified address. | Nothing to do — treat as success in UI. |
-| `EMAIL_VERIFICATION_TOKEN_INVALID` / `_USED` / `_EXPIRED` / `_WRONG_APPLICATION` | 401 | Verification token unknown / consumed / past 24 h / cross-Application. | Re-send the verification email. |
+| `EMAIL_VERIFICATION_TOKEN_INVALID` / `EMAIL_VERIFICATION_TOKEN_USED` / `EMAIL_VERIFICATION_TOKEN_EXPIRED` / `EMAIL_VERIFICATION_TOKEN_WRONG_APPLICATION` | 401 | Verification token unknown / consumed / past 24 h / cross-Application. | Re-send the verification email. |
 | `EMAIL_VERIFICATION_STALE` | 401 | Token was issued for a different email than is currently on the account. | Re-send verification for the current address. |
 | `MAGIC_LINK_INVALID` / `MAGIC_LINK_USED` / `MAGIC_LINK_EXPIRED` / `MAGIC_LINK_WRONG_APPLICATION` | 401 | End-user magic-link token unknown / consumed / expired / cross-Application. | Request a new magic link. |
 | `MAGIC_LINK_STALE` | 401 | Magic-link token issued for a different email than is currently on the account. | Request a new magic link. |
@@ -183,6 +199,10 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `INVALID_REDIRECT_URI` | 400 | MCP OAuth dynamic registration: `redirect_uris` empty, >20 entries, or a URI fails validation. | Register 1–20 valid redirect URIs. |
 | `MCP_NOT_FOUND` | 404 | No MCP server at this path. | Check the Application slug in the MCP URL. |
 | `OPERATOR_MCP_UNAUTHORIZED` | 401 | Operator MCP called without a PAT (`rp_op_…`) or OAuth access token. | Pass a valid operator credential. |
+| `MCP_GRANT_INVALID` | 400 | Operator-MCP consent POST (`/oauth/grant`) body didn't parse. | Send the OAuth params the authorize redirect carried, plus `tenant_id` and `approve`. |
+| `MCP_GRANT_INVALID_CLIENT` | 400 | Consent named an unknown `client_id`, or a `redirect_uri` that client never registered. Deliberately not a redirect — we don't bounce to an unvalidated URI. | The client must complete RFC 7591 registration first. |
+| `MCP_GRANT_PKCE_REQUIRED` | 400 | `code_challenge_method` wasn't `S256`. | Use PKCE with S256; `plain` is not accepted. |
+| `TENANT_MEMBERSHIP_REQUIRED` | 403 | Operator-MCP consent chose a workspace the signed-in operator doesn't belong to. | Pick a workspace from your memberships. |
 
 ### Billing — checkout, providers, credentials
 
@@ -201,6 +221,8 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `BILLING_WEBHOOK_AUTOCONFIG_UNSUPPORTED` | 400 | Automatic webhook registration isn't supported for this provider. | Create the webhook in the provider dashboard and paste the secret. |
 | `BILLING_WEBHOOK_BASE_NOT_PUBLIC` | 400 | Webhook auto-config needs a public base URL but the deployment's base is private/localhost. | Use a public URL (or a tunnel in dev). |
 | `BILLING_WEBHOOK_REGISTRATION_FAILED` | 502 | The provider's API rejected webhook registration. | Read the message; fix credentials/permissions at the provider, retry. |
+| `BILLING_PROVIDER_UNKNOWN` | 400 | A provider name that isn't in the module registry at all (distinct from `BILLING_PROVIDER_NOT_AVAILABLE`, which is a real provider this Application hasn't enabled). | Use a registered provider name. |
+| `SUBSCRIPTION_NOT_FOUND` | 404 | Subscription id unknown in this Application/workspace. | List subscriptions to get a valid id. |
 
 ### Billing — plans & entitlements
 
@@ -216,6 +238,7 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `PLAN_USAGE_CONFIG_REQUIRED` / `PLAN_USAGE_METER_UNKNOWN` | 400 | USAGE-kind plan missing usage config, or referencing a meter that doesn't exist. | Create the meter first; reference its slug. |
 | `PLAN_ENTITLEMENT_INVALID` | 400 | Entitlement row fails validation for its kind. | Match the entitlement schema for the kind. |
 | `PLAN_ENTITLEMENT_NOT_FOUND` | 404 | Entitlement id not on this plan. | List the plan's entitlements. |
+| `DEFAULT_PLAN_NOT_FOUND` | 400 | Setting an Application's free-tier `defaultPlanSlug` to a plan that doesn't exist or isn't active. | Pass an existing active plan slug, or `null` to clear it. |
 
 ### Coupons
 
@@ -301,6 +324,9 @@ Two directions — see the "Webhooks — two directions" section of [billing.md]
 | `WEBHOOK_PAYLOAD_INVALID` | 400 | PayPal webhook body isn't a recognisable event. | Check the provider configuration. |
 | `WEBHOOK_ENDPOINT_NOT_FOUND` | 404 | Outbound-webhook endpoint id unknown in this Application. | List the Application's webhook endpoints. |
 | `WEBHOOK_URL_UNSAFE` | 400 | Outbound webhook URL points at a private/loopback address (SSRF guard). | Use a publicly routable HTTPS URL. |
+| `WEBHOOK_PROVIDER_UNKNOWN` | 404 | The `/webhooks/billing/<provider>` path segment isn't a registered provider. | Fix the webhook URL at the provider. |
+| `WEBHOOK_APPLICATION_UNRESOLVED` | 401 | An inbound provider webhook arrived on a URL with no Application slug, so it can't be attributed. | Point the provider at the per-Application endpoint (`…/webhooks/billing/<provider>/<appSlug>`). |
+| `WEBHOOK_DELIVERY_NOT_FOUND` | 404 | Manual retry targeted a delivery id that isn't on this endpoint (or already succeeded). | List deliveries and retry a PENDING/FAILED row. |
 
 ### Operator workspaces & sessions (panel)
 
@@ -322,7 +348,7 @@ Two directions — see the "Webhooks — two directions" section of [billing.md]
 | `APP_ACCESS_DENIED` | 403 | A MEMBER's per-application grant (APP_VIEWER / APP_BILLING) doesn't allow this action on the granted Application. | Ask an OWNER/ADMIN to raise the grant (PUT /tenant/workspace/members/:id/grants). Note: an app the member holds NO grant for returns 404 `APPLICATION_NOT_FOUND`, not 403. |
 | `APP_GRANT_MEMBER_ONLY` | 400 | Tried to set a per-application grant on an OWNER/ADMIN membership. | Grants only scope MEMBER roles — OWNER/ADMIN already have full access. Demote to MEMBER first if scoping is wanted. |
 | `APP_GRANT_NOT_FOUND` | 404 | Deleting a grant that doesn't exist on that membership. | List grants via GET /tenant/workspace/members/:id/grants. |
-| `MAGIC_LINK_TOKEN_INVALID` / `_USED` / `_EXPIRED` | 401 | Operator magic-link token failures (note: end-user codes drop the `_TOKEN`). | Request a new link. |
+| `MAGIC_LINK_TOKEN_INVALID` / `MAGIC_LINK_TOKEN_USED` / `MAGIC_LINK_TOKEN_EXPIRED` | 401 | Operator magic-link token failures (note: end-user codes drop the `_TOKEN`). | Request a new link. |
 
 ### Operator personal-access-tokens (PATs)
 
@@ -334,6 +360,21 @@ Two directions — see the "Webhooks — two directions" section of [billing.md]
 | `OPERATOR_TOKEN_EXPIRY_IN_PAST` | 400 | `expiresAt` already passed. | Pass a future timestamp or omit. |
 | `OPERATOR_TOKEN_LIMIT_REACHED` | 400 | Operator already has the max active PATs. | Revoke unused tokens first. |
 | `OPERATOR_TOKEN_NOT_FOUND` | 404 | PAT id unknown. | List your tokens. |
+
+### Operator registration & invite keys
+
+Gates who may create an operator account on this deployment — `OPERATOR_SIGNUP_MODE` is `open`, `invite`, or `closed`.
+
+| Code | HTTP | When | How to handle |
+|---|---|---|---|
+| `OPERATOR_SIGNUP_CLOSED` | 403 | `OPERATOR_SIGNUP_MODE=closed` — no new operator accounts at all. | Sign in with an existing account, or ask the deployment administrator to open sign-up. |
+| `OPERATOR_INVITE_REQUIRED` | 403 | `OPERATOR_SIGNUP_MODE=invite` and the sign-up carried no `inviteKey`. | Pass an invite key minted by the deployment administrator. |
+| `OPERATOR_INVITE_INVALID` | 403 | The presented invite key is unknown or revoked. | Check the key, or ask for a fresh one. |
+| `OPERATOR_INVITE_EXPIRED` | 403 | The invite key is past its `expiresAt`. | Ask for a fresh key. |
+| `OPERATOR_INVITE_USED` | 409 | Each invite key creates exactly one operator; this one already did. | Ask for a fresh key. |
+| `OPERATOR_INVITE_NOT_FOUND` | 404 | Admin invite management — no invite with that id. | Check the id against `GET /api/v1/admin/operator-invites`. |
+| `OPERATOR_INVITE_ALREADY_USED` | 409 | Revoking an invite that has already created an operator. | Manage the resulting operator account instead. |
+| `OPERATOR_INVITE_EXPIRY_IN_PAST` | 400 | Minting an invite with an `expiresAt` already in the past. | Pass a future timestamp, or omit it for a non-expiring key. |
 
 ### SDK client-side codes (`@relipay/node`)
 

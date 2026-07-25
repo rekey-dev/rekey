@@ -1,4 +1,5 @@
 import * as React from 'react';
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import {
@@ -9,8 +10,24 @@ import {
   type AuthResponse,
 } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
+import { AuthCard } from '@/components/AuthCard';
 import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
+
+export const metadata: Metadata = { title: 'Create your workspace · ReliPay' };
+
+/**
+ * Only follow a post-auth `next` target that is a local path: must start
+ * with '/', must not be scheme-relative ('//' or '/\') — anything else
+ * (absolute URLs, schemes) is dropped to prevent open redirects.
+ * (Mirrored in login/page.tsx.)
+ */
+function safeNext(raw: FormDataEntryValue | null): string | null {
+  const v = String(raw ?? '');
+  return v.startsWith('/') && !v.startsWith('//') && !v.startsWith('/\\') && !v.includes('://')
+    ? v
+    : null;
+}
 
 type SignupMode = 'open' | 'invite' | 'closed';
 
@@ -32,10 +49,11 @@ async function signUp(formData: FormData): Promise<void> {
   const password = String(formData.get('password') ?? '');
   const workspaceName = String(formData.get('workspaceName') ?? '').trim();
   const inviteKey = String(formData.get('inviteKey') ?? '').trim();
+  const next = safeNext(formData.get('next'));
   // Preserve what the operator typed (never the password, never the invite key)
   // so a failed submit doesn't blank the form — a common first-signup drop-off.
   // The invite key is deliberately NOT round-tripped through the URL.
-  const keep = `&email=${encodeURIComponent(email)}&name=${encodeURIComponent(workspaceName)}`;
+  const keep = `&email=${encodeURIComponent(email)}&name=${encodeURIComponent(workspaceName)}${next ? `&next=${encodeURIComponent(next)}` : ''}`;
   if (!email || !password || !workspaceName) redirect(`/sign-up?error=missing${keep}`);
 
   try {
@@ -52,6 +70,7 @@ async function signUp(formData: FormData): Promise<void> {
     }
     throw err;
   }
+  if (next) redirect(`${next}${next.includes('?') ? '&' : '?'}e=signup`);
   redirect('/applications?e=signup');
 }
 
@@ -68,10 +87,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   INTERNAL_ERROR: 'Something went wrong creating your workspace. Please try again.',
 };
 
-const GENERIC_ERROR = 'Something went wrong creating your workspace. Please try again.';
-
 const INPUT_BASE =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 export default async function SignUpPage({
   searchParams,
@@ -82,48 +99,50 @@ export default async function SignUpPage({
   const error = typeof params.error === 'string' ? params.error : undefined;
   const keepEmail = typeof params.email === 'string' ? params.email : undefined;
   const keepName = typeof params.name === 'string' ? params.name : undefined;
+  // Round-tripped through the form so accept-invite (etc.) can resume after
+  // sign-up. The server action re-validates it before redirecting.
+  const next = typeof params.next === 'string' ? params.next : undefined;
   // Per-field errors render at the broken field instead of the page-top
   // banner (WP4) — the operator's eye is already at the form.
   const emailError = error === 'EMAIL_ALREADY_EXISTS' ? ERROR_MESSAGES[error] : undefined;
   const passwordError = error === 'PASSWORD_TOO_SHORT' ? ERROR_MESSAGES[error] : undefined;
   const inviteError =
-    error && error.startsWith('OPERATOR_INVITE') ? (ERROR_MESSAGES[error] ?? GENERIC_ERROR) : undefined;
-  // Never echo a raw error code to the user — fall back to a friendly message.
+    error && error.startsWith('OPERATOR_INVITE') ? ERROR_MESSAGES[error] : undefined;
+  // Only codes we have copy for surface at all: `?error=` is in the URL, so an
+  // unrecognized value (hand-edited, or crafted into a link) previously painted
+  // a real-looking "something went wrong" on a perfectly healthy form.
   const bannerError =
-    error && !emailError && !passwordError && !inviteError ? (ERROR_MESSAGES[error] ?? GENERIC_ERROR) : undefined;
+    error && !emailError && !passwordError && !inviteError ? ERROR_MESSAGES[error] : undefined;
 
   // Closed: no form at all — registration is disabled deployment-wide.
   if (mode === 'closed') {
     return (
-      <main className="min-h-screen grid place-items-center px-6 bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-950 dark:to-neutral-900">
-        <div className="w-full max-w-md space-y-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-8 shadow-sm text-center">
-          <h1 className="text-2xl font-semibold">Registration closed</h1>
-          <p className="text-sm text-[var(--color-muted-fg)]">
-            New operator sign-up is disabled on this deployment. If you already have an account, sign in below.
-          </p>
-          <Link
-            href="/login"
-            className="inline-block rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] transition-colors"
-          >
-            Sign in
-          </Link>
-        </div>
-      </main>
+      <AuthCard title="Registration closed" spacing="sm" className="text-center">
+        <p className="text-sm text-[var(--color-muted-fg)]">
+          New operator sign-up is disabled on this deployment. If you already have an account, sign in below.
+        </p>
+        <Link
+          href="/login"
+          className="inline-block rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] transition-colors"
+        >
+          Sign in
+        </Link>
+      </AuthCard>
     );
   }
 
   return (
-    <main className="min-h-screen grid place-items-center px-6 bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-950 dark:to-neutral-900">
+    <AuthCard
+      action={signUp}
+      title="Create your workspace"
+      subtitle={
+        mode === 'invite'
+          ? 'Sign-up is invite-only here. Paste the key you were given.'
+          : "You'll be the owner. Invite teammates after sign-up."
+      }
+    >
       <TrackView event={AnalyticsEvent.RegisterPageView} />
-      <form action={signUp} className="w-full max-w-md space-y-5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-8 shadow-sm">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold">Create your workspace</h1>
-          <p className="text-sm text-[var(--color-muted-fg)]">
-            {mode === 'invite'
-              ? 'Sign-up is invite-only here. Paste the key you were given.'
-              : "You'll be the owner. Invite teammates after sign-up."}
-          </p>
-        </div>
+        {next && <input type="hidden" hidden name="next" value={next} />}
 
         {bannerError && (
           <p role="alert" className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
@@ -167,7 +186,7 @@ export default async function SignUpPage({
               'w-full rounded-md border bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 ' +
               (emailError
                 ? 'border-red-500 focus:ring-red-500/30 focus:border-red-500'
-                : 'border-[var(--color-border)] focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]')
+                : 'border-[var(--color-border)] focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]')
             } />
           {emailError && (
             <span role="alert" className="block text-xs text-red-600 dark:text-red-400">{emailError}</span>
@@ -182,7 +201,7 @@ export default async function SignUpPage({
               'w-full rounded-md border bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 ' +
               (passwordError
                 ? 'border-red-500 focus:ring-red-500/30 focus:border-red-500'
-                : 'border-[var(--color-border)] focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]')
+                : 'border-[var(--color-border)] focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]')
             } />
           {passwordError && (
             <span role="alert" className="block text-xs text-red-600 dark:text-red-400">{passwordError}</span>
@@ -195,13 +214,36 @@ export default async function SignUpPage({
           Create workspace
         </SubmitButton>
 
+        {/* No env var for the marketing host — the panel links relipay.dev
+            absolutely elsewhere (docs, MCP guide), so match that. */}
+        <p className="text-xs text-[var(--color-muted-fg)] text-center">
+          By creating a workspace you agree to the{' '}
+          <a
+            href="https://relipay.dev/terms"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:text-[var(--color-fg)]"
+          >
+            Terms of Service
+          </a>{' '}
+          and{' '}
+          <a
+            href="https://relipay.dev/privacy"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:text-[var(--color-fg)]"
+          >
+            Privacy Policy
+          </a>
+          .
+        </p>
+
         <p className="text-sm text-[var(--color-muted-fg)] text-center pt-2 border-t border-[var(--color-border)]">
           Already have an account?{' '}
           <Link href="/login" className="underline hover:text-[var(--color-fg)]">
             Sign in
           </Link>
         </p>
-      </form>
-    </main>
+    </AuthCard>
   );
 }

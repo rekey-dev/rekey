@@ -7,7 +7,7 @@
  * key you pass.
  *
  * Webhook verification uses HMAC-SHA256 of the raw body with the webhook
- * secret — see webhooks/razorpay.handler.ts.
+ * secret — see modules/razorpay/index.ts (the ProviderModule).
  *
  * Stub is preserved for tests / missing-creds dev runs.
  */
@@ -83,7 +83,7 @@ export class RealRazorpayProvider implements BillingProvider {
   /**
    * One-time purchase via a Razorpay Payment Link (single charge, no
    * subscription). Returns the hosted `short_url`. Fulfillment lands on the
-   * `payment_link.paid` webhook (razorpay.handler).
+   * `payment_link.paid` webhook (modules/razorpay translate → apply.ts).
    */
   async createOneTimeCheckout(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
     // The razorpay SDK's paymentLink.create types are over-strict (demand

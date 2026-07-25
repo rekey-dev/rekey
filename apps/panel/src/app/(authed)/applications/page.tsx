@@ -20,6 +20,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { EmptyState } from '@/components/EmptyState';
 import { OnboardingChecklist, type OnboardingStep } from '@/components/OnboardingChecklist';
 import { ReadyToGoLive } from '@/components/ReadyToGoLive';
+import { Banner } from '@/components/Banner';
 
 async function createApp(formData: FormData): Promise<void> {
   'use server';
@@ -33,7 +34,7 @@ async function createApp(formData: FormData): Promise<void> {
       body: { name, slug },
     });
     revalidatePath(`/applications/${app.id}`);
-    redirect(`/applications/${app.id}?e=app_created`);
+    redirect(`/applications/${app.id}?saved=created&e=app_created`);
   } catch (err) {
     if (err instanceof PanelApiError) {
       redirect(`/applications?error=${encodeURIComponent(err.code)}&newApp=1`);
@@ -265,7 +266,7 @@ export default async function ApplicationsPage({
               <li key={a.id}>
                 <Link
                   href={`/applications/${a.id}`}
-                  className="group flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4 transition-colors hover:border-[var(--color-primary)]/40 hover:bg-[var(--color-surface-muted)]/40"
+                  className="group flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4 transition-colors hover:border-[color-mix(in_srgb,var(--color-primary)_40%,transparent)] hover:bg-[color-mix(in_srgb,var(--color-surface-muted)_40%,transparent)]"
                 >
                   <div className="min-w-0">
                     <div className="font-medium text-[var(--color-fg)]">{a.name}</div>
@@ -319,9 +320,9 @@ function NewAppModal({
     >
       <form action={createApp} className="space-y-3">
         {error && (
-          <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-            {ERR[error] ?? error}
-          </p>
+          <Banner tone="error">
+            {ERR[error] ?? 'Something went wrong. Please try again.'}
+          </Banner>
         )}
         <label className="block space-y-1">
           <span className="text-xs font-medium">Application name</span>
@@ -331,7 +332,7 @@ function NewAppModal({
             required
             autoFocus
             placeholder="Acme Production"
-            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]"
+            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
           />
           <span className="block text-xs text-[var(--color-muted-fg)]">Shown to your team in the panel.</span>
         </label>
@@ -339,7 +340,7 @@ function NewAppModal({
           <span className="text-xs font-medium">Slug</span>
           <SlugAvailabilityField
             placeholder="acme-prod"
-            inputClassName="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]"
+            inputClassName="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
           />
         </label>
         <div className="rounded-md bg-[var(--color-surface-muted)] border border-[var(--color-border)] p-3 text-xs text-[var(--color-muted-fg)] space-y-1">

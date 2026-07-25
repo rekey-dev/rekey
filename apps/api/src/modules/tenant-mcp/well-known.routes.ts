@@ -33,6 +33,7 @@ export async function operatorMcpWellKnownRoutes(app: FastifyInstance): Promise<
     {
       schema: {
         tags: ['MCP · Operator · OAuth'],
+        security: [],
         summary: 'Authorization-server metadata (RFC 8414, path-insertion form)',
       },
     },
@@ -47,6 +48,7 @@ export async function operatorMcpWellKnownRoutes(app: FastifyInstance): Promise<
     {
       schema: {
         tags: ['MCP · Operator · OAuth'],
+        security: [],
         summary: 'Protected-resource metadata (RFC 9728, path-insertion form)',
       },
     },

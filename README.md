@@ -1,6 +1,6 @@
 # ReliPay
 
-Self-hostable, multi-tenant auth and billing for the apps you run. User auth and provider-agnostic billing share one tenant model, behind one API, in one `docker compose up`.
+Self-hostable, multi-tenant auth and billing for the apps you run. User auth and provider-agnostic billing share one tenant model, behind one API, in one `docker compose --profile full up`.
 
 > **Status:** Public beta. [MIT licensed](LICENSE).
 
@@ -13,8 +13,9 @@ If you're an AI coding agent reading this repo, start at [AGENTS.md](AGENTS.md).
 The whole stack boots with one command — the API auto-migrates on start:
 
 ```bash
-cp .env.example .env   # fill JWT_SECRET + SUPER_ADMIN_KEY (openssl rand -hex 32 each)
-docker compose up      # Postgres + Redis + API (:3030) + panel (:3031)
+cp .env.example .env             # fill POSTGRES_PASSWORD, REDIS_PASSWORD, JWT_SECRET, SUPER_ADMIN_KEY
+                                 # (see .env.example — the datastore passwords also go in DATABASE_URL/REDIS_URL)
+docker compose --profile full up # Postgres + Redis + API (:3030) + panel (:3031)
 ```
 
 Prefer to run from source (watch mode)? Start just the datastores in Docker:
@@ -64,6 +65,41 @@ Packages:
 - `prisma/schema.prisma` — owned by `apps/api`
 - `docs/` — concept primers, API key model, **end-user auth**, **billing**, **coupons**, error model, quickstart
 
+## Billing providers
+
+Stripe, PayPal, and Razorpay ship in the box, all behind one `BillingProvider`
+interface with geographic routing (Razorpay for India, Stripe elsewhere, by
+default — configurable per Application). Need a different processor? Providers
+are self-describing modules — one directory describes checkout, webhook
+verification, and event mapping, and the registry wires up the rest. See
+[docs/billing-providers.md](docs/billing-providers.md) for the how-to and
+[#184](https://github.com/EtherLabZ/ReliPay/issues/184) for rollout status.
+
+
+## Known dev-only behaviours
+
+Things that are deliberately unsafe outside local development, documented here
+rather than left for you to discover. None are enabled by default.
+
+**`RELIPAY_DEV_ECHO_AUTH_TOKENS=true`** makes the operator password-reset and
+magic-link endpoints return the raw token in the API response, and the panel
+then puts that token in a URL query string (`?demoToken=…`) to render a working
+link. Query strings land in browser history, `Referer` headers, and access logs,
+so a token that reaches one is best treated as disclosed.
+
+The flag exists because those endpoints are unauthenticated by necessity — you
+cannot require a session to recover a forgotten password — so with no mail
+transport configured there is otherwise no way to complete the flow locally.
+
+Guards: the API **refuses to boot** if the flag is set with
+`NODE_ENV=production`, and the token is withheld unless `NODE_ENV` is exactly
+`development`. Unset or unknown values withhold it. We chose to leave the
+query-string hand-off in place rather than re-engineer a dev convenience, and to
+document it instead — if this turns out to bite someone, the fix is a one-shot
+httpOnly cookie and we'll take it.
+
+**`RELIPAY_BILLING_FORCE_STUB=true`** forces stub billing providers. Also
+refuses to boot in production.
 
 ## Contributing
 

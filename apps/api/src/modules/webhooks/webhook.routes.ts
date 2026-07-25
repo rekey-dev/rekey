@@ -83,28 +83,45 @@ async function ensureEndpointInApp(applicationId: string, endpointId: string): P
 export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('onRequest', requireTenantSession);
 
-  app.get('/:id/webhooks', async (req) => {
-    const { id } = AppParam.parse(req.params);
-    await ensureAppAccess(req, id, 'read');
-    const endpoints = await webhookService.listEndpoints(id);
-    return {
-      success: true,
-      data: endpoints.map((e) => ({
-        id: e.id,
-        url: e.url,
-        events: e.events,
-        enabled: e.enabled,
-        createdAt: e.createdAt.toISOString(),
-      })),
-    };
-  });
+  app.get(
+    '/:id/webhooks',
+    {
+      schema: {
+        tags: ['Tenant · Webhooks'],
+        security: [{ tenantSession: [] }],
+        summary: 'List webhook endpoints for an Application',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'read');
+      const endpoints = await webhookService.listEndpoints(id);
+      return {
+        success: true,
+        data: endpoints.map((e) => ({
+          id: e.id,
+          url: e.url,
+          events: e.events,
+          enabled: e.enabled,
+          createdAt: e.createdAt.toISOString(),
+        })),
+      };
+    },
+  );
 
   app.post(
     '/:id/webhooks',
     {
       schema: {
         tags: ['Tenant · Webhooks'],
+        security: [{ tenantSession: [] }],
         summary: 'Create a webhook endpoint. Returns the signing secret once.',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         body: {
           type: 'object',
           required: ['url', 'events'],
@@ -154,7 +171,14 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
   app.patch(
     '/:id/webhooks/:endpointId',
     {
-      schema: { tags: ['Tenant · Webhooks'], summary: 'Update an endpoint' },
+      schema: {
+        tags: ['Tenant · Webhooks'],
+        security: [{ tenantSession: [] }],
+        summary: 'Update an endpoint',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
+      },
     },
     async (req) => {
       const { id, endpointId } = EndpointParam.parse(req.params);
@@ -196,7 +220,14 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
   app.delete(
     '/:id/webhooks/:endpointId',
     {
-      schema: { tags: ['Tenant · Webhooks'], summary: 'Remove an endpoint' },
+      schema: {
+        tags: ['Tenant · Webhooks'],
+        security: [{ tenantSession: [] }],
+        summary: 'Remove an endpoint',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
+      },
     },
     async (req) => {
       const { id, endpointId } = EndpointParam.parse(req.params);
@@ -211,7 +242,11 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Tenant · Webhooks'],
+        security: [{ tenantSession: [] }],
         summary: 'Rotate the endpoint\'s signing secret. Returns the new value once.',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
       },
     },
     async (req) => {
@@ -230,33 +265,50 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  app.get('/:id/webhooks/:endpointId/deliveries', async (req) => {
-    const { id, endpointId } = EndpointParam.parse(req.params);
-    await ensureAppAccess(req, id, 'read');
-    await ensureEndpointInApp(id, endpointId);
-    const rows = await webhookService.listDeliveries(id, endpointId);
-    return {
-      success: true,
-      data: rows.map((r) => ({
-        id: r.id,
-        eventId: r.eventId,
-        eventType: r.eventType,
-        status: r.status,
-        attempts: r.attempts,
-        responseStatus: r.responseStatus,
-        error: r.error,
-        createdAt: r.createdAt.toISOString(),
-        nextAttemptAt: r.nextAttemptAt?.toISOString() ?? null,
-      })),
-    };
-  });
+  app.get(
+    '/:id/webhooks/:endpointId/deliveries',
+    {
+      schema: {
+        tags: ['Tenant · Webhooks'],
+        security: [{ tenantSession: [] }],
+        summary: 'List recent delivery attempts for an endpoint',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
+      },
+    },
+    async (req) => {
+      const { id, endpointId } = EndpointParam.parse(req.params);
+      await ensureAppAccess(req, id, 'read');
+      await ensureEndpointInApp(id, endpointId);
+      const rows = await webhookService.listDeliveries(id, endpointId);
+      return {
+        success: true,
+        data: rows.map((r) => ({
+          id: r.id,
+          eventId: r.eventId,
+          eventType: r.eventType,
+          status: r.status,
+          attempts: r.attempts,
+          responseStatus: r.responseStatus,
+          error: r.error,
+          createdAt: r.createdAt.toISOString(),
+          nextAttemptAt: r.nextAttemptAt?.toISOString() ?? null,
+        })),
+      };
+    },
+  );
 
   app.post(
     '/:id/webhooks/:endpointId/deliveries/:deliveryId/retry',
     {
       schema: {
         tags: ['Tenant · Webhooks'],
+        security: [{ tenantSession: [] }],
         summary: 'Force a re-attempt of a failed delivery',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
       },
     },
     async (req) => {

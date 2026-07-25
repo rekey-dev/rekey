@@ -1,4 +1,5 @@
 import * as React from 'react';
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
@@ -12,16 +13,33 @@ import {
 } from '@/lib/api';
 import { PasskeyLoginButton } from '@/components/PasskeyLoginButton';
 import { SubmitButton } from '@/components/SubmitButton';
+import { AuthCard, OrDivider } from '@/components/AuthCard';
+import { Banner } from '@/components/Banner';
 import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
+
+/**
+ * Only follow a post-auth `next` target that is a local path: must start
+ * with '/', must not be scheme-relative ('//' or '/\') — anything else
+ * (absolute URLs, schemes) is dropped to prevent open redirects.
+ * (Mirrored in sign-up/page.tsx.)
+ */
+function safeNext(raw: FormDataEntryValue | null): string | null {
+  const v = String(raw ?? '');
+  return v.startsWith('/') && !v.startsWith('//') && !v.startsWith('/\\') && !v.includes('://')
+    ? v
+    : null;
+}
 
 async function signIn(formData: FormData): Promise<void> {
   'use server';
   const email = String(formData.get('email') ?? '').trim();
   const password = String(formData.get('password') ?? '');
+  const next = safeNext(formData.get('next'));
   // Preserve the typed email (never the password) so a failed sign-in doesn't
-  // make the operator retype it.
-  const keep = `&email=${encodeURIComponent(email)}`;
+  // make the operator retype it — and the `next` target so a retry still
+  // round-trips back (e.g. accept-invite).
+  const keep = `&email=${encodeURIComponent(email)}${next ? `&next=${encodeURIComponent(next)}` : ''}`;
   if (!email || !password) redirect(`/login?error=missing${keep}`);
 
   let result: SignInResponse;
@@ -38,12 +56,14 @@ async function signIn(formData: FormData): Promise<void> {
   // token in the URL. The token is single-use, 5-min-lifetime, and bound
   // to this operator + this sign-in attempt.
   if (result.mfaRequired) {
+    // Carry `next` through the MFA hop so an invite round-trip survives it.
     redirect(
-      `/mfa-verify?challenge=${encodeURIComponent(result.mfaChallengeToken)}`,
+      `/mfa-verify?challenge=${encodeURIComponent(result.mfaChallengeToken)}${next ? `&next=${encodeURIComponent(next)}` : ''}`,
     );
   }
 
   await setSessionCookies({ accessToken: result.accessToken, refreshToken: result.refreshToken });
+  if (next) redirect(`${next}${next.includes('?') ? '&' : '?'}e=login`);
   redirect('/applications?e=login');
 }
 
@@ -71,11 +91,15 @@ async function startPasskeyLogin(): Promise<
 async function completePasskeyLogin(formData: FormData): Promise<void> {
   'use server';
   const expectedChallenge = String(formData.get('expectedChallenge') ?? '');
+  // Carry `next` through the passkey ceremony (same rules as the password
+  // form) so an invite round-trip survives a passkey sign-in too.
+  const next = safeNext(formData.get('next'));
+  const keep = next ? `&next=${encodeURIComponent(next)}` : '';
   let response: unknown;
   try {
     response = JSON.parse(String(formData.get('response') ?? ''));
   } catch {
-    redirect('/login?error=PASSKEY_RESPONSE_INVALID');
+    redirect(`/login?error=PASSKEY_RESPONSE_INVALID${keep}`);
   }
   let result: { accessToken: string; refreshToken: string };
   try {
@@ -85,11 +109,12 @@ async function completePasskeyLogin(formData: FormData): Promise<void> {
     );
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/login?error=${encodeURIComponent(err.code)}`);
+      redirect(`/login?error=${encodeURIComponent(err.code)}${keep}`);
     }
     throw err;
   }
   await setSessionCookies({ accessToken: result.accessToken, refreshToken: result.refreshToken });
+  if (next) redirect(`${next}${next.includes('?') ? '&' : '?'}e=login_passkey`);
   redirect('/applications?e=login_passkey');
 }
 
@@ -101,7 +126,7 @@ async function completePasskeyLogin(formData: FormData): Promise<void> {
  *
  * `_formData` is the Next bound-action arg (ignored — provider is bound).
  */
-async function startOAuth(provider: string, _formData: FormData): Promise<void> {
+async function startOAuth(provider: string, next: string | null, _formData: FormData): Promise<void> {
   'use server';
   const state = randomUUID();
   const jar = await cookies();
@@ -111,6 +136,12 @@ async function startOAuth(provider: string, _formData: FormData): Promise<void> 
   const opts = { httpOnly: true as const, sameSite: 'lax' as const, secure, path: '/', maxAge: 600 };
   jar.set('oauth_state', state, opts);
   jar.set('oauth_provider', provider, opts);
+  // Carry `next` across the provider round-trip in a one-shot cookie (OAuth
+  // `state` stays a pure CSRF nonce). Validated here AND re-validated by the
+  // callback route before following.
+  const safe = safeNext(next);
+  if (safe) jar.set('oauth_next', safe, opts);
+  else jar.delete('oauth_next');
   let authorizationUrl: string;
   try {
     const data = await publicPost<{ authorizationUrl: string }>(
@@ -120,7 +151,9 @@ async function startOAuth(provider: string, _formData: FormData): Promise<void> 
     authorizationUrl = data.authorizationUrl;
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/login?error=${encodeURIComponent(err.code)}`);
+      redirect(
+        `/login?error=${encodeURIComponent(err.code)}${safe ? `&next=${encodeURIComponent(safe)}` : ''}`,
+      );
     }
     throw err;
   }
@@ -132,8 +165,14 @@ const PROVIDER_LABELS: Record<string, string> = {
   github: 'Continue with GitHub',
 };
 
+export const metadata: Metadata = { title: 'Sign in · ReliPay' };
+
 const ERROR_MESSAGES: Record<string, string> = {
   missing: 'Email and password are required.',
+  // Generic codes the sign-in path can emit. Required entries now that an
+  // unrecognised ?error= renders nothing at all.
+  RATE_LIMITED: 'Too many attempts. Wait a minute and try again.',
+  INTERNAL_ERROR: 'Something went wrong on our side. Please try again.',
   INVALID_CREDENTIALS: 'Email or password is incorrect.',
   NO_TENANT_MEMBERSHIPS: 'Your account has no workspace memberships. Ask an owner for an invite.',
   PASSKEY_UNKNOWN: 'No operator account matches that passkey. Register it first under Account → Passkeys.',
@@ -161,6 +200,9 @@ export default async function LoginPage({
   const error = typeof params.error === 'string' ? params.error : undefined;
   const reason = typeof params.reason === 'string' ? params.reason : undefined;
   const keepEmail = typeof params.email === 'string' ? params.email : undefined;
+  // Round-tripped through the form so accept-invite (etc.) can resume after
+  // sign-in. The server action re-validates it before redirecting.
+  const next = typeof params.next === 'string' ? params.next : undefined;
 
   // Which social providers are enabled on this deployment (server env). Empty
   // (or unreachable API) → no social buttons, just password + passkey.
@@ -169,28 +211,27 @@ export default async function LoginPage({
     .catch(() => [] as string[]);
 
   const inputCls =
-    'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+    'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
   return (
-    <main className="min-h-screen grid place-items-center px-6 bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-950 dark:to-neutral-900">
+    <AuthCard
+      title="Sign in to ReliPay"
+      subtitle="Operator account — manage Applications, billing, and team."
+    >
       <TrackView event={AnalyticsEvent.LoginPageView} />
-      <div className="w-full max-w-md space-y-5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-8 shadow-sm">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold">Sign in to ReliPay</h1>
-          <p className="text-sm text-[var(--color-muted-fg)]">
-            Operator account — manage Applications, billing, and team.
-          </p>
-        </div>
-
         {reason === 'expired' && (
           <p className="rounded border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950 px-3 py-2 text-sm text-amber-800 dark:text-amber-300">
             Your session expired. Please sign in again.
           </p>
         )}
-        {error && (
-          <p role="alert" className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-            {ERROR_MESSAGES[error] ?? 'Something went wrong. Please try again.'}
-          </p>
+        {reason === 'reset' && (
+          <Banner tone="success">Password updated. Sign in with your new password.</Banner>
+        )}
+        {/* Only render for codes we actually emit. An unknown ?error= (stale
+            bookmark, crafted link) used to paint an unexplained failure on the
+            page where trust is decided — render nothing instead. */}
+        {error && ERROR_MESSAGES[error] && (
+          <Banner tone="error">{ERROR_MESSAGES[error]}</Banner>
         )}
 
         {oauthProviders.length > 0 && (
@@ -199,7 +240,7 @@ export default async function LoginPage({
               {oauthProviders
                 .filter((p) => p in PROVIDER_LABELS)
                 .map((p) => (
-                  <form key={p} action={startOAuth.bind(null, p)}>
+                  <form key={p} action={startOAuth.bind(null, p, next ?? null)}>
                     <OAuthButton provider={p} label={PROVIDER_LABELS[p]!} />
                   </form>
                 ))}
@@ -209,6 +250,9 @@ export default async function LoginPage({
         )}
 
         <form action={signIn} className="space-y-5">
+          {/* `hidden` attr keeps Tailwind's space-y sibling selector from
+              shifting the first label's margin. */}
+          {next && <input type="hidden" hidden name="next" value={next} />}
           <label className="block space-y-1.5">
             <span className="text-sm font-medium">Email</span>
             <input type="email" name="email" required autoComplete="email"
@@ -229,7 +273,7 @@ export default async function LoginPage({
 
         {/* Passwordless alternative — phishing-resistant, no second factor needed. */}
         <OrDivider />
-        <PasskeyLoginButton start={startPasskeyLogin} complete={completePasskeyLogin} />
+        <PasskeyLoginButton start={startPasskeyLogin} complete={completePasskeyLogin} next={next} />
 
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-sm text-[var(--color-muted-fg)] pt-2 border-t border-[var(--color-border)]">
           <Link href="/sign-up" className="hover:text-[var(--color-fg)]">
@@ -243,33 +287,19 @@ export default async function LoginPage({
           </Link>
         </div>
 
-        <p className="text-center text-xs text-[var(--color-muted-fg)]">
-          Test environment — data may be reset without notice.{' '}
-          <a
-            href="https://discord.gg/rCw3ydefq"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="underline underline-offset-2 hover:text-[var(--color-fg)]"
-          >
-            Request production access
-          </a>
-          .
-        </p>
-      </div>
-    </main>
-  );
-}
-
-function OrDivider(): React.JSX.Element {
-  return (
-    <div className="relative">
-      <div className="absolute inset-0 flex items-center" aria-hidden="true">
-        <div className="w-full border-t border-[var(--color-border)]" />
-      </div>
-      <div className="relative flex justify-center">
-        <span className="bg-[var(--color-surface)] px-2 text-xs text-[var(--color-muted-fg)]">or</span>
-      </div>
-    </div>
+        {/* Demo-deployment notice. Opt-in via PANEL_DEMO_NOTICE so a self-hosted
+            or production panel never tells operators their data may be wiped —
+            it said that unconditionally before. Deliberately NOT a
+            NEXT_PUBLIC_* var: those are inlined at build time, so a
+            self-hoster setting it in compose env would see no change without
+            rebuilding the image. This page is a server component, so a plain
+            server env var is read at runtime. */}
+        {process.env.PANEL_DEMO_NOTICE === '1' && (
+          <p className="text-center text-xs text-[var(--color-muted-fg)]">
+            Demo environment — data may be reset without notice.
+          </p>
+        )}
+    </AuthCard>
   );
 }
 

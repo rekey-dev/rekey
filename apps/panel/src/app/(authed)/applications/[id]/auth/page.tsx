@@ -171,14 +171,12 @@ export default async function AuthMethodsPage({
                 label="End-user sign-up"
                 hint={
                   <>
-                    Applies to <code className="text-xs">auth.signUp(...)</code>, magic-link, and
-                    OAuth-first sign-in. <strong>Secret-key only</strong> lets your server create
-                    users with a secret key (<code className="text-xs">rp_live_…</code>) while the
-                    publishable key is refused with{' '}
-                    <code className="text-xs">SIGNUP_REQUIRES_SECRET_KEY</code> — the publishable
-                    key can still sign existing users in. <strong>Invite only</strong> rejects all
-                    sign-up with <code className="text-xs">SIGNUP_DISABLED</code>. Existing users
-                    can always sign in.
+                    Controls who can create new accounts, whatever the sign-up method (password,
+                    magic link, or OAuth). <strong>Secret-key only</strong> means only your own
+                    server can create accounts — use it when you provision users yourself.{' '}
+                    <strong>Invite only</strong> blocks all new sign-ups. Existing users can always
+                    sign in. Blocked attempts return a clear error code (e.g.{' '}
+                    <code className="text-xs">SIGNUP_DISABLED</code>) your app can handle.
                   </>
                 }
               >
@@ -199,10 +197,10 @@ export default async function AuthMethodsPage({
               defaultChecked={organizationsEnabled}
               hint={
                 <>
-                  Let end-users create multi-user organizations and invite teammates via{' '}
-                  <code className="text-xs">relipay.organizations.*</code>. Off = the SDK org
-                  endpoints reject with <code className="text-xs">ORGANIZATIONS_NOT_ENABLED</code>.
-                  View existing orgs on the Organizations tab.
+                  Lets end-users create shared team accounts and invite teammates. Enable this if
+                  your product has team workspaces; leave it off for purely individual accounts.
+                  View existing orgs on the Organizations tab. While off, organization API calls
+                  return <code className="text-xs">ORGANIZATIONS_NOT_ENABLED</code>.
                 </>
               }
             />
@@ -223,9 +221,10 @@ export default async function AuthMethodsPage({
               defaultChecked={breachCheckEnabled}
               hint={
                 <>
-                  On (default) = reject known-breached passwords at sign-up / reset / change via the
-                  HaveIBeenPwned k-anonymity API (only a hash prefix leaves the server). Turn off for
-                  offline or restricted-egress deployments.
+                  Rejects passwords that have appeared in known data breaches, checked whenever a
+                  user sets or changes one. Recommended on: passwords themselves never leave your
+                  server — only an anonymous partial hash is compared against the public breach
+                  database. Turn off only if this deployment can&apos;t reach the internet.
                 </>
               }
             />
@@ -248,12 +247,11 @@ export default async function AuthMethodsPage({
               label="Two-factor authentication (TOTP)"
               hint={
                 <>
-                  <strong>optional</strong> = users may enable it; <strong>required</strong> =
-                  enforced for everyone. End-users enroll via{' '}
-                  <code className="text-xs">auth.mfa.setup()</code> (TOTP + backup codes).{' '}
-                  <strong>Required</strong> returns{' '}
-                  <code className="text-xs">mfaEnrollmentRequired</code> at sign-in for users who
-                  haven&apos;t enrolled, so your app can route them to setup.
+                  Adds a second sign-in step using an authenticator app (with backup codes).{' '}
+                  <strong>Optional</strong> lets each user decide; <strong>required</strong>{' '}
+                  enforces it for everyone — users who haven&apos;t set it up are asked to at their
+                  next sign-in (your app sees{' '}
+                  <code className="text-xs">mfaEnrollmentRequired</code> and routes them to setup).
                 </>
               }
             >
@@ -268,9 +266,10 @@ export default async function AuthMethodsPage({
               label="Redirect URLs"
               hint={
                 <>
-                  URLs your app returns to after sign-in, one per line, e.g.{' '}
-                  <code className="text-xs">https://yourapp.com/callback</code>. Acts as the
-                  allow-list for OAuth / hosted sign-in flows; invalid URLs are rejected on save.
+                  Where users can be sent back to after signing in — one URL per line, e.g.{' '}
+                  <code className="text-xs">https://yourapp.com/callback</code>. Sign-in flows may
+                  only redirect to addresses on this list, which stops attackers bouncing users to
+                  look-alike sites. Invalid URLs are rejected on save.
                 </>
               }
             >
@@ -294,7 +293,7 @@ export default async function AuthMethodsPage({
 }
 
 const inputCls =
-  'rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 /**
  * Checkbox row with a bold label + muted hint, matching the panel's grouped

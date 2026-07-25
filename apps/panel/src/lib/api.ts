@@ -622,7 +622,12 @@ export interface BillingCredentialsStatus {
   provider: string | null;
 }
 
-export type BillingProviderName = 'stripe' | 'paypal' | 'razorpay';
+/**
+ * Billing provider name. Open string (P4): the set of providers is the API's
+ * runtime provider-module registry, discovered via
+ * `GET /tenant/applications/:id/billing/providers` — no compile-time union.
+ */
+export type BillingProviderName = string;
 
 export interface BillingCredentialRow {
   provider: BillingProviderName;
@@ -633,6 +638,54 @@ export interface BillingCredentialRow {
   priority: number;
   /** Whether the provider webhook secret/id is set (manually or auto-registered). */
   webhookConfigured: boolean;
+}
+
+/** What a provider module can do — from the registry, via discovery (P4). */
+export interface BillingProviderCapabilities {
+  oneTime: boolean;
+  captureStep: boolean;
+  /** false → no webhook-create API (Razorpay): manual dashboard setup only. */
+  autoWebhookRegister: boolean;
+  periodRotationEvents: boolean;
+  onlineVerify: boolean;
+}
+
+/** One credential form field, as declared by the provider module (never a stored value). */
+export interface BillingCredentialFieldInfo {
+  key: string;
+  label: string;
+  /** true → render a password input; the API never echoes it back. */
+  secret: boolean;
+  optional: boolean;
+  placeholder?: string;
+  help?: string;
+  /** Shape rule ('sk_', 'whsec_'…) reduced to its operator-readable message. */
+  pattern?: { message: string };
+}
+
+/**
+ * One entry of `GET /tenant/applications/:id/billing/providers` (P4): a
+ * registered provider module + this application's configured status. Drives
+ * the whole panel billing page — provider list, labels, credential forms,
+ * webhook UX gating.
+ */
+export interface BillingProviderDescriptor {
+  name: BillingProviderName;
+  label: string;
+  docsUrl: string;
+  defaultCountries: string[];
+  priority: number;
+  capabilities: BillingProviderCapabilities;
+  credentialFields: BillingCredentialFieldInfo[];
+  configured: boolean;
+  /** null until this application has credentials for the provider. */
+  status: {
+    enabled: boolean;
+    mode: 'test' | 'live';
+    countries: string[];
+    priority: number;
+    webhookConfigured: boolean;
+  } | null;
 }
 
 // ---------- Unauth helpers (sign-in / sign-up / accept-invite) ----------

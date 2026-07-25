@@ -3,7 +3,9 @@ import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 
 export const metadata: Metadata = {
-  title: 'Billing portal',
+  // Neutral default — the [slug] layout's generateMetadata overrides this with
+  // the merchant's own name, which is the only brand a customer recognizes.
+  title: 'Customer portal',
   description: 'Manage your subscription, billing history, and account.',
   // Authenticated customer surface — keep it out of search indexes.
   robots: { index: false, follow: false },

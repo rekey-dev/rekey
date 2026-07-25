@@ -186,7 +186,16 @@ export const AuthConfigSchema = z.object({
   });
 export type AuthConfig = z.infer<typeof AuthConfigSchema>;
 
-export const BillingProviderSchema = z.enum(['stripe', 'paypal', 'razorpay']);
+/**
+ * Billing provider name. Deliberately an open `z.string()` (P4, spec:
+ * billing-provider-modules): the authoritative set of providers is the API's
+ * runtime provider-module registry (`providerNameSchema` in
+ * apps/api/.../billing/providers/registry.ts), not a compile-time enum here —
+ * so adding a provider module never requires an SDK release, and a stale SDK
+ * degrades to a capitalized name rather than a broken flow. Unknown names are
+ * rejected server-side by the registry-derived enum.
+ */
+export const BillingProviderSchema = z.string().min(1);
 export type BillingProvider = z.infer<typeof BillingProviderSchema>;
 
 export const BillingConfigSchema = z.object({
@@ -578,10 +587,29 @@ export const CheckoutResultDtoSchema = z.object({
 });
 export type CheckoutResultDto = z.infer<typeof CheckoutResultDtoSchema>;
 
+/**
+ * What a billing provider module can do, as declared by its registry entry.
+ * Served by `GET /api/v1/billing/providers` (P4 discovery) so front-ends can
+ * adapt (e.g. no auto-webhook button for Razorpay) without name checks.
+ */
+export const BillingProviderCapabilitiesSchema = z.object({
+  oneTime: z.boolean(),
+  captureStep: z.boolean(),
+  autoWebhookRegister: z.boolean(),
+  periodRotationEvents: z.boolean(),
+  onlineVerify: z.boolean(),
+});
+export type BillingProviderCapabilities = z.infer<typeof BillingProviderCapabilitiesSchema>;
+
 export const BillingProviderInfoDtoSchema = z.object({
   provider: BillingProviderSchema,
   priority: z.number().int().min(0),
   countries: z.array(z.string().length(2)),
+  // P4 discovery additions — optional so pre-P4 servers still parse. Prefer
+  // `label` when present; fall back to a capitalized `provider` otherwise.
+  label: z.string().optional(),
+  docsUrl: z.string().optional(),
+  capabilities: BillingProviderCapabilitiesSchema.optional(),
 });
 export type BillingProviderInfoDto = z.infer<typeof BillingProviderInfoDtoSchema>;
 

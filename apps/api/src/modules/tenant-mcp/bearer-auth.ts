@@ -78,7 +78,7 @@ async function resolveByPat(request: FastifyRequest, raw: string): Promise<void>
     where: { tokenHash: hashOperatorToken(raw) },
   });
   if (!token || token.revokedAt !== null) throw unauthorized();
-  if (token.expiresAt !== null && token.expiresAt < new Date()) throw unauthorized();
+  if (token.expiresAt !== null && token.expiresAt <= new Date()) throw unauthorized();
   if (!token.scopes.includes('read')) {
     // PATs default to `['read']` — but a future operator could mint a write-
     // only PAT and try to use it here. Refuse with the same 401 the unknown-

@@ -1,5 +1,5 @@
 /**
- * Standard error banner.
+ * Standard error banner — thin wrapper over the <Banner> primitive.
  *
  * Maps a known error code to a friendly message via the page's local
  * `messages` map; falls back to a generic "Something went wrong" line
@@ -9,6 +9,7 @@
  */
 
 import * as React from 'react';
+import { Banner } from './Banner';
 
 interface Props {
   code: string;
@@ -21,10 +22,7 @@ interface Props {
 export function ErrorBanner({ code, messages, requestId }: Props): React.JSX.Element {
   const known = messages?.[code];
   return (
-    <p
-      role="alert"
-      className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300 space-y-1"
-    >
+    <Banner tone="error" className="space-y-1">
       <span className="block">
         {known ??
           'Something went wrong on our side. Please retry; if the problem persists, share the request id below with support.'}
@@ -32,6 +30,6 @@ export function ErrorBanner({ code, messages, requestId }: Props): React.JSX.Ele
       {requestId && (
         <span className="block text-xs font-mono opacity-80">request id: {requestId}</span>
       )}
-    </p>
+    </Banner>
   );
 }

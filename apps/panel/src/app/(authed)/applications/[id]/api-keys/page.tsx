@@ -17,6 +17,17 @@ import { EmptyState } from '@/components/EmptyState';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate, formatDateTime } from '@/lib/date';
 
+const ERR: Record<string, string> = {
+  missing: 'A key name is required.',
+  API_KEY_LIMIT_REACHED:
+    'This application has reached its API key limit. Revoke an unused key first.',
+  API_KEY_EXPIRY_IN_PAST: 'The expiry date must be in the future.',
+  PUBLIC_KEY_ROTATION_IN_GRACE:
+    'A previous publishable key is still in its grace window. Confirm the forced rotation to drop it.',
+  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage API keys.',
+  APPLICATION_NOT_FOUND: 'Application not found.',
+};
+
 interface CreateKeyResp {
   apiKey: ApiKeyRow;
   rawKey: string;
@@ -97,6 +108,11 @@ export default async function ApiKeysPage({
   // ~2 min later, so a refresh stops showing it without us mutating cookies here).
   const reveal = (await cookies()).get(REVEAL_COOKIE)?.value;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The mint modal reopens itself only when the redirect carries `newKey=1`
+  // (createKey failures). Errors without it — e.g. rotatePublicKey — would
+  // otherwise render invisibly inside the closed modal, so show those at page
+  // level instead (never both).
+  const mintModalOpen = sp.newKey === '1';
   const [keys, app] = await Promise.all([
     api<ApiKeyRow[]>({
       method: 'GET',
@@ -115,6 +131,11 @@ export default async function ApiKeysPage({
 
   return (
     <div className="space-y-6">
+      {error && !mintModalOpen && (
+        <p role="alert" className="rounded-lg border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+          {ERR[error] ?? 'Something went wrong. Please try again.'}
+        </p>
+      )}
       <SectionHeader
         title="Publishable key"
         description={
@@ -197,15 +218,15 @@ export default async function ApiKeysPage({
             trigger="+ New API key"
           >
             <form action={createKey.bind(null, id)} className="space-y-3">
-              {error && (
+              {error && mintModalOpen && (
                 <p role="alert" className="rounded-lg border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-                  {error}
+                  {ERR[error] ?? 'Something went wrong. Please try again.'}
                 </p>
               )}
               <label className="block space-y-1">
                 <span className="text-xs font-medium">Name</span>
                 <input type="text" name="name" required autoFocus placeholder="Production server"
-                  className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]" />
+                  className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]" />
                 <span className="block text-xs text-[var(--color-muted-fg)]">Internal label — helps you identify the key in this list later.</span>
               </label>
               <SubmitButton pendingLabel="Minting key…">Mint key</SubmitButton>

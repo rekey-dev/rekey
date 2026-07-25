@@ -28,7 +28,7 @@ export function CopyLinkButton(): React.JSX.Element {
       onClick={copy}
       title="Copy link to this page"
       aria-label="Copy link to this page"
-      className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 text-xs font-medium text-[var(--color-muted-fg)] transition-colors hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
+      className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 text-xs font-medium text-[var(--color-muted-fg)] transition-colors hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
     >
       {copied ? (
         <>

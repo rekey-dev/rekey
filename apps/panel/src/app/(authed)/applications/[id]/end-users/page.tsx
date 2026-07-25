@@ -19,6 +19,7 @@ import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
+import { Banner } from '@/components/Banner';
 
 // ─── End-user actions ────────────────────────────────────────────────
 
@@ -207,6 +208,9 @@ const ERR: Record<string, string> = {
   END_USER_ROLE_IS_DEFAULT: 'Cannot delete the default role. Mark another as default first.',
   END_USER_ROLE_IN_USE: 'Cannot delete — end-users still hold this role. Reassign them first.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage end-users + roles.',
+  ORGANIZATIONS_NOT_ENABLED: 'organizations are not enabled for this Application',
+  ORGANIZATION_NOT_FOUND: 'the organization no longer exists',
+  ORGANIZATION_ALREADY_MEMBER: 'they are already a member of that organization',
 };
 
 // ─── Page ───────────────────────────────────────────────────────────
@@ -289,14 +293,11 @@ export default async function EndUsersPage({
   return (
     <div className="space-y-8">
       {orgError && (
-        <p
-          role="alert"
-          className="rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-sm text-amber-800 dark:text-amber-300"
-        >
+        <Banner tone="warning">
           End-user{createdEmail ? ` ${createdEmail}` : ''} was created, but adding them to the
-          organization failed ({ERR[orgError] ?? orgError}). Add them manually from the
+          organization failed ({ERR[orgError] ?? 'something went wrong'}). Add them manually from the
           Organizations tab.
-        </p>
+        </Banner>
       )}
 
       {/* ─── Roles section ─────────────────────────── */}
@@ -389,7 +390,7 @@ export default async function EndUsersPage({
             name="search"
             defaultValue={search}
             placeholder="Search by email…"
-            className="w-full max-w-sm rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]"
+            className="w-full max-w-sm rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
           />
           <select
             name="verified"
@@ -571,9 +572,9 @@ function DeleteRoleControl({
     >
       <form action={deleteRole.bind(null, applicationId, role.name)} className="space-y-3">
         {error && (
-          <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+          <Banner tone="error">
             {ERR[error] ?? error}
-          </p>
+          </Banner>
         )}
         <Field
           label="Reassign holders to"
@@ -616,9 +617,9 @@ function NewRoleModal({
     >
       <form action={createRole.bind(null, applicationId)} className="space-y-3">
         {error && (
-          <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+          <Banner tone="error">
             {ERR[error] ?? error}
-          </p>
+          </Banner>
         )}
         <Field label="Name" required hint="Lowercase letters, digits, hyphens, underscores (2–40).">
           <input
@@ -671,9 +672,9 @@ function NewUserModal({
     >
       <form action={createUser.bind(null, applicationId)} className="space-y-3">
         {error && (
-          <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+          <Banner tone="error">
             {ERR[error] ?? error}
-          </p>
+          </Banner>
         )}
         <Field label="Email" required>
           <input type="email" name="email" required autoFocus className={inputCls} />
@@ -758,9 +759,9 @@ function EditUserModal({
     >
       <form action={updateUser.bind(null, applicationId, user.id)} className="space-y-3">
         {error && (
-          <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+          <Banner tone="error">
             {ERR[error] ?? error}
-          </p>
+          </Banner>
         )}
         <Field
           label="Role"
@@ -804,11 +805,11 @@ function EditUserModal({
 // ─── Field primitive ────────────────────────────────────────────────
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 /** Compact select used in the list-filter row (auto width, same chrome). */
 const filterSelectCls =
-  'rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 function Field({
   label,

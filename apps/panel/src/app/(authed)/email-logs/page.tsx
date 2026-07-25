@@ -40,7 +40,7 @@ export default async function WorkspaceEmailLogsPage({
         action={<EmailLogStatusFilter basePath="/email-logs" active={status} pageSize={PAGE_SIZE} />}
       />
 
-      <EmailLogsTable rows={rows} />
+      <EmailLogsTable rows={rows} filtered={Boolean(status)} />
       <Pager
         basePath="/email-logs"
         offset={offset}

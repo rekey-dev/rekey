@@ -21,7 +21,9 @@ import { Badge } from '@/components/Badge';
 import { CopyButton } from '@/components/CopyButton';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
+import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { formatDate, formatDateTime } from '@/lib/date';
+import { Banner } from '@/components/Banner';
 
 interface OperatorTokenRow {
   id: string;
@@ -130,7 +132,7 @@ async function dismissReveal(): Promise<void> {
 }
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 export default async function ApiTokensPage({
   searchParams,
@@ -167,14 +169,14 @@ export default async function ApiTokensPage({
       />
 
       {error && (
-        <p role="alert" className="rounded-md border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-          {ERR[error] ?? error}
-        </p>
+        <Banner tone="error">
+          {ERR[error] ?? 'Something went wrong. Please try again.'}
+        </Banner>
       )}
       {revoked && (
-        <p aria-live="polite" className="rounded-md border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-300">
+        <Banner tone="success">
           Token revoked.
-        </p>
+        </Banner>
       )}
 
       {/* One-time reveal */}
@@ -254,51 +256,49 @@ export default async function ApiTokensPage({
             No personal-access-tokens yet.
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
-            <table className="w-full text-sm">
-              <thead className="bg-[var(--color-surface-muted)] text-left text-xs text-[var(--color-muted-fg)]">
-                <tr>
-                  <th scope="col" className="px-4 py-2 font-medium">Name</th>
-                  <th scope="col" className="px-4 py-2 font-medium">Token</th>
-                  <th scope="col" className="px-4 py-2 font-medium">Scopes</th>
-                  <th scope="col" className="px-4 py-2 font-medium">Last used</th>
-                  <th scope="col" className="px-4 py-2 font-medium">Expires</th>
-                  <th scope="col" className="px-4 py-2 font-medium text-right"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[var(--color-border)]">
-                {tokens.map((t) => (
-                  <tr key={t.id} className="align-top">
-                    <td className="px-4 py-3">{t.name}</td>
-                    <td className="px-4 py-3 font-mono text-xs text-[var(--color-muted-fg)]">{t.tokenPrefix}…</td>
-                    <td className="px-4 py-3">
-                      <div className="flex flex-wrap gap-1">
-                        {t.scopes.length === 0 ? (
-                          <span className="text-xs text-[var(--color-faint-fg)]">—</span>
-                        ) : (
-                          t.scopes.map((s) => <Badge key={s} tone={scopeTone(s)}>{s}</Badge>)
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-xs text-[var(--color-muted-fg)] whitespace-nowrap">
-                      {t.lastUsedAt ? formatDateTime(t.lastUsedAt) : 'never'}
-                    </td>
-                    <td className="px-4 py-3 text-xs text-[var(--color-muted-fg)] whitespace-nowrap">
-                      {t.expiresAt ? formatDate(t.expiresAt) : 'never'}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <form action={revokeToken} className="inline">
-                        <input type="hidden" name="id" value={t.id} />
-                        <ConfirmButton confirm={`Revoke "${t.name}"? Any tool using it stops working immediately.`}>
-                          Revoke
-                        </ConfirmButton>
-                      </form>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <Table minWidth="min-w-[48rem]">
+            <THead>
+              <TR>
+                <TH>Name</TH>
+                <TH>Token</TH>
+                <TH>Scopes</TH>
+                <TH>Last used</TH>
+                <TH>Expires</TH>
+                <TH align="right"> </TH>
+              </TR>
+            </THead>
+            <TBody>
+              {tokens.map((t) => (
+                <TR key={t.id} hover>
+                  <TD>{t.name}</TD>
+                  <TD mono muted>{t.tokenPrefix}…</TD>
+                  <TD>
+                    <div className="flex flex-wrap gap-1">
+                      {t.scopes.length === 0 ? (
+                        <span className="text-xs text-[var(--color-faint-fg)]">—</span>
+                      ) : (
+                        t.scopes.map((s) => <Badge key={s} tone={scopeTone(s)}>{s}</Badge>)
+                      )}
+                    </div>
+                  </TD>
+                  <TD muted className="whitespace-nowrap text-xs">
+                    {t.lastUsedAt ? formatDateTime(t.lastUsedAt) : 'never'}
+                  </TD>
+                  <TD muted className="whitespace-nowrap text-xs">
+                    {t.expiresAt ? formatDate(t.expiresAt) : 'never'}
+                  </TD>
+                  <TD align="right">
+                    <form action={revokeToken} className="inline">
+                      <input type="hidden" name="id" value={t.id} />
+                      <ConfirmButton confirm={`Revoke "${t.name}"? Any tool using it stops working immediately.`}>
+                        Revoke
+                      </ConfirmButton>
+                    </form>
+                  </TD>
+                </TR>
+              ))}
+            </TBody>
+          </Table>
         )}
       </section>
 

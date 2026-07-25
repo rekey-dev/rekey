@@ -253,7 +253,7 @@ export const mcpOAuthService = {
       row.applicationId !== args.application.id ||
       row.clientId !== args.clientId ||
       row.redirectUri !== args.redirectUri ||
-      row.expiresAt < new Date()
+      row.expiresAt <= new Date()
     ) {
       invalid();
     }

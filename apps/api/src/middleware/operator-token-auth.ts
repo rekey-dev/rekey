@@ -71,7 +71,7 @@ export async function resolveOperatorToken(
   });
   if (!token) throw unauthorized();
   if (token.revokedAt !== null) throw unauthorized();
-  if (token.expiresAt !== null && token.expiresAt < new Date()) throw unauthorized();
+  if (token.expiresAt !== null && token.expiresAt <= new Date()) throw unauthorized();
 
   const user = await prisma.tenantUser.findUnique({ where: { id: token.tenantUserId } });
   if (!user) throw unauthorized();

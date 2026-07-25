@@ -17,7 +17,17 @@ import { applicationsService } from '../applications/applications.service.js';
 import { apiKeysService } from '../api-keys/api-keys.service.js';
 import { plansService } from '../plans/plans.service.js';
 import { couponsService } from '../coupons/coupons.service.js';
-import { billingCredentialsService } from '../billing/credentials.service.js';
+import {
+  billingCredentialsService,
+  type BillingProviderName,
+} from '../billing/credentials.service.js';
+import {
+  providerNameSchema,
+  registryNames,
+  getModule,
+  credentialDataSchema,
+  providerDescriptor,
+} from '../billing/providers/registry.js';
 import { billingStatsService } from '../billing/stats.service.js';
 import { oauthService } from '../oauth/oauth.service.js';
 import { licensesService } from '../licenses/licenses.service.js';
@@ -123,6 +133,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
         summary: 'List Applications in the active workspace',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
       },
@@ -154,6 +165,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
         summary: 'Check if an Application slug is available',
         description:
           'Used by the "Create application" form for live availability feedback. ' +
@@ -192,7 +204,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
         summary: 'Get one Application (must belong to the active workspace)',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       },
     },
@@ -217,8 +233,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
         summary: 'Dashboard stats for one Application (Overview tiles)',
         description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
           'End-user totals + 30-day sign-up trend, security-events summary, billing snapshot, ' +
           'and a usage/credits roll-up. Scoped to the active workspace.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
@@ -237,8 +256,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
         summary: 'Recent inbound API requests for an Application',
         description:
+          'Requires the **OWNER or ADMIN** workspace role.\n\nRequires **read** access to ' +
+          'this Application — OWNER/ADMIN, or a MEMBER holding any grant on it (grant-less ' +
+          'legacy members keep workspace-wide read).\n\n' +
           "Requests made to this Application's public API with its secret key, newest " +
           'first (status, route, duration, IP). Recorded best-effort by a global ' +
           'response hook; the table is capped per app by a periodic pruner, so this is ' +
@@ -262,14 +285,17 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
         summary: 'Create an Application in the active workspace',
+        description:
+          'Requires the **OWNER or ADMIN** workspace role.',
         body: {
           type: 'object',
           required: ['name', 'slug'],
           properties: {
             name: { type: 'string', minLength: 1, maxLength: 120 },
             slug: { type: 'string', minLength: 1, maxLength: 40 },
-            billingProvider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] },
+            billingProvider: { type: 'string', enum: registryNames },
             enableBilling: {
               type: 'boolean',
               description: 'Create with the billing surface enabled. Defaults false.',
@@ -298,8 +324,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
         summary: 'Patch the auth configuration for an Application',
         description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.\n\n' +
           'Toggle which auth methods are enabled (`password`, `magic_link`, …), set ' +
           '`signupEnabled=false` for invite-only apps, set the password minimum length, ' +
           'or update the redirect URL allowlist. OAuth provider availability is implicit ' +
@@ -376,8 +405,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
         summary: 'Toggle billing for an Application',
         description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.\n\n' +
           'Master switch. When disabled, the public billing API (checkout, ' +
           'subscriptions, coupons) returns 403 BILLING_DISABLED and the panel hides ' +
           'the Billing group. Default off for new apps.',
@@ -449,7 +481,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · API Keys'],
+        security: [{ tenantSession: [] }],
         summary: 'List active API keys for an application',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       },
     },
@@ -468,7 +504,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       config: { idempotency: true },
       schema: {
         tags: ['Tenant · API Keys'],
+        security: [{ tenantSession: [] }],
         summary: 'Mint an API key (raw shown once)',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         body: {
           type: 'object',
@@ -530,7 +570,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · API Keys'],
+        security: [{ tenantSession: [] }],
         summary: 'Revoke an API key',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, keyId: { type: 'string' } },
@@ -562,7 +606,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Plans'],
+        security: [{ tenantSession: [] }],
         summary: 'List Plans',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
       },
     },
@@ -581,7 +629,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       config: { idempotency: true },
       schema: {
         tags: ['Tenant · Plans'],
+        security: [{ tenantSession: [] }],
         summary: 'Create a Plan',
+        description:
+          'Requires **billing-write** access to this Application — OWNER/ADMIN, or a MEMBER ' +
+          'with an `APP_ADMIN` or `APP_BILLING` grant on it.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         body: {
           type: 'object',
@@ -633,7 +685,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Plans'],
+        security: [{ tenantSession: [] }],
         summary: 'Toggle a Plan\'s active flag',
+        description:
+          'Requires **billing-write** access to this Application — OWNER/ADMIN, or a MEMBER ' +
+          'with an `APP_ADMIN` or `APP_BILLING` grant on it.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, slug: { type: 'string' } },
@@ -661,7 +717,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Plans'],
+        security: [{ tenantSession: [] }],
         summary: "List a plan's entitlements (the benefit bundle it grants)",
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, slug: { type: 'string' } },
@@ -696,7 +756,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Plans'],
+        security: [{ tenantSession: [] }],
         summary: 'Add or update one entitlement on a plan (upsert by kind+key)',
+        description:
+          'Requires **billing-write** access to this Application — OWNER/ADMIN, or a MEMBER ' +
+          'with an `APP_ADMIN` or `APP_BILLING` grant on it.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, slug: { type: 'string' } },
@@ -751,7 +815,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Plans'],
+        security: [{ tenantSession: [] }],
         summary: 'Remove an entitlement from a plan',
+        description:
+          'Requires **billing-write** access to this Application — OWNER/ADMIN, or a MEMBER ' +
+          'with an `APP_ADMIN` or `APP_BILLING` grant on it.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, slug: { type: 'string' }, entId: { type: 'string' } },
@@ -777,8 +845,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Coupons'],
+        security: [{ tenantSession: [] }],
         summary: 'List Coupons (with redemption stats)',
         description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
           'Each coupon carries `redemptionCount` and `totalDiscountIssued` (smallest ' +
           'currency unit) aggregated from the redemptions table.',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
@@ -799,7 +870,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       config: { idempotency: true },
       schema: {
         tags: ['Tenant · Coupons'],
+        security: [{ tenantSession: [] }],
         summary: 'Create a Coupon',
+        description:
+          'Requires **billing-write** access to this Application — OWNER/ADMIN, or a MEMBER ' +
+          'with an `APP_ADMIN` or `APP_BILLING` grant on it.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         body: {
           type: 'object',
@@ -845,7 +920,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Coupons'],
+        security: [{ tenantSession: [] }],
         summary: 'Toggle a Coupon\'s active flag',
+        description:
+          'Requires **billing-write** access to this Application — OWNER/ADMIN, or a MEMBER ' +
+          'with an `APP_ADMIN` or `APP_BILLING` grant on it.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, code: { type: 'string' } },
@@ -881,13 +960,70 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   // PATCH /:id/billing-credentials/:provider       → toggle enabled / change routing only
   // DELETE /:id/billing-credentials/:provider      → remove the provider entirely
 
+  // Tenant discovery endpoint (P4): EVERY registered provider module —
+  // configured for this app or not — with the metadata the panel needs to
+  // render the provider list and autogenerate credential forms. Credential
+  // FIELD SCHEMAS only, never stored values (`providerDescriptor` projects
+  // the module; secrets are structurally absent). Per-app configured status
+  // rides along so one call drives the whole billing page.
+  app.get(
+    '/:id/billing/providers',
+    {
+      schema: {
+        tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
+        summary: 'Discover all registered billing provider modules (+ per-app status)',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
+          'One entry per REGISTERED provider module (in registry order), whether or not this ' +
+          'Application has configured it: display metadata (label, docs URL, default countries, ' +
+          'priority), capabilities, and the credential field schema the panel renders forms from. ' +
+          '`status` is null until the provider is configured for this Application. ' +
+          'Never returns credential values — those are write-only.',
+        params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'read');
+      const statuses = await billingCredentialsService.list(id);
+      const byProvider = new Map(statuses.map((s) => [s.provider as string, s]));
+      return {
+        success: true,
+        data: {
+          providers: registryNames.map((name) => {
+            const row = byProvider.get(name);
+            return {
+              ...providerDescriptor(getModule(name)!),
+              configured: row !== undefined,
+              status:
+                row === undefined
+                  ? null
+                  : {
+                      enabled: row.enabled,
+                      mode: row.mode,
+                      countries: row.countries,
+                      priority: row.priority,
+                      webhookConfigured: row.webhookConfigured,
+                    },
+            };
+          }),
+        },
+      };
+    },
+  );
+
   app.get(
     '/:id/billing-credentials',
     {
       schema: {
         tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
         summary: 'List all billing providers configured for this Application',
         description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
           'Returns one entry per configured provider with its enabled flag, country list, and priority. ' +
           'Never returns the credentials themselves — those are write-only.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
@@ -906,18 +1042,27 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
         summary: 'Set or rotate BYO credentials for one provider',
         description:
-          'Body shape depends on `provider`:\n' +
-          '  stripe   → { data: { apiKey, webhookSecret }, countries?, priority?, enabled? }\n' +
-          '  paypal   → { data: { clientId, clientSecret, webhookId }, countries?, priority?, enabled? }\n' +
-          '  razorpay → { data: { keyId, keySecret, webhookSecret }, countries?, priority?, enabled? }\n\n' +
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.\n\n' +
+          'Body shape depends on `provider` (fields come from the provider module registry):\n' +
+          registryNames
+            .map(
+              (n) =>
+                `  ${n} → { data: { ${getModule(n)!
+                  .credentialSchema.map((f) => f.key)
+                  .join(', ')} }, countries?, priority?, enabled? }`,
+            )
+            .join('\n') +
+          '\n\n' +
           'Credentials are AES-256-GCM encrypted at rest. There is no GET that returns plaintext.',
         params: {
           type: 'object',
           properties: {
             id: { type: 'string' },
-            provider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] },
+            provider: { type: 'string', enum: registryNames },
           },
           required: ['id', 'provider'],
         },
@@ -925,70 +1070,31 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     },
     async (req) => {
       const params = z
-        .object({ id: z.string(), provider: z.enum(['stripe', 'paypal', 'razorpay']) })
+        .object({ id: z.string(), provider: providerNameSchema })
         .parse(req.params);
+      const provider = params.provider as BillingProviderName;
       await ensureAppAccess(req, params.id, 'write');
 
-      const Routing = {
-        countries: z.array(z.string().length(2)).optional(),
-        priority: z.number().int().min(0).max(1000).optional(),
-        enabled: z.boolean().optional(),
-        mode: z.enum(['test', 'live']).optional(),
-      };
-
-      if (params.provider === 'stripe') {
-        const body = z
-          .object({
-            data: z.object({
-              apiKey: z.string().min(4).max(512),
-              // Optional — blank means "auto-configure via register-webhook".
-              webhookSecret: z.string().max(512).optional().default(''),
-            }),
-            ...Routing,
-          })
-          .parse(req.body);
-        const opts: Parameters<typeof billingCredentialsService.upsertStripe>[2] = {};
-        if (body.countries !== undefined) opts.countries = body.countries;
-        if (body.priority !== undefined) opts.priority = body.priority;
-        if (body.enabled !== undefined) opts.enabled = body.enabled;
-        if (body.mode !== undefined) opts.mode = body.mode;
-        await billingCredentialsService.upsertStripe(params.id, body.data, opts);
-      } else if (params.provider === 'paypal') {
-        const body = z
-          .object({
-            data: z.object({
-              clientId: z.string().min(4).max(512),
-              clientSecret: z.string().min(4).max(512),
-              // Optional — blank means "auto-configure via register-webhook".
-              webhookId: z.string().max(512).optional().default(''),
-            }),
-            ...Routing,
-          })
-          .parse(req.body);
-        const opts: Parameters<typeof billingCredentialsService.upsertPaypal>[2] = {};
-        if (body.countries !== undefined) opts.countries = body.countries;
-        if (body.priority !== undefined) opts.priority = body.priority;
-        if (body.enabled !== undefined) opts.enabled = body.enabled;
-        if (body.mode !== undefined) opts.mode = body.mode;
-        await billingCredentialsService.upsertPaypal(params.id, body.data, opts);
-      } else {
-        const body = z
-          .object({
-            data: z.object({
-              keyId: z.string().min(4).max(512),
-              keySecret: z.string().min(4).max(512),
-              webhookSecret: z.string().min(4).max(512),
-            }),
-            ...Routing,
-          })
-          .parse(req.body);
-        const opts: Parameters<typeof billingCredentialsService.upsertRazorpay>[2] = {};
-        if (body.countries !== undefined) opts.countries = body.countries;
-        if (body.priority !== undefined) opts.priority = body.priority;
-        if (body.enabled !== undefined) opts.enabled = body.enabled;
-        if (body.mode !== undefined) opts.mode = body.mode;
-        await billingCredentialsService.upsertRazorpay(params.id, body.data, opts);
-      }
+      // Generic body validation (P3): the `data` shape derives from the
+      // module's credentialSchema; routing fields are provider-independent.
+      // Pattern rules (sk_/whsec_/rzp_ prefixes) are enforced by the
+      // credentials service, which raises BILLING_CREDENTIALS_INVALID.
+      const module = getModule(params.provider)!; // providerNameSchema ⇒ registered
+      const body = z
+        .object({
+          data: credentialDataSchema(module),
+          countries: z.array(z.string().length(2)).optional(),
+          priority: z.number().int().min(0).max(1000).optional(),
+          enabled: z.boolean().optional(),
+          mode: z.enum(['test', 'live']).optional(),
+        })
+        .parse(req.body);
+      const opts: Parameters<typeof billingCredentialsService.upsertCredentials>[3] = {};
+      if (body.countries !== undefined) opts.countries = body.countries;
+      if (body.priority !== undefined) opts.priority = body.priority;
+      if (body.enabled !== undefined) opts.enabled = body.enabled;
+      if (body.mode !== undefined) opts.mode = body.mode;
+      await billingCredentialsService.upsertCredentials(params.id, provider, body.data, opts);
 
       // Audit the credential mutation — provider secrets are highly sensitive.
       // Never log the secret material itself, only that it was set/rotated.
@@ -1011,12 +1117,16 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
         summary: 'Update routing or enabled flag for one provider (no secret rotation)',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: {
           type: 'object',
           properties: {
             id: { type: 'string' },
-            provider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] },
+            provider: { type: 'string', enum: registryNames },
           },
           required: ['id', 'provider'],
         },
@@ -1033,8 +1143,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     },
     async (req) => {
       const params = z
-        .object({ id: z.string(), provider: z.enum(['stripe', 'paypal', 'razorpay']) })
+        .object({ id: z.string(), provider: providerNameSchema })
         .parse(req.params);
+      const provider = params.provider as BillingProviderName;
       await ensureAppAccess(req, params.id, 'write');
       const body = z
         .object({
@@ -1045,15 +1156,15 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         })
         .parse(req.body);
       if (body.enabled !== undefined) {
-        await billingCredentialsService.setEnabled(params.id, params.provider, body.enabled);
+        await billingCredentialsService.setEnabled(params.id, provider, body.enabled);
       }
       if (body.mode !== undefined) {
-        await billingCredentialsService.setMode(params.id, params.provider, body.mode);
+        await billingCredentialsService.setMode(params.id, provider, body.mode);
       }
       if (body.countries !== undefined || body.priority !== undefined) {
         await billingCredentialsService.setRouting(
           params.id,
-          params.provider,
+          provider,
           body.countries ?? [],
           body.priority ?? 100,
         );
@@ -1076,12 +1187,16 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
         summary: 'Remove credentials for one provider entirely',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: {
           type: 'object',
           properties: {
             id: { type: 'string' },
-            provider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] },
+            provider: { type: 'string', enum: registryNames },
           },
           required: ['id', 'provider'],
         },
@@ -1089,10 +1204,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     },
     async (req) => {
       const params = z
-        .object({ id: z.string(), provider: z.enum(['stripe', 'paypal', 'razorpay']) })
+        .object({ id: z.string(), provider: providerNameSchema })
         .parse(req.params);
       await ensureAppAccess(req, params.id, 'write');
-      await billingCredentialsService.remove(params.id, params.provider);
+      await billingCredentialsService.remove(params.id, params.provider as BillingProviderName);
       void recordSecurityEvent({
         type: 'app.billing_credentials_deleted',
         actorType: 'operator',
@@ -1111,8 +1226,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
         summary: 'Auto-configure the provider webhook via its API (no manual paste)',
         description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.\n\n' +
           "Creates the webhook endpoint at this Application's ReliPay URL and stores the " +
           'returned signing secret (Stripe) / webhook id (PayPal) into the credentials. ' +
           'Save the provider credentials first. Razorpay is not supported — configure it manually.',
@@ -1120,7 +1238,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           type: 'object',
           properties: {
             id: { type: 'string' },
-            provider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] },
+            provider: { type: 'string', enum: registryNames },
           },
           required: ['id', 'provider'],
         },
@@ -1128,13 +1246,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     },
     async (req) => {
       const params = z
-        .object({ id: z.string(), provider: z.enum(['stripe', 'paypal', 'razorpay']) })
+        .object({ id: z.string(), provider: providerNameSchema })
         .parse(req.params);
       await ensureAppAccess(req, params.id, 'write');
       const application = await applicationsService.get(params.id);
       const result = await billingCredentialsService.registerWebhook(
         params.id,
-        params.provider,
+        params.provider as BillingProviderName,
         application.slug,
       );
       return { success: true, data: result };
@@ -1146,15 +1264,18 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
         summary: 'List recent INBOUND provider webhook events (Stripe/PayPal/Razorpay)',
         description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
           'The events ReliPay received from the billing provider (subscription activated, ' +
           'payment captured, etc.). Filter by `?provider=`. This is the inbound log — distinct ' +
           "from outbound webhook deliveries (this Application's own /webhooks endpoints).",
         querystring: {
           type: 'object',
           properties: {
-            provider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] },
+            provider: { type: 'string', enum: registryNames },
             ...paginationJsonSchema,
           },
         },
@@ -1163,7 +1284,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     async (req) => {
       const params = z.object({ id: z.string().min(1) }).parse(req.params);
       const query = z
-        .object({ provider: z.enum(['stripe', 'paypal', 'razorpay']).optional() })
+        .object({ provider: providerNameSchema.optional() })
         .merge(PaginationQuery)
         .parse(req.query);
       await ensureAppAccess(req, params.id, 'read');
@@ -1203,8 +1324,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
         summary: 'Revenue / subscription stats for this Application (Billing Overview tiles)',
         description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
           'Subscription counters (active, past-due, canceled/new in the last 30 days), MRR ' +
           '(ACTIVE recurring SUBSCRIPTION plans, yearly normalized to monthly), 30-day payment ' +
           'volume + success/failure counts, and a 12-month UTC monthly revenue series. ' +
@@ -1227,8 +1351,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
         summary: 'List payments for this Application (newest first)',
         description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
           'Operator view of every Payment row — subscription invoices and one-time charges. ' +
           'Filter by `status`, a `from`/`to` createdAt window, and `mode` (TEST/LIVE — operator ' +
           'surfaces see both modes by default; rows carry `mode`). Joined with the paying ' +
@@ -1329,8 +1456,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
         summary: 'List dunning cases for this Application (newest first)',
         description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
           'Failed-payment recovery cases. A case opens when a subscription goes PAST_DUE, ' +
           'sends reminder emails on day 0/3/7, and exhausts on day 14 (subscription canceled). ' +
           'The provider drives the actual card retries — see docs/billing.md → Dunning. ' +
@@ -1417,8 +1547,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · OAuth'],
+        security: [{ tenantSession: [] }],
         summary: 'Set or rotate an OAuth provider config (clientId + clientSecret + redirectUri)',
         description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.\n\n' +
           'clientSecret is encrypted at rest. Public bits (clientId, redirectUri, scopes, issuerUrl) live in `oauthConfig`. ' +
           'Built-in providers: google, github, microsoft, discord, gitlab, slack, oidc. ' +
           'For `oidc`, also pass `issuerUrl` (e.g. https://login.example.com) — endpoints are auto-discovered.',
@@ -1479,7 +1612,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · OAuth'],
+        security: [{ tenantSession: [] }],
         summary: 'Remove an OAuth provider config',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, provider: { type: 'string' } },
@@ -1505,8 +1642,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · End-users'],
+        security: [{ tenantSession: [] }],
         summary: 'List recent end-users (for license issuance pickers etc.)',
         description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
           'Sort with `?sort=createdAt|email&order=asc|desc` (default createdAt desc). ' +
           'Rows carry `mode` (TEST = signed up via an rp_test_* key); operator surfaces see ' +
           'both modes by default — filter with `?mode=TEST|LIVE`.',
@@ -1584,8 +1724,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       config: { idempotency: true },
       schema: {
         tags: ['Tenant · End-users'],
+        security: [{ tenantSession: [] }],
         summary: 'Create an end-user manually (operator-driven)',
         description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.\n\n' +
           'Use this for support seeding / data migrations. The SDK\'s public sign-up endpoint is ' +
           'the normal path. Password is optional — if omitted, the user can only sign in via OAuth ' +
           'or via password-reset flow. Marks the email verified by default since an operator vouched.',
@@ -1657,7 +1800,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · End-users'],
+        security: [{ tenantSession: [] }],
         summary: 'Get one end-user with their passkeys + recent impersonation audits',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
       },
     },
     async (req) => {
@@ -1726,7 +1873,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · End-users'],
+        security: [{ tenantSession: [] }],
         summary: "Get an end-user's subscriptions, payments + licenses (operator billing view)",
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
       },
     },
     async (req) => {
@@ -1817,8 +1968,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · End-users'],
+        security: [{ tenantSession: [] }],
         summary: 'Patch an end-user (role, metadata, verified flag)',
         description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.\n\n' +
           'Email is immutable (it\'s the natural key per-Application). To change a password use the ' +
           'password-reset flow. Pass `metadata: null` to clear; pass an object to overwrite — partial ' +
           'merges aren\'t supported because Json columns can\'t deep-merge atomically.',
@@ -1898,8 +2052,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · End-users'],
+        security: [{ tenantSession: [] }],
         summary:
           'Delete an end-user (cascade), or GDPR-erase them with ?erasure=true (tombstone + retain financials)',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, euid: { type: 'string' } },
@@ -2048,7 +2206,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Credits'],
+        security: [{ tenantSession: [] }],
         summary: "Get an end-user's credit balance + recent ledger",
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
       },
     },
     async (req) => {
@@ -2080,8 +2242,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       config: { idempotency: true },
       schema: {
         tags: ['Tenant · Credits'],
+        security: [{ tenantSession: [] }],
         summary: 'Manually grant / refund / adjust an end-user\'s credits',
         description:
+          'Requires **billing-write** access to this Application — OWNER/ADMIN, or a MEMBER ' +
+          'with an `APP_ADMIN` or `APP_BILLING` grant on it.\n\n' +
           'Positive `amount` adds credits (GRANT / REFUND). Negative `amount` with reason ADJUST ' +
           'removes them (refused if it would overdraw). Idempotent on `idempotencyKey` when provided.',
         body: {
@@ -2141,8 +2306,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · End-users'],
+        security: [{ tenantSession: [] }],
         summary: 'Export everything stored about one end-user as JSON (GDPR/DSAR)',
         description:
+          'Requires the **OWNER or ADMIN** workspace role.\n\nRequires **read** access to ' +
+          'this Application — OWNER/ADMIN, or a MEMBER holding any grant on it (grant-less ' +
+          'legacy members keep workspace-wide read).\n\n' +
           'Returns a downloadable JSON document: profile, OAuth identities, session metadata ' +
           '(no token material), MFA enrollment metadata (no secrets), passkey metadata, ' +
           'organization memberships, subscriptions, payments, licenses (key prefix only), ' +
@@ -2454,8 +2623,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · End-users'],
+        security: [{ tenantSession: [] }],
         summary: 'Mint a short-lived impersonation token for an end-user (audited)',
         description:
+          'Requires the **OWNER or ADMIN** workspace role.\n\nRequires **read** access to ' +
+          'this Application — OWNER/ADMIN, or a MEMBER holding any grant on it (grant-less ' +
+          'legacy members keep workspace-wide read).\n\n' +
           'Operator-as-user access token, 5-minute lifetime, no refresh. Every minting writes ' +
           'an `impersonation_audits` row. Use sparingly — every action taken with this token ' +
           'is attributed to the end-user in their own activity logs, with the operator id in ' +
@@ -2536,8 +2709,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
         summary: 'Force-logout every end-user of this Application (session kill-switch)',
         description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.\n\n' +
           'Bumps the app token generation (invalidating all live end-user access + ' +
           'MFA-challenge tokens) and revokes every active refresh token. End-users ' +
           'must sign in again. Irreversible.',
@@ -2582,8 +2758,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
         summary: 'Rotate the publishable key (dual-key grace window)',
         description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.\n\n' +
           'Mints a new rp_pub_ key and keeps the old one valid for `graceDays` (default 30, ' +
           'max 90) so clients shipped with the old key keep working until you redeploy. ' +
           'Roll the new key out to your frontends/installs during the window.',
@@ -2651,7 +2830,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
         summary: 'Update hosted customer portal settings (enable/disable, branding)',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
         body: {
           type: 'object',
@@ -2727,7 +2910,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
         summary: 'Get the Application IP allowlist + CORS origins',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
         params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
       },
     },
@@ -2747,8 +2934,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
         summary: 'Set the Application IP allowlist (secret-key calls) + CORS origins',
         description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.\n\n' +
           'ipAllowlist: CIDRs/IPs that server-side secret keys must call from (empty = ' +
           'allow all). corsOrigins: browser origins the SDK calls from, folded into the ' +
           'API CORS allowlist. Each field is replace-in-full when provided.',
@@ -2807,7 +2997,14 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   app.get(
     '/:id/end-user-roles',
     {
-      schema: { tags: ['Tenant · End-users'], summary: 'List the role catalog for an Application' },
+      schema: {
+        tags: ['Tenant · End-users'],
+        security: [{ tenantSession: [] }],
+        summary: 'List the role catalog for an Application',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
+      },
     },
     async (req) => {
       const { id } = AppParam.parse(req.params);
@@ -2821,7 +3018,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · End-users'],
+        security: [{ tenantSession: [] }],
         summary: 'Add a role to the catalog',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         body: {
           type: 'object',
           required: ['name'],
@@ -2858,7 +3059,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · End-users'],
+        security: [{ tenantSession: [] }],
         summary: 'Update a role (description, default flag)',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         body: {
           type: 'object',
           properties: {
@@ -2894,7 +3099,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · End-users'],
+        security: [{ tenantSession: [] }],
         summary: 'Delete a role; pass ?reassignTo=name to bulk-move users in one transaction',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         querystring: {
           type: 'object',
           properties: { reassignTo: { type: 'string', minLength: 1, maxLength: 40 } },
@@ -2923,7 +3132,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Licenses'],
+        security: [{ tenantSession: [] }],
         summary: 'List licenses for an Application',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
       },
     },
@@ -2943,8 +3156,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       config: { idempotency: true },
       schema: {
         tags: ['Tenant · Licenses'],
+        security: [{ tenantSession: [] }],
         summary: 'Issue a license to an end-user',
         description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.\n\n' +
           'Returns the raw key in `data.rawKey` — show ONCE. PERPETUAL/TIMED/SEATS kinds. ' +
           'Customer apps validate via POST /api/v1/licenses/verify.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
@@ -3016,7 +3232,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Licenses'],
+        security: [{ tenantSession: [] }],
         summary: 'Revoke a license',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, licenseId: { type: 'string' } },
@@ -3041,7 +3261,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Usage'],
+        security: [{ tenantSession: [] }],
         summary: 'List usage meters',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
       },
     },
@@ -3058,7 +3282,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Usage'],
+        security: [{ tenantSession: [] }],
         summary: 'Create a usage meter',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         body: {
           type: 'object',
           required: ['slug', 'name', 'unit'],
@@ -3090,7 +3318,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Usage'],
+        security: [{ tenantSession: [] }],
         summary: 'Toggle a usage meter active/inactive',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
       },
     },
     async (req) => {
@@ -3108,7 +3340,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Usage'],
+        security: [{ tenantSession: [] }],
         summary: 'Permanently delete a usage meter (cascades to records)',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
       },
     },
     async (req) => {
@@ -3134,7 +3370,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
         summary: 'List end-user organizations in this Application',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
       },
@@ -3165,7 +3405,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
         summary: 'Get one organization with its members + pending invitations',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, orgId: { type: 'string' } },
@@ -3215,7 +3459,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
         summary: 'Delete an organization (cascades to memberships + invitations)',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, orgId: { type: 'string' } },
@@ -3244,7 +3492,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
         summary: 'Create an organization (optionally seed an initial OWNER)',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         body: {
           type: 'object',
@@ -3295,7 +3547,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
         summary: 'Update an organization (name / metadata)',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, orgId: { type: 'string' } },
@@ -3344,7 +3600,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
         summary: 'Add an existing end-user to an organization with a role',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, orgId: { type: 'string' } },
@@ -3391,7 +3651,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
         summary: "Change an organization member's role",
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, orgId: { type: 'string' }, euid: { type: 'string' } },
@@ -3434,7 +3698,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
         summary: 'Remove an end-user from an organization',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, orgId: { type: 'string' }, euid: { type: 'string' } },
@@ -3463,7 +3731,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
         summary: 'Org billing summary — entitlements, shared credit pool, beneficiary subscriptions',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, orgId: { type: 'string' } },
@@ -3531,8 +3803,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     {
       schema: {
         tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
         summary: 'Mint + reveal the raw key for an org-pooled license (shown once)',
         description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.\n\n' +
           'Org-pooled license keys are issued during provisioning and stored hash-only, so the ' +
           'raw key is never readable afterwards. This mints a NEW key for the existing pooled ' +
           'license and returns it in `data.rawKey` — show ONCE. Use it to hand the org its key ' +

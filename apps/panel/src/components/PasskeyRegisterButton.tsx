@@ -12,6 +12,7 @@
 import * as React from 'react';
 import { startRegistration } from '@simplewebauthn/browser';
 import { isRedirectError } from '@/lib/redirect-error';
+import { Banner } from '@/components/Banner';
 
 type OptionsJSON = Parameters<typeof startRegistration>[0]['optionsJSON'];
 
@@ -72,7 +73,7 @@ export function PasskeyRegisterButton({ start, complete }: Props): React.JSX.Ele
           maxLength={64}
           aria-label="Device label"
           disabled={pending}
-          className="flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]"
+          className="flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
         />
         <button
           type="button"
@@ -84,12 +85,9 @@ export function PasskeyRegisterButton({ start, complete }: Props): React.JSX.Ele
         </button>
       </div>
       {err && (
-        <p
-          role="alert"
-          className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300"
-        >
+        <Banner tone="error">
           {err}
-        </p>
+        </Banner>
       )}
     </div>
   );

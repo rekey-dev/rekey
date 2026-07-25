@@ -8,6 +8,20 @@
  * Keep `tags` consistent ("Admin · Tenants", "Admin · Applications", etc.) so
  * the docs UI groups routes intuitively. Every route should have at minimum
  * `summary` and ideally `description`.
+ *
+ * **Security schemes are a contract, not decoration.** There is deliberately NO
+ * top-level `security` default: six different credentials guard this API and no
+ * single one is a sane fallback, so a route with no `security` would silently
+ * inherit a lie. Instead every route states its own `security` — including
+ * `security: []` for genuinely public routes, so "public" is asserted rather
+ * than inferred from an omission.
+ *
+ * Reading the array: the outer array is OR, each object's keys are AND. So
+ * `[{ apiKey: [] }, { publishableKey: [] }]` means "secret key OR publishable
+ * key", while `[{ apiKey: [], userToken: [] }]` means "secret key AND the
+ * end-user JWT". OpenAPI cannot express role or grant requirements
+ * (`requireTenantRole`, `ensureAppAccess`, API-key scopes) — those belong in the
+ * route's `description`.
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -22,10 +36,32 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
         description:
           'Self-hostable authentication + billing + admin REST API. All money is in ' +
           'integer minor units (cents). Every error carries a `code`, human `message`, ' +
-          'and a `fix`. Authenticate public routes with an Application secret key ' +
-          '(`rp_live_…` / `rp_test_…`) in the `Authorization: Bearer` header; per-user ' +
-          'routes also take the user JWT in `X-Relipay-User-Token`.',
-        version: '0.1.0-beta.1',
+          'and a `fix`.\n\n' +
+          '## Which credential do I send?\n\n' +
+          'Six different credentials guard this API. Each route documents its own — ' +
+          'read the padlock, not this list. In short:\n\n' +
+          '- **Publishable key** (`rp_pub_…`, `Authorization: Bearer`) — the browser ' +
+          'credential. Safe to ship in client-side JavaScript. Accepted on the ' +
+          'public-bootstrap surface (sign-in/up, magic link, passkeys, OAuth start, ' +
+          'plan/subscription reads, checkout, organizations). Restricted by the ' +
+          "Application's origin allowlist rather than kept secret.\n" +
+          '- **Application secret key** (`rp_live_…` / `rp_test_…`, `Authorization: ' +
+          'Bearer`) — the server-side credential. Accepted everywhere the publishable ' +
+          'key is, plus the privileged surface it cannot reach (usage, credits, ' +
+          'licenses, coupon redemption, session/user administration). Never ship it to ' +
+          'a browser.\n' +
+          '- **End-user JWT** (`X-Relipay-User-Token`) — sent *in addition to* one of ' +
+          'the two keys above on routes that act on behalf of a signed-in end user. ' +
+          'You get it from the `token` in a sign-in response.\n' +
+          '- **Operator session** (`Authorization: Bearer` access token) — for the ' +
+          'panel/operator surface under `/api/v1/tenant/*`.\n' +
+          '- **Operator PAT** (`rp_op_…`, `Authorization: Bearer`) — long-lived operator ' +
+          'token for scripts and agents.\n' +
+          '- **Super-admin key** (`SUPER_ADMIN_KEY`, `Authorization: Bearer`) — the ' +
+          'self-host bootstrap credential, for `/api/v1/admin/*` only.\n\n' +
+          'Provider webhook ingress routes take **no** credential at all — the ' +
+          'provider signature is the authentication.',
+        version: '1.1.0',
       },
       servers: [
         { url: 'https://api.relipay.dev', description: 'Production' },
@@ -37,13 +73,133 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
             type: 'http',
             scheme: 'bearer',
             description:
-              'Bootstrap admin credential (SUPER_ADMIN_KEY env var). Required for every /api/v1/admin/* route.',
+              '**What:** the self-host bootstrap admin credential — a single shared ' +
+              'secret, not tied to any workspace or Application.\n\n' +
+              '**Where from:** the `SUPER_ADMIN_KEY` environment variable you set on the ' +
+              'API deployment.\n\n' +
+              '**Where used:** `/api/v1/admin/*` only. Server-side only — this key can ' +
+              'read and write every tenant on the deployment, so treat it like a root ' +
+              'password. `requireApiKey` and the operator guards all reject it.',
           },
           apiKey: {
             type: 'http',
             scheme: 'bearer',
+            bearerFormat: 'rp_live_… / rp_test_…',
             description:
-              'Application-scoped secret key (rp_live_… or rp_test_…). Used by @relipay/node for the public API.',
+              '**What:** an Application-scoped **secret** key. Full server-side authority ' +
+              'over that one Application; the `rp_test_` / `rp_live_` prefix also picks ' +
+              "the request's test-or-live data mode.\n\n" +
+              '**Where from:** Panel → Application → API Keys (shown once at mint time). ' +
+              'Used by `@relipay/node`.\n\n' +
+              '**Where used:** every non-admin, non-operator route. Some keys are minted ' +
+              'with narrow scopes (`auth:read`, `auth:write`, `billing:read`, ' +
+              '`billing:write`, `webhooks:read`); when a route needs a specific scope its ' +
+              'description says so. May also be restricted by the ' +
+              "Application's IP allowlist.\n\n" +
+              '**Never** put this in browser or mobile-client code — use the publishable ' +
+              'key there.',
+          },
+          publishableKey: {
+            type: 'http',
+            scheme: 'bearer',
+            bearerFormat: 'rp_pub_…',
+            description:
+              '**What:** the Application **publishable** key — a browser-safe credential. ' +
+              'It identifies the Application and asserts "legitimate public client"; it ' +
+              'grants nothing on its own (sign-in still needs the password or passkey, ' +
+              'license verify still needs the license key).\n\n' +
+              '**Safe in browser code.** It is designed to be embedded in client-side ' +
+              'JavaScript, mobile apps, and public HTML. Its protection is the ' +
+              "Application's **origin allowlist** (Panel → Application → Access) plus " +
+              'per-route rate limits, not secrecy.\n\n' +
+              '**Where from:** Panel → Application (displayed alongside the secret key). ' +
+              'Rotating it leaves the previous key valid for a grace window so clients ' +
+              'can redeploy.\n\n' +
+              '**Where used:** only the public-bootstrap surface — routes guarded by ' +
+              '`requirePublishableOrSecretKey`. It is structurally rejected by every ' +
+              'privileged route, so it can never reach money or administrative writes. ' +
+              'API-key scopes do not apply to it (route membership is the gate). ' +
+              'Publishable requests always read **live** data.',
+          },
+          userToken: {
+            type: 'apiKey',
+            in: 'header',
+            name: 'X-Relipay-User-Token',
+            description:
+              '**What:** the end-user access JWT — proof that a specific end user of your ' +
+              'Application is signed in. It is a *second* credential: send it **together ' +
+              'with** the publishable or secret key in `Authorization`, never instead of ' +
+              'one.\n\n' +
+              '**Where from:** the `token` field returned by sign-in, sign-up, ' +
+              'magic-link/OAuth/passkey completion, or `POST /api/v1/auth/refresh`.\n\n' +
+              '**Where used:** every route that acts on behalf of the signed-in user — ' +
+              '`/api/v1/users/me`, subscriptions and payment methods, organizations, MFA ' +
+              'enrollment, coupon redemption. The JWT carries its issuing ' +
+              '`applicationId` and must match the Application the key resolved to, so a ' +
+              "token from one Application can't be replayed against another.",
+          },
+          tenantSession: {
+            type: 'http',
+            scheme: 'bearer',
+            description:
+              '**What:** an **operator** (workspace-member) session access token — the ' +
+              'credential the ReliPay panel uses. Scoped to one workspace plus the ' +
+              "operator's live role in it (OWNER / ADMIN / MEMBER).\n\n" +
+              '**Where from:** `POST /api/v1/tenant/auth/sign-in` (or the passkey / OAuth ' +
+              'equivalents) returns `accessToken`; refresh it at ' +
+              '`POST /api/v1/tenant/auth/refresh`. Short-lived — for scripts and agents ' +
+              'prefer an operator PAT.\n\n' +
+              '**Where used:** the operator surface under `/api/v1/tenant/*`. Workspace ' +
+              'membership and role are re-read from the database on every request, so a ' +
+              'downgrade or removal takes effect immediately. Routes that additionally ' +
+              'demand OWNER/ADMIN, or a per-Application grant, say so in their ' +
+              'description — OpenAPI cannot express that here.',
+          },
+          operatorPat: {
+            type: 'http',
+            scheme: 'bearer',
+            bearerFormat: 'rp_op_…',
+            description:
+              '**What:** an operator **personal access token** — a long-lived stand-in ' +
+              'for an operator session, for scripts, CI, and AI agents. Bound to one ' +
+              'operator and one workspace, and carries its own scope list ' +
+              '(`read`, `keys:mint`, `mcp:operator:write`, …) that is default-deny.\n\n' +
+              '**Where from:** `POST /api/v1/tenant/auth/api-tokens` (requires an ' +
+              'operator session). Shown once at mint time.\n\n' +
+              '**Where used:** `/api/v1/tenant/operator/*` and the operator MCP endpoint. ' +
+              "Workspace membership and the operator's live role are re-checked on every " +
+              'request, so revoking membership kills the token. Server-side only.',
+          },
+          mcpAccessToken: {
+            type: 'http',
+            scheme: 'bearer',
+            description:
+              '**What:** the credential for the operator MCP JSON-RPC endpoint ' +
+              '(`/api/v1/tenant/mcp`). The guard accepts **either** an operator PAT ' +
+              '(`rp_op_…`, which must carry the `read` scope) **or** an OAuth-issued ' +
+              "access JWT (`typ: op_mcp_access`) minted by this deployment's operator-MCP " +
+              'authorization server. One bearer at a time — credentials are not chained.\n\n' +
+              '**Where from:** mint a PAT at `POST /api/v1/tenant/auth/api-tokens`, or let ' +
+              'your MCP client run the OAuth flow starting at ' +
+              '`GET /api/v1/tenant/mcp/oauth/authorize`.\n\n' +
+              '**Where used:** the MCP endpoint only. Read tools need nothing beyond ' +
+              'authentication; write tools additionally require the ' +
+              '`mcp:operator:write` scope (plus `applications:write` on the OAuth path) ' +
+              'and an OWNER/ADMIN role floor.',
+          },
+          endUserMcpToken: {
+            type: 'http',
+            scheme: 'bearer',
+            description:
+              "**What:** an **end-user** MCP access JWT (`typ: mcp_access`), scoped to one " +
+              'Application and one of its end users. Distinct from `mcpAccessToken`, which is ' +
+              'the operator-facing MCP credential — do not mix them up.\n\n' +
+              '**Where from:** the OAuth 2.1 + PKCE flow this deployment hosts per Application ' +
+              'at `/api/v1/mcp/{slug}/oauth/authorize` → `/oauth/token`. An MCP client ' +
+              '(e.g. a custom connector) drives it; the end user signs in and consents.\n\n' +
+              '**Where used:** `POST /api/v1/mcp/{slug}` only. Read-only — it exposes that ' +
+              "user's own profile, subscription, and usage. Invalidated by the Application's " +
+              'session kill-switch (`tokenGeneration`) like any other end-user token.',
           },
         },
       },

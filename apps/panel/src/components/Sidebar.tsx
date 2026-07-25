@@ -117,7 +117,7 @@ function SearchButton(): React.JSX.Element {
     <button
       type="button"
       onClick={openCommandPalette}
-      className="mt-2 flex w-full items-center gap-2 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-xs text-[var(--color-muted-fg)] transition-colors hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
+      className="mt-2 flex w-full items-center gap-2 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-xs text-[var(--color-muted-fg)] transition-colors hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
     >
       <span className="text-[var(--color-faint-fg)]">{ICONS.search}</span>
       Search…
@@ -194,7 +194,7 @@ export function Sidebar({
       <div className="px-4 pt-4 pb-3">
         <Link
           href="/applications"
-          className="mb-3 inline-flex items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
+          className="mb-3 inline-flex items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/logo-mark.png" alt="" className="h-6 w-auto" />
@@ -227,7 +227,7 @@ export function Sidebar({
                   title={item.title}
                   aria-current={active ? 'page' : undefined}
                   className={
-                    'flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50 ' +
+                    'flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] ' +
                     (active
                       ? 'bg-[var(--color-surface-muted)] font-medium text-[var(--color-fg)]'
                       : 'text-[var(--color-muted-fg)] hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-fg)]')

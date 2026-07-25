@@ -66,12 +66,21 @@ function cuid(): string {
   return randomBytes(16).toString('base64url');
 }
 
+// Hard ceiling on enabled endpoints fanned out per event. An application with
+// this many live webhooks is already pathological; the cap bounds memory + the
+// per-event fan-out so a runaway integration can't load an unbounded set into
+// memory on every emitted event. Deterministic order (oldest first) so which
+// endpoints win under the cap is stable rather than DB-order-dependent.
+const MAX_ENDPOINTS_PER_EVENT = 100;
+
 function listForEvent(
   applicationId: string,
   type: WebhookEventType,
 ): Promise<WebhookEndpoint[]> {
   return prisma.webhookEndpoint.findMany({
     where: { applicationId, enabled: true },
+    orderBy: { createdAt: 'asc' },
+    take: MAX_ENDPOINTS_PER_EVENT,
   }).then((rows) => rows.filter((r) => endpointMatches(r.events, type)));
 }
 

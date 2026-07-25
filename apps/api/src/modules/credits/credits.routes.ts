@@ -87,16 +87,24 @@ async function resolveSubject(
 }
 
 export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
+  // Server-side only: `requireApiKey` rejects the publishable key outright.
   app.addHook('onRequest', requireApiKey);
   app.addHook('onRequest', requireBillingEnabled);
-  app.addHook('onRequest', requireScope('billing:write'));
+  // Scope is per-route, not per-plugin: the reads take `billing:read` so a
+  // deliberately-narrow read-only key works. `billing:write` implies
+  // `billing:read` in SCOPE_IMPLICATIONS, so existing write keys are unaffected.
 
   app.get(
     '/balance',
     {
+      onRequest: requireScope('billing:read'),
       schema: {
         tags: ['Public · Credits'],
         summary: "Get a subject's current credit balance (end-user or org)",
+        description:
+          'Accepts a narrow `billing:read` key, since this only reads. A `billing:write` ' +
+          'key also works, because write implies read. Secret key only; the publishable ' +
+          'key is rejected.',
         security: [{ apiKey: [] }],
         querystring: {
           type: 'object',
@@ -115,6 +123,7 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/consume',
     {
+      onRequest: requireScope('billing:write'),
       // Generic Idempotency-Key HEADER support (scoped to the Application).
       // Distinct from the body-level `idempotencyKey` below, which dedupes at
       // the credit-ledger level and keeps working unchanged — the header is
@@ -160,9 +169,13 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/ledger',
     {
+      onRequest: requireScope('billing:read'),
       schema: {
         tags: ['Public · Credits'],
         summary: "List a subject's recent credit ledger entries (newest first)",
+        description:
+          'Accepts a narrow `billing:read` key, like `GET /balance`. Secret key only; the ' +
+          'publishable key is rejected.',
         security: [{ apiKey: [] }],
         querystring: {
           type: 'object',

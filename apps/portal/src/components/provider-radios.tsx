@@ -8,11 +8,24 @@
 
 import type { BillingProviderInfoDto } from '@relipay/react';
 
+/**
+ * Built-in fallback labels for the three bundled providers. The server's
+ * `label` (P4 discovery, carried on the already-fetched providers list) wins
+ * when present; an unknown provider degrades to a capitalized name.
+ */
 const LABELS: Record<string, string> = {
   stripe: 'Stripe',
   paypal: 'PayPal',
   razorpay: 'Razorpay',
 };
+
+function labelFor(p: BillingProviderInfoDto): string {
+  return (
+    p.label ??
+    LABELS[p.provider] ??
+    (p.provider.length === 0 ? p.provider : p.provider[0]!.toUpperCase() + p.provider.slice(1))
+  );
+}
 
 export function ProviderRadios({
   providers,
@@ -31,7 +44,7 @@ export function ProviderRadios({
             className="flex cursor-pointer items-center gap-2.5 rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-[var(--color-bg)]"
           >
             <input type="radio" name={name} value={p.provider} defaultChecked={i === 0} />
-            <span className="font-medium text-[var(--color-fg)]">{LABELS[p.provider] ?? p.provider}</span>
+            <span className="font-medium text-[var(--color-fg)]">{labelFor(p)}</span>
           </label>
         ))}
       </div>

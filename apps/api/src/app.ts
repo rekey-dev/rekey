@@ -21,6 +21,15 @@ import { env, corsAllowedOrigins } from './config/env.js';
 import { healthRoutes } from './routes/health.js';
 import { jwksRoutes } from './routes/jwks.js';
 import { relipayErrorHandler } from './lib/error.js';
+import { requestIdFor } from './lib/request-id.js';
+import {
+  authCeilingOptions,
+  globalRateLimitMax,
+  rateLimitError,
+  rateLimitedAfter,
+  wantsAuthCeiling,
+} from './lib/rate-limit.js';
+import { rejectUnsupportedMediaType } from './middleware/media-type.js';
 import { recordApiRequest, flushApiRequestLogs, pruneApiRequestLogs } from './lib/request-log.js';
 import { pruneExpiredAuthTokens, pruneExpiredIdempotencyKeys } from './lib/token-prune.js';
 import { idempotencyPreHandler, idempotencyOnSend } from './middleware/idempotency.js';
@@ -35,7 +44,12 @@ import { authRoutes, authenticatedAuthRoutes, userTokenMeRoutes } from './module
 import { plansRoutes } from './modules/plans/index.js';
 import { couponsAdminRoutes, couponsPublicRoutes } from './modules/coupons/index.js';
 import { billingRoutes } from './modules/billing/index.js';
-import { stripeWebhookRoutes, paypalWebhookRoutes, razorpayWebhookRoutes } from './modules/billing/webhooks/index.js';
+import {
+  stripeWebhookRoutes,
+  paypalWebhookRoutes,
+  razorpayWebhookRoutes,
+  billingProviderWebhookRoutes,
+} from './modules/billing/webhooks/index.js';
 import { meRoutes } from './routes/me.js';
 import { usersMeRoutes } from './routes/users-me.js';
 import {
@@ -82,6 +96,65 @@ export interface BuildAppOptions {
   logger?: boolean | Record<string, unknown>;
 }
 
+/** Entries proxy-addr understands besides literal IPs/CIDRs. */
+const PROXY_KEYWORDS = new Set(['loopback', 'linklocal', 'uniquelocal']);
+
+/** Rough IPv4/IPv6/CIDR shape check — proxy-addr throws on malformed input. */
+function looksLikeAddress(entry: string): boolean {
+  if (PROXY_KEYWORDS.has(entry)) return true;
+  const [addr, mask, ...rest] = entry.split('/');
+  if (rest.length > 0 || !addr) return false;
+  if (mask !== undefined && !/^\d{1,3}$/.test(mask)) return false;
+  const ipv4 = /^(\d{1,3}\.){3}\d{1,3}$/;
+  const ipv6 = /^[0-9a-fA-F:]+$/;
+  if (ipv4.test(addr)) {
+    return addr.split('.').every((o) => Number(o) <= 255);
+  }
+  return ipv6.test(addr) && addr.includes(':');
+}
+
+/**
+ * Resolve Fastify's `trustProxy` from TRUSTED_PROXIES.
+ *
+ * Unset (the default) → `false`: `request.ip` is the real socket peer and a
+ * client-supplied X-Forwarded-For is ignored.
+ *
+ * Accepts a positive hop count ("1") or a comma-separated IP/CIDR allowlist
+ * ("10.0.0.0/8,172.16.0.1"), plus proxy-addr's `loopback`/`linklocal`/
+ * `uniquelocal` keywords. Deliberately NO trust-everything option: that is
+ * exactly the setting this replaced, where any peer could forge
+ * X-Forwarded-For and thereby request.ip — which rate limits, lockout, and IP
+ * allowlists all key off. Anything unparseable throws at boot rather than
+ * leaving proxy-addr to fail per-request on malformed input.
+ */
+export function trustProxyConfig(
+  raw: string | undefined = process.env.TRUSTED_PROXIES,
+): false | number | string[] {
+  const value = raw?.trim();
+  if (!value || value === 'false') return false;
+
+  const hops = Number(value);
+  if (!Number.isNaN(hops)) {
+    if (Number.isInteger(hops) && hops > 0) return hops;
+    throw new Error(
+      `[CONFIG] TRUSTED_PROXIES="${value}" is not a valid hop count — use a positive integer, an IP/CIDR list, or leave it unset.`,
+    );
+  }
+
+  const entries = value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const invalid = entries.filter((entry) => !looksLikeAddress(entry));
+  if (entries.length === 0 || invalid.length > 0) {
+    throw new Error(
+      `[CONFIG] TRUSTED_PROXIES contains entries that are not an IP, CIDR, or proxy-addr keyword: ${invalid.join(', ') || '(empty)'}. ` +
+        'Trusting X-Forwarded-For from the wrong source lets clients forge request.ip.',
+    );
+  }
+  return entries;
+}
+
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({
     logger:
@@ -100,7 +173,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         },
       } as Record<string, unknown>),
     bodyLimit: 1024 * 1024,
-    trustProxy: env.NODE_ENV === 'production',
+    // Trusting X-Forwarded-For means trusting whoever set it. Keyed off
+    // NODE_ENV this was `true` in production for ANY peer, so a client could
+    // mint unlimited rate-limit buckets (and forge request.ip for lockout and
+    // IP allowlists) with one header — measured: 60/60 requests bypassed the
+    // limiter with a rotating XFF. Now opt-in and explicit: set TRUSTED_PROXIES
+    // to your proxy's IP/CIDR list, or a hop count, once you actually run
+    // behind one. Default off = request.ip is the real socket peer.
+    trustProxy: trustProxyConfig(),
     // Treat `/x` and `/x/` as the same route. List/create endpoints register
     // at the collection root (`/` under a prefix → `/api/v1/admin/applications/`),
     // but SDK/CLI/MCP callers naturally hit the no-slash form. Without this,
@@ -108,6 +188,15 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     // both forms, so merging them is safe. (Fastify 5: find-my-way options
     // live under `routerOptions`.)
     routerOptions: { ignoreTrailingSlash: true },
+    // Request ids. Fastify's default is a per-process counter that restarts at
+    // `req-1` on every boot, so the id in an error envelope collided across
+    // restarts and replicas and "share the request id with support" pointed at
+    // nothing. `requestIdHeader: false` disables Fastify's own header handling —
+    // it would adopt an inbound value verbatim — and genReqId takes over, so an
+    // inbound X-Request-Id is honoured for trace continuity but sanitised and
+    // length-capped first (see lib/request-id.ts).
+    requestIdHeader: false,
+    genReqId: (req) => requestIdFor(req.headers as Record<string, unknown>),
   });
 
   // CORS — strict allowlist. Reflective `origin: true` is forbidden because
@@ -142,8 +231,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // Rate limiter. The default in-memory store is per-process, so with multiple
   // API replicas the effective limit multiplies. We back it with the shared
   // Redis client (null in test → in-memory) so the limit is shared across
-  // replicas. @fastify/rate-limit defaults to `skipOnError: true` — if Redis is
-  // unreachable it fails OPEN (skips the limit) rather than breaking auth.
+  // replicas. Store errors fail open — see `skipOnError` below.
   // Per-route tighter caps on auth endpoints layer on top via authRateLimit().
   const sharedRedis = getRedis();
   if (sharedRedis) {
@@ -152,14 +240,28 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     });
   }
   await app.register(rateLimit, {
-    max: env.RATE_LIMIT_MAX,
+    max: globalRateLimitMax(env.RATE_LIMIT_MAX),
     timeWindow: env.RATE_LIMIT_WINDOW_MS,
+    // Fail OPEN when the store errors. This is nominally the plugin default,
+    // but with `enableOfflineQueue: false` on our ioredis client a Redis
+    // outage surfaced as a synchronous throw ("Stream isn't writeable") that
+    // 500'd EVERY route — including /health and pure-Postgres reads. Set it
+    // explicitly so the behaviour is stated, not inherited. Losing rate
+    // limiting for the duration of a Redis outage is strictly better than
+    // losing the whole API.
+    skipOnError: true,
     // Key authed server-to-server traffic by API key so a customer's backend
     // (all calls from one IP) gets a per-key budget instead of one shared IP
     // budget. requireApiKey runs before this hook on authed routes, so
     // req.apiKey is set; unauthenticated routes fall back to req.ip — identical
     // to the previous per-IP behaviour.
     keyGenerator: (req) => req.apiKey?.id ?? req.ip,
+    // The plugin's default builder returns a bare Error with a statusCode and
+    // no `code`, which our envelope rendered as `BAD_REQUEST` + "check the
+    // request shape" — unswitchable, and actively misleading for a throttled
+    // caller. Set once here: route-level configs inherit it, so every limiter
+    // emits RATE_LIMITED with retryAfterSeconds.
+    errorResponseBuilder: rateLimitError,
     ...(sharedRedis ? { redis: sharedRedis } : {}),
   });
   await app.register(sensible);
@@ -180,6 +282,50 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // Error handler before any routes so hook-thrown RelipayError instances
   // hit our envelope, not Fastify's default error shape.
   app.setErrorHandler(relipayErrorHandler);
+
+  // Stamp the request id on EVERY response, not just error ones — docs/errors.md
+  // promises it unconditionally, and a client that wants to log the id of a
+  // successful call (to correlate later) needs it there too.
+  app.addHook('onRequest', async (req, reply) => {
+    reply.header('X-Request-Id', req.id);
+  });
+
+  // 415 for form-encoded bodies on JSON-only routes. onRequest so it lands
+  // before body parsing — see middleware/media-type.ts for why the global
+  // formbody parser made this necessary.
+  app.addHook('onRequest', rejectUnsupportedMediaType);
+
+  // Coarse ceiling for auth endpoints, deliberately at `onRequest`.
+  //
+  // A route-level `config.rateLimit` REPLACES the global limiter's hook for that
+  // route (the plugin's onRoute handler picks one or the other, it does not
+  // layer them). authRateLimit() now spends its tight cap on a per-identity
+  // bucket and, because that key needs the parsed body, runs at
+  // `preValidation` — which left auth routes with NO rate check before body
+  // parsing at all. An attacker could then push unbounded 1 MiB bodies at a
+  // sign-in route and pay only the parse cost, which is a worse DoS surface
+  // than the per-Application lockout this batch set out to fix.
+  //
+  // So this ceiling runs at `onRequest`, before any body is read, restoring a
+  // bounded parse budget. Its key is `apiKey?.id ?? ip` — the same rule the
+  // global limiter uses, and for the same reason: on routes where the API-key
+  // hook hasn't resolved yet it degrades to per-IP, which is exactly the
+  // protection unauthenticated routes already get.
+  //
+  // Driven through `createRateLimit` rather than a second `rateLimit()` hook on
+  // purpose: the hook form sets a per-request "already ran" flag that the
+  // route's own limiter shares, so it would silently disable the tight cap.
+  const authCeiling = app.createRateLimit(
+    authCeilingOptions(env.RATE_LIMIT_MAX, env.RATE_LIMIT_WINDOW_MS),
+  );
+  app.addHook('onRequest', async (req) => {
+    if (!wantsAuthCeiling(req.routeOptions?.config?.rateLimit)) return;
+    const result = await authCeiling(req);
+    // `isAllowed` is the union discriminant, not redundant with `isExceeded`:
+    // narrowing on it is what makes ttl/max visible on the failure branch.
+    if (result.isAllowed || !result.isExceeded) return;
+    throw rateLimitedAfter(result.ttl, result.max);
+  });
 
   // Generic Idempotency-Key support — opt-in per route via
   // `config: { idempotency: true }` (see middleware/idempotency.ts for the
@@ -356,6 +502,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(stripeWebhookRoutes, { prefix: '/api/v1/billing/webhook' });
   await app.register(paypalWebhookRoutes, { prefix: '/api/v1/billing/webhook' });
   await app.register(razorpayWebhookRoutes, { prefix: '/api/v1/billing/webhook' });
+  // Generic provider-module pipeline (docs/specs/billing-provider-modules.md).
+  // The legacy per-provider URLs above stay registered forever — operators
+  // have them configured at the provider — and (Stripe since P1) forward
+  // into this same pipeline.
+  await app.register(billingProviderWebhookRoutes, { prefix: '/api/v1/webhooks/billing' });
 
   // Tenant operator surface — email/password auth, workspace memberships,
   // tenant-scoped admin. The panel uses these day-to-day.
@@ -410,13 +561,18 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // (apps/admin → admin.relipay.dev). GET-only; gated by SUPER_ADMIN_KEY.
   await app.register(adminMetricsRoutes, { prefix: '/api/v1/admin/metrics' });
 
-  app.setNotFoundHandler((_req, reply) => {
+  app.setNotFoundHandler((req, reply) => {
+    // `requestId` here too: docs/errors.md documents it on every error envelope,
+    // and a 404 that turns out to be a routing/proxy problem is exactly the case
+    // where an operator wants to find the matching log line.
+    reply.header('X-Request-Id', req.id);
     return reply.status(404).send({
       success: false,
       error: {
         code: 'ROUTE_NOT_FOUND',
         message: 'Route not found.',
         fix: 'Browse /docs for the full route list.',
+        requestId: req.id,
       },
     });
   });

@@ -359,5 +359,6 @@ export type {
   EndUserDto,
   ProvidersListDto,
   BillingProviderInfoDto,
+  BillingProviderCapabilities,
   BillingProvider,
 } from '@relipay/shared-types';

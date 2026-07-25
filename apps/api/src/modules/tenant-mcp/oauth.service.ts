@@ -286,7 +286,7 @@ export const operatorMcpOAuthService = {
       !row ||
       row.clientId !== args.clientId ||
       row.redirectUri !== args.redirectUri ||
-      row.expiresAt < new Date()
+      row.expiresAt <= new Date()
     ) {
       invalid();
     }
@@ -335,7 +335,7 @@ export const operatorMcpOAuthService = {
     const invalid = (): never => {
       throw new OAuthError('invalid_grant', 'Refresh token is invalid, expired, or revoked.');
     };
-    if (!row || row.expiresAt < new Date() || row.revokedAt !== null) invalid();
+    if (!row || row.expiresAt <= new Date() || row.revokedAt !== null) invalid();
     if (row!.clientId !== args.clientId) {
       throw new OAuthError('invalid_grant', 'Refresh token is not valid for this client.');
     }

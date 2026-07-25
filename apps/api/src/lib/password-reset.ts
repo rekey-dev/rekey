@@ -62,7 +62,7 @@ export async function lookupResetToken(raw: string): Promise<ResetLookup> {
   });
   if (!token) return { kind: 'unknown' };
   if (token.consumedAt !== null) return { kind: 'consumed', token };
-  if (token.expiresAt < new Date()) return { kind: 'expired', token };
+  if (token.expiresAt <= new Date()) return { kind: 'expired', token };
   return { kind: 'ok', token };
 }
 

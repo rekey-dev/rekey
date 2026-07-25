@@ -13,6 +13,7 @@ import { CopyButton } from '@/components/CopyButton';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
+import { publicHttpUrl } from '@/lib/public-url';
 import { PageHeader } from '@/components/PageHeader';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
@@ -153,9 +154,13 @@ export default async function TeamPage({
       }).catch(() => [] as ApplicationRow[])
     : [];
   const memberRows = members.filter((m) => m.role === 'MEMBER');
-  const inviteUrl = inviteToken
-    ? `${process.env.PANEL_URL ?? 'http://localhost:3031'}/accept-invite?token=${inviteToken}`
-    : null;
+  // PANEL_URL is server-only and on some deploys is an in-cluster host (e.g.
+  // http://panel:3031) — publicHttpUrl() keeps that out of the client HTML.
+  // When it doesn't look public, fall back to a relative path: the operator is
+  // viewing this page at the panel's real origin, so the link resolves there
+  // and can be prefixed with their domain before sharing.
+  const panelBase = publicHttpUrl(process.env.PANEL_URL ?? 'http://localhost:3031') ?? '';
+  const inviteUrl = inviteToken ? `${panelBase}/accept-invite?token=${inviteToken}` : null;
 
   return (
     <section className="mx-auto max-w-7xl space-y-6 px-6 py-8 lg:px-8">
@@ -253,7 +258,7 @@ export default async function TeamPage({
         </p>
         {error && (error === 'grant-missing' || error === 'APP_GRANT_MEMBER_ONLY') && (
           <p role="alert" className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
-            {ERR[error] ?? error}
+            {ERR[error] ?? 'Something went wrong. Please try again.'}
           </p>
         )}
         {memberRows.length === 0 ? (
@@ -288,7 +293,7 @@ export default async function TeamPage({
                       {m.grants.map((g) => (
                         <li
                           key={g.applicationId}
-                          className="flex items-center justify-between gap-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)]/40 px-3 py-1.5"
+                          className="flex items-center justify-between gap-3 rounded-md border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-surface-muted)_40%,transparent)] px-3 py-1.5"
                         >
                           <span className="min-w-0 truncate text-sm">
                             {g.applicationName}{' '}
@@ -412,7 +417,7 @@ export default async function TeamPage({
           >
             {error && error !== 'INVITE_TARGET_ALREADY_MEMBER' && (
               <p role="alert" className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
-                {ERR[error] ?? error}
+                {ERR[error] ?? 'Something went wrong. Please try again.'}
               </p>
             )}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -424,6 +429,7 @@ export default async function TeamPage({
                   type="email"
                   name="email"
                   required
+                  autoComplete="email"
                   placeholder="teammate@example.com"
                   className={fieldInputCls}
                 />

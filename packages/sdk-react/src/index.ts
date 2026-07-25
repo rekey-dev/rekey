@@ -38,6 +38,7 @@ export type {
   PortalPaymentDto,
   ProvidersListDto,
   BillingProviderInfoDto,
+  BillingProviderCapabilities,
   BillingProvider,
 } from './client.js';
 export { mcpConnectionInfo } from './mcp.js';

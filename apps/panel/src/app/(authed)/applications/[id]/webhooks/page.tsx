@@ -13,6 +13,7 @@ import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
+import { Banner } from '@/components/Banner';
 
 interface EndpointRow {
   id: string;
@@ -37,6 +38,14 @@ const ALL_EVENTS = [
   'payment.succeeded',
   'payment.failed',
 ];
+
+const ERR: Record<string, string> = {
+  missing: 'A URL and at least one event are required.',
+  WEBHOOK_URL_UNSAFE:
+    'That URL is not allowed — use a public HTTPS URL (private/internal hosts are blocked).',
+  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage webhook endpoints.',
+  APPLICATION_NOT_FOUND: 'Application not found.',
+};
 
 async function createEndpoint(applicationId: string, formData: FormData): Promise<void> {
   'use server';
@@ -144,7 +153,7 @@ export default async function WebhooksPage({
                 name="url"
                 required
                 placeholder="https://your-app.example.com/api/relipay/webhook"
-                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]"
+                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
               />
             </label>
             <fieldset className="space-y-2">
@@ -215,9 +224,9 @@ export default async function WebhooksPage({
         />
       )}
       {error && (
-        <p role="alert" className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-          {error}
-        </p>
+        <Banner tone="error">
+          {ERR[error] ?? 'Something went wrong. Please try again.'}
+        </Banner>
       )}
 
       {endpoints.length === 0 ? (

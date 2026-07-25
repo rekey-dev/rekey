@@ -78,7 +78,7 @@ export function THead({
 
 export function TBody({ children }: { children: React.ReactNode }): React.JSX.Element {
   // Zebra striping on body rows; the header keeps its own muted surface.
-  return <tbody className="[&>tr:nth-child(even)]:bg-[var(--color-surface-muted)]/40">{children}</tbody>;
+  return <tbody className="[&>tr:nth-child(even)]:bg-[color-mix(in_srgb,var(--color-surface-muted)_40%,transparent)]">{children}</tbody>;
 }
 
 export function TR({
@@ -95,7 +95,7 @@ export function TR({
     <tr
       className={[
         'border-b border-[var(--color-border)] last:border-0 align-middle transition-colors',
-        hover ? 'hover:bg-[var(--color-surface-muted)]/70' : '',
+        hover ? 'hover:bg-[color-mix(in_srgb,var(--color-surface-muted)_70%,transparent)]' : '',
         className,
       ]
         .filter(Boolean)
@@ -196,7 +196,7 @@ export function TH({
           href={sort.href}
           className={[
             'group inline-flex items-center gap-1 rounded hover:text-[var(--color-fg)]',
-            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]',
             sort.dir ? 'text-[var(--color-fg)]' : '',
           ]
             .filter(Boolean)

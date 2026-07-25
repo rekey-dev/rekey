@@ -16,12 +16,23 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     environment:
       POSTGRES_USER: relipay
-      POSTGRES_PASSWORD: relipay
+      # No default. An unset POSTGRES_PASSWORD fails the container start with a
+      # clear Postgres error, which is the right outcome: the previous default
+      # of `relipay` shipped a known credential on every deployment.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (openssl rand -hex 24)}
       POSTGRES_DB: relipay
     ports:
-      - "5432:5432"
+      # Bound to loopback, NOT 0.0.0.0. Only the api container needs Postgres and
+      # it reaches it over the compose network by service name; publishing on all
+      # interfaces put the database on the public internet for anyone deploying
+      # to a VPS without a host firewall. Loopback keeps `pnpm dev` against
+      # dockerised datastores working.
+      - "127.0.0.1:5432:5432"
     volumes:
       - relipay_postgres:/var/lib/postgresql/data
     healthcheck:
@@ -33,14 +44,30 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     # AOF persistence so BullMQ webhook-delivery jobs (delayed retries) survive a
     # Redis restart. The DB retry poller backstops any gap; durable queue state
     # avoids needless re-deliveries on a bounce.
-    command: ["redis-server", "--appendonly", "yes"]
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--requirepass",
+        "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env (openssl rand -hex 24)}",
+      ]
     ports:
-      - "6379:6379"
+      # Loopback only — same reasoning as Postgres above. An unauthenticated
+      # Redis on a public interface is a trivially readable session/lockout store.
+      - "127.0.0.1:6379:6379"
     volumes:
       - relipay_redis:/data
+    environment:
+      # redis-cli reads this, so the healthcheck below doesn't put the password
+      # in a command line that shows up in `docker inspect`/`ps` output.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -49,6 +76,9 @@ services:
 
   api:
     profiles: ["full"]    # only starts with `docker compose --profile full up`
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     build:
       context: .
       target: api-runtime
@@ -58,8 +88,8 @@ services:
       redis:    { condition: service_healthy }
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgresql://relipay:relipay@postgres:5432/relipay?schema=public
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://relipay:${POSTGRES_PASSWORD}@postgres:5432/relipay?schema=public
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       JWT_SECRET:        ${JWT_SECRET:-change-me-in-prod}
       SESSION_SECRET:    ${SESSION_SECRET:-change-me-in-prod}
       ENCRYPTION_KEY:    ${ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
@@ -83,9 +113,21 @@ services:
       OPERATOR_MCP_ENABLED: ${OPERATOR_MCP_ENABLED:-true}
     ports:
       - "3030:3030"
+    healthcheck:
+      # Liveness, deliberately not /health/ready: restarting the API cannot fix
+      # a Postgres or Redis outage, and a restart loop during one makes recovery
+      # harder. Gate traffic on /health or /health/ready at the proxy instead.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3030/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
 
   panel:
     profiles: ["full"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     build:
       context: .
       target: panel-runtime
@@ -109,6 +151,9 @@ services:
   # http://localhost:3050/<slug>. See docs/portal.md.
   portal:
     profiles: ["full"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     build:
       context: .
       target: portal-runtime

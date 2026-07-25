@@ -20,6 +20,7 @@ import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
+import { Banner } from '@/components/Banner';
 
 // ─── Actions ─────────────────────────────────────────────────────────
 
@@ -128,7 +129,7 @@ export default async function OrganizationsPage({
         />
 
         {!enabled && (
-          <div className="rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
+          <Banner tone="warning">
             Organizations are <strong>disabled</strong> for this application — the SDK org endpoints
             return <code className="font-mono text-xs">ORGANIZATIONS_NOT_ENABLED</code> for end-users
             (operator management here still works). Enable it under{' '}
@@ -136,17 +137,14 @@ export default async function OrganizationsPage({
               Auth
             </Link>
             .
-          </div>
+          </Banner>
         )}
 
         {created && <SavedBanner params={['created']} message={`Organization ${created} created.`} />}
         {error && !newOrgError && (
-          <p
-            role="alert"
-            className="rounded-lg border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300"
-          >
+          <Banner tone="error">
             {ERR[error] ?? error}
-          </p>
+          </Banner>
         )}
 
         {orgs.length === 0 ? (
@@ -218,7 +216,7 @@ export default async function OrganizationsPage({
 // ─── Modal ───────────────────────────────────────────────────────────
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 function NewOrgModal({
   applicationId,
@@ -242,9 +240,9 @@ function NewOrgModal({
     >
       <form action={createOrg.bind(null, applicationId)} className="space-y-3">
         {error && !slugError && (
-          <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+          <Banner tone="error">
             {ERR[error] ?? error}
-          </p>
+          </Banner>
         )}
         <label className="block space-y-1">
           <span className="text-xs font-medium">Name<span className="text-[var(--color-primary)] ml-0.5">*</span></span>

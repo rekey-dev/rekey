@@ -109,6 +109,16 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
 
   app.get(
     '/:id/email-config',
+    {
+      schema: {
+        tags: ['Tenant · Email'],
+        security: [{ tenantSession: [] }],
+        summary: "Get an Application's email config and effective transport",
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
+      },
+    },
     async (req) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'read');
@@ -132,7 +142,11 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Tenant · Email'],
+        security: [{ tenantSession: [] }],
         summary: "Set or rotate the Application's BYO email transport (Resend or SMTP) + sender",
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         body: {
           type: 'object',
           required: ['fromAddress'],
@@ -187,7 +201,11 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Tenant · Email'],
+        security: [{ tenantSession: [] }],
         summary: 'Revert this Application to the default (or no) email transport',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
       },
     },
     async (req) => {
@@ -205,7 +223,11 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Tenant · Email'],
+        security: [{ tenantSession: [] }],
         summary: 'List recent email send-logs for this Application',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it (grant-less legacy members keep workspace-wide read).',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         querystring: {
           type: 'object',
@@ -236,32 +258,56 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
 
   // ---------- Templates ----------
 
-  app.get('/:id/email-templates', async (req) => {
-    const { id } = AppParam.parse(req.params);
-    await ensureAppAccess(req, id, 'read');
-    return { success: true, data: await emailService.listEvents(id) };
-  });
+  /**
+   * Shared schema head for the three template READ routes below. They all sit
+   * behind `requireTenantSession` (plugin hook) + `ensureAppAccess(id, 'read')`.
+   */
+  const templateReadSchema = {
+    tags: ['Tenant · Email'],
+    security: [{ tenantSession: [] }],
+    description:
+      'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+      'any grant on it (grant-less legacy members keep workspace-wide read).',
+  };
 
-  app.get('/:id/email-templates/:eventKey', async (req) => {
-    const { id, eventKey } = EventParam.parse(req.params);
-    await ensureAppAccess(req, id, 'read');
-    if (!isKnownEvent(eventKey)) {
-      throw new RelipayError({
-        statusCode: 404,
-        code: 'EMAIL_EVENT_UNKNOWN',
-        message: `Email event "${eventKey}" is not in the registry.`,
-        fix: 'Use one of the events returned by GET /email-templates.',
-      });
-    }
-    return { success: true, data: await emailService.getTemplate(id, eventKey) };
-  });
+  app.get(
+    '/:id/email-templates',
+    { schema: { ...templateReadSchema, summary: 'List customisable email events' } },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'read');
+      return { success: true, data: await emailService.listEvents(id) };
+    },
+  );
+
+  app.get(
+    '/:id/email-templates/:eventKey',
+    { schema: { ...templateReadSchema, summary: 'Get the template for one event' } },
+    async (req) => {
+      const { id, eventKey } = EventParam.parse(req.params);
+      await ensureAppAccess(req, id, 'read');
+      if (!isKnownEvent(eventKey)) {
+        throw new RelipayError({
+          statusCode: 404,
+          code: 'EMAIL_EVENT_UNKNOWN',
+          message: `Email event "${eventKey}" is not in the registry.`,
+          fix: 'Use one of the events returned by GET /email-templates.',
+        });
+      }
+      return { success: true, data: await emailService.getTemplate(id, eventKey) };
+    },
+  );
 
   app.put(
     '/:id/email-templates/:eventKey',
     {
       schema: {
         tags: ['Tenant · Email'],
+        security: [{ tenantSession: [] }],
         summary: 'Upsert a customised template for one event',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
       },
     },
     async (req) => {
@@ -293,7 +339,11 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Tenant · Email'],
+        security: [{ tenantSession: [] }],
         summary: 'Revert one event to the built-in default template',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
       },
     },
     async (req) => {
@@ -304,18 +354,31 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  app.post('/:id/email-templates/:eventKey/preview', async (req) => {
-    const { id, eventKey } = EventParam.parse(req.params);
-    await ensureAppAccess(req, id, 'read');
-    return { success: true, data: await emailService.previewWithSamples(id, eventKey) };
-  });
+  app.post(
+    '/:id/email-templates/:eventKey/preview',
+    {
+      schema: {
+        ...templateReadSchema,
+        summary: 'Render a template against sample data (no email is sent)',
+      },
+    },
+    async (req) => {
+      const { id, eventKey } = EventParam.parse(req.params);
+      await ensureAppAccess(req, id, 'read');
+      return { success: true, data: await emailService.previewWithSamples(id, eventKey) };
+    },
+  );
 
   app.post(
     '/:id/email-templates/:eventKey/test-send',
     {
       schema: {
         tags: ['Tenant · Email'],
+        security: [{ tenantSession: [] }],
         summary: 'Render the template with sample values and send to a chosen address',
+        description:
+          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.',
         body: {
           type: 'object',
           required: ['to'],

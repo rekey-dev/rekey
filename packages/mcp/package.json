@@ -1,6 +1,6 @@
 {
   "name": "@relipay/mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "license": "MIT",
   "description": "Model Context Protocol server for ReliPay — lets Claude Desktop / Cursor / Claude Code introspect a deployment.",
   "type": "module",
@@ -43,7 +43,6 @@
     "vitest": "^2.1.5"
   },
   "publishConfig": {
-    "access": "public",
-    "tag": "beta"
+    "access": "public"
   }
 }

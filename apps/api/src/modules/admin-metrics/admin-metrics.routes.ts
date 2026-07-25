@@ -132,6 +132,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Deployment-wide rollup',
         description: 'Tenants, applications, end-users, orgs, subscriptions, payments, MRR, webhook + API-request health over the last 24h/30d.',
       },
@@ -144,6 +145,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Service health',
         description: 'Live DB + Redis ping, outbound webhook 24h success rate, oldest unprocessed inbound webhook.',
       },
@@ -156,6 +158,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Active users & signup trend',
         description: 'End-user & operator active counts over 24h/7d/30d (refresh-token proxy) plus a 14-day end-user signup histogram.',
       },
@@ -168,6 +171,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Per-tenant summary (searchable + sortable)',
       },
     },
@@ -182,6 +186,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Per-application summary (searchable + sortable)',
       },
     },
@@ -196,6 +201,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'End-users (search by email/id)',
       },
     },
@@ -210,6 +216,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Operator accounts (search by email/name/id)',
       },
     },
@@ -224,6 +231,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Security audit (filter by actor/type/ip)',
       },
     },
@@ -238,6 +246,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'API request log (filter by status/method/path)',
       },
     },
@@ -252,6 +261,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Payments (filter by status, search by id/provider-id)',
       },
     },
@@ -266,6 +276,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Subscriptions (filter by status)',
       },
     },
@@ -280,6 +291,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Inbound webhook events (filter by provider, onlyFailed)',
       },
     },
@@ -294,6 +306,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Outbound webhook deliveries (filter by status/endpoint)',
       },
     },
@@ -308,6 +321,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Outstanding prepaid credits',
         description: 'SUM(CreditBalance.balance) deployment-wide + top-20 applications by outstanding balance.',
       },
@@ -320,6 +334,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'End-user accounts in lockout',
         description: 'End-users currently locked by the Redis brute-force limiter (`bf:lock:eu:login:*`) — failed-sign-in protection currently engaged.',
       },
@@ -341,6 +356,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Email transport rollup',
         description: 'EmailLog status counts over the last 24h + 7d, plus top-5 applications by error count (7d).',
       },
@@ -353,6 +369,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Per-endpoint webhook health (24h)',
         description: 'Outbound deliveries aggregated by endpoint — success rate + retry-storm flag. Sorted by failure count.',
       },
@@ -365,6 +382,7 @@ export async function adminMetricsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Metrics'],
+        security: [{ superAdminKey: [] }],
         summary: 'Payment health per application (30d)',
         description: 'Payments aggregated by application + status over the last 30 days. Surfaces apps whose provider integration is failing.',
       },

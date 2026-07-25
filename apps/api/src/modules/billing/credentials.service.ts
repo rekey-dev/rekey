@@ -10,7 +10,11 @@
  * response.** The route layer returns only `{provider, configured, enabled,
  * countries, priority}` shapes — see `statusList` below.
  *
- * Provider-specific credential shapes:
+ * Credential shapes are declared by each provider module's
+ * `credentialSchema` (providers/modules/<name>/), and this service is
+ * generic over them (P3): validation, mode inference, and the
+ * webhook-configured check all derive from the registry. The stored JSON
+ * keys are pinned by the registry-integrity test — zero data migration:
  *   stripe   → { apiKey: 'sk_live_…', webhookSecret: 'whsec_…' }
  *   paypal   → { clientId, clientSecret, webhookId }
  *   razorpay → { keyId, keySecret, webhookSecret }
@@ -27,9 +31,12 @@ import { encryptJson, decryptJson } from '../../lib/secrets.js';
 import { RelipayError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
 import { applicationsService } from '../applications/applications.service.js';
+import { getModule, credentialRulesSchema } from './providers/registry.js';
+import type { ProviderModule } from './providers/module-types.js';
 
 export type BillingProviderName = 'stripe' | 'paypal' | 'razorpay';
 
+/** @deprecated P3 — shapes are declared by the provider modules' `credentialSchema`; kept for typed callers. */
 export type StripeCredentials = {
   apiKey: string;
   webhookSecret: string;
@@ -66,31 +73,43 @@ export interface CredentialsStatus {
   webhookConfigured: boolean;
 }
 
-/** Does this provider's decrypted creds carry the webhook secret/id it needs? */
+/**
+ * Does this provider's decrypted creds carry the webhook secret/id it needs?
+ * Registry-driven: reads the module's single `webhookRole` field (Stripe /
+ * Razorpay declare `webhookSecret`, PayPal `webhookId` — same checks the
+ * hand-written version made). A provider without a registered module or a
+ * `webhookRole` field can never verify inbound webhooks → false.
+ */
 function hasWebhookConfigured(provider: BillingProviderName, data: unknown): boolean {
-  const d = (data ?? {}) as Record<string, unknown>;
-  if (provider === 'paypal') return typeof d.webhookId === 'string' && d.webhookId.length > 0;
-  return typeof d.webhookSecret === 'string' && (d.webhookSecret as string).length > 0;
+  const field = getModule(provider)?.credentialSchema.find((f) => f.webhookRole);
+  if (!field) return false;
+  const v = ((data ?? {}) as Record<string, unknown>)[field.key];
+  return typeof v === 'string' && v.length > 0;
 }
 
 /**
- * Best-effort mode inference from key shapes:
- *   - Stripe: `sk_live_` / `sk_test_`
- *   - Razorpay: `rzp_live_` / `rzp_test_`
- *   - PayPal: no shape distinction, defaults to 'test' unless caller overrides.
+ * Best-effort mode inference, delegated to the module's optional
+ * `inferMode` hook (Stripe: `sk_live_`, Razorpay: `rzp_live_`); modules
+ * without one (PayPal — no shape distinction) default to 'test'.
  *
  * Operators can always override with `options.mode` at upsert time.
  */
 function inferMode(provider: BillingProviderName, data: unknown): 'test' | 'live' {
-  if (provider === 'stripe') {
-    const key = (data as { apiKey?: string }).apiKey ?? '';
-    return key.startsWith('sk_live_') ? 'live' : 'test';
+  return getModule(provider)?.inferMode?.((data ?? {}) as Record<string, string>) ?? 'test';
+}
+
+/** Resolve a registered module or 400 — providers only exist via the registry. */
+function requireModule(provider: string): ProviderModule {
+  const module = getModule(provider);
+  if (!module) {
+    throw new RelipayError({
+      statusCode: 400,
+      code: 'BILLING_PROVIDER_UNKNOWN',
+      message: `"${provider}" is not a registered billing provider.`,
+      fix: 'Use one of the registered providers (see GET /api/v1/tenant/applications/:id/billing-credentials).',
+    });
   }
-  if (provider === 'razorpay') {
-    const key = (data as { keyId?: string }).keyId ?? '';
-    return key.startsWith('rzp_live_') ? 'live' : 'test';
-  }
-  return 'test';
+  return module;
 }
 
 function unwrap<P extends BillingProviderName>(
@@ -244,75 +263,62 @@ export const billingCredentialsService = {
       .map(({ _s: _, ...rest }) => rest);
   },
 
+  /**
+   * The ONE generic upsert (P3): validates `data` against the module's
+   * `credentialSchema` rules (pattern prefixes, required fields — same
+   * messages and precedence the hand-written per-provider validators had,
+   * derived via `credentialRulesSchema`), runs the module's optional
+   * `validateCredentials` escape hatch, then stores. Blank optional webhook
+   * fields are allowed — "Auto-configure webhook" (registerWebhook) fills
+   * them in later via the provider API.
+   */
+  async upsertCredentials(
+    applicationId: string,
+    provider: BillingProviderName,
+    data: Record<string, string>,
+    options?: { countries?: string[]; priority?: number; enabled?: boolean; mode?: BillingMode },
+  ): Promise<void> {
+    const module = requireModule(provider);
+    const parsed = credentialRulesSchema(module).safeParse(data);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0]!;
+      const fix = (issue as { params?: { fix?: string } }).params?.fix;
+      throw new RelipayError({
+        statusCode: 400,
+        code: 'BILLING_CREDENTIALS_INVALID',
+        message: issue.message,
+        ...(fix !== undefined && { fix }),
+      });
+    }
+    module.validateCredentials?.(data);
+    await this.upsertRaw(applicationId, provider, data, options);
+  },
+
+  /** @deprecated P3 — use `upsertCredentials(applicationId, 'stripe', data)`. */
   async upsertStripe(
     applicationId: string,
     data: StripeCredentials,
     options?: { countries?: string[]; priority?: number; enabled?: boolean; mode?: BillingMode },
   ): Promise<void> {
-    if (!data.apiKey.startsWith('sk_')) {
-      throw new RelipayError({
-        statusCode: 400,
-        code: 'BILLING_CREDENTIALS_INVALID',
-        message: 'Stripe `apiKey` must start with `sk_` (live or test).',
-        fix: 'Get a secret key from Stripe Dashboard → Developers → API keys.',
-      });
-    }
-    // webhookSecret is optional now — operators can leave it blank and click
-    // "Auto-configure webhook" (registerWebhook) to have ReliPay create the
-    // endpoint via the Stripe API and store the signing secret. If supplied
-    // manually it must still be a valid signing secret.
-    if (data.webhookSecret && !data.webhookSecret.startsWith('whsec_')) {
-      throw new RelipayError({
-        statusCode: 400,
-        code: 'BILLING_CREDENTIALS_INVALID',
-        message: 'Stripe `webhookSecret`, when provided, must start with `whsec_`.',
-        fix: 'Leave it blank to auto-configure, or paste the signing secret from Stripe → Developers → Webhooks.',
-      });
-    }
-    await this.upsertRaw(applicationId, 'stripe', data, options);
+    await this.upsertCredentials(applicationId, 'stripe', { ...data }, options);
   },
 
+  /** @deprecated P3 — use `upsertCredentials(applicationId, 'paypal', data)`. */
   async upsertPaypal(
     applicationId: string,
     data: PaypalCredentials,
     options?: { countries?: string[]; priority?: number; enabled?: boolean; mode?: BillingMode },
   ): Promise<void> {
-    // webhookId is optional now — leave blank and click "Auto-configure
-    // webhook" to have ReliPay create the PayPal webhook via API and store
-    // its id. clientId + clientSecret are always required.
-    if (!data.clientId || !data.clientSecret) {
-      throw new RelipayError({
-        statusCode: 400,
-        code: 'BILLING_CREDENTIALS_INVALID',
-        message: 'PayPal credentials require `clientId` and `clientSecret`.',
-        fix: 'Get these from PayPal Developer Dashboard → Apps & Credentials.',
-      });
-    }
-    await this.upsertRaw(applicationId, 'paypal', data, options);
+    await this.upsertCredentials(applicationId, 'paypal', { ...data }, options);
   },
 
+  /** @deprecated P3 — use `upsertCredentials(applicationId, 'razorpay', data)`. */
   async upsertRazorpay(
     applicationId: string,
     data: RazorpayCredentials,
     options?: { countries?: string[]; priority?: number; enabled?: boolean; mode?: BillingMode },
   ): Promise<void> {
-    if (!data.keyId.startsWith('rzp_')) {
-      throw new RelipayError({
-        statusCode: 400,
-        code: 'BILLING_CREDENTIALS_INVALID',
-        message: 'Razorpay `keyId` must start with `rzp_` (live or test).',
-        fix: 'Get keys from Razorpay Dashboard → Settings → API Keys.',
-      });
-    }
-    if (!data.keySecret || !data.webhookSecret) {
-      throw new RelipayError({
-        statusCode: 400,
-        code: 'BILLING_CREDENTIALS_INVALID',
-        message: 'Razorpay credentials require `keyId`, `keySecret`, and `webhookSecret`.',
-        fix: 'Get these from Razorpay Dashboard → Settings.',
-      });
-    }
-    await this.upsertRaw(applicationId, 'razorpay', data, options);
+    await this.upsertCredentials(applicationId, 'razorpay', { ...data }, options);
   },
 
   async upsertRaw(

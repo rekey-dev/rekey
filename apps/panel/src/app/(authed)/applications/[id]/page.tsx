@@ -8,6 +8,7 @@ import {
   type BillingCredentialRow,
   type PlanRow,
 } from '@/lib/api';
+import { SavedBanner } from '@/components/SavedBanner';
 
 /**
  * Application overview — the landing page when an operator picks an
@@ -16,10 +17,14 @@ import {
  */
 export default async function ApplicationOverviewPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }): Promise<React.JSX.Element> {
   const { id } = await params;
+  const sp = await searchParams;
+  const created = sp.saved === 'created';
   const basePath = `/api/v1/tenant/applications/${encodeURIComponent(id)}`;
 
   // Fetch in parallel; empty arrays / nulls on failure so the page stays
@@ -40,6 +45,7 @@ export default async function ApplicationOverviewPage({
 
   return (
     <div className="space-y-6">
+      {created && <SavedBanner message="Application created." />}
       <header>
         <h2 className="text-base font-medium">Overview</h2>
         <p className="text-sm text-neutral-600 dark:text-neutral-500 mt-1">
@@ -219,7 +225,7 @@ function Sparkline({ data }: { data: number[] }): React.JSX.Element {
       {data.map((v, i) => (
         <div
           key={i}
-          className="w-1 rounded-sm bg-[var(--color-primary)]/60 group-hover:bg-[var(--color-primary)] transition-colors"
+          className="w-1 rounded-sm bg-[color-mix(in_srgb,var(--color-primary)_60%,transparent)] group-hover:bg-[var(--color-primary)] transition-colors"
           style={{ height: `${Math.max(6, (v / max) * 100)}%` }}
         />
       ))}
@@ -253,7 +259,7 @@ function AreaChart({ data }: { data: Array<{ date: string; count: number }> }): 
         role="img"
         aria-label={`Sign-ups over the last ${n} days`}
       >
-        <polygon points={area} className="fill-[var(--color-primary)]/12" />
+        <polygon points={area} className="fill-[color-mix(in_srgb,var(--color-primary)_12%,transparent)]" />
         <polyline
           points={line}
           fill="none"
@@ -287,6 +293,7 @@ function ConfigRow({
 }): React.JSX.Element {
   const dot =
     status === 'ok' ? 'bg-green-500' : status === 'warn' ? 'bg-amber-500' : 'bg-neutral-400';
+  const srStatus = status === 'ok' ? 'OK' : status === 'warn' ? 'Needs attention' : 'Off';
   return (
     <Link
       href={href}
@@ -294,6 +301,7 @@ function ConfigRow({
     >
       <span className="flex items-center gap-2 text-sm">
         <span className={`w-1.5 h-1.5 rounded-full ${dot} shrink-0`} aria-hidden />
+        <span className="sr-only">{srStatus}:</span>
         {label}
       </span>
       <span className="flex items-center gap-1.5 min-w-0">

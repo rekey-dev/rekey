@@ -55,7 +55,10 @@ export async function securityEventsRoutes(app: FastifyInstance): Promise<void> 
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · Security'],
+        security: [{ tenantSession: [] }],
         summary: 'List recent security events for the active workspace',
+        description:
+          'Requires the **OWNER or ADMIN** workspace role.',
         querystring: {
           type: 'object',
           properties: {

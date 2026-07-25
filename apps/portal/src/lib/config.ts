@@ -23,6 +23,10 @@ export interface PortalBranding {
   logoUrl?: string;
   /** One-line tagline under the title. */
   tagline?: string;
+  /** Support contact email — rendered as a mailto: link in the footer/errors. */
+  supportEmail?: string;
+  /** Support page URL — takes precedence over supportEmail when both are set. */
+  supportUrl?: string;
 }
 
 export interface PortalConfig {
@@ -49,6 +53,36 @@ export function safeCssColor(value: string | undefined): string | undefined {
   if (/^(rgb|rgba|hsl|hsla)\([0-9.,%\s/]+\)$/i.test(s)) return s;
   if (/^[a-zA-Z]+$/.test(s)) return s; // named color (e.g. rebeccapurple)
   return undefined;
+}
+
+/**
+ * Whitelist an operator-supplied image URL before it's rendered into an `<img
+ * src>`. Only absolute http(s) URLs are allowed — this rejects `javascript:`,
+ * `data:`, and other schemes an operator could set to phish their own customers
+ * or smuggle a tracking payload. Returns undefined for empty/invalid input so
+ * the caller can skip rendering the logo entirely.
+ */
+/**
+ * Resolve the operator's support contact into a safe href: an http(s) URL when
+ * supportUrl is set (validated), else a mailto: when supportEmail looks like an
+ * email. Returns undefined when neither is usable — callers hide the link.
+ */
+export function supportLink(branding: PortalBranding): string | undefined {
+  const url = safeHttpUrl(branding.supportUrl);
+  if (url) return url;
+  const email = branding.supportEmail?.trim();
+  if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return `mailto:${email}`;
+  return undefined;
+}
+
+export function safeHttpUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const u = new URL(value.trim());
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Cached per-request so layout + page don't double-fetch. */

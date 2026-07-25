@@ -2,11 +2,18 @@
 
 import * as React from 'react';
 import { SubmitButton } from '@/components/SubmitButton';
+import { Banner } from '@/components/Banner';
 
 type Kind = 'FEATURE' | 'CREDIT' | 'LICENSE' | 'USAGE';
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
+
+const ERR: Record<string, string> = {
+  PLAN_ENTITLEMENT_INVALID: 'The entitlement is missing required fields for its kind.',
+  PLAN_ENTITLEMENT_NOT_FOUND: 'Entitlement not found.',
+  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage plan entitlements.',
+};
 
 /**
  * Add/update one plan entitlement. Client component so the field set follows
@@ -28,9 +35,9 @@ export function EntitlementForm({
         credits. Optional.
       </p>
       {error && (
-        <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-          {error}
-        </p>
+        <Banner tone="error">
+          {ERR[error] ?? 'Something went wrong. Please try again.'}
+        </Banner>
       )}
       <label className="block space-y-1">
         <span className="text-xs font-medium">Kind</span>

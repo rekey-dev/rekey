@@ -1,8 +1,10 @@
 import * as React from 'react';
+import { redirect } from 'next/navigation';
 import { formatDateTime } from '@/lib/date';
 import { api, type SecurityEventRow } from '@/lib/api';
 import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
 import { PageHeader } from '@/components/PageHeader';
+import { SubmitButton } from '@/components/SubmitButton';
 import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
@@ -23,7 +25,22 @@ const TYPE_LABEL: Record<string, string> = {
 const ACTOR_TYPES = ['operator', 'end_user', 'system'] as const;
 
 const inputCls =
-  'rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
+
+// Server action (rather than a plain GET form) so the Apply button gets a
+// useFormStatus pending state while the filtered list re-renders. Mirrors the
+// GET form's behavior exactly: only non-empty filter fields become query
+// params; sort/page-size reset, same as a native form submit did.
+async function applyFilters(formData: FormData): Promise<void> {
+  'use server';
+  const qs = new URLSearchParams();
+  for (const key of ['type', 'actorType', 'from', 'to'] as const) {
+    const v = String(formData.get(key) ?? '').trim();
+    if (v) qs.set(key, v);
+  }
+  const s = qs.toString();
+  redirect(s ? `/audit-log?${s}` : '/audit-log');
+}
 
 export default async function AuditLogPage({
   searchParams,
@@ -105,7 +122,7 @@ export default async function AuditLogPage({
         }
       />
 
-      <form className="flex flex-wrap items-end gap-2">
+      <form action={applyFilters} className="flex flex-wrap items-end gap-2">
         <label className="block space-y-1">
           <span className="block text-xs font-medium text-[var(--color-fg)]">Event type</span>
           <select name="type" defaultValue={type} className={inputCls}>
@@ -136,12 +153,12 @@ export default async function AuditLogPage({
           <span className="block text-xs font-medium text-[var(--color-fg)]">To</span>
           <input type="date" name="to" defaultValue={to} className={inputCls} />
         </label>
-        <button
-          type="submit"
-          className="rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-[var(--color-surface-muted)]"
+        <SubmitButton
+          pendingLabel="Applying…"
+          className="rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-[var(--color-surface-muted)] disabled:opacity-60 disabled:cursor-not-allowed"
         >
           Apply
-        </button>
+        </SubmitButton>
         {filtered && (
           <a
             href="/audit-log"

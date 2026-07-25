@@ -66,6 +66,7 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
       preHandler: requireOperatorScope('read'),
       schema: {
         tags: ['Tenant · Operator PAT'],
+        security: [{ operatorPat: [] }],
         summary: 'List Applications in the PAT\'s workspace (requires `read` scope)',
       },
     },
@@ -82,6 +83,7 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
       preHandler: requireOperatorScope('read'),
       schema: {
         tags: ['Tenant · Operator PAT'],
+        security: [{ operatorPat: [] }],
         summary: 'List active API keys for an application (requires `read` scope)',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       },
@@ -100,6 +102,7 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
       preHandler: requireOperatorScope('keys:mint'),
       schema: {
         tags: ['Tenant · Operator PAT'],
+        security: [{ operatorPat: [] }],
         summary: 'Mint an Application API key via an operator PAT (requires `keys:mint` scope)',
         description:
           'Mints an Application secret key. The PAT must carry the `keys:mint` scope and be bound ' +

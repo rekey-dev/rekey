@@ -11,7 +11,13 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
 
   app.get(
     '/status',
-    { schema: { tags: ['Tenant · MFA'], summary: 'MFA status for the operator' } },
+    {
+      schema: {
+        tags: ['Tenant · MFA'],
+        security: [{ tenantSession: [] }],
+        summary: 'MFA status for the operator',
+      },
+    },
     async (req) => ({ success: true, data: await tenantMfaService.status(req.tenantUser!.id) }),
   );
 
@@ -20,6 +26,7 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Tenant · MFA'],
+        security: [{ tenantSession: [] }],
         summary: 'Mint a new TOTP secret + 10 backup codes',
         description:
           'Returns the otpauth URI for QR + backup codes (one-time-show). Not enrolled until /setup-confirm.',
@@ -48,6 +55,7 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · MFA'],
+        security: [{ tenantSession: [] }],
         summary: 'Confirm enrollment with the current TOTP code',
         body: {
           type: 'object',
@@ -70,7 +78,13 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
 
   app.post(
     '/disable',
-    { schema: { tags: ['Tenant · MFA'], summary: 'Disable MFA for the operator' } },
+    {
+      schema: {
+        tags: ['Tenant · MFA'],
+        security: [{ tenantSession: [] }],
+        summary: 'Disable MFA for the operator',
+      },
+    },
     async (req) => {
       await tenantMfaService.disable(req.tenantUser!.id);
       return { success: true, data: { disabled: true } };

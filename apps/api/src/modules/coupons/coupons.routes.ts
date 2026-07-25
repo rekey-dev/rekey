@@ -5,7 +5,7 @@ import { couponsService } from './coupons.service.js';
 import { applicationsService } from '../applications/applications.service.js';
 import { plansService } from '../plans/plans.service.js';
 import { requireSuperAdmin } from '../../middleware/admin-auth.js';
-import { requireApiKey, requireScope } from '../../middleware/api-key-auth.js';
+import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { requireBillingEnabled } from '../../middleware/billing-enabled.js';
 
@@ -40,6 +40,7 @@ export async function couponsAdminRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Coupons'],
+        security: [{ superAdminKey: [] }],
         summary: 'List coupons for an application',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         querystring: { type: 'object', properties: { includeInactive: { type: 'boolean' } } },
@@ -58,6 +59,7 @@ export async function couponsAdminRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Coupons'],
+        security: [{ superAdminKey: [] }],
         summary: 'Create a coupon',
         description:
           'Discount kinds: PERCENT (amountOff in basis-points × 10, so 1500 = 15%) ' +
@@ -109,6 +111,7 @@ export async function couponsAdminRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Coupons'],
+        security: [{ superAdminKey: [] }],
         summary: "Toggle a coupon's active flag",
         params: {
           type: 'object',
@@ -131,14 +134,21 @@ export async function couponsAdminRoutes(app: FastifyInstance): Promise<void> {
 }
 
 /**
- * Public coupon endpoint — POST /api/v1/billing/coupons/validate.
+ * Coupon validation endpoint — POST /api/v1/billing/coupons/validate.
  *
  * Used by pricing pages to render "$50 off" before submitting the actual
- * checkout. Requires both API key (Application scope) and user JWT (so we
- * can check per-user redemption limits).
+ * checkout, so it accepts the publishable key exactly like `POST
+ * /billing/checkout` (which takes the same `couponCode`).
+ *
+ * The user JWT is not optional decoration: it is the authorizer, and per-user
+ * redemption limits are evaluated against `req.endUser`.
+ *
+ * `billing:read` binds SECRET-key callers only. `requireScope` no-ops for a
+ * publishable request, because a publishable key carries no scopes to check —
+ * the origin allowlist and the user session are what constrain it instead.
  */
 export async function couponsPublicRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireApiKey);
+  app.addHook('onRequest', requirePublishableOrSecretKey);
   app.addHook('onRequest', requireBillingEnabled);
   app.addHook('onRequest', requireScope('billing:read'));
   app.addHook('onRequest', requireUserSession);
@@ -151,8 +161,15 @@ export async function couponsPublicRoutes(app: FastifyInstance): Promise<void> {
         summary: 'Validate a coupon for the current user against a plan',
         description:
           'Returns the discounted amount on success. Surfaces a precise RelipayError ' +
-          'on every failure mode so the panel / pricing page can render a useful message.',
-        security: [{ apiKey: [] }],
+          'on every failure mode so the panel / pricing page can render a useful message.\n\n' +
+          'Callable from a browser with the publishable key, or from your server ' +
+          'with a secret key carrying the `billing:read` scope. Either way the ' +
+          'end-user JWT is required, because per-user redemption limits are ' +
+          'checked against that user.',
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
         body: {
           type: 'object',
           required: ['code', 'planSlug'],
