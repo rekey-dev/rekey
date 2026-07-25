@@ -752,3 +752,36 @@ export async function publicGet<T>(path: string): Promise<T> {
   }
   return json.data;
 }
+
+/**
+ * Read `/health/ready`.
+ *
+ * Deliberately NOT routed through `publicGet`: the health endpoints answer a bare
+ * `{status, db, redis}` object rather than the `{success, data}` envelope every
+ * other route uses, so `publicGet` would treat a perfectly good response as a
+ * protocol error and throw. They also answer 503 when a dependency is down, and
+ * that body is exactly the one we want to read.
+ *
+ * Returns null on anything unparseable. A health probe must never be the reason a
+ * page fails to render.
+ */
+export interface ReadyReport {
+  status?: string;
+  db?: 'ok' | 'unreachable';
+  redis?: 'ok' | 'unreachable' | 'not_configured';
+}
+
+export async function getReadyReport(): Promise<ReadyReport | null> {
+  try {
+    const res = await fetch(`${apiUrl()}/health/ready`, {
+      // Short cache: enough that a burst of navigations shares one probe, short
+      // enough that a resolved outage clears the banner promptly.
+      next: { revalidate: 15 },
+    });
+    const json = (await res.json().catch(() => null)) as ReadyReport | null;
+    if (json === null || typeof json !== 'object') return null;
+    return json;
+  } catch {
+    return null;
+  }
+}

@@ -457,6 +457,49 @@ describe('browser-reachable end-user self-service flows', () => {
   });
 
   // ------------------------------------------------------------------
+  // 6b. Profile reads: /users/me is browser-tier, /me is not
+  // ------------------------------------------------------------------
+
+  describe('GET /users/me vs GET /me', () => {
+    it('a browser can read its own profile with a publishable key + user token', async () => {
+      const res = await asBrowser('GET', '/api/v1/users/me');
+      expect(res.statusCode).toBe(200);
+      const body = res.json().data as { id: string; email: string };
+      expect(body.id).toBe(ctx.userId);
+      expect(body.email).toBe(ctx.userEmail);
+    });
+
+    it('never returns the password hash', async () => {
+      // `authService.getById` redacts it, and this route spreads the whole
+      // record — so the redaction is the only thing standing between a browser
+      // and an Argon2id hash. Pin it here rather than trusting the type alias.
+      const res = await asBrowser('GET', '/api/v1/users/me');
+      expect(Object.keys(res.json().data as object)).not.toContain('passwordHash');
+    });
+
+    it('401 USER_TOKEN_MISSING with a publishable key and no user token', async () => {
+      expectNoSessionRefused(await asAnonBrowser('GET', '/api/v1/users/me'));
+    });
+
+    it('GET /me stays secret-key-only — it returns operator config, not user data', async () => {
+      // The response carries the Application's whole authConfig and
+      // billingConfig. Those are operator configuration, so a browser-shipped
+      // key must not reach them even though the sibling route above is open.
+      const browser = await asBrowser('GET', '/api/v1/me');
+      expect(browser.statusCode).toBe(401);
+      expect(browser.json().error.code).toBe('API_KEY_INVALID');
+
+      const server = await app.inject({
+        method: 'GET',
+        url: '/api/v1/me',
+        headers: { authorization: `Bearer ${ctx.liveKey}` },
+      });
+      expect(server.statusCode).toBe(200);
+      expect((server.json().data as { id: string }).id).toBe(ctx.applicationId);
+    });
+  });
+
+  // ------------------------------------------------------------------
   // 7. Read-scope corrections on GET-only billing routes
   // ------------------------------------------------------------------
 

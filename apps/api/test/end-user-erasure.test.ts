@@ -13,7 +13,9 @@
  *   - an `end_user.erased` security event is recorded;
  *   - OWNER/ADMIN gate (MEMBER → 403);
  *   - cross-tenant / cross-application 404 (no enumeration);
- *   - plain DELETE (no flag) still hard-deletes everything (back-compat).
+ *   - plain DELETE (no flag) still hard-deletes everything (back-compat);
+ *   - a failed provider cancel REFUSES the delete (502 PROVIDER_CANCEL_FAILED)
+ *     but does NOT block an erasure — the deliberate asymmetry.
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -572,7 +574,11 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
       expect(deliveries!.length).toBeGreaterThanOrEqual(1);
     });
 
-    it('a provider cancel failure still deletes the user (best-effort)', async () => {
+    it('a provider cancel failure REFUSES the delete and keeps the user', async () => {
+      // Deliberate reversal of the previous best-effort contract. Once the row is
+      // gone there is nothing left to retry from, so a card would keep being
+      // charged for a user the operator can no longer see. Refusing is
+      // recoverable; deleting is not.
       const b = await bootstrap('pcancelfail');
       const { euid } = await signUpUser(b, 'pcancelfail@example.com');
       await seedProviderSub(b, euid, 'fail');
@@ -586,18 +592,40 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
         url: `/api/v1/tenant/applications/${b.applicationId}/end-users/${euid}`,
         headers: { authorization: `Bearer ${b.tenantAccess}` },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(502);
+      expect(res.json().error.code).toBe('PROVIDER_CANCEL_FAILED');
       expect(cancelSpy).toHaveBeenCalledTimes(1);
-      // Despite the provider error, the user is gone.
-      expect(await prisma.endUser.findUnique({ where: { id: euid } })).toBeNull();
+      // The user must survive — that is the whole point of refusing.
+      expect(await prisma.endUser.findUnique({ where: { id: euid } })).not.toBeNull();
 
-      const events = await waitFor(async () => {
+      // And the blocked attempt is auditable, so an operator can see why.
+      const blocked = await waitFor(async () => {
         const rows = await prisma.securityEvent.findMany({
-          where: { applicationId: b.applicationId, type: 'end_user.deleted' },
+          where: { applicationId: b.applicationId, type: 'end_user.delete_blocked' },
         });
         return rows.length > 0 ? rows : null;
       });
-      expect((events![0]!.metadata as { providerCancelFailures: number }).providerCancelFailures).toBe(1);
+      expect((blocked![0]!.metadata as { reason: string }).reason).toBe(
+        'provider_subscription_cancel_failed',
+      );
+    });
+
+    it('erasure still succeeds when the provider cancel fails (GDPR deadline wins)', async () => {
+      // The asymmetry with the delete above is the decision: an erasure answers a
+      // legal request with a deadline, so blocking it on a third party being down
+      // would be the worse failure. The user is tombstoned either way.
+      const b = await bootstrap('ecancelfail');
+      const { euid } = await signUpUser(b, 'ecancelfail@example.com');
+      await seedProviderSub(b, euid, 'erasefail');
+
+      vi.spyOn(StripeStubProvider.prototype, 'cancelSubscription').mockRejectedValue(
+        new Error('stripe down'),
+      );
+
+      const res = await erase(b, euid);
+      expect(res.statusCode).toBe(200);
+      const row = await prisma.endUser.findUnique({ where: { id: euid } });
+      expect(row!.erasedAt).not.toBeNull();
     });
 
     it('erasure path also cancels the provider subscription', async () => {

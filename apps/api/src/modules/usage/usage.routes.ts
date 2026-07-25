@@ -98,6 +98,13 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
       // keyGenerator, so one customer's high scan volume doesn't starve others.
       config: {
         rateLimit: { max: env.RATE_LIMIT_USAGE_MAX, timeWindow: env.RATE_LIMIT_WINDOW_MS },
+        // Accept the generic `Idempotency-Key` header as well as the body-level
+        // `idempotencyKey` below. The body key dedupes at the RECORD level via
+        // the unique (meterId, idempotencyKey) constraint; the header replays the
+        // whole HTTP response. `POST /credits/consume` already offers both, and a
+        // client retrying blindly should not have to know which mechanism a given
+        // route happens to implement.
+        idempotency: true,
       },
       schema: {
         tags: ['Public · Usage'],

@@ -4,6 +4,86 @@ Notable changes to ReliPay, covering the self-hosted stack as well as the
 `@relipay/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 1.1.1
+
+A follow-up pass on the parts of 1.1.0 that were still failing open, plus the
+panel bugs people reported. One behaviour change on an operator endpoint is worth
+reading before you upgrade.
+
+### Changed behaviour
+
+**Deleting an end-user now fails if the payment provider will not cancel their
+subscription.** It used to delete anyway and log the failure. The problem with
+that is timing: once the record is gone there is nothing left to retry from, so a
+card kept being charged for a user the operator could no longer see. The endpoint
+now answers 502 `PROVIDER_CANCEL_FAILED`, leaves the user in place, and records
+the blocked attempt so you can see why.
+
+Erasure is deliberately different. `?erasure=true` still succeeds even when the
+provider call fails, because it answers a legal request with a deadline and
+blocking that on a third party being down is the worse outcome. The tombstone
+keeps the row, so the subscription stays findable. If you need to satisfy an
+erasure request while a provider is down, use the erase path.
+
+### Security
+
+**A Redis outage no longer switches off brute-force protection.** Every Redis
+error in the lockout code was being swallowed and read as "no failures, not
+locked". Two things followed from that. Failed sign-ins stopped being counted, so
+password guessing was unlimited. And an account that had already tripped a
+lockout read as unlocked, so an attacker who had been locked out was let back in.
+
+Credential endpoints now answer 503 when that store is unavailable. Sign-in is
+briefly unavailable instead of unprotected. Reads and everything that is not an
+auth endpoint keep working, so an outage degrades the product rather than opening
+it or taking it down.
+
+The rate limiter's auth tier fails closed for the same reason. That one matters
+for `forgot-password` and `magic-link/request`, which have no lockout behind them
+because they are not sign-in attempts, so a skipped limiter left them unbounded
+and each request sends an email. The general limiter still fails open on purpose:
+it protects throughput, not credentials, and failing it closed would turn a Redis
+restart into a full outage.
+
+**You can now see when this is happening.** The panel shows a banner naming the
+unreachable dependency, and says plainly that credential endpoints are refusing
+requests on purpose so nobody goes hunting for a bug that is not there. The
+outage is also recorded in the security log with a start time, throttled to one
+entry per dependency every five minutes.
+
+**Plan and coupon changes are now audited.** Forty-seven kinds of operator action
+were already recorded, including billing credential changes, but plans and
+coupons were not, so a price change left no trail at all. During a billing
+dispute nobody could say who moved a price or when.
+
+### Fixed
+
+**A browser can read its own user's profile.** `GET /users/me` accepts the
+publishable key now. 1.1.0 opened MFA enrollment, password change, OAuth linking
+and organization management to browser apps but left profile reads behind, so an
+app could sign a user in and then not display their name.
+
+`GET /me` stays server-only, deliberately. It returns the whole Application
+including its auth and billing configuration, which is operator setup rather than
+user data.
+
+**Two panel bugs.** The delete confirmation dialog was not reliably centred: it
+depended on a browser default rather than saying where it should sit, so it
+landed off-centre for some people. Centring is now explicit. And the focus
+outline on the End-users tab was being clipped by the scrolling tab strip, which
+made it look broken for keyboard users. Focus rings on both tab rows are also
+full-strength now instead of half-transparent, which was too faint to serve as an
+indicator.
+
+While fixing the dialog we found every confirmation dialog on a list page shared
+the same element ids, so a screen reader announced the first row's name no matter
+which row you were deleting. On a delete confirmation.
+
+**`Idempotency-Key` works on `POST /usage/record`.** That route already deduped
+retries through a body field; it now also accepts the header, so a client that
+retries the same way everywhere does not need to know which mechanism each route
+uses.
+
 ## 1.1.0
 
 This release is mostly the result of turning the tooling on ourselves. We ran
