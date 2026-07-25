@@ -32,7 +32,7 @@ export function Tab({
   // and shows a faint border. See design.md §13.
   const base =
     'px-3 py-2 text-sm whitespace-nowrap border-b-2 -mb-px transition-colors ' +
-    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] focus-visible:rounded-sm';
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-primary)] focus-visible:rounded-sm';
   const cls = active
     ? `${base} text-[var(--color-fg)] border-[var(--color-primary)] font-medium`
     : `${base} text-[var(--color-muted-fg)] border-transparent hover:text-[var(--color-fg)] hover:border-[var(--color-border)]`;

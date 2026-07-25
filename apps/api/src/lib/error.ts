@@ -15,9 +15,11 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
 import {
   classifyDependencyOutage,
+  shouldRecordOutageEvent,
   OUTAGE_SUBSYSTEM_LABEL,
   type OutageSubsystem,
 } from './dependency-outage.js';
+import { recordSecurityEvent } from './security-events.js';
 
 export interface RelipayErrorPayload {
   code: string;
@@ -199,6 +201,20 @@ export function relipayErrorHandler(
   const outage = classifyDependencyOutage(err);
   if (outage) {
     req.log.error({ err, requestId, subsystem: outage }, 'dependency unavailable');
+    // Durable, operator-visible trail. Throttled per (subsystem, tenant): an
+    // outage hits every request, and a row each would bury the log it is meant to
+    // explain. Fire-and-forget — an audit write must never replace the response.
+    const outageTenantId = req.tenantId ?? req.application?.tenantId ?? null;
+    if (shouldRecordOutageEvent(outage, outageTenantId)) {
+      void recordSecurityEvent({
+        type: 'system.dependency_unavailable',
+        actorType: 'system',
+        ...(outageTenantId !== null && { tenantId: outageTenantId }),
+        ...(req.application?.id !== undefined && { applicationId: req.application.id }),
+        ip: req.ip,
+        metadata: { subsystem: outage, route: req.routeOptions?.url ?? req.url },
+      });
+    }
     const payload = dependencyUnavailablePayload(outage);
     reply.header('Retry-After', String(payload.retryAfterSeconds));
     return reply.status(payload.statusCode).send({

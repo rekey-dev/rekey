@@ -146,7 +146,7 @@ export function AppNav({
               key={g.key}
               href={target}
               aria-current={isActive ? 'page' : undefined}
-              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] ${
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)] ${
                 isActive
                   ? 'bg-[var(--color-surface-muted)] text-[var(--color-fg)]'
                   : 'text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:bg-[color-mix(in_srgb,var(--color-surface-muted)_60%,transparent)]'
@@ -172,7 +172,7 @@ export function AppNav({
                   key={c.seg || 'index'}
                   href={hrefFor(c.seg)}
                   aria-current={isActive ? 'page' : undefined}
-                  className={`-mb-px whitespace-nowrap rounded-t border-b-2 px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] ${
+                  className={`-mb-px whitespace-nowrap rounded-t border-b-2 px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-primary)] ${
                     isActive
                       ? 'border-[var(--color-primary)] text-[var(--color-fg)] font-medium'
                       : 'border-transparent text-[var(--color-muted-fg)] hover:text-[var(--color-fg)]'

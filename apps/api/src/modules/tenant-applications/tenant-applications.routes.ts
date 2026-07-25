@@ -676,6 +676,17 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...(body.creditsAmount !== undefined && { creditsAmount: body.creditsAmount }),
         ...(body.metadata !== undefined && { metadata: body.metadata }),
       });
+      // Pricing is money. A plan/coupon change with no trail means nobody can
+      // answer "who moved this price, and when" during a billing dispute.
+      void recordSecurityEvent({
+        type: 'app.plan_created',
+        actorType: 'operator',
+        actorId: req.tenantUser!.id,
+        tenantId: req.tenantId!,
+        applicationId: id,
+        ...requestContext(req),
+        metadata: { slug: plan.slug, name: plan.name, amount: plan.amount, currency: plan.currency, interval: plan.interval, kind: plan.kind },
+      });
       return reply.status(201).send({ success: true, data: plan });
     },
   );
@@ -706,7 +717,17 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const { id, slug } = PlanSlugParam.parse(req.params);
       await ensureAppAccess(req, id, 'billing-write');
       const body = PlanActiveBody.parse(req.body);
-      return { success: true, data: await plansService.setActive(id, slug, body.active) };
+      const updated = await plansService.setActive(id, slug, body.active);
+      void recordSecurityEvent({
+        type: 'app.plan_updated',
+        actorType: 'operator',
+        actorId: req.tenantUser!.id,
+        tenantId: req.tenantId!,
+        applicationId: id,
+        ...requestContext(req),
+        metadata: { slug, active: body.active },
+      });
+      return { success: true, data: updated };
     },
   );
 
@@ -806,6 +827,15 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...(body.licenseKind !== undefined && { licenseKind: body.licenseKind }),
         ...(body.rollover !== undefined && { rollover: body.rollover }),
       });
+      void recordSecurityEvent({
+        type: 'app.plan_entitlement_updated',
+        actorType: 'operator',
+        actorId: req.tenantUser!.id,
+        tenantId: req.tenantId!,
+        applicationId: id,
+        ...requestContext(req),
+        metadata: { planSlug: slug, entitlementId: e.id, kind: e.kind, key: e.key },
+      });
       return { success: true, data: { id: e.id, kind: e.kind, key: e.key } };
     },
   );
@@ -834,6 +864,15 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       await ensureAppAccess(req, params.id, 'billing-write');
       const plan = await plansService.getBySlug(params.id, params.slug);
       const data = await entitlementsService.remove(plan.id, params.entId);
+      void recordSecurityEvent({
+        type: 'app.plan_entitlement_removed',
+        actorType: 'operator',
+        actorId: req.tenantUser!.id,
+        tenantId: req.tenantId!,
+        applicationId: params.id,
+        ...requestContext(req),
+        metadata: { planSlug: params.slug, entitlementId: params.entId },
+      });
       return { success: true, data };
     },
   );
@@ -911,6 +950,15 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           maxRedemptionsPerUser: body.maxRedemptionsPerUser,
         }),
       });
+      void recordSecurityEvent({
+        type: 'app.coupon_created',
+        actorType: 'operator',
+        actorId: req.tenantUser!.id,
+        tenantId: req.tenantId!,
+        applicationId: id,
+        ...requestContext(req),
+        metadata: { code: coupon.code, discountType: coupon.discountType, amountOff: coupon.amountOff, currency: coupon.currency },
+      });
       return reply.status(201).send({ success: true, data: coupon });
     },
   );
@@ -941,10 +989,17 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const { id, code } = CouponCodeParam.parse(req.params);
       await ensureAppAccess(req, id, 'billing-write');
       const body = CouponActiveBody.parse(req.body);
-      return {
-        success: true,
-        data: await couponsService.setActive(id, code, body.active),
-      };
+      const updated = await couponsService.setActive(id, code, body.active);
+      void recordSecurityEvent({
+        type: 'app.coupon_updated',
+        actorType: 'operator',
+        actorId: req.tenantUser!.id,
+        tenantId: req.tenantId!,
+        applicationId: id,
+        ...requestContext(req),
+        metadata: { code, active: body.active },
+      });
+      return { success: true, data: updated };
     },
   );
 
@@ -2154,19 +2209,56 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
 
       // Before the cascade removes the row, stop any still-billing provider
       // subscription — otherwise Stripe/PayPal/Razorpay keeps charging a user
-      // that no longer exists. Best-effort: a provider error must NOT block the
-      // delete (same contract as the dunning-exhaustion + erasure cancel).
+      // that no longer exists.
+      //
+      // This path FAILS CLOSED, unlike the erasure branch above. If the provider
+      // cancel does not succeed we refuse the delete, because the alternative is
+      // a live card being charged for a user who no longer exists in any system
+      // the operator can see — and once the row is gone there is nothing left to
+      // retry from. Refusing is recoverable; deleting is not.
+      //
+      // Erasure stays best-effort deliberately: it answers a GDPR request with a
+      // legal deadline, and blocking that on a third party being down would be
+      // the worse failure. The asymmetry is the decision, not an oversight.
       const app = await prisma.application.findUniqueOrThrow({ where: { id: params.id } });
-      const cancelResult = await billingService
-        .cancelActiveProviderSubscriptionsForEndUser({
+      let cancelResult: { attempted: number; failed: number };
+      try {
+        cancelResult = await billingService.cancelActiveProviderSubscriptionsForEndUser({
           application: app,
           endUserId: params.euid,
           log: req.log,
-        })
-        .catch((err) => {
-          req.log.warn({ err, endUserId: params.euid }, 'end-user delete: provider cancel sweep failed');
-          return { attempted: 0, failed: 0 };
         });
+      } catch (err) {
+        // The sweep itself blew up (credential decrypt, registry lookup). It
+        // previously degraded to `{attempted: 0, failed: 0}`, which read as
+        // "nothing to cancel" and let the delete proceed.
+        req.log.error({ err, endUserId: params.euid }, 'end-user delete: provider cancel sweep failed');
+        cancelResult = { attempted: -1, failed: -1 };
+      }
+
+      if (cancelResult.failed !== 0) {
+        void recordSecurityEvent({
+          type: 'end_user.delete_blocked',
+          actorType: 'operator',
+          actorId: req.tenantUser!.id,
+          tenantId: req.tenantId!,
+          applicationId: params.id,
+          ...requestContext(req),
+          metadata: {
+            endUserId: params.euid,
+            reason: 'provider_subscription_cancel_failed',
+            attempted: cancelResult.attempted,
+            failed: cancelResult.failed,
+          },
+        });
+        throw new RelipayError({
+          statusCode: 502,
+          code: 'PROVIDER_CANCEL_FAILED',
+          message:
+            'This end-user still has an active subscription that the payment provider refused to cancel, so the delete was refused to avoid leaving a live charge behind.',
+          fix: 'Check the provider dashboard and the Activity log, cancel the subscription there or fix the stored credentials, then retry the delete. To satisfy an erasure request without waiting, use the erase endpoint instead — it tombstones the user and does not block on the provider.',
+        });
+      }
 
       await prisma.endUser.delete({ where: { id: params.euid } });
 

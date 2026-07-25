@@ -69,7 +69,7 @@ export function ConfirmButton({
         ref={dialogRef}
         aria-labelledby={titleId}
         aria-describedby={descId}
-        className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 max-w-md w-full text-[var(--color-fg)] backdrop:bg-black/50"
+        className="m-auto h-fit w-[calc(100vw-2rem)] max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 text-[var(--color-fg)] backdrop:bg-black/50"
         onClick={(e) => {
           if (e.target === dialogRef.current) close();
         }}

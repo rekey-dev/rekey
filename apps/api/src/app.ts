@@ -242,7 +242,17 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(rateLimit, {
     max: globalRateLimitMax(env.RATE_LIMIT_MAX),
     timeWindow: env.RATE_LIMIT_WINDOW_MS,
-    // Fail OPEN when the store errors. This is nominally the plugin default,
+    // Fail OPEN when the store errors — deliberately, and ONLY here.
+    //
+    // This limiter protects throughput, not credentials, so letting requests
+    // through during a store outage is better than turning a Redis restart into
+    // a full outage. The auth tier does the opposite: `authCeilingOptions` and
+    // `authRateLimit` both set `skipOnError: false` so credential endpoints fail
+    // closed, and lib/brute-force.ts raises 503 rather than reading an
+    // unreachable lock as "not locked". Do not "fix" the asymmetry by making
+    // this one closed as well without re-reading both of those.
+    //
+    // This is nominally the plugin default,
     // but with `enableOfflineQueue: false` on our ioredis client a Redis
     // outage surfaced as a synchronous throw ("Stream isn't writeable") that
     // 500'd EVERY route — including /health and pure-Postgres reads. Set it

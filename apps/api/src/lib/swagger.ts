@@ -61,7 +61,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
           'self-host bootstrap credential, for `/api/v1/admin/*` only.\n\n' +
           'Provider webhook ingress routes take **no** credential at all — the ' +
           'provider signature is the authentication.',
-        version: '1.1.0',
+        version: '1.1.1',
       },
       servers: [
         { url: 'https://api.relipay.dev', description: 'Production' },

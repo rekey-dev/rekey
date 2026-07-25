@@ -46,6 +46,15 @@ export function TypedConfirmButton({
   const [typed, setTyped] = React.useState('');
   const matches = typed === expected;
 
+  // Unique per instance. The ids used to be the literal strings
+  // "typed-confirm-title" / "typed-confirm-desc", and the End-users list renders
+  // one of these per row — so every dialog on the page shared the same ids and
+  // `aria-labelledby` resolved to the FIRST row's heading. Screen-reader users
+  // deleting row 12 heard row 1's name.
+  const baseId = React.useId();
+  const titleId = `${baseId}-title`;
+  const descId = `${baseId}-desc`;
+
   const open = (): void => {
     setTyped('');
     dialogRef.current?.showModal();
@@ -79,17 +88,17 @@ export function TypedConfirmButton({
       </button>
       <dialog
         ref={dialogRef}
-        aria-labelledby="typed-confirm-title"
-        aria-describedby="typed-confirm-desc"
-        className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 max-w-md w-full text-[var(--color-fg)] backdrop:bg-black/50"
+        aria-labelledby={titleId}
+        aria-describedby={descId}
+        className="m-auto h-fit w-[calc(100vw-2rem)] max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 text-[var(--color-fg)] backdrop:bg-black/50"
         onClick={(e) => {
           if (e.target === dialogRef.current) close();
         }}
       >
-        <h2 id="typed-confirm-title" className="text-base font-semibold">
+        <h2 id={titleId} className="text-base font-semibold">
           {title}
         </h2>
-        <p id="typed-confirm-desc" className="text-sm text-neutral-600 dark:text-neutral-400 mt-1">
+        <p id={descId} className="text-sm text-neutral-600 dark:text-neutral-400 mt-1">
           {description}
         </p>
         <p className="text-sm mt-3">

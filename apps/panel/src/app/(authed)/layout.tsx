@@ -15,6 +15,7 @@ import {
 import { Sidebar } from '@/components/Sidebar';
 import { MobileSidebar } from '@/components/MobileSidebar';
 import { CommandPalette } from '@/components/CommandPalette';
+import { DependencyBanner } from '@/components/DependencyBanner';
 import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
 
@@ -106,6 +107,8 @@ export default async function AuthedLayout({
         }
       />
       <main id="main" tabIndex={-1} className="flex-1 min-w-0 overflow-x-hidden outline-none">
+        {/* Renders nothing unless a backing service is actually unreachable. */}
+        <DependencyBanner />
         {children}
       </main>
       {/* Cmd+K palette — a client island; available on every authed page. */}

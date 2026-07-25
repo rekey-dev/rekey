@@ -123,12 +123,30 @@ export function authCeilingKey(req: FastifyRequest): string {
 export function authCeilingOptions(
   max: number,
   timeWindowMs: number,
-): { max: number; timeWindow: number; keyGenerator: (req: FastifyRequest) => string } {
+): {
+  max: number;
+  timeWindow: number;
+  keyGenerator: (req: FastifyRequest) => string;
+  skipOnError: boolean;
+} {
   const isTest = process.env.NODE_ENV === 'test';
   return {
     max: isTest ? 1_000_000 : max,
     timeWindow: timeWindowMs,
     keyGenerator: authCeilingKey,
+    // Fail CLOSED on the auth tier, overriding the global `skipOnError: true`.
+    //
+    // The global limiter protects throughput, so letting a store outage through
+    // is better than turning a Redis restart into a full outage. These buckets
+    // protect credentials, and several auth endpoints have no second line of
+    // defence: `forgot-password` and `magic-link/request` are not brute-force
+    // scoped (they are not sign-in attempts), so with the limiter skipped they
+    // would accept unbounded requests, each one sending an email.
+    //
+    // The plugin rethrows the store error when this is false; ioredis errors are
+    // classified in lib/dependency-outage.ts and surface as 503
+    // DEPENDENCY_UNAVAILABLE, which is what we want a client to see.
+    skipOnError: false,
   };
 }
 
@@ -154,6 +172,8 @@ export interface AuthRateLimitConfig {
   timeWindow: string;
   hook: 'preValidation';
   keyGenerator: (req: FastifyRequest) => string;
+  /** Fail closed on a store error — see `authCeilingOptions` for why. */
+  skipOnError: boolean;
   /** Flag app.ts reads to also apply the per-Application ceiling. */
   [AUTH_CEILING_MARKER]: true;
 }
@@ -181,6 +201,7 @@ export interface AuthRateLimitConfig {
 export function authRateLimit(maxPerMinute: number): AuthRateLimitConfig {
   const isTest = process.env.NODE_ENV === 'test';
   return {
+    skipOnError: false,
     max: isTest ? 1_000_000 : maxPerMinute,
     timeWindow: '1 minute',
     hook: 'preValidation',

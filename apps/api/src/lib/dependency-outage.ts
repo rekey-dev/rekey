@@ -103,3 +103,32 @@ export function classifyDependencyOutage(err: unknown): OutageSubsystem | null {
 
   return null;
 }
+
+/**
+ * Throttled audit trail for dependency outages.
+ *
+ * A Redis or Postgres outage hits every request, so writing one security-event
+ * row per failure would flood the very log an operator opens to understand what
+ * happened. One row per (subsystem, tenant) per window is enough to answer "when
+ * did this start" without burying anything else.
+ *
+ * Deliberately keyed with tenantId in it: `listSecurityEvents` filters on
+ * tenantId, so a row written without one can never reach the panel — a trap this
+ * codebase has fallen into before.
+ *
+ * Best-effort by construction: `recordSecurityEvent` swallows its own errors, and
+ * during a Postgres outage this write will itself fail. That is fine. The log line
+ * in the error handler is the primary signal; this is the durable one for when
+ * Postgres is up and Redis is not, which is the common case.
+ */
+const OUTAGE_EVENT_WINDOW_MS = 5 * 60 * 1000;
+const lastOutageEventAt = new Map<string, number>();
+
+export function shouldRecordOutageEvent(subsystem: OutageSubsystem, tenantId: string | null): boolean {
+  const key = `${subsystem}:${tenantId ?? '-'}`;
+  const now = Date.now();
+  const previous = lastOutageEventAt.get(key) ?? 0;
+  if (now - previous < OUTAGE_EVENT_WINDOW_MS) return false;
+  lastOutageEventAt.set(key, now);
+  return true;
+}
