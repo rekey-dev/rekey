@@ -4,6 +4,7 @@ import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
 import { CopyButton } from '@/components/CopyButton';
 import { SectionHeader } from '@/components/Card';
 import { SubmitButton } from '@/components/SubmitButton';
+import { Banner } from '@/components/Banner';
 
 const PORTAL_BASE = (process.env.NEXT_PUBLIC_PORTAL_URL ?? 'https://portal.relipay.dev').replace(/\/$/, '');
 const PORTAL_HOST = PORTAL_BASE.replace(/^https?:\/\//, '');
@@ -22,16 +23,37 @@ async function setPortalEnabled(applicationId: string, enabled: boolean): Promis
   await patchPortal(applicationId, { enabled }, `portal_${enabled ? 'enabled' : 'disabled'}`);
 }
 
+/** Only absolute http(s) URLs survive — reject javascript:/data:/other schemes. */
+function httpUrlOrEmpty(value: string): string {
+  if (!value) return '';
+  try {
+    const u = new URL(value);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : '';
+  } catch {
+    return '';
+  }
+}
+
 async function saveBranding(applicationId: string, formData: FormData): Promise<void> {
   'use server';
   const str = (k: string): string => String(formData.get(k) ?? '').trim();
+  const logoUrl = httpUrlOrEmpty(str('logoUrl'));
+  if (str('logoUrl') && !logoUrl) {
+    redirect(`/applications/${applicationId}/portal?error=INVALID_LOGO_URL`);
+  }
+  const supportUrl = httpUrlOrEmpty(str('supportUrl'));
+  if (str('supportUrl') && !supportUrl) {
+    redirect(`/applications/${applicationId}/portal?error=INVALID_SUPPORT_URL`);
+  }
   const branding = {
     displayName: str('displayName'),
     tagline: str('tagline'),
     primaryColor: str('primaryColor'),
     backgroundColor: str('backgroundColor'),
     surfaceColor: str('surfaceColor'),
-    logoUrl: str('logoUrl'),
+    logoUrl,
+    supportEmail: str('supportEmail'),
+    supportUrl,
   };
   await patchPortal(applicationId, { branding }, 'branding_saved');
 }
@@ -50,7 +72,15 @@ async function saveDomain(applicationId: string, formData: FormData): Promise<vo
 }
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
+
+const ERR: Record<string, string> = {
+  PORTAL_DOMAIN_TAKEN: 'That domain is already used by another application.',
+  INVALID_LOGO_URL: 'Logo URL must be a full http(s) link (e.g. https://…/logo.png).',
+  INVALID_SUPPORT_URL: 'Support URL must be a full http(s) link.',
+  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can configure the hosted portal.',
+  APPLICATION_NOT_FOUND: 'Application not found.',
+};
 
 export default async function PortalPage({
   params,
@@ -75,6 +105,8 @@ export default async function PortalPage({
     backgroundColor?: string;
     surfaceColor?: string;
     logoUrl?: string;
+    supportEmail?: string;
+    supportUrl?: string;
   };
   const domain = app.portalDomain ?? '';
   const domainVerified = Boolean(app.portalDomainVerifiedAt);
@@ -94,9 +126,9 @@ export default async function PortalPage({
       />
 
       {error && (
-        <p role="alert" className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
-          {error === 'PORTAL_DOMAIN_TAKEN' ? 'That domain is already used by another application.' : error}
-        </p>
+        <Banner tone="error">
+          {ERR[error] ?? 'Something went wrong. Please try again.'}
+        </Banner>
       )}
 
       {/* Enable / URL */}
@@ -153,6 +185,17 @@ export default async function PortalPage({
             <span className="text-xs font-medium">Surface color</span>
             <input name="surfaceColor" type="text" defaultValue={b.surfaceColor ?? ''} placeholder="#ffffff" className={inputCls} />
           </label>
+          <label className="space-y-1">
+            <span className="text-xs font-medium">Support email</span>
+            <input name="supportEmail" type="email" defaultValue={b.supportEmail ?? ''} placeholder="support@yourapp.com" className={inputCls} />
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs font-medium">Support URL</span>
+            <input name="supportUrl" type="url" defaultValue={b.supportUrl ?? ''} placeholder="https://yourapp.com/help" className={inputCls} />
+          </label>
+          <p className="text-xs text-[var(--color-muted-fg)] sm:col-span-2">
+            When set, the portal shows a &ldquo;Contact support&rdquo; link (URL wins over email).
+          </p>
           <div className="sm:col-span-2">
             <SubmitButton pendingLabel="Saving…">Save branding</SubmitButton>
           </div>

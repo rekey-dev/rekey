@@ -205,6 +205,20 @@ if (env.NODE_ENV === 'production' && !env.ENCRYPTION_KEY) {
   );
 }
 
+if (
+  env.NODE_ENV === 'production' &&
+  process.env.RELIPAY_DEV_ECHO_AUTH_TOKENS === 'true'
+) {
+  // Echoing raw password-reset / magic-link tokens back in API responses is a
+  // local-development convenience (it lets the panel show a working link with
+  // no mail transport). In production it is an account-takeover handout: the
+  // operator endpoints that return them are unauthenticated by necessity.
+  throw new Error(
+    '[SECURITY] RELIPAY_DEV_ECHO_AUTH_TOKENS=true is not allowed in production — refusing to boot. ' +
+      'It returns raw password-reset and magic-link tokens in API responses. Unset it and configure email transport.',
+  );
+}
+
 if (env.NODE_ENV === 'production' && process.env.RELIPAY_BILLING_FORCE_STUB === 'true') {
   // The stub forces fake billing providers AND (historically) bypassed webhook
   // signature verification. Neither is ever legitimate in production: real

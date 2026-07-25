@@ -16,9 +16,10 @@ import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
+import { Banner } from '@/components/Banner';
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 async function createCoupon(applicationId: string, formData: FormData): Promise<void> {
   'use server';
@@ -164,9 +165,9 @@ export default async function CouponsPage({
           >
             <form action={action} className="space-y-3">
               {error && (
-                <p role="alert" className="rounded-md border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+                <Banner tone="error">
                   {ERR[error] ?? error}
-                </p>
+                </Banner>
               )}
               <div className="grid gap-3 sm:grid-cols-2">
                 <Field label="Code" hint="Shown to end-users at checkout (case-insensitive)">
@@ -282,7 +283,7 @@ function CouponsTable({
                 ) : (
                   <SubmitButton
                     pendingLabel="Reactivating…"
-                    className="rounded text-xs font-medium text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50 disabled:opacity-60"
+                    className="rounded text-xs font-medium text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
                   >
                     Reactivate
                   </SubmitButton>

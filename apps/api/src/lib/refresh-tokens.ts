@@ -100,7 +100,7 @@ export async function lookupRefreshToken(raw: string): Promise<RefreshOutcome> {
   });
   if (!token) return { kind: 'unknown' };
   if (token.revokedAt !== null) return { kind: 'revoked', token };
-  if (token.expiresAt < new Date()) return { kind: 'expired', token };
+  if (token.expiresAt <= new Date()) return { kind: 'expired', token };
   return { kind: 'ok', token };
 }
 

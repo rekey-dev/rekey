@@ -25,6 +25,7 @@ export async function jwksRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Public · Auth'],
+        security: [],
         summary: 'JSON Web Key Set (RS256 public keys for end-user access tokens)',
         description:
           'Public RSA keys (RFC 7517) for verifying RS256-signed end-user access tokens ' +

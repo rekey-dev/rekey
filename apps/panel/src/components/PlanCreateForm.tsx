@@ -13,6 +13,7 @@
 
 import * as React from 'react';
 import { SubmitButton } from './SubmitButton';
+import { Banner } from './Banner';
 
 interface MeterOption {
   slug: string;
@@ -125,6 +126,13 @@ export function PlanCreateForm({
   const [kind, setKind] = React.useState<Kind>('SUBSCRIPTION');
   const [licenseKind, setLicenseKind] = React.useState<'PERPETUAL' | 'TIMED' | 'SEATS'>('PERPETUAL');
 
+  // Live cents → dollars preview for the Amount field (same pattern as
+  // CouponAmountPreview) — removes the cents-vs-dollars ambiguity as you type.
+  const [amount, setAmount] = React.useState('');
+  const amountNum = Number(amount);
+  const amountPreview =
+    Number.isFinite(amountNum) && amountNum > 0 ? `= $${(amountNum / 100).toFixed(2)}` : null;
+
   // Bundle builder state. The list is serialized into a hidden `entitlements`
   // input and applied (one PUT each) by the server action after the plan is
   // created — so a Subscription can ship with credits / usage caps / licenses /
@@ -166,9 +174,9 @@ export function PlanCreateForm({
   return (
     <form action={action} className="space-y-4">
       {error && (
-        <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+        <Banner tone="error">
           {ERR[error] ?? error}
-        </p>
+        </Banner>
       )}
 
       {/* Kind cards */}
@@ -181,7 +189,7 @@ export function PlanCreateForm({
               className={
                 'cursor-pointer rounded-lg border p-3 transition-colors ' +
                 (kind === c.value
-                  ? 'border-[var(--color-primary)] bg-[var(--color-primary-soft)]/40 ring-1 ring-[var(--color-primary)]/40'
+                  ? 'border-[var(--color-primary)] bg-[color-mix(in_srgb,var(--color-primary-soft)_40%,transparent)] ring-1 ring-[color-mix(in_srgb,var(--color-primary)_40%,transparent)]'
                   : 'border-[var(--color-border)] hover:bg-[var(--color-surface-muted)]')
               }
             >
@@ -224,7 +232,14 @@ export function PlanCreateForm({
         <Field
           label={kind === 'USAGE' ? 'Base fee (cents)' : kind === 'CREDIT' ? 'Pack price (cents)' : 'Amount (cents)'}
           required
-          hint={kind === 'USAGE' ? '0 = pure pay-as-you-go.' : kind === 'CREDIT' ? 'One-time charge for the pack. 4999 = $49.99' : '999 = $9.99'}
+          hint={
+            <>
+              {kind === 'USAGE' ? '0 = pure pay-as-you-go.' : kind === 'CREDIT' ? 'One-time charge for the pack. 4999 = $49.99' : '999 = $9.99'}
+              <span aria-live="polite" className="ml-1 font-medium text-[var(--color-fg)]">
+                {amountPreview}
+              </span>
+            </>
+          }
         >
           <input
             type="number"
@@ -233,6 +248,8 @@ export function PlanCreateForm({
             min={0}
             step={1}
             placeholder={kind === 'USAGE' ? '0' : '999'}
+            value={amount}
+            onChange={(e) => setAmount(e.currentTarget.value)}
             className={`${inputCls} font-mono`}
           />
         </Field>
@@ -487,7 +504,7 @@ export function PlanCreateForm({
 }
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 function Field({
   label,

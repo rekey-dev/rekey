@@ -23,6 +23,9 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     environment:
       POSTGRES_USER: relipay
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -39,10 +42,34 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     # AOF persistence so BullMQ webhook-delivery jobs (delayed retries) survive a
     # Redis restart. The DB retry poller backstops any gap; durable queue state
     # avoids needless re-deliveries on a bounce.
-    command: ["redis-server", "--appendonly", "yes"]
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--requirepass",
+        "${REDIS_PASSWORD}",
+      ]
+    environment:
+      # redis-cli reads this, so the healthcheck doesn't put the password in an
+      # argv element visible via `docker inspect`.
+      #
+      # Plain ${VAR} rather than ${VAR:?err}: the fail-fast form belongs in the
+      # self-host compose, where a human is filling in a .env. Here the variable
+      # is set in the Dokploy compose environment (same mechanism as
+      # POSTGRES_PASSWORD below, which is proven in production), and this file is
+      # parsed by whatever compose version Dokploy ships — not worth depending on
+      # a syntax that isn't already exercised in this file.
+      #
+      # NOTE: the password lands in REDIS_URL unencoded, so keep it URL-safe.
+      # `openssl rand -hex 24` is; a password containing @ : / or # would not be.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
     volumes:
       - relipay_redis:/data
     healthcheck:
@@ -58,13 +85,25 @@ services:
       target: api-runtime
     image: relipay-api:prod
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+    healthcheck:
+      # Liveness, deliberately NOT /health/ready: restarting the API cannot fix a
+      # Postgres or Redis outage, and a restart loop during one slows recovery.
+      # Traefik/LB health gating should use /health or /health/ready instead.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3030/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://relipay:${POSTGRES_PASSWORD}@postgres:5432/relipay?schema=public
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       JWT_SECRET: ${JWT_SECRET}
       SESSION_SECRET: ${SESSION_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
@@ -96,6 +135,9 @@ services:
       target: panel-runtime
     image: relipay-panel:prod
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     depends_on:
       - api
     environment:
@@ -123,6 +165,9 @@ services:
       target: portal-runtime
     image: relipay-portal:prod
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     depends_on:
       - api
     environment:
@@ -145,6 +190,9 @@ services:
       target: admin-runtime
     image: relipay-admin:prod
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     depends_on:
       - api
     environment:

@@ -28,6 +28,13 @@
   --color-fg: #171717;             /* neutral-900 */
   --color-muted-fg: #737373;       /* neutral-500 */
   --color-faint-fg: #a3a3a3;       /* neutral-400 */
+
+  /* Semantic status colors — banner/status-badge foregrounds; soft fills are
+     derived with color-mix (10% tint) so one token covers text/dot/fill.
+     Note: the portal is currently light-only (no .dark block); dark values
+     belong here if/when a dark theme lands. */
+  --color-success: #15803d;        /* green-700 */
+  --color-danger: #b91c1c;         /* red-700 */
 }
 
 body {

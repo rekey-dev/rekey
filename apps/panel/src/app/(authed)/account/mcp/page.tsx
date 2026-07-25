@@ -10,11 +10,11 @@
  * MCP page that exposes a single end-user's own account). This page is
  * the operator's view of THEIR workspace, not their customers' data.
  *
- * Phase 1 ships PAT-Bearer auth (`Authorization: Bearer rp_op_…`),
- * using the same PAT minted on `/account/api-tokens`. Phase 2 will add
- * a full OAuth 2.1 + PKCE authorization server so MCP clients can drive
- * the browser sign-in flow without a pre-minted token; that section is
- * present here as a roadmap callout, not a wired connector.
+ * Two live auth paths: the OAuth 2.1 + PKCE authorization server
+ * (preferred — the client drives the browser sign-in + workspace pick +
+ * consent, no pre-minted token) and PAT-Bearer auth
+ * (`Authorization: Bearer rp_op_…`, minted on `/account/api-tokens`,
+ * for headless / non-browser automation).
  */
 
 import * as React from 'react';
@@ -174,7 +174,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
     <section className="mx-auto max-w-7xl space-y-6 px-6 py-8 lg:px-8">
       <PageHeader
         title="Operator MCP"
-        description="Connect Claude Desktop, Claude Code, or Cursor to a workspace via a hosted MCP server. The agent reads applications, end-users, payments, and webhook health — never any customer's individual data."
+        description="Connect Claude Desktop, Claude Code, or Cursor to a workspace via a hosted MCP server. The agent reads applications, end-users, payments, and webhook health — write and admin tools exist but need explicitly granted scopes — and never sees any customer's individual data."
       />
 
       <Card>
@@ -221,7 +221,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
           <ul className="space-y-1 text-xs text-[var(--color-muted-fg)]">
             <li><code>response_type</code> = <code>code</code></li>
             <li><code>code_challenge_method</code> = <code>S256</code> (PKCE mandatory)</li>
-            <li><code>scope</code> = <code>mcp:operator:read</code> (read-only workspace access — the only scope today)</li>
+            <li><code>scope</code> = <code>mcp:operator:read</code> (always granted), plus <code>mcp:operator:write</code> and/or <code>mcp:operator:admin</code> when requested — each shown for approval on the consent screen</li>
             <li><code>grant_types_supported</code>: <code>authorization_code</code>, <code>refresh_token</code></li>
             <li><code>token_endpoint_auth_method</code> = <code>none</code> (public client; PKCE replaces the secret)</li>
           </ul>
@@ -307,7 +307,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
       </Card>
 
       <Card>
-        <h2 className="text-sm font-semibold">Available tools</h2>
+        <h2 className="text-sm font-semibold">Read tools</h2>
         <ul className="mt-2 space-y-2 text-sm">
           {tools.map((t) => (
             <li key={t.name}>
@@ -317,8 +317,12 @@ export default function OperatorMcpPage(): React.JSX.Element {
           ))}
         </ul>
         <p className="mt-3 text-xs text-[var(--color-faint-fg)]">
-          All tools are READ-ONLY. The PAT&apos;s default <code>read</code> scope is sufficient; no
-          write scope is required. Workspace scoping is structural — the PAT is bound to one
+          The tools above are read-only and available to every credential. Write tools (create /
+          update applications, plans, webhook endpoints, members) additionally require the{' '}
+          <code>mcp:operator:write</code> OAuth scope — or a PAT carrying{' '}
+          <code>applications:write</code>. Admin tools (billing-provider credentials, subscription
+          cancel) require <code>mcp:operator:admin</code>, grantable only via OAuth consent — a PAT
+          never carries it. Workspace scoping is structural — the credential is bound to one
           workspace, so every tool sees only that workspace&apos;s data.
         </p>
       </Card>
@@ -335,9 +339,10 @@ export default function OperatorMcpPage(): React.JSX.Element {
             this workspace instantly invalidates every PAT bound to it.
           </li>
           <li>
-            Scopes are default-deny. The operator MCP surface only requires <code>read</code>; if
-            future write tools are added, they will demand explicit scopes (e.g.{' '}
-            <code>applications:write</code>, <code>keys:mint</code>).
+            Scopes are default-deny. Read is the floor; write tools demand{' '}
+            <code>mcp:operator:write</code> (OAuth) or a PAT with <code>applications:write</code>,
+            and admin tools demand <code>mcp:operator:admin</code> — approved explicitly on the
+            OAuth consent screen, never carried by a PAT.
           </li>
           <li>
             <code>lastUsedAt</code> on the PAT advances on every successful call — visible on{' '}

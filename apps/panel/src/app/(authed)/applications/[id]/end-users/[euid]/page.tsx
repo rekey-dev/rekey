@@ -28,6 +28,7 @@ import { Card, SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
+import { Banner } from '@/components/Banner';
 
 interface EndUserDetailDto {
   endUser: {
@@ -301,7 +302,7 @@ export default async function EndUserDetailPage({
         eyebrow={
           <Link
             href={`/applications/${id}/end-users`}
-            className="inline-flex items-center gap-1 rounded text-xs text-[var(--color-muted-fg)] transition-colors hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
+            className="inline-flex items-center gap-1 rounded text-xs text-[var(--color-muted-fg)] transition-colors hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
           >
             ← End-users
           </Link>
@@ -317,20 +318,20 @@ export default async function EndUserDetailPage({
       />
 
       {erased && (
-        <p className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+        <Banner tone="error">
           End-user erased. PII and credentials were deleted; financial records are retained anonymized.
-        </p>
+        </Banner>
       )}
       {eraseError && (
-        <p role="alert" className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+        <Banner tone="error">
           {ERASE_ERR[eraseError] ?? eraseError}
-        </p>
+        </Banner>
       )}
       {isErased && (
-        <p className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950 px-3 py-2 text-sm text-amber-800 dark:text-amber-300">
+        <Banner tone="warning">
           This end-user has been erased (GDPR). Their PII and credentials are gone and they can no
           longer sign in. Financial records below are retained but anonymized.
-        </p>
+        </Banner>
       )}
 
       {impersonated && reveal && (
@@ -357,12 +358,9 @@ export default async function EndUserDetailPage({
         </div>
       )}
       {impError && (
-        <p
-          role="alert"
-          className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300"
-        >
+        <Banner tone="error">
           {IMPERSONATE_ERR[impError] ?? impError}
-        </p>
+        </Banner>
       )}
 
       <Card className="space-y-3">
@@ -537,14 +535,14 @@ export default async function EndUserDetailPage({
         />
 
         {credited && (
-          <p className="rounded-lg border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-300">
+          <Banner tone="success">
             Credits updated.
-          </p>
+          </Banner>
         )}
         {creditError && (
-          <p role="alert" className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+          <Banner tone="error">
             {CREDIT_ERR[creditError] ?? creditError}
-          </p>
+          </Banner>
         )}
 
         <Card className="space-y-4">
@@ -777,4 +775,4 @@ export default async function EndUserDetailPage({
 }
 
 const creditInputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';

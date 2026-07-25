@@ -5,6 +5,7 @@ import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
+import { Banner } from '@/components/Banner';
 import { PageHeader } from '@/components/PageHeader';
 
 /** Split a textarea into trimmed non-empty lines (also tolerates commas). */
@@ -58,7 +59,7 @@ const ERR: Record<string, string> = {
 };
 
 const textareaCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-mono text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-mono text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 export default async function AccessPage({
   params,
@@ -95,12 +96,9 @@ export default async function AccessPage({
         />
       )}
       {error && (
-        <p
-          role="alert"
-          className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300"
-        >
+        <Banner tone="error">
           {ERR[error] ?? error}
-        </p>
+        </Banner>
       )}
 
       <form

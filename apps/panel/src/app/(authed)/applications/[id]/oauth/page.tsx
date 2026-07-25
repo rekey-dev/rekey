@@ -122,6 +122,8 @@ const ERR: Record<string, string> = {
   missing: 'All fields are required.',
   missing_issuer: 'The OIDC provider requires an issuer URL.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can configure OAuth providers.',
+  APPLICATION_NOT_FOUND: 'Application not found.',
+  FST_ERR_VALIDATION: 'One or more fields are invalid — check the values and try again.',
 };
 
 export default async function OAuthPage({
@@ -188,7 +190,7 @@ export default async function OAuthPage({
               <div className="mt-auto flex items-center gap-3">
                 <Modal
                   trigger={isConfigured ? 'Rotate / edit' : 'Configure'}
-                  triggerClassName="inline-block rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
+                  triggerClassName="inline-block rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
                   modalKey={`newOauth_${p.name}`}
                   title={`${isConfigured ? 'Rotate' : 'Configure'} ${p.label}`}
                   description={p.hint}
@@ -205,7 +207,7 @@ export default async function OAuthPage({
                     href={p.consoleUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="rounded text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
+                    className="rounded text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
                   >
                     Provider console ↗
                   </a>
@@ -247,7 +249,7 @@ function ConfigForm({
 
       {error && (
         <p role="alert" className="rounded-md border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-xs text-red-700 dark:text-red-300">
-          {ERR[error] ?? error}
+          {ERR[error] ?? 'Something went wrong. Please try again.'}
         </p>
       )}
 
@@ -308,7 +310,7 @@ function ConfigForm({
 }
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-mono text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-mono text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 function Field({
   label,

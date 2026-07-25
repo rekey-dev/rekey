@@ -21,6 +21,7 @@ import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
 import { EntitlementForm } from './EntitlementForm';
 import { SubmitButton } from '@/components/SubmitButton';
+import { Banner } from '@/components/Banner';
 
 async function createPlan(applicationId: string, formData: FormData): Promise<void> {
   'use server';
@@ -249,19 +250,19 @@ export default async function PlansPage({
     <div className="space-y-5">
       <BillingModeBanner applicationId={id} />
       {created && (
-        <p className="rounded-lg border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-300">
+        <Banner tone="success">
           Plan <code className="font-mono">{created}</code> created.
-        </p>
+        </Banner>
       )}
       {entSaved && (
-        <p className="rounded-lg border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-300">
+        <Banner tone="success">
           Entitlement saved on <code className="font-mono">{entSaved}</code>.
-        </p>
+        </Banner>
       )}
       {entError && (
-        <p role="alert" className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+        <Banner tone="error">
           {ERR[entError] ?? entError}
-        </p>
+        </Banner>
       )}
 
       <SectionHeader
@@ -391,7 +392,7 @@ function PlansTable({
                     title={`Entitlements — ${p.slug}`}
                     description="The benefit bundle this plan grants on purchase (licenses, credits, feature flags, usage allowance). Materialized onto the buyer when the subscription activates."
                     trigger="Entitlements"
-                    triggerClassName="cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
+                    triggerClassName="cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
                   >
                     <div className="space-y-4">
                       {ents.length > 0 ? (
@@ -426,7 +427,7 @@ function PlansTable({
                     ) : (
                       <SubmitButton
                         pendingLabel="Reactivating…"
-                        className="rounded text-xs font-medium text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50 disabled:opacity-60"
+                        className="rounded text-xs font-medium text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
                       >
                         Reactivate
                       </SubmitButton>

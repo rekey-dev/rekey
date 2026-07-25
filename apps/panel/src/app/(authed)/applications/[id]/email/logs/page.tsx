@@ -56,7 +56,7 @@ export default async function ApplicationEmailLogsPage({
         <EmailLogStatusFilter basePath={`/applications/${id}/email/logs`} active={status} pageSize={PAGE_SIZE} />
       </div>
 
-      <EmailLogsTable rows={tableRows} />
+      <EmailLogsTable rows={tableRows} filtered={Boolean(status)} />
       <Pager
         basePath={`/applications/${id}/email/logs`}
         offset={offset}

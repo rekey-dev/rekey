@@ -111,7 +111,16 @@ function shapeOperatorToken(
 }
 
 /**
- * Unauthenticated tenant-auth endpoints. Mounted under /api/v1/tenant/auth.
+ * Unauthenticated tenant-auth endpoints. Mounted under /api/v1/tenant/auth —
+ * the SAME prefix as `tenantAuthAuthenticatedRoutes` below, but no hook is
+ * registered here, and Fastify encapsulation keeps `requireTenantSession` off
+ * these routes. Every one is annotated `security: []`.
+ *
+ * "No security scheme" is not the same as "no credential": `/mfa-verify`,
+ * `/refresh`, `/sign-out`, `/reset-password` and `/magic-link/verify` all carry
+ * a single-use token **in the request body**. That is not an
+ * `Authorization`-header credential, so it cannot be an OpenAPI security scheme
+ * — it is documented as a body field instead.
  */
 export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
   app.get(
@@ -119,6 +128,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Tenant · Auth'],
+        security: [],
         summary: 'Operator-registration mode for this deployment (open | invite | closed)',
         description:
           'Public UX hint so the sign-up page can render the right state: an invite-key ' +
@@ -134,6 +144,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Tenant · Auth'],
+        security: [],
         summary: 'Self-serve sign-up — creates an operator account, a Tenant, and an OWNER membership',
         description:
           'Gated by OPERATOR_SIGNUP_MODE: open (anyone), invite (requires a single-use `inviteKey`), ' +
@@ -172,6 +183,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
+        security: [],
         summary: 'Operator sign-in. Returns memberships + a session scoped to the first workspace.',
         body: {
           type: 'object',
@@ -215,6 +227,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
+        security: [],
         summary: 'Exchange an operator MFA challenge token + code for a real session',
         description:
           'Called after /sign-in returns `mfaRequired: true`. The challenge token expires after 5 minutes and is bound to the operator that just passed the primary factor.',
@@ -243,6 +256,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Tenant · Auth'],
+        security: [],
         summary: 'Exchange a refresh token for a new pair (rotated)',
         body: {
           type: 'object',
@@ -263,6 +277,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Tenant · Auth'],
+        security: [],
         summary: 'Revoke the presented refresh token (idempotent)',
         body: {
           type: 'object',
@@ -284,6 +299,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
+        security: [],
         summary: 'Request a password-reset token. ReliPay does not send email — caller forwards the token.',
         body: {
           type: 'object',
@@ -305,6 +321,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
+        security: [],
         summary: 'Consume a reset token + set new password (revokes all sessions)',
         body: {
           type: 'object',
@@ -329,6 +346,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
+        security: [],
         summary: 'Request a passwordless sign-in token. ReliPay does not send email — caller forwards the token.',
         body: {
           type: 'object',
@@ -351,6 +369,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
+        security: [],
         summary: 'Consume a magic-link token + mint an operator session (or MFA challenge)',
         body: {
           type: 'object',
@@ -379,6 +398,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
     {
       schema: {
         tags: ['Tenant · Auth'],
+        security: [{ tenantSession: [] }],
         summary: 'Current operator + memberships + active workspace',
       },
     },
@@ -401,6 +421,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
     {
       schema: {
         tags: ['Tenant · Auth'],
+        security: [{ tenantSession: [] }],
         summary: 'Switch the active workspace. Returns a new {access, refresh} pair scoped to the target.',
         body: {
           type: 'object',
@@ -425,6 +446,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
     {
       schema: {
         tags: ['Tenant · Auth'],
+        security: [{ tenantSession: [] }],
         summary: 'List the operator\'s active sessions',
         description:
           'Returns active sessions (live refresh tokens) ordered newest-first, with the ' +
@@ -452,6 +474,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
     {
       schema: {
         tags: ['Tenant · Auth'],
+        security: [{ tenantSession: [] }],
         summary: 'Revoke one operator session by id. Idempotent.',
         params: {
           type: 'object',
@@ -483,6 +506,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
     {
       schema: {
         tags: ['Tenant · Auth'],
+        security: [{ tenantSession: [] }],
         summary: 'Recent API requests made by the calling operator',
         description:
           "The operator's own requests to the tenant API (the panel calls these on " +
@@ -508,6 +532,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
     {
       schema: {
         tags: ['Tenant · Auth'],
+        security: [{ tenantSession: [] }],
         summary: 'Revoke every refresh token for the calling operator (logout all devices)',
       },
     },
@@ -529,6 +554,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
     {
       schema: {
         tags: ['Tenant · Auth'],
+        security: [{ tenantSession: [] }],
         summary: 'Authenticated password change. Revokes other sessions on success.',
         body: {
           type: 'object',
@@ -565,8 +591,10 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · Auth'],
+        security: [{ tenantSession: [] }],
         summary: 'Mint a personal-access-token (raw shown once)',
         description:
+          'Requires the **OWNER or ADMIN** workspace role.\n\n' +
           'Mints a long-lived, revocable, scoped operator PAT bound to the active workspace. ' +
           'Default-deny: omit `scopes` for read-only. Allowed scopes: read, applications:write, keys:mint. ' +
           'The `rawToken` is shown exactly once and cannot be recovered.',
@@ -618,6 +646,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
     {
       schema: {
         tags: ['Tenant · Auth'],
+        security: [{ tenantSession: [] }],
         summary: "List the operator's active personal-access-tokens (redacted — no hash)",
       },
     },
@@ -630,10 +659,18 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
   app.delete(
     '/api-tokens/:id',
     {
-      preHandler: requireTenantRole(['OWNER', 'ADMIN']),
+      // Deliberately NOT role-gated (unlike the mint above). `revoke` is scoped
+      // to `req.tenantUser.id`, so this can only ever kill the caller's own
+      // token — the same scoping `GET /api-tokens` relies on, which is also
+      // ungated. Requiring OWNER/ADMIN here stranded an operator downgraded to
+      // MEMBER with a live PAT they could see but not revoke; revocation must
+      // never need more privilege than minting did.
       schema: {
         tags: ['Tenant · Auth'],
+        security: [{ tenantSession: [] }],
         summary: 'Revoke one of the operator\'s personal-access-tokens. Idempotent.',
+        description:
+          'Requires the **OWNER or ADMIN** workspace role.',
         params: {
           type: 'object',
           required: ['id'],

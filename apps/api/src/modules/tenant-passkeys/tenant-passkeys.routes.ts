@@ -45,7 +45,13 @@ export async function tenantPasskeysAuthenticatedRoutes(app: FastifyInstance): P
 
   app.get(
     '/passkeys',
-    { schema: { tags: ['Tenant · Passkeys'], summary: 'List operator passkeys' } },
+    {
+      schema: {
+        tags: ['Tenant · Passkeys'],
+        security: [{ tenantSession: [] }],
+        summary: 'List operator passkeys',
+      },
+    },
     async (req) => {
       const rows = await tenantPasskeysService.list(req.tenantUser!.id);
       return { success: true, data: { passkeys: rows } };
@@ -57,6 +63,7 @@ export async function tenantPasskeysAuthenticatedRoutes(app: FastifyInstance): P
     {
       schema: {
         tags: ['Tenant · Passkeys'],
+        security: [{ tenantSession: [] }],
         summary: 'Begin a registration ceremony for the current operator',
       },
     },
@@ -71,6 +78,7 @@ export async function tenantPasskeysAuthenticatedRoutes(app: FastifyInstance): P
     {
       schema: {
         tags: ['Tenant · Passkeys'],
+        security: [{ tenantSession: [] }],
         summary: 'Complete a registration ceremony; stores the credential',
         body: {
           type: 'object',
@@ -100,6 +108,7 @@ export async function tenantPasskeysAuthenticatedRoutes(app: FastifyInstance): P
     {
       schema: {
         tags: ['Tenant · Passkeys'],
+        security: [{ tenantSession: [] }],
         summary: 'Remove a passkey from the current operator',
         params: {
           type: 'object',
@@ -119,12 +128,20 @@ export async function tenantPasskeysAuthenticatedRoutes(app: FastifyInstance): P
   );
 }
 
+/**
+ * Operator passkey **sign-in** ceremony — genuinely unauthenticated (`security: []`).
+ * No hook is registered here on purpose: the caller has no session yet, and the
+ * WebAuthn assertion itself is the credential. Registered under the same
+ * `/api/v1/tenant/auth` prefix as the session-gated plugin above; Fastify
+ * encapsulation keeps `requireTenantSession` off these two routes.
+ */
 export async function tenantPasskeysPublicRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/passkeys/authenticate/start',
     {
       schema: {
         tags: ['Tenant · Passkeys'],
+        security: [],
         summary: 'Begin a passkey sign-in ceremony for an operator (usernameless)',
       },
     },
@@ -139,6 +156,7 @@ export async function tenantPasskeysPublicRoutes(app: FastifyInstance): Promise<
     {
       schema: {
         tags: ['Tenant · Passkeys'],
+        security: [],
         summary: 'Complete a passkey sign-in; mints a session',
         body: {
           type: 'object',

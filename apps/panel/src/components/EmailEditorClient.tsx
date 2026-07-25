@@ -58,7 +58,18 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
   const [designJsonHidden, setDesignJsonHidden] = React.useState<string>('');
   const [bodyHtmlHidden, setBodyHtmlHidden] = React.useState<string>('');
   const [submitting, setSubmitting] = React.useState(false);
+  const [ready, setReady] = React.useState(false);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
   const formRef = React.useRef<HTMLFormElement | null>(null);
+  const exportTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Never leave a pending export timeout behind after unmount.
+  React.useEffect(
+    () => () => {
+      if (exportTimeoutRef.current) clearTimeout(exportTimeoutRef.current);
+    },
+    [],
+  );
 
   // Hydrate the editor from saved design once it's ready.
   //
@@ -72,6 +83,8 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
       if (props.initialDesignJson && editor?.loadDesign) {
         editor.loadDesign(props.initialDesignJson);
       }
+      // Unlock Save — before this fires, exportHtml would silently no-op.
+      setReady(true);
     },
     [props.initialDesignJson],
   );
@@ -85,15 +98,31 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
     return out;
   }, [props.variables]);
 
+  const EXPORT_TIMEOUT_MS = 15_000;
+
   function handleSubmit(e: React.FormEvent<HTMLFormElement>): void {
     e.preventDefault();
-    setSubmitting(true);
+    setSaveError(null);
     const editor = editorRef.current?.editor;
     if (!editor?.exportHtml) {
-      setSubmitting(false);
+      setSaveError('The editor is still loading — wait a moment and try again.');
       return;
     }
+    setSubmitting(true);
+    // exportHtml's callback can simply never fire (iframe wedged, editor torn
+    // down). Without a deadline that leaves the button stuck on "Saving…"
+    // forever — so time out, re-enable Save, and surface an error instead.
+    let settled = false;
+    exportTimeoutRef.current = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      setSubmitting(false);
+      setSaveError('The editor did not respond in time. Try saving again — if it keeps failing, reload the page.');
+    }, EXPORT_TIMEOUT_MS);
     editor.exportHtml((data) => {
+      if (settled) return; // timed out — don't submit a stale export
+      settled = true;
+      if (exportTimeoutRef.current) clearTimeout(exportTimeoutRef.current);
       setDesignJsonHidden(JSON.stringify(data.design));
       setBodyHtmlHidden(data.html);
       // Defer to the next tick so React commits the hidden-input values
@@ -132,7 +161,7 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
             required
             maxLength={998}
             placeholder="Welcome to {{appName}}"
-            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]"
+            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
           />
         </div>
 
@@ -158,11 +187,17 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
 
         <button
           type="submit"
-          disabled={submitting}
+          disabled={!ready || submitting}
           className="rounded-md bg-[var(--color-primary)] px-3.5 py-1.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-60 shrink-0"
         >
-          {submitting ? 'Saving…' : 'Save'}
+          {!ready ? 'Loading editor…' : submitting ? 'Saving…' : 'Save'}
         </button>
+
+        {saveError && (
+          <p role="alert" className="w-full text-xs text-red-600 dark:text-red-400">
+            {saveError}
+          </p>
+        )}
       </div>
 
       <div className="rounded-b-md border border-t-0 border-[var(--color-border)] overflow-hidden" style={{ height: 600 }}>

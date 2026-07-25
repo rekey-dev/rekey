@@ -127,7 +127,7 @@ export const apiKeysService = {
     });
     if (!apiKey) return null;
     if (apiKey.revokedAt !== null) return null;
-    if (apiKey.expiresAt !== null && apiKey.expiresAt < new Date()) return null;
+    if (apiKey.expiresAt !== null && apiKey.expiresAt <= new Date()) return null;
     return { apiKey, applicationId: apiKey.applicationId };
   },
 };

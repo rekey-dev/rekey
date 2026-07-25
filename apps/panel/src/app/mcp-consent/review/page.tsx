@@ -3,6 +3,7 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { ACCESS_COOKIE, api, PanelApiError, type MeDto } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
+import { Banner } from '@/components/Banner';
 import { CONSENT_COOKIE } from '../consent-cookie';
 
 const WRITE_SCOPE = 'mcp:operator:write';
@@ -139,11 +140,11 @@ export default async function McpConsentReviewPage({
         </div>
 
         {errored && (
-          <p role="alert" className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+          <Banner tone="error">
             {sp.error === 'workspace'
               ? 'Pick a workspace to continue.'
               : 'Could not complete authorization. Try again, or restart the connection from your client.'}
-          </p>
+          </Banner>
         )}
 
         <div

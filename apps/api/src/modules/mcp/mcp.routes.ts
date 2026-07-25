@@ -101,7 +101,13 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   // (later increment) points clients here.
   app.get(
     '/:slug/.well-known/oauth-protected-resource',
-    { schema: { tags: ['MCP · OAuth'], summary: 'OAuth protected-resource metadata (RFC 9728)' } },
+    {
+      schema: {
+        tags: ['MCP · OAuth'],
+        security: [],
+        summary: 'OAuth protected-resource metadata (RFC 9728)',
+      },
+    },
     async (req) => {
       const { slug } = SlugParam.parse(req.params);
       await resolveMcpApp(slug);
@@ -112,7 +118,13 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   // RFC 8414 — authorization-server metadata.
   app.get(
     '/:slug/.well-known/oauth-authorization-server',
-    { schema: { tags: ['MCP · OAuth'], summary: 'OAuth authorization-server metadata (RFC 8414)' } },
+    {
+      schema: {
+        tags: ['MCP · OAuth'],
+        security: [],
+        summary: 'OAuth authorization-server metadata (RFC 8414)',
+      },
+    },
     async (req) => {
       const { slug } = SlugParam.parse(req.params);
       await resolveMcpApp(slug);
@@ -124,10 +136,16 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/:slug/oauth/register',
     {
-      config: { rateLimit: authRateLimit(20) },
+      // RFC 7591 clients post JSON, but some post form-encoded — both allowed.
+      config: { rateLimit: authRateLimit(20), acceptsForm: true },
       schema: {
         tags: ['MCP · OAuth'],
+        security: [],
         summary: 'Dynamic client registration (RFC 7591)',
+        description:
+          'Unauthenticated by design (RFC 7591 open registration). Registers a PUBLIC ' +
+          'client — PKCE, no client secret is issued — so there is nothing to authenticate ' +
+          'with yet at this point in the flow.',
         body: {
           type: 'object',
           required: ['redirect_uris'],
@@ -158,7 +176,16 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   // ---- Authorization endpoint: GET renders login+consent, POST processes it ----
   app.get(
     '/:slug/oauth/authorize',
-    { schema: { tags: ['MCP · OAuth'], summary: 'Authorization endpoint — login + consent page' } },
+    {
+      schema: {
+        tags: ['MCP · OAuth'],
+        security: [],
+        summary: 'Authorization endpoint — login + consent page',
+        description:
+          'Renders an HTML sign-in + consent form for a browser. No ReliPay credential — ' +
+          'the end user authenticates by submitting the form below.',
+      },
+    },
     async (req, reply) => {
       const { slug } = SlugParam.parse(req.params);
       const application = await resolveMcpApp(slug);
@@ -194,8 +221,16 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/:slug/oauth/authorize',
     {
-      config: { rateLimit: authRateLimit(10) },
-      schema: { tags: ['MCP · OAuth'], summary: 'Submit login + consent' },
+      // Browser form POST — form-encoded by definition.
+      config: { rateLimit: authRateLimit(10), acceptsForm: true },
+      schema: {
+        tags: ['MCP · OAuth'],
+        security: [],
+        summary: 'Submit login + consent',
+        description:
+          "No ReliPay credential — the end user's email + password (+ MFA code) travel in " +
+          'the form body and ARE the authentication.',
+      },
     },
     async (req, reply) => {
       const { slug } = SlugParam.parse(req.params);
@@ -286,8 +321,17 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/:slug/oauth/token',
     {
-      config: { rateLimit: authRateLimit(30) },
-      schema: { tags: ['MCP · OAuth'], summary: 'Token endpoint' },
+      // RFC 6749 §4.1.3 mandates application/x-www-form-urlencoded.
+      config: { rateLimit: authRateLimit(30), acceptsForm: true },
+      schema: {
+        tags: ['MCP · OAuth'],
+        security: [],
+        summary: 'Token endpoint (RFC 6749 — authorization_code + refresh_token)',
+        description:
+          'No ReliPay credential and no client secret: clients here are public and prove ' +
+          'themselves with PKCE. The `code` + `code_verifier` (or `refresh_token`) in the ' +
+          'form body are the credential.',
+      },
     },
     async (req, reply) => {
       const { slug } = SlugParam.parse(req.params);
@@ -336,10 +380,18 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/:slug/oauth/introspect',
     {
-      config: { rateLimit: authRateLimit(30) },
+      // RFC 7662 §2.1 mandates application/x-www-form-urlencoded.
+      config: { rateLimit: authRateLimit(30), acceptsForm: true },
       schema: {
         tags: ['MCP · OAuth'],
-        summary: 'Token introspection (RFC 7662). Authenticate with the app secret key.',
+        security: [{ apiKey: [] }],
+        summary: 'Token introspection (RFC 7662)',
+        description:
+          "Requires this Application's own **secret** key as `Authorization: Bearer` — the " +
+          'handler verifies it and rejects a key belonging to any other Application with ' +
+          '401 `invalid_client`. The publishable key is not accepted: introspection reveals ' +
+          'token state. Intended for a customer running their own MCP server against ' +
+          "ReliPay-issued end-user MCP tokens.",
       },
     },
     async (req, reply) => {
@@ -365,7 +417,18 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   // ---- MCP resource endpoint (JSON-RPC over HTTP, Bearer mcp_access token) ----
   app.post(
     '/:slug',
-    { schema: { tags: ['MCP'], summary: 'MCP server endpoint (JSON-RPC 2.0)' } },
+    {
+      schema: {
+        tags: ['MCP'],
+        security: [{ endUserMcpToken: [] }],
+        summary: 'MCP server endpoint (JSON-RPC 2.0)',
+        description:
+          'Requires an **end-user** MCP access token (`Authorization: Bearer`), obtained ' +
+          'through the OAuth flow above — NOT an Application key and not an operator ' +
+          'credential. A missing or invalid token gets 401 plus a `WWW-Authenticate` header ' +
+          'pointing at the protected-resource metadata.',
+      },
+    },
     async (req, reply) => {
       const { slug } = SlugParam.parse(req.params);
       const application = await resolveMcpApp(slug);
@@ -404,7 +467,16 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   // server-initiated messages, so direct clients to POST.
   app.get(
     '/:slug',
-    { schema: { tags: ['MCP'], summary: 'MCP endpoint — use POST (JSON-RPC)' } },
+    {
+      schema: {
+        tags: ['MCP'],
+        security: [],
+        summary: 'MCP endpoint — use POST (JSON-RPC)',
+        description:
+          'Always 405 with `Allow: POST`. Checks no credential, because it never does any ' +
+          'work — it exists so a GET-typer sees the method violation instead of a 404.',
+      },
+    },
     async (req, reply) => {
       const { slug } = SlugParam.parse(req.params);
       await resolveMcpApp(slug);

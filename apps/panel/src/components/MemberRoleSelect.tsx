@@ -54,7 +54,7 @@ export function MemberRoleSelect({
         name="role"
         defaultValue={currentRole}
         onChange={onChange}
-        className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30"
+        className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)]"
       >
         {ROLES.map((r) => (
           <option key={r} value={r}>

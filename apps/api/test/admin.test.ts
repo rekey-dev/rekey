@@ -40,16 +40,34 @@ describe('admin surface — end to end', () => {
 
   // ---------- /health ----------
 
-  it('GET /health → ok', async () => {
-    const res = await app.inject({ method: 'GET', url: '/health' });
+  it('GET /health/live → ok without touching a dependency', async () => {
+    // Liveness must never report a dependency: a container healthcheck points
+    // here, and restarting the API cannot fix a Postgres or Redis outage.
+    const res = await app.inject({ method: 'GET', url: '/health/live' });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ status: 'ok', service: 'relipay-api' });
+  });
+
+  it('GET /health → ok, and reports which dependencies it checked', async () => {
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { status: string; service: string; db: string; redis: string };
+    // `status: 'ok'` is load-bearing — existing monitors and the compose
+    // healthcheck match on it.
+    expect(body.status).toBe('ok');
+    expect(body.service).toBe('relipay-api');
+    expect(body.db).toBe('ok');
+    // Redis is absent in the test env, which is reported distinctly from down.
+    expect(['ok', 'not_configured']).toContain(body.redis);
   });
 
   it('GET /health/ready → ready when DB is up', async () => {
     const res = await app.inject({ method: 'GET', url: '/health/ready' });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ status: 'ready', db: 'ok' });
+    const body = res.json() as { status: string; db: string; redis: string };
+    expect(body.status).toBe('ready');
+    expect(body.db).toBe('ok');
+    expect(['ok', 'not_configured']).toContain(body.redis);
   });
 
   // ---------- admin auth ----------

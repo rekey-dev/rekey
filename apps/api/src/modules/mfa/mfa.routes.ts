@@ -17,7 +17,7 @@ import { z } from 'zod';
 import { AuthConfigSchema } from '@relipay/shared-types';
 import { mfaService } from './mfa.service.js';
 import { RelipayError } from '../../lib/error.js';
-import { requireApiKey, requireScope } from '../../middleware/api-key-auth.js';
+import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
 
@@ -39,7 +39,12 @@ function assertMfaEnabled(application: Application): void {
 }
 
 export async function mfaRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireApiKey);
+  // Accepts the publishable key, like `POST /auth/mfa-verify` (the sign-in MFA
+  // challenge) already does. `requireUserSession` is the authorizer for every
+  // route here — each one acts only on `req.endUser`. Secret-only enrollment
+  // meant a browser-only app could be *challenged* for MFA it could never
+  // *enroll*, and `authConfig.mfa='required'` hard-stopped those users.
+  app.addHook('onRequest', requirePublishableOrSecretKey);
   app.addHook('onRequest', requireScope('auth:write'));
   app.addHook('onRequest', requireUserSession);
 
@@ -48,6 +53,10 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Public · MFA'],
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
         summary: 'MFA status for the current user',
       },
     },
@@ -62,6 +71,10 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Public · MFA'],
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
         summary: 'Mint a new TOTP secret + 10 backup codes (one-time-show). Not enrolled until /setup-confirm.',
       },
     },
@@ -92,6 +105,10 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Public · MFA'],
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
         summary: 'Confirm MFA enrollment by entering the current 6-digit code',
         body: {
           type: 'object',
@@ -119,6 +136,10 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Public · MFA'],
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
         summary: 'Verify a TOTP or backup code (step-up auth). Returns { ok: bool }.',
         description: 'Backup codes are single-use — consumed on success.',
         body: {
@@ -141,15 +162,41 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/disable',
     {
+      config: { rateLimit: authRateLimit(10) },
+      // `code` is optional, so a caller with nothing to send may POST with no
+      // body at all — which is exactly what `disableMfa(accessToken)` in
+      // @relipay/node does (it passes `undefined`, so the transport sets neither
+      // Content-Type nor body). Declaring `schema.body` makes Fastify validate
+      // `undefined` against `{type:'object'}` and answer 400 "body must be
+      // object", which would have broken every published 1.0.0 SDK caller.
+      // Normalising here keeps the schema (and therefore the /docs entry for
+      // `code`) while still accepting the bodyless shape.
+      preValidation: async (req) => {
+        if (req.body === undefined || req.body === null) req.body = {};
+      },
       schema: {
         tags: ['Public · MFA'],
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
         summary: 'Disable MFA for the current user',
+        description:
+          'Browser callers (publishable key) must send `code` — a current TOTP or an unused backup code. ' +
+          'Server-side callers using an Application secret key are not required to, preserving the original contract.',
+        body: {
+          type: 'object',
+          properties: { code: { type: 'string', minLength: 1, maxLength: 64 } },
+        },
       },
     },
     async (req) => {
+      const body = (req.body ?? {}) as { code?: unknown };
       await mfaService.disable({
         endUserId: req.endUser!.id,
         application: req.application!,
+        requireCode: req.authKind === 'publishable',
+        ...(typeof body.code === 'string' ? { code: body.code } : {}),
       });
       return { success: true, data: { disabled: true } };
     },

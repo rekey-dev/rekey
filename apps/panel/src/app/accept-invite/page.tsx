@@ -8,6 +8,7 @@
  */
 
 import * as React from 'react';
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
@@ -19,7 +20,11 @@ import {
   api,
 } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
+import { AuthCard } from '@/components/AuthCard';
 import { formatDateTime } from '@/lib/date';
+import { Banner } from '@/components/Banner';
+
+export const metadata: Metadata = { title: 'Accept invitation · ReliPay' };
 
 interface PreviewDto {
   tenantId: string;
@@ -67,11 +72,17 @@ async function acceptAuthed(formData: FormData): Promise<void> {
 
 const ERR: Record<string, string> = {
   missing: 'Invite token missing.',
-  INVITATION_NOT_FOUND: 'This invite is invalid.',
-  INVITATION_REVOKED: 'This invite was revoked.',
-  INVITATION_EXPIRED: 'This invite has expired. Ask the owner for a new link.',
+  INVITATION_NOT_FOUND:
+    'This invite link is incomplete or has expired — ask whoever invited you to send a new one.',
+  INVITATION_REVOKED: 'This invite was withdrawn. Ask whoever invited you to send a new one.',
+  INVITATION_EXPIRED: 'This invite has expired. Ask whoever invited you to send a new one.',
   INVITATION_ALREADY_ACCEPTED: 'This invite has already been used.',
-  INVITATION_NOT_USABLE: 'This invite is no longer usable.',
+  INVITATION_NOT_USABLE: 'This invite is no longer usable. Ask for a new one.',
+  PREVIEW_FAILED: 'We couldn’t check this invite just now. Please try again in a moment.',
+  // Unknown codes now render nothing, so the generic ones the accept action
+  // can actually redirect with have to be mapped or the failure is silent.
+  INTERNAL_ERROR: 'Something went wrong on our side. Please try again.',
+  RATE_LIMITED: 'Too many attempts. Please wait a minute and try again.',
 };
 
 export default async function AcceptInvitePage({
@@ -81,13 +92,24 @@ export default async function AcceptInvitePage({
 }): Promise<React.JSX.Element> {
   const params = await searchParams;
   const token = typeof params.token === 'string' ? params.token : '';
-  const error = typeof params.error === 'string' ? params.error : undefined;
+  // Only codes we have copy for render a banner — an unrecognized `?error=`
+  // value shows nothing rather than an unexplained "something went wrong".
+  const error = typeof params.error === 'string' ? ERR[params.error] : undefined;
 
   if (!token) {
     return (
-      <main className="min-h-screen grid place-items-center px-6">
-        <p className="text-sm text-neutral-600 dark:text-neutral-500">No invite token in URL.</p>
-      </main>
+      <AuthCard title="Invite link incomplete" spacing="sm">
+        <p className="text-sm text-[var(--color-muted-fg)]">
+          This invite link is incomplete or has expired — ask whoever invited you to send a new
+          one. If you already have an account, you can sign in instead.
+        </p>
+        <Link
+          href="/login"
+          className="block w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-center text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] transition-colors"
+        >
+          Go to sign in
+        </Link>
+      </AuthCard>
     );
   }
 
@@ -108,9 +130,19 @@ export default async function AcceptInvitePage({
         <h1 className="text-2xl font-semibold">Workspace invitation</h1>
 
         {previewError && (
-          <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-            {ERR[previewError] ?? previewError}
-          </p>
+          <>
+            <Banner tone="error">
+              {ERR[previewError] ?? 'This invite link isn’t usable. Ask whoever invited you to send a new one.'}
+            </Banner>
+            {/* The dead-end state used to render no way out at all — always
+                offer sign-in, since the person may already have an account. */}
+            <Link
+              href="/login"
+              className="block w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-center text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] transition-colors"
+            >
+              Go to sign in
+            </Link>
+          </>
         )}
 
         {preview && (
@@ -126,11 +158,7 @@ export default async function AcceptInvitePage({
               </p>
             </div>
 
-            {error && (
-              <p role="alert" className="rounded border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-                {ERR[error] ?? error}
-              </p>
-            )}
+            {error && <Banner tone="error">{error}</Banner>}
 
             {signedIn ? (
               <form action={acceptAuthed}>

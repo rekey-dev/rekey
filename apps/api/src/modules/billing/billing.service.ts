@@ -9,8 +9,8 @@
  * Subscription activation, payment recording, and status transitions all
  * happen via webhook events from the provider — *not* synchronously here.
  * The local `Subscription` row is created in `PENDING` state at checkout
- * and flips to `ACTIVE` when the webhook fires (see
- * `webhooks/stripe.handler.ts` + `webhooks/paypal.handler.ts`, both live).
+ * and flips to `ACTIVE` when the webhook fires (see the provider modules'
+ * `translate` + the shared appliers in `webhooks/apply.ts`).
  */
 
 import type { Application, DataMode, EndUser, Plan, Subscription } from '@prisma/client';
@@ -252,7 +252,7 @@ export const billingService = {
 
     // Redemption is NOT recorded here. The coupon id rides on
     // `subscription.metadata.couponId` and is consumed at payment-success
-    // time in `webhooks/stripe.handler.ts > onInvoicePaid`. Recording at
+    // time in `webhooks/apply.ts > applyPaymentSucceeded`. Recording at
     // checkout-creation was abusable — an attacker could apply a coupon,
     // abandon checkout, and exhaust the per-user / global redemption
     // limit for legitimate users. See decisions.md 2026-05-19.

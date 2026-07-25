@@ -103,6 +103,74 @@ describe('password flows + sign-out-everywhere', () => {
     expect(data.resetToken!.length).toBeGreaterThanOrEqual(32);
   });
 
+  it('forgot-password NEVER returns the raw token to a publishable key', async () => {
+    // Regression: the publishable key ships in browser code, so handing it the
+    // reset token let anyone holding it take over any end-user account —
+    // forgot-password → reset-password → sign-in, no email access needed.
+    // A secret-key caller keeps the legacy raw-token contract (asserted above).
+    await signUp(appA, 'pubkey-reset@example.com');
+    const publicKey = await app
+      .inject({
+        method: 'GET',
+        url: `/api/v1/admin/applications/${appA.applicationId}`,
+        headers: { authorization: `Bearer ${ADMIN_KEY}` },
+      })
+      .then((r) => (r.json().data as { publicKey: string }).publicKey);
+    expect(publicKey.startsWith('rp_pub_')).toBe(true);
+
+    const r = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/forgot-password',
+      headers: { authorization: `Bearer ${publicKey}` },
+      payload: { email: 'pubkey-reset@example.com' },
+    });
+    expect(r.statusCode).toBe(200);
+    const data = r.json().data as { emailSent: boolean; resetToken: string | null };
+    expect(data.resetToken).toBeNull();
+    // No transport configured in tests, so nothing was delivered either — the
+    // browser flow legitimately requires email transport.
+    expect(data.emailSent).toBe(false);
+  });
+
+  it('magic-link/request NEVER returns the raw token to a publishable key', async () => {
+    // Same leak class as the reset-token regression above, higher stakes: a
+    // magic-link token IS a session — verifying it signs the holder in with no
+    // password step at all.
+    await signUp(appA, 'pubkey-magic@example.com');
+    // Enable magic_link. Direct DB mutation matching the audit-3 pattern —
+    // exercising the authConfig edit API is incidental here, and a partial
+    // authConfig payload fails validation (the whole object is replaced).
+    await prisma.application.update({
+      where: { id: appA.applicationId },
+      data: {
+        authConfig: {
+          methods: ['password', 'magic_link'],
+          passwordMinLength: 8,
+          redirectUrls: [],
+          organizationsEnabled: false,
+          signupEnabled: true,
+          passwordBreachCheckEnabled: false,
+        } as never,
+      },
+    });
+    const publicKey = await app
+      .inject({
+        method: 'GET',
+        url: `/api/v1/admin/applications/${appA.applicationId}`,
+        headers: { authorization: `Bearer ${ADMIN_KEY}` },
+      })
+      .then((r) => (r.json().data as { publicKey: string }).publicKey);
+
+    const r = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/magic-link/request',
+      headers: { authorization: `Bearer ${publicKey}` },
+      payload: { email: 'pubkey-magic@example.com' },
+    });
+    expect(r.statusCode).toBe(200);
+    expect((r.json().data as { magicLinkToken: string | null }).magicLinkToken).toBeNull();
+  });
+
   it('forgot-password does NOT enumerate — same shape, no token, for unknown email', async () => {
     const r = await app.inject({
       method: 'POST',

@@ -17,6 +17,7 @@ cp .env.example .env
 # Fill in the required secrets:
 #   JWT_SECRET=$(openssl rand -hex 32)
 #   SUPER_ADMIN_KEY=$(openssl rand -hex 32)
+# Optional for local dev (REQUIRED in production — the API refuses to boot without it):
 #   ENCRYPTION_KEY=$(openssl rand -hex 32)
 
 docker compose up -d postgres redis
@@ -32,6 +33,12 @@ curl http://localhost:3030/health
 ```
 
 ## 2 — Create your first Tenant
+
+Steps 2–4 provision everything with raw `curl` + your `SUPER_ADMIN_KEY` — no UI
+needed. Prefer clicking? The operator panel at `http://localhost:3031` does the
+same thing: sign up there, create an Application, and copy its secret key from
+the API keys page (this is the flow the SDK READMEs describe), then skip to
+step 5.
 
 ```bash
 ADMIN=$(grep ^SUPER_ADMIN_KEY .env | cut -d= -f2)

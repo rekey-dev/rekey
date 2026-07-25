@@ -38,11 +38,17 @@ export function ConfirmSubmit({
   const dialogRef = React.useRef<HTMLDialogElement | null>(null);
   const baseId = React.useId();
 
+  // Same keyboard focus ring as <Button> (components/button.tsx). The buttons
+  // here keep their compact py-1.5 padding, which Button's fixed base classes
+  // would override, so the ring classes are applied directly instead.
+  const focusRing =
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_40%,transparent)]';
+
   const pad = size === 'sm' ? 'px-3 py-1.5 text-xs' : 'px-3 py-1.5 text-sm';
   const triggerCls =
     variant === 'primary'
-      ? `rounded-md bg-[var(--color-primary)] font-medium text-[var(--color-primary-fg)] ${pad}`
-      : `rounded-md border border-[var(--color-border)] hover:bg-[var(--color-bg)] ${pad}`;
+      ? `rounded-md bg-[var(--color-primary)] font-medium text-[var(--color-primary-fg)] ${pad} ${focusRing}`
+      : `rounded-md border border-[var(--color-border)] hover:bg-[var(--color-bg)] ${pad} ${focusRing}`;
 
   const open = (): void => {
     try {
@@ -75,14 +81,14 @@ export function ConfirmSubmit({
           <button
             type="button"
             onClick={close}
-            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-bg)]"
+            className={`rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-bg)] ${focusRing}`}
           >
             Keep it
           </button>
           <button
             type="submit"
             onClick={close}
-            className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)]"
+            className={`rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] ${focusRing}`}
           >
             {confirmLabel ?? label}
           </button>

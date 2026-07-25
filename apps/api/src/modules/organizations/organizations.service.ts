@@ -325,7 +325,7 @@ export const organizationsService = {
           fix: 'Ask an OWNER / ADMIN for a fresh invite.',
         });
       }
-      if (inv.expiresAt < new Date()) {
+      if (inv.expiresAt <= new Date()) {
         throw new RelipayError({
           statusCode: 400,
           code: 'ORGANIZATION_INVITATION_EXPIRED',

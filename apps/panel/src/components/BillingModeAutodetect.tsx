@@ -14,10 +14,19 @@
 
 import * as React from 'react';
 
-/** Input names we'll watch — covers Stripe (apiKey) and Razorpay (keyId). */
+/** Default input names to watch — covers Stripe (apiKey) and Razorpay (keyId). */
 const WATCH_NAMES = ['apiKey', 'keyId'];
 
-export function BillingModeAutodetect(): React.JSX.Element | null {
+export function BillingModeAutodetect({
+  /**
+   * Credential input names to watch. Registry-driven callers (the P4
+   * discovery-rendered forms) pass every credential field key — inputs whose
+   * values never carry a `_live_`/`_test_` marker simply never flip the mode.
+   */
+  names = WATCH_NAMES,
+}: {
+  names?: string[];
+} = {}): React.JSX.Element | null {
   const ref = React.useRef<HTMLInputElement>(null);
 
   React.useEffect(() => {
@@ -27,7 +36,7 @@ export function BillingModeAutodetect(): React.JSX.Element | null {
     const select = form.elements.namedItem('mode');
     if (!(select instanceof HTMLSelectElement)) return;
 
-    const inputs = WATCH_NAMES.map((name) => {
+    const inputs = names.map((name) => {
       const el = form.elements.namedItem(name);
       return el instanceof HTMLInputElement ? el : null;
     }).filter((el): el is HTMLInputElement => el !== null);
@@ -42,7 +51,7 @@ export function BillingModeAutodetect(): React.JSX.Element | null {
     return () => {
       inputs.forEach((el) => el.removeEventListener('blur', onBlur));
     };
-  }, []);
+  }, [names]);
 
   // Hidden sentinel input gives us a stable handle to the parent <form>
   // without grabbing it via DOM tree-walking from a sibling. It also

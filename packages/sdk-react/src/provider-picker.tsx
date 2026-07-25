@@ -44,17 +44,31 @@ export interface ProviderOption {
   priority?: number;
   /** ISO 3166-1 alpha-2 countries this provider is routed for. Display-only. */
   countries?: string[];
+  /**
+   * Server-provided display name (P4 discovery). Preferred over the built-in
+   * fallback map when present — so a provider added server-side renders its
+   * proper label without an SDK update.
+   */
+  label?: string;
 }
 
-/** Friendly, brand-correct display names. Falls back to the raw id. */
-const PROVIDER_LABELS: Record<BillingProvider, string> = {
+/**
+ * Built-in fallback labels for the three bundled providers. The server's
+ * `label` (P4 discovery) wins when present; an unknown provider from a newer
+ * server degrades to a capitalized name — never a broken flow.
+ */
+const PROVIDER_LABELS: Record<string, string> = {
   stripe: 'Stripe',
   paypal: 'PayPal',
   razorpay: 'Razorpay',
 };
 
-function providerLabel(p: BillingProvider): string {
-  return PROVIDER_LABELS[p] ?? p;
+function capitalize(name: string): string {
+  return name.length === 0 ? name : name[0]!.toUpperCase() + name.slice(1);
+}
+
+function providerLabel(opt: ProviderOption): string {
+  return opt.label ?? PROVIDER_LABELS[opt.provider] ?? capitalize(opt.provider);
 }
 
 export interface ProviderPickerProps {
@@ -141,7 +155,7 @@ function ProviderPickerBody({
                 onChange={() => select(opt.provider)}
               />
               <span className="relipay-provider-dot" aria-hidden="true" />
-              <span className="relipay-provider-name">{providerLabel(opt.provider)}</span>
+              <span className="relipay-provider-name">{providerLabel(opt)}</span>
             </label>
           );
         })}

@@ -32,6 +32,7 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Applications'],
+        security: [{ superAdminKey: [] }],
         summary: 'List applications',
         description: 'Optionally filter by `tenantId`.',
         querystring: {
@@ -52,6 +53,7 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Applications'],
+        security: [{ superAdminKey: [] }],
         summary: 'Get an application by id',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       },
@@ -67,6 +69,7 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Applications'],
+        security: [{ superAdminKey: [] }],
         summary: 'Create an application under a tenant',
         description:
           'Mints a unique slug, public key, and default auth/billing config. ' +

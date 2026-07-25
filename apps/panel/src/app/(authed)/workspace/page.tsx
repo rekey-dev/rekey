@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { api, PanelApiError, type MeDto } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
+import { Banner } from '@/components/Banner';
 import { PageHeader } from '@/components/PageHeader';
 import { Card } from '@/components/Card';
 import { CopyButton } from '@/components/CopyButton';
@@ -98,12 +99,9 @@ export default async function WorkspaceSettingsPage({
         </div>
         <form action={renameWorkspace} className="space-y-4">
           {error && (
-            <p
-              role="alert"
-              className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
-            >
-              {ERR[error] ?? error}
-            </p>
+            <Banner tone="error">
+              {ERR[error] ?? 'Something went wrong. Please try again.'}
+            </Banner>
           )}
           <Field
             label="Workspace name"

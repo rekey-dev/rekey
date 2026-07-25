@@ -15,8 +15,11 @@
  * a single sub-tab (Overview, Users) render no second row — the primary row
  * carries the bottom border instead.
  *
- * The Billing group is omitted entirely when the application has billing
- * disabled — matching the server-side gate (`requireBillingEnabled`).
+ * When the application has billing disabled the Billing group collapses to a
+ * single "Billing (off)" item linking to the Providers page — the only place
+ * billing can be turned back on — instead of disappearing entirely (which left
+ * no path to the enable toggle). The full group returns once enabled,
+ * matching the server-side gate (`requireBillingEnabled`).
  */
 
 import * as React from 'react';
@@ -31,7 +34,7 @@ interface SubTab {
 
 interface Group {
   key: string;
-  label: string;
+  label: React.ReactNode;
   children: SubTab[];
 }
 
@@ -67,27 +70,38 @@ export function AppNav({
         { seg: 'mcp', label: 'MCP' },
       ],
     },
-    ...(billingEnabled
-      ? [
-          {
-            key: 'billing',
-            label: 'Billing',
-            children: [
-              // Revenue dashboard is the group landing — stat tiles + the
-              // 12-month revenue chart live at /applications/{id}/revenue.
-              { seg: 'revenue', label: 'Overview' },
-              { seg: 'billing', label: 'Providers' },
-              { seg: 'plans', label: 'Plans' },
-              { seg: 'payments', label: 'Payments' },
-              { seg: 'dunning', label: 'Dunning' },
-              { seg: 'coupons', label: 'Coupons' },
-              { seg: 'licenses', label: 'Licenses' },
-              { seg: 'usage', label: 'Usage' },
-              { seg: 'portal', label: 'Portal' },
-            ],
-          },
-        ]
-      : []),
+    billingEnabled
+      ? {
+          key: 'billing',
+          label: 'Billing',
+          children: [
+            // Revenue dashboard is the group landing — stat tiles + the
+            // 12-month revenue chart live at /applications/{id}/revenue.
+            { seg: 'revenue', label: 'Overview' },
+            { seg: 'billing', label: 'Providers' },
+            { seg: 'plans', label: 'Plans' },
+            { seg: 'payments', label: 'Payments' },
+            { seg: 'dunning', label: 'Dunning' },
+            { seg: 'coupons', label: 'Coupons' },
+            { seg: 'licenses', label: 'Licenses' },
+            { seg: 'usage', label: 'Usage' },
+            { seg: 'portal', label: 'Portal' },
+          ],
+        }
+      : {
+          // Billing disabled: keep a single entry point to the Providers page
+          // (where the enable toggle lives) so it isn't a dead end.
+          key: 'billing',
+          label: (
+            <span className="inline-flex items-center gap-1.5">
+              Billing
+              <span className="rounded bg-[var(--color-surface-muted)] px-1 py-px text-[10px] font-medium uppercase tracking-wide text-[var(--color-muted-fg)]">
+                off
+              </span>
+            </span>
+          ),
+          children: [{ seg: 'billing', label: 'Providers' }],
+        },
     {
       key: 'developer',
       label: 'Developer',
@@ -132,10 +146,10 @@ export function AppNav({
               key={g.key}
               href={target}
               aria-current={isActive ? 'page' : undefined}
-              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50 ${
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] ${
                 isActive
                   ? 'bg-[var(--color-surface-muted)] text-[var(--color-fg)]'
-                  : 'text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)]/60'
+                  : 'text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:bg-[color-mix(in_srgb,var(--color-surface-muted)_60%,transparent)]'
               }`}
             >
               {g.label}
@@ -158,7 +172,7 @@ export function AppNav({
                   key={c.seg || 'index'}
                   href={hrefFor(c.seg)}
                   aria-current={isActive ? 'page' : undefined}
-                  className={`-mb-px whitespace-nowrap rounded-t border-b-2 px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50 ${
+                  className={`-mb-px whitespace-nowrap rounded-t border-b-2 px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] ${
                     isActive
                       ? 'border-[var(--color-primary)] text-[var(--color-fg)] font-medium'
                       : 'border-transparent text-[var(--color-muted-fg)] hover:text-[var(--color-fg)]'
@@ -171,7 +185,7 @@ export function AppNav({
           </nav>
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute top-0 right-0 h-full w-12 bg-gradient-to-l from-[var(--color-bg)] via-[var(--color-bg)]/80 to-transparent"
+            className="pointer-events-none absolute top-0 right-0 h-full w-12 bg-gradient-to-l from-[var(--color-bg)] via-[color-mix(in_srgb,var(--color-bg)_80%,transparent)] to-transparent"
           />
         </div>
       )}

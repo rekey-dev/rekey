@@ -6,6 +6,7 @@ import {
   PanelApiError,
   type ApplicationRow,
   type BillingCredentialRow,
+  type BillingProviderDescriptor,
   type BillingProviderName,
 } from '@/lib/api';
 import { CopyButton } from '@/components/CopyButton';
@@ -14,6 +15,7 @@ import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
 import { formatDateTime } from '@/lib/date';
+import { publicHttpUrl } from '@/lib/public-url';
 import { Modal } from '@/components/Modal';
 import { BillingModeAutodetect } from '@/components/BillingModeAutodetect';
 import { BillingModeNotice } from '@/components/BillingModeBanner';
@@ -41,75 +43,44 @@ const WEBHOOK_STATUS_TONE: Record<WebhookEventRow['status'], BadgeTone> = {
 
 // ---------- Server actions ----------
 
-async function upsertStripe(applicationId: string, formData: FormData): Promise<void> {
+/**
+ * The ONE generic credentials action (P4) — replaces the per-provider
+ * upsertStripe/upsertPaypal/upsertRazorpay trio. `fieldKeys` is bound from
+ * the provider's discovery `credentialFields`, so the collected `data` shape
+ * always matches what the module's registry-derived PUT route expects. The
+ * API re-validates everything (pattern prefixes, required fields) and raises
+ * BILLING_CREDENTIALS_INVALID, surfaced via the ?error banner.
+ */
+async function saveProviderCredentials(
+  applicationId: string,
+  provider: BillingProviderName,
+  fieldKeys: string[],
+  formData: FormData,
+): Promise<void> {
   'use server';
-  const apiKey = String(formData.get('apiKey') ?? '').trim();
-  const webhookSecret = String(formData.get('webhookSecret') ?? '').trim();
+  const data: Record<string, string> = {};
+  for (const key of fieldKeys) {
+    data[key] = String(formData.get(key) ?? '').trim();
+  }
   const countries = parseCountries(formData.get('countries'));
   const priority = parsePriority(formData.get('priority'));
   const mode = parseMode(formData.get('mode'));
   try {
     await api({
       method: 'PUT',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/stripe`,
-      body: { data: { apiKey, webhookSecret }, countries, priority, mode },
+      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${encodeURIComponent(provider)}`,
+      body: { data, countries, priority, mode },
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/billing?error=${encodeURIComponent(err.code)}&edit=stripe`);
+      redirect(
+        `/applications/${applicationId}/billing?error=${encodeURIComponent(err.code)}&edit=${encodeURIComponent(provider)}`,
+      );
     }
     throw err;
   }
   revalidatePath(`/applications/${applicationId}/billing`);
-  redirect(`/applications/${applicationId}/billing?saved=stripe`);
-}
-
-async function upsertPaypal(applicationId: string, formData: FormData): Promise<void> {
-  'use server';
-  const clientId = String(formData.get('clientId') ?? '').trim();
-  const clientSecret = String(formData.get('clientSecret') ?? '').trim();
-  const webhookId = String(formData.get('webhookId') ?? '').trim();
-  const countries = parseCountries(formData.get('countries'));
-  const priority = parsePriority(formData.get('priority'));
-  const mode = parseMode(formData.get('mode'));
-  try {
-    await api({
-      method: 'PUT',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/paypal`,
-      body: { data: { clientId, clientSecret, webhookId }, countries, priority, mode },
-    });
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/billing?error=${encodeURIComponent(err.code)}&edit=paypal`);
-    }
-    throw err;
-  }
-  revalidatePath(`/applications/${applicationId}/billing`);
-  redirect(`/applications/${applicationId}/billing?saved=paypal`);
-}
-
-async function upsertRazorpay(applicationId: string, formData: FormData): Promise<void> {
-  'use server';
-  const keyId = String(formData.get('keyId') ?? '').trim();
-  const keySecret = String(formData.get('keySecret') ?? '').trim();
-  const webhookSecret = String(formData.get('webhookSecret') ?? '').trim();
-  const countries = parseCountries(formData.get('countries'));
-  const priority = parsePriority(formData.get('priority'));
-  const mode = parseMode(formData.get('mode'));
-  try {
-    await api({
-      method: 'PUT',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/razorpay`,
-      body: { data: { keyId, keySecret, webhookSecret }, countries, priority, mode },
-    });
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/billing?error=${encodeURIComponent(err.code)}&edit=razorpay`);
-    }
-    throw err;
-  }
-  revalidatePath(`/applications/${applicationId}/billing`);
-  redirect(`/applications/${applicationId}/billing?saved=razorpay`);
+  redirect(`/applications/${applicationId}/billing?saved=${encodeURIComponent(provider)}`);
 }
 
 async function toggleEnabled(
@@ -120,7 +91,7 @@ async function toggleEnabled(
   'use server';
   await api({
     method: 'PATCH',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${provider}`,
+    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${encodeURIComponent(provider)}`,
     body: { enabled },
   });
   revalidatePath(`/applications/${applicationId}/billing`);
@@ -199,7 +170,7 @@ async function removeProvider(
   'use server';
   await api({
     method: 'DELETE',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${provider}`,
+    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${encodeURIComponent(provider)}`,
   });
   revalidatePath(`/applications/${applicationId}/billing`);
   redirect(`/applications/${applicationId}/billing`);
@@ -213,7 +184,7 @@ async function registerWebhook(
   try {
     await api({
       method: 'POST',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${provider}/register-webhook`,
+      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${encodeURIComponent(provider)}/register-webhook`,
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
@@ -259,11 +230,21 @@ const ERR: Record<string, string> = {
   INTERNAL_ERROR: 'Something went wrong. Check the API logs for the request id.',
 };
 
-const PROVIDER_LABEL: Record<BillingProviderName, string> = {
+/**
+ * Built-in fallback labels (P4): the discovery endpoint's `label` is the
+ * source of truth; this map only covers banner lookups for names that fall
+ * outside the fetched registry (e.g. a stale `?saved=` param). Unknown names
+ * degrade to a capitalized spelling.
+ */
+const FALLBACK_LABEL: Record<string, string> = {
   stripe: 'Stripe',
   paypal: 'PayPal',
   razorpay: 'Razorpay',
 };
+
+function capitalize(name: string): string {
+  return name.length === 0 ? name : name[0]!.toUpperCase() + name.slice(1);
+}
 
 export default async function BillingPage({
   params,
@@ -279,11 +260,14 @@ export default async function BillingPage({
   const edit = typeof sp.edit === 'string' ? sp.edit : undefined;
   const webhook = typeof sp.webhook === 'string' ? sp.webhook : undefined;
 
-  const [app, list, webhookEvents] = await Promise.all([
+  const [app, discovery, webhookEvents] = await Promise.all([
     api<ApplicationRow>({ method: 'GET', path: `/api/v1/tenant/applications/${encodeURIComponent(id)}` }),
-    api<BillingCredentialRow[]>({
+    // P4 discovery: every registered provider module + this app's configured
+    // status in one call — drives the provider table, labels, and the
+    // autogenerated credential forms.
+    api<{ providers: BillingProviderDescriptor[] }>({
       method: 'GET',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/billing-credentials`,
+      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/billing/providers`,
     }),
     api<WebhookEventRow[]>({
       method: 'GET',
@@ -291,7 +275,14 @@ export default async function BillingPage({
     }).catch(() => [] as WebhookEventRow[]),
   ]);
 
-  const byProvider = new Map(list.map((r) => [r.provider, r]));
+  const providers = discovery.providers;
+  // Configured-credential rows, reconstructed from the discovery statuses —
+  // same shape `GET /billing-credentials` returns (BillingModeNotice reads it).
+  const list: BillingCredentialRow[] = providers
+    .filter((d) => d.status !== null)
+    .map((d) => ({ provider: d.name, configured: true, ...d.status! }));
+  const labelOf = (name: string): string =>
+    providers.find((d) => d.name === name)?.label ?? FALLBACK_LABEL[name] ?? capitalize(name);
   const billingEnabled = app.billingConfig.enabled;
   const dunningEnabled = app.billingConfig.dunningEnabled ?? false;
 
@@ -299,21 +290,18 @@ export default async function BillingPage({
   // API origin the provider can reach — not the in-cluster RELIPAY_URL
   // (e.g. `http://api:3030`), which would show an unreachable `api:3030`-style
   // host. Prefer NEXT_PUBLIC_API_URL (the public origin); fall back to
-  // RELIPAY_URL only for local dev where they're the same. When neither is a
-  // public URL the row renders a "configure NEXT_PUBLIC_API_URL" warning so the
+  // RELIPAY_URL only for local dev where they're the same — and only after
+  // publicHttpUrl() confirms it looks public (dotted host or localhost), so an
+  // in-cluster value never leaks into the HTML. When neither passes, apiBase is
+  // null and the row renders a "configure NEXT_PUBLIC_API_URL" warning so the
   // operator catches it before pasting (Stripe silently rejects relative/bad
   // hosts and the webhook then fails forever — UX-AUDIT MEDIUM #24).
-  const publicApiBase = process.env.NEXT_PUBLIC_API_URL ?? process.env.RELIPAY_URL;
-  const apiBase = publicApiBase?.replace(/\/$/, '');
-  const stripeWebhookUrl = apiBase
-    ? `${apiBase}/api/v1/billing/webhook/stripe/${app.slug}`
-    : null;
-  const paypalWebhookUrl = apiBase
-    ? `${apiBase}/api/v1/billing/webhook/paypal/${app.slug}`
-    : null;
-  const razorpayWebhookUrl = apiBase
-    ? `${apiBase}/api/v1/billing/webhook/razorpay/${app.slug}`
-    : null;
+  const apiBase =
+    publicHttpUrl(process.env.NEXT_PUBLIC_API_URL) ?? publicHttpUrl(process.env.RELIPAY_URL);
+  // Module-name-driven (P4): the shared webhook pipeline route is
+  // /billing/webhook/:provider/:slug for every registered module.
+  const webhookUrlFor = (name: string): string | null =>
+    apiBase ? `${apiBase}/api/v1/billing/webhook/${encodeURIComponent(name)}/${app.slug}` : null;
 
   return (
     <div className="space-y-5">
@@ -327,13 +315,13 @@ export default async function BillingPage({
       )}
       {saved && saved !== 'billing' && saved !== 'subject' && saved !== 'dunning' && (
         <SavedBanner
-          message={`${PROVIDER_LABEL[saved as BillingProviderName] ?? saved} credentials saved. Encrypted at rest.`}
+          message={`${labelOf(saved)} credentials saved. Encrypted at rest.`}
         />
       )}
       {webhook && (
         <SavedBanner
           params={['webhook']}
-          message={`${PROVIDER_LABEL[webhook as BillingProviderName] ?? webhook} webhook configured automatically — no dashboard paste needed.`}
+          message={`${labelOf(webhook)} webhook configured automatically — no dashboard paste needed.`}
         />
       )}
       {error && (
@@ -425,14 +413,14 @@ export default async function BillingPage({
                     <button
                       type="button"
                       disabled
-                      className="rounded-md border px-3 py-1.5 text-sm cursor-default border-[var(--color-primary)] bg-[var(--color-primary)]/5 text-[var(--color-primary)]"
+                      className="rounded-md border px-3 py-1.5 text-sm cursor-default border-[var(--color-primary)] bg-[color-mix(in_srgb,var(--color-primary)_5%,transparent)] text-[var(--color-primary)]"
                     >
                       {s === 'user' ? 'Individual users' : 'Organizations'} ✓
                     </button>
                   ) : (
                     <SubmitButton
                       pendingLabel="Switching…"
-                      className="rounded-md border px-3 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50 border-[var(--color-border)] text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)] disabled:opacity-60"
+                      className="rounded-md border px-3 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] border-[var(--color-border)] text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)] disabled:opacity-60"
                     >
                       {s === 'user' ? 'Individual users' : 'Organizations'}
                     </SubmitButton>
@@ -450,7 +438,7 @@ export default async function BillingPage({
           title="Billing providers"
           description={
             <>
-              Configure any subset of {Object.values(PROVIDER_LABEL).join(' / ')}. End-users pick one
+              Configure any subset of {providers.map((d) => d.label).join(' / ')}. End-users pick one
               at checkout, or the geo router picks based on their country (CF-IPCountry header). After
               payment, checkout returns to the <code className="text-xs">successUrl</code> /{' '}
               <code className="text-xs">cancelUrl</code> your app passes on each checkout call — set
@@ -474,11 +462,12 @@ export default async function BillingPage({
           </TR>
         </THead>
         <TBody>
-          {(['stripe', 'paypal', 'razorpay'] as BillingProviderName[]).map((p) => {
-            const row = byProvider.get(p);
+          {providers.map((d) => {
+            const p = d.name;
+            const row = d.status;
             return (
               <TR key={p} hover>
-                <TD className="font-medium">{PROVIDER_LABEL[p]}</TD>
+                <TD className="font-medium">{d.label}</TD>
                 <TD>
                   {!row ? (
                     <span className="text-xs text-[var(--color-muted-fg)]">not configured</span>
@@ -508,18 +497,19 @@ export default async function BillingPage({
                     <span className="text-[var(--color-muted-fg)]">—</span>
                   ) : row.webhookConfigured ? (
                     <Badge tone="success" dot>configured</Badge>
-                  ) : p === 'razorpay' ? (
-                    // Razorpay has no webhook-create API — it's always a manual
-                    // dashboard paste, so no Auto-configure. The "how" + the why
-                    // live in the Edit modal; the tooltip hints it here.
-                    <span title="Razorpay has no webhook API — set it up manually in Edit (no Auto-configure).">
+                  ) : !d.capabilities.autoWebhookRegister ? (
+                    // Capability-driven (P4): no webhook-create API (Razorpay)
+                    // → always a manual dashboard paste, so no Auto-configure.
+                    // The "how" + the why live in the Edit modal; the tooltip
+                    // hints it here.
+                    <span title={`${d.label} has no webhook API — set it up manually in Edit (no Auto-configure).`}>
                       <Badge tone="warning" dot>not set up</Badge>
                     </span>
                   ) : (
                     <form action={registerWebhook.bind(null, id, p)} className="inline">
                       <SubmitButton
                         pendingLabel="Configuring…"
-                        className="rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50 disabled:opacity-60"
+                        className="rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
                         title="Create the webhook via the provider API and store the secret automatically"
                       >
                         Auto-configure
@@ -530,16 +520,9 @@ export default async function BillingPage({
                 <TD align="right">
                   <div className="flex items-center justify-end gap-3">
                     <ProviderEditModal
-                      provider={p}
-                      existing={row}
+                      descriptor={d}
                       applicationId={id}
-                      webhookUrl={
-                        p === 'stripe'
-                          ? stripeWebhookUrl
-                          : p === 'paypal'
-                            ? paypalWebhookUrl
-                            : razorpayWebhookUrl
-                      }
+                      webhookUrl={webhookUrlFor(p)}
                       error={edit === p ? error : undefined}
                     />
                     {row && (
@@ -547,18 +530,18 @@ export default async function BillingPage({
                         <form action={toggleEnabled.bind(null, id, p, !row.enabled)} className="inline">
                           <SubmitButton
                             pendingLabel={row.enabled ? 'Disabling…' : 'Enabling…'}
-                            className="rounded text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50 disabled:opacity-60"
+                            className="rounded text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
                           >
                             {row.enabled ? 'Disable' : 'Enable'}
                           </SubmitButton>
                         </form>
                         <form action={removeProvider.bind(null, id, p)} className="inline">
                           <TypedConfirmButton
-                            expected={PROVIDER_LABEL[p].toLowerCase()}
-                            title={`Remove ${PROVIDER_LABEL[p]} credentials?`}
-                            description={`Existing subscriptions keep running but no new checkouts can use ${PROVIDER_LABEL[p]}. You'll need to re-paste the API keys from the ${PROVIDER_LABEL[p]} dashboard to restore.`}
+                            expected={d.label.toLowerCase()}
+                            title={`Remove ${d.label} credentials?`}
+                            description={`Existing subscriptions keep running but no new checkouts can use ${d.label}. You'll need to re-paste the API keys from the ${d.label} dashboard to restore.`}
                             triggerLabel="Remove"
-                            confirmLabel={`Remove ${PROVIDER_LABEL[p]}`}
+                            confirmLabel={`Remove ${d.label}`}
                           />
                         </form>
                       </>
@@ -598,7 +581,7 @@ export default async function BillingPage({
               {webhookEvents.map((e) => (
                 <TR key={e.id} hover className="align-top">
                   <TD muted className="whitespace-nowrap text-xs">{formatDateTime(e.receivedAt)}</TD>
-                  <TD className="text-xs">{PROVIDER_LABEL[e.provider as BillingProviderName] ?? e.provider}</TD>
+                  <TD className="text-xs">{labelOf(e.provider)}</TD>
                   <TD mono>{e.eventType}</TD>
                   <TD>
                     <Badge tone={WEBHOOK_STATUS_TONE[e.status]} dot>{e.status}</Badge>
@@ -620,7 +603,7 @@ export default async function BillingPage({
 }
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 function Field({ label, hint, children }: { label: string; hint?: React.ReactNode; children: React.ReactNode }): React.JSX.Element {
   return (
@@ -632,24 +615,24 @@ function Field({ label, hint, children }: { label: string; hint?: React.ReactNod
   );
 }
 
+interface WebhookMeta {
+  dashboardPath: string;
+  events: string[];
+  /** What the operator pastes back into ReliPay after creating the webhook. */
+  returnLabel: string;
+  /** Intro copy for manual-only providers (capabilities.autoWebhookRegister: false). */
+  manualIntro?: string;
+}
+
 /**
- * Per-provider webhook setup metadata. Drives the WebhookSetup block so the
- * modal isn't a wall of inline event-name <code> tags. `autoConfigurable`
- * providers expose ReliPay's one-click register; Razorpay has no webhook-create
- * API, so it's a short manual paste.
+ * Per-provider webhook setup COPY for the built-in three — dashboard click
+ * paths and event lists live in the panel, not the registry (they're prose,
+ * not contract). Whether a provider is auto-configurable comes from the
+ * discovery `capabilities.autoWebhookRegister`, and unknown providers fall
+ * back to a generic docsUrl-driven recipe (`webhookMetaFor`).
  */
-const WEBHOOK_META: Record<
-  BillingProviderName,
-  {
-    autoConfigurable: boolean;
-    dashboardPath: string;
-    events: string[];
-    /** What the operator pastes back into ReliPay after creating the webhook. */
-    returnLabel: string;
-  }
-> = {
+const WEBHOOK_META: Record<string, WebhookMeta> = {
   stripe: {
-    autoConfigurable: true,
     dashboardPath: 'Stripe Dashboard → Developers → Webhooks → Add endpoint',
     events: [
       'checkout.session.completed',
@@ -661,7 +644,6 @@ const WEBHOOK_META: Record<
     returnLabel: 'Copy the signing secret (whsec_…) Stripe shows, paste it below.',
   },
   paypal: {
-    autoConfigurable: true,
     dashboardPath: 'PayPal Developer Dashboard → your App → Webhooks',
     events: [
       'BILLING.SUBSCRIPTION.ACTIVATED',
@@ -674,7 +656,6 @@ const WEBHOOK_META: Record<
     returnLabel: 'Copy the generated Webhook ID, paste it below.',
   },
   razorpay: {
-    autoConfigurable: false,
     dashboardPath: 'Razorpay Dashboard → Settings → Webhooks → Add New Webhook',
     events: [
       'subscription.activated',
@@ -685,8 +666,22 @@ const WEBHOOK_META: Record<
       'payment_link.paid',
     ],
     returnLabel: 'Set a secret on the webhook, then enter the SAME secret below.',
+    manualIntro:
+      'Unlike Stripe and PayPal, Razorpay has no API to create webhooks — so there’s no Auto-configure button for it. It’s a quick one-time setup in the Razorpay dashboard:',
   },
 };
+
+/** Webhook copy for a provider — panel-curated where we have it, docsUrl-generic otherwise. */
+function webhookMetaFor(d: BillingProviderDescriptor): WebhookMeta {
+  return (
+    WEBHOOK_META[d.name] ?? {
+      dashboardPath: `the ${d.label} dashboard's webhook settings (see ${d.docsUrl})`,
+      events: [],
+      returnLabel: `Paste the webhook secret / id ${d.label} gives you into the field above.`,
+      manualIntro: `${d.label} has no API to create webhooks — so there’s no Auto-configure button for it. It’s a quick one-time setup in the ${d.label} dashboard:`,
+    }
+  );
+}
 
 /**
  * Webhook setup guidance for one provider. Replaces the old raw URL + inline
@@ -694,17 +689,16 @@ const WEBHOOK_META: Record<
  * the auto/manual split uses a native <details> so it needs no client JS.
  */
 function WebhookSetup({
-  provider,
-  label,
+  descriptor,
   webhookUrl,
   configured,
 }: {
-  provider: BillingProviderName;
-  label: string;
+  descriptor: BillingProviderDescriptor;
   webhookUrl: string | null;
   configured: boolean;
 }): React.JSX.Element {
-  const meta = WEBHOOK_META[provider];
+  const label = descriptor.label;
+  const meta = webhookMetaFor(descriptor);
 
   // No public base URL → no usable endpoint to paste. Surface the blocker.
   if (!webhookUrl) {
@@ -747,27 +741,29 @@ function WebhookSetup({
         <StepDot n={3} />
         <span>{meta.returnLabel}</span>
       </li>
-      <li className="flex gap-2">
-        <StepDot n={4} />
-        <div className="min-w-0 flex-1 space-y-1.5">
-          <span>Subscribe to these events:</span>
-          <div className="flex flex-wrap gap-1">
-            {meta.events.map((e) => (
-              <code
-                key={e}
-                className="rounded bg-[var(--color-surface-muted)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--color-fg)]"
-              >
-                {e}
-              </code>
-            ))}
+      {meta.events.length > 0 && (
+        <li className="flex gap-2">
+          <StepDot n={4} />
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <span>Subscribe to these events:</span>
+            <div className="flex flex-wrap gap-1">
+              {meta.events.map((e) => (
+                <code
+                  key={e}
+                  className="rounded bg-[var(--color-surface-muted)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--color-fg)]"
+                >
+                  {e}
+                </code>
+              ))}
+            </div>
           </div>
-        </div>
-      </li>
+        </li>
+      )}
     </ol>
   );
 
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)]/40 p-3 space-y-2.5">
+    <div className="rounded-lg border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-surface-muted)_40%,transparent)] p-3 space-y-2.5">
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-semibold text-[var(--color-fg)]">Webhook</span>
         {configured ? (
@@ -781,9 +777,9 @@ function WebhookSetup({
         checkouts complete but nothing is fulfilled.
       </p>
 
-      {meta.autoConfigurable ? (
+      {descriptor.capabilities.autoWebhookRegister ? (
         <>
-          <div className="rounded-md border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 px-2.5 py-2">
+          <div className="rounded-md border border-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] bg-[color-mix(in_srgb,var(--color-primary)_5%,transparent)] px-2.5 py-2">
             <p className="text-xs font-medium text-[var(--color-fg)]">Recommended — one click</p>
             <p className="mt-0.5 text-xs text-[var(--color-muted-fg)]">
               Save your API keys below, then hit <span className="font-medium">Auto-configure</span>{' '}
@@ -803,9 +799,8 @@ function WebhookSetup({
           <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-2.5 py-2">
             <p className="text-xs font-medium text-[var(--color-fg)]">Manual setup only</p>
             <p className="mt-0.5 text-xs text-[var(--color-muted-fg)]">
-              Unlike Stripe and PayPal, Razorpay has no API to create webhooks — so there’s no
-              <span className="font-medium"> Auto-configure</span> button for it. It’s a quick
-              one-time setup in the Razorpay dashboard:
+              {meta.manualIntro ??
+                `${label} has no API to create webhooks — set it up once in the ${label} dashboard:`}
             </p>
           </div>
           {manualSteps}
@@ -817,7 +812,7 @@ function WebhookSetup({
 
 function StepDot({ n }: { n: number }): React.JSX.Element {
   return (
-    <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--color-primary)]/10 text-[10px] font-semibold text-[var(--color-primary)]">
+    <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--color-primary)_10%,transparent)] text-[10px] font-semibold text-[var(--color-primary)]">
       {n}
     </span>
   );
@@ -827,28 +822,31 @@ function StepDot({ n }: { n: number }): React.JSX.Element {
  * Per-provider configure / rotate Modal. Same chrome (Modal trigger button +
  * label + hint Field rows) matches the rest of the panel. Trigger label
  * flips between "Configure" and "Edit" based on whether creds exist.
+ *
+ * Fully discovery-driven (P4): the credential inputs render from the
+ * module's `credentialFields` — secret fields become password inputs, the
+ * field `help` (or `pattern.message`) becomes the hint — and the submit
+ * action is the ONE generic `saveProviderCredentials`.
  */
 function ProviderEditModal({
-  provider,
-  existing,
+  descriptor,
   applicationId,
   webhookUrl,
   error,
 }: {
-  provider: BillingProviderName;
-  existing: BillingCredentialRow | undefined;
+  descriptor: BillingProviderDescriptor;
   applicationId: string;
   webhookUrl: string | null;
   error: string | undefined;
 }): React.JSX.Element {
-  const label =
-    provider === 'stripe' ? 'Stripe' : provider === 'paypal' ? 'PayPal' : 'Razorpay';
-  const action =
-    provider === 'stripe'
-      ? upsertStripe.bind(null, applicationId)
-      : provider === 'paypal'
-      ? upsertPaypal.bind(null, applicationId)
-      : upsertRazorpay.bind(null, applicationId);
+  const { name: provider, label, credentialFields } = descriptor;
+  const existing = descriptor.status;
+  const action = saveProviderCredentials.bind(
+    null,
+    applicationId,
+    provider,
+    credentialFields.map((f) => f.key),
+  );
 
   return (
     <Modal
@@ -861,7 +859,7 @@ function ProviderEditModal({
           : `Connect your ${label} account. Credentials are AES-256-GCM encrypted at rest; never returned in any API response.`
       }
       trigger={existing ? 'Edit' : 'Configure'}
-      triggerClassName="cursor-pointer rounded text-xs font-medium text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
+      triggerClassName="cursor-pointer rounded text-xs font-medium text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
     >
       <form action={action} className="space-y-3">
         {error && (
@@ -870,57 +868,22 @@ function ProviderEditModal({
           </p>
         )}
 
-        {provider === 'stripe' && (
-          <>
-            <Field label="API key" hint="From Stripe → Developers → API keys.">
-              <input type="password" name="apiKey" required autoComplete="off" placeholder="sk_test_… or sk_live_…"
-                className={`${inputCls} font-mono`} />
-            </Field>
-            <Field label="Webhook signing secret" hint="Leave blank to auto-configure (recommended). Only fill this if you set the webhook up by hand.">
-              <input type="password" name="webhookSecret" autoComplete="off" placeholder="whsec_… (or leave blank)"
-                className={`${inputCls} font-mono`} />
-            </Field>
-          </>
-        )}
-
-        {provider === 'paypal' && (
-          <>
-            <Field label="Client ID" hint="From PayPal Developer → Apps & Credentials.">
-              <input type="text" name="clientId" required autoComplete="off"
-                className={`${inputCls} font-mono`} />
-            </Field>
-            <Field label="Client secret">
-              <input type="password" name="clientSecret" required autoComplete="off"
-                className={`${inputCls} font-mono`} />
-            </Field>
-            <Field label="Webhook ID" hint="Leave blank to auto-configure (recommended). Only fill this if you set the webhook up by hand.">
-              <input type="text" name="webhookId" autoComplete="off" placeholder="(or leave blank)"
-                className={`${inputCls} font-mono`} />
-            </Field>
-          </>
-        )}
-
-        {provider === 'razorpay' && (
-          <>
-            <Field label="Key ID" hint="From Razorpay Dashboard → Settings → API Keys.">
-              <input type="text" name="keyId" required autoComplete="off" placeholder="rzp_test_… or rzp_live_…"
-                className={`${inputCls} font-mono`} />
-            </Field>
-            <Field label="Key secret">
-              <input type="password" name="keySecret" required autoComplete="off"
-                className={`${inputCls} font-mono`} />
-            </Field>
-            <Field label="Webhook secret" hint="The same secret you set on the webhook in Razorpay — see the Webhook steps below.">
-              <input type="password" name="webhookSecret" required autoComplete="off"
-                className={`${inputCls} font-mono`} />
-            </Field>
-          </>
-        )}
+        {credentialFields.map((f) => (
+          <Field key={f.key} label={f.label} hint={f.help ?? f.pattern?.message}>
+            <input
+              type={f.secret ? 'password' : 'text'}
+              name={f.key}
+              required={!f.optional}
+              autoComplete="off"
+              {...(f.placeholder !== undefined && { placeholder: f.placeholder })}
+              className={`${inputCls} font-mono`}
+            />
+          </Field>
+        ))}
 
         {/* Webhook setup — numbered, copy-first; auto-configure where supported. */}
         <WebhookSetup
-          provider={provider}
-          label={label}
+          descriptor={descriptor}
           webhookUrl={webhookUrl}
           configured={existing?.webhookConfigured ?? false}
         />
@@ -932,7 +895,7 @@ function ProviderEditModal({
               <option value="live">Live</option>
             </select>
           </Field>
-          <BillingModeAutodetect />
+          <BillingModeAutodetect names={credentialFields.map((f) => f.key)} />
           <Field label="Countries" hint="Empty = global">
             <input type="text" name="countries" defaultValue={existing?.countries.join(', ') ?? ''}
               placeholder="US, CA" className={`${inputCls} font-mono`} />

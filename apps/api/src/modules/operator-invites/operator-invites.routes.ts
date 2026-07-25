@@ -35,6 +35,7 @@ export async function operatorInvitesRoutes(app: FastifyInstance): Promise<void>
     {
       schema: {
         tags: ['Admin · Operator Invites'],
+        security: [{ superAdminKey: [] }],
         summary: 'Mint a single-use operator-invite key (raw key shown once)',
         description:
           'Returns the raw key in `data.rawToken`. **Show it to the recipient exactly once** — ' +
@@ -87,6 +88,7 @@ export async function operatorInvitesRoutes(app: FastifyInstance): Promise<void>
     {
       schema: {
         tags: ['Admin · Operator Invites'],
+        security: [{ superAdminKey: [] }],
         summary: 'List operator-invite keys (newest first, paginated; never returns the hash)',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
       },
@@ -103,6 +105,7 @@ export async function operatorInvitesRoutes(app: FastifyInstance): Promise<void>
     {
       schema: {
         tags: ['Admin · Operator Invites'],
+        security: [{ superAdminKey: [] }],
         summary: 'Revoke an unused operator-invite key. Idempotent.',
         params: {
           type: 'object',

@@ -90,7 +90,7 @@ export function OnboardingChecklist({
         <button
           type="button"
           onClick={dismiss}
-          className="shrink-0 rounded text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
+          className="shrink-0 rounded text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
         >
           Dismiss
         </button>
@@ -109,7 +109,7 @@ export function OnboardingChecklist({
             ) : (
               <Link
                 href={step.href}
-                className="group flex items-baseline gap-2.5 rounded-md px-2 py-1.5 transition-colors hover:bg-[var(--color-surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
+                className="group flex items-baseline gap-2.5 rounded-md px-2 py-1.5 transition-colors hover:bg-[var(--color-surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
               >
                 <CheckCircle done={false} />
                 <span className="min-w-0">

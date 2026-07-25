@@ -15,7 +15,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
-import { api, PanelApiError, type OperatorSessionRow } from '@/lib/api';
+import { api, PanelApiError, type MeDto, type OperatorSessionRow } from '@/lib/api';
 import { QrCode } from '@/components/QrCode';
 import { CopyButton } from '@/components/CopyButton';
 import { DownloadButton } from '@/components/DownloadButton';
@@ -26,9 +26,10 @@ import { formatDateTime } from '@/lib/date';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, SectionHeader } from '@/components/Card';
 import { Badge } from '@/components/Badge';
+import { Banner } from '@/components/Banner';
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 /**
  * The MFA setup secret + backup codes are sensitive one-time-reveal data:
@@ -187,6 +188,11 @@ export default async function SecurityPage({
     method: 'GET',
     path: '/api/v1/tenant/auth/sessions',
   });
+  // Operator email for the change-password form's hidden username field —
+  // best-effort: the form works without it.
+  const operatorEmail = await api<MeDto>({ method: 'GET', path: '/api/v1/tenant/auth/me' })
+    .then((me) => me.user.email)
+    .catch(() => null);
   const sessionRevoked = sp.session_revoked === '1';
   const signedOutAll = sp.signed_out_all === '1';
 
@@ -299,9 +305,9 @@ export default async function SecurityPage({
               <StepHeader n={3} title="Confirm with the current 6-digit code" />
               <form action={confirmMfa} className="mt-3 space-y-2">
                 {error && (
-                  <p role="alert" className="rounded-md border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-                    {ERR[error] ?? error}
-                  </p>
+                  <Banner tone="error">
+                    {ERR[error] ?? 'Something went wrong. Please try again.'}
+                  </Banner>
                 )}
                 <div className="flex items-end gap-2">
                   <label className="block space-y-1">
@@ -316,7 +322,7 @@ export default async function SecurityPage({
                       autoFocus
                       placeholder="000000"
                       maxLength={6}
-                      className="w-32 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-center text-base font-mono tracking-widest text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]"
+                      className="w-32 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-center text-base font-mono tracking-widest text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
                     />
                   </label>
                   <SubmitButton pendingLabel="Verifying…">Enable MFA</SubmitButton>
@@ -330,9 +336,9 @@ export default async function SecurityPage({
         {!status.enabled && !setupInProgress && (
           <Card className="space-y-3">
             {confirmed && (
-              <p aria-live="polite" className="rounded-md border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-300">
+              <Banner tone="success">
                 MFA enabled successfully.
-              </p>
+              </Banner>
             )}
             <p className="text-sm text-[var(--color-muted-fg)]">
               MFA is currently <strong>not enabled</strong>. We strongly recommend enabling it for any operator with workspace owner or admin permissions.
@@ -353,7 +359,7 @@ export default async function SecurityPage({
         <Card>
           <Link
             href="/account/passkeys"
-            className="rounded text-sm font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50"
+            className="rounded text-sm font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
           >
             Manage passkeys →
           </Link>
@@ -377,9 +383,9 @@ export default async function SecurityPage({
         />
 
         {(sessionRevoked || signedOutAll) && (
-          <p aria-live="polite" className="rounded-md border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-300">
+          <Banner tone="success">
             {signedOutAll ? 'Signed out of all devices.' : 'Session revoked.'}
-          </p>
+          </Banner>
         )}
 
         <Card padded={false} className="divide-y divide-[var(--color-border)]">
@@ -418,14 +424,14 @@ export default async function SecurityPage({
           className="space-y-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5"
         >
           {pwerror && (
-            <p role="alert" className="rounded-md border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+            <Banner tone="error">
               {ERR[pwerror] ?? pwerror}
-            </p>
+            </Banner>
           )}
           {pwchanged && (
-            <p aria-live="polite" className="rounded-md border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-300">
+            <Banner tone="success">
               Password changed.
-            </p>
+            </Banner>
           )}
           <label className="block space-y-1">
             <span className="text-xs font-medium text-[var(--color-fg)]">Current password</span>
@@ -450,11 +456,26 @@ export default async function SecurityPage({
             <span className="text-xs text-[var(--color-muted-fg)]">At least 8 characters.</span>
           </label>
           <SubmitButton pendingLabel="Changing password…" className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-60">Change password</SubmitButton>
+          {/* Visually hidden (not display:none, which many password managers
+              skip) so managers associate the new credential with the operator
+              email. Placed last so Tailwind's space-y rhythm is unaffected. */}
+          {operatorEmail && (
+            <input
+              type="email"
+              name="username"
+              value={operatorEmail}
+              readOnly
+              autoComplete="username"
+              tabIndex={-1}
+              aria-hidden="true"
+              className="sr-only"
+            />
+          )}
         </form>
       </section>
 
       <p className="border-t border-[var(--color-border)] pt-4 text-center text-xs text-[var(--color-muted-fg)]">
-        <Link href="/team" className="rounded hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50">
+        <Link href="/team" className="rounded hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]">
           Looking for team management? →
         </Link>
       </p>

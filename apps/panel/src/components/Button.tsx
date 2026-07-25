@@ -49,6 +49,10 @@ export function Button(props: ButtonProps): React.JSX.Element {
 
   const cls = [
     'inline-flex items-center justify-center gap-2 transition-colors whitespace-nowrap',
+    // Keyboard focus affordance — brand ring at 40%. Tailwind 3 can't apply an
+    // opacity modifier to a var() arbitrary value (`ring-[color-mix(in_srgb,var(--x)_40%,transparent)]` emits
+    // nothing), so the tint is done with color-mix instead.
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_40%,transparent)]',
     SIZES[size],
     VARIANTS[variant],
     className,

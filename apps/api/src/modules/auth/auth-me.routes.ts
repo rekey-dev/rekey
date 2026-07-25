@@ -29,6 +29,7 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Public · Auth'],
+        security: [{ userToken: [] }],
         summary: 'Get the current end-user (from the user token alone)',
         description:
           'Resolves the end-user from the X-Relipay-User-Token JWT only — no Application secret ' +

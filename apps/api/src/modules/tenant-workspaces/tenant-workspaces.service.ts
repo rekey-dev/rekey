@@ -70,7 +70,7 @@ export interface InvitationRow {
 function deriveStatus(inv: TenantInvitation): InvitationRow['status'] {
   if (inv.revokedAt) return 'revoked';
   if (inv.acceptedAt) return 'accepted';
-  if (inv.expiresAt < new Date()) return 'expired';
+  if (inv.expiresAt <= new Date()) return 'expired';
   return 'pending';
 }
 
@@ -403,7 +403,7 @@ export const tenantWorkspacesService = {
         fix: 'Sign in normally — you should already have access.',
       });
     }
-    if (inv.expiresAt < new Date()) {
+    if (inv.expiresAt <= new Date()) {
       throw new RelipayError({
         statusCode: 400,
         code: 'INVITATION_EXPIRED',
@@ -447,7 +447,7 @@ export const tenantWorkspacesService = {
           fix: 'Ask the workspace owner for a fresh invite.',
         });
       }
-      if (inv.expiresAt < new Date()) {
+      if (inv.expiresAt <= new Date()) {
         throw new RelipayError({
           statusCode: 400,
           code: 'INVITATION_EXPIRED',

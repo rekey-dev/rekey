@@ -70,6 +70,7 @@ import { assertSignupAllowed, signupAllowed, type AuthKind } from '../../lib/sig
 import { endUserRolesService } from '../end-user-roles/end-user-roles.service.js';
 import { mfaService } from '../mfa/mfa.service.js';
 import { emailService } from '../email/email.service.js';
+import { recordAuthEmailDeliveryFailure } from '../../lib/email-transport.js';
 import { webhookService } from '../webhooks/webhook.service.js';
 
 export interface SignUpInput {
@@ -641,17 +642,27 @@ export const authService = {
   },
 
   /**
-   * Issue a password-reset token. Always returns success-shaped data even
-   * when the email is unknown — never disclose enumeration.
+   * Issue a password-reset token.
+   *
+   * ENUMERATION CAVEAT — this does NOT fully hide whether an address has an
+   * account. The status code and shape are constant, and the timing is padded
+   * (see the unknown-user branch), but `delivered` is `false` for an unknown
+   * address and `true` for a known one, so a caller can still distinguish the
+   * two. This endpoint accepts the publishable key, which ships in browser
+   * code, so that oracle is reachable by anyone who reads a JS bundle. It is
+   * long-standing behaviour that the response contract exposes, not something
+   * to change silently — tracked rather than fixed here.
    *
    * Delivery strategy:
    *   - If the Application has BYO Resend creds (or RESEND_DEFAULT_API_KEY
    *     is set), we transport the email ourselves and return
    *     `{ delivered: true, emailSent: true, resetToken: null }`. The
    *     customer's server has no further work.
-   *   - Otherwise (no transport configured), we return the raw token in
-   *     `resetToken` — the legacy "ReliPay does not send email" contract
-   *     where the customer's server forwards it via their own provider.
+   *   - Otherwise (no transport configured) a SECRET-key caller gets the raw
+   *     token in `resetToken` — the legacy "ReliPay does not send email"
+   *     contract where the customer's server forwards it via their own
+   *     provider. A PUBLISHABLE-key caller never does: that key ships in
+   *     browser code, so handing it a reset token is account takeover.
    *
    * `resetUrl` is optional; when unset we substitute a placeholder so the
    * customer's app templates remain valid. Callers should always supply
@@ -662,6 +673,12 @@ export const authService = {
     email: string;
     /** Optional URL the email's reset button should point at, with `{token}` substituted. */
     resetUrl?: string;
+    /**
+     * Which credential the caller presented. A publishable key is meant to be
+     * embedded in browser code, so it must NEVER receive the raw reset token —
+     * see the fallback branch below.
+     */
+    authKind?: AuthKind;
   }): Promise<{
     delivered: boolean;
     emailSent: boolean;
@@ -703,8 +720,34 @@ export const authService = {
       // the API caller. The user receives it in their inbox.
       return { delivered: true, emailSent: true, resetToken: null };
     }
-    // No transport / send error — fall back to the legacy contract so the
-    // customer's server can still forward the token via its own provider.
+    if (outcome.kind === 'error') {
+      // Send FAILED (bad key, quota, network) — withhold the token rather than
+      // hand a live credential to whatever is logging responses.
+      //
+      // `emailSent: false` deliberately differs from the delivered path above.
+      // It reports TRANSPORT health, not account existence: both branches are
+      // reached only by an existing user, so it tells a prober nothing about
+      // whether an address has an account. (What does differ on existence is
+      // `delivered` — see the caveat on this method's docblock.)
+      void recordAuthEmailDeliveryFailure({
+        applicationId: input.application.id,
+        tenantId: input.application.tenantId,
+        eventKey: 'password_reset',
+        endUserId: endUser.id,
+        reason: outcome.message,
+      });
+      return { delivered: true, emailSent: false, resetToken: null };
+    }
+    // No transport. The legacy contract hands the raw token back
+    // so the customer's SERVER can forward it via its own provider — but that
+    // is only ever safe for a secret-key caller. A publishable key lives in
+    // browser code, so returning the token there let anyone holding it reset
+    // any end-user's password and sign in as them (full account takeover).
+    // Browser-driven reset flows require configured email transport; without
+    // it we report undelivered and withhold the token.
+    if (input.authKind === 'publishable') {
+      return { delivered: true, emailSent: false, resetToken: null };
+    }
     return { delivered: true, emailSent: false, resetToken: issued.raw };
   },
 
@@ -932,12 +975,17 @@ export const authService = {
 
     // Refuse to mint a magic link that would auto-create a user when this
     // caller isn't allowed to create one (invite_only, or secret_only reached
-    // with a publishable key) — preserves the invite-only / secret-only
-    // posture. Existing users still get a sign-in link, so this stays
-    // enumeration-safe (the refusal is silent + only on the no-account path).
+    // with a publishable key) — preserves the invite-only / secret-only posture.
+    // Existing users still get a sign-in link.
+    //
+    // Under the default `public` signup mode this branch is unreachable, so a
+    // known and an unknown address are genuinely indistinguishable. Under
+    // invite_only / secret_only it is reachable, and then `delivered` differs on
+    // existence — the same caveat as requestPasswordReset. Silent refusal and
+    // padded timing narrow it; they do not close it.
     if (!endUser && !signupAllowed(config, input.authKind)) {
-      // Don't disclose existence — sleep + return the same enumeration-safe
-      // shape as forgot-password.
+      // Sleep to flatten the timing side channel, and return the same shape
+      // forgot-password uses for its unknown-address path.
       await new Promise((r) => setTimeout(r, 50));
       return { delivered: false, emailSent: false, magicLinkToken: null };
     }
@@ -963,6 +1011,26 @@ export const authService = {
 
     if (outcome.kind === 'sent') {
       return { delivered: true, emailSent: true, magicLinkToken: null };
+    }
+    if (outcome.kind === 'error') {
+      // As above, and the stakes are higher: this token IS a session.
+      void recordAuthEmailDeliveryFailure({
+        applicationId: input.application.id,
+        tenantId: input.application.tenantId,
+        eventKey: 'magic_link_signin',
+        endUserId: endUser?.id ?? null,
+        reason: outcome.message,
+      });
+      return { delivered: true, emailSent: false, magicLinkToken: null };
+    }
+    // Same rule as requestPasswordReset, and the stakes are higher: a
+    // magic-link token IS a session — verifying it signs the holder in with no
+    // password involved. The raw-token fallback is for a customer's SERVER to
+    // forward via its own provider, so it is only ever safe for a secret key.
+    // A publishable key lives in browser code; handing it this token is
+    // instant account takeover.
+    if (input.authKind === 'publishable') {
+      return { delivered: true, emailSent: false, magicLinkToken: null };
     }
     return { delivered: true, emailSent: false, magicLinkToken: issued.raw };
   },
@@ -1191,6 +1259,19 @@ export const authService = {
     });
     if (outcome.kind === 'sent') {
       return { emailSent: true, verificationToken: null };
+    }
+    if (outcome.kind === 'error') {
+      // Lower stakes than reset/magic-link (this token only flips
+      // emailVerified) but the same reasoning: a failed send is not a
+      // no-transport deployment, and the token should not land in logs.
+      void recordAuthEmailDeliveryFailure({
+        applicationId: input.application.id,
+        tenantId: input.application.tenantId,
+        eventKey: 'email_verification',
+        endUserId: endUser.id,
+        reason: outcome.message,
+      });
+      return { emailSent: false, verificationToken: null };
     }
     return { emailSent: false, verificationToken: issued.raw };
   },

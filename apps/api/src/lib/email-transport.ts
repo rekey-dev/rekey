@@ -33,6 +33,7 @@ import nodemailer from 'nodemailer';
 import { env } from '../config/env.js';
 import { decryptJson } from './secrets.js';
 import { prisma } from './prisma.js';
+import { recordSecurityEvent } from './security-events.js';
 
 export type EmailProvider = 'resend' | 'smtp';
 
@@ -70,6 +71,53 @@ export interface SendInput {
   subject: string;
   html: string;
   text?: string;
+}
+
+/**
+ * A send that FAILED is not a send that was never attempted.
+ *
+ * The auth flows fall back to returning the raw token when there is no mail
+ * transport — that's the documented "your server forwards it" contract. They
+ * used to take the same branch on `{kind:'error'}`, so a lapsed Resend key or a
+ * blown quota silently turned every password-reset and magic-link request into
+ * a token handed back in the JSON body: straight into request logs, error
+ * trackers, and anything else recording responses, while the endpoint still
+ * answered 200 and nobody noticed.
+ *
+ * Callers now withhold the token on `error` and call this instead. The response
+ * shape must stay IDENTICAL to the delivered path: only an existing user
+ * triggers a send at all, so surfacing the failure to the caller would turn
+ * these endpoints into email-enumeration oracles. The operator learns about it
+ * out of band — the EmailLog row (recorded for every outcome, including this
+ * one) plus this security event, which shows up in the app's activity feed.
+ */
+export async function recordAuthEmailDeliveryFailure(input: {
+  /** null on the operator surface — those flows aren't Application-scoped. */
+  applicationId: string | null;
+  /**
+   * REQUIRED for the event to be visible. `listSecurityEvents` filters on
+   * tenantId, so a row written without one can never be returned by the only
+   * consumer — the panel's security-events page. Omitting it made the
+   * compensating control this whole fix leans on unobservable.
+   */
+  tenantId: string | null;
+  eventKey: string;
+  endUserId?: string | null;
+  reason: string;
+}): Promise<void> {
+  await recordSecurityEvent({
+    type: 'auth.email_delivery_failed',
+    actorType: 'system',
+    applicationId: input.applicationId,
+    tenantId: input.tenantId,
+    ...(input.endUserId ? { actorId: input.endUserId } : {}),
+    metadata: {
+      eventKey: input.eventKey,
+      // Transport's own message; no token or recipient address.
+      reason: input.reason.slice(0, 500),
+      consequence: 'token_withheld',
+    },
+  });
 }
 
 /** Optional metadata threaded into the EmailLog row. */

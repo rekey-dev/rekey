@@ -27,8 +27,16 @@ const STATUS_TONE: Record<DunningStatus, BadgeTone> = {
   CANCELED: 'neutral',
 };
 
+/** Friendly labels for display — the raw enum still goes to the API. */
+const STATUS_LABEL: Record<DunningStatus, string> = {
+  OPEN: 'Open',
+  RECOVERED: 'Recovered',
+  EXHAUSTED: 'Exhausted',
+  CANCELED: 'Canceled',
+};
+
 const inputCls =
-  'rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 export default async function DunningPage({
   params,
@@ -154,7 +162,7 @@ export default async function DunningPage({
             <option value="">All statuses</option>
             {STATUSES.map((s) => (
               <option key={s} value={s}>
-                {s}
+                {STATUS_LABEL[s]}
               </option>
             ))}
           </select>
@@ -222,7 +230,7 @@ export default async function DunningPage({
                 <TD>
                   <span className="inline-flex items-center gap-1.5">
                     <Badge tone={STATUS_TONE[c.status]} dot>
-                      {c.status}
+                      {STATUS_LABEL[c.status]}
                     </Badge>
                     {/* Test/live isolation: flag sandbox dunning cases (mirrors payments). */}
                     {c.mode === 'TEST' && <Badge tone="info">TEST</Badge>}

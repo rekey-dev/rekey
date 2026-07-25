@@ -27,6 +27,7 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Plans'],
+        security: [{ superAdminKey: [] }],
         summary: 'List plans for an application',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         querystring: {
@@ -51,6 +52,7 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Plans'],
+        security: [{ superAdminKey: [] }],
         summary: 'Create a plan',
         description:
           'Creates a Plan locally, then registers it with the Application\'s billing provider. ' +
@@ -91,6 +93,7 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Plans'],
+        security: [{ superAdminKey: [] }],
         summary: 'Toggle a plan\'s active flag',
         params: {
           type: 'object',

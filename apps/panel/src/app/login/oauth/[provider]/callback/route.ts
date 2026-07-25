@@ -27,6 +27,18 @@ function seeOther(path: string): NextResponse {
   return new NextResponse(null, { status: 303, headers: { Location: path } });
 }
 
+/**
+ * Only follow a post-auth `next` target that is a local path — mirrors
+ * login/page.tsx's safeNext. Re-validated here even though startOAuth already
+ * checked it, so a tampered cookie can't become an open redirect.
+ */
+function safeNext(raw: string | undefined): string | null {
+  const v = String(raw ?? '');
+  return v.startsWith('/') && !v.startsWith('//') && !v.startsWith('/\\') && !v.includes('://')
+    ? v
+    : null;
+}
+
 export async function GET(
   req: NextRequest,
   ctx: { params: Promise<{ provider: string }> },
@@ -41,13 +53,22 @@ export async function GET(
   const jar = await cookies();
   const cookieState = jar.get('oauth_state')?.value;
   const cookieProvider = jar.get('oauth_provider')?.value;
+  // Post-auth target stashed by startOAuth alongside the CSRF state.
+  const next = safeNext(jar.get('oauth_next')?.value);
 
-  const fail = (errCode: string): NextResponse => {
-    const res = seeOther(`/login?error=${encodeURIComponent(errCode)}`);
+  const clearOAuthCookies = (res: NextResponse): NextResponse => {
     res.cookies.delete('oauth_state');
     res.cookies.delete('oauth_provider');
+    res.cookies.delete('oauth_next');
     return res;
   };
+
+  const fail = (errCode: string): NextResponse =>
+    clearOAuthCookies(
+      seeOther(
+        `/login?error=${encodeURIComponent(errCode)}${next ? `&next=${encodeURIComponent(next)}` : ''}`,
+      ),
+    );
 
   if (providerError) return fail('oauth_denied');
   // CSRF: the returned state must match the cookie we set on start, for THIS
@@ -68,22 +89,24 @@ export async function GET(
   }
 
   // MFA-enrolled operator → hand off to the verify page with the challenge.
+  // Carry `next` through the MFA hop so an invite round-trip survives it.
   if (result.mfaRequired) {
-    const res = seeOther(`/mfa-verify?challenge=${encodeURIComponent(result.mfaChallengeToken)}`);
-    res.cookies.delete('oauth_state');
-    res.cookies.delete('oauth_provider');
-    return res;
+    return clearOAuthCookies(
+      seeOther(
+        `/mfa-verify?challenge=${encodeURIComponent(result.mfaChallengeToken)}${next ? `&next=${encodeURIComponent(next)}` : ''}`,
+      ),
+    );
   }
 
   const secure = process.env.NODE_ENV === 'production';
-  const res = seeOther('/applications?e=login_oauth');
+  const res = seeOther(
+    next ? `${next}${next.includes('?') ? '&' : '?'}e=login_oauth` : '/applications?e=login_oauth',
+  );
   res.cookies.set(ACCESS_COOKIE, result.accessToken, {
     httpOnly: true, sameSite: 'strict', secure, path: '/', maxAge: ACCESS_MAX_AGE,
   });
   res.cookies.set(REFRESH_COOKIE, result.refreshToken, {
     httpOnly: true, sameSite: 'strict', secure, path: '/', maxAge: REFRESH_MAX_AGE,
   });
-  res.cookies.delete('oauth_state');
-  res.cookies.delete('oauth_provider');
-  return res;
+  return clearOAuthCookies(res);
 }

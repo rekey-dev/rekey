@@ -165,7 +165,43 @@ export const mfaService = {
     return true;
   },
 
-  async disable(args: { endUserId: string; application?: Application }): Promise<void> {
+  /**
+   * Turn MFA off.
+   *
+   * `requireCode` is set for browser (publishable-key) callers. Disabling MFA
+   * used to be secret-key-only, so in practice only the customer's backend
+   * could reach it and could gate it however it liked. Now that a browser can
+   * call it with just a user session, an attacker holding a stolen access token
+   * could otherwise switch off the one control specifically meant to survive
+   * token theft. So a browser must prove a current factor first; a secret-key
+   * caller keeps the previous contract (its backend is the trusted gate, and
+   * adding a required field would break existing integrations).
+   */
+  async disable(args: {
+    endUserId: string;
+    application?: Application;
+    requireCode?: boolean;
+    code?: string | undefined;
+  }): Promise<void> {
+    // Only demand a factor when one is actually enrolled. `verify` returns
+    // false for a credential with enrolledAt=null, so requiring a code
+    // unconditionally turned "cancel a half-finished enrollment" into a 401 —
+    // disable used to be a successful no-op there.
+    const enrolled = await prisma.mfaCredential.findUnique({
+      where: { endUserId: args.endUserId },
+      select: { enrolledAt: true },
+    });
+    if (args.requireCode && enrolled?.enrolledAt) {
+      const ok = args.code ? await this.verify({ endUserId: args.endUserId, code: args.code }) : false;
+      if (!ok) {
+        throw new RelipayError({
+          statusCode: 401,
+          code: 'MFA_CODE_INVALID',
+          message: 'Disabling MFA from a browser requires a current authenticator or backup code.',
+          fix: 'Send `code` with a current 6-digit TOTP or an unused backup code. Server-side callers using a secret key are not required to.',
+        });
+      }
+    }
     const removed = await prisma.mfaCredential.deleteMany({ where: { endUserId: args.endUserId } });
     if (removed.count > 0 && args.application) {
       void webhookService

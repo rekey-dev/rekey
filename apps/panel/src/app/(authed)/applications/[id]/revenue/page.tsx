@@ -29,6 +29,14 @@ const PAYMENT_STATUS_TONE: Record<PaymentRow['status'], BadgeTone> = {
   REFUNDED: 'neutral',
 };
 
+/** Friendly labels for display — the raw enum still comes from the API. */
+const PAYMENT_STATUS_LABEL: Record<PaymentRow['status'], string> = {
+  SUCCEEDED: 'Succeeded',
+  PENDING: 'Pending',
+  FAILED: 'Failed',
+  REFUNDED: 'Refunded',
+};
+
 export default async function BillingOverviewPage({
   params,
 }: {
@@ -201,7 +209,7 @@ export default async function BillingOverviewPage({
                   <TD>
                     <span className="inline-flex items-center gap-1.5">
                       <Badge tone={PAYMENT_STATUS_TONE[p.status]} dot>
-                        {p.status}
+                        {PAYMENT_STATUS_LABEL[p.status]}
                       </Badge>
                       {/* Recent payments span both modes — flag sandbox rows. */}
                       {p.mode === 'TEST' && <Badge tone="info">TEST</Badge>}
@@ -277,23 +285,44 @@ function RevenueBarChart({
 
   return (
     <div className="mt-4">
-      <div className="flex items-end gap-1.5 h-32" role="img" aria-label="Revenue by month, last 12 months">
-        {data.map((d) => (
-          <div key={d.month} className="flex-1 flex flex-col items-center gap-1 min-w-0 h-full justify-end">
-            <div
-              className="w-full rounded-sm bg-[var(--color-primary)]/70 hover:bg-[var(--color-primary)] transition-colors"
-              style={{ height: `${Math.max(d.amountCents === 0 ? 1 : 4, (d.amountCents / max) * 100)}%` }}
-              title={`${d.month}: ${formatMoney(d.amountCents, currency)}`}
-            />
-          </div>
-        ))}
-      </div>
-      <div className="flex gap-1.5 mt-1">
-        {data.map((d) => (
-          <span key={d.month} className="flex-1 text-center text-[10px] text-[var(--color-muted-fg)] truncate">
-            {monthLabel(d.month)}
-          </span>
-        ))}
+      {/* Screen-reader equivalent of the visual chart: hover titles on the
+          bars aren't focusable, so the values live in this sr-only table. */}
+      <table className="sr-only">
+        <caption>Revenue by month, last 12 months</caption>
+        <thead>
+          <tr>
+            <th scope="col">Month</th>
+            <th scope="col">Revenue</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.map((d) => (
+            <tr key={d.month}>
+              <th scope="row">{d.month}</th>
+              <td>{formatMoney(d.amountCents, currency)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div aria-hidden="true">
+        <div className="flex items-end gap-1.5 h-32">
+          {data.map((d) => (
+            <div key={d.month} className="flex-1 flex flex-col items-center gap-1 min-w-0 h-full justify-end">
+              <div
+                className="w-full rounded-sm bg-[color-mix(in_srgb,var(--color-primary)_70%,transparent)] hover:bg-[var(--color-primary)] transition-colors"
+                style={{ height: `${Math.max(d.amountCents === 0 ? 1 : 4, (d.amountCents / max) * 100)}%` }}
+                title={`${d.month}: ${formatMoney(d.amountCents, currency)}`}
+              />
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-1.5 mt-1">
+          {data.map((d) => (
+            <span key={d.month} className="flex-1 text-center text-[10px] text-[var(--color-muted-fg)] truncate">
+              {monthLabel(d.month)}
+            </span>
+          ))}
+        </div>
       </div>
       {total === 0 && (
         <p className="mt-2 text-xs text-[var(--color-muted-fg)]">

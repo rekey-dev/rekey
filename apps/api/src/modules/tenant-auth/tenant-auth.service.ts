@@ -47,6 +47,26 @@ import {
 } from '../../lib/tenant-magic-link.js';
 import { panelBaseUrl } from '../../lib/panel-url.js';
 import { emailService } from '../email/email.service.js';
+import { recordAuthEmailDeliveryFailure } from '../../lib/email-transport.js';
+import { env } from '../../config/env.js';
+
+/**
+ * Whether to echo raw reset / magic-link tokens back in API responses.
+ *
+ * Local-development convenience only: it lets the panel render a working
+ * reset link with no mail transport configured. Deny-by-default and gated on
+ * an explicit flag rather than `NODE_ENV`, because NODE_ENV defaults to
+ * 'development' — keying off it would fail OPEN for anyone running the API
+ * outside our Docker image. `config/env.ts` refuses to boot when the flag is
+ * set with NODE_ENV=production.
+ */
+function echoAuthTokensInDev(): boolean {
+  // The test env is not a deployment: the integration suites drive these flows
+  // end-to-end (request -> consume the token -> assert the session), so they
+  // need the raw value. NODE_ENV='test' is set by vitest, never by a server.
+  if (env.NODE_ENV === 'test') return true;
+  return env.NODE_ENV === 'development' && process.env.RELIPAY_DEV_ECHO_AUTH_TOKENS === 'true';
+}
 import { resolveSignupInvite, consumeSignupInvite } from './operator-signup-policy.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 
@@ -370,7 +390,18 @@ export const tenantAuthService = {
         tenantId: membership?.tenantId ?? null,
       });
       if (outcome.kind === 'sent') return { delivered: true, token: null };
+      if (outcome.kind === 'error') {
+        void recordAuthEmailDeliveryFailure({
+          applicationId: null,
+          tenantId: membership?.tenantId ?? null,
+          eventKey: 'magic_link_signin',
+          reason: outcome.message,
+        });
+      }
     }
+    // Same reasoning as requestPasswordReset above, and worse: this token IS a
+    // session — verifying it signs the holder in as the operator outright.
+    if (!echoAuthTokensInDev()) return { delivered: true, token: null };
     return { delivered: true, token: issued.raw };
   },
 
@@ -682,7 +713,33 @@ export const tenantAuthService = {
         tenantId: membership?.tenantId ?? null,
       });
       if (outcome.kind === 'sent') return { delivered: true, resetToken: null };
+      if (outcome.kind === 'error') {
+        // Token behaviour is already correct here (the dev flag withholds it in
+        // production), but an operator whose mail transport just broke gets no
+        // signal at all — they simply cannot recover their own password. Record
+        // it so the failure is visible instead of silent. Response shape stays
+        // put: this endpoint is unauthenticated, so it must not become an
+        // operator-email enumeration oracle.
+        void recordAuthEmailDeliveryFailure({
+          applicationId: null,
+          tenantId: membership?.tenantId ?? null,
+          eventKey: 'password_reset',
+          reason: outcome.message,
+        });
+      }
     }
+    // These endpoints are UNAUTHENTICATED by necessity (you cannot require a
+    // session to recover a forgotten password), so returning the raw token
+    // here handed anyone who knew an operator's email a workspace takeover:
+    // reset the password, sign in, own the Tenant. Unlike the end-user
+    // surface there is no "customer's server forwards it" contract to honour —
+    // the panel is first-party.
+    //
+    // DENY BY DEFAULT: an explicit opt-in flag, not `NODE_ENV !== 'production'`.
+    // NODE_ENV defaults to 'development', so a self-hoster running the API
+    // outside our Docker image (which does set it) would otherwise have leaked
+    // silently. env.ts refuses to boot if this flag is set in production.
+    if (!echoAuthTokensInDev()) return { delivered: true, resetToken: null };
     return { delivered: true, resetToken: issued.raw };
   },
 

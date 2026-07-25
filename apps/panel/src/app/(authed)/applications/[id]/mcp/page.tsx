@@ -9,6 +9,7 @@ import { Badge } from '@/components/Badge';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
+import { Banner } from '@/components/Banner';
 
 // Fallback only — the public MCP URL is authoritative from the API
 // (`app.mcpUrl`, derived server-side from PUBLIC_WEBHOOK_BASE_URL). The panel's
@@ -99,12 +100,9 @@ export default async function McpPage({
 
       {saved && <SavedBanner message="MCP settings saved." />}
       {error && (
-        <p
-          role="alert"
-          className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300"
-        >
+        <Banner tone="error">
           {ERR[error] ?? error}
-        </p>
+        </Banner>
       )}
 
       {/* Master switch — gates the MCP + OAuth endpoints for this application. */}

@@ -235,7 +235,7 @@ export const licensesService = {
     if (license.status === 'REVOKED' || license.revokedAt !== null) {
       return { ok: false, reason: 'revoked', license: redactLicense(license) };
     }
-    if (license.expiresAt !== null && license.expiresAt < new Date()) {
+    if (license.expiresAt !== null && license.expiresAt <= new Date()) {
       // Mark EXPIRED on the way through if not already.
       if (license.status !== 'EXPIRED') {
         await prisma.license.update({ where: { id: license.id }, data: { status: 'EXPIRED' } });

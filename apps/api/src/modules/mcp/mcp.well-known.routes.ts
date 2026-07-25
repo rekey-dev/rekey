@@ -36,7 +36,13 @@ export async function mcpWellKnownRoutes(app: FastifyInstance): Promise<void> {
   // 404s for it.
   app.get(
     '/.well-known/oauth-authorization-server/api/v1/mcp/:slug',
-    { schema: { tags: ['MCP · OAuth'], summary: 'OAuth authorization-server metadata (RFC 8414, path-insertion form)' } },
+    {
+      schema: {
+        tags: ['MCP · OAuth'],
+        security: [],
+        summary: 'OAuth authorization-server metadata (RFC 8414, path-insertion form)',
+      },
+    },
     async (req) => {
       const { slug } = SlugParam.parse(req.params);
       await resolveMcpApp(slug);
@@ -49,7 +55,13 @@ export async function mcpWellKnownRoutes(app: FastifyInstance): Promise<void> {
   // pointer (which targets the suffix form).
   app.get(
     '/.well-known/oauth-protected-resource/api/v1/mcp/:slug',
-    { schema: { tags: ['MCP · OAuth'], summary: 'OAuth protected-resource metadata (RFC 9728, path-insertion form)' } },
+    {
+      schema: {
+        tags: ['MCP · OAuth'],
+        security: [],
+        summary: 'OAuth protected-resource metadata (RFC 9728, path-insertion form)',
+      },
+    },
     async (req) => {
       const { slug } = SlugParam.parse(req.params);
       await resolveMcpApp(slug);

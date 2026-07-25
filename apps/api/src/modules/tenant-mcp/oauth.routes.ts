@@ -29,6 +29,7 @@ import { env } from '../../config/env.js';
 import { RelipayError } from '../../lib/error.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
 import { requireTenantSession } from '../../middleware/tenant-session.js';
+import { resolveOperatorToken } from '../../middleware/operator-token-auth.js';
 import {
   OAuthError,
   grantScopes,
@@ -99,6 +100,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
     {
       schema: {
         tags: ['MCP · Operator · OAuth'],
+        security: [],
         summary: 'Authorization-server metadata (RFC 8414)',
       },
     },
@@ -110,6 +112,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
     {
       schema: {
         tags: ['MCP · Operator · OAuth'],
+        security: [],
         summary: 'Protected-resource metadata (RFC 9728)',
       },
     },
@@ -120,10 +123,15 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
   app.post(
     '/oauth/register',
     {
-      config: { rateLimit: authRateLimit(20) },
+      // RFC 7591 clients post JSON, but some post form-encoded — both allowed.
+      config: { rateLimit: authRateLimit(20), acceptsForm: true },
       schema: {
         tags: ['MCP · Operator · OAuth'],
+        security: [],
         summary: 'Dynamic client registration (RFC 7591)',
+        description:
+          'Unauthenticated by design (RFC 7591 open registration). Registers a PUBLIC ' +
+          'client — PKCE, no client secret — so there is nothing to authenticate with yet.',
         body: {
           type: 'object',
           required: ['redirect_uris'],
@@ -158,7 +166,14 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
   app.get(
     '/oauth/authorize',
     {
-      schema: { tags: ['MCP · Operator · OAuth'], summary: 'Authorization endpoint → panel consent' },
+      schema: {
+        tags: ['MCP · Operator · OAuth'],
+        security: [],
+        summary: 'Authorization endpoint → panel consent',
+        description:
+          'Redirects the browser into the panel consent screen. No credential — the operator ' +
+          'may not be signed in yet; the panel handles that and then calls /oauth/grant.',
+      },
     },
     async (req, reply) => {
       const q = AuthorizeQuery.safeParse(req.query);
@@ -201,7 +216,16 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
     {
       onRequest: requireTenantSession,
       config: { rateLimit: authRateLimit(30) },
-      schema: { tags: ['MCP · Operator · OAuth'], summary: 'Mint an authorization code (panel consent)' },
+      schema: {
+        tags: ['MCP · Operator · OAuth'],
+        security: [{ tenantSession: [] }],
+        summary: 'Mint an authorization code (panel consent)',
+        description:
+          'Called by the panel after the operator approves. Requires an operator **session** ' +
+          'access token (not a PAT) — the session bearer doubles as the CSRF guard, since it ' +
+          "cannot be forged cross-site. The operator's membership of the requested workspace " +
+          'is confirmed before the code is minted.',
+      },
     },
     async (req, reply) => {
       const body = GrantBody.safeParse(req.body);
@@ -285,8 +309,17 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
   app.post(
     '/oauth/token',
     {
-      config: { rateLimit: authRateLimit(20) },
-      schema: { tags: ['MCP · Operator · OAuth'], summary: 'Token endpoint' },
+      // RFC 6749 §4.1.3 mandates application/x-www-form-urlencoded.
+      config: { rateLimit: authRateLimit(20), acceptsForm: true },
+      schema: {
+        tags: ['MCP · Operator · OAuth'],
+        security: [],
+        summary: 'Token endpoint',
+        description:
+          'No ReliPay credential and no client secret: clients are public and prove ' +
+          'themselves with PKCE. The `code` + `code_verifier` (or `refresh_token`) in the ' +
+          'form body are the credential.',
+      },
     },
     async (req, reply) => {
       const body = TokenBody.safeParse(req.body);
@@ -347,12 +380,46 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
   app.post(
     '/oauth/introspect',
     {
-      schema: { tags: ['MCP · Operator · OAuth'], summary: 'Token introspection (RFC 7662)' },
+      // RFC 7662 §2.1 mandates application/x-www-form-urlencoded, and §2.1 also
+      // requires the endpoint be PROTECTED. It wasn't: any unauthenticated
+      // caller could submit tokens and, for a live one, get back sub
+      // (tenantUserId), tid, scope, client_id and exp — a free, unlogged,
+      // unthrottled validity-and-metadata oracle for operator-MCP access
+      // tokens, which are workspace-wide admin credentials. The per-app twin
+      // (modules/mcp/mcp.routes.ts) has always required that Application's
+      // secret key; the operator analogue is an operator PAT.
+      //
+      // Introspection is a resource-server call, and our resource server is
+      // this API, so this has no external consumers to break.
+      config: { rateLimit: authRateLimit(30), acceptsForm: true },
+      onRequest: resolveOperatorToken,
+      schema: {
+        tags: ['MCP · Operator · OAuth'],
+        summary: 'Token introspection (RFC 7662). Authenticate with an operator PAT.',
+        security: [{ operatorPat: [] }],
+        description:
+          'Requires an operator PAT. Answers only about tokens in the caller\'s own ' +
+          'workspace; an unknown, expired, or out-of-workspace token returns ' +
+          '`{ active: false }`.',
+      },
     },
     async (req, reply) => {
+      // Token state is sensitive — never let a proxy cache an introspection
+      // result. Mirrors the per-app route.
+      reply.header('Cache-Control', 'no-store');
       const body = IntrospectBody.safeParse(req.body);
       if (!body.success) return reply.send({ active: false });
-      return reply.send(operatorMcpOAuthService.introspect(body.data.token));
+      const result = operatorMcpOAuthService.introspect(body.data.token);
+      // Scope the answer to the PAT's own workspace. `introspect` takes no
+      // tenant argument and will happily describe a token belonging to any
+      // workspace on the deployment, so requiring a PAT alone only narrowed the
+      // oracle from "anyone" to "any operator on this deployment" — a full fix
+      // on a single-workspace self-host, not on a shared one. The per-app twin
+      // is scoped by construction (it takes the Application).
+      if (result.active === true && result.tid !== req.tenantId) {
+        return reply.send({ active: false });
+      }
+      return reply.send(result);
     },
   );
 }

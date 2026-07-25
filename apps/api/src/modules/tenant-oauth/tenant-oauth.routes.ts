@@ -38,6 +38,7 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
     {
       schema: {
         tags: ['Tenant · OAuth'],
+        security: [],
         summary: 'List operator OAuth providers configured on this deployment',
       },
     },
@@ -49,6 +50,7 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
     {
       schema: {
         tags: ['Tenant · OAuth'],
+        security: [],
         summary: 'Begin operator OAuth sign-in — returns the provider authorization URL',
         params: { type: 'object', required: ['provider'], properties: { provider: { type: 'string' } } },
         body: {
@@ -70,6 +72,7 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
     {
       schema: {
         tags: ['Tenant · OAuth'],
+        security: [],
         summary: 'Complete operator OAuth sign-in; mints a session (or an MFA challenge)',
         params: { type: 'object', required: ['provider'], properties: { provider: { type: 'string' } } },
         body: {

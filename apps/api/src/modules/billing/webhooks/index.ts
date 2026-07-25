@@ -1,6 +1,11 @@
+// Legacy per-provider webhook URLs — permanent aliases into the pipeline
+// (providers have them registered; they must keep working byte-for-byte).
 export { stripeWebhookRoutes } from './stripe.routes.js';
-export { dispatchStripeEvent } from './stripe.handler.js';
 export { paypalWebhookRoutes } from './paypal.routes.js';
-export { dispatchPaypalEvent } from './paypal.handler.js';
 export { razorpayWebhookRoutes } from './razorpay.routes.js';
-export { dispatchRazorpayEvent } from './razorpay.handler.js';
+// Provider-module pipeline (spec: billing-provider-modules) — the generic
+// route plus the shared appliers the per-provider paths delegate to. The
+// bespoke dispatchers (stripe/razorpay/paypal .handler.ts) were deleted in
+// P2; per-event logic lives in the modules' `translate` + apply.ts.
+export { billingProviderWebhookRoutes, handleBillingProviderWebhook } from './pipeline.js';
+export { applyBillingEvent } from './apply.js';

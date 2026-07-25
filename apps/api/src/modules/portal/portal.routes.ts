@@ -25,8 +25,15 @@ export async function portalConfigRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/config/:slug',
     {
+      // Unauthenticated by design, but tightened so it isn't a cheap oracle for
+      // enumerating which Application slugs exist on a deployment. The
+      // publishable key it returns is public by design (it ships in browser
+      // bundles), so this is about discovery volume, not the key itself — a
+      // real portal visitor makes one call per page load, not thousands.
+      config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
       schema: {
         tags: ['Public · Portal'],
+        security: [],
         summary: 'Public config for the hosted customer portal of one Application',
         description:
           'Returns { slug, name, publishableKey, billingEnabled, branding } when the app has ' +

@@ -7,6 +7,7 @@ import { EmailEditorClient } from '@/components/EmailEditorClient';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
+import { Banner } from '@/components/Banner';
 
 interface TemplateRow {
   subject: string;
@@ -23,6 +24,20 @@ interface PreviewRow {
   text: string;
   customised: boolean;
 }
+
+interface EventListRow {
+  key: string;
+  label: string;
+}
+
+const ERR: Record<string, string> = {
+  missing: 'Subject and body are required.',
+  'bad-design': 'The editor produced invalid design data — reload the page and try again.',
+  'missing-to': 'Enter an email address to send the test to.',
+  EMAIL_EVENT_UNKNOWN: 'Unknown email event — this template no longer exists.',
+  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can edit email templates.',
+  APPLICATION_NOT_FOUND: 'Application not found.',
+};
 
 async function saveTemplate(applicationId: string, eventKey: string, formData: FormData): Promise<void> {
   'use server';
@@ -100,7 +115,7 @@ export default async function TemplateEditorPage({
   const testSent = sp.test === 'sent';
   const error = typeof sp.error === 'string' ? sp.error : undefined;
 
-  const [template, preview] = await Promise.all([
+  const [template, preview, events] = await Promise.all([
     api<TemplateRow | null>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/email-templates/${encodeURIComponent(eventKey)}`,
@@ -110,7 +125,14 @@ export default async function TemplateEditorPage({
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/email-templates/${encodeURIComponent(eventKey)}/preview`,
       body: {},
     }),
+    // For the friendly heading — the per-event endpoint doesn't return the label.
+    api<EventListRow[]>({
+      method: 'GET',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/email-templates`,
+    }).catch(() => [] as EventListRow[]),
   ]);
+
+  const heading = events.find((e) => e.key === eventKey)?.label ?? eventKey;
 
   if (!template) {
     return (
@@ -137,7 +159,10 @@ export default async function TemplateEditorPage({
           >
             ← Email
           </Link>
-          <h2 className="text-lg font-semibold mt-0.5">{eventKey}</h2>
+          <h2 className="text-lg font-semibold mt-0.5">{heading}</h2>
+          {heading !== eventKey && (
+            <p className="font-mono text-[11px] text-[var(--color-muted-fg)]">{eventKey}</p>
+          )}
           <p className="text-xs text-[var(--color-muted-fg)]">
             {template.customised
               ? 'Customized for this Application. Revert to drop your changes.'
@@ -160,9 +185,9 @@ export default async function TemplateEditorPage({
         />
       )}
       {error && (
-        <p role="alert" className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-          {error}
-        </p>
+        <Banner tone="error">
+          {ERR[error] ?? 'Something went wrong. Please try again.'}
+        </Banner>
       )}
 
       <EmailEditorClient
@@ -214,7 +239,7 @@ export default async function TemplateEditorPage({
                 name="to"
                 required
                 placeholder="you@example.com"
-                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]"
+                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
               />
             </label>
             <SubmitButton pendingLabel="Sending…">Send test</SubmitButton>

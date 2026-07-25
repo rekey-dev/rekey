@@ -9,6 +9,7 @@
 
 import { afterAll, beforeEach } from 'vitest';
 import { prisma } from '../src/lib/prisma.js';
+import { getRedis } from '../src/lib/redis.js';
 
 const DOMAIN_TABLES = [
   'idempotency_keys',
@@ -52,7 +53,34 @@ const DOMAIN_TABLES = [
   'tenants',
 ];
 
-beforeEach(async () => {
+/**
+ * Postgres is not the only store holding per-test state.
+ *
+ * Brute-force lock keys are keyed on application + email, so they outlive the
+ * TRUNCATE that removed the end-user they refer to — a lock set by one test can
+ * still be counting when the next one signs in as a freshly created user with a
+ * recycled address. Rate-limit counters have the same shape (see
+ * `globalRateLimitMax` in lib/rate-limit.ts, which is what stops the global
+ * limiter from throttling the suite against itself), so clear those too rather
+ * than depend on which store the plugin happens to be using.
+ *
+ * SCAN rather than FLUSHDB: the BullMQ webhook queue shares this Redis and its
+ * jobs are not per-test state.
+ */
+async function clearRedisTestState(): Promise<void> {
+  const redis = getRedis();
+  if (!redis) return;
+  for (const pattern of ['fastify-rate-limit-*', 'bf:*']) {
+    let cursor = '0';
+    do {
+      const [next, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 500);
+      cursor = next;
+      if (keys.length > 0) await redis.del(...keys);
+    } while (cursor !== '0');
+  }
+}
+
+async function truncateDomainTables(): Promise<void> {
   // Quoted identifiers + RESTART IDENTITY + CASCADE.
   // Single statement so the truncate is atomic.
   const stmt = `TRUNCATE TABLE ${DOMAIN_TABLES.map((t) => `"${t}"`).join(', ')} RESTART IDENTITY CASCADE`;
@@ -75,6 +103,11 @@ beforeEach(async () => {
       throw err;
     }
   }
+}
+
+beforeEach(async () => {
+  await truncateDomainTables();
+  await clearRedisTestState();
 });
 
 afterAll(async () => {

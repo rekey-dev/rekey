@@ -20,7 +20,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { oauthService } from './oauth.service.js';
-import { requireApiKey, requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
+import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { shapeSignInOutcome } from '../auth/auth.routes.js';
 
@@ -30,8 +30,9 @@ const CallbackBody = z.object({ code: z.string().min(1).max(4096) });
 
 export async function oauthRoutes(app: FastifyInstance): Promise<void> {
   // Pre-user OAuth login (start + callback) — part of the public-bootstrap
-  // surface, so a browser-only app reaches it with the publishable key.
-  // (Account-linking routes below require an existing user and stay secret-only.)
+  // surface, so a browser-only app reaches it with the publishable key. The
+  // account-linking routes below also accept it: they are authorized by the
+  // signed-in user's JWT (`requireUserSession`), not by the key tier.
   app.addHook('onRequest', requirePublishableOrSecretKey);
   app.addHook('onRequest', requireScope('auth:write'));
 
@@ -49,7 +50,7 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
           required: ['state'],
           properties: { state: { type: 'string', minLength: 1, maxLength: 512 } },
         },
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [] }, { publishableKey: [] }],
       },
     },
     async (req) => {
@@ -78,7 +79,7 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
           required: ['code'],
           properties: { code: { type: 'string', minLength: 1, maxLength: 4096 } },
         },
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [] }, { publishableKey: [] }],
       },
     },
     async (req) => {
@@ -125,7 +126,11 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
  *     sign-in method (no password + no other OAuth) — lockout guard.
  */
 export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook('onRequest', requireApiKey);
+  // Same credential tier as the `/:provider/start` + `/callback` sign-in
+  // siblings. `requireUserSession` is the gate: linking always targets
+  // `req.endUser`, so OAuth sign-in and OAuth linking are reachable from the
+  // same browser client instead of only the former.
+  app.addHook('onRequest', requirePublishableOrSecretKey);
   app.addHook('onRequest', requireScope('auth:write'));
   app.addHook('onRequest', requireUserSession);
 
@@ -135,7 +140,10 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         tags: ['Public · OAuth'],
         summary: 'List OAuth providers linked to the current user',
-        security: [{ apiKey: [] }],
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
       },
     },
     async (req) => ({
@@ -159,7 +167,10 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
           required: ['state'],
           properties: { state: { type: 'string', minLength: 1, maxLength: 512 } },
         },
-        security: [{ apiKey: [] }],
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
       },
     },
     async (req) => {
@@ -186,7 +197,10 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
           required: ['code'],
           properties: { code: { type: 'string', minLength: 1, maxLength: 4096 } },
         },
-        security: [{ apiKey: [] }],
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
       },
     },
     async (req) => {
@@ -209,7 +223,10 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
         tags: ['Public · OAuth'],
         summary: 'Remove an OAuth provider from the current user. Refuses if it would lock the account out.',
         params: { type: 'object', properties: { provider: { type: 'string' } }, required: ['provider'] },
-        security: [{ apiKey: [] }],
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
       },
     },
     async (req) => {

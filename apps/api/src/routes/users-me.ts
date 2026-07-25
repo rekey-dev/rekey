@@ -28,7 +28,7 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
           'Requires both the Application secret key (Authorization header) and the user JWT ' +
           '(X-Relipay-User-Token header). Refuses to return data if the JWT was issued by a ' +
           'different Application than the secret key represents.',
-        security: [{ apiKey: [] }],
+        security: [{ apiKey: [], userToken: [] }],
       },
     },
     async (req) => {

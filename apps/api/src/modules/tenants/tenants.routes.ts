@@ -23,6 +23,7 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Tenants'],
+        security: [{ superAdminKey: [] }],
         summary: 'List all tenants',
         description: 'Returns Tenants newest-first (paginated). Bootstrap-admin only.',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
@@ -39,6 +40,7 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Tenants'],
+        security: [{ superAdminKey: [] }],
         summary: 'Get a tenant by id',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       },
@@ -54,6 +56,7 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · Tenants'],
+        security: [{ superAdminKey: [] }],
         summary: 'Create a tenant',
         description:
           'Creates a new Tenant. The first call also bootstraps the system. ' +

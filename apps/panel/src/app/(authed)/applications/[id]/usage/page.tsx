@@ -7,10 +7,12 @@ import { Modal } from '@/components/Modal';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
+import { SavedBanner } from '@/components/SavedBanner';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
+import { Banner } from '@/components/Banner';
 
 interface MeterRow {
   id: string;
@@ -112,11 +114,7 @@ export default async function UsagePage({
 
   return (
     <div className="space-y-5">
-      {created && (
-        <p className="rounded-lg border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-300">
-          Meter <code className="font-mono">{created}</code> created.
-        </p>
-      )}
+      {created && <SavedBanner params={['created']} message={`Meter ${created} created.`} />}
 
       <SectionHeader
         title="Usage meters"
@@ -137,9 +135,9 @@ export default async function UsagePage({
           >
             <form action={createMeter.bind(null, id)} className="space-y-3">
               {error && (
-                <p role="alert" className="rounded-md border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+                <Banner tone="error">
                   {ERR[error] ?? error}
-                </p>
+                </Banner>
               )}
               <Field label="Slug" hint="URL-safe identifier — what your SDK calls report against.">
                 <input
@@ -207,7 +205,7 @@ export default async function UsagePage({
                     <form action={setMeterActive.bind(null, id, m.slug, !m.active)} className="inline">
                       <SubmitButton
                         pendingLabel={m.active ? 'Disabling…' : 'Enabling…'}
-                        className="rounded text-xs font-medium text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/50 disabled:opacity-60"
+                        className="rounded text-xs font-medium text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
                       >
                         {m.active ? 'Disable' : 'Enable'}
                       </SubmitButton>
@@ -231,7 +229,7 @@ export default async function UsagePage({
 }
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 function Field({
   label,

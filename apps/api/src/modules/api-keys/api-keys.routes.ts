@@ -23,6 +23,7 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · API Keys'],
+        security: [{ superAdminKey: [] }],
         summary: 'List active API keys for an application',
         description: 'Returns key metadata only. The raw key value is unrecoverable after creation.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
@@ -41,6 +42,7 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · API Keys'],
+        security: [{ superAdminKey: [] }],
         summary: 'Mint an API key for an application',
         description:
           'Returns the raw key in `data.rawKey`. **Show this to the operator exactly once** — ' +
@@ -106,6 +108,7 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Admin · API Keys'],
+        security: [{ superAdminKey: [] }],
         summary: 'Revoke an API key',
         description: 'Soft-revokes the key (sets `revokedAt`). Idempotent.',
         params: {
