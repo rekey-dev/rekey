@@ -12,8 +12,8 @@
 
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { RelipayError, getAccessToken, relipay } from './relipay';
-import type { EndUserDto } from '@relipay/node';
+import { RekeyError, getAccessToken, rekey } from './relipay';
+import type { EndUserDto } from '@rekey.dev/node';
 
 async function currentPath(): Promise<string> {
   const h = await headers();
@@ -25,9 +25,9 @@ export async function requireUser(): Promise<EndUserDto> {
   if (!access) redirect('/sign-in');
 
   try {
-    return await relipay.auth.getCurrentUser(access);
+    return await rekey.auth.getCurrentUser(access);
   } catch (err) {
-    if (err instanceof RelipayError && err.code === 'USER_TOKEN_INVALID') {
+    if (err instanceof RekeyError && err.code === 'USER_TOKEN_INVALID') {
       const ret = await currentPath();
       redirect(`/refresh-session?return=${encodeURIComponent(ret)}`);
     }

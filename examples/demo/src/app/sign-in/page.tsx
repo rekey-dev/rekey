@@ -1,7 +1,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { relipay, RelipayError, setSessionCookies } from '@/lib/relipay';
+import { rekey, RekeyError, setSessionCookies } from '@/lib/relipay';
 
 async function signIn(formData: FormData): Promise<void> {
   'use server';
@@ -12,7 +12,7 @@ async function signIn(formData: FormData): Promise<void> {
   }
 
   try {
-    const result = await relipay.auth.signIn({ email, password });
+    const result = await rekey.auth.signIn({ email, password });
     if (result.mfaRequired) {
       // This demo doesn't implement the MFA second factor; surface a clear message.
       redirect('/sign-in?error=MFA_REQUIRED');
@@ -22,7 +22,7 @@ async function signIn(formData: FormData): Promise<void> {
       refreshToken: result.refreshToken,
     });
   } catch (err) {
-    if (err instanceof RelipayError) {
+    if (err instanceof RekeyError) {
       redirect(`/sign-in?error=${encodeURIComponent(err.code)}`);
     }
     throw err;

@@ -1,5 +1,5 @@
 /**
- * Shared test helpers for the @relipay/react suite.
+ * Shared test helpers for the @rekey.dev/react suite.
  *
  * Auth state is the one piece of global context the control/auth widgets read
  * (via `useUser()`), so we expose a tiny mock for it. The theming context is
@@ -14,7 +14,7 @@
  * shared state object + fixtures the factory closes over.
  */
 
-import type { EndUserDto } from '@relipay/shared-types';
+import type { EndUserDto } from '@rekey.dev/shared-types';
 
 export interface AuthState {
   user: EndUserDto | null;

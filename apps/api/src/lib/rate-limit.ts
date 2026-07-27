@@ -27,7 +27,7 @@
  */
 
 import type { FastifyRequest } from 'fastify';
-import { RelipayError } from './error.js';
+import { RekeyError } from './error.js';
 
 /** Context `@fastify/rate-limit` hands `errorResponseBuilder`. */
 export interface RateLimitContext {
@@ -42,11 +42,11 @@ export interface RateLimitContext {
 /**
  * The 429 (or 403, if a `ban` threshold is ever configured) body. Returned —
  * not thrown — because the plugin throws whatever this produces, which routes
- * it through `relipayErrorHandler` and therefore through the standard envelope.
+ * it through `rekeyErrorHandler` and therefore through the standard envelope.
  */
-export function rateLimitError(_req: FastifyRequest, context: RateLimitContext): RelipayError {
+export function rateLimitError(_req: FastifyRequest, context: RateLimitContext): RekeyError {
   const retryAfterSeconds = Math.max(1, Math.ceil(context.ttl / 1000));
-  return new RelipayError({
+  return new RekeyError({
     statusCode: context.statusCode,
     code: 'RATE_LIMITED',
     message: `Rate limit exceeded (${context.max} requests per window). Retry in ${retryAfterSeconds}s.`,
@@ -56,7 +56,7 @@ export function rateLimitError(_req: FastifyRequest, context: RateLimitContext):
 }
 
 /** Build the same 429 from a raw remaining-TTL, for limiters we drive by hand. */
-export function rateLimitedAfter(ttlMs: number, max: number): RelipayError {
+export function rateLimitedAfter(ttlMs: number, max: number): RekeyError {
   return rateLimitError(undefined as unknown as FastifyRequest, {
     statusCode: 429,
     ban: false,
@@ -72,7 +72,7 @@ export function rateLimitedAfter(ttlMs: number, max: number): RelipayError {
  * route's rate-limit config are ignored by the plugin, so this rides along for
  * free rather than needing a second `config` field on 25 route definitions.
  */
-export const AUTH_CEILING_MARKER = 'relipayAuthCeiling';
+export const AUTH_CEILING_MARKER = 'rekeyAuthCeiling';
 
 /** Longest identity fragment we put in a bucket key (RFC 5321 caps email at 254). */
 const MAX_IDENTITY_LENGTH = 254;

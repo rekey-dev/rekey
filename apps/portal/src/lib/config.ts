@@ -8,7 +8,7 @@
 
 import 'server-only';
 import { cache } from 'react';
-import { relipayApiUrl } from './env';
+import { rekeyApiUrl } from './env';
 
 export interface PortalBranding {
   /** Overrides the Application name in the portal header. */
@@ -87,7 +87,7 @@ export function safeHttpUrl(value: string | undefined): string | undefined {
 
 /** Cached per-request so layout + page don't double-fetch. */
 export const getPortalConfig = cache(async (slug: string): Promise<PortalConfig | null> => {
-  const res = await fetch(`${relipayApiUrl()}/api/v1/portal/config/${encodeURIComponent(slug)}`, {
+  const res = await fetch(`${rekeyApiUrl()}/api/v1/portal/config/${encodeURIComponent(slug)}`, {
     cache: 'no-store',
   });
   if (res.status === 404) return null;

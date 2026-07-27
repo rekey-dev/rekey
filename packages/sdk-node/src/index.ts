@@ -1,21 +1,21 @@
 /**
- * @relipay/node — server SDK for ReliPay.
+ * @rekey.dev/node — server SDK for Rekey.
  *
  * One client instance per Application. Construct with the Application's
- * secret key (`rp_live_…` or `rp_test_…`) and the URL of your ReliPay
+ * secret key (`rp_live_…` or `rp_test_…`) and the URL of your Rekey
  * deployment. Never ship the secret key to the browser — for browser code
- * use `@relipay/react` with the Application's public key instead.
+ * use `@rekey.dev/react` with the Application's public key instead.
  *
  * @example Smoke-test your credentials
  * ```ts
- * import { ReliPay } from "@relipay/node";
+ * import { Rekey } from "@rekey.dev/node";
  *
- * const relipay = new ReliPay({
+ * const rekey = new Rekey({
  *   apiUrl: process.env.RELIPAY_URL!,
  *   secretKey: process.env.RELIPAY_SECRET!,
  * });
  *
- * const me = await relipay.applications.me();
+ * const me = await rekey.applications.me();
  * console.log(`Connected to "${me.name}" (${me.slug})`);
  * ```
  */
@@ -46,7 +46,7 @@ import type {
   OrganizationWithRoleDto,
   PlanDto,
   ProvidersListDto,
-  RelipayErrorShape,
+  RekeyErrorShape,
   ResetPasswordRequest,
   SignInOutcomeDto,
   SignInRequest,
@@ -56,11 +56,11 @@ import type {
   UsageRecordDto,
   ValidateCouponRequest,
   ValidateCouponResultDto,
-} from '@relipay/shared-types';
+} from '@rekey.dev/shared-types';
 
 // The canonical error class lives in shared-types; import it for internal use
-// and re-export below so @relipay/node's public surface is unchanged.
-import { RelipayError } from '@relipay/shared-types';
+// and re-export below so @rekey.dev/node's public surface is unchanged.
+import { RekeyError } from '@rekey.dev/shared-types';
 
 export type {
   ApplicationDto,
@@ -104,7 +104,7 @@ export type {
   UsageRecordDto,
   UsageAggregateDto,
   SubscriptionStatusType,
-  RelipayErrorShape,
+  RekeyErrorShape,
   AuthConfig,
   BillingConfig,
   BillingProvider,
@@ -113,11 +113,11 @@ export type {
   JwksDto,
   OAuthIntrospectionResponse,
   OAuthAuthServerMetadata,
-} from '@relipay/shared-types';
+} from '@rekey.dev/shared-types';
 
-/** Configuration for a ReliPay client instance. */
+/** Configuration for a Rekey client instance. */
 export interface ReliPayConfig {
-  /** Base URL of the ReliPay API. e.g. `https://relipay.example.com` */
+  /** Base URL of the Rekey API. e.g. `https://rekey.example.com` */
   apiUrl: string;
   /** Secret key for one Application — `rp_live_…` or `rp_test_…`. Never ship to the browser. */
   secretKey: string;
@@ -125,19 +125,19 @@ export interface ReliPayConfig {
   fetch?: typeof fetch;
 }
 
-// RelipayError is the shared class (imported above) — re-exported so the public
-// API name is preserved and `instanceof` is consistent with @relipay/react.
-export { RelipayError };
+// RekeyError is the shared class (imported above) — re-exported so the public
+// API name is preserved and `instanceof` is consistent with @rekey.dev/react.
+export { RekeyError };
 
 /**
- * Outbound webhook event registry — the events ReliPay can POST to your app
+ * Outbound webhook event registry — the events Rekey can POST to your app
  * (verify them with `verifyWebhookSignature` below). `WEBHOOK_EVENTS` carries
  * `{ name, description }` pairs for introspection/autocomplete;
  * `KNOWN_WEBHOOK_EVENTS` is just the names. Mirrors the API's registry exactly.
  *
  * @example
  * ```ts
- * import { WEBHOOK_EVENTS, isKnownWebhookEvent, type WebhookEventEnvelope } from '@relipay/node';
+ * import { WEBHOOK_EVENTS, isKnownWebhookEvent, type WebhookEventEnvelope } from '@rekey.dev/node';
  *
  * for (const e of WEBHOOK_EVENTS) console.log(`${e.name} — ${e.description}`);
  *
@@ -145,15 +145,15 @@ export { RelipayError };
  * if (event.type === 'subscription.activated') unlockPlan(event.data);
  * ```
  */
-export { WEBHOOK_EVENTS, KNOWN_WEBHOOK_EVENTS, isKnownWebhookEvent } from '@relipay/shared-types';
-export type { WebhookEventType, WebhookEventEnvelope } from '@relipay/shared-types';
+export { WEBHOOK_EVENTS, KNOWN_WEBHOOK_EVENTS, isKnownWebhookEvent } from '@rekey.dev/shared-types';
+export type { WebhookEventType, WebhookEventEnvelope } from '@rekey.dev/shared-types';
 
 /**
- * Top-level ReliPay client. Auth and billing live as namespaces
- * (`relipay.applications`, `relipay.auth`, `relipay.billing`) so an agent
- * reading `relipay.` in an editor sees a discoverable surface.
+ * Top-level Rekey client. Auth and billing live as namespaces
+ * (`rekey.applications`, `rekey.auth`, `rekey.billing`) so an agent
+ * reading `rekey.` in an editor sees a discoverable surface.
  */
-export class ReliPay {
+export class Rekey {
   private readonly apiUrl: string;
   private readonly secretKey: string;
   private readonly fetchImpl: typeof fetch;
@@ -172,22 +172,22 @@ export class ReliPay {
   public readonly usage: UsageClient;
   /** Prepaid credits — balance reads, idempotent drawdown, ledger. */
   public readonly credits: CreditsClient;
-  /** MCP — validate ReliPay-issued MCP tokens from your own MCP server. */
+  /** MCP — validate Rekey-issued MCP tokens from your own MCP server. */
   public readonly mcp: McpClient;
 
   constructor(config: ReliPayConfig) {
     if (!config.apiUrl) {
-      throw new RelipayError({
+      throw new RekeyError({
         code: 'CONFIG_MISSING_API_URL',
-        message: 'ReliPay client requires `apiUrl`.',
+        message: 'Rekey client requires `apiUrl`.',
         fix: 'Pass `apiUrl: process.env.RELIPAY_URL` when constructing the client.',
       });
     }
     if (!config.secretKey || !config.secretKey.startsWith('rp_')) {
-      throw new RelipayError({
+      throw new RekeyError({
         code: 'CONFIG_INVALID_SECRET_KEY',
-        message: 'ReliPay client requires a valid `secretKey` (starts with `rp_`).',
-        fix: 'Get a key from the ReliPay panel under Application → API Keys, then pass it as `secretKey`.',
+        message: 'Rekey client requires a valid `secretKey` (starts with `rp_`).',
+        fix: 'Get a key from the Rekey panel under Application → API Keys, then pass it as `secretKey`.',
       });
     }
 
@@ -224,7 +224,7 @@ export class ReliPay {
 
     const json = (await res.json().catch(() => ({}))) as
       | { success: true; data: T }
-      | { success: false; error: RelipayErrorShape & { requestId?: string } };
+      | { success: false; error: RekeyErrorShape & { requestId?: string } };
 
     if (!res.ok || ('success' in json && json.success === false)) {
       const requestId = res.headers.get('x-request-id') ?? undefined;
@@ -234,11 +234,11 @@ export class ReliPay {
           : {
               code: 'UNKNOWN_ERROR',
               message: `Request failed with status ${res.status}.`,
-              fix: 'Check the ReliPay API logs for the matching request id.',
+              fix: 'Check the Rekey API logs for the matching request id.',
             };
       const resolvedRequestId =
         ('requestId' in err && err.requestId) || requestId;
-      throw new RelipayError({
+      throw new RekeyError({
         ...err,
         statusCode: res.status,
         ...(resolvedRequestId !== undefined && { requestId: resolvedRequestId }),
@@ -251,7 +251,7 @@ export class ReliPay {
   /**
    * @internal Raw request for the non-enveloped OAuth/MCP endpoints — returns
    * the parsed JSON as-is (those endpoints emit standard OAuth shapes, not the
-   * `{ success, data }` envelope). Throws `RelipayError` on non-2xx, mapping
+   * `{ success, data }` envelope). Throws `RekeyError` on non-2xx, mapping
    * the OAuth `{ error, error_description }` body when present.
    */
   async requestRaw<T>(
@@ -275,21 +275,21 @@ export class ReliPay {
         typeof json.error_description === 'string'
           ? json.error_description
           : `Request failed with status ${res.status}.`;
-      throw new RelipayError({ code, message, statusCode: res.status });
+      throw new RekeyError({ code, message, statusCode: res.status });
     }
     return json as T;
   }
 }
 
 /**
- * MCP helpers for customers running their OWN MCP server behind ReliPay auth.
+ * MCP helpers for customers running their OWN MCP server behind Rekey auth.
  * The hosted MCP server (account tools) is consumed by MCP clients directly —
  * this client is for the "bring your own MCP server" path: validate incoming
- * ReliPay-issued tokens, and read the OAuth metadata.
+ * Rekey-issued tokens, and read the OAuth metadata.
  */
 class McpClient {
   private slugCache: string | null = null;
-  constructor(private readonly client: ReliPay) {}
+  constructor(private readonly client: Rekey) {}
 
   private async slug(): Promise<string> {
     if (this.slugCache) return this.slugCache;
@@ -305,7 +305,7 @@ class McpClient {
    *
    * @example
    * ```ts
-   * const result = await relipay.mcp.introspect(bearerToken);
+   * const result = await rekey.mcp.introspect(bearerToken);
    * if (!result.active) throw new Error('unauthorized');
    * const endUserId = result.sub;
    * ```
@@ -334,20 +334,20 @@ class McpClient {
 }
 
 class ApplicationsClient {
-  constructor(private readonly client: ReliPay) {}
+  constructor(private readonly client: Rekey) {}
 
   /**
    * Verify credentials and fetch the calling Application. Use this as your
    * SDK smoke test — if it returns, your secret key is good and you're
-   * pointed at the right ReliPay deployment.
+   * pointed at the right Rekey deployment.
    *
    * @example
    * ```ts
-   * const me = await relipay.applications.me();
+   * const me = await rekey.applications.me();
    * console.log(`Connected to "${me.name}" (${me.slug})`);
    * ```
    *
-   * @throws {RelipayError} with `code: "API_KEY_INVALID"` if the key is wrong/revoked/expired.
+   * @throws {RekeyError} with `code: "API_KEY_INVALID"` if the key is wrong/revoked/expired.
    */
   me(): Promise<ApplicationDto> {
     return this.client.request('GET', '/api/v1/me/');
@@ -355,7 +355,7 @@ class ApplicationsClient {
 }
 
 class AuthClient {
-  constructor(private readonly client: ReliPay) {}
+  constructor(private readonly client: Rekey) {}
 
   /**
    * Create a new end-user in the calling Application via email + password.
@@ -364,16 +364,16 @@ class AuthClient {
    *
    * @example
    * ```ts
-   * const { endUser, token } = await relipay.auth.signUp({
+   * const { endUser, token } = await rekey.auth.signUp({
    *   email: 'alice@example.com',
    *   password: 'correct-horse-battery-staple',
    * });
    * // store token in your session, return it to the browser, etc.
    * ```
    *
-   * @throws {RelipayError} `EMAIL_ALREADY_EXISTS` (409) if the email is taken in this Application.
-   * @throws {RelipayError} `PASSWORD_TOO_SHORT` (400) if shorter than the Application's `passwordMinLength`.
-   * @throws {RelipayError} `AUTH_METHOD_DISABLED` (400) if the Application doesn't have `"password"` enabled.
+   * @throws {RekeyError} `EMAIL_ALREADY_EXISTS` (409) if the email is taken in this Application.
+   * @throws {RekeyError} `PASSWORD_TOO_SHORT` (400) if shorter than the Application's `passwordMinLength`.
+   * @throws {RekeyError} `AUTH_METHOD_DISABLED` (400) if the Application doesn't have `"password"` enabled.
    */
   signUp(input: SignUpRequest): Promise<AuthResultDto> {
     return this.client.request('POST', '/api/v1/auth/sign-up', input);
@@ -391,7 +391,7 @@ class AuthClient {
    * **Branch on `result.mfaRequired` before reading `accessToken`** — the
    * MFA-required branch has no session tokens.
    *
-   * @throws {RelipayError} `INVALID_CREDENTIALS` (401) — single code on purpose.
+   * @throws {RekeyError} `INVALID_CREDENTIALS` (401) — single code on purpose.
    *   Don't try to distinguish wrong-email from wrong-password from the SDK side either.
    */
   signIn(input: SignInRequest): Promise<SignInOutcomeDto> {
@@ -402,11 +402,11 @@ class AuthClient {
    * Exchange an MFA challenge token + TOTP/backup code for a real session.
    * Use after `signIn` (or OAuth callback) returns `mfaRequired: true`.
    *
-   * @throws {RelipayError} `MFA_CHALLENGE_INVALID` (401) if the token is
+   * @throws {RekeyError} `MFA_CHALLENGE_INVALID` (401) if the token is
    *   forged, expired, or signed with a different secret.
-   * @throws {RelipayError} `MFA_CHALLENGE_WRONG_APPLICATION` (401) if the
+   * @throws {RekeyError} `MFA_CHALLENGE_WRONG_APPLICATION` (401) if the
    *   token was issued under a different Application.
-   * @throws {RelipayError} `MFA_CODE_INVALID` (401) if the code doesn't
+   * @throws {RekeyError} `MFA_CODE_INVALID` (401) if the code doesn't
    *   verify against the user's TOTP secret or remaining backup codes.
    */
   mfaVerify(input: MfaVerifyRequest): Promise<AuthResultDto> {
@@ -476,7 +476,7 @@ class AuthClient {
     expectedChallenge: string;
   }> {
     return this.client.request('POST', '/api/v1/auth/passkey/register/start', undefined, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -489,7 +489,7 @@ class AuthClient {
     },
   ): Promise<{ credentialId: string; deviceName: string | null }> {
     return this.client.request('POST', '/api/v1/auth/passkey/register/complete', input, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -504,7 +504,7 @@ class AuthClient {
     }>
   > {
     return this.client.request('GET', '/api/v1/auth/passkeys', undefined, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -514,11 +514,11 @@ class AuthClient {
       'DELETE',
       `/api/v1/auth/passkeys/${encodeURIComponent(credentialRowId)}`,
       undefined,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
-  // End-user organization / team methods live on `relipay.organizations.*`
+  // End-user organization / team methods live on `rekey.organizations.*`
   // (OrganizationsClient) — the canonical, fuller surface. The earlier
   // duplicates here (createOrganization / listMyOrganizations /
   // inviteToOrganization / acceptOrganizationInvitation) were removed to
@@ -527,13 +527,13 @@ class AuthClient {
   /**
    * Resolve the end-user behind a presented access token.
    *
-   * @throws {RelipayError} `USER_TOKEN_INVALID` (401) if expired/forged/wrong-secret.
-   * @throws {RelipayError} `USER_TOKEN_WRONG_APPLICATION` (401) if the token was issued
+   * @throws {RekeyError} `USER_TOKEN_INVALID` (401) if expired/forged/wrong-secret.
+   * @throws {RekeyError} `USER_TOKEN_WRONG_APPLICATION` (401) if the token was issued
    *   by a different Application than the calling secret key represents.
    */
   getCurrentUser(accessToken: string): Promise<EndUserDto & { activeOrganizationId: string | null }> {
     return this.client.request('GET', '/api/v1/users/me/', undefined, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -542,9 +542,9 @@ class AuthClient {
    * refresh is revoked atomically — call this **once** and store the new
    * `refreshToken` from the response immediately.
    *
-   * @throws {RelipayError} `REFRESH_TOKEN_REUSED` (401) if you replay an already-used token.
+   * @throws {RekeyError} `REFRESH_TOKEN_REUSED` (401) if you replay an already-used token.
    *   This is a strong signal the original was leaked; treat as compromise.
-   * @throws {RelipayError} `REFRESH_TOKEN_EXPIRED` (401) after the 30-day refresh window.
+   * @throws {RekeyError} `REFRESH_TOKEN_EXPIRED` (401) after the 30-day refresh window.
    */
   refresh(refreshToken: string): Promise<AuthResultDto> {
     // /auth/refresh returns the same shape as /auth/mfa-verify — always a
@@ -566,11 +566,11 @@ class AuthClient {
   /**
    * Request a password-reset token for an email. Always succeeds — never
    * tells you whether the email exists. **You must email the returned
-   * `resetToken` to the user**: ReliPay does not send email.
+   * `resetToken` to the user**: Rekey does not send email.
    *
    * @example
    * ```ts
-   * const { resetToken } = await relipay.auth.requestPasswordReset({ email });
+   * const { resetToken } = await rekey.auth.requestPasswordReset({ email });
    * if (resetToken) await sendgrid.send({ to: email, subject: 'Reset', text: `link: ${url(resetToken)}` });
    * ```
    */
@@ -582,8 +582,8 @@ class AuthClient {
    * Consume a reset token + set a new password. Single-use. On success,
    * every refresh token for the user is revoked.
    *
-   * @throws {RelipayError} `PASSWORD_RESET_TOKEN_INVALID` / `_USED` / `_EXPIRED` / `_WRONG_APPLICATION`
-   * @throws {RelipayError} `PASSWORD_TOO_SHORT` if below the Application's `passwordMinLength`
+   * @throws {RekeyError} `PASSWORD_RESET_TOKEN_INVALID` / `_USED` / `_EXPIRED` / `_WRONG_APPLICATION`
+   * @throws {RekeyError} `PASSWORD_TOO_SHORT` if below the Application's `passwordMinLength`
    */
   resetPassword(input: ResetPasswordRequest): Promise<{ ok: true }> {
     return this.client.request('POST', '/api/v1/auth/reset-password', input);
@@ -596,7 +596,7 @@ class AuthClient {
    */
   changePassword(accessToken: string, input: ChangePasswordRequest): Promise<{ ok: true }> {
     return this.client.request('POST', '/api/v1/auth/change-password', input, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -610,13 +610,13 @@ class AuthClient {
       'POST',
       '/api/v1/auth/sign-out-everywhere',
       undefined,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
   /**
    * Send (or re-send) an email-verification link to the current user.
-   * If email transport is configured on the Application, ReliPay sends
+   * If email transport is configured on the Application, Rekey sends
    * the email and `verificationToken` is null. Otherwise the raw token
    * is returned for the caller to forward via their own provider.
    *
@@ -628,7 +628,7 @@ class AuthClient {
     input?: { verifyUrl?: string },
   ): Promise<{ emailSent: boolean; verificationToken: string | null }> {
     return this.client.request('POST', '/api/v1/auth/send-verification', input ?? {}, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -658,7 +658,7 @@ class AuthClient {
     }>
   > {
     return this.client.request('GET', '/api/v1/auth/sessions', undefined, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -668,7 +668,7 @@ class AuthClient {
       'DELETE',
       `/api/v1/auth/sessions/${encodeURIComponent(sessionId)}`,
       undefined,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
@@ -686,7 +686,7 @@ class AuthClient {
     policy: 'off' | 'optional' | 'required';
   }> {
     return this.client.request('GET', '/api/v1/auth/mfa/status', undefined, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -701,14 +701,14 @@ class AuthClient {
     warning: string;
   }> {
     return this.client.request('POST', '/api/v1/auth/mfa/setup', undefined, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
   /** Confirm enrollment by submitting the current 6-digit TOTP code. */
   confirmMfaSetup(accessToken: string, code: string): Promise<{ ok: true }> {
     return this.client.request('POST', '/api/v1/auth/mfa/setup-confirm', { code }, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -718,14 +718,14 @@ class AuthClient {
    */
   mfaChallenge(accessToken: string, code: string): Promise<{ ok: boolean }> {
     return this.client.request('POST', '/api/v1/auth/mfa/challenge', { code }, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
   /** Disable MFA for the current user. */
   disableMfa(accessToken: string): Promise<{ disabled: true }> {
     return this.client.request('POST', '/api/v1/auth/mfa/disable', undefined, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -748,7 +748,7 @@ class AuthClient {
   }
 
   /**
-   * Exchange the provider `code` for a ReliPay session. Returns a
+   * Exchange the provider `code` for a Rekey session. Returns a
    * `SignInOutcome` — branch on `mfaRequired` before reading `accessToken`.
    * Verify the `state` CSRF value yourself before calling.
    */
@@ -770,7 +770,7 @@ class AuthClient {
     }>
   > {
     return this.client.request('GET', '/api/v1/auth/oauth/identities', undefined, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -784,7 +784,7 @@ class AuthClient {
       'POST',
       `/api/v1/auth/oauth/${encodeURIComponent(provider)}/link/start`,
       { state },
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
@@ -802,7 +802,7 @@ class AuthClient {
       'POST',
       `/api/v1/auth/oauth/${encodeURIComponent(provider)}/link/complete`,
       { code },
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
@@ -815,7 +815,7 @@ class AuthClient {
       'DELETE',
       `/api/v1/auth/oauth/${encodeURIComponent(provider)}`,
       undefined,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 }
@@ -836,7 +836,7 @@ function listQuery(page?: ListPage): string {
 }
 
 class OrganizationsClient {
-  constructor(private readonly client: ReliPay) {}
+  constructor(private readonly client: Rekey) {}
 
   /** Create an organization; the calling user becomes the OWNER. */
   create(
@@ -844,7 +844,7 @@ class OrganizationsClient {
     input: { name: string; slug: string; metadata?: Record<string, unknown> },
   ): Promise<{ organization: OrganizationDto; membership: { id: string; role: 'OWNER' } }> {
     return this.client.request('POST', '/api/v1/users/me/organizations/', input, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -852,7 +852,7 @@ class OrganizationsClient {
    *  result is paginated (default 50, max 100); pass `page.offset` for more. */
   listMine(accessToken: string, page?: ListPage): Promise<OrganizationWithRoleDto[]> {
     return this.client.request('GET', `/api/v1/users/me/organizations/${listQuery(page)}`, undefined, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -862,7 +862,7 @@ class OrganizationsClient {
       'GET',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}`,
       undefined,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
@@ -876,7 +876,7 @@ class OrganizationsClient {
       'PATCH',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}`,
       input,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
@@ -891,7 +891,7 @@ class OrganizationsClient {
       'GET',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/members${listQuery(page)}`,
       undefined,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
@@ -908,7 +908,7 @@ class OrganizationsClient {
       'POST',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/invitations`,
       input,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
@@ -922,7 +922,7 @@ class OrganizationsClient {
       'POST',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/invitations/${encodeURIComponent(invitationId)}/revoke`,
       undefined,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
@@ -945,7 +945,7 @@ class OrganizationsClient {
       'PATCH',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(targetEndUserId)}`,
       input,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
@@ -965,7 +965,7 @@ class OrganizationsClient {
       'DELETE',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(targetEndUserId)}`,
       undefined,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
@@ -979,7 +979,7 @@ class OrganizationsClient {
       'POST',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/leave`,
       undefined,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
@@ -1001,7 +1001,7 @@ class OrganizationsClient {
       'POST',
       '/api/v1/auth/organizations/accept-invitation',
       input,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
@@ -1018,7 +1018,7 @@ class OrganizationsClient {
       'POST',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/switch`,
       undefined,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 
@@ -1031,13 +1031,13 @@ class OrganizationsClient {
       'POST',
       '/api/v1/users/me/organizations/clear-active-organization',
       undefined,
-      { 'X-Relipay-User-Token': accessToken },
+      { 'X-Rekey-User-Token': accessToken },
     );
   }
 }
 
 class LicensesClient {
-  constructor(private readonly client: ReliPay) {}
+  constructor(private readonly client: Rekey) {}
 
   /**
    * Verify a license key + record an activation for this machine. Call
@@ -1051,7 +1051,7 @@ class LicensesClient {
    *
    * @example
    * ```ts
-   * const result = await relipay.licenses.verify({
+   * const result = await rekey.licenses.verify({
    *   key,
    *   machineFingerprint,
    *   label: 'Adam\'s MacBook',
@@ -1069,7 +1069,7 @@ class LicensesClient {
 }
 
 class UsageClient {
-  constructor(private readonly client: ReliPay) {}
+  constructor(private readonly client: Rekey) {}
 
   /**
    * Record a usage event against a named meter. `quantity` can be
@@ -1132,7 +1132,7 @@ function creditSubjectQuery(subject: CreditSubject): URLSearchParams {
 }
 
 class CreditsClient {
-  constructor(private readonly client: ReliPay) {}
+  constructor(private readonly client: Rekey) {}
 
   /** Current spendable balance for a subject (end-user or org); 0 if none. */
   getBalance(subject: CreditSubject): Promise<CreditBalanceDto> {
@@ -1140,7 +1140,7 @@ class CreditsClient {
   }
 
   /**
-   * Deduct credits from a subject (end-user or org pool). Throws `RelipayError`
+   * Deduct credits from a subject (end-user or org pool). Throws `RekeyError`
    * `code: "CREDITS_INSUFFICIENT"` (HTTP 402) when the balance is too low.
    *
    * Pass `idempotencyKey` (e.g. the lead id) so a retried call never
@@ -1186,20 +1186,20 @@ export interface EntitlementsDto {
 }
 
 /**
- * Verify the HMAC signature on an inbound webhook from ReliPay. Returns
+ * Verify the HMAC signature on an inbound webhook from Rekey. Returns
  * `true` only when (a) the timestamp is fresh (within `toleranceSeconds`,
  * default 300) AND (b) the signature matches a constant-time compare.
  *
- * Use against the `X-Relipay-Signature` header and the raw request body
+ * Use against the `X-Rekey-Signature` header and the raw request body
  * BYTES (not the parsed JSON — any reserialization breaks the HMAC).
  *
  * @example
  * ```ts
- * import { verifyWebhookSignature } from '@relipay/node';
+ * import { verifyWebhookSignature } from '@rekey.dev/node';
  *
- * app.post('/webhooks/relipay', { config: { rawBody: true } }, (req) => {
+ * app.post('/webhooks/rekey', { config: { rawBody: true } }, (req) => {
  *   const ok = verifyWebhookSignature({
- *     header: req.headers['x-relipay-signature'] as string,
+ *     header: req.headers['x-rekey-signature'] as string,
  *     payload: req.rawBody!,
  *     secret: process.env.RELIPAY_WEBHOOK_SECRET!,
  *   });
@@ -1268,7 +1268,7 @@ export interface VerifiedAccessTokenClaims {
 
 export interface VerifyAccessTokenOptions {
   /**
-   * URL of the deployment's JWKS — `https://<your-relipay>/.well-known/jwks.json`.
+   * URL of the deployment's JWKS — `https://<your-rekey>/.well-known/jwks.json`.
    * Fetched lazily and cached in-process for `cacheTtlMs` (default 5 minutes);
    * an unknown `kid` triggers one immediate refetch so freshly rotated keys
    * are picked up without waiting out the TTL.
@@ -1302,10 +1302,10 @@ async function loadJwks(
   if (options.jwks) return options.jwks;
   const url = options.jwksUrl;
   if (!url) {
-    throw new RelipayError({
+    throw new RekeyError({
       code: 'CONFIG_MISSING_JWKS',
       message: 'verifyAccessToken requires either `jwksUrl` or a pre-fetched `jwks`.',
-      fix: 'Pass `jwksUrl: "https://<your-relipay>/.well-known/jwks.json"`.',
+      fix: 'Pass `jwksUrl: "https://<your-rekey>/.well-known/jwks.json"`.',
     });
   }
   const ttl = options.cacheTtlMs ?? 5 * 60 * 1000;
@@ -1315,16 +1315,16 @@ async function loadJwks(
   const fetchImpl = options.fetch ?? fetch;
   const res = await fetchImpl(url);
   if (!res.ok) {
-    throw new RelipayError({
+    throw new RekeyError({
       code: 'JWKS_FETCH_FAILED',
       message: `Fetching the JWKS from ${url} failed with status ${res.status}.`,
-      fix: 'Check the URL points at your ReliPay deployment’s /.well-known/jwks.json.',
+      fix: 'Check the URL points at your Rekey deployment’s /.well-known/jwks.json.',
       statusCode: res.status,
     });
   }
   const jwks = (await res.json()) as JwksDto;
   if (!jwks || !Array.isArray(jwks.keys)) {
-    throw new RelipayError({
+    throw new RekeyError({
       code: 'JWKS_FETCH_FAILED',
       message: 'The JWKS endpoint did not return a `{ keys: [...] }` body.',
       fix: 'Check the URL points at /.well-known/jwks.json, not another route.',
@@ -1335,11 +1335,11 @@ async function loadJwks(
 }
 
 /**
- * Verify an end-user ACCESS token **offline** — no round-trip to the ReliPay
+ * Verify an end-user ACCESS token **offline** — no round-trip to the Rekey
  * API. Works only for Applications that opted into RS256 tokens
  * (`authConfig.tokenAlg = "RS256"`, Panel → Application → Auth); the default
  * HS256 tokens are symmetric and can only be verified by the API itself
- * (use `relipay.auth.getCurrentUser(token)` for those).
+ * (use `rekey.auth.getCurrentUser(token)` for those).
  *
  * Checks performed (same posture as the API's verifier):
  *   - header `alg` must be `RS256` and `kid` must exist in the JWKS —
@@ -1353,30 +1353,30 @@ async function loadJwks(
  * revocation guarantees keep using `auth.getCurrentUser`.
  *
  * Node-only (uses `node:crypto`). Returns the verified claims; throws
- * `RelipayError` on any failure.
+ * `RekeyError` on any failure.
  *
  * @example Express/Fastify middleware at the edge
  * ```ts
- * import { verifyAccessToken } from '@relipay/node';
+ * import { verifyAccessToken } from '@rekey.dev/node';
  *
- * const claims = await verifyAccessToken(req.headers['x-relipay-user-token'], {
- *   jwksUrl: 'https://relipay.example.com/.well-known/jwks.json',
+ * const claims = await verifyAccessToken(req.headers['x-rekey-user-token'], {
+ *   jwksUrl: 'https://rekey.example.com/.well-known/jwks.json',
  * });
  * if (claims.applicationId !== MY_APP_ID) throw new Error('wrong app');
  * req.userId = claims.sub;
  * ```
  *
- * @throws {RelipayError} `TOKEN_ALG_NOT_RS256` — token is HS256 (app hasn't opted in) or another alg.
- * @throws {RelipayError} `TOKEN_KID_UNKNOWN` — `kid` not in the JWKS (forged, or key deleted).
- * @throws {RelipayError} `USER_TOKEN_EXPIRED` — `exp` passed; refresh the session.
- * @throws {RelipayError} `USER_TOKEN_INVALID` — malformed, bad signature, or wrong `typ`.
+ * @throws {RekeyError} `TOKEN_ALG_NOT_RS256` — token is HS256 (app hasn't opted in) or another alg.
+ * @throws {RekeyError} `TOKEN_KID_UNKNOWN` — `kid` not in the JWKS (forged, or key deleted).
+ * @throws {RekeyError} `USER_TOKEN_EXPIRED` — `exp` passed; refresh the session.
+ * @throws {RekeyError} `USER_TOKEN_INVALID` — malformed, bad signature, or wrong `typ`.
  */
 export async function verifyAccessToken(
   token: string,
   options: VerifyAccessTokenOptions,
 ): Promise<VerifiedAccessTokenClaims> {
-  const invalid = (message: string): RelipayError =>
-    new RelipayError({
+  const invalid = (message: string): RekeyError =>
+    new RekeyError({
       code: 'USER_TOKEN_INVALID',
       message,
       fix: 'Have the user sign in again to obtain a fresh token.',
@@ -1401,7 +1401,7 @@ export async function verifyAccessToken(
   // symmetric (the verifying key can also MINT tokens), so they are never
   // verified client-side.
   if (header.alg !== 'RS256') {
-    throw new RelipayError({
+    throw new RekeyError({
       code: 'TOKEN_ALG_NOT_RS256',
       message: `Offline verification supports RS256 tokens only (got alg=${String(header.alg)}).`,
       fix: 'Enable RS256 for the Application (authConfig.tokenAlg) or verify via auth.getCurrentUser().',
@@ -1421,7 +1421,7 @@ export async function verifyAccessToken(
     jwk = jwks.keys.find((k) => k.kid === header.kid);
   }
   if (!jwk) {
-    throw new RelipayError({
+    throw new RekeyError({
       code: 'TOKEN_KID_UNKNOWN',
       message: `No JWKS key matches the token's kid (${header.kid}).`,
       fix: 'The token may be forged, or its signing key was deleted after rotation. Re-authenticate the user.',
@@ -1456,7 +1456,7 @@ export async function verifyAccessToken(
   }
   const nowSec = Math.floor((options.now ? options.now() : Date.now()) / 1000);
   if (typeof payload.exp !== 'number' || payload.exp <= nowSec) {
-    throw new RelipayError({
+    throw new RekeyError({
       code: 'USER_TOKEN_EXPIRED',
       message: 'The access token has expired.',
       fix: 'Refresh the session (auth.refresh) or have the user sign in again.',
@@ -1468,7 +1468,7 @@ export async function verifyAccessToken(
 }
 
 class BillingClient {
-  constructor(private readonly client: ReliPay) {}
+  constructor(private readonly client: Rekey) {}
 
   /**
    * List the calling Application's active plans. Public — pricing pages
@@ -1486,11 +1486,11 @@ class BillingClient {
    * Fetch the current end-user's active subscription, or `null` if they
    * have none. Returns the most recent ACTIVE / PENDING / PAST_DUE row.
    *
-   * Pass the user's access token (the SDK puts it in `X-Relipay-User-Token`).
+   * Pass the user's access token (the SDK puts it in `X-Rekey-User-Token`).
    */
   getSubscription(accessToken: string): Promise<SubscriptionDto | null> {
     return this.client.request('GET', '/api/v1/billing/subscription', undefined, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -1500,16 +1500,16 @@ class BillingClient {
    * happens via the provider's webhook — not synchronously here.
    *
    * Pass `couponCode` to apply a discount. The whole checkout fails if the
-   * coupon doesn't validate (typed `RelipayError` with the precise reason).
+   * coupon doesn't validate (typed `RekeyError` with the precise reason).
    *
    * If the Application's billing subject is **org** (Panel → Application →
    * Billing → Subject), an individual can't hold a subscription — you MUST
    * pass `organizationId` of a team the user owns/admins. Omitting it throws
-   * `RelipayError` `code: "BILLING_ORGANIZATION_REQUIRED"`.
+   * `RekeyError` `code: "BILLING_ORGANIZATION_REQUIRED"`.
    *
    * @example
    * ```ts
-   * const { url, discountAmount } = await relipay.billing.createCheckout(userAccessToken, {
+   * const { url, discountAmount } = await rekey.billing.createCheckout(userAccessToken, {
    *   planSlug: 'pro_monthly',
    *   successUrl: 'https://yourapp.com/billing?status=ok',
    *   cancelUrl:  'https://yourapp.com/billing?status=cancel',
@@ -1523,7 +1523,7 @@ class BillingClient {
     input: CreateCheckoutRequest & { couponCode?: string },
   ): Promise<CheckoutResultDto> {
     return this.client.request('POST', '/api/v1/billing/checkout', input, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -1531,7 +1531,7 @@ class BillingClient {
    * Validate a coupon for the current user against a plan, *without*
    * applying it. Render "$50 off" on a pricing page before submit.
    *
-   * @throws {RelipayError} with one of `COUPON_NOT_FOUND` / `COUPON_INACTIVE`
+   * @throws {RekeyError} with one of `COUPON_NOT_FOUND` / `COUPON_INACTIVE`
    *   / `COUPON_NOT_YET_STARTED` / `COUPON_EXPIRED` / `COUPON_NOT_APPLICABLE`
    *   / `COUPON_CURRENCY_MISMATCH` / `COUPON_REDEMPTION_LIMIT_REACHED` /
    *   `COUPON_USER_LIMIT_REACHED`. Surface the message + fix to the user.
@@ -1541,7 +1541,7 @@ class BillingClient {
     input: ValidateCouponRequest,
   ): Promise<ValidateCouponResultDto> {
     return this.client.request('POST', '/api/v1/billing/coupons/validate', input, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 
@@ -1570,7 +1570,7 @@ class BillingClient {
    *
    * @example
    * ```ts
-   * const { features } = await relipay.billing.getEntitlements(userAccessToken);
+   * const { features } = await rekey.billing.getEntitlements(userAccessToken);
    * if (features.advanced_reporting) renderReportingTab();
    * ```
    */
@@ -1579,7 +1579,7 @@ class BillingClient {
       ? `?organizationId=${encodeURIComponent(opts.organizationId)}`
       : '';
     return this.client.request('GET', `/api/v1/billing/entitlements${qs}`, undefined, {
-      'X-Relipay-User-Token': accessToken,
+      'X-Rekey-User-Token': accessToken,
     });
   }
 }

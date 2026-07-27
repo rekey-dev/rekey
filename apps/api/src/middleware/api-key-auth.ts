@@ -18,7 +18,7 @@ import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { ApiKey, Application, DataMode } from '@prisma/client';
 import { apiKeysService } from '../modules/api-keys/api-keys.service.js';
 import { prisma } from '../lib/prisma.js';
-import { RelipayError } from '../lib/error.js';
+import { RekeyError } from '../lib/error.js';
 import { ipMatchesAllowlist } from '../lib/ip-allowlist.js';
 import { portalOriginsForApp } from '../lib/portal-origins.js';
 import { recordSecurityEvent, requestContext } from '../lib/security-events.js';
@@ -60,7 +60,7 @@ export async function requireApiKey(
   const presented = header.startsWith('Bearer ') ? header.slice(7) : '';
 
   if (!presented) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 401,
       code: 'API_KEY_MISSING',
       message: 'This endpoint requires an Authorization: Bearer <secretKey> header.',
@@ -73,7 +73,7 @@ export async function requireApiKey(
     // Could be a public key or the super-admin key, both wrong here. Same code
     // either way — refuse to identify which kind of mistake it was, so an
     // attacker can't probe.
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 401,
       code: 'API_KEY_INVALID',
       message: 'The presented credential is not a valid Application secret key.',
@@ -83,7 +83,7 @@ export async function requireApiKey(
 
   const verified = await apiKeysService.verify(presented);
   if (!verified) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 401,
       code: 'API_KEY_INVALID',
       message: 'API key is unknown, revoked, or expired.',
@@ -97,7 +97,7 @@ export async function requireApiKey(
   if (!application) {
     // Should never happen — FK CASCADE removes the key when the app dies.
     // Treat as 401 not 500: the credential's referent is gone.
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 401,
       code: 'API_KEY_INVALID',
       message: 'API key references an application that no longer exists.',
@@ -121,7 +121,7 @@ export async function requireApiKey(
       ...requestContext(request),
       metadata: { apiKeyId: verified.apiKey.id },
     });
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 403,
       code: 'IP_NOT_ALLOWED',
       message: 'This API key is restricted to an IP allowlist that does not include your address.',
@@ -166,7 +166,7 @@ export async function requireApiKey(
  *      strictly stronger than the secret key here: it names the single user the
  *      route may act on. Demanding a secret key on top adds no authorization,
  *      it only forbids the credential a browser is allowed to hold — which
- *      makes the flow unreachable from `@relipay/react`.
+ *      makes the flow unreachable from `@rekey.dev/react`.
  *
  * Beyond that, safety rests on the per-route rate limits and the per-app CORS
  * origin allowlist enforced below (the browser analogue of the secret key's IP
@@ -223,7 +223,7 @@ export async function requirePublishableOrSecretKey(
     },
   });
   if (!application) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 401,
       code: 'PUBLISHABLE_KEY_INVALID',
       message: 'The presented publishable key is unknown or has been rotated out.',
@@ -250,7 +250,7 @@ export async function requirePublishableOrSecretKey(
         ...requestContext(request),
         metadata: { origin: origin ?? null },
       });
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'ORIGIN_NOT_ALLOWED',
         message: 'This publishable key is restricted to an origin allowlist that does not include this request.',
@@ -330,7 +330,7 @@ export function requireScope(
     if (request.authKind === 'publishable') return;
     if (!request.apiKey) {
       // Programming error: this hook must run after `requireApiKey`.
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 500,
         code: 'INTERNAL_ERROR',
         message: 'requireScope ran without an ApiKey on the request.',
@@ -338,7 +338,7 @@ export function requireScope(
       });
     }
     if (!hasScope(request.apiKey.scopes, required)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'API_KEY_SCOPE_INSUFFICIENT',
         message:

@@ -161,7 +161,7 @@ export default async function ApplicationOverviewPage({
               and drop it into your server: <code className="font-mono text-xs">RELIPAY_SECRET=rp_live_…</code>
             </li>
             <li>
-              Wire <code className="font-mono text-xs">@relipay/node</code> on your backend (or one of the React/Next SDKs on the frontend).
+              Wire <code className="font-mono text-xs">@rekey.dev/node</code> on your backend (or one of the React/Next SDKs on the frontend).
             </li>
             <li>
               Optional —{' '}

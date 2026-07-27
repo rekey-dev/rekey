@@ -7,10 +7,10 @@
  */
 
 import { redirect } from 'next/navigation';
-import { RelipayError } from '@relipay/react';
+import { RekeyError } from '@rekey.dev/react';
 import { portalClientFor, setSession, clearSession, getRefreshToken, getAccessToken } from './session';
 import { getPortalConfig } from './config';
-import { portalBaseUrl, relipayApiUrl } from './env';
+import { portalBaseUrl, rekeyApiUrl } from './env';
 
 export async function signInAction(slug: string, formData: FormData): Promise<void> {
   const email = String(formData.get('email') ?? '').trim();
@@ -26,7 +26,7 @@ export async function signInAction(slug: string, formData: FormData): Promise<vo
     }
     await setSession(slug, out.accessToken, out.refreshToken);
   } catch (err) {
-    if (err instanceof RelipayError) {
+    if (err instanceof RekeyError) {
       redirect(`/${slug}/login?error=${encodeURIComponent(err.code)}`);
     }
     throw err;
@@ -44,7 +44,7 @@ export async function mfaVerifyAction(slug: string, formData: FormData): Promise
     const out = await client.mfaVerify({ mfaChallengeToken: challenge, code });
     await setSession(slug, out.accessToken, out.refreshToken);
   } catch (err) {
-    if (err instanceof RelipayError) {
+    if (err instanceof RekeyError) {
       // Keep the challenge so a mistyped code doesn't force a fresh sign-in.
       redirect(
         `/${slug}/login?mfa=${encodeURIComponent(challenge)}&error=${encodeURIComponent(err.code)}`,
@@ -67,7 +67,7 @@ async function publishablePost(
 ): Promise<{ ok: boolean; code?: string }> {
   const config = await getPortalConfig(slug);
   if (!config) return { ok: false, code: 'PORTAL_NOT_FOUND' };
-  const res = await fetch(`${relipayApiUrl()}${path}`, {
+  const res = await fetch(`${rekeyApiUrl()}${path}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -129,7 +129,7 @@ export async function cancelSubscriptionAction(slug: string, organizationId: str
       ...(organizationId && { organizationId }),
     });
   } catch (err) {
-    if (err instanceof RelipayError) {
+    if (err instanceof RekeyError) {
       redirect(`/${slug}?error=${encodeURIComponent(err.code)}`);
     }
     throw err;
@@ -165,7 +165,7 @@ export async function checkoutAction(
     });
     url = result.url;
   } catch (err) {
-    if (err instanceof RelipayError) {
+    if (err instanceof RekeyError) {
       redirect(`/${slug}?error=${encodeURIComponent(err.code)}`);
     }
     throw err;

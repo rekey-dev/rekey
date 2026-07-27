@@ -1,18 +1,18 @@
 /**
- * @relipay/react — React hooks + headless components for end-user auth.
+ * @rekey.dev/react — React hooks + headless components for end-user auth.
  *
  * @example
  * ```tsx
  * // Server (Next.js App Router root layout)
  * const user = await getCurrentUserFromCookie();
  * return (
- *   <RelipayProvider apiUrl={env.RELIPAY_URL} initialUser={user} accessToken={user?.accessToken ?? null}>
+ *   <RekeyProvider apiUrl={env.RELIPAY_URL} initialUser={user} accessToken={user?.accessToken ?? null}>
  *     {children}
- *   </RelipayProvider>
+ *   </RekeyProvider>
  * );
  *
  * // Client component
- * import { useUser, SignedIn, SignedOut } from '@relipay/react';
+ * import { useUser, SignedIn, SignedOut } from '@rekey.dev/react';
  *
  * function Header() {
  *   const { user } = useUser();
@@ -26,11 +26,11 @@
  * ```
  */
 
-export { RelipayProvider } from './context.js';
-export type { RelipayContextValue, RelipayProviderProps } from './context.js';
+export { RekeyProvider } from './context.js';
+export type { RekeyContextValue, RekeyProviderProps } from './context.js';
 export { useUser, useRelipay } from './hooks.js';
 export { SignedIn, SignedOut, Loading } from './components.js';
-export { RelipayBrowserClient, RelipayError } from './client.js';
+export { RekeyBrowserClient, RekeyError } from './client.js';
 export type {
   ReliPayBrowserConfig,
   EndUserDto,
@@ -55,7 +55,7 @@ export type {
 } from './theme.js';
 
 // Control components — gate UI on auth state / entitlements.
-export { Protect, RelipayLoading, RelipayLoaded } from './control.js';
+export { Protect, RekeyLoading, RekeyLoaded } from './control.js';
 export type { ProtectProps, ProtectAuthorization } from './control.js';
 
 // Auth widgets.

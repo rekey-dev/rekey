@@ -1,5 +1,5 @@
 /**
- * The QR app's OWN data store. This is deliberately NOT in ReliPay — ReliPay
+ * The QR app's OWN data store. This is deliberately NOT in Rekey — Rekey
  * owns auth + billing + usage + entitlements; the QR codes themselves are our
  * product data. A tiny JSON-file-backed store keeps the sample runnable with
  * zero infra (swap for Postgres/sqlite in a real app).
@@ -16,9 +16,9 @@ export interface QrCode {
   id: string;
   slug: string;
   destination: string;
-  /** ReliPay subject this QR belongs to: an end-user id, or an org id. */
+  /** Rekey subject this QR belongs to: an end-user id, or an org id. */
   ownerEndUserId: string;
-  /** Set when the QR belongs to a team workspace (ReliPay organization). */
+  /** Set when the QR belongs to a team workspace (Rekey organization). */
   organizationId: string | null;
   title: string;
   createdAt: string;

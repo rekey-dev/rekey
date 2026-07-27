@@ -198,14 +198,14 @@ describe('Outbound webhooks', () => {
       });
 
       const [delivery] = await sink.waitFor(1);
-      expect(delivery!.headers['x-relipay-event-type']).toBe('user.created');
-      expect(delivery!.headers['x-relipay-event-id']).toBeTruthy();
+      expect(delivery!.headers['x-rekey-event-type']).toBe('user.created');
+      expect(delivery!.headers['x-rekey-event-id']).toBeTruthy();
       // Signature verifies with the issued secret.
       expect(
         verifyWebhookSignature({
           body: delivery!.body,
           secret: created.secret,
-          header: delivery!.headers['x-relipay-signature']!,
+          header: delivery!.headers['x-rekey-signature']!,
         }),
       ).toBe(true);
       // Wrong secret fails to verify.
@@ -213,7 +213,7 @@ describe('Outbound webhooks', () => {
         verifyWebhookSignature({
           body: delivery!.body,
           secret: 'wrong-secret',
-          header: delivery!.headers['x-relipay-signature']!,
+          header: delivery!.headers['x-rekey-signature']!,
         }),
       ).toBe(false);
       // Payload shape.
@@ -257,7 +257,7 @@ describe('Outbound webhooks', () => {
           url: '/api/v1/auth/send-verification',
           headers: {
             authorization: `Bearer ${b.liveKey}`,
-            'x-relipay-user-token': eu.accessToken,
+            'x-rekey-user-token': eu.accessToken,
           },
           payload: {},
         })
@@ -270,7 +270,7 @@ describe('Outbound webhooks', () => {
       });
 
       const deliveries = await sink.waitFor(2);
-      const types = deliveries.map((d) => d.headers['x-relipay-event-type']);
+      const types = deliveries.map((d) => d.headers['x-rekey-event-type']);
       expect(types).toContain('user.created');
       expect(types).toContain('email.verified');
     } finally {

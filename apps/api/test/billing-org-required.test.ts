@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Application, EndUser } from '@prisma/client';
 import { billingService } from '../src/modules/billing/billing.service.js';
-import { RelipayError } from '../src/lib/error.js';
+import { RekeyError } from '../src/lib/error.js';
 
 const baseInput = {
   endUser: { id: 'eu_test' } as unknown as EndUser,
@@ -37,7 +37,7 @@ describe('checkout enforces org billing subject', () => {
       await billingService.createCheckoutSession({ application: appWithSubject('user'), ...baseInput });
     } catch (e) {
       // It will fail later (no such plan), but never with the org guard.
-      expect((e as RelipayError).code).not.toBe('BILLING_ORGANIZATION_REQUIRED');
+      expect((e as RekeyError).code).not.toBe('BILLING_ORGANIZATION_REQUIRED');
     }
   });
 });

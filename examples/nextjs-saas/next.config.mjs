@@ -13,10 +13,10 @@ const nextConfig = {
   // transpilePackages keeps the App Router / Turbopack happy with workspace
   // packages that aren't pre-compiled to the consumer's target.
   transpilePackages: [
-    '@relipay/node',
-    '@relipay/nextjs',
-    '@relipay/react',
-    '@relipay/shared-types',
+    '@rekey.dev/node',
+    '@rekey.dev/nextjs',
+    '@rekey.dev/react',
+    '@rekey.dev/shared-types',
   ],
 };
 export default nextConfig;

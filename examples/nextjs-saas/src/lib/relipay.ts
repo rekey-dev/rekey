@@ -1,19 +1,19 @@
 /**
- * Server-only ReliPay wiring.
+ * Server-only Rekey wiring.
  *
- * This module is the single place the *server* SDK (`@relipay/node`) is
+ * This module is the single place the *server* SDK (`@rekey.dev/node`) is
  * constructed. It holds the Application SECRET key — so it must never be
  * imported from a Client Component. (Next will refuse to bundle it to the
  * browser because it touches `process.env.RELIPAY_SECRET`, but keeping all
  * secret-key calls behind server actions / route handlers is the discipline.)
  *
- * The `@relipay/nextjs/server` helpers (`auth`, `signIn`, `signUp`, `signOut`)
+ * The `@rekey.dev/nextjs/server` helpers (`auth`, `signIn`, `signUp`, `signOut`)
  * build their OWN internal client from the same env vars — we reuse those for
- * the auth + cookie-session lifecycle. This `relipay` client is for everything
+ * the auth + cookie-session lifecycle. This `rekey` client is for everything
  * else the Next helpers don't cover: billing, credits, usage, organizations,
  * sessions, password reset, license verify, application config.
  *
- *   RELIPAY_URL     — base URL of the ReliPay API (e.g. https://api.relipay.dev)
+ *   RELIPAY_URL     — base URL of the Rekey API (e.g. https://api.relipay.dev)
  *   RELIPAY_SECRET  — Application secret key (rp_live_… / rp_test_…), server-only
  *
  * The env checks are LAZY (inside `getRelipay()`) rather than at module-eval
@@ -25,7 +25,7 @@
  */
 
 import 'server-only';
-import { ReliPay, RelipayError } from '@relipay/node';
+import { Rekey, RekeyError } from '@rekey.dev/node';
 
 function requireEnv(name: 'RELIPAY_URL' | 'RELIPAY_SECRET'): string {
   const value = process.env[name];
@@ -39,16 +39,16 @@ function requireEnv(name: 'RELIPAY_URL' | 'RELIPAY_SECRET'): string {
   return value;
 }
 
-let cached: ReliPay | undefined;
+let cached: Rekey | undefined;
 
 /**
  * Lazily-constructed singleton. First call validates env + builds the client;
  * subsequent calls return the same instance. Throws if env is missing — but
  * only at call time, not at module import.
  */
-export function getRelipay(): ReliPay {
+export function getRelipay(): Rekey {
   if (!cached) {
-    cached = new ReliPay({
+    cached = new Rekey({
       apiUrl: requireEnv('RELIPAY_URL'),
       secretKey: requireEnv('RELIPAY_SECRET'),
     });
@@ -57,17 +57,17 @@ export function getRelipay(): ReliPay {
 }
 
 /**
- * Compatibility export — `import { relipay } from '@/lib/relipay'` keeps
+ * Compatibility export — `import { rekey } from '@/lib/relipay'` keeps
  * working. Wrapped in a Proxy so the validation still runs lazily; reading
  * any method delegates to the singleton's bound method.
  */
-export const relipay = new Proxy({} as ReliPay, {
+export const rekey = new Proxy({} as Rekey, {
   get(_target, prop, receiver) {
     return Reflect.get(getRelipay(), prop, receiver);
   },
-}) as ReliPay;
+}) as Rekey;
 
-export { RelipayError };
+export { RekeyError };
 
 /**
  * API URL — also handed to the browser provider (it's not a secret). Read

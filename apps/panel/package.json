@@ -1,5 +1,5 @@
 {
-  "name": "@relipay/panel",
+  "name": "@rekey.dev/panel",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -11,7 +11,7 @@
     "lint": "echo \"(eslint not yet wired)\""
   },
   "dependencies": {
-    "@relipay/shared-types": "workspace:*",
+    "@rekey.dev/shared-types": "workspace:*",
     "@simplewebauthn/browser": "^13.3.0",
     "next": "^15.5.18",
     "qrcode": "^1.5.4",

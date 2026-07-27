@@ -1,5 +1,5 @@
 /**
- * BillingProvider interface — the seam between ReliPay's domain shape and
+ * BillingProvider interface — the seam between Rekey's domain shape and
  * each upstream payment processor.
  *
  * The contract expresses the **intersection** of what we'll support across
@@ -47,7 +47,7 @@ export interface CancelSubscriptionInput {
 
 /**
  * The methods every BillingProvider must implement. Synchronous failures
- * should throw `RelipayError` with a `BILLING_*` code; asynchronous state
+ * should throw `RekeyError` with a `BILLING_*` code; asynchronous state
  * changes (subscription activated, payment succeeded) flow through the
  * webhook ingress, not this interface.
  */

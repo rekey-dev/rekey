@@ -106,7 +106,7 @@ async function deletePasskey(id: string): Promise<void> {
 
 const ERRORS: Record<string, string> = {
   WEBAUTHN_NOT_CONFIGURED:
-    'Passkeys are not configured on this ReliPay deployment. Ask your administrator to set PANEL_WEBAUTHN_RP_ID and PANEL_WEBAUTHN_RP_ORIGINS.',
+    'Passkeys are not configured on this Rekey deployment. Ask your administrator to set PANEL_WEBAUTHN_RP_ID and PANEL_WEBAUTHN_RP_ORIGINS.',
   PASSKEY_REGISTRATION_FAILED:
     'The authenticator did not return a valid registration. Try again with a different device.',
   PASSKEY_ALREADY_REGISTERED:

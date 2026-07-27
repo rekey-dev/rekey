@@ -15,7 +15,7 @@
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
 import {
   issueOperatorMcpAccessToken,
@@ -76,9 +76,9 @@ const AUTH_CODE_TTL_MS = 60 * 1000; // 60s, single-use
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30d
 
 /**
- * OAuth error (RFC 6749 §5.2). Carried distinctly from RelipayError because
+ * OAuth error (RFC 6749 §5.2). Carried distinctly from RekeyError because
  * the token endpoint must emit the `{ error, error_description }` shape OAuth
- * clients parse — not the ReliPay envelope.
+ * clients parse — not the Rekey envelope.
  */
 export class OAuthError extends Error {
   constructor(
@@ -180,7 +180,7 @@ export const operatorMcpOAuthService = {
   async registerClient(input: RegisterClientInput): Promise<Record<string, unknown>> {
     const redirectUris = input.redirectUris.map((u) => u.trim()).filter(Boolean);
     if (redirectUris.length === 0 || redirectUris.length > 20) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'INVALID_REDIRECT_URI',
         message: 'redirect_uris must contain between 1 and 20 entries.',
@@ -189,7 +189,7 @@ export const operatorMcpOAuthService = {
     }
     for (const uri of redirectUris) {
       if (!isAcceptableRedirectUri(uri)) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'INVALID_REDIRECT_URI',
           message: `redirect_uri "${uri}" is not acceptable.`,

@@ -1,9 +1,9 @@
 /**
- * `relipay apps …` — Application management.
+ * `rekey apps …` — Application management.
  *
- *   relipay apps list [--tenant <id>]
- *   relipay apps get <id>
- *   relipay apps create --tenant <id> --name <name> --slug <slug>
+ *   rekey apps list [--tenant <id>]
+ *   rekey apps get <id>
+ *   rekey apps create --tenant <id> --name <name> --slug <slug>
  */
 
 import type { Command } from 'commander';
@@ -78,7 +78,7 @@ export function registerAppsCommand(program: Command): void {
         fail(ctx, {
           code: 'CLI_APPS_CREATE_ARGS_MISSING',
           message: 'apps create requires --tenant, --name, --slug.',
-          fix: 'Pass all three. See `relipay apps create --help`.',
+          fix: 'Pass all three. See `rekey apps create --help`.',
         });
       }
       const data = await adminRequest<ApplicationDto>({

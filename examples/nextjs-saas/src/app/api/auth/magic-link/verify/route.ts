@@ -1,6 +1,6 @@
 /**
  * GET /api/auth/magic-link/verify?token=… — consume a magic-link token, set
- * the session cookies, and redirect into the app. This is the URL ReliPay
+ * the session cookies, and redirect into the app. This is the URL Rekey
  * lands the user on (via the templated signInUrl in the request step).
  */
 
@@ -11,8 +11,8 @@ import {
   REFRESH_COOKIE,
   ACCESS_COOKIE_OPTS,
   REFRESH_COOKIE_OPTS,
-} from '@relipay/nextjs';
-import { relipay, RelipayError } from '@/lib/relipay';
+} from '@rekey.dev/nextjs';
+import { rekey, RekeyError } from '@/lib/relipay';
 
 export async function GET(req: Request): Promise<NextResponse> {
   const url = new URL(req.url);
@@ -22,7 +22,7 @@ export async function GET(req: Request): Promise<NextResponse> {
     return NextResponse.redirect(`${origin}/login?error=missing`);
   }
   try {
-    const outcome = await relipay.auth.verifyMagicLink({ token });
+    const outcome = await rekey.auth.verifyMagicLink({ token });
     if (outcome.mfaRequired) {
       return NextResponse.redirect(`${origin}/login?error=MFA_REQUIRED`);
     }
@@ -31,7 +31,7 @@ export async function GET(req: Request): Promise<NextResponse> {
     jar.set(REFRESH_COOKIE, outcome.refreshToken, REFRESH_COOKIE_OPTS);
     return NextResponse.redirect(`${origin}/dashboard`);
   } catch (err) {
-    const code = err instanceof RelipayError ? err.code : 'MAGIC_LINK_INVALID';
+    const code = err instanceof RekeyError ? err.code : 'MAGIC_LINK_INVALID';
     return NextResponse.redirect(`${origin}/login?error=${encodeURIComponent(code)}`);
   }
 }

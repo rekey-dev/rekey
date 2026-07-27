@@ -135,7 +135,7 @@ describe('coupons', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/coupons/validate',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-relipay-user-token': userAccess },
+      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': userAccess },
       payload: { code: 'FIFTEEN', planSlug: 'pro_monthly' },
     });
     expect(res.statusCode).toBe(200);
@@ -150,7 +150,7 @@ describe('coupons', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/coupons/validate',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-relipay-user-token': userAccess },
+      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': userAccess },
       payload: { code: 'huge', planSlug: 'pro_monthly' },
     });
     const data = res.json().data as { discountAmount: number; amountAfterDiscount: number };
@@ -168,7 +168,7 @@ describe('coupons', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/coupons/validate',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-relipay-user-token': userAccess },
+      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': userAccess },
       payload: { code: 'team-only', planSlug: 'pro_monthly' },
     });
     expect(res.statusCode).toBe(400);
@@ -185,7 +185,7 @@ describe('coupons', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/coupons/validate',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-relipay-user-token': userAccess },
+      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': userAccess },
       payload: { code: 'expired', planSlug: 'pro_monthly' },
     });
     expect(res.statusCode).toBe(400);
@@ -203,7 +203,7 @@ describe('coupons', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/checkout',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-relipay-user-token': userAccess },
+      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': userAccess },
       payload: {
         planSlug: 'pro_monthly',
         successUrl: 'https://x.example/ok',
@@ -232,7 +232,7 @@ describe('coupons', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/checkout',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-relipay-user-token': userAccess },
+      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': userAccess },
       payload: {
         planSlug: 'pro_monthly',
         successUrl: 'https://x.example/ok',
@@ -263,7 +263,7 @@ describe('coupons', () => {
     const first = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/coupons/validate',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-relipay-user-token': userAccess },
+      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': userAccess },
       payload: { code: 'once', planSlug: 'pro_monthly' },
     });
     expect(first.statusCode).toBe(200);
@@ -282,7 +282,7 @@ describe('coupons', () => {
     const second = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/coupons/validate',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-relipay-user-token': userAccess },
+      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': userAccess },
       payload: { code: 'once', planSlug: 'pro_monthly' },
     });
     expect(second.statusCode).toBe(400);

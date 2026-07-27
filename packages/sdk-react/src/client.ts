@@ -1,5 +1,5 @@
 /**
- * Browser-side ReliPay client.
+ * Browser-side Rekey client.
  *
  * Two credentials, never the secret key:
  *   1. **Publishable key** (`rp_pub_…`). A browser-safe Application credential
@@ -10,11 +10,11 @@
  *      app; it grants nothing on its own (sign-in still needs the password,
  *      license verify still needs the license key).
  *   2. **User JWT** (per call). Once signed in, per-user reads use the short
- *      lived access token via the `X-Relipay-User-Token` header.
+ *      lived access token via the `X-Rekey-User-Token` header.
  *
  * The secret key (`rp_live_*`) NEVER belongs in the browser — money and
  * account-management routes reject the publishable key and require it
- * server-side via `@relipay/node`.
+ * server-side via `@rekey.dev/node`.
  *
  * `apiUrl` is required. Bring-your-own fetch is supported for SSR/SSE shims
  * and tests.
@@ -22,7 +22,7 @@
 
 import type {
   EndUserDto,
-  RelipayErrorShape,
+  RekeyErrorShape,
   SignUpRequest,
   SignInRequest,
   MfaVerifyRequest,
@@ -35,10 +35,10 @@ import type {
   CheckoutResultDto,
   OrganizationWithRoleDto,
   ProvidersListDto,
-} from '@relipay/shared-types';
-import { RelipayError } from '@relipay/shared-types';
+} from '@rekey.dev/shared-types';
+import { RekeyError } from '@rekey.dev/shared-types';
 
-/** Resolved entitlements for the signed-in user (mirrors @relipay/node). */
+/** Resolved entitlements for the signed-in user (mirrors @rekey.dev/node). */
 export interface EntitlementsDto {
   features: Record<string, boolean | number | string>;
   entitlements: Array<{
@@ -77,32 +77,32 @@ export interface ReliPayBrowserConfig {
   fetch?: typeof fetch;
 }
 
-// RelipayError is the shared class (imported above) — re-exported so the public
-// name is preserved and `instanceof` matches @relipay/node.
-export { RelipayError };
+// RekeyError is the shared class (imported above) — re-exported so the public
+// name is preserved and `instanceof` matches @rekey.dev/node.
+export { RekeyError };
 
 interface RawResp<T> {
   data: T;
   status: number;
 }
 
-export class RelipayBrowserClient {
+export class RekeyBrowserClient {
   private readonly apiUrl: string;
   private readonly publishableKey: string | undefined;
   private readonly fetchImpl: typeof fetch;
 
   constructor(config: ReliPayBrowserConfig) {
     if (!config.apiUrl) {
-      throw new RelipayError({
+      throw new RekeyError({
         code: 'CONFIG_MISSING_API_URL',
-        message: '@relipay/react: apiUrl is required.',
-        fix: 'Pass apiUrl when constructing RelipayBrowserClient or via <RelipayProvider apiUrl=...>',
+        message: '@rekey.dev/react: apiUrl is required.',
+        fix: 'Pass apiUrl when constructing RekeyBrowserClient or via <RekeyProvider apiUrl=...>',
       });
     }
     if (config.publishableKey && !config.publishableKey.startsWith('rp_pub_')) {
-      throw new RelipayError({
+      throw new RekeyError({
         code: 'CONFIG_INVALID_PUBLISHABLE_KEY',
-        message: '@relipay/react: publishableKey must start with `rp_pub_`.',
+        message: '@rekey.dev/react: publishableKey must start with `rp_pub_`.',
         fix: 'Copy the publishable key from Panel → Application → API keys. Never put a secret key (rp_live_/rp_test_) in the browser.',
       });
     }
@@ -117,7 +117,7 @@ export class RelipayBrowserClient {
    * try/catch noise.
    *
    * Hits `GET /api/v1/auth/me` — a user-token-only endpoint: it resolves the
-   * end-user from the `X-Relipay-User-Token` JWT alone, with NO Application
+   * end-user from the `X-Rekey-User-Token` JWT alone, with NO Application
    * secret key (the browser must never hold one). The JWT is API-signed and
    * carries the user + application ids, so it is a sufficient credential.
    *
@@ -129,7 +129,7 @@ export class RelipayBrowserClient {
       const res = await this.raw<EndUserDto>('GET', meEndpoint, undefined, { accessToken });
       return res.data;
     } catch (err) {
-      if (err instanceof RelipayError && err.code === 'USER_TOKEN_INVALID') {
+      if (err instanceof RekeyError && err.code === 'USER_TOKEN_INVALID') {
         return null;
       }
       throw err;
@@ -230,7 +230,7 @@ export class RelipayBrowserClient {
   }
 
   // ---------- Self-service billing (publishable key + the user's own token) ----------
-  // These authorize on the user's token (X-Relipay-User-Token) and act ONLY on
+  // These authorize on the user's token (X-Rekey-User-Token) and act ONLY on
   // that user's own resources; the publishable key identifies the app. Powers a
   // backendless customer portal.
 
@@ -294,10 +294,10 @@ export class RelipayBrowserClient {
   /** Self-service call — sends BOTH the publishable key (app) and the user token. */
   private selfService<T>(method: string, path: string, body: unknown, accessToken: string): Promise<T> {
     if (!this.publishableKey) {
-      throw new RelipayError({
+      throw new RekeyError({
         code: 'CONFIG_MISSING_PUBLISHABLE_KEY',
-        message: `@relipay/react: ${path} needs a publishable key.`,
-        fix: 'Pass publishableKey to RelipayBrowserClient / <RelipayProvider publishableKey="rp_pub_…">.',
+        message: `@rekey.dev/react: ${path} needs a publishable key.`,
+        fix: 'Pass publishableKey to RekeyBrowserClient / <RekeyProvider publishableKey="rp_pub_…">.',
       });
     }
     return this.raw<T>(method, path, body, { publishable: true, accessToken }).then((r) => r.data);
@@ -311,10 +311,10 @@ export class RelipayBrowserClient {
     headers?: Record<string, string>,
   ): Promise<T> {
     if (!this.publishableKey) {
-      throw new RelipayError({
+      throw new RekeyError({
         code: 'CONFIG_MISSING_PUBLISHABLE_KEY',
-        message: `@relipay/react: ${path} needs a publishable key.`,
-        fix: 'Pass publishableKey to RelipayBrowserClient / <RelipayProvider publishableKey="rp_pub_…">.',
+        message: `@rekey.dev/react: ${path} needs a publishable key.`,
+        fix: 'Pass publishableKey to RekeyBrowserClient / <RekeyProvider publishableKey="rp_pub_…">.',
       });
     }
     return this.raw<T>(method, path, body, { publishable: true, ...(headers && { headers }) }).then(
@@ -334,7 +334,7 @@ export class RelipayBrowserClient {
         ...(opts.publishable && this.publishableKey
           ? { Authorization: `Bearer ${this.publishableKey}` }
           : {}),
-        ...(opts.accessToken ? { 'X-Relipay-User-Token': opts.accessToken } : {}),
+        ...(opts.accessToken ? { 'X-Rekey-User-Token': opts.accessToken } : {}),
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         ...(opts.headers ?? {}),
       },
@@ -343,13 +343,13 @@ export class RelipayBrowserClient {
     });
     const json = (await res.json().catch(() => ({}))) as
       | { success: true; data: T }
-      | { success: false; error: RelipayErrorShape };
+      | { success: false; error: RekeyErrorShape };
     if (!res.ok || ('success' in json && json.success === false)) {
       const err =
         'error' in json
           ? json.error
           : { code: 'UNKNOWN_ERROR', message: `HTTP ${res.status}` };
-      throw new RelipayError({ ...err, statusCode: res.status });
+      throw new RekeyError({ ...err, statusCode: res.status });
     }
     return { data: (json as { success: true; data: T }).data, status: res.status };
   }
@@ -361,4 +361,4 @@ export type {
   BillingProviderInfoDto,
   BillingProviderCapabilities,
   BillingProvider,
-} from '@relipay/shared-types';
+} from '@rekey.dev/shared-types';

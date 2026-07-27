@@ -11,7 +11,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { creditsService, type CreditSubjectInput } from './credits.service.js';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { requireApiKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireBillingEnabled } from '../../middleware/billing-enabled.js';
 
@@ -62,7 +62,7 @@ async function resolveSubject(
       select: { id: true },
     });
     if (!org) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'ORGANIZATION_NOT_FOUND',
         message: `Organization "${input.organizationId}" not found in this Application.`,
@@ -76,7 +76,7 @@ async function resolveSubject(
     select: { id: true },
   });
   if (!eu) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 404,
       code: 'END_USER_NOT_FOUND',
       message: `End-user "${input.endUserId}" not found in this Application.`,

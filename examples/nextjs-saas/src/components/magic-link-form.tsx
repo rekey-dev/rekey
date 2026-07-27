@@ -37,14 +37,14 @@ export function MagicLinkForm(): React.JSX.Element {
         setMsg(
           <span>
             No email transport configured —{' '}
-            <a className="underline text-relipay-700 dark:text-relipay-500" href={href}>
+            <a className="underline text-rekey-700 dark:text-rekey-500" href={href}>
               click here to sign in
             </a>
             .
           </span>,
         );
       } else {
-        setMsg(<span className="text-relipay-700 dark:text-relipay-500">Magic link sent — check your inbox.</span>);
+        setMsg(<span className="text-rekey-700 dark:text-rekey-500">Magic link sent — check your inbox.</span>);
       }
     } finally {
       setBusy(false);

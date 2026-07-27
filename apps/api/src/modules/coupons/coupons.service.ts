@@ -25,7 +25,7 @@
 import type { Coupon, Prisma } from '@prisma/client';
 import { CouponDiscountType } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 
 const CODE_RE = /^[A-Za-z0-9_-]{1,40}$/;
 
@@ -159,7 +159,7 @@ export const couponsService = {
 
   async create(input: CreateCouponInput): Promise<Coupon> {
     if (!CODE_RE.test(input.code)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'COUPON_CODE_INVALID',
         message: `Coupon code "${input.code}" must be 1-40 alphanumerics, underscores, or hyphens.`,
@@ -167,7 +167,7 @@ export const couponsService = {
       });
     }
     if (input.amountOff < 0) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'COUPON_AMOUNT_INVALID',
         message: 'Coupon amountOff must be >= 0.',
@@ -175,7 +175,7 @@ export const couponsService = {
       });
     }
     if (input.discountType === 'PERCENT' && input.amountOff > 10000) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'COUPON_AMOUNT_INVALID',
         message: `PERCENT coupon amountOff "${input.amountOff}" exceeds 100% (10000).`,
@@ -204,7 +204,7 @@ export const couponsService = {
       });
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 409,
           code: 'COUPON_CODE_TAKEN',
           message: `Coupon code "${input.code}" already exists in this application.`,
@@ -220,7 +220,7 @@ export const couponsService = {
       where: { applicationId_code: { applicationId, code: normaliseCode(code) } },
     });
     if (!coupon) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'COUPON_NOT_FOUND',
         message: `Coupon "${code}" not found.`,
@@ -232,7 +232,7 @@ export const couponsService = {
 
   /**
    * Resolve a code → coupon and validate it for this user, plan, and amount.
-   * Throws `RelipayError` with a stable code on every failure mode so the
+   * Throws `RekeyError` with a stable code on every failure mode so the
    * SDK / panel can render a useful message.
    */
   async validate(input: ValidateInput): Promise<ValidateResult> {
@@ -241,7 +241,7 @@ export const couponsService = {
       where: { applicationId_code: { applicationId: input.applicationId, code } },
     });
     if (!coupon) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'COUPON_NOT_FOUND',
         message: `No active coupon matching "${input.code}".`,
@@ -249,7 +249,7 @@ export const couponsService = {
       });
     }
     if (!coupon.active) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'COUPON_INACTIVE',
         message: `Coupon "${input.code}" is no longer active.`,
@@ -258,7 +258,7 @@ export const couponsService = {
     }
     const now = new Date();
     if (coupon.startsAt && now < coupon.startsAt) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'COUPON_NOT_YET_STARTED',
         message: `Coupon "${input.code}" is not active until ${coupon.startsAt.toISOString()}.`,
@@ -266,7 +266,7 @@ export const couponsService = {
       });
     }
     if (coupon.endsAt && now > coupon.endsAt) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'COUPON_EXPIRED',
         message: `Coupon "${input.code}" expired on ${coupon.endsAt.toISOString()}.`,
@@ -274,7 +274,7 @@ export const couponsService = {
       });
     }
     if (coupon.planSlugs.length > 0 && !coupon.planSlugs.includes(input.planSlug)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'COUPON_NOT_APPLICABLE',
         message: `Coupon "${input.code}" does not apply to plan "${input.planSlug}".`,
@@ -286,7 +286,7 @@ export const couponsService = {
       coupon.currency &&
       coupon.currency.toUpperCase() !== input.currency.toUpperCase()
     ) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'COUPON_CURRENCY_MISMATCH',
         message: `Coupon "${input.code}" is denominated in ${coupon.currency} but the plan is in ${input.currency}.`,
@@ -296,7 +296,7 @@ export const couponsService = {
     if (coupon.maxRedemptions !== null) {
       const total = await prisma.couponRedemption.count({ where: { couponId: coupon.id } });
       if (total >= coupon.maxRedemptions) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'COUPON_REDEMPTION_LIMIT_REACHED',
           message: `Coupon "${input.code}" has reached its redemption limit.`,
@@ -309,7 +309,7 @@ export const couponsService = {
         where: { couponId: coupon.id, endUserId: input.endUserId },
       });
       if (userCount >= coupon.maxRedemptionsPerUser) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'COUPON_USER_LIMIT_REACHED',
           message: `You have already used coupon "${input.code}" the maximum number of times.`,
@@ -333,7 +333,7 @@ export const couponsService = {
    * row-level lock on the coupon row so two concurrent webhook handlers
    * cannot both pass the count check.
    *
-   * Throws `RelipayError`(COUPON_REDEMPTION_LIMIT_REACHED / COUPON_USER_LIMIT_REACHED)
+   * Throws `RekeyError`(COUPON_REDEMPTION_LIMIT_REACHED / COUPON_USER_LIMIT_REACHED)
    * when the limit is now exceeded. Callers that just want the idempotent
    * "already recorded" behaviour should catch P2002 via the
    * `(couponId, paymentId)` unique index — re-recording the same payment
@@ -367,7 +367,7 @@ export const couponsService = {
       if (coupon.maxRedemptions !== null) {
         const total = await tx.couponRedemption.count({ where: { couponId: coupon.id } });
         if (total >= coupon.maxRedemptions) {
-          throw new RelipayError({
+          throw new RekeyError({
             statusCode: 400,
             code: 'COUPON_REDEMPTION_LIMIT_REACHED',
             message: `Coupon "${coupon.code}" has reached its redemption limit.`,
@@ -380,7 +380,7 @@ export const couponsService = {
           where: { couponId: coupon.id, endUserId: args.endUserId },
         });
         if (userCount >= coupon.maxRedemptionsPerUser) {
-          throw new RelipayError({
+          throw new RekeyError({
             statusCode: 400,
             code: 'COUPON_USER_LIMIT_REACHED',
             message: `User has reached the per-user redemption limit for "${coupon.code}".`,

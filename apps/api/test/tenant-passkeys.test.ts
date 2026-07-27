@@ -94,7 +94,7 @@ describe('Operator passkeys', () => {
   it('register/start returns options when env configured', async () => {
     process.env.PANEL_WEBAUTHN_RP_ID = 'panel.test';
     process.env.PANEL_WEBAUTHN_RP_ORIGINS = 'https://panel.test';
-    process.env.PANEL_WEBAUTHN_RP_NAME = 'ReliPay Panel';
+    process.env.PANEL_WEBAUTHN_RP_NAME = 'Rekey Panel';
 
     const session = await signUp('pk-configured@example.com');
     const r = await app.inject({
@@ -106,7 +106,7 @@ describe('Operator passkeys', () => {
     const data = r.json().data;
     expect(typeof data.expectedChallenge).toBe('string');
     expect(data.options.rp.id).toBe('panel.test');
-    expect(data.options.rp.name).toBe('ReliPay Panel');
+    expect(data.options.rp.name).toBe('Rekey Panel');
   });
 
   it('register/start derives the RP from CORS_ALLOWED_ORIGINS when PANEL_WEBAUTHN_* is unset', async () => {

@@ -372,8 +372,8 @@ export default async function BillingPage({
             </div>
             <p className="mt-1 max-w-prose text-sm text-[var(--color-muted-fg)]">
               {dunningEnabled
-                ? 'When a subscription goes past due, ReliPay emails the customer reminders on day 0, 3 and 7, then cancels the subscription on day 14 if it’s still unpaid (and cancels it provider-side too). A successful payment in between closes the case.'
-                : 'Off. A past-due subscription gets no reminder emails and is not auto-cancelled — the provider’s own retries still run. Turn this on to have ReliPay chase failed payments and auto-cancel after 14 days.'}
+                ? 'When a subscription goes past due, Rekey emails the customer reminders on day 0, 3 and 7, then cancels the subscription on day 14 if it’s still unpaid (and cancels it provider-side too). A successful payment in between closes the case.'
+                : 'Off. A past-due subscription gets no reminder emails and is not auto-cancelled — the provider’s own retries still run. Turn this on to have Rekey chase failed payments and auto-cancel after 14 days.'}
             </p>
           </div>
           <form action={setDunningEnabled.bind(null, id, !dunningEnabled)} className="shrink-0">
@@ -554,11 +554,11 @@ export default async function BillingPage({
         </TBody>
       </Table>
 
-      {/* Inbound provider webhook log — events ReliPay received from the providers. */}
+      {/* Inbound provider webhook log — events Rekey received from the providers. */}
       <section className="space-y-3">
         <SectionHeader
           title="Inbound webhook events"
-          description="Events ReliPay received from your billing providers (subscription activated, payment captured, …). Newest first — distinct from your app's own outbound webhooks."
+          description="Events Rekey received from your billing providers (subscription activated, payment captured, …). Newest first — distinct from your app's own outbound webhooks."
         />
         {webhookEvents.length === 0 ? (
           <EmptyState
@@ -618,7 +618,7 @@ function Field({ label, hint, children }: { label: string; hint?: React.ReactNod
 interface WebhookMeta {
   dashboardPath: string;
   events: string[];
-  /** What the operator pastes back into ReliPay after creating the webhook. */
+  /** What the operator pastes back into Rekey after creating the webhook. */
   returnLabel: string;
   /** Intro copy for manual-only providers (capabilities.autoWebhookRegister: false). */
   manualIntro?: string;
@@ -773,7 +773,7 @@ function WebhookSetup({
         )}
       </div>
       <p className="text-xs text-[var(--color-muted-fg)]">
-        {label} tells ReliPay when payments succeed or subscriptions change. Without a webhook,
+        {label} tells Rekey when payments succeed or subscriptions change. Without a webhook,
         checkouts complete but nothing is fulfilled.
       </p>
 
@@ -783,7 +783,7 @@ function WebhookSetup({
             <p className="text-xs font-medium text-[var(--color-fg)]">Recommended — one click</p>
             <p className="mt-0.5 text-xs text-[var(--color-muted-fg)]">
               Save your API keys below, then hit <span className="font-medium">Auto-configure</span>{' '}
-              in the providers table. ReliPay creates the webhook and stores its secret for you — no
+              in the providers table. Rekey creates the webhook and stores its secret for you — no
               dashboard steps, leave the secret field blank.
             </p>
           </div>

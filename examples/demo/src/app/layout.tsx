@@ -15,8 +15,8 @@ const fontAkkurat = localFont({
 });
 
 export const metadata: Metadata = {
-  title: 'ReliPay Demo',
-  description: 'Reference Next.js app showing @relipay/node end-to-end',
+  title: 'Rekey Demo',
+  description: 'Reference Next.js app showing @rekey.dev/node end-to-end',
 };
 
 export default function RootLayout({

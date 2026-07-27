@@ -1,4 +1,4 @@
-# ReliPay
+# Rekey
 
 Self-hostable, multi-tenant auth and billing for the apps you run. User auth and provider-agnostic billing share one tenant model, behind one API, in one `docker compose --profile full up`.
 
@@ -41,26 +41,26 @@ Apps (each runs on a fixed dev port):
 
 | App | Package | Port | What |
 |---|---|---|---|
-| `apps/api` | `@relipay/api` | 3030 | Fastify monolith — auth + billing + admin API |
-| `apps/panel` | `@relipay/panel` | 3031 | Next.js admin panel (panel.relipay.dev) |
-| `apps/admin` | `@relipay/admin` | — | Read-only super-admin dashboard (admin.relipay.dev) |
-| `apps/portal` | `@relipay/portal` | 3050 | Hosted customer portal V2 (portal.relipay.dev) |
+| `apps/api` | `@rekey.dev/api` | 3030 | Fastify monolith — auth + billing + admin API |
+| `apps/panel` | `@rekey.dev/panel` | 3031 | Next.js admin panel (panel.relipay.dev) |
+| `apps/admin` | `@rekey.dev/admin` | — | Read-only super-admin dashboard (admin.relipay.dev) |
+| `apps/portal` | `@rekey.dev/portal` | 3050 | Hosted customer portal V2 (portal.relipay.dev) |
 
 Examples (integration references — not deployed; each ships a `.env.example`):
 
 | Path | Package | Port | What |
 |---|---|---|---|
-| `examples/demo` | `relipay-demo` | 3032 | Minimal Next.js auth demo via `@relipay/node` |
-| `examples/nextjs-saas` | `relipay-nextjs-saas` | 3040 | Full SaaS boilerplate — auth + billing + teams |
-| `examples/portal` | `relipay-portal-selfhost-example` | 3050 | Single-app self-host portal |
+| `examples/demo` | `rekey-demo` | 3032 | Minimal Next.js auth demo via `@rekey.dev/node` |
+| `examples/nextjs-saas` | `rekey-nextjs-saas` | 3040 | Full SaaS boilerplate — auth + billing + teams |
+| `examples/portal` | `rekey-portal-selfhost-example` | 3050 | Single-app self-host portal |
 | `examples/qr-saas` | `qr-saas` | 3000 | Metered QR product end-to-end |
 
 Packages:
 
 - `packages/shared-types` — Zod schemas shared between API and SDKs
-- `packages/sdk-node` — `@relipay/node`, the server SDK
+- `packages/sdk-node` — `@rekey.dev/node`, the server SDK
 - `packages/sdk-react`, `packages/sdk-nextjs` — client SDKs
-- `packages/cli` — the `relipay` CLI
+- `packages/cli` — the `rekey` CLI
 - `packages/mcp` — MCP server
 - `prisma/schema.prisma` — owned by `apps/api`
 - `docs/` — concept primers, API key model, **end-user auth**, **billing**, **coupons**, error model, quickstart
@@ -73,7 +73,7 @@ default — configurable per Application). Need a different processor? Providers
 are self-describing modules — one directory describes checkout, webhook
 verification, and event mapping, and the registry wires up the rest. See
 [docs/billing-providers.md](docs/billing-providers.md) for the how-to and
-[#184](https://github.com/EtherLabZ/ReliPay/issues/184) for rollout status.
+[#184](https://github.com/EtherLabZ/Rekey/issues/184) for rollout status.
 
 
 ## Known dev-only behaviours

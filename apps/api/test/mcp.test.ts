@@ -559,7 +559,7 @@ describe('MCP OAuth AS — discovery + DCR', () => {
       params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } },
     })) as { statusCode: number; json: () => { result: { serverInfo: { name: string } } } };
     expect(init.statusCode).toBe(200);
-    expect(init.json().result.serverInfo.name).toBe('relipay-account');
+    expect(init.json().result.serverInfo.name).toBe('rekey-account');
 
     const list = (await rpc(ctx.slug, token, { jsonrpc: '2.0', id: 2, method: 'tools/list' })) as {
       statusCode: number;

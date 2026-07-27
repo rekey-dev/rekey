@@ -8,7 +8,7 @@
 
 import type { OperatorInvite } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { generateOperatorInviteToken } from '../../lib/operator-invite.js';
 
 /** A key's lifecycle state, derived from its timestamps. */
@@ -58,7 +58,7 @@ export const operatorInvitesService = {
     expiresAt?: Date | undefined;
   }): Promise<{ invite: PublicOperatorInvite; rawToken: string }> {
     if (input.expiresAt !== undefined && input.expiresAt.getTime() <= Date.now()) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'OPERATOR_INVITE_EXPIRY_IN_PAST',
         message: `expiresAt (${input.expiresAt.toISOString()}) is not in the future — the key would be dead on arrival.`,
@@ -99,7 +99,7 @@ export const operatorInvitesService = {
   async revoke(id: string): Promise<PublicOperatorInvite> {
     const row = await prisma.operatorInvite.findUnique({ where: { id } });
     if (!row) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'OPERATOR_INVITE_NOT_FOUND',
         message: 'No operator invite with that id.',
@@ -107,7 +107,7 @@ export const operatorInvitesService = {
       });
     }
     if (row.usedAt) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 409,
         code: 'OPERATOR_INVITE_ALREADY_USED',
         message: 'That invite key was already used to create an operator and cannot be revoked.',

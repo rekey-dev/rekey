@@ -1,18 +1,18 @@
 /**
  * Tenant service.
  *
- * A Tenant is the *outer* entity in ReliPay's two-level model:
+ * A Tenant is the *outer* entity in Rekey's two-level model:
  *   Tenant → Application → EndUser.
  *
  * One Tenant typically owns multiple Applications (e.g. a company with
  * staging/prod or a holding company with several SaaS products).
  *
  * Tenants are created via the bootstrap admin surface only. There is no
- * self-serve tenant signup in v1 — that ships with relipay.cloud.
+ * self-serve tenant signup in v1 — that ships with rekey.cloud.
  */
 
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import type { Tenant } from '@prisma/client';
 
 export interface CreateTenantInput {
@@ -32,7 +32,7 @@ export const tenantsService = {
   async get(id: string): Promise<Tenant> {
     const tenant = await prisma.tenant.findUnique({ where: { id } });
     if (!tenant) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'TENANT_NOT_FOUND',
         message: `Tenant "${id}" not found.`,

@@ -11,7 +11,7 @@
 import { accountTools, type ToolContext } from './account-tools.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
-const SERVER_INFO = { name: 'relipay-account', version: '1.0.0' };
+const SERVER_INFO = { name: 'rekey-account', version: '1.0.0' };
 
 export interface JsonRpcMessage {
   jsonrpc?: string;

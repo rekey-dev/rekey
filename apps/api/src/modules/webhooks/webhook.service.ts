@@ -6,7 +6,7 @@
  *   2. We fan out to every enabled WebhookEndpoint whose subscription
  *      list matches the event type (or carries `"*"`).
  *   3. Each match becomes a WebhookDelivery row in PENDING.
- *   4. We POST the payload with a `t=<ts>,v1=<hmac>` `X-Relipay-Signature`
+ *   4. We POST the payload with a `t=<ts>,v1=<hmac>` `X-Rekey-Signature`
  *      header. 2xx → SUCCEEDED; everything else (incl. network error) →
  *      schedule a retry with exponential backoff up to MAX_ATTEMPTS.
  *
@@ -32,7 +32,7 @@
 
 import type { WebhookEndpoint, WebhookDelivery } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
 import { signWebhook, generateWebhookSecret } from '../../lib/webhook-signing.js';
 import { assertSafeUrl } from '../../lib/ssrf-guard.js';
@@ -124,10 +124,10 @@ async function postOnce(args: {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Relipay-Signature': args.signatureHeader,
-        'X-Relipay-Event-Id': args.eventId,
-        'X-Relipay-Event-Type': args.eventType,
-        'User-Agent': 'relipay-webhooks/1.0',
+        'X-Rekey-Signature': args.signatureHeader,
+        'X-Rekey-Event-Id': args.eventId,
+        'X-Rekey-Event-Type': args.eventType,
+        'User-Agent': 'rekey-webhooks/1.0',
       },
       body: args.body,
       signal: controller.signal,
@@ -421,7 +421,7 @@ export const webhookService = {
           })
         : null;
     if (!endpoint) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'WEBHOOK_ENDPOINT_NOT_FOUND',
         message: `Webhook endpoint "${args.endpointId}" not found for this application.`,

@@ -1,19 +1,19 @@
 /**
- * @relipay/nextjs — Next.js helpers for ReliPay.
+ * @rekey.dev/nextjs — Next.js helpers for Rekey.
  *
  * Entrypoints:
  *
- *   `@relipay/nextjs/middleware`  — relipayMiddleware() for middleware.ts
- *   `@relipay/nextjs/server`      — auth() / signIn() / signOut() / createSession() server-side (secret key)
- *   `@relipay/nextjs/client`      — relipayBrowser() for client-component login/register (publishable key)
+ *   `@rekey.dev/nextjs/middleware`  — rekeyMiddleware() for middleware.ts
+ *   `@rekey.dev/nextjs/server`      — auth() / signIn() / signOut() / createSession() server-side (secret key)
+ *   `@rekey.dev/nextjs/client`      — rekeyBrowser() for client-component login/register (publishable key)
  *
  * Server + middleware helpers are re-exported here for convenience. The client
- * helper is NOT re-exported — import it from `@relipay/nextjs/client` so the
+ * helper is NOT re-exported — import it from `@rekey.dev/nextjs/client` so the
  * secret-key server module never gets pulled into a browser bundle. Direct
  * subpath imports also keep the edge bundle minimal.
  */
 
-export { relipayMiddleware } from './middleware.js';
+export { rekeyMiddleware } from './middleware.js';
 export { auth, signIn, signUp, mfaVerify, signOut, createSession } from './server.js';
 export type { Session, SignInOutcome } from './server.js';
 export type { MiddlewareConfig } from './middleware.js';

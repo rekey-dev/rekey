@@ -16,7 +16,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { AuthConfigSchema } from '@relipay/shared-types';
+import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { applicationsService } from '../src/modules/applications/applications.service.js';
@@ -124,7 +124,12 @@ describe('Sign-up mode (public / secret_only / invite_only)', () => {
     it('publishable magic-link for a NEW email is silently refused (enumeration-safe)', async () => {
       const res = await magicLinkRequest(publicKey, 'pub-ml-new@example.com');
       expect(res.statusCode).toBe(200);
-      expect(res.json().data).toMatchObject({ delivered: false, magicLinkToken: null });
+      // The refusal is now genuinely silent. This used to assert
+      // `delivered: false`, which meant the "enumeration-safe" in the test name
+      // was not true: under secret_only, `false` here versus `true` for an
+      // existing user was a complete account-existence oracle on a browser-
+      // reachable endpoint. A publishable caller gets one fixed body.
+      expect(res.json().data).toMatchObject({ delivered: true, magicLinkToken: null });
       // No user was created.
       const u = await prisma.endUser.findUnique({
         where: { applicationId_email: { applicationId, email: 'pub-ml-new@example.com' } },

@@ -355,7 +355,7 @@ export default async function McpPage({
               <div>
                 <dt className="font-medium text-[var(--color-fg)]">Tools list is empty</dt>
                 <dd className="text-[var(--color-muted-fg)]">
-                  The access token is valid but for a different audience. ReliPay binds each token to{' '}
+                  The access token is valid but for a different audience. Rekey binds each token to{' '}
                   <code>aud = {mcpUrl}</code>; using it against a different app&apos;s MCP endpoint returns
                   an empty tool list. Re-do the flow for the right Application.
                 </dd>
@@ -393,7 +393,7 @@ export default async function McpPage({
                 </a>,{' '}
                 <a className="text-[var(--color-primary)] underline" href="https://datatracker.ietf.org/doc/html/rfc7591" target="_blank" rel="noopener noreferrer">
                   RFC 7591
-                </a>{' '}— what ReliPay implements.
+                </a>{' '}— what Rekey implements.
               </li>
             </ul>
           </Card>

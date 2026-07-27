@@ -8,7 +8,7 @@ import { AuthCard } from '@/components/AuthCard';
 import { Banner } from '@/components/Banner';
 import { PasswordConfirmFields } from '@/components/PasswordConfirmFields';
 
-export const metadata: Metadata = { title: 'Set a new password · ReliPay' };
+export const metadata: Metadata = { title: 'Set a new password · Rekey' };
 
 async function reset(formData: FormData): Promise<void> {
   'use server';

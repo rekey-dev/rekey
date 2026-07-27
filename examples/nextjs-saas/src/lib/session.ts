@@ -1,12 +1,12 @@
 /**
  * Session + app-config helpers used by server components and server actions.
  *
- * `getSession()`     — thin re-export of @relipay/nextjs/server's auth(): reads
+ * `getSession()`     — thin re-export of @rekey.dev/nextjs/server's auth(): reads
  *                      the httpOnly cookies, refreshes once if the access token
  *                      expired, returns `{ user, accessToken } | null`.
  * `requireSession()` — same, but redirects to /login when signed out.
  * `getAppConfig()`   — reads the Application's live config (organizationsEnabled
- *                      + billingSubject) via relipay.applications.me(). The UI is
+ *                      + billingSubject) via rekey.applications.me(). The UI is
  *                      driven from this: when billingSubject === 'org' the user
  *                      MUST be inside a team before they can check out.
  * `getActiveOrgId()` — the active-org id carried by the access token (set by
@@ -16,8 +16,8 @@
 
 import 'server-only';
 import { redirect } from 'next/navigation';
-import { auth, type Session } from '@relipay/nextjs/server';
-import { relipay } from './relipay';
+import { auth, type Session } from '@rekey.dev/nextjs/server';
+import { rekey } from './relipay';
 import { resolveEntitlements, type ResolvedEntitlements } from './entitlements';
 
 export type { Session };
@@ -47,7 +47,7 @@ export interface AppConfig {
  * real app; here it's a single network call and Next dedupes within a render.
  */
 export async function getAppConfig(): Promise<AppConfig> {
-  const me = await relipay.applications.me();
+  const me = await rekey.applications.me();
   return {
     organizationsEnabled: me.authConfig.organizationsEnabled,
     billingSubject: (me.billingConfig.billingSubject as 'org' | 'user') ?? 'user',
@@ -62,7 +62,7 @@ export async function getAppConfig(): Promise<AppConfig> {
  * `activeOrganizationId`.
  */
 export async function getActiveOrgId(accessToken: string): Promise<string | null> {
-  const user = await relipay.auth.getCurrentUser(accessToken);
+  const user = await rekey.auth.getCurrentUser(accessToken);
   return user.activeOrganizationId ?? null;
 }
 
@@ -91,7 +91,7 @@ export async function getWorkspaceContext(): Promise<WorkspaceContext> {
   let activeOrgName: string | null = null;
   if (activeOrgId) {
     try {
-      const org = await relipay.organizations.get(session.accessToken, activeOrgId);
+      const org = await rekey.organizations.get(session.accessToken, activeOrgId);
       activeOrgName = org.name;
     } catch {
       activeOrgName = null;

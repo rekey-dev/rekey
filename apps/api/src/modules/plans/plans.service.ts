@@ -1,7 +1,7 @@
 /**
  * Plans service.
  *
- * Plans are admin-managed (Panel → Application → Plans, or `relipay plans
+ * Plans are admin-managed (Panel → Application → Plans, or `rekey plans
  * create` CLI). They are *not* end-user-mutable. Each Application owns its
  * own plan catalogue; slugs are unique per-Application.
  *
@@ -12,7 +12,7 @@
 
 import type { Plan, PlanInterval, PlanKind, LicenseKind, Application } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { applicationsService } from '../applications/applications.service.js';
 import { getProviderForApplication } from '../billing/providers/index.js';
 
@@ -57,7 +57,7 @@ export const plansService = {
       where: { applicationId_slug: { applicationId, slug } },
     });
     if (!plan) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'PLAN_NOT_FOUND',
         message: `Plan "${slug}" not found in application "${applicationId}".`,
@@ -69,7 +69,7 @@ export const plansService = {
 
   async create(input: CreatePlanInput): Promise<Plan> {
     if (!SLUG_RE.test(input.slug)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'PLAN_SLUG_INVALID',
         message: `Plan slug "${input.slug}" is not URL-safe.`,
@@ -77,7 +77,7 @@ export const plansService = {
       });
     }
     if (input.amount < 0) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'PLAN_AMOUNT_INVALID',
         message: 'Plan amount must be >= 0 (smallest currency unit, e.g. cents).',
@@ -91,7 +91,7 @@ export const plansService = {
     // surfacing the gap here prevents broken plans from being checked out.
     if (kind === 'LICENSE') {
       if (!input.licenseKind) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'PLAN_LICENSE_KIND_REQUIRED',
           message: 'LICENSE-kind plans need `licenseKind` (PERPETUAL / TIMED / SEATS).',
@@ -99,7 +99,7 @@ export const plansService = {
         });
       }
       if (input.licenseKind === 'TIMED' && !input.licenseDurationDays) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'PLAN_LICENSE_DURATION_REQUIRED',
           message: 'TIMED licenses need a duration in days.',
@@ -107,7 +107,7 @@ export const plansService = {
         });
       }
       if (input.licenseKind === 'SEATS' && !input.licenseSeatsAllowed) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'PLAN_LICENSE_SEATS_REQUIRED',
           message: 'SEATS licenses need a seat count.',
@@ -117,7 +117,7 @@ export const plansService = {
     }
     if (kind === 'USAGE') {
       if (!input.meterSlug || input.pricePerUnitCents === undefined) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'PLAN_USAGE_CONFIG_REQUIRED',
           message: 'USAGE-kind plans need `meterSlug` + `pricePerUnitCents`.',
@@ -129,7 +129,7 @@ export const plansService = {
         where: { applicationId_slug: { applicationId: input.applicationId, slug: input.meterSlug } },
       });
       if (!meter) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'PLAN_USAGE_METER_UNKNOWN',
           message: `Meter "${input.meterSlug}" not found in this Application.`,
@@ -139,7 +139,7 @@ export const plansService = {
     }
     if (kind === 'CREDIT') {
       if (input.creditsAmount === undefined || input.creditsAmount <= 0) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'PLAN_CREDITS_AMOUNT_REQUIRED',
           message: 'CREDIT-kind plans need a positive `creditsAmount` (credits granted per purchase).',
@@ -172,7 +172,7 @@ export const plansService = {
       });
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 409,
           code: 'PLAN_SLUG_TAKEN',
           message: `A plan with slug "${input.slug}" already exists in this application.`,
@@ -212,7 +212,7 @@ export const plansService = {
 
   /**
    * Edit a plan's ENTITLEMENTS in place — the things it grants, which live
-   * entirely on the ReliPay side and don't touch the provider-registered Price:
+   * entirely on the Rekey side and don't touch the provider-registered Price:
    * display name, LICENSE seats/duration, CREDIT amount, and free-form metadata
    * (feature flags etc.).
    *

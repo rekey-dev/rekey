@@ -1,8 +1,8 @@
 {
-  "name": "@relipay/react",
-  "version": "1.1.1",
+  "name": "@rekey.dev/react",
+  "version": "1.1.2",
   "license": "MIT",
-  "description": "ReliPay React hooks + components — useUser, SignedIn/SignedOut, sign-in / sign-up forms.",
+  "description": "Rekey React hooks + components — useUser, SignedIn/SignedOut, sign-in / sign-up forms.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -28,13 +28,13 @@
     "hooks",
     "auth",
     "billing",
-    "relipay"
+    "rekey"
   ],
   "peerDependencies": {
     "react": "^18.0.0 || ^19.0.0"
   },
   "dependencies": {
-    "@relipay/shared-types": "workspace:*"
+    "@rekey.dev/shared-types": "workspace:*"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

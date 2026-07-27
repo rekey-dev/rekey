@@ -37,7 +37,7 @@ export default async function RequestsPage({
       <div>
         <h2 className="text-base font-medium">Requests</h2>
         <p className="text-sm text-neutral-600 dark:text-neutral-500 mt-1">
-          API calls your backend made to ReliPay — useful for debugging your integration. Method,
+          API calls your backend made to Rekey — useful for debugging your integration. Method,
           route, status, and latency per request, newest first. Captured best-effort and capped to
           the most recent requests; informational, not a billing-grade audit trail.
         </p>

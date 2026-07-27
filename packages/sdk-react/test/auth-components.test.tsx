@@ -35,8 +35,8 @@ beforeEach(() => setAuth({}));
 describe('<SignIn>', () => {
   it('renders labelled, named email + password inputs with proper autocomplete', () => {
     const { container } = render(<SignIn action={noop} />);
-    const email = container.querySelector('#relipay-signin-email') as HTMLInputElement;
-    const pw = container.querySelector('#relipay-signin-password') as HTMLInputElement;
+    const email = container.querySelector('#rekey-signin-email') as HTMLInputElement;
+    const pw = container.querySelector('#rekey-signin-password') as HTMLInputElement;
     expect(email.name).toBe('email');
     expect(email.type).toBe('email');
     expect(email.autocomplete).toBe('email');
@@ -44,8 +44,8 @@ describe('<SignIn>', () => {
     expect(pw.type).toBe('password');
     expect(pw.autocomplete).toBe('current-password');
     // Each input is associated with a <label for=…>.
-    expect(container.querySelector('label[for="relipay-signin-email"]')).not.toBeNull();
-    expect(container.querySelector('label[for="relipay-signin-password"]')).not.toBeNull();
+    expect(container.querySelector('label[for="rekey-signin-email"]')).not.toBeNull();
+    expect(container.querySelector('label[for="rekey-signin-password"]')).not.toBeNull();
   });
 
   it('renders the magic-link form only when a magic-link action/url is given', () => {
@@ -79,7 +79,7 @@ describe('<SignIn>', () => {
 describe('<SignUp>', () => {
   it('uses new-password autocomplete on the password field', () => {
     const { container } = render(<SignUp action={noop} />);
-    const pw = container.querySelector('#relipay-signup-password') as HTMLInputElement;
+    const pw = container.querySelector('#rekey-signup-password') as HTMLInputElement;
     expect(pw.autocomplete).toBe('new-password');
   });
 
@@ -93,7 +93,7 @@ describe('<UserButton>', () => {
   it('renders nothing when signed out', () => {
     signedOut();
     const { container } = render(<UserButton signOutAction={noop} />);
-    expect(container.querySelector('.relipay-userbtn')).toBeNull();
+    expect(container.querySelector('.rekey-userbtn')).toBeNull();
     expect(container.textContent).toBe('');
   });
 

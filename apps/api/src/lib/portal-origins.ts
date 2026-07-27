@@ -1,5 +1,5 @@
 /**
- * Browser origins the ReliPay-hosted customer portal (Portal V2) calls an
+ * Browser origins the Rekey-hosted customer portal (Portal V2) calls an
  * Application's publishable API from. Auto-allowed for publishable-key requests
  * so operators don't have to hand-add the portal host to their CORS origins.
  */

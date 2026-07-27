@@ -1,21 +1,21 @@
 /**
  * QR domain service — CRUD + tier enforcement.
  *
- * Enforcement reads come from ReliPay, never from local state:
+ * Enforcement reads come from Rekey, never from local state:
  *   - QR count cap  → `billing.getEntitlements().features.max_qr_codes`
  *                     (Free users have no subscription → no entitlement →
  *                      we apply the Free default).
- *   - scan cap      → enforced by ReliPay at `usage.record` time as a hard
+ *   - scan cap      → enforced by Rekey at `usage.record` time as a hard
  *                     cap on the `qr_scans` meter (402 USAGE_QUOTA_EXCEEDED);
  *                     we just record + surface the error.
  *   - analytics     → `features.analytics === true`.
  *
- * A QR can belong to a personal user OR a team (ReliPay organization). The
- * `subject` we pass to ReliPay reads/writes follows that: org QRs meter +
+ * A QR can belong to a personal user OR a team (Rekey organization). The
+ * `subject` we pass to Rekey reads/writes follows that: org QRs meter +
  * gate against the org's pooled entitlements; personal QRs against the user.
  */
 
-import type { ReliPay } from '@relipay/node';
+import type { Rekey } from '@rekey.dev/node';
 import { store, freshSlug, type QrCode, type Scope } from './store.js';
 import {
   METER_QR_SCANS,
@@ -36,7 +36,7 @@ export class QrError extends Error {
   }
 }
 
-/** A resolved billing subject for ReliPay reads/writes. */
+/** A resolved billing subject for Rekey reads/writes. */
 export interface Subject {
   accessToken: string;
   /** end-user id (always known) */
@@ -50,14 +50,14 @@ function scopeOf(subject: Subject): Scope {
 }
 
 /**
- * Resolve the effective tier limits + flags for a subject from ReliPay.
+ * Resolve the effective tier limits + flags for a subject from Rekey.
  * Falls back to Free defaults when the subject has no active subscription.
  */
 export async function resolveEntitlements(
-  relipay: ReliPay,
+  rekey: Rekey,
   subject: Subject,
 ): Promise<{ maxQrs: number; analytics: boolean; raw: Record<string, boolean | number | string> }> {
-  const ent = await relipay.billing.getEntitlements(
+  const ent = await rekey.billing.getEntitlements(
     subject.accessToken,
     subject.organizationId ? { organizationId: subject.organizationId } : undefined,
   );
@@ -71,23 +71,23 @@ export async function resolveEntitlements(
 }
 
 export const qrService = {
-  async list(relipay: ReliPay, subject: Subject): Promise<QrCode[]> {
+  async list(rekey: Rekey, subject: Subject): Promise<QrCode[]> {
     return store.list(scopeOf(subject));
   },
 
   /**
-   * Create a dynamic QR. Enforces the tier's QR-count cap by reading ReliPay
+   * Create a dynamic QR. Enforces the tier's QR-count cap by reading Rekey
    * entitlements first (402 when the cap is reached).
    */
   async create(
-    relipay: ReliPay,
+    rekey: Rekey,
     subject: Subject,
     input: { destination: string; title?: string; slug?: string },
   ): Promise<QrCode> {
     if (!/^https?:\/\//i.test(input.destination)) {
       throw new QrError(400, 'QR_BAD_DESTINATION', 'destination must be an http(s) URL.');
     }
-    const { maxQrs } = await resolveEntitlements(relipay, subject);
+    const { maxQrs } = await resolveEntitlements(rekey, subject);
     const current = store.count(scopeOf(subject));
     if (current >= maxQrs) {
       throw new QrError(
@@ -113,7 +113,7 @@ export const qrService = {
 
   /** Edit a QR's destination (the "dynamic" part). Ownership-checked. */
   async updateDestination(
-    relipay: ReliPay,
+    rekey: Rekey,
     subject: Subject,
     qrId: string,
     destination: string,
@@ -125,7 +125,7 @@ export const qrService = {
     return store.updateDestination(qr.id, destination)!;
   },
 
-  async remove(relipay: ReliPay, subject: Subject, qrId: string): Promise<void> {
+  async remove(rekey: Rekey, subject: Subject, qrId: string): Promise<void> {
     const qr = this.assertOwned(subject, qrId);
     store.remove(qr.id);
   },
@@ -143,16 +143,16 @@ export const qrService = {
   },
 
   /**
-   * Public scan: record a `qr_scans` usage event in ReliPay, then return the
-   * destination to redirect to. ReliPay enforces the monthly scan quota as a
+   * Public scan: record a `qr_scans` usage event in Rekey, then return the
+   * destination to redirect to. Rekey enforces the monthly scan quota as a
    * hard cap and throws USAGE_QUOTA_EXCEEDED (402) when exhausted — we surface
    * that so the redirect endpoint can return a "quota exceeded" page.
    *
    * The scan is attributed to the QR's subject (org pool if it's a team QR,
    * else the owning end-user) so quota + analytics aggregate correctly.
    */
-  async recordScan(relipay: ReliPay, qr: QrCode): Promise<{ destination: string }> {
-    await relipay.usage.record({
+  async recordScan(rekey: Rekey, qr: QrCode): Promise<{ destination: string }> {
+    await rekey.usage.record({
       meterSlug: METER_QR_SCANS,
       quantity: 1,
       ...(qr.organizationId ? { organizationId: qr.organizationId } : { endUserId: qr.ownerEndUserId }),
@@ -163,14 +163,14 @@ export const qrService = {
 
   /**
    * Analytics for a QR — gated behind the `analytics` feature flag. Reads the
-   * scan total from the ReliPay usage aggregate for the QR's subject.
+   * scan total from the Rekey usage aggregate for the QR's subject.
    */
   async analytics(
-    relipay: ReliPay,
+    rekey: Rekey,
     subject: Subject,
     qrId: string,
   ): Promise<{ scans: number; since: string }> {
-    const { analytics } = await resolveEntitlements(relipay, subject);
+    const { analytics } = await resolveEntitlements(rekey, subject);
     if (!analytics) {
       throw new QrError(
         403,
@@ -183,7 +183,7 @@ export const qrService = {
     // 30-day window. (Per-QR breakdown would filter on metadata; the public
     // aggregate endpoint sums by subject + meter, which is the tier-level view.)
     const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
-    const agg = await relipay.usage.aggregate({
+    const agg = await rekey.usage.aggregate({
       meterSlug: METER_QR_SCANS,
       from: since,
       ...(subject.organizationId ? { organizationId: subject.organizationId } : { endUserId: subject.endUserId }),

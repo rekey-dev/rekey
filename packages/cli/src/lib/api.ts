@@ -1,7 +1,7 @@
 /**
  * Thin admin-side fetch helper. The CLI calls `/api/v1/admin/*` routes
  * with a Bearer header carrying SUPER_ADMIN_KEY. We don't use
- * `@relipay/node` here because that SDK is for the *public* API
+ * `@rekey.dev/node` here because that SDK is for the *public* API
  * (Application secret keys), not the admin surface.
  */
 
@@ -23,8 +23,8 @@ export async function adminRequest<T>(args: RequestArgs): Promise<T> {
   if (!args.ctx.apiUrl) {
     fail(args.ctx, {
       code: 'CLI_API_URL_MISSING',
-      message: 'No ReliPay API URL configured.',
-      fix: 'Set RELIPAY_URL in your environment, or pass --api-url=https://your-relipay.example.',
+      message: 'No Rekey API URL configured.',
+      fix: 'Set RELIPAY_URL in your environment, or pass --api-url=https://your-rekey.example.',
     });
   }
   if (!args.ctx.adminKey) {
@@ -56,7 +56,7 @@ export async function adminRequest<T>(args: RequestArgs): Promise<T> {
     fail(args.ctx, {
       code: 'CLI_HTTP_ERROR',
       message: `Request failed with HTTP ${res.status}.`,
-      fix: 'Check the ReliPay API logs for details.',
+      fix: 'Check the Rekey API logs for details.',
     });
   }
   return (json as { success: true; data: T }).data;

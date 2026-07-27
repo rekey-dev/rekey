@@ -1,7 +1,7 @@
 /**
  * Tenant-operator magic-link (passwordless sign-in) tokens.
  *
- * Mirrors `lib/tenant-password-reset.ts`. ReliPay doesn't send operator email —
+ * Mirrors `lib/tenant-password-reset.ts`. Rekey doesn't send operator email —
  * the request flow returns the raw token so the deploying org hands it off to
  * whatever mailer they use (or, in dev, clicks through directly). Distinct from
  * the reset token because /verify mints a SESSION (it does not change a

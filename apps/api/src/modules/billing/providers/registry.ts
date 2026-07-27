@@ -138,7 +138,7 @@ function keyList(fields: CredentialField[]): string {
  *     validators used.
  *
  * At most ONE issue is emitted (first failure wins) so the credentials
- * service can map it 1:1 onto a RelipayError. `params.fix` carries the
+ * service can map it 1:1 onto a RekeyError. `params.fix` carries the
  * field's `help` text (or a docsUrl pointer) for the error envelope's `fix`.
  */
 export function credentialRulesSchema(module: ProviderModule): z.ZodType<Record<string, string>> {

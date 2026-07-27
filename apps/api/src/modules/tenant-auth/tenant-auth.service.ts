@@ -16,7 +16,7 @@
 
 import type { Tenant, TenantRole, TenantUser } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { hashPassword, verifyPassword } from '../../lib/passwords.js';
 import { assertNotLocked, registerFailure, clearFailures, LOGIN_POLICY } from '../../lib/brute-force.js';
 import {
@@ -200,7 +200,7 @@ export const tenantAuthService = {
     device?: TenantDeviceContext;
   }): Promise<AuthSessionResult> {
     if (input.password.length < PASSWORD_MIN_LENGTH) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'PASSWORD_TOO_SHORT',
         message: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`,
@@ -215,10 +215,10 @@ export const tenantAuthService = {
       where: { email: input.email.toLowerCase() },
     });
     if (existing) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 409,
         code: 'EMAIL_ALREADY_EXISTS',
-        message: 'A ReliPay operator with that email already exists.',
+        message: 'A Rekey operator with that email already exists.',
         fix: 'Sign in instead, or use a different email. Each operator account is unique by email.',
       });
     }
@@ -330,7 +330,7 @@ export const tenantAuthService = {
   async completeSignIn(user: TenantUser, device?: TenantDeviceContext): Promise<TenantSignInOutcome> {
     const memberships = await loadMemberships(user.id);
     if (memberships.length === 0) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'NO_TENANT_MEMBERSHIPS',
         message: 'Your account is not a member of any workspace.',
@@ -355,7 +355,7 @@ export const tenantAuthService = {
 
   /**
    * Request a magic-link token. **Enumeration-safe**: always returns the same
-   * shape, never revealing whether the email maps to an operator. ReliPay
+   * shape, never revealing whether the email maps to an operator. Rekey
    * doesn't send operator email — the raw `token` is returned for the caller
    * (panel) to forward, exactly like `requestPasswordReset`.
    */
@@ -412,7 +412,7 @@ export const tenantAuthService = {
   async verifyMagicLink(input: { token: string; device?: TenantDeviceContext }): Promise<TenantSignInOutcome> {
     const outcome = await lookupTenantMagicLinkToken(input.token);
     if (outcome.kind === 'unknown') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'MAGIC_LINK_TOKEN_INVALID',
         message: 'Magic-link token is unknown.',
@@ -420,7 +420,7 @@ export const tenantAuthService = {
       });
     }
     if (outcome.kind === 'consumed') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'MAGIC_LINK_TOKEN_USED',
         message: 'Magic-link token has already been used.',
@@ -428,7 +428,7 @@ export const tenantAuthService = {
       });
     }
     if (outcome.kind === 'expired') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'MAGIC_LINK_TOKEN_EXPIRED',
         message: 'Magic-link token has expired.',
@@ -438,7 +438,7 @@ export const tenantAuthService = {
     // Consume BEFORE minting the session so a lost race can't double-spend.
     const consumed = await consumeTenantMagicLinkToken(outcome.token);
     if (!consumed) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'MAGIC_LINK_TOKEN_USED',
         message: 'Magic-link token has already been used.',
@@ -466,7 +466,7 @@ export const tenantAuthService = {
     const ok = user !== null && (await verifyPassword(user.passwordHash, input.password));
     if (!ok || user === null) {
       if (user) await registerFailure(lockScope, LOGIN_POLICY);
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'INVALID_CREDENTIALS',
         message: 'Email or password is incorrect.',
@@ -482,7 +482,7 @@ export const tenantAuthService = {
       // Edge case — user exists but every membership got revoked. Likely a
       // freshly-revoked account. Block them with a friendly error rather
       // than issuing a token that points nowhere.
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'NO_TENANT_MEMBERSHIPS',
         message: 'Your account is not a member of any workspace.',
@@ -526,7 +526,7 @@ export const tenantAuthService = {
   }): Promise<AuthSessionResult> {
     const claims = verifyTenantMfaChallengeToken(input.mfaChallengeToken);
     if (!claims) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'MFA_CHALLENGE_INVALID',
         message: 'MFA challenge token is invalid or expired.',
@@ -535,7 +535,7 @@ export const tenantAuthService = {
     }
     const ok = await tenantMfaService.verify({ tenantUserId: claims.sub, code: input.code });
     if (!ok) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'MFA_CODE_INVALID',
         message: 'TOTP or backup code did not verify.',
@@ -545,7 +545,7 @@ export const tenantAuthService = {
     const user = await prisma.tenantUser.findUniqueOrThrow({ where: { id: claims.sub } });
     const memberships = await loadMemberships(user.id);
     if (memberships.length === 0) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'NO_TENANT_MEMBERSHIPS',
         message: 'Your account is not a member of any workspace.',
@@ -559,7 +559,7 @@ export const tenantAuthService = {
   async refresh(presentedRaw: string): Promise<AuthSessionResult> {
     const outcome = await lookupTenantRefreshToken(presentedRaw);
     if (outcome.kind === 'unknown') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'REFRESH_TOKEN_INVALID',
         message: 'Refresh token is unknown.',
@@ -571,7 +571,7 @@ export const tenantAuthService = {
       // refresh for this operator. Compromise of one refresh in the chain
       // is treated as compromise of the chain.
       await revokeAllTenantRefreshTokensForUser(outcome.token.tenantUserId);
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'REFRESH_TOKEN_REUSED',
         message:
@@ -580,7 +580,7 @@ export const tenantAuthService = {
       });
     }
     if (outcome.kind === 'expired') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'REFRESH_TOKEN_EXPIRED',
         message: 'Refresh token has expired.',
@@ -593,7 +593,7 @@ export const tenantAuthService = {
     } catch (e) {
       if ((e as Error).message === 'TENANT_REFRESH_RACE') {
         await revokeAllTenantRefreshTokensForUser(outcome.token.tenantUserId);
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 401,
           code: 'REFRESH_TOKEN_REUSED',
           message:
@@ -608,7 +608,7 @@ export const tenantAuthService = {
     });
     const memberships = await loadMemberships(user.id);
     if (memberships.length === 0) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'NO_TENANT_MEMBERSHIPS',
         message: 'Your account is no longer a member of any workspace.',
@@ -655,7 +655,7 @@ export const tenantAuthService = {
     const memberships = await loadMemberships(args.tenantUserId);
     const target = memberships.find((m) => m.tenantId === args.targetTenantId);
     if (!target) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'NOT_A_MEMBER',
         message: `You are not a member of workspace "${args.targetTenantId}".`,
@@ -669,7 +669,7 @@ export const tenantAuthService = {
   async getById(id: string): Promise<{ user: PublicTenantUser; memberships: MembershipSummary[] }> {
     const user = await prisma.tenantUser.findUnique({ where: { id } });
     if (!user) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'TENANT_USER_NOT_FOUND',
         message: 'Operator account not found.',
@@ -745,7 +745,7 @@ export const tenantAuthService = {
 
   async resetPassword(input: { token: string; newPassword: string }): Promise<{ ok: true }> {
     if (input.newPassword.length < PASSWORD_MIN_LENGTH) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'PASSWORD_TOO_SHORT',
         message: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`,
@@ -754,7 +754,7 @@ export const tenantAuthService = {
     }
     const outcome = await lookupTenantResetToken(input.token);
     if (outcome.kind === 'unknown') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'PASSWORD_RESET_TOKEN_INVALID',
         message: 'Reset token is unknown.',
@@ -762,7 +762,7 @@ export const tenantAuthService = {
       });
     }
     if (outcome.kind === 'consumed') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'PASSWORD_RESET_TOKEN_USED',
         message: 'Reset token has already been used.',
@@ -770,7 +770,7 @@ export const tenantAuthService = {
       });
     }
     if (outcome.kind === 'expired') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'PASSWORD_RESET_TOKEN_EXPIRED',
         message: 'Reset token has expired.',
@@ -780,7 +780,7 @@ export const tenantAuthService = {
 
     const consumed = await consumeTenantResetToken(outcome.token);
     if (!consumed) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'PASSWORD_RESET_TOKEN_USED',
         message: 'Reset token has already been used.',
@@ -803,7 +803,7 @@ export const tenantAuthService = {
     newPassword: string;
   }): Promise<{ ok: true }> {
     if (input.newPassword.length < PASSWORD_MIN_LENGTH) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'PASSWORD_TOO_SHORT',
         message: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`,
@@ -813,7 +813,7 @@ export const tenantAuthService = {
     const user = await prisma.tenantUser.findUniqueOrThrow({ where: { id: input.tenantUserId } });
     const ok = await verifyPassword(user.passwordHash, input.currentPassword);
     if (!ok) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'INVALID_CREDENTIALS',
         message: 'Current password is incorrect.',

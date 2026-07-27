@@ -2,13 +2,13 @@
 
 This is what your customer's *users* go through to sign up and sign in to the customer's app. It is distinct from:
 
-- The Application secret key (`rp_live_*`) — the customer's *server* presents that to ReliPay.
+- The Application secret key (`rp_live_*`) — the customer's *server* presents that to Rekey.
 - The bootstrap admin key (`SUPER_ADMIN_KEY`) — operators present that to manage Tenants/Applications.
 
 ## Flow at a glance
 
 ```
-Browser                  Customer's server                 ReliPay
+Browser                  Customer's server                 Rekey
    │                            │                              │
    │ ─── { email, password } ──>│                              │
    │                            │ POST /api/v1/auth/sign-up    │
@@ -23,12 +23,12 @@ Browser                  Customer's server                 ReliPay
    │ ─── (later request) ──────>│                              │
    │                            │ GET /api/v1/users/me/        │
    │                            │  Authorization: Bearer rp_live_xxx
-   │                            │  X-Relipay-User-Token: <jwt> │
+   │                            │  X-Rekey-User-Token: <jwt> │
    │                            │ ────────────────────────────>│
    │                            │ <──── 200 { id, email, ... } │
 ```
 
-The **customer's server** is the trusted intermediary. It holds the Application secret key. It receives the user's password (over TLS) and forwards it to ReliPay. It receives the JWT and decides how to ship it back to the browser (cookie, response body, whatever the customer wants).
+The **customer's server** is the trusted intermediary. It holds the Application secret key. It receives the user's password (over TLS) and forwards it to Rekey. It receives the JWT and decides how to ship it back to the browser (cookie, response body, whatever the customer wants).
 
 The browser **never** sees the Application secret key. The browser **may** see its own JWT (in a cookie or localStorage); that JWT is bound to one Application and one EndUser via the cross-app guard described below.
 
@@ -66,7 +66,7 @@ Authenticates an existing EndUser. Same response shape as sign-up. Errors: `INVA
 Returns the current EndUser. Requires **two** headers:
 
 - `Authorization: Bearer rp_live_…` — the Application secret key
-- `X-Relipay-User-Token: <jwt>` — the user JWT obtained from sign-up/sign-in
+- `X-Rekey-User-Token: <jwt>` — the user JWT obtained from sign-up/sign-in
 
 Errors: `USER_TOKEN_MISSING` (401), `USER_TOKEN_INVALID` (401), `USER_TOKEN_WRONG_APPLICATION` (401).
 
@@ -76,7 +76,7 @@ Sign-up and sign-in return **two** tokens, used for different jobs:
 
 | Token | Format | Lifetime | Where to send | What it's for |
 |---|---|---|---|---|
-| **Access** | JWT (HS256 default; RS256 opt-in) | 15 minutes | `X-Relipay-User-Token` header | Identifies the end-user on every per-user call (e.g. `GET /users/me`) |
+| **Access** | JWT (HS256 default; RS256 opt-in) | 15 minutes | `X-Rekey-User-Token` header | Identifies the end-user on every per-user call (e.g. `GET /users/me`) |
 | **Refresh** | Opaque base64url, 32 bytes random | 30 days, sliding | `body.refreshToken` of `POST /auth/refresh` | Mints a fresh access + refresh pair when the access expires |
 
 ### The access JWT
@@ -116,7 +116,7 @@ POST /api/v1/auth/forgot-password   { email }
 ```
 
 - **Always returns 200** with the same shape, regardless of whether the email exists. The `delivered` flag tells the calling server which case it was. *Never* enumerate users via this endpoint.
-- **ReliPay does not send email.** The customer's server receives the `resetToken` and ships it via its own provider (SendGrid, Resend, SES, etc.). This keeps us out of email-deliverability ops and lets each customer own their from-address branding.
+- **Rekey does not send email.** The customer's server receives the `resetToken` and ships it via its own provider (SendGrid, Resend, SES, etc.). This keeps us out of email-deliverability ops and lets each customer own their from-address branding.
 - Token lifetime: 1 hour. Single-use. Stored as SHA-256 hash in `password_reset_tokens`.
 
 ### Reset password
@@ -135,7 +135,7 @@ POST /api/v1/auth/reset-password   { token, newPassword }
 
 ```
 POST /api/v1/auth/change-password   { currentPassword, newPassword }
-Headers: Authorization: Bearer rp_live_…  +  X-Relipay-User-Token: <jwt>
+Headers: Authorization: Bearer rp_live_…  +  X-Rekey-User-Token: <jwt>
 → 200 { ok: true }
 ```
 
@@ -159,7 +159,7 @@ GET /api/v1/tenant/applications/:id/end-users/:euid/export
 → application/json attachment
 ```
 
-Operator-initiated subject-access export for GDPR Art. 15 / CCPA requests. Returns one JSON document of everything ReliPay stores about the end-user: profile, OAuth identities, session **metadata** (never token hashes), MFA enrollment metadata (never secrets), passkey metadata, organization memberships, subscriptions, payments, licenses (key prefix only), credit balance + ledger, usage records (capped at the most recent 10 000 rows — see `notes` in the document), security events, and impersonation audits. Credential material (password hashes, token/secret material, license key hashes) is never included. OWNER/ADMIN only; every export is recorded as an `end_user.data_exported` security event. In the panel: end-user detail page → "Export data (JSON)".
+Operator-initiated subject-access export for GDPR Art. 15 / CCPA requests. Returns one JSON document of everything Rekey stores about the end-user: profile, OAuth identities, session **metadata** (never token hashes), MFA enrollment metadata (never secrets), passkey metadata, organization memberships, subscriptions, payments, licenses (key prefix only), credit balance + ledger, usage records (capped at the most recent 10 000 rows — see `notes` in the document), security events, and impersonation audits. Credential material (password hashes, token/secret material, license key hashes) is never included. OWNER/ADMIN only; every export is recorded as an `end_user.data_exported` security event. In the panel: end-user detail page → "Export data (JSON)".
 
 ### Data erasure (right to be forgotten)
 
@@ -194,15 +194,15 @@ The auth module enforces:
 ## SDK usage
 
 ```ts
-// 1. user signs up via your form, server posts to ReliPay
-const { endUser, token } = await relipay.auth.signUp({
+// 1. user signs up via your form, server posts to Rekey
+const { endUser, token } = await rekey.auth.signUp({
   email: req.body.email,
   password: req.body.password,
 });
 // store token however your stack stores sessions
 
 // 2. on subsequent requests, look up the user
-const user = await relipay.auth.getCurrentUser(req.cookies.session);
+const user = await rekey.auth.getCurrentUser(req.cookies.session);
 ```
 
 See [`packages/sdk-node/AGENTS.md`](../packages/sdk-node/AGENTS.md) for the full method surface.

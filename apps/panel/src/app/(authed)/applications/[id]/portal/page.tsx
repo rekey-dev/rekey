@@ -117,7 +117,7 @@ export default async function PortalPage({
         title="Hosted customer portal"
         description={
           <>
-            A ReliPay-hosted page where <strong>your end-users</strong> sign in and manage their own
+            A Rekey-hosted page where <strong>your end-users</strong> sign in and manage their own
             subscription, plan, and billing — no UI to build, no backend to deploy. Runs on your
             Application's <strong>publishable key</strong> + each customer's own session; you never
             expose a secret key.

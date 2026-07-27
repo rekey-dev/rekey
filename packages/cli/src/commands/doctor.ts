@@ -1,5 +1,5 @@
 /**
- * `relipay doctor` — diagnose connectivity + config.
+ * `rekey doctor` — diagnose connectivity + config.
  *
  * Designed for AI agents to read structured output and self-heal. Each check
  * has a `name`, a `status` (`ok` / `warn` / `fail`), a human `message`, and
@@ -20,7 +20,7 @@ interface Check {
 export function registerDoctorCommand(program: Command): void {
   program
     .command('doctor')
-    .description('Diagnose CLI configuration + reach the ReliPay API')
+    .description('Diagnose CLI configuration + reach the Rekey API')
     .action(async function (this: Command) {
       const ctx = readGlobalOpts(this);
       const checks = await runDoctorChecks(ctx);
@@ -37,7 +37,7 @@ async function runDoctorChecks(ctx: OutputContext): Promise<Check[]> {
       name: 'api-url',
       status: 'fail',
       message: 'RELIPAY_URL is not set.',
-      fix: 'Set RELIPAY_URL in your environment, or pass --api-url=https://your-relipay.example.',
+      fix: 'Set RELIPAY_URL in your environment, or pass --api-url=https://your-rekey.example.',
     });
   } else {
     checks.push({ name: 'api-url', status: 'ok', message: `using ${ctx.apiUrl}` });
@@ -64,7 +64,7 @@ async function runDoctorChecks(ctx: OutputContext): Promise<Check[]> {
           name: 'health',
           status: 'fail',
           message: `API returned HTTP ${res.status} to /health.`,
-          fix: 'Check that the ReliPay API is running at the configured URL.',
+          fix: 'Check that the Rekey API is running at the configured URL.',
         });
       }
     } catch (err) {
@@ -72,7 +72,7 @@ async function runDoctorChecks(ctx: OutputContext): Promise<Check[]> {
         name: 'health',
         status: 'fail',
         message: `Could not reach ${ctx.apiUrl}/health: ${(err as Error).message}`,
-        fix: 'Check network reachability + that ReliPay is running.',
+        fix: 'Check network reachability + that Rekey is running.',
       });
     }
   }

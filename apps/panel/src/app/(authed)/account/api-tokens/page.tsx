@@ -7,7 +7,7 @@
  * is OWNER/ADMIN only; the raw token is shown EXACTLY ONCE (stashed in a
  * short-lived HttpOnly cookie for the post-redirect reveal, never in the URL).
  *
- * Also documents wiring the @relipay/mcp server with a PAT so AI tools can mint
+ * Also documents wiring the @rekey.dev/mcp server with a PAT so AI tools can mint
  * Application API keys via the scoped `keys:mint` tool instead of the master key.
  */
 
@@ -165,7 +165,7 @@ export default async function ApiTokensPage({
     <section className="mx-auto max-w-7xl space-y-10 px-6 py-8 lg:px-8">
       <PageHeader
         title="API tokens"
-        description="Personal-access-tokens (rp_op_…) let you — or an AI agent acting as you — call the ReliPay API without a session, scoped to exactly what you grant. Revocable any time. For MCP setup see Account → Operator MCP."
+        description="Personal-access-tokens (rp_op_…) let you — or an AI agent acting as you — call the Rekey API without a session, scoped to exactly what you grant. Revocable any time. For MCP setup see Account → Operator MCP."
       />
 
       {error && (

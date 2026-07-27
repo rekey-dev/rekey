@@ -18,7 +18,7 @@
 
 import type { EndUserRole } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 
 const NAME_RE = /^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$/;
 
@@ -43,7 +43,7 @@ export const endUserRolesService = {
         orderBy: { createdAt: 'asc' },
       });
       if (!any) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 500,
           code: 'NO_END_USER_ROLES',
           message: 'This Application has no end-user roles defined.',
@@ -65,7 +65,7 @@ export const endUserRolesService = {
       select: { id: true },
     });
     if (!exists) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'END_USER_ROLE_UNKNOWN',
         message: `Role "${name}" is not defined for this Application.`,
@@ -99,7 +99,7 @@ export const endUserRolesService = {
   }): Promise<EndUserRole> {
     const name = input.name.trim();
     if (!NAME_RE.test(name)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'END_USER_ROLE_NAME_INVALID',
         message:
@@ -126,7 +126,7 @@ export const endUserRolesService = {
         });
       } catch (e) {
         if ((e as { code?: string }).code === 'P2002') {
-          throw new RelipayError({
+          throw new RekeyError({
             statusCode: 409,
             code: 'END_USER_ROLE_NAME_TAKEN',
             message: `Role "${name}" already exists for this Application.`,
@@ -148,7 +148,7 @@ export const endUserRolesService = {
       where: { applicationId_name: { applicationId: args.applicationId, name: args.name } },
     });
     if (!role) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'END_USER_ROLE_NOT_FOUND',
         message: `Role "${args.name}" not found.`,
@@ -194,7 +194,7 @@ export const endUserRolesService = {
       where: { applicationId_name: { applicationId, name } },
     });
     if (!role) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'END_USER_ROLE_NOT_FOUND',
         message: `Role "${name}" not found.`,
@@ -202,7 +202,7 @@ export const endUserRolesService = {
       });
     }
     if (role.isDefault) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'END_USER_ROLE_IS_DEFAULT',
         message: `Cannot delete "${name}" — it's the default role for this Application.`,
@@ -213,7 +213,7 @@ export const endUserRolesService = {
       where: { applicationId, role: name },
     });
     if (inUse > 0 && !reassignTo) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'END_USER_ROLE_IN_USE',
         message: `Cannot delete "${name}" — ${inUse} end-user${inUse === 1 ? '' : 's'} still hold this role.`,
@@ -222,7 +222,7 @@ export const endUserRolesService = {
     }
     if (reassignTo) {
       if (reassignTo === name) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'END_USER_ROLE_REASSIGN_SELF',
           message: 'Cannot reassign to the role being deleted.',
@@ -234,7 +234,7 @@ export const endUserRolesService = {
         select: { id: true },
       });
       if (!target) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'END_USER_ROLE_REASSIGN_TARGET_UNKNOWN',
           message: `Target role "${reassignTo}" doesn't exist in this Application.`,

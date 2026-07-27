@@ -26,7 +26,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
 import { requireTenantSession } from '../../middleware/tenant-session.js';
 import { resolveOperatorToken } from '../../middleware/operator-token-auth.js';
@@ -230,7 +230,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
     async (req, reply) => {
       const body = GrantBody.safeParse(req.body);
       if (!body.success) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'MCP_GRANT_INVALID',
           message: 'Grant body did not parse.',
@@ -239,7 +239,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
       }
       const operator = req.tenantUser;
       if (!operator) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 401,
           code: 'OPERATOR_MCP_UNAUTHORIZED',
           message: 'No authenticated operator.',
@@ -250,7 +250,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
       const client = await operatorMcpOAuthService.getClient(data.client_id);
       if (!client || !client.redirectUris.includes(data.redirect_uri)) {
         // Don't redirect to an unvalidated URI — refuse outright.
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'MCP_GRANT_INVALID_CLIENT',
           message: 'Unknown client_id or unregistered redirect_uri.',
@@ -258,7 +258,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         });
       }
       if (data.code_challenge_method !== 'S256') {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'MCP_GRANT_PKCE_REQUIRED',
           message: 'Only PKCE S256 is supported.',
@@ -282,7 +282,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
       // their active session workspace. Re-check membership against the DB.
       const role = await operatorMcpOAuthService.memberRole(operator.id, data.tenant_id);
       if (!role) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 403,
           code: 'TENANT_MEMBERSHIP_REQUIRED',
           message: 'You are not a member of the chosen workspace.',
@@ -316,7 +316,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         security: [],
         summary: 'Token endpoint',
         description:
-          'No ReliPay credential and no client secret: clients are public and prove ' +
+          'No Rekey credential and no client secret: clients are public and prove ' +
           'themselves with PKCE. The `code` + `code_verifier` (or `refresh_token`) in the ' +
           'form body are the credential.',
       },

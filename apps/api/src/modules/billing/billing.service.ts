@@ -1,5 +1,5 @@
 /**
- * Billing service — public surface used by `@relipay/node`.
+ * Billing service — public surface used by `@rekey.dev/node`.
  *
  * Three operations today:
  *   - listPlans(application)              → public plan catalogue
@@ -15,12 +15,12 @@
 
 import type { Application, DataMode, EndUser, Plan, Subscription } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { plansService } from '../plans/plans.service.js';
 import { couponsService } from '../coupons/coupons.service.js';
 import { getProviderForApplication, pickProvider } from './providers/index.js';
 import type { BillingProviderName } from './credentials.service.js';
-import { BillingConfigSchema } from '@relipay/shared-types';
+import { BillingConfigSchema } from '@rekey.dev/shared-types';
 import { emitSubscriptionEvent } from './webhooks/billing-events.js';
 
 /**
@@ -128,7 +128,7 @@ export const billingService = {
     // (the mistake an AI agent / new integrator makes first).
     const billingConfig = BillingConfigSchema.parse(input.application.billingConfig);
     if (billingConfig.billingSubject === 'org' && input.beneficiaryOrgId === undefined) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'BILLING_ORGANIZATION_REQUIRED',
         message: 'This Application bills per organization, but no organization was provided for checkout.',
@@ -138,7 +138,7 @@ export const billingService = {
 
     const plan = await plansService.getBySlug(input.application.id, input.planSlug);
     if (!plan.active) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'PLAN_INACTIVE',
         message: `Plan "${input.planSlug}" is not currently available for new sign-ups.`,
@@ -185,7 +185,7 @@ export const billingService = {
       existing.provider !== providerName &&
       (existing.status === 'ACTIVE' || existing.status === 'PAST_DUE')
     ) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 409,
         code: 'BILLING_PROVIDER_SWITCH_BLOCKED',
         message: `You already have an active subscription on this plan via "${existing.provider}". Cancel it first to switch to "${providerName}".`,
@@ -325,7 +325,7 @@ export const billingService = {
       opts?.organizationId ? { organizationId: opts.organizationId } : undefined,
     );
     if (!sub) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'SUBSCRIPTION_NOT_FOUND',
         message: 'You have no active subscription to cancel.',
@@ -389,7 +389,7 @@ export const billingService = {
       where: { id: subscriptionId, applicationId: application.id },
     });
     if (!sub) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'SUBSCRIPTION_NOT_FOUND',
         message: `Subscription "${subscriptionId}" not found in this application.`,

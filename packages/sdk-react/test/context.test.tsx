@@ -1,5 +1,5 @@
 /**
- * <RelipayProvider> + hooks — the source of the auth state every control/auth
+ * <RekeyProvider> + hooks — the source of the auth state every control/auth
  * widget reads. We test the provider for real (no mocking of itself) so the
  * seams the components depend on are pinned:
  *   - initialUser seeds a signed-in, non-loading state synchronously (the SSR
@@ -10,9 +10,9 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
-import { RelipayProvider } from '../src/context.js';
+import { RekeyProvider } from '../src/context.js';
 import { useUser } from '../src/hooks.js';
-import type { EndUserDto } from '@relipay/shared-types';
+import type { EndUserDto } from '@rekey.dev/shared-types';
 
 const user: EndUserDto = {
   id: 'eu_1',
@@ -36,12 +36,12 @@ function Probe(): React.JSX.Element {
 
 afterEach(() => vi.restoreAllMocks());
 
-describe('<RelipayProvider> seed states', () => {
+describe('<RekeyProvider> seed states', () => {
   it('seeds a signed-in, settled state from initialUser (SSR path)', () => {
     render(
-      <RelipayProvider apiUrl="https://api.example.com" initialUser={user} accessToken="tok_abc">
+      <RekeyProvider apiUrl="https://api.example.com" initialUser={user} accessToken="tok_abc">
         <Probe />
-      </RelipayProvider>,
+      </RekeyProvider>,
     );
     expect(screen.getByTestId('signedIn').textContent).toBe('true');
     expect(screen.getByTestId('email').textContent).toBe('seed@example.com');
@@ -49,9 +49,9 @@ describe('<RelipayProvider> seed states', () => {
 
   it('resolves to signed-out (not loading) when there is no access token', async () => {
     render(
-      <RelipayProvider apiUrl="https://api.example.com" accessToken={null}>
+      <RekeyProvider apiUrl="https://api.example.com" accessToken={null}>
         <Probe />
-      </RelipayProvider>,
+      </RekeyProvider>,
     );
     await waitFor(() => {
       expect(screen.getByTestId('loading').textContent).toBe('false');
@@ -68,9 +68,9 @@ describe('<RelipayProvider> seed states', () => {
       }),
     );
     render(
-      <RelipayProvider apiUrl="https://api.example.com" accessToken="tok_abc">
+      <RekeyProvider apiUrl="https://api.example.com" accessToken="tok_abc">
         <Probe />
-      </RelipayProvider>,
+      </RekeyProvider>,
     );
     await waitFor(() => {
       expect(screen.getByTestId('signedIn').textContent).toBe('true');
@@ -79,7 +79,7 @@ describe('<RelipayProvider> seed states', () => {
     // Hits the user-token-only endpoint with the JWT header, no secret key.
     const [url, init] = fetchSpy.mock.calls[0]!;
     expect(String(url)).toContain('/api/v1/auth/me');
-    expect((init?.headers as Record<string, string>)['X-Relipay-User-Token']).toBe('tok_abc');
+    expect((init?.headers as Record<string, string>)['X-Rekey-User-Token']).toBe('tok_abc');
   });
 
   it('treats a failed user fetch as signed-out (no throw to the UI)', async () => {
@@ -90,9 +90,9 @@ describe('<RelipayProvider> seed states', () => {
       }),
     );
     render(
-      <RelipayProvider apiUrl="https://api.example.com" accessToken="bad_tok">
+      <RekeyProvider apiUrl="https://api.example.com" accessToken="bad_tok">
         <Probe />
-      </RelipayProvider>,
+      </RekeyProvider>,
     );
     await waitFor(() => {
       expect(screen.getByTestId('loading').textContent).toBe('false');
@@ -102,10 +102,10 @@ describe('<RelipayProvider> seed states', () => {
 });
 
 describe('hooks outside the provider', () => {
-  it('useUser() throws a helpful error when used without <RelipayProvider>', () => {
+  it('useUser() throws a helpful error when used without <RekeyProvider>', () => {
     // Silence the expected React error boundary console noise.
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect(() => render(<Probe />)).toThrow(/RelipayProvider/);
+    expect(() => render(<Probe />)).toThrow(/RekeyProvider/);
     spy.mockRestore();
   });
 });

@@ -3,13 +3,13 @@
  *
  * ── Why these take server actions instead of calling the API ──
  *
- * Every `/api/v1/auth/*` endpoint on ReliPay is guarded by the secret-key
+ * Every `/api/v1/auth/*` endpoint on Rekey is guarded by the secret-key
  * middleware (`requireApiKey`), which **explicitly rejects public keys**. The
  * browser must never hold the secret key, so these widgets cannot POST
- * credentials to ReliPay directly. Instead — exactly like Clerk's components
+ * credentials to Rekey directly. Instead — exactly like Clerk's components
  * talk to Clerk's FAPI — they delegate writes to *your* server: you pass a
  * Server Action (or a route URL) and the widget renders the form/buttons around
- * it. Your action runs `@relipay/node` server-side (with the secret) and rotates
+ * it. Your action runs `@rekey.dev/node` server-side (with the secret) and rotates
  * the session cookie; the provider then reflects the new user on the next load.
  *
  * Two integration styles, pick per prop:
@@ -53,7 +53,7 @@ function OAuthButtons({ providers }: { providers: OAuthProvider[] }): React.JSX.
   const cx = useCx();
   if (providers.length === 0) return null;
   return (
-    <div className="relipay-oauth-list">
+    <div className="rekey-oauth-list">
       {providers.map((p) => {
         const label = p.label ?? `Continue with ${titleCase(p.provider)}`;
         if (p.startAction) {
@@ -61,7 +61,7 @@ function OAuthButtons({ providers }: { providers: OAuthProvider[] }): React.JSX.
             <form key={p.provider} action={p.startAction}>
               <button
                 type="submit"
-                className={cx('relipay-btn relipay-btn-secondary relipay-btn-block', 'buttonSecondary')}
+                className={cx('rekey-btn rekey-btn-secondary rekey-btn-block', 'buttonSecondary')}
               >
                 {label}
               </button>
@@ -72,7 +72,7 @@ function OAuthButtons({ providers }: { providers: OAuthProvider[] }): React.JSX.
           <a
             key={p.provider}
             href={p.startUrl ?? '#'}
-            className={cx('relipay-btn relipay-btn-secondary relipay-btn-block', 'buttonSecondary')}
+            className={cx('rekey-btn rekey-btn-secondary rekey-btn-block', 'buttonSecondary')}
           >
             {label}
           </a>
@@ -87,7 +87,7 @@ function Alert({ kind, children }: { kind: 'error' | 'info'; children: React.Rea
   const cx = useCx();
   if (!children) return null;
   return (
-    <div role={kind === 'error' ? 'alert' : 'status'} className={cx(`relipay-alert relipay-alert-${kind}`, 'alert')}>
+    <div role={kind === 'error' ? 'alert' : 'status'} className={cx(`rekey-alert rekey-alert-${kind}`, 'alert')}>
       {children}
     </div>
   );
@@ -136,47 +136,47 @@ function SignInBody(props: SignInProps): React.JSX.Element {
     title = 'Sign in', subtitle,
   } = props;
   return (
-    <div className={cx('relipay-card', 'card')}>
-      <div className={cx('relipay-header', 'header')}>
-        <h1 className={cx('relipay-title', 'title')}>{title}</h1>
-        {subtitle && <p className={cx('relipay-subtitle', 'subtitle')}>{subtitle}</p>}
+    <div className={cx('rekey-card', 'card')}>
+      <div className={cx('rekey-header', 'header')}>
+        <h1 className={cx('rekey-title', 'title')}>{title}</h1>
+        {subtitle && <p className={cx('rekey-subtitle', 'subtitle')}>{subtitle}</p>}
       </div>
 
       <Alert kind="error">{error}</Alert>
 
       <OAuthButtons providers={oauthProviders} />
-      {oauthProviders.length > 0 && <div className={cx('relipay-divider', 'divider')}>or</div>}
+      {oauthProviders.length > 0 && <div className={cx('rekey-divider', 'divider')}>or</div>}
 
-      <form {...formProps(action, actionUrl)} className="relipay-stack">
-        <div className="relipay-field">
-          <label className={cx('relipay-label', 'label')} htmlFor="relipay-signin-email">Email</label>
+      <form {...formProps(action, actionUrl)} className="rekey-stack">
+        <div className="rekey-field">
+          <label className={cx('rekey-label', 'label')} htmlFor="rekey-signin-email">Email</label>
           <input
-            id="relipay-signin-email" name="email" type="email" required autoComplete="email"
-            placeholder="you@example.com" className={cx('relipay-input', 'input')}
+            id="rekey-signin-email" name="email" type="email" required autoComplete="email"
+            placeholder="you@example.com" className={cx('rekey-input', 'input')}
           />
         </div>
-        <div className="relipay-field">
-          <label className={cx('relipay-label', 'label')} htmlFor="relipay-signin-password">Password</label>
+        <div className="rekey-field">
+          <label className={cx('rekey-label', 'label')} htmlFor="rekey-signin-password">Password</label>
           <input
-            id="relipay-signin-password" name="password" type="password" required autoComplete="current-password"
-            placeholder="Your password" className={cx('relipay-input', 'input')}
+            id="rekey-signin-password" name="password" type="password" required autoComplete="current-password"
+            placeholder="Your password" className={cx('rekey-input', 'input')}
           />
         </div>
-        <button type="submit" className={cx('relipay-btn relipay-btn-primary relipay-btn-block', 'buttonPrimary')}>
+        <button type="submit" className={cx('rekey-btn rekey-btn-primary rekey-btn-block', 'buttonPrimary')}>
           Sign in
         </button>
       </form>
 
       {(magicLinkAction || magicLinkUrl) && (
         <>
-          <div className={cx('relipay-divider', 'divider')}>or use a magic link</div>
-          <form {...formProps(magicLinkAction, magicLinkUrl)} className="relipay-row">
+          <div className={cx('rekey-divider', 'divider')}>or use a magic link</div>
+          <form {...formProps(magicLinkAction, magicLinkUrl)} className="rekey-row">
             <input
               name="email" type="email" required autoComplete="email" aria-label="Email for magic link"
-              placeholder="you@example.com" className={cx('relipay-input', 'input')}
+              placeholder="you@example.com" className={cx('rekey-input', 'input')}
             />
             <button
-              type="submit" className={cx('relipay-btn relipay-btn-secondary', 'buttonSecondary')}
+              type="submit" className={cx('rekey-btn rekey-btn-secondary', 'buttonSecondary')}
               style={{ flexShrink: 0 }}
             >
               Email link
@@ -186,10 +186,10 @@ function SignInBody(props: SignInProps): React.JSX.Element {
       )}
 
       {(signUpUrl || forgotPasswordUrl) && (
-        <div className={cx('relipay-footer', 'footer')}>
-          {signUpUrl && <a className="relipay-link" href={signUpUrl}>Create account</a>}
+        <div className={cx('rekey-footer', 'footer')}>
+          {signUpUrl && <a className="rekey-link" href={signUpUrl}>Create account</a>}
           {signUpUrl && forgotPasswordUrl && ' · '}
-          {forgotPasswordUrl && <a className="relipay-link" href={forgotPasswordUrl}>Forgot password?</a>}
+          {forgotPasswordUrl && <a className="rekey-link" href={forgotPasswordUrl}>Forgot password?</a>}
         </div>
       )}
     </div>
@@ -248,40 +248,40 @@ function SignUpBody(props: SignUpProps): React.JSX.Element {
     title = 'Create your account', subtitle,
   } = props;
   return (
-    <div className={cx('relipay-card', 'card')}>
-      <div className={cx('relipay-header', 'header')}>
-        <h1 className={cx('relipay-title', 'title')}>{title}</h1>
-        {subtitle && <p className={cx('relipay-subtitle', 'subtitle')}>{subtitle}</p>}
+    <div className={cx('rekey-card', 'card')}>
+      <div className={cx('rekey-header', 'header')}>
+        <h1 className={cx('rekey-title', 'title')}>{title}</h1>
+        {subtitle && <p className={cx('rekey-subtitle', 'subtitle')}>{subtitle}</p>}
       </div>
 
       <Alert kind="error">{error}</Alert>
 
       <OAuthButtons providers={oauthProviders} />
-      {oauthProviders.length > 0 && <div className={cx('relipay-divider', 'divider')}>or</div>}
+      {oauthProviders.length > 0 && <div className={cx('rekey-divider', 'divider')}>or</div>}
 
-      <form {...formProps(action, actionUrl)} className="relipay-stack">
-        <div className="relipay-field">
-          <label className={cx('relipay-label', 'label')} htmlFor="relipay-signup-email">Email</label>
+      <form {...formProps(action, actionUrl)} className="rekey-stack">
+        <div className="rekey-field">
+          <label className={cx('rekey-label', 'label')} htmlFor="rekey-signup-email">Email</label>
           <input
-            id="relipay-signup-email" name="email" type="email" required autoComplete="email"
-            placeholder="you@example.com" className={cx('relipay-input', 'input')}
+            id="rekey-signup-email" name="email" type="email" required autoComplete="email"
+            placeholder="you@example.com" className={cx('rekey-input', 'input')}
           />
         </div>
-        <div className="relipay-field">
-          <label className={cx('relipay-label', 'label')} htmlFor="relipay-signup-password">Password</label>
+        <div className="rekey-field">
+          <label className={cx('rekey-label', 'label')} htmlFor="rekey-signup-password">Password</label>
           <input
-            id="relipay-signup-password" name="password" type="password" required autoComplete="new-password"
-            placeholder="Choose a strong password" className={cx('relipay-input', 'input')}
+            id="rekey-signup-password" name="password" type="password" required autoComplete="new-password"
+            placeholder="Choose a strong password" className={cx('rekey-input', 'input')}
           />
         </div>
-        <button type="submit" className={cx('relipay-btn relipay-btn-primary relipay-btn-block', 'buttonPrimary')}>
+        <button type="submit" className={cx('rekey-btn rekey-btn-primary rekey-btn-block', 'buttonPrimary')}>
           Create account
         </button>
       </form>
 
       {signInUrl && (
-        <div className={cx('relipay-footer', 'footer')}>
-          Already have an account? <a className="relipay-link" href={signInUrl}>Sign in</a>
+        <div className={cx('rekey-footer', 'footer')}>
+          Already have an account? <a className="rekey-link" href={signInUrl}>Sign in</a>
         </div>
       )}
     </div>
@@ -325,7 +325,7 @@ function NavButtonBody({
 }: NavButtonProps & { variant: 'primary' | 'secondary' | 'danger'; fallbackLabel: string }): React.JSX.Element {
   const cx = useCx();
   const slot = variant === 'primary' ? 'buttonPrimary' : variant === 'danger' ? 'buttonDanger' : 'buttonSecondary';
-  const klass = cx(`relipay-btn relipay-btn-${variant}`, slot);
+  const klass = cx(`rekey-btn rekey-btn-${variant}`, slot);
   const label = children ?? fallbackLabel;
   return action ? (
     <form action={action}>
@@ -399,10 +399,10 @@ function UserButtonBody({
   const initial = (user.email?.[0] ?? '?').toUpperCase();
 
   return (
-    <div className="relipay-userbtn" ref={ref}>
+    <div className="rekey-userbtn" ref={ref}>
       <button
         type="button"
-        className={cx('relipay-avatar', 'avatar')}
+        className={cx('rekey-avatar', 'avatar')}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label="Account menu"
@@ -411,28 +411,28 @@ function UserButtonBody({
         {initial}
       </button>
       {open && (
-        <div className={cx('relipay-menu', 'menu')} role="menu">
-          <div className="relipay-menu-head">
-            <div className="relipay-menu-head-email">{user.email}</div>
+        <div className={cx('rekey-menu', 'menu')} role="menu">
+          <div className="rekey-menu-head">
+            <div className="rekey-menu-head-email">{user.email}</div>
           </div>
           {manageAccountUrl && (
-            <a className={cx('relipay-menu-item', 'menuItem')} href={manageAccountUrl} role="menuitem">
+            <a className={cx('rekey-menu-item', 'menuItem')} href={manageAccountUrl} role="menuitem">
               Manage account
             </a>
           )}
           {sessionsUrl && (
-            <a className={cx('relipay-menu-item', 'menuItem')} href={sessionsUrl} role="menuitem">
+            <a className={cx('rekey-menu-item', 'menuItem')} href={sessionsUrl} role="menuitem">
               Sessions &amp; devices
             </a>
           )}
           {extraItems.map((it, i) =>
             it.href ? (
-              <a key={i} className={cx('relipay-menu-item', 'menuItem')} href={it.href} role="menuitem">
+              <a key={i} className={cx('rekey-menu-item', 'menuItem')} href={it.href} role="menuitem">
                 {it.label}
               </a>
             ) : (
               <button
-                key={i} type="button" className={cx('relipay-menu-item', 'menuItem')}
+                key={i} type="button" className={cx('rekey-menu-item', 'menuItem')}
                 role="menuitem" onClick={it.onClick}
               >
                 {it.label}
@@ -442,7 +442,7 @@ function UserButtonBody({
           {signOutAction ? (
             <form action={signOutAction}>
               <button
-                type="submit" className={cx('relipay-menu-item relipay-menu-item-danger', 'menuItem')}
+                type="submit" className={cx('rekey-menu-item rekey-menu-item-danger', 'menuItem')}
                 role="menuitem"
               >
                 Sign out
@@ -450,7 +450,7 @@ function UserButtonBody({
             </form>
           ) : (
             <a
-              className={cx('relipay-menu-item relipay-menu-item-danger', 'menuItem')}
+              className={cx('rekey-menu-item rekey-menu-item-danger', 'menuItem')}
               href={signOutUrl ?? '#'} role="menuitem"
             >
               Sign out

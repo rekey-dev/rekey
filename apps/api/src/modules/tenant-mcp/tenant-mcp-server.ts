@@ -12,7 +12,7 @@ import { operatorTools, type OperatorTool, type OperatorToolContext } from './op
 import { operatorWriteTools } from './operator-write-tools.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
-const SERVER_INFO = { name: 'relipay-operator', version: '1.0.0' };
+const SERVER_INFO = { name: 'rekey-operator', version: '1.0.0' };
 
 /** All operator tools — read tools first, then the phase-1 write tools. */
 const allTools: OperatorTool[] = [...operatorTools, ...operatorWriteTools];

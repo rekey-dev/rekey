@@ -141,7 +141,7 @@ export default async function ApiKeysPage({
         description={
           <>
             Browser-safe credential (<code className="font-mono text-xs">rp_pub_…</code>) for
-            your frontend, mobile, or desktop app — pass it to <code>@relipay/react</code> for
+            your frontend, mobile, or desktop app — pass it to <code>@rekey.dev/react</code> for
             sign-in, sign-up, magic links, passkeys, license checks, and plan listing with{' '}
             <strong>no backend required</strong>. It only identifies this application and carries no
             privileges of its own, so it's safe to ship in client code. Charging customers and
@@ -196,7 +196,7 @@ export default async function ApiKeysPage({
             {reveal}
           </code>
           <p className="text-xs text-amber-800 dark:text-amber-300">
-            Pass as <code>Authorization: Bearer &lt;key&gt;</code> from your server-side code via <code>@relipay/node</code>.
+            Pass as <code>Authorization: Bearer &lt;key&gt;</code> from your server-side code via <code>@rekey.dev/node</code>.
           </p>
         </div>
       )}

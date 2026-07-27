@@ -7,7 +7,7 @@ import { SubmitButton } from '@/components/SubmitButton';
 import { AuthCard } from '@/components/AuthCard';
 import { Banner } from '@/components/Banner';
 
-export const metadata: Metadata = { title: 'Reset your password · ReliPay' };
+export const metadata: Metadata = { title: 'Reset your password · Rekey' };
 
 async function request(formData: FormData): Promise<void> {
   'use server';

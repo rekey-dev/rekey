@@ -123,7 +123,7 @@ describe('Audit-5 end-user organizations', () => {
       url: '/api/v1/users/me/organizations/',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.ownerAccess,
+        'x-rekey-user-token': b.ownerAccess,
       },
       payload: { name: 'Acme', slug: 'acme' },
     });
@@ -140,7 +140,7 @@ describe('Audit-5 end-user organizations', () => {
       url: '/api/v1/users/me/organizations/',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.ownerAccess,
+        'x-rekey-user-token': b.ownerAccess,
       },
       payload: { name: 'Acme', slug: 'acme' },
     });
@@ -157,7 +157,7 @@ describe('Audit-5 end-user organizations', () => {
       url: '/api/v1/users/me/organizations/',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.ownerAccess,
+        'x-rekey-user-token': b.ownerAccess,
       },
     });
     const rows = list.json().data as Array<{ slug: string; role: string }>;
@@ -172,7 +172,7 @@ describe('Audit-5 end-user organizations', () => {
       url: '/api/v1/users/me/organizations/',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.ownerAccess,
+        'x-rekey-user-token': b.ownerAccess,
       },
       payload: { name: 'Acme', slug: 'acme' },
     });
@@ -181,7 +181,7 @@ describe('Audit-5 end-user organizations', () => {
       url: '/api/v1/users/me/organizations/',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.ownerAccess,
+        'x-rekey-user-token': b.ownerAccess,
       },
       payload: { name: 'Acme 2', slug: 'ACME' }, // service lowercases
     });
@@ -199,7 +199,7 @@ describe('Audit-5 end-user organizations', () => {
         url: '/api/v1/users/me/organizations/',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': b.ownerAccess,
+          'x-rekey-user-token': b.ownerAccess,
         },
         payload: { name: 'Acme', slug: 'acme' },
       })
@@ -212,7 +212,7 @@ describe('Audit-5 end-user organizations', () => {
         url: `/api/v1/users/me/organizations/${org.organization.id}/invitations`,
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': b.ownerAccess,
+          'x-rekey-user-token': b.ownerAccess,
         },
         payload: { email: 'admin@example.com', role: 'ADMIN' },
       })
@@ -223,7 +223,7 @@ describe('Audit-5 end-user organizations', () => {
       url: '/api/v1/auth/organizations/accept-invitation',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': invitee.access,
+        'x-rekey-user-token': invitee.access,
       },
       payload: { token: inv.token },
     });
@@ -236,7 +236,7 @@ describe('Audit-5 end-user organizations', () => {
       url: '/api/v1/auth/organizations/accept-invitation',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': invitee.access,
+        'x-rekey-user-token': invitee.access,
       },
       payload: { token: inv.token },
     });
@@ -253,7 +253,7 @@ describe('Audit-5 end-user organizations', () => {
         url: '/api/v1/users/me/organizations/',
         headers: {
           authorization: `Bearer ${a.liveKey}`,
-          'x-relipay-user-token': a.ownerAccess,
+          'x-rekey-user-token': a.ownerAccess,
         },
         payload: { name: 'A-Org', slug: 'a-org' },
       })
@@ -264,7 +264,7 @@ describe('Audit-5 end-user organizations', () => {
         url: `/api/v1/users/me/organizations/${orgA.organization.id}/invitations`,
         headers: {
           authorization: `Bearer ${a.liveKey}`,
-          'x-relipay-user-token': a.ownerAccess,
+          'x-rekey-user-token': a.ownerAccess,
         },
         payload: { email: 'whoever@example.com', role: 'MEMBER' },
       })
@@ -276,7 +276,7 @@ describe('Audit-5 end-user organizations', () => {
       url: '/api/v1/auth/organizations/accept-invitation',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.ownerAccess,
+        'x-rekey-user-token': b.ownerAccess,
       },
       payload: { token: inv.token },
     });
@@ -294,7 +294,7 @@ describe('Audit-5 end-user organizations', () => {
         url: '/api/v1/users/me/organizations/',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': b.ownerAccess,
+          'x-rekey-user-token': b.ownerAccess,
         },
         payload: { name: 'Acme', slug: 'acme' },
       })
@@ -307,7 +307,7 @@ describe('Audit-5 end-user organizations', () => {
         url: `/api/v1/users/me/organizations/${org.organization.id}/invitations`,
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': b.ownerAccess,
+          'x-rekey-user-token': b.ownerAccess,
         },
         payload: { email: 'admin-demote@example.com', role: 'ADMIN' },
       })
@@ -317,7 +317,7 @@ describe('Audit-5 end-user organizations', () => {
       url: '/api/v1/auth/organizations/accept-invitation',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': admin.access,
+        'x-rekey-user-token': admin.access,
       },
       payload: { token: inv.token },
     });
@@ -327,7 +327,7 @@ describe('Audit-5 end-user organizations', () => {
       url: `/api/v1/users/me/organizations/${org.organization.id}/members/${b.ownerEndUserId}`,
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': admin.access,
+        'x-rekey-user-token': admin.access,
       },
       payload: { role: 'MEMBER' },
     });
@@ -343,7 +343,7 @@ describe('Audit-5 end-user organizations', () => {
         url: '/api/v1/users/me/organizations/',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': b.ownerAccess,
+          'x-rekey-user-token': b.ownerAccess,
         },
         payload: { name: 'Acme', slug: 'acme' },
       })
@@ -355,7 +355,7 @@ describe('Audit-5 end-user organizations', () => {
       url: `/api/v1/users/me/organizations/${org.organization.id}/members/${b.ownerEndUserId}`,
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.ownerAccess,
+        'x-rekey-user-token': b.ownerAccess,
       },
       payload: { role: 'MEMBER' },
     });
@@ -369,7 +369,7 @@ describe('Audit-5 end-user organizations', () => {
       url: `/api/v1/users/me/organizations/${org.organization.id}/leave`,
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.ownerAccess,
+        'x-rekey-user-token': b.ownerAccess,
       },
     });
     expect(leave.statusCode).toBe(409);
@@ -382,7 +382,7 @@ describe('Audit-5 end-user organizations', () => {
       .inject({
         method: 'POST',
         url: '/api/v1/users/me/organizations/',
-        headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': b.ownerAccess },
+        headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.ownerAccess },
         payload: { name: 'Acme', slug: 'acme' },
       })
       .then((r) => r.json().data as { organization: { id: string } });
@@ -393,14 +393,14 @@ describe('Audit-5 end-user organizations', () => {
       .inject({
         method: 'POST',
         url: `/api/v1/users/me/organizations/${org.organization.id}/invitations`,
-        headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': b.ownerAccess },
+        headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.ownerAccess },
         payload: { email: 'co-owner@example.com', role: 'OWNER' },
       })
       .then((r) => r.json().data as { token: string });
     await app.inject({
       method: 'POST',
       url: '/api/v1/auth/organizations/accept-invitation',
-      headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': co.access },
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': co.access },
       payload: { token: inv.token },
     });
 
@@ -408,7 +408,7 @@ describe('Audit-5 end-user organizations', () => {
     const blocked = await app.inject({
       method: 'POST',
       url: `/api/v1/users/me/organizations/${org.organization.id}/leave`,
-      headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': b.ownerAccess },
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.ownerAccess },
     });
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json().error.code).toBe('ORGANIZATION_OWNER_CANNOT_LEAVE');
@@ -417,13 +417,13 @@ describe('Audit-5 end-user organizations', () => {
     await app.inject({
       method: 'PATCH',
       url: `/api/v1/users/me/organizations/${org.organization.id}/members/${b.ownerEndUserId}`,
-      headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': b.ownerAccess },
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.ownerAccess },
       payload: { role: 'ADMIN' },
     });
     const left = await app.inject({
       method: 'POST',
       url: `/api/v1/users/me/organizations/${org.organization.id}/leave`,
-      headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': b.ownerAccess },
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.ownerAccess },
     });
     expect(left.statusCode).toBe(200);
     expect(left.json().data.removed).toBe(true);
@@ -437,7 +437,7 @@ describe('Audit-5 end-user organizations', () => {
         url: '/api/v1/users/me/organizations/',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': b.ownerAccess,
+          'x-rekey-user-token': b.ownerAccess,
         },
         payload: { name: 'Acme', slug: 'acme' },
       })
@@ -449,7 +449,7 @@ describe('Audit-5 end-user organizations', () => {
         url: `/api/v1/users/me/organizations/${org.organization.id}/invitations`,
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': b.ownerAccess,
+          'x-rekey-user-token': b.ownerAccess,
         },
         payload: { email: 'member-leave@example.com', role: 'MEMBER' },
       })
@@ -459,7 +459,7 @@ describe('Audit-5 end-user organizations', () => {
       url: '/api/v1/auth/organizations/accept-invitation',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': member.access,
+        'x-rekey-user-token': member.access,
       },
       payload: { token: inv.token },
     });
@@ -468,7 +468,7 @@ describe('Audit-5 end-user organizations', () => {
       url: `/api/v1/users/me/organizations/${org.organization.id}/leave`,
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': member.access,
+        'x-rekey-user-token': member.access,
       },
     });
     expect(leave.statusCode).toBe(200);
@@ -485,7 +485,7 @@ describe('Audit-5 end-user organizations', () => {
         url: '/api/v1/users/me/organizations/',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': b.ownerAccess,
+          'x-rekey-user-token': b.ownerAccess,
         },
         payload: { name: 'Acme', slug: 'acme' },
       })
@@ -497,7 +497,7 @@ describe('Audit-5 end-user organizations', () => {
         url: `/api/v1/users/me/organizations/${org.organization.id}/invitations`,
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': b.ownerAccess,
+          'x-rekey-user-token': b.ownerAccess,
         },
         payload: { email: 'will-be-revoked@example.com', role: 'MEMBER' },
       })
@@ -508,7 +508,7 @@ describe('Audit-5 end-user organizations', () => {
       url: `/api/v1/users/me/organizations/${org.organization.id}/invitations/${inv.invitation.id}/revoke`,
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.ownerAccess,
+        'x-rekey-user-token': b.ownerAccess,
       },
     });
     expect(revoke.statusCode).toBe(200);
@@ -519,7 +519,7 @@ describe('Audit-5 end-user organizations', () => {
       url: '/api/v1/auth/organizations/accept-invitation',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': invitee.access,
+        'x-rekey-user-token': invitee.access,
       },
       payload: { token: inv.token },
     });

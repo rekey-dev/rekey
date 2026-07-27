@@ -121,7 +121,7 @@ export default async function OrganizationsPage({
               Group end-users into companies/teams — use this if you bill organizations rather than
               individuals. Optional, and distinct from your workspace members. End-users create +
               manage these from your app via the SDK
-              (<code className="font-mono text-xs">relipay.organizations.*</code>); you can also
+              (<code className="font-mono text-xs">rekey.organizations.*</code>); you can also
               provision and curate them here.
             </>
           }
@@ -154,7 +154,7 @@ export default async function OrganizationsPage({
               <>
                 Create one if you bill companies/teams rather than individuals — use “+ New
                 organization”, or let end-users create teams from your app with
-                <code className="font-mono text-xs"> relipay.organizations.create()</code>.
+                <code className="font-mono text-xs"> rekey.organizations.create()</code>.
               </>
             }
           />

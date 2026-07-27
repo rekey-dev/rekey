@@ -10,7 +10,7 @@
  */
 
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { generateSecretKey, hashKey } from '../../lib/keys.js';
 import type { ApiKey } from '@prisma/client';
 
@@ -59,7 +59,7 @@ export const apiKeysService = {
     // as expired — a dead-on-arrival credential the operator was told was
     // "created". Fail fast with a clear error instead.
     if (input.expiresAt !== undefined && input.expiresAt.getTime() <= Date.now()) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'API_KEY_EXPIRY_IN_PAST',
         message: `expiresAt (${input.expiresAt.toISOString()}) is not in the future — the key would be dead on arrival.`,
@@ -71,7 +71,7 @@ export const apiKeysService = {
       where: { applicationId: input.applicationId, revokedAt: null },
     });
     if (activeCount >= MAX_KEYS_PER_APP) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'API_KEY_LIMIT_REACHED',
         message: `Application already has ${MAX_KEYS_PER_APP} active API keys.`,
@@ -98,7 +98,7 @@ export const apiKeysService = {
   async revoke(applicationId: string, id: string): Promise<PublicApiKey> {
     const key = await prisma.apiKey.findUnique({ where: { id } });
     if (!key || key.applicationId !== applicationId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'API_KEY_NOT_FOUND',
         message: `API key "${id}" not found in application "${applicationId}".`,

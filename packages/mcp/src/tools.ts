@@ -81,14 +81,14 @@ export const tools: Array<ToolDefinition<z.ZodRawShape>> = [
   {
     name: 'list_tenants',
     description:
-      'List all Tenants. Tenants are the outer multi-tenancy unit (one per ReliPay customer). Use this when the user asks "what tenants exist" or to find a tenantId to drill into.',
+      'List all Tenants. Tenants are the outer multi-tenancy unit (one per Rekey customer). Use this when the user asks "what tenants exist" or to find a tenantId to drill into.',
     inputSchema: ListTenantsArgs,
     execute: (c) => c.request('GET', '/api/v1/admin/tenants'),
   },
   {
     name: 'list_applications',
     description:
-      'List Applications, optionally filtered by Tenant. An Application is one project under a Tenant; every domain row in ReliPay carries an applicationId. Use this to find the applicationId for subsequent calls.',
+      'List Applications, optionally filtered by Tenant. An Application is one project under a Tenant; every domain row in Rekey carries an applicationId. Use this to find the applicationId for subsequent calls.',
     inputSchema: ListApplicationsArgs,
     execute: (c, args) => {
       const path = args.tenantId

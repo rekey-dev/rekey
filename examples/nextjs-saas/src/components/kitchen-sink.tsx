@@ -1,12 +1,12 @@
 'use client';
 
 /**
- * A live gallery of every drop-in component from @relipay/react.
+ * A live gallery of every drop-in component from @rekey.dev/react.
  *
  * This is a Client Component (the kit uses hooks + local state), but it stays
- * honest about ReliPay's security model: every mutating widget is wired to the
+ * honest about Rekey's security model: every mutating widget is wired to the
  * app's OWN Server Actions (passed down as props from the server page), not to
- * any browser-side API call. The kit reads auth state from <RelipayProvider>
+ * any browser-side API call. The kit reads auth state from <RekeyProvider>
  * (seeded server-side in the root layout) via useUser() under the hood.
  *
  * Server-resolved data (orgs, members, plans, entitlements, the app's
@@ -19,8 +19,8 @@ import {
   SignedIn,
   SignedOut,
   Protect,
-  RelipayLoading,
-  RelipayLoaded,
+  RekeyLoading,
+  RekeyLoaded,
   SignIn,
   SignUp,
   UserButton,
@@ -37,10 +37,10 @@ import {
   type OrgSummary,
   type OrgMember,
   type PricingPlan,
-} from '@relipay/react';
+} from '@rekey.dev/react';
 
 /** Brand the kit to the demo's teal so it visually matches the rest of the app. */
-const relipayTheme: Appearance = {
+const rekeyTheme: Appearance = {
   variables: {
     colorPrimary: '#0d9488',
     borderRadius: '12px',
@@ -87,14 +87,14 @@ export function KitchenSink(props: KitchenSinkProps): React.JSX.Element {
       {/* Control components ------------------------------------------------ */}
       <Section
         title="Control components"
-        blurb="<SignedIn> / <SignedOut> / <Protect> / <RelipayLoading> / <RelipayLoaded> — render regions by auth state + entitlements."
+        blurb="<SignedIn> / <SignedOut> / <Protect> / <RekeyLoading> / <RekeyLoaded> — render regions by auth state + entitlements."
       >
         <div className="space-y-1 text-sm">
-          <RelipayLoading><span className="pill">resolving session…</span></RelipayLoading>
-          <RelipayLoaded>
+          <RekeyLoading><span className="pill">resolving session…</span></RekeyLoading>
+          <RekeyLoaded>
             <SignedIn><span className="pill pill-pro">You are signed in</span></SignedIn>
             <SignedOut><span className="pill">You are signed out</span></SignedOut>
-          </RelipayLoaded>
+          </RekeyLoaded>
           <div>
             <Protect
               authorization={{ features: props.features, role: props.viewerRole }}
@@ -123,16 +123,16 @@ export function KitchenSink(props: KitchenSinkProps): React.JSX.Element {
       >
         <SignedIn>
           <UserButton
-            appearance={relipayTheme}
+            appearance={rekeyTheme}
             manageAccountUrl="/account"
             sessionsUrl="/account"
             signOutAction={props.signOutAction}
           />
-          <SignOutButton action={props.signOutAction} appearance={relipayTheme} />
+          <SignOutButton action={props.signOutAction} appearance={rekeyTheme} />
         </SignedIn>
         <SignedOut>
-          <SignInButton url="/kitchen-sink#sign-in" appearance={relipayTheme} />
-          <SignUpButton url="/kitchen-sink#sign-up" appearance={relipayTheme} />
+          <SignInButton url="/kitchen-sink#sign-in" appearance={rekeyTheme} />
+          <SignUpButton url="/kitchen-sink#sign-up" appearance={rekeyTheme} />
         </SignedOut>
       </Section>
 
@@ -143,7 +143,7 @@ export function KitchenSink(props: KitchenSinkProps): React.JSX.Element {
       >
         <div id="sign-in">
           <SignIn
-            appearance={relipayTheme}
+            appearance={rekeyTheme}
             action={props.signInAction}
             magicLinkAction={props.magicLinkAction}
             signUpUrl="/signup"
@@ -153,7 +153,7 @@ export function KitchenSink(props: KitchenSinkProps): React.JSX.Element {
         </div>
         <div id="sign-up">
           <SignUp
-            appearance={relipayTheme}
+            appearance={rekeyTheme}
             action={props.signUpAction}
             signInUrl="/login"
             subtitle="Wired to signUpAction"
@@ -168,17 +168,17 @@ export function KitchenSink(props: KitchenSinkProps): React.JSX.Element {
       >
         <SignedIn>
           <OrganizationSwitcher
-            appearance={relipayTheme}
+            appearance={rekeyTheme}
             organizations={props.organizations}
             activeOrganizationId={props.activeOrgId}
             switchAction={props.switchOrgAction}
             createAction={props.createOrgAction}
             billingSubject={props.billingSubject}
           />
-          <CreateOrganization appearance={relipayTheme} action={props.createOrgAction} />
+          <CreateOrganization appearance={rekeyTheme} action={props.createOrgAction} />
           {props.activeOrgId && (
             <OrganizationProfile
-              appearance={relipayTheme}
+              appearance={rekeyTheme}
               organization={{ id: props.activeOrgId, name: props.activeOrgName ?? 'Active team' }}
               members={props.members}
               viewerRole={props.viewerRole}
@@ -199,7 +199,7 @@ export function KitchenSink(props: KitchenSinkProps): React.JSX.Element {
       >
         <div className="w-full space-y-4">
           <PricingTable
-            appearance={relipayTheme}
+            appearance={rekeyTheme}
             plans={props.plans}
             currentPlanSlug={props.currentPlanSlug}
             checkoutAction={props.checkoutAction}
@@ -209,7 +209,7 @@ export function KitchenSink(props: KitchenSinkProps): React.JSX.Element {
           {!orgGateBlocking && props.plans.some((p) => p.amount > 0) && (
             <SignedIn>
               <CheckoutButton
-                appearance={relipayTheme}
+                appearance={rekeyTheme}
                 planSlug={props.plans.find((p) => p.amount > 0)!.slug}
                 action={props.checkoutAction}
                 {...(props.activeOrgId ? { hiddenFields: { orgId: props.activeOrgId } } : {})}

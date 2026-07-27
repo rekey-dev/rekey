@@ -1,19 +1,19 @@
 /**
  * Application service.
  *
- * An Application is one project under a Tenant. Every domain row in ReliPay
+ * An Application is one project under a Tenant. Every domain row in Rekey
  * (EndUser, ApiKey, Subscription, WebhookEvent…) carries an `applicationId`.
  *
  * On create we mint:
  *   - a unique `slug` (URL-safe identifier, used inside keys),
- *   - a `publicKey` (browser-safe, embedded in `@relipay/react`),
+ *   - a `publicKey` (browser-safe, embedded in `@rekey.dev/react`),
  *   - sensible default `authConfig` and `billingConfig` from shared-types.
  *
  * Slugs are immutable. Renaming is fine; the slug stays.
  */
 
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { generatePublicKey } from '../../lib/keys.js';
 import {
   AuthConfigSchema,
@@ -21,7 +21,7 @@ import {
   type AuthConfig,
   type BillingConfig,
   type BillingProvider,
-} from '@relipay/shared-types';
+} from '@rekey.dev/shared-types';
 import { Prisma, type Application } from '@prisma/client';
 
 export interface CreateApplicationInput {
@@ -98,7 +98,7 @@ export const applicationsService = {
   async get(id: string): Promise<Application> {
     const app = await prisma.application.findUnique({ where: { id } });
     if (!app) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'APPLICATION_NOT_FOUND',
         message: `Application "${id}" not found.`,
@@ -111,7 +111,7 @@ export const applicationsService = {
   async getBySlug(slug: string): Promise<Application> {
     const app = await prisma.application.findUnique({ where: { slug } });
     if (!app) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'APPLICATION_NOT_FOUND',
         message: `Application slug "${slug}" not found.`,
@@ -123,7 +123,7 @@ export const applicationsService = {
 
   async create(input: CreateApplicationInput): Promise<Application> {
     if (!SLUG_RE.test(input.slug)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'APPLICATION_SLUG_INVALID',
         message: `Slug "${input.slug}" is not URL-safe.`,
@@ -134,7 +134,7 @@ export const applicationsService = {
     // Ensure parent tenant exists with a clear error rather than a Prisma FK failure.
     const tenant = await prisma.tenant.findUnique({ where: { id: input.tenantId } });
     if (!tenant) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'TENANT_NOT_FOUND',
         message: `Tenant "${input.tenantId}" not found.`,
@@ -180,7 +180,7 @@ export const applicationsService = {
       });
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 409,
           code: 'APPLICATION_SLUG_TAKEN',
           message: `An application with slug "${input.slug}" already exists.`,
@@ -365,7 +365,7 @@ export const applicationsService = {
       app.previousPublicKeyValidUntil &&
       app.previousPublicKeyValidUntil > new Date()
     ) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 409,
         code: 'PUBLIC_KEY_ROTATION_IN_GRACE',
         message: `A previous publishable key is still in its grace window until ${app.previousPublicKeyValidUntil.toISOString()}. Rotating again would drop it and lock out clients still using it.`,

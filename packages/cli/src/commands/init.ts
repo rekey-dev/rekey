@@ -1,9 +1,9 @@
 /**
- * `relipay init` — bootstrap a fresh deployment.
+ * `rekey init` — bootstrap a fresh deployment.
  *
  * One-shot, non-interactive when given the required flags:
  *
- *   relipay init --tenant-name "Acme" --owner-email ops@acme.com \
+ *   rekey init --tenant-name "Acme" --owner-email ops@acme.com \
  *                --app-name "Acme Prod" --app-slug acme-prod \
  *                --json
  *
@@ -30,7 +30,7 @@ interface InitOptions {
 export function registerInitCommand(program: Command): void {
   program
     .command('init')
-    .description('Bootstrap a fresh ReliPay deployment: Tenant + Application + first API key.')
+    .description('Bootstrap a fresh Rekey deployment: Tenant + Application + first API key.')
     .requiredOption('--tenant-name <name>', 'Display name for the new Tenant')
     .requiredOption('--owner-email <email>', 'Owner email for the new Tenant')
     .requiredOption('--app-name <name>', 'Display name for the first Application')
@@ -42,7 +42,7 @@ export function registerInitCommand(program: Command): void {
         fail(ctx, {
           code: 'CLI_INIT_ARGS_MISSING',
           message: 'init requires --tenant-name, --owner-email, --app-name, --app-slug.',
-          fix: 'Pass all four flags. See `relipay init --help`.',
+          fix: 'Pass all four flags. See `rekey init --help`.',
         });
       }
 

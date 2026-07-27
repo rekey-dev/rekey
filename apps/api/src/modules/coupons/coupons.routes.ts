@@ -160,7 +160,7 @@ export async function couponsPublicRoutes(app: FastifyInstance): Promise<void> {
         tags: ['Public · Billing'],
         summary: 'Validate a coupon for the current user against a plan',
         description:
-          'Returns the discounted amount on success. Surfaces a precise RelipayError ' +
+          'Returns the discounted amount on success. Surfaces a precise RekeyError ' +
           'on every failure mode so the panel / pricing page can render a useful message.\n\n' +
           'Callable from a browser with the publishable key, or from your server ' +
           'with a secret key carrying the `billing:read` scope. Either way the ' +

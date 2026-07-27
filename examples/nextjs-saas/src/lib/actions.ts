@@ -1,16 +1,16 @@
 'use server';
 
 /**
- * Server Actions — every mutating ReliPay call lives here, behind the
+ * Server Actions — every mutating Rekey call lives here, behind the
  * `'use server'` boundary, so the secret key never reaches the browser.
  *
- * Auth lifecycle uses the @relipay/nextjs/server helpers (cookie session);
+ * Auth lifecycle uses the @rekey.dev/nextjs/server helpers (cookie session);
  * everything else (billing, credits, orgs, sessions, password) uses the
- * @relipay/node client from ./relipay.
+ * @rekey.dev/node client from ./rekey.
  *
  * Form-driven actions follow the App Router convention: they read FormData,
  * do the work, then `redirect(...)` with a `?status=` / `?error=` query the
- * page renders. RelipayError codes are surfaced verbatim so the user sees the
+ * page renders. RekeyError codes are surfaced verbatim so the user sees the
  * real reason (INVALID_CREDENTIALS, BILLING_ORGANIZATION_REQUIRED, …).
  */
 
@@ -21,9 +21,9 @@ import {
   signIn as nextSignIn,
   signUp as nextSignUp,
   signOut as nextSignOut,
-} from '@relipay/nextjs/server';
-import { ACCESS_COOKIE, REFRESH_COOKIE, ACCESS_COOKIE_OPTS, REFRESH_COOKIE_OPTS } from '@relipay/nextjs';
-import { relipay, RelipayError } from './relipay';
+} from '@rekey.dev/nextjs/server';
+import { ACCESS_COOKIE, REFRESH_COOKIE, ACCESS_COOKIE_OPTS, REFRESH_COOKIE_OPTS } from '@rekey.dev/nextjs';
+import { rekey, RekeyError } from './relipay';
 import { requireSession, getActiveOrgId } from './session';
 import { PLAN_CREDITS } from './constants';
 
@@ -57,7 +57,7 @@ export async function signInAction(formData: FormData): Promise<void> {
       redirect('/login?error=MFA_REQUIRED');
     }
   } catch (err) {
-    if (err instanceof RelipayError) redirect(`/login?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof RekeyError) redirect(`/login?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
   redirect('/dashboard');
@@ -70,7 +70,7 @@ export async function signUpAction(formData: FormData): Promise<void> {
   try {
     await nextSignUp({ email, password });
   } catch (err) {
-    if (err instanceof RelipayError) redirect(`/signup?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof RekeyError) redirect(`/signup?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
   redirect('/dashboard');
@@ -80,17 +80,17 @@ export async function signOutAction(): Promise<void> {
   await nextSignOut('/login');
 }
 
-/** Forgot password — request a reset token. ReliPay does NOT send email, so in
+/** Forgot password — request a reset token. Rekey does NOT send email, so in
  *  a no-transport setup the raw token comes back and we surface a reset link. */
 export async function requestPasswordResetAction(formData: FormData): Promise<void> {
   const email = String(formData.get('email') ?? '').trim();
   if (!email) redirect('/forgot-password?error=missing');
   let token: string | null = null;
   try {
-    const res = await relipay.auth.requestPasswordReset({ email });
+    const res = await rekey.auth.requestPasswordReset({ email });
     token = res.resetToken ?? null;
   } catch (err) {
-    if (err instanceof RelipayError) redirect(`/forgot-password?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof RekeyError) redirect(`/forgot-password?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
   // Enumeration-safe: always report "sent". If transport isn't configured the
@@ -105,9 +105,9 @@ export async function resetPasswordAction(formData: FormData): Promise<void> {
   const password = String(formData.get('password') ?? '');
   if (!token || !password) redirect('/reset-password?error=missing');
   try {
-    await relipay.auth.resetPassword({ token, newPassword: password });
+    await rekey.auth.resetPassword({ token, newPassword: password });
   } catch (err) {
-    if (err instanceof RelipayError) {
+    if (err instanceof RekeyError) {
       redirect(`/reset-password?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.code)}`);
     }
     throw err;
@@ -122,13 +122,13 @@ export async function resetPasswordAction(formData: FormData): Promise<void> {
 export async function revokeSessionAction(formData: FormData): Promise<void> {
   const sessionId = String(formData.get('sessionId') ?? '');
   const session = await requireSession();
-  if (sessionId) await relipay.auth.revokeSession(session.accessToken, sessionId);
+  if (sessionId) await rekey.auth.revokeSession(session.accessToken, sessionId);
   revalidatePath('/account');
 }
 
 export async function signOutEverywhereAction(): Promise<void> {
   const session = await requireSession();
-  await relipay.auth.signOutEverywhere(session.accessToken);
+  await rekey.auth.signOutEverywhere(session.accessToken);
   await nextSignOut('/login?reason=signed-out-everywhere');
 }
 
@@ -139,7 +139,7 @@ export async function signOutEverywhereAction(): Promise<void> {
 /**
  * Start a hosted checkout for a plan. When the app bills per-org and the
  * session is inside a team, the org id is attached so the subscription is
- * org-scoped. Without an org on an org-billing app, ReliPay returns
+ * org-scoped. Without an org on an org-billing app, Rekey returns
  * BILLING_ORGANIZATION_REQUIRED — we surface it.
  */
 export async function checkoutAction(formData: FormData): Promise<void> {
@@ -148,7 +148,7 @@ export async function checkoutAction(formData: FormData): Promise<void> {
   const session = await requireSession();
   const orgId = await getActiveOrgId(session.accessToken);
   try {
-    const result = await relipay.billing.createCheckout(session.accessToken, {
+    const result = await rekey.billing.createCheckout(session.accessToken, {
       planSlug,
       successUrl: `${appBaseUrl()}/billing?upgraded=1`,
       cancelUrl: `${appBaseUrl()}/billing?upgrade=cancel`,
@@ -156,7 +156,7 @@ export async function checkoutAction(formData: FormData): Promise<void> {
     });
     if (result.url) redirect(result.url);
   } catch (err) {
-    if (err instanceof RelipayError) redirect(`/billing?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof RekeyError) redirect(`/billing?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
   redirect('/billing?error=NO_CHECKOUT_URL');
@@ -167,7 +167,7 @@ export async function buyCreditsAction(): Promise<void> {
   const session = await requireSession();
   const orgId = await getActiveOrgId(session.accessToken);
   try {
-    const result = await relipay.billing.createCheckout(session.accessToken, {
+    const result = await rekey.billing.createCheckout(session.accessToken, {
       planSlug: PLAN_CREDITS,
       successUrl: `${appBaseUrl()}/billing?bought=credits`,
       cancelUrl: `${appBaseUrl()}/billing?buy=cancel`,
@@ -175,7 +175,7 @@ export async function buyCreditsAction(): Promise<void> {
     });
     if (result.url) redirect(result.url);
   } catch (err) {
-    if (err instanceof RelipayError) redirect(`/billing?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof RekeyError) redirect(`/billing?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
   redirect('/billing?error=NO_CHECKOUT_URL');
@@ -198,16 +198,16 @@ export async function createOrgAction(formData: FormData): Promise<void> {
   if (!name) redirect('/team?error=missing-name');
   const session = await requireSession();
   try {
-    const { organization } = await relipay.organizations.create(session.accessToken, {
+    const { organization } = await rekey.organizations.create(session.accessToken, {
       name,
       slug: slugify(name),
     });
     // On an org-billing app, immediately switch into the new team so billing +
     // feature usage work — mirrors the gated flow in examples/qr-saas.
-    const switched = await relipay.organizations.switch(session.accessToken, organization.id);
+    const switched = await rekey.organizations.switch(session.accessToken, organization.id);
     await adoptTokens(switched.accessToken, switched.refreshToken);
   } catch (err) {
-    if (err instanceof RelipayError) redirect(`/team?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof RekeyError) redirect(`/team?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
   redirect('/team?created=1');
@@ -218,14 +218,14 @@ export async function switchOrgAction(formData: FormData): Promise<void> {
   const session = await requireSession();
   try {
     if (orgId) {
-      const switched = await relipay.organizations.switch(session.accessToken, orgId);
+      const switched = await rekey.organizations.switch(session.accessToken, orgId);
       await adoptTokens(switched.accessToken, switched.refreshToken);
     } else {
-      const cleared = await relipay.organizations.clearActive(session.accessToken);
+      const cleared = await rekey.organizations.clearActive(session.accessToken);
       await adoptTokens(cleared.accessToken, cleared.refreshToken);
     }
   } catch (err) {
-    if (err instanceof RelipayError) redirect(`/team?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof RekeyError) redirect(`/team?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
   redirect('/team?switched=1');
@@ -238,12 +238,12 @@ export async function inviteMemberAction(formData: FormData): Promise<void> {
   if (!orgId || !email) redirect('/team?error=missing-invite');
   const session = await requireSession();
   try {
-    const { token } = await relipay.organizations.invite(session.accessToken, orgId, { email, role });
-    // ReliPay returns the raw invite token ONCE — a real app emails it; we
+    const { token } = await rekey.organizations.invite(session.accessToken, orgId, { email, role });
+    // Rekey returns the raw invite token ONCE — a real app emails it; we
     // surface it so the demo user can copy the accept link.
     redirect(`/team?invited=1&token=${encodeURIComponent(token)}`);
   } catch (err) {
-    if (err instanceof RelipayError) redirect(`/team?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof RekeyError) redirect(`/team?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
 }

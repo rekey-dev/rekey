@@ -442,7 +442,7 @@ export default async function EndUsersPage({
             }
             description={
               <>
-                End-users sign up via your application using the ReliPay SDKs, or you can seed them
+                End-users sign up via your application using the Rekey SDKs, or you can seed them
                 manually with the &quot;+ New end-user&quot; button.
               </>
             }

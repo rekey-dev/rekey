@@ -1,6 +1,6 @@
 # MCP server — operator + integrator guide
 
-ReliPay hosts **two MCP surfaces**:
+Rekey hosts **two MCP surfaces**:
 
 1. **Per-Application end-user MCP** at `/api/v1/mcp/<slug>` — end-users sign
    into one of your Applications via OAuth 2.1 + PKCE and read their own

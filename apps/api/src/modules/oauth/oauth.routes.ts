@@ -70,7 +70,7 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         tags: ['Public · OAuth'],
-        summary: 'Exchange an OAuth code for a ReliPay session',
+        summary: 'Exchange an OAuth code for a Rekey session',
         description:
           'Pass the `code` query param from the provider callback. Returns a fresh access+refresh pair for the matched-or-created EndUser. Verify state CSRF *before* calling.',
         params: { type: 'object', properties: { provider: { type: 'string' } }, required: ['provider'] },

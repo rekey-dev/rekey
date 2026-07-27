@@ -20,7 +20,7 @@
  */
 
 import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
-import { RelipayError } from '../../../../../lib/error.js';
+import { RekeyError } from '../../../../../lib/error.js';
 import { RazorpayStubProvider, RealRazorpayProvider } from '../../razorpay.js';
 import type { RazorpayCredentials } from '../../../credentials.service.js';
 import type {
@@ -75,7 +75,7 @@ function resolveApplication(req: RawWebhookReq): AppRef {
   // Slug-scoped only — Razorpay payloads carry nothing to scope credentials
   // by, so a slug-less request is unverifiable → unauthenticated.
   if (req.params.slug) return { slug: req.params.slug };
-  throw new RelipayError({
+  throw new RekeyError({
     statusCode: 401,
     code: 'WEBHOOK_APPLICATION_UNRESOLVED',
     message: 'Razorpay webhook URL carries no application slug.',

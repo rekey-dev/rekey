@@ -17,7 +17,7 @@
 
 import type { Prisma, PrismaClient, CreditReason } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 
 function isUniqueViolation(e: unknown): boolean {
   return (e as { code?: string }).code === 'P2002';
@@ -42,7 +42,7 @@ export function resolveCreditSubject(input: CreditSubjectInput): ResolvedSubject
   if (input.endUserId) {
     return { endUserId: input.endUserId, organizationId: null, subjectKey: `u:${input.endUserId}` };
   }
-  throw new RelipayError({
+  throw new RekeyError({
     statusCode: 400,
     code: 'CREDITS_SUBJECT_REQUIRED',
     message: 'A credit subject (endUserId or organizationId) is required.',
@@ -66,8 +66,8 @@ export interface ApplyDeltaResult {
   applied: boolean;
 }
 
-const INSUFFICIENT = (need: number, have: number): RelipayError =>
-  new RelipayError({
+const INSUFFICIENT = (need: number, have: number): RekeyError =>
+  new RekeyError({
     statusCode: 402,
     code: 'CREDITS_INSUFFICIENT',
     message: `Not enough credits: need ${need}, balance ${have}.`,
@@ -176,7 +176,7 @@ export const creditsService = {
     metadata?: Record<string, unknown> | undefined;
   }): Promise<ApplyDeltaResult> {
     if (!Number.isInteger(input.amount) || input.amount <= 0) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'CREDITS_AMOUNT_INVALID',
         message: 'Consume amount must be a positive integer.',
@@ -205,7 +205,7 @@ export const creditsService = {
     metadata?: Record<string, unknown> | undefined;
   }): Promise<ApplyDeltaResult> {
     if (!Number.isInteger(input.amount) || input.amount === 0) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'CREDITS_AMOUNT_INVALID',
         message: 'Grant amount must be a non-zero integer.',

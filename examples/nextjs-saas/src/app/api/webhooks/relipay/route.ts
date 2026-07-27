@@ -1,19 +1,19 @@
 /**
- * POST /api/webhooks/relipay — receive webhooks ReliPay sends to YOUR app.
+ * POST /api/webhooks/rekey — receive webhooks Rekey sends to YOUR app.
  *
  * Covers the auth lifecycle events (user.created, …) and the billing events
  * (subscription.activated / canceled / past_due, payment.succeeded / failed).
- * See docs/billing.md "Webhooks ReliPay sends to YOUR app".
+ * See docs/billing.md "Webhooks Rekey sends to YOUR app".
  *
  * Two rules every handler must follow:
  *   1. Verify the signature against the RAW request bytes — any
  *      reserialization breaks the HMAC.
  *   2. Dedupe on `eventId`: a delivery that times out on your side is
- *      retried by ReliPay, so the same event can arrive more than once.
+ *      retried by Rekey, so the same event can arrive more than once.
  */
 
 import { NextResponse, type NextRequest } from 'next/server';
-import { verifyWebhookSignature, type WebhookEventEnvelope } from '@relipay/node';
+import { verifyWebhookSignature, type WebhookEventEnvelope } from '@rekey.dev/node';
 
 // Demo-only dedupe store. In production use something durable shared across
 // instances (a unique-keyed DB table or Redis SETNX) — this Set resets on
@@ -24,7 +24,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   const payload = await req.text(); // raw body — do NOT use req.json() before verifying
 
   const ok = verifyWebhookSignature({
-    header: req.headers.get('x-relipay-signature'),
+    header: req.headers.get('x-rekey-signature'),
     payload,
     secret: process.env.RELIPAY_WEBHOOK_SECRET ?? '',
   });
@@ -35,7 +35,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   const event = JSON.parse(payload) as WebhookEventEnvelope;
 
   if (seenEventIds.has(event.eventId)) {
-    // Already processed — acknowledge so ReliPay stops retrying.
+    // Already processed — acknowledge so Rekey stops retrying.
     return NextResponse.json({ received: true, duplicate: true });
   }
   seenEventIds.add(event.eventId);

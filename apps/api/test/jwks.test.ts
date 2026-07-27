@@ -107,7 +107,7 @@ describe('JWKS / RS256 end-user access tokens', () => {
     return app.inject({
       method: 'GET',
       url: '/api/v1/users/me/',
-      headers: { authorization: `Bearer ${boot.liveKey}`, 'x-relipay-user-token': token },
+      headers: { authorization: `Bearer ${boot.liveKey}`, 'x-rekey-user-token': token },
     });
   }
 
@@ -191,7 +191,7 @@ describe('JWKS / RS256 end-user access tokens', () => {
     const authMe = await app.inject({
       method: 'GET',
       url: '/api/v1/auth/me',
-      headers: { 'x-relipay-user-token': token },
+      headers: { 'x-rekey-user-token': token },
     });
     expect(authMe.statusCode).toBe(200);
   });

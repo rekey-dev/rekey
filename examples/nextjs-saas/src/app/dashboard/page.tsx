@@ -1,11 +1,11 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { getWorkspaceContext } from '@/lib/session';
-import { relipay } from '@/lib/relipay';
+import { rekey } from '@/lib/relipay';
 import { AppShell } from '@/components/app-shell';
 import { METER_QR_SCANS } from '@/lib/constants';
 
-/** Start of the current calendar month (UTC) — matches ReliPay's quota window. */
+/** Start of the current calendar month (UTC) — matches Rekey's quota window. */
 function monthStartUtc(): string {
   const now = new Date();
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
@@ -19,7 +19,7 @@ export default async function DashboardPage(): Promise<React.JSX.Element> {
   let scansThisMonth: number | null = null;
   if (!orgGateBlocking) {
     try {
-      const agg = await relipay.usage.aggregate({
+      const agg = await rekey.usage.aggregate({
         meterSlug: METER_QR_SCANS,
         from: monthStartUtc(),
         ...(activeOrgId ? { organizationId: activeOrgId } : { endUserId: session.user.id }),
@@ -52,7 +52,7 @@ export default async function DashboardPage(): Promise<React.JSX.Element> {
       <section>
         <h1 className="text-xl font-semibold">Dashboard</h1>
         <p className="text-sm text-neutral-500">
-          Everything here is gated on entitlements resolved server-side from ReliPay.
+          Everything here is gated on entitlements resolved server-side from Rekey.
         </p>
       </section>
 
@@ -99,7 +99,7 @@ export default async function DashboardPage(): Promise<React.JSX.Element> {
       <section className="card">
         <h3 className="font-semibold">Resolved entitlements (raw)</h3>
         <p className="text-xs text-neutral-500">
-          Straight from <code>relipay.billing.getEntitlements()</code> for the active subject.
+          Straight from <code>rekey.billing.getEntitlements()</code> for the active subject.
         </p>
         <pre className="mt-2 overflow-x-auto rounded-lg bg-neutral-100 dark:bg-neutral-950 p-3 text-xs">
           {JSON.stringify(entitlements.features, null, 2)}

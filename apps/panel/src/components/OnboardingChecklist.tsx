@@ -44,7 +44,7 @@ export function OnboardingChecklist({
   storageKey,
 }: {
   steps: OnboardingStep[];
-  /** Per-workspace dismissal key, e.g. `relipay.onboarding.dismissed.<tenantId>`. */
+  /** Per-workspace dismissal key, e.g. `rekey.onboarding.dismissed.<tenantId>`. */
   storageKey: string;
 }): React.JSX.Element | null {
   const [visible, setVisible] = React.useState(false);

@@ -78,7 +78,7 @@ describe('Portal V2 API', () => {
   }
   const pubAuth = (token: string) => ({
     authorization: `Bearer ${publicKey}`,
-    'x-relipay-user-token': token,
+    'x-rekey-user-token': token,
   });
 
   // ---------- public config endpoint ----------
@@ -133,7 +133,7 @@ describe('Portal V2 API', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/billing/subscription',
-      headers: { authorization: `Bearer ${publicKey}`, 'x-relipay-user-token': token },
+      headers: { authorization: `Bearer ${publicKey}`, 'x-rekey-user-token': token },
     });
     expect(res.statusCode).toBe(200);
   });
@@ -143,7 +143,7 @@ describe('Portal V2 API', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/billing/payments',
-      headers: { authorization: `Bearer ${publicKey}`, 'x-relipay-user-token': token },
+      headers: { authorization: `Bearer ${publicKey}`, 'x-rekey-user-token': token },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().data).toEqual([]);

@@ -1,6 +1,6 @@
 /**
- * Product constants — the ReliPay meter / plan / feature slugs this app gates
- * on. These MUST match what's provisioned on the ReliPay Application you point
+ * Product constants — the Rekey meter / plan / feature slugs this app gates
+ * on. These MUST match what's provisioned on the Rekey Application you point
  * at. The deployed demo app "qr" is provisioned (see examples/qr-saas) with
  * exactly these slugs, so this boilerplate works against it unchanged.
  */
@@ -8,7 +8,7 @@
 /** Usage meter: one event per public scan. Monthly hard cap per tier. */
 export const METER_QR_SCANS = 'qr_scans';
 
-/** Plan slugs modeled in ReliPay. */
+/** Plan slugs modeled in Rekey. */
 export const PLAN_FREE = 'free';
 export const PLAN_PRO = 'pro_monthly';
 export const PLAN_CREDITS = 'qr_bulk_pack'; // CREDIT pack (500 credits / $19)

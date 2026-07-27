@@ -1,5 +1,5 @@
 /**
- * Server-only ReliPay client (same lazy-singleton pattern as
+ * Server-only Rekey client (same lazy-singleton pattern as
  * examples/nextjs-saas/src/lib/relipay.ts). Holds the Application SECRET key
  * — never import from a Client Component.
  *
@@ -10,14 +10,14 @@
  */
 
 import 'server-only';
-import { ReliPay, RelipayError } from '@relipay/node';
+import { Rekey, RekeyError } from '@rekey.dev/node';
 import { requireEnv } from './env';
 
-let cached: ReliPay | undefined;
+let cached: Rekey | undefined;
 
-export function getRelipay(): ReliPay {
+export function getRelipay(): Rekey {
   if (!cached) {
-    cached = new ReliPay({
+    cached = new Rekey({
       apiUrl: requireEnv('RELIPAY_URL'),
       secretKey: requireEnv('RELIPAY_SECRET_KEY'),
     });
@@ -25,11 +25,11 @@ export function getRelipay(): ReliPay {
   return cached;
 }
 
-/** Lazy proxy so `import { relipay }` works without eager env validation. */
-export const relipay = new Proxy({} as ReliPay, {
+/** Lazy proxy so `import { rekey }` works without eager env validation. */
+export const rekey = new Proxy({} as Rekey, {
   get(_target, prop, receiver) {
     return Reflect.get(getRelipay(), prop, receiver);
   },
-}) as ReliPay;
+}) as Rekey;
 
-export { RelipayError };
+export { RekeyError };

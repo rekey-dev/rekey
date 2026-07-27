@@ -6,8 +6,8 @@
 
 import 'server-only';
 import { cookies } from 'next/headers';
-import { RelipayBrowserClient } from '@relipay/react';
-import { relipayApiUrl } from './env';
+import { RekeyBrowserClient } from '@rekey.dev/react';
+import { rekeyApiUrl } from './env';
 import { getPortalConfig } from './config';
 
 const ACCESS = 'relipay_portal_access';
@@ -26,10 +26,10 @@ function cookieOpts(slug: string, maxAge: number) {
 }
 
 /** A publishable-key client for `slug`, or null if the app's portal isn't live. */
-export async function portalClientFor(slug: string): Promise<RelipayBrowserClient | null> {
+export async function portalClientFor(slug: string): Promise<RekeyBrowserClient | null> {
   const config = await getPortalConfig(slug);
   if (!config) return null;
-  return new RelipayBrowserClient({ apiUrl: relipayApiUrl(), publishableKey: config.publishableKey });
+  return new RekeyBrowserClient({ apiUrl: rekeyApiUrl(), publishableKey: config.publishableKey });
 }
 
 /**

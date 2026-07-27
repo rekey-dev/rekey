@@ -133,16 +133,16 @@ export default async function WebhooksPage({
         title="Webhook endpoints"
         description={
           <>
-            Events ReliPay sends to your backend when things happen (sign-ups, payments, dunning).
+            Events Rekey sends to your backend when things happen (sign-ups, payments, dunning).
             Each endpoint gets a signing secret — deliveries carry an HMAC-SHA256 signature in{' '}
-            <code className="font-mono">X-Relipay-Signature</code>.
+            <code className="font-mono">X-Rekey-Signature</code>.
           </>
         }
         action={
         <Modal
           trigger="+ Add endpoint"
           title="Add webhook endpoint"
-          description="ReliPay POSTs user lifecycle events to the URL with an HMAC-signed body."
+          description="Rekey POSTs user lifecycle events to the URL with an HMAC-signed body."
           modalKey="newWebhook"
         >
           <form action={createBound} className="space-y-3">
@@ -152,7 +152,7 @@ export default async function WebhooksPage({
                 type="url"
                 name="url"
                 required
-                placeholder="https://your-app.example.com/api/relipay/webhook"
+                placeholder="https://your-app.example.com/api/rekey/webhook"
                 className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
               />
             </label>
@@ -195,8 +195,8 @@ export default async function WebhooksPage({
         >
           payload &amp; verification guide on relipay.dev/docs/webhooks
         </a>{' '}
-        covers the JSON envelope ReliPay sends, the full event list, and how to verify the{' '}
-        <code className="font-mono">X-Relipay-Signature</code> header in your handler.
+        covers the JSON envelope Rekey sends, the full event list, and how to verify the{' '}
+        <code className="font-mono">X-Rekey-Signature</code> header in your handler.
       </p>
 
       {created && secret && (
@@ -206,8 +206,8 @@ export default async function WebhooksPage({
           </div>
           <p className="text-xs text-amber-800 dark:text-amber-300">
             Store this now. You'll use it to verify the{' '}
-            <code className="font-mono">X-Relipay-Signature</code> header on every inbound
-            delivery. ReliPay never displays it again — rotate from the endpoint detail page if lost.
+            <code className="font-mono">X-Rekey-Signature</code> header on every inbound
+            delivery. Rekey never displays it again — rotate from the endpoint detail page if lost.
           </p>
           <div className="flex items-center gap-2">
             <code className="flex-1 break-all rounded-md border border-amber-200 bg-[var(--color-surface)] px-3 py-2 font-mono text-xs dark:border-amber-800">

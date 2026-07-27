@@ -30,14 +30,14 @@
 import * as React from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 
-export const OPEN_COMMAND_PALETTE_EVENT = 'relipay:open-command-palette';
+export const OPEN_COMMAND_PALETTE_EVENT = 'rekey:open-command-palette';
 
 /** Convenience for client components that want a "Search" button. */
 export function openCommandPalette(): void {
   window.dispatchEvent(new Event(OPEN_COMMAND_PALETTE_EVENT));
 }
 
-const RECENTS_KEY = 'relipay.palette.recents';
+const RECENTS_KEY = 'rekey.palette.recents';
 const RECENTS_MAX = 5;
 
 interface PaletteApp {
@@ -281,7 +281,7 @@ export function CommandPalette(): React.JSX.Element {
     }
   }
 
-  const listboxId = 'relipay-palette-listbox';
+  const listboxId = 'rekey-palette-listbox';
   const activeOptionId = filtered.length > 0 ? `palette-opt-${activeIndex}` : undefined;
 
   // Render rows with a group header whenever the group changes (source order

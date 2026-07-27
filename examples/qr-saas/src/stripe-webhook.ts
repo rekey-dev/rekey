@@ -1,5 +1,5 @@
 /**
- * Drive the REAL signed Stripe webhook path against the local ReliPay API.
+ * Drive the REAL signed Stripe webhook path against the local Rekey API.
  *
  * The stub billing provider creates a PENDING subscription at checkout but
  * issues NO inbound webhook (there's no real Stripe to call us back). To flip

@@ -32,7 +32,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../../../lib/prisma.js';
-import { RelipayError } from '../../../lib/error.js';
+import { RekeyError } from '../../../lib/error.js';
 import { applicationsService } from '../../applications/applications.service.js';
 import { billingCredentialsService, type BillingProviderName } from '../credentials.service.js';
 import { getModule } from '../providers/registry.js';
@@ -69,7 +69,7 @@ export async function handleBillingProviderWebhook(
 ): Promise<unknown> {
   const rawBody = (request as RequestWithRawBody).rawBody;
   if (!rawBody) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'WEBHOOK_RAW_BODY_MISSING',
       message: 'Webhook handler did not receive a raw body.',
@@ -104,7 +104,7 @@ export async function handleBillingProviderWebhook(
   const creds = (credsRow?.data ?? null) as Record<string, string> | null;
   const webhookField = module.credentialSchema.find((f) => f.webhookRole);
   if (!creds || (webhookField && !creds[webhookField.key])) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 503,
       code: 'BILLING_CREDENTIALS_NOT_CONFIGURED',
       message: `Application "${application.slug}" has no ${module.display.label} webhook ${
@@ -138,7 +138,7 @@ export async function handleBillingProviderWebhook(
         { provider: module.name, code: result.code },
         'billing webhook signature verification failed',
       );
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: result.code,
         message: result.message,
@@ -239,7 +239,7 @@ export async function billingProviderWebhookRoutes(app: FastifyInstance): Promis
     const params = RouteParams.parse(request.params);
     const module = getModule(params.provider);
     if (!module) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'WEBHOOK_PROVIDER_UNKNOWN',
         message: `"${params.provider}" is not a registered billing provider.`,

@@ -1,6 +1,6 @@
 /**
  * Hosted MCP account tools — read-only views of the *authenticated* end-user's
- * own ReliPay data, scoped to (applicationId, endUserId). No secrets are ever
+ * own Rekey data, scoped to (applicationId, endUserId). No secrets are ever
  * returned (no key hashes, password hashes, provider creds).
  *
  * Each tool is a plain `{ name, description, inputSchema, handler }`. The MCP

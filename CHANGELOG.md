@@ -1,8 +1,36 @@
 # Changelog
 
-Notable changes to ReliPay, covering the self-hosted stack as well as the
-`@relipay/*` SDK packages. The packages share one version and release together
+Notable changes to Rekey, covering the self-hosted stack as well as the
+`@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
+
+## 1.1.2
+
+ReliPay is now **Rekey**. This release moves the SDK packages to their new
+home: install `@rekey.dev/node`, `@rekey.dev/react`, `@rekey.dev/nextjs`,
+`@rekey.dev/cli`, `@rekey.dev/mcp`, `@rekey.dev/shared-types`. The old
+`@relipay/*` packages are deprecated on npm and will receive no further
+updates.
+
+### Breaking changes (relative to `@relipay/*` 1.1.1)
+
+- **Package scope**: `@relipay/<name>` → `@rekey.dev/<name>`. Update imports
+  and dependencies; APIs are otherwise unchanged in this release.
+- **Exported names**: `RelipayError` → `RekeyError` (plus the matching
+  `RekeyErrorShape`/`RekeyErrorSchema`/`RekeyErrorPayload` types),
+  `RelipayProvider` → `RekeyProvider`, `relipayMiddleware` →
+  `rekeyMiddleware`, `relipayBrowser` → `rekeyBrowser`, and the `Relipay`
+  client class is now `Rekey`. `instanceof` checks and named imports need the
+  new names.
+- **User-token header**: the SDK now sends `X-Rekey-User-Token` and servers
+  from this version onward read only that header. A 1.1.1 (`@relipay/*`) SDK
+  talking to a 1.1.2+ server will get 401s on per-user routes — upgrading the
+  package is the fix.
+- **CLI binaries**: `relipay` → `rekey`, `relipay-mcp` → `rekey-mcp`.
+
+Self-hosters: your deployment domains, environment variable names
+(`RELIPAY_URL` etc.), cookie names, and docker-compose service names are
+unchanged in this release.
 
 ## 1.1.1
 
@@ -336,18 +364,18 @@ npm install @relipay/node
 
 ## 1.0.0
 
-First stable release. All `@relipay/*` packages publish under the `latest`
-dist-tag. `npm install @relipay/node` (no tag) now resolves.
+First stable release. All `@rekey.dev/*` packages publish under the `latest`
+dist-tag. `npm install @rekey.dev/node` (no tag) now resolves.
 
 Since `1.0.0-rc.1`: operator MCP write/operate tools (plan entitlements,
 member management, credentials, end-user + mode controls, scoped + audited),
-new ReliPay brand/logo across the apps, panel MCP-consent and passkey
+new Rekey brand/logo across the apps, panel MCP-consent and passkey
 sign-in fixes, and marketing self-host guide + SEO updates.
 
 Install:
 
 ```bash
-npm install @relipay/node
+npm install @rekey.dev/node
 ```
 
 ## 1.0.0-rc.1
@@ -356,12 +384,12 @@ First release candidate for the 1.0 line. Published under the `beta` npm
 dist-tag (pre-release) so it can be smoke-tested end-to-end before `1.0.0`
 stable promotes to `latest`.
 
-- Cut the first public release from the new OSS home, `relipay-dev/relipay`.
+- Cut the first public release from the new OSS home, `rekey-dev/rekey`.
 - No API changes versus `0.1.0-beta.4`; this is a version-line bump to exercise
   the public release pipeline (clean mirror → GitHub Release → npm publish).
 
 Install:
 
 ```bash
-npm install @relipay/node@beta
+npm install @rekey.dev/node@beta
 ```

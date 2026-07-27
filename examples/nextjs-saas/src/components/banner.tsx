@@ -3,7 +3,7 @@ import * as React from 'react';
 /**
  * A status/error banner. Server-rendered from the page's `?status=` /
  * `?error=` query so flows (checkout return, sign-in errors, invite results)
- * surface a clear message. RelipayError codes are mapped to friendly copy
+ * surface a clear message. RekeyError codes are mapped to friendly copy
  * where known, else shown verbatim.
  */
 
@@ -49,7 +49,7 @@ export function Banner({
   }
   if (status) {
     return (
-      <div className="mb-4 rounded-lg border border-relipay-600 bg-relipay-50 dark:bg-relipay-800/30 px-3 py-2 text-sm text-relipay-800 dark:text-relipay-100">
+      <div className="mb-4 rounded-lg border border-rekey-600 bg-rekey-50 dark:bg-rekey-800/30 px-3 py-2 text-sm text-rekey-800 dark:text-rekey-100">
         {MESSAGES[status] ?? status}
       </div>
     );

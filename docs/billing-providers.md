@@ -1,9 +1,9 @@
 # Adding a billing provider
 
-ReliPay ships with Stripe, PayPal, and Razorpay. If your processor isn't one of
+Rekey ships with Stripe, PayPal, and Razorpay. If your processor isn't one of
 those, you add it as a **provider module**: one directory in the API that
-describes everything ReliPay needs — how to create checkouts, how to verify the
-processor's webhooks, and how its events map onto ReliPay's subscription state
+describes everything Rekey needs — how to create checkouts, how to verify the
+processor's webhooks, and how its events map onto Rekey's subscription state
 machine. The registry derives the rest: routes, validation, credential
 handling, and the panel's configuration form.
 
@@ -44,7 +44,7 @@ const mollie: ProviderModule = {
     resolveApplication,  // which Application does this event belong to?
     verify,              // is this really from the processor?
     extractEventId,      // idempotency key — replays are acked, not re-applied
-    translate,           // processor event → normalized ReliPay events
+    translate,           // processor event → normalized Rekey events
   },
 };
 ```

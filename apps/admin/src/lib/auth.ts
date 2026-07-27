@@ -31,7 +31,26 @@ interface Session {
 const sessions = new Map<string, Session>();
 const failedAttempts = new Map<string, { count: number; resetAt: number }>();
 
-/** Lazily resolve the env value so test setups can poke it. Refuse if absent. */
+/**
+ * Is a usable key configured at all?
+ *
+ * Separate from `verifyKey` because the two failures need different answers:
+ * a wrong key is the operator's mistake, a missing key is the deployment's. The
+ * login page renders distinct copy for each so nobody spends an evening
+ * re-pasting a key at a server that was never given one.
+ */
+export function isAdminKeyConfigured(): boolean {
+  return (process.env.SUPER_ADMIN_KEY ?? '').length >= 32;
+}
+
+/**
+ * Lazily resolve the env value so test setups can poke it. Refuse if absent.
+ *
+ * Deliberately NOT cached at module init, despite that being suggested as a
+ * micro-optimisation: the laziness is what lets tests set the variable after
+ * import, and it costs one property read on a path that runs once per sign-in.
+ * Caching would trade a real testing property for nothing measurable.
+ */
 function adminKey(): Buffer {
   const k = process.env.SUPER_ADMIN_KEY ?? '';
   if (k.length < 32) {

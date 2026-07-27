@@ -15,7 +15,7 @@
 
 import type { TenantApiToken } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import {
   generateOperatorToken,
   DEFAULT_OPERATOR_TOKEN_SCOPES,
@@ -63,7 +63,7 @@ function normaliseScopes(requested: string[]): OperatorTokenScope[] {
   if (requested.length === 0) return [...DEFAULT_OPERATOR_TOKEN_SCOPES];
   const unknown = requested.filter((s) => !isOperatorTokenScope(s));
   if (unknown.length > 0) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'OPERATOR_SCOPE_UNKNOWN',
       message: `Unknown PAT scope(s): ${unknown.join(', ')}.`,
@@ -86,7 +86,7 @@ export const operatorTokensService = {
     // rejects as expired — a dead-on-arrival credential the operator was told
     // was "created". Fail fast with a clear error instead.
     if (input.expiresAt !== undefined && input.expiresAt.getTime() <= Date.now()) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'OPERATOR_TOKEN_EXPIRY_IN_PAST',
         message: `expiresAt (${input.expiresAt.toISOString()}) is not in the future — the token would be dead on arrival.`,
@@ -98,7 +98,7 @@ export const operatorTokensService = {
       where: { tenantUserId: input.tenantUserId, revokedAt: null },
     });
     if (activeCount >= MAX_TOKENS_PER_OPERATOR) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'OPERATOR_TOKEN_LIMIT_REACHED',
         message: `You already have ${MAX_TOKENS_PER_OPERATOR} active personal-access-tokens.`,
@@ -141,7 +141,7 @@ export const operatorTokensService = {
   async revoke(tenantUserId: string, id: string): Promise<PublicOperatorToken> {
     const token = await prisma.tenantApiToken.findUnique({ where: { id } });
     if (!token || token.tenantUserId !== tenantUserId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'OPERATOR_TOKEN_NOT_FOUND',
         message: `Personal-access-token "${id}" not found.`,

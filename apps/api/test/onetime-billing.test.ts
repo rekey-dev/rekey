@@ -81,7 +81,7 @@ describe('one-time vs recurring checkout', () => {
       .inject({
         method: 'POST',
         url: '/api/v1/billing/checkout',
-        headers: { authorization: `Bearer ${liveKey}`, 'x-relipay-user-token': euToken },
+        headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': euToken },
         payload: {
           planSlug,
           successUrl: 'https://app.example/ok',

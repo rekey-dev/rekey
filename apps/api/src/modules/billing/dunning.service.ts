@@ -1,12 +1,12 @@
 /**
  * Dunning — failed-payment recovery cases (roadmap §5 v1).
  *
- * What ReliPay does vs what the PROVIDER does:
+ * What Rekey does vs what the PROVIDER does:
  *   - The provider owns the actual re-charging. Stripe Smart Retries keeps
  *     retrying the card on its own schedule (each retry lands here as another
  *     `invoice.payment_failed` / `invoice.paid`); PayPal retries a SUSPENDED
- *     subscription similarly. ReliPay never re-charges a card itself.
- *   - ReliPay owns the STATE MACHINE + NOTIFICATIONS: one `DunningCase` per
+ *     subscription similarly. Rekey never re-charges a card itself.
+ *   - Rekey owns the STATE MACHINE + NOTIFICATIONS: one `DunningCase` per
  *     PAST_DUE trip, reminder emails to the end-user (day 0/3/7, via the
  *     per-app email transport when one is configured), `dunning.*` outbound
  *     webhook events, and the day-14 exhaustion (cancel locally + best-effort
@@ -34,7 +34,7 @@
 
 import type { FastifyBaseLogger } from 'fastify';
 import type { DunningCase, Subscription } from '@prisma/client';
-import { BillingConfigSchema } from '@relipay/shared-types';
+import { BillingConfigSchema } from '@rekey.dev/shared-types';
 import { prisma } from '../../lib/prisma.js';
 import { emailService } from '../email/email.service.js';
 import { emitDunningEvent, emitSubscriptionEvent } from './webhooks/billing-events.js';

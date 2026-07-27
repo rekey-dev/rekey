@@ -1,14 +1,14 @@
 /**
  * Single-page web UI for the QR SaaS — vanilla HTML+JS, no build step.
  * Served at GET / by the Express server. Talks to the same /auth + /api routes
- * a curl user would, attaching the ReliPay access token (kept in localStorage)
+ * a curl user would, attaching the Rekey access token (kept in localStorage)
  * as a Bearer header. Purely a convenience face on the API.
  *
- * It exercises ReliPay end-to-end across four tabs:
+ * It exercises Rekey end-to-end across four tabs:
  *   QR Codes — dynamic QR CRUD + per-QR scan analytics (Pro feature-gated).
  *   Billing  — entitlements, usage-this-month, plan catalog + upgrade checkout,
  *              prepaid credit balance/ledger + buy-credits checkout.
- *   Team     — ReliPay organizations: create, list, switch (active-org token),
+ *   Team     — Rekey organizations: create, list, switch (active-org token),
  *              members, invitations. Org workspaces pool billing + usage.
  *   Account  — active sessions (revoke / sign-out-everywhere) + magic-link.
  *
@@ -21,7 +21,7 @@ export const INDEX_HTML = /* html */ `<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>QR SaaS — built on ReliPay</title>
+<title>QR SaaS — built on Rekey</title>
 <style>
   :root { --bg:#0b0c10; --card:#15171e; --bd:#262a35; --fg:#e6e8ee; --mut:#9aa1b1; --pri:#5b8cff; --pri2:#3f6fe0; --ok:#37d39b; --err:#ff6b6b; }
   * { box-sizing:border-box; }
@@ -66,8 +66,8 @@ export const INDEX_HTML = /* html */ `<!doctype html>
 </head>
 <body>
 <div class="wrap">
-  <h1>QR SaaS <span class="pill">built on ReliPay</span></h1>
-  <p class="sub">Dynamic QR codes — auth, billing, credits, usage caps &amp; teams all via ReliPay. This page is a thin face on the JSON API.</p>
+  <h1>QR SaaS <span class="pill">built on Rekey</span></h1>
+  <p class="sub">Dynamic QR codes — auth, billing, credits, usage caps &amp; teams all via Rekey. This page is a thin face on the JSON API.</p>
 
   <div id="msg" class="msg"></div>
 
@@ -188,7 +188,7 @@ export const INDEX_HTML = /* html */ `<!doctype html>
       </div>
       <div class="card">
         <h3>Magic link</h3>
-        <p class="sub" style="margin:0 0 8px">Send a passwordless sign-in link to your email (ReliPay handles delivery).</p>
+        <p class="sub" style="margin:0 0 8px">Send a passwordless sign-in link to your email (Rekey handles delivery).</p>
         <div class="row"><input id="magicEmail" type="email" placeholder="you@demo.dev" style="flex:1" />
           <button onclick="sendMagicLink()">Send link</button></div>
         <div id="magicOut" class="hide" style="margin-top:10px"></div>

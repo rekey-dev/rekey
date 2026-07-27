@@ -13,8 +13,8 @@ import { NextResponse, type NextRequest } from 'next/server';
 import {
   ACCESS_COOKIE,
   REFRESH_COOKIE,
-  relipay,
-  RelipayError,
+  rekey,
+  RekeyError,
 } from '@/lib/relipay';
 
 const ONE_DAY = 60 * 60 * 24;
@@ -29,7 +29,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   }
 
   try {
-    const fresh = await relipay.auth.refresh(refresh);
+    const fresh = await rekey.auth.refresh(refresh);
     // Relative Location — resolves against the public host, not the internal
     // bind address `req.url` carries behind a proxy.
     const res = new NextResponse(null, { status: 303, headers: { location: safeReturn } });
@@ -50,7 +50,7 @@ export async function GET(req: NextRequest): Promise<Response> {
     });
     return res;
   } catch (err) {
-    void (err instanceof RelipayError);
+    void (err instanceof RekeyError);
     return new NextResponse(null, { status: 303, headers: { location: '/sign-out?reason=expired' } });
   }
 }

@@ -11,7 +11,7 @@ import * as React from 'react';
  */
 export const THEME_INIT = `
 (function(){try{
-  var saved = localStorage.getItem('relipay-admin-theme') || 'system';
+  var saved = localStorage.getItem('rekey-admin-theme') || 'system';
   var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
   var dark = saved === 'dark' || (saved === 'system' && prefersDark);
   document.documentElement.classList.toggle('dark', dark);
@@ -30,13 +30,13 @@ export function ThemeToggle(): React.JSX.Element {
   const [mode, setMode] = React.useState<Mode>('system');
 
   React.useEffect(() => {
-    const saved = (localStorage.getItem('relipay-admin-theme') as Mode | null) ?? 'system';
+    const saved = (localStorage.getItem('rekey-admin-theme') as Mode | null) ?? 'system';
     setMode(saved);
   }, []);
 
   function pick(next: Mode): void {
     setMode(next);
-    localStorage.setItem('relipay-admin-theme', next);
+    localStorage.setItem('rekey-admin-theme', next);
     applyMode(next);
   }
 

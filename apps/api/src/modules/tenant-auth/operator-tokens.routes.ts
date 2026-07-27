@@ -21,7 +21,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { applicationsService } from '../applications/applications.service.js';
 import { apiKeysService } from '../api-keys/api-keys.service.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import {
   resolveOperatorToken,
   requireOperatorScope,
@@ -36,7 +36,7 @@ import { recordSecurityEvent, requestContext } from '../../lib/security-events.j
 async function ensureAppInTenant(applicationId: string, tenantId: string): Promise<void> {
   const app = await applicationsService.get(applicationId);
   if (app.tenantId !== tenantId) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 404,
       code: 'APPLICATION_NOT_FOUND',
       message: `Application "${applicationId}" not found in this workspace.`,

@@ -1,13 +1,13 @@
 /**
- * ReliPay wiring for the QR SaaS sample.
+ * Rekey wiring for the QR SaaS sample.
  *
  * Two clients live here:
  *
- *  1. `relipay` — the @relipay/node server SDK, constructed with the
+ *  1. `rekey` — the @rekey.dev/node server SDK, constructed with the
  *     Application's secret key. This is what the QR app uses at runtime for
  *     auth, usage metering, entitlement reads, checkout, credits, orgs.
  *
- *  2. `TenantAdmin` — a thin typed wrapper over the ReliPay *tenant operator*
+ *  2. `TenantAdmin` — a thin typed wrapper over the Rekey *tenant operator*
  *     REST API (`/api/v1/tenant/...`). The server SDK deliberately does NOT
  *     expose tenant-operator surfaces (creating Applications, usage meters,
  *     plans, plan entitlements) because those are panel-side / one-time
@@ -15,10 +15,10 @@
  *     QR product though, so we hit the REST API directly with the operator
  *     session token. In production you'd do this once, by hand, in the panel.
  *
- * Browser usage (FYI): a React frontend would use `@relipay/react` with the
+ * Browser usage (FYI): a React frontend would use `@rekey.dev/react` with the
  * Application's *public* key — never the secret key. e.g.
  *
- *   import { ReliPayProvider, useAuth } from '@relipay/react';
+ *   import { ReliPayProvider, useAuth } from '@rekey.dev/react';
  *   <ReliPayProvider apiUrl={API} publicKey={PUBLIC_KEY}>...</ReliPayProvider>
  *   const { user, signIn, signOut } = useAuth();
  *
@@ -26,16 +26,16 @@
  * /api/v1/billing/* endpoints this server SDK calls, but with the public key.
  */
 
-import { ReliPay } from '@relipay/node';
+import { Rekey } from '@rekey.dev/node';
 
 export const RELIPAY_URL = process.env.RELIPAY_URL ?? 'http://localhost:3050';
 
 /** Construct the runtime server SDK client from a minted secret key. */
-export function makeClient(secretKey: string): ReliPay {
-  return new ReliPay({ apiUrl: RELIPAY_URL, secretKey });
+export function makeClient(secretKey: string): Rekey {
+  return new Rekey({ apiUrl: RELIPAY_URL, secretKey });
 }
 
-/** Shape of the `{ success, data }` envelope the ReliPay API returns. */
+/** Shape of the `{ success, data }` envelope the Rekey API returns. */
 type Envelope<T> = { success: true; data: T } | { success: false; error: ApiError };
 export interface ApiError {
   code: string;
@@ -44,7 +44,7 @@ export interface ApiError {
   requestId?: string;
 }
 
-/** A typed error carrying ReliPay's structured error body + HTTP status. */
+/** A typed error carrying Rekey's structured error body + HTTP status. */
 export class TenantApiError extends Error {
   readonly code: string;
   readonly status: number;
@@ -136,9 +136,9 @@ export class TenantAdmin {
     input: { name: string; mode: 'live' | 'test'; scopes?: string[] },
   ): Promise<{ apiKey: { id: string }; rawKey: string; warning: string }> {
     // NOTE: this endpoint returns the SECRET key only. The Application's
-    // browser-safe public key (`rp_pub_…`, needed for @relipay/react) is NOT
+    // browser-safe public key (`rp_pub_…`, needed for @rekey.dev/react) is NOT
     // in this response — you have to read it separately from
-    // `relipay.applications.me()`. See getApplication() below.
+    // `rekey.applications.me()`. See getApplication() below.
     return this.req('POST', `/api/v1/tenant/applications/${appId}/api-keys`, input);
   }
 

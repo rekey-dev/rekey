@@ -1,6 +1,6 @@
 # Data erasure (GDPR right to be forgotten)
 
-ReliPay supports two distinct ways to remove an end-user, with very different
+Rekey supports two distinct ways to remove an end-user, with very different
 guarantees. Pick the right one:
 
 | Operation | Route | What happens |
@@ -80,7 +80,7 @@ with HTTP `410 END_USER_ERASED`:
 - **Security event:** `end_user.erased` (actor = operator) with per-model counts.
 - **Outbound webhook:** `user.erased` — payload `data.user` = `{ id, erasedAt }`.
   Use it to propagate the erasure to your own copies of the user's PII. (See the
-  webhook events registry in `@relipay/node` / docs/webhooks.)
+  webhook events registry in `@rekey.dev/node` / docs/webhooks.)
 
 ## Panel
 

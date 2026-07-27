@@ -21,7 +21,7 @@ import type {
   TenantRole,
 } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import {
   generateInvitationToken,
   hashInvitationToken,
@@ -91,7 +91,7 @@ function ensureCanManage(actor: TenantRole, target: TenantRole): void {
   // OWNER can do anything. ADMIN can manage MEMBER only. MEMBER can manage nothing.
   if (actor === 'OWNER') return;
   if (actor === 'ADMIN' && target === 'MEMBER') return;
-  throw new RelipayError({
+  throw new RekeyError({
     statusCode: 403,
     code: 'TENANT_ROLE_INSUFFICIENT',
     message: `Your role (${actor}) cannot manage members with role ${target}.`,
@@ -141,7 +141,7 @@ export const tenantWorkspacesService = {
       where: { id: membershipId },
     });
     if (!membership || membership.tenantId !== tenantId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'MEMBERSHIP_NOT_FOUND',
         message: 'Membership not found in this workspace.',
@@ -179,7 +179,7 @@ export const tenantWorkspacesService = {
   }): Promise<MemberGrantRow> {
     const membership = await this.loadMembershipOrThrow(args.tenantId, args.membershipId);
     if (membership.role !== 'MEMBER') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'APP_GRANT_MEMBER_ONLY',
         message: `Per-application grants only apply to MEMBER roles — this membership is ${membership.role} and already has full access to every Application.`,
@@ -191,7 +191,7 @@ export const tenantWorkspacesService = {
       select: { id: true, tenantId: true, name: true, slug: true },
     });
     if (!app || app.tenantId !== args.tenantId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'APPLICATION_NOT_FOUND',
         message: `Application "${args.applicationId}" not found in this workspace.`,
@@ -231,7 +231,7 @@ export const tenantWorkspacesService = {
       where: { tenantMembershipId: args.membershipId, applicationId: args.applicationId },
     });
     if (deleted.count === 0) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'APP_GRANT_NOT_FOUND',
         message: 'No grant for that application on this membership.',
@@ -275,7 +275,7 @@ export const tenantWorkspacesService = {
       where: { tenantId: input.tenantId, tenantUser: { email } },
     });
     if (existing) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 409,
         code: 'INVITE_TARGET_ALREADY_MEMBER',
         message: `${email} is already a member of this workspace.`,
@@ -339,7 +339,7 @@ export const tenantWorkspacesService = {
       where: { id: args.invitationId },
     });
     if (!inv || inv.tenantId !== args.tenantId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'INVITATION_NOT_FOUND',
         message: 'Invitation not found in this workspace.',
@@ -348,7 +348,7 @@ export const tenantWorkspacesService = {
     }
     ensureCanManage(args.actorRole, inv.role);
     if (inv.acceptedAt) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'INVITATION_ALREADY_ACCEPTED',
         message: 'Invitation was already accepted; revoke the resulting membership instead.',
@@ -380,7 +380,7 @@ export const tenantWorkspacesService = {
       include: { tenant: { select: { name: true } } },
     });
     if (!inv) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'INVITATION_NOT_FOUND',
         message: 'Invitation token is unknown.',
@@ -388,7 +388,7 @@ export const tenantWorkspacesService = {
       });
     }
     if (inv.revokedAt) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'INVITATION_REVOKED',
         message: 'This invitation has been revoked.',
@@ -396,7 +396,7 @@ export const tenantWorkspacesService = {
       });
     }
     if (inv.acceptedAt) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'INVITATION_ALREADY_ACCEPTED',
         message: 'This invitation has already been used.',
@@ -404,7 +404,7 @@ export const tenantWorkspacesService = {
       });
     }
     if (inv.expiresAt <= new Date()) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'INVITATION_EXPIRED',
         message: 'This invitation has expired.',
@@ -440,7 +440,7 @@ export const tenantWorkspacesService = {
       // Re-check inside txn so concurrent accepts don't both succeed.
       const inv = await tx.tenantInvitation.findUnique({ where: { tokenHash } });
       if (!inv || inv.revokedAt || inv.acceptedAt) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'INVITATION_NOT_USABLE',
           message: 'Invitation is missing, revoked, or already accepted.',
@@ -448,7 +448,7 @@ export const tenantWorkspacesService = {
         });
       }
       if (inv.expiresAt <= new Date()) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'INVITATION_EXPIRED',
           message: 'Invitation has expired.',
@@ -464,7 +464,7 @@ export const tenantWorkspacesService = {
         where: { id: args.tenantUserId },
       });
       if (accepting.email.toLowerCase() !== inv.email.toLowerCase()) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 403,
           code: 'INVITATION_EMAIL_MISMATCH',
           message: 'This invitation was issued to a different email address.',
@@ -546,7 +546,7 @@ export const tenantWorkspacesService = {
       where: { id: args.membershipId },
     });
     if (!target || target.tenantId !== args.tenantId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'MEMBERSHIP_NOT_FOUND',
         message: 'Membership not found in this workspace.',
@@ -561,7 +561,7 @@ export const tenantWorkspacesService = {
         where: { tenantId: args.tenantId, role: 'OWNER' },
       });
       if (owners <= 1) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'CANNOT_REMOVE_LAST_OWNER',
           message: 'Cannot remove the last OWNER of a workspace.',
@@ -583,7 +583,7 @@ export const tenantWorkspacesService = {
       include: { tenantUser: { select: { email: true, name: true } } },
     });
     if (!target || target.tenantId !== args.tenantId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'MEMBERSHIP_NOT_FOUND',
         message: 'Membership not found in this workspace.',
@@ -599,7 +599,7 @@ export const tenantWorkspacesService = {
         where: { tenantId: args.tenantId, role: 'OWNER' },
       });
       if (owners <= 1) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'CANNOT_REMOVE_LAST_OWNER',
           message: 'Cannot demote the last OWNER of a workspace.',
@@ -644,7 +644,7 @@ export const tenantWorkspacesService = {
       select: { id: true, name: true, createdAt: true },
     });
     if (!t) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'TENANT_NOT_FOUND',
         message: 'Workspace not found.',
@@ -668,7 +668,7 @@ export const tenantWorkspacesService = {
   }): Promise<{ id: string; name: string }> {
     const name = args.name.trim();
     if (name.length < 2 || name.length > 80) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'WORKSPACE_NAME_INVALID',
         message: 'Workspace name must be 2–80 characters.',
@@ -690,7 +690,7 @@ export const tenantWorkspacesService = {
   async renameWorkspace(args: { tenantId: string; name: string }): Promise<{ id: string; name: string }> {
     const name = args.name.trim();
     if (name.length < 2 || name.length > 80) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'WORKSPACE_NAME_INVALID',
         message: 'Workspace name must be 2–80 characters.',

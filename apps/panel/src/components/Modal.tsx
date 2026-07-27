@@ -39,7 +39,7 @@ import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 
 let modalCounter = 0;
 function useModalId(): string {
-  const [id] = React.useState(() => `relipay-modal-${++modalCounter}`);
+  const [id] = React.useState(() => `rekey-modal-${++modalCounter}`);
   return id;
 }
 

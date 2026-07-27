@@ -8,9 +8,9 @@ export default async function HomePage(): Promise<React.JSX.Element> {
   return (
     <main className="min-h-screen grid place-items-center px-6">
       <div className="w-full max-w-lg space-y-6 text-center">
-        <h1 className="text-3xl font-semibold">ReliPay Demo</h1>
+        <h1 className="text-3xl font-semibold">Rekey Demo</h1>
         <p className="text-sm text-neutral-500 dark:text-neutral-400">
-          Reference Next.js app demonstrating <code>@relipay/node</code> end-to-end:
+          Reference Next.js app demonstrating <code>@rekey.dev/node</code> end-to-end:
           sign-up, sign-in, refresh, password reset, and change-password.
         </p>
 

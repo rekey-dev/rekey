@@ -1,11 +1,11 @@
 import * as React from 'react';
 import { getWorkspaceContext } from '@/lib/session';
-import { relipay } from '@/lib/relipay';
+import { rekey } from '@/lib/relipay';
 import { AppShell } from '@/components/app-shell';
 import { Banner } from '@/components/banner';
 import { CopyField } from '@/components/copy-field';
 import { createOrgAction, switchOrgAction, inviteMemberAction } from '@/lib/actions';
-import type { OrganizationWithRoleDto, OrganizationMemberDto } from '@relipay/node';
+import type { OrganizationWithRoleDto, OrganizationMemberDto } from '@rekey.dev/node';
 
 export default async function TeamPage({
   searchParams,
@@ -28,13 +28,13 @@ export default async function TeamPage({
   const { session, entitlements, activeOrgId, config } = ctx;
   const orgRequired = config.billingSubject === 'org';
 
-  const orgs: OrganizationWithRoleDto[] = await relipay.organizations
+  const orgs: OrganizationWithRoleDto[] = await rekey.organizations
     .listMine(session.accessToken)
     .catch(() => []);
 
   let members: OrganizationMemberDto[] = [];
   if (activeOrgId) {
-    members = await relipay.organizations.listMembers(session.accessToken, activeOrgId).catch(() => []);
+    members = await rekey.organizations.listMembers(session.accessToken, activeOrgId).catch(() => []);
   }
 
   return (
@@ -61,7 +61,7 @@ export default async function TeamPage({
           <h3 className="font-semibold">Invitation token</h3>
           <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
             A real app would email this. The invitee accepts it via{' '}
-            <code>relipay.organizations.acceptInvitation</code>.
+            <code>rekey.organizations.acceptInvitation</code>.
           </p>
           <div className="mt-2">
             <CopyField label="Invite token" value={inviteToken} />

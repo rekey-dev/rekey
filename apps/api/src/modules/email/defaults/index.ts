@@ -35,7 +35,7 @@ function shell(bodyHtml: string): string {
 ${bodyHtml}
       </td></tr>
     </table>
-    <p style="color:#86868b;font-size:12px;margin:16px 0 0;">Sent via ReliPay</p>
+    <p style="color:#86868b;font-size:12px;margin:16px 0 0;">Sent via Rekey</p>
   </td></tr>
 </table>
 </body></html>`;

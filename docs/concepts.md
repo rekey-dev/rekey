@@ -1,6 +1,6 @@
 # Concepts
 
-ReliPay's data model is the smallest possible thing that supports auth + billing for many independent applications. There are five entities you have to know.
+Rekey's data model is the smallest possible thing that supports auth + billing for many independent applications. There are five entities you have to know.
 
 ```
 Tenant ─────► Application ─────► EndUser
@@ -12,7 +12,7 @@ Tenant ─────► Application ─────► EndUser
 
 ## Tenant
 
-A **Tenant** is a ReliPay customer — the company or developer who runs (or signs up to) ReliPay. A Tenant typically owns one or more Applications.
+A **Tenant** is a Rekey customer — the company or developer who runs (or signs up to) Rekey. A Tenant typically owns one or more Applications.
 
 - Created via `POST /api/v1/admin/tenants` (bootstrap admin only).
 - Is **never** the thing an end-user authenticates against.
@@ -22,7 +22,7 @@ When in doubt: a Tenant is the *operator*, not the *user*.
 
 ## Application
 
-An **Application** is one project under a Tenant — `MyApp-prod`, `MyApp-staging`, `OtherSaas-eu`. This is the unit of multi-tenancy: every domain row in ReliPay carries an `applicationId`.
+An **Application** is one project under a Tenant — `MyApp-prod`, `MyApp-staging`, `OtherSaas-eu`. This is the unit of multi-tenancy: every domain row in Rekey carries an `applicationId`.
 
 - Has a unique URL-safe `slug` (immutable after create).
 - Has a publishable key (`rp_pub_<slug>_<rand>`) — a real browser credential for the public-bootstrap routes (sign-in/up, magic-link, passkey, license verify, plans). Rotatable with a grace window. See [api-keys.md](api-keys.md#publishable-key).
@@ -30,7 +30,7 @@ An **Application** is one project under a Tenant — `MyApp-prod`, `MyApp-stagin
 - Owns its own end-user pool — users do not cross Applications.
 - Owns its `authConfig` (which auth methods enabled, redirect URLs) and `billingConfig` (which provider, currency).
 
-A handy frame: a single ReliPay instance with three Tenants, each running two Applications, looks like six totally independent SaaS systems sharing one DB.
+A handy frame: a single Rekey instance with three Tenants, each running two Applications, looks like six totally independent SaaS systems sharing one DB.
 
 ## EndUser
 
@@ -42,10 +42,10 @@ An **EndUser** is a signup inside one Application. Email is unique *per Applicat
 
 ## ApiKey
 
-The **secret key** a customer's server uses to call ReliPay via `@relipay/node`. Many per Application. Format: `rp_live_<rand>` or `rp_test_<rand>`. Stored as SHA-256 hash; raw value shown to operator exactly once at creation.
+The **secret key** a customer's server uses to call Rekey via `@rekey.dev/node`. Many per Application. Format: `rp_live_<rand>` or `rp_test_<rand>`. Stored as SHA-256 hash; raw value shown to operator exactly once at creation.
 
 Distinct from:
-- **Publishable key** (`rp_pub_<slug>_<rand>`) — browser-safe credential for the public-bootstrap routes via `@relipay/react`; no backend required. Identity, not authorization.
+- **Publishable key** (`rp_pub_<slug>_<rand>`) — browser-safe credential for the public-bootstrap routes via `@rekey.dev/react`; no backend required. Identity, not authorization.
 - **`SUPER_ADMIN_KEY`** — bootstrap credential, not Application-scoped.
 
 See [api-keys.md](api-keys.md) for the full key model.
@@ -74,7 +74,7 @@ Semantics:
 
 Routes with their own deduplication are deliberately **not** opted in: provider webhooks (`WebhookEvent` dedup above), `auth/sign-up` (duplicate emails 409 naturally). The credits routes additionally accept a body-level `idempotencyKey` that dedupes at the *ledger* level — that keeps working unchanged; the header is the generic transport-level mechanism on top.
 
-## What ReliPay deliberately doesn't model (in v1)
+## What Rekey deliberately doesn't model (in v1)
 
 - **Cross-Application users.** Your end-user is in one Application. If your product family wants single-sign-on across Applications, that's a panel/account feature for Phase 2+, not a data-model feature.
 - **Tax computation.** Defer to provider (Stripe Tax) or external (TaxJar).

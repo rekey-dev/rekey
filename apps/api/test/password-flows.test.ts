@@ -127,9 +127,11 @@ describe('password flows + sign-out-everywhere', () => {
     expect(r.statusCode).toBe(200);
     const data = r.json().data as { emailSent: boolean; resetToken: string | null };
     expect(data.resetToken).toBeNull();
-    // No transport configured in tests, so nothing was delivered either — the
-    // browser flow legitimately requires email transport.
-    expect(data.emailSent).toBe(false);
+    // `emailSent` is now a FIXED `true` for a publishable caller, regardless of
+    // what happened. It has to be: anything that varies with the real outcome
+    // tells an attacker whether a send was attempted, i.e. whether the address
+    // exists. See enumeration-resistance.test.ts for the full contract.
+    expect(data.emailSent).toBe(true);
   });
 
   it('magic-link/request NEVER returns the raw token to a publishable key', async () => {
@@ -341,7 +343,7 @@ describe('password flows + sign-out-everywhere', () => {
     const wrong = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/change-password',
-      headers: { authorization: `Bearer ${appA.liveKey}`, 'x-relipay-user-token': accessToken },
+      headers: { authorization: `Bearer ${appA.liveKey}`, 'x-rekey-user-token': accessToken },
       payload: { currentPassword: 'WRONG', newPassword: 'brand-new-passphrase' },
     });
     expect(wrong.statusCode).toBe(401);
@@ -354,7 +356,7 @@ describe('password flows + sign-out-everywhere', () => {
     const r = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/change-password',
-      headers: { authorization: `Bearer ${appA.liveKey}`, 'x-relipay-user-token': accessToken },
+      headers: { authorization: `Bearer ${appA.liveKey}`, 'x-rekey-user-token': accessToken },
       payload: { currentPassword: 'pw-one-two-three', newPassword: 'fresh-passphrase' },
     });
     expect(r.statusCode).toBe(200);
@@ -395,7 +397,7 @@ describe('password flows + sign-out-everywhere', () => {
     const r = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/sign-out-everywhere',
-      headers: { authorization: `Bearer ${appA.liveKey}`, 'x-relipay-user-token': accessToken },
+      headers: { authorization: `Bearer ${appA.liveKey}`, 'x-rekey-user-token': accessToken },
     });
     expect(r.statusCode).toBe(200);
     const data = r.json().data as { revokedCount: number };

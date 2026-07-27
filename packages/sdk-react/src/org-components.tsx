@@ -9,7 +9,7 @@
  * auth widgets, these components are **render + delegate**:
  *
  *   - READ data (the user's orgs, the active org id, a team's members/invites)
- *     comes in as PROPS that the customer resolves server-side via `@relipay/node`
+ *     comes in as PROPS that the customer resolves server-side via `@rekey.dev/node`
  *     (`organizations.listMine`, `organizations.listMembers`, …).
  *   - WRITES (create, switch, invite, set-role, remove) are customer Server
  *     Actions passed via props and wired to `<form action={…}>`.
@@ -97,11 +97,11 @@ function OrganizationSwitcherBody({
   const hasSwitchTargets = organizations.length > 0 || showPersonal;
 
   return (
-    <div className={cx('relipay-card', 'card')}>
-      <div className={cx('relipay-header', 'header')}>
-        <h2 className={cx('relipay-title', 'title')} style={{ fontSize: '1rem' }}>{label}</h2>
+    <div className={cx('rekey-card', 'card')}>
+      <div className={cx('rekey-header', 'header')}>
+        <h2 className={cx('rekey-title', 'title')} style={{ fontSize: '1rem' }}>{label}</h2>
         {orgRequired && !activeOrganizationId && (
-          <p className={cx('relipay-subtitle', 'subtitle')}>
+          <p className={cx('rekey-subtitle', 'subtitle')}>
             This app bills per team — select or create a team to continue.
           </p>
         )}
@@ -110,16 +110,16 @@ function OrganizationSwitcherBody({
       {/* Current selection + a native select to switch. Suppressed when there's
           nothing to switch to (per-org billing, no teams yet) — see above. */}
       {hasSwitchTargets ? (
-        <form action={switchAction} className="relipay-stack">
-          <label className={cx('relipay-label', 'label')} htmlFor="relipay-org-select">
+        <form action={switchAction} className="rekey-stack">
+          <label className={cx('rekey-label', 'label')} htmlFor="rekey-org-select">
             {active ? `Current: ${active.name}` : orgRequired ? 'No team selected' : 'Personal workspace'}
           </label>
-          <div className="relipay-row">
+          <div className="rekey-row">
             <select
-              id="relipay-org-select"
+              id="rekey-org-select"
               name="orgId"
               defaultValue={activeOrganizationId ?? ''}
-              className={cx('relipay-select', 'input')}
+              className={cx('rekey-select', 'input')}
             >
               {showPersonal && <option value="">Personal</option>}
               {orgRequired && !activeOrganizationId && <option value="" disabled>Select a team…</option>}
@@ -132,7 +132,7 @@ function OrganizationSwitcherBody({
             </select>
             <button
               type="submit"
-              className={cx('relipay-btn relipay-btn-secondary', 'buttonSecondary')}
+              className={cx('rekey-btn rekey-btn-secondary', 'buttonSecondary')}
               style={{ flexShrink: 0 }}
             >
               Switch
@@ -143,19 +143,19 @@ function OrganizationSwitcherBody({
 
       {createAction && (
         <>
-          <div className={cx('relipay-divider', 'divider')}>or</div>
+          <div className={cx('rekey-divider', 'divider')}>or</div>
           {creating ? (
-            <form action={createAction} className="relipay-row">
+            <form action={createAction} className="rekey-row">
               <input
                 name="name"
                 required
                 autoFocus
                 placeholder="New team name"
-                className={cx('relipay-input', 'input')}
+                className={cx('rekey-input', 'input')}
               />
               <button
                 type="submit"
-                className={cx('relipay-btn relipay-btn-primary', 'buttonPrimary')}
+                className={cx('rekey-btn rekey-btn-primary', 'buttonPrimary')}
                 style={{ flexShrink: 0 }}
               >
                 Create
@@ -164,7 +164,7 @@ function OrganizationSwitcherBody({
           ) : (
             <button
               type="button"
-              className={cx('relipay-btn relipay-btn-secondary relipay-btn-block', 'buttonSecondary')}
+              className={cx('rekey-btn rekey-btn-secondary rekey-btn-block', 'buttonSecondary')}
               onClick={() => setCreating(true)}
             >
               Create team
@@ -224,32 +224,32 @@ function CreateOrganizationBody({
 }: CreateOrganizationProps): React.JSX.Element {
   const cx = useCx();
   return (
-    <div className={cx('relipay-card', 'card')}>
-      <div className={cx('relipay-header', 'header')}>
-        <h2 className={cx('relipay-title', 'title')}>{title}</h2>
-        {subtitle && <p className={cx('relipay-subtitle', 'subtitle')}>{subtitle}</p>}
+    <div className={cx('rekey-card', 'card')}>
+      <div className={cx('rekey-header', 'header')}>
+        <h2 className={cx('rekey-title', 'title')}>{title}</h2>
+        {subtitle && <p className={cx('rekey-subtitle', 'subtitle')}>{subtitle}</p>}
       </div>
       {error && (
-        <div role="alert" className={cx('relipay-alert relipay-alert-error', 'alert')}>{error}</div>
+        <div role="alert" className={cx('rekey-alert rekey-alert-error', 'alert')}>{error}</div>
       )}
-      <form action={action} className="relipay-stack">
-        <div className="relipay-field">
-          <label className={cx('relipay-label', 'label')} htmlFor="relipay-org-name">Team name</label>
+      <form action={action} className="rekey-stack">
+        <div className="rekey-field">
+          <label className={cx('rekey-label', 'label')} htmlFor="rekey-org-name">Team name</label>
           <input
-            id="relipay-org-name" name="name" required autoFocus
-            placeholder="Acme Inc." className={cx('relipay-input', 'input')}
+            id="rekey-org-name" name="name" required autoFocus
+            placeholder="Acme Inc." className={cx('rekey-input', 'input')}
           />
         </div>
         {withSlug && (
-          <div className="relipay-field">
-            <label className={cx('relipay-label', 'label')} htmlFor="relipay-org-slug">Slug</label>
+          <div className="rekey-field">
+            <label className={cx('rekey-label', 'label')} htmlFor="rekey-org-slug">Slug</label>
             <input
-              id="relipay-org-slug" name="slug"
-              placeholder="acme" className={cx('relipay-input', 'input')}
+              id="rekey-org-slug" name="slug"
+              placeholder="acme" className={cx('rekey-input', 'input')}
             />
           </div>
         )}
-        <button type="submit" className={cx('relipay-btn relipay-btn-primary relipay-btn-block', 'buttonPrimary')}>
+        <button type="submit" className={cx('rekey-btn rekey-btn-primary rekey-btn-block', 'buttonPrimary')}>
           Create team
         </button>
       </form>
@@ -329,39 +329,39 @@ function OrganizationProfileBody({
   const heading = title ?? `${organization.name} · Members`;
 
   return (
-    <div className={cx('relipay-card', 'card')} style={{ maxWidth: '32rem' }}>
-      <div className={cx('relipay-header', 'header')}>
-        <h2 className={cx('relipay-title', 'title')}>{heading}</h2>
-        <p className={cx('relipay-subtitle', 'subtitle')}>
+    <div className={cx('rekey-card', 'card')} style={{ maxWidth: '32rem' }}>
+      <div className={cx('rekey-header', 'header')}>
+        <h2 className={cx('rekey-title', 'title')}>{heading}</h2>
+        <p className={cx('rekey-subtitle', 'subtitle')}>
           {members.length} member{members.length === 1 ? '' : 's'}
           {viewerRole ? ` · you are ${viewerRole.toLowerCase()}` : ''}
         </p>
       </div>
 
       {/* Member list */}
-      <div className="relipay-stack">
+      <div className="rekey-stack">
         {members.map((m) => (
-          <div key={m.id} className="relipay-member-row">
+          <div key={m.id} className="rekey-member-row">
             <span>{m.email}</span>
             {manage && setRoleAction ? (
-              <form action={setRoleAction} className="relipay-row relipay-spacer">
+              <form action={setRoleAction} className="rekey-row rekey-spacer">
                 <HiddenFields fields={hiddenFields} />
                 <input type="hidden" name="endUserId" value={m.id} />
-                <select name="role" defaultValue={m.role} aria-label={`Role for ${m.email}`} className={cx('relipay-select', 'input')} style={{ padding: '4px 8px', width: 'auto' }}>
+                <select name="role" defaultValue={m.role} aria-label={`Role for ${m.email}`} className={cx('rekey-select', 'input')} style={{ padding: '4px 8px', width: 'auto' }}>
                   {ROLES.map((r) => (
                     <option key={r} value={r}>{r.charAt(0) + r.slice(1).toLowerCase()}</option>
                   ))}
                 </select>
-                <button type="submit" className={cx('relipay-link', 'menuItem')}>Save</button>
+                <button type="submit" className={cx('rekey-link', 'menuItem')}>Save</button>
               </form>
             ) : (
-              <span className={cx('relipay-badge', 'badge') + ' relipay-spacer'}>{m.role}</span>
+              <span className={cx('rekey-badge', 'badge') + ' rekey-spacer'}>{m.role}</span>
             )}
             {manage && removeAction && (
               <form action={removeAction}>
                 <HiddenFields fields={hiddenFields} />
                 <input type="hidden" name="endUserId" value={m.id} />
-                <button type="submit" className="relipay-link" style={{ color: 'var(--relipay-color-danger)' }}>
+                <button type="submit" className="rekey-link" style={{ color: 'var(--rekey-color-danger)' }}>
                   Remove
                 </button>
               </form>
@@ -373,17 +373,17 @@ function OrganizationProfileBody({
       {/* Pending invitations */}
       {invitations.length > 0 && (
         <>
-          <div className={cx('relipay-label', 'label')} style={{ marginTop: 'var(--relipay-spacing)' }}>Pending invitations</div>
-          <div className="relipay-stack">
+          <div className={cx('rekey-label', 'label')} style={{ marginTop: 'var(--rekey-spacing)' }}>Pending invitations</div>
+          <div className="rekey-stack">
             {invitations.map((inv) => (
-              <div key={inv.id} className="relipay-member-row">
+              <div key={inv.id} className="rekey-member-row">
                 <span>{inv.email}</span>
-                <span className={cx('relipay-badge', 'badge') + ' relipay-spacer'}>{inv.role}</span>
+                <span className={cx('rekey-badge', 'badge') + ' rekey-spacer'}>{inv.role}</span>
                 {manage && revokeInviteAction && (
                   <form action={revokeInviteAction}>
                     <HiddenFields fields={hiddenFields} />
                     <input type="hidden" name="invitationId" value={inv.id} />
-                    <button type="submit" className="relipay-link" style={{ color: 'var(--relipay-color-danger)' }}>
+                    <button type="submit" className="rekey-link" style={{ color: 'var(--rekey-color-danger)' }}>
                       Revoke
                     </button>
                   </form>
@@ -397,19 +397,19 @@ function OrganizationProfileBody({
       {/* Invite form (OWNER/ADMIN only) */}
       {manage && inviteAction && (
         <>
-          <div className={cx('relipay-divider', 'divider')}>invite a teammate</div>
-          <form action={inviteAction} className="relipay-row">
+          <div className={cx('rekey-divider', 'divider')}>invite a teammate</div>
+          <form action={inviteAction} className="rekey-row">
             <HiddenFields fields={hiddenFields} />
             <input
               name="email" type="email" required aria-label="Invite teammate by email"
-              placeholder="teammate@example.com" className={cx('relipay-input', 'input')}
+              placeholder="teammate@example.com" className={cx('rekey-input', 'input')}
             />
-            <select name="role" defaultValue="MEMBER" aria-label="Invite role" className={cx('relipay-select', 'input')} style={{ width: 'auto', flexShrink: 0 }}>
+            <select name="role" defaultValue="MEMBER" aria-label="Invite role" className={cx('rekey-select', 'input')} style={{ width: 'auto', flexShrink: 0 }}>
               {ROLES.map((r) => (
                 <option key={r} value={r}>{r.charAt(0) + r.slice(1).toLowerCase()}</option>
               ))}
             </select>
-            <button type="submit" className={cx('relipay-btn relipay-btn-primary', 'buttonPrimary')} style={{ flexShrink: 0 }}>
+            <button type="submit" className={cx('rekey-btn rekey-btn-primary', 'buttonPrimary')} style={{ flexShrink: 0 }}>
               Invite
             </button>
           </form>

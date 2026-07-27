@@ -41,7 +41,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { requestContext } from '../../lib/security-events.js';
 import { resolveOperatorMcpBearer } from './bearer-auth.js';
 import { operatorMcpIssuer, scopeHasWrite, scopeHasAdmin } from './oauth.service.js';
@@ -89,7 +89,7 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
       // misconfiguration that would bypass auth (defence in depth — the
       // hook above already 401s on failure).
       if (!req.tenantUser || !req.tenantId) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 401,
           code: 'OPERATOR_MCP_UNAUTHORIZED',
           message: 'Operator MCP authentication did not populate the request.',

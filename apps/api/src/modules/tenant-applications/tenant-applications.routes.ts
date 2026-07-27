@@ -37,8 +37,8 @@ import { prisma } from '../../lib/prisma.js';
 import { PaginationQuery, parsePagination, paginationJsonSchema } from '../../lib/pagination.js';
 import { listApiRequests } from '../../lib/request-log.js';
 import { CouponDiscountType, type LicenseKind } from '@prisma/client';
-import { BillingProviderSchema, GrantCreditsRequestSchema } from '@relipay/shared-types';
-import { RelipayError } from '../../lib/error.js';
+import { BillingProviderSchema, GrantCreditsRequestSchema } from '@rekey.dev/shared-types';
+import { RekeyError } from '../../lib/error.js';
 import { hashPassword } from '../../lib/passwords.js';
 import { endUserRolesService } from '../end-user-roles/end-user-roles.service.js';
 import { organizationsService } from '../organizations/organizations.service.js';
@@ -447,7 +447,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           select: { id: true },
         });
         if (!plan) {
-          throw new RelipayError({
+          throw new RekeyError({
             statusCode: 400,
             code: 'DEFAULT_PLAN_NOT_FOUND',
             message: `No active plan "${body.defaultPlanSlug}" in this Application.`,
@@ -530,7 +530,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // Billing keeps its own test mode; only API-key minting is gated here.
       // Remove this guard (and re-expose the option in the panel) to restore it.
       if (body.mode === 'test') {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'TEST_API_KEYS_DISABLED',
           message: 'Test-mode API keys are temporarily disabled.',
@@ -1286,7 +1286,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         description:
           'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.\n\n' +
-          "Creates the webhook endpoint at this Application's ReliPay URL and stores the " +
+          "Creates the webhook endpoint at this Application's Rekey URL and stores the " +
           'returned signing secret (Stripe) / webhook id (PayPal) into the credentials. ' +
           'Save the provider credentials first. Razorpay is not supported — configure it manually.',
         params: {
@@ -1324,7 +1324,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
           'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
-          'The events ReliPay received from the billing provider (subscription activated, ' +
+          'The events Rekey received from the billing provider (subscription activated, ' +
           'payment captured, etc.). Filter by `?provider=`. This is the inbound log — distinct ' +
           "from outbound webhook deliveries (this Application's own /webhooks endpoints).",
         querystring: {
@@ -1882,7 +1882,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         },
       });
       if (!eu || eu.applicationId !== params.id) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 404,
           code: 'END_USER_NOT_FOUND',
           message: `End-user "${params.euid}" not found in this Application.`,
@@ -1940,7 +1940,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       await ensureAppAccess(req, params.id, 'read');
       const existing = await prisma.endUser.findUnique({ where: { id: params.euid } });
       if (!existing || existing.applicationId !== params.id) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 404,
           code: 'END_USER_NOT_FOUND',
           message: `End-user "${params.euid}" not found in this Application.`,
@@ -2061,7 +2061,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // Confirm the user belongs to this Application (cross-app guard).
       const existing = await prisma.endUser.findUnique({ where: { id: params.euid } });
       if (!existing || existing.applicationId !== params.id) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 404,
           code: 'END_USER_NOT_FOUND',
           message: `End-user "${params.euid}" not found in this Application.`,
@@ -2146,7 +2146,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // Erasure is irreversible + PII-dense — gate it to OWNER/ADMIN, matching
       // the DSAR export. (Plain delete keeps the 'write' grant authz.)
       if (isErasure && req.tenantRole !== 'OWNER' && req.tenantRole !== 'ADMIN') {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 403,
           code: 'TENANT_ROLE_INSUFFICIENT',
           message: 'Only workspace owners and admins can erase (GDPR) an end-user.',
@@ -2156,7 +2156,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
 
       const existing = await prisma.endUser.findUnique({ where: { id: params.euid } });
       if (!existing || existing.applicationId !== params.id) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 404,
           code: 'END_USER_NOT_FOUND',
           message: `End-user "${params.euid}" not found in this Application.`,
@@ -2251,7 +2251,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             failed: cancelResult.failed,
           },
         });
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 502,
           code: 'PROVIDER_CANCEL_FAILED',
           message:
@@ -2310,7 +2310,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       await ensureAppAccess(req, params.id, 'read');
       const existing = await prisma.endUser.findUnique({ where: { id: params.euid } });
       if (!existing || existing.applicationId !== params.id) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 404,
           code: 'END_USER_NOT_FOUND',
           message: `End-user "${params.euid}" not found in this Application.`,
@@ -2359,7 +2359,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       await ensureAppAccess(req, params.id, 'billing-write');
       const existing = await prisma.endUser.findUnique({ where: { id: params.euid } });
       if (!existing || existing.applicationId !== params.id) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 404,
           code: 'END_USER_NOT_FOUND',
           message: `End-user "${params.euid}" not found in this Application.`,
@@ -2384,7 +2384,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   //
   // GET /:id/end-users/:euid/export
   //
-  // Single JSON document of everything ReliPay stores about one end-user, so
+  // Single JSON document of everything Rekey stores about one end-user, so
   // operators can answer data-subject access requests (GDPR Art. 15 / CCPA).
   // OWNER/ADMIN only (same gate as the audit CSV export — this is PII-dense).
   //
@@ -2436,7 +2436,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         },
       });
       if (!endUser || endUser.applicationId !== params.id) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 404,
           code: 'END_USER_NOT_FOUND',
           message: `End-user "${params.euid}" not found in this Application.`,
@@ -2743,7 +2743,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       await ensureAppAccess(req, params.id, 'read');
       const endUser = await prisma.endUser.findUnique({ where: { id: params.euid } });
       if (!endUser || endUser.applicationId !== params.id) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 404,
           code: 'END_USER_NOT_FOUND',
           message: `End-user "${params.euid}" not found in this Application.`,
@@ -2903,7 +2903,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
 
   // ---------- Hosted customer portal (Portal V2) ----------
 
-  // Opt this Application into (or out of) the ReliPay-hosted customer portal at
+  // Opt this Application into (or out of) the Rekey-hosted customer portal at
   // portal.relipay.dev/<slug>, and set its branding. Enabling auto-allows the
   // portal origin for this app's publishable key. OWNER/ADMIN.
   const PortalConfigBody = z.object({
@@ -2952,7 +2952,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         });
       } catch (e) {
         if ((e as { code?: string }).code === 'P2002') {
-          throw new RelipayError({
+          throw new RekeyError({
             statusCode: 409,
             code: 'PORTAL_DOMAIN_TAKEN',
             message: 'That portal domain is already in use by another application.',

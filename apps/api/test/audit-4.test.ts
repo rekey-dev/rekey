@@ -121,7 +121,7 @@ describe('Audit-4 passkeys', () => {
             webauthn: {
               rpId: 'localhost',
               rpOrigins: ['http://localhost:3030'],
-              rpName: 'ReliPay Test',
+              rpName: 'Rekey Test',
             },
           } as never,
         },
@@ -152,7 +152,7 @@ describe('Audit-4 passkeys', () => {
       url: '/api/v1/auth/passkey/register/start',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.endUserAccess,
+        'x-rekey-user-token': b.endUserAccess,
       },
       payload: {},
     });
@@ -173,7 +173,7 @@ describe('Audit-4 passkeys', () => {
         url: '/api/v1/auth/passkey/register/start',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': b.endUserAccess,
+          'x-rekey-user-token': b.endUserAccess,
         },
         payload: {},
       })
@@ -184,7 +184,7 @@ describe('Audit-4 passkeys', () => {
       url: '/api/v1/auth/passkey/register/complete',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.endUserAccess,
+        'x-rekey-user-token': b.endUserAccess,
       },
       payload: {
         response: { id: 'cred-test-fixture' }, // shape doesn't matter; mock ignores it
@@ -202,7 +202,7 @@ describe('Audit-4 passkeys', () => {
       url: '/api/v1/auth/passkeys',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.endUserAccess,
+        'x-rekey-user-token': b.endUserAccess,
       },
     });
     expect(list.statusCode).toBe(200);
@@ -297,7 +297,7 @@ describe('Audit-4 passkeys', () => {
       url: '/api/v1/auth/passkey/register/start',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.endUserAccess,
+        'x-rekey-user-token': b.endUserAccess,
       },
       payload: {},
     });
@@ -334,7 +334,7 @@ describe('Audit-4 passkeys', () => {
       url: `/api/v1/auth/passkeys/${cred.id}`,
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.endUserAccess,
+        'x-rekey-user-token': b.endUserAccess,
       },
     });
     expect(res.statusCode).toBe(200);
@@ -370,7 +370,7 @@ describe('Audit-4 passkeys', () => {
       url: '/api/v1/users/me/',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': data.accessToken,
+        'x-rekey-user-token': data.accessToken,
       },
     });
     expect(me.statusCode).toBe(200);
@@ -428,7 +428,7 @@ describe('Audit-4 passkeys', () => {
     const before = await app.inject({
       method: 'GET',
       url: '/api/v1/users/me/',
-      headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': session.accessToken },
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': session.accessToken },
     });
     expect(before.statusCode).toBe(200);
 
@@ -447,7 +447,7 @@ describe('Audit-4 passkeys', () => {
     const after = await app.inject({
       method: 'GET',
       url: '/api/v1/users/me/',
-      headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': session.accessToken },
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': session.accessToken },
     });
     expect(after.statusCode).toBe(401);
     expect(after.json().error.code).toBe('USER_TOKEN_INVALID');

@@ -1,12 +1,12 @@
-# `@relipay/mcp`
+# `@rekey.dev/mcp`
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server for [ReliPay](https://relipay.dev). Lets Claude Desktop, Cursor, and Claude Code introspect a deployment — and mint API keys — directly, without screenshots or copy-paste from the panel.
+A [Model Context Protocol](https://modelcontextprotocol.io) server for [Rekey](https://relipay.dev). Lets Claude Desktop, Cursor, and Claude Code introspect a deployment — and mint API keys — directly, without screenshots or copy-paste from the panel.
 
 > **For AI agents connected through this server:** see [AGENTS.md](./AGENTS.md) for what's safe to call and the write-tool safety model.
 
 ```bash
 # Run on demand (no global install needed):
-npx -y @relipay/mcp
+npx -y @rekey.dev/mcp
 ```
 
 It's a stdio MCP server — you don't run it by hand. Wire it into your MCP client's config (below) and the client launches it.
@@ -17,7 +17,7 @@ The server reads three env vars (set them in your MCP client config, not your sh
 
 | Env var | Required | What it's for | Where to get it |
 | --- | --- | --- | --- |
-| `RELIPAY_URL` | yes | Base URL of the deployment, e.g. `https://api.relipay.dev`. | Your ReliPay deployment |
+| `RELIPAY_URL` | yes | Base URL of the deployment, e.g. `https://api.relipay.dev`. | Your Rekey deployment |
 | `SUPER_ADMIN_KEY` | for **read** tools | Authenticates the global read/introspection tools. | Deployment admin |
 | `RELIPAY_OPERATOR_TOKEN` | for `mint_api_key` | A scoped operator **personal-access-token** (`rp_op_…`). | Panel → operator API tokens (or `POST /api/v1/tenant/auth/api-tokens`), scoped to `keys:mint` |
 
@@ -38,9 +38,9 @@ The server reads three env vars (set them in your MCP client config, not your sh
 ```json
 {
   "mcpServers": {
-    "relipay": {
+    "rekey": {
       "command": "npx",
-      "args": ["-y", "@relipay/mcp"],
+      "args": ["-y", "@rekey.dev/mcp"],
       "env": {
         "RELIPAY_URL": "https://api.relipay.dev",
         "SUPER_ADMIN_KEY": "your-admin-key",
@@ -98,7 +98,7 @@ Every tool error is a JSON object — `error: { code, message, fix?, statusCode?
 ## Gotchas
 
 - **Money is integers in the smallest currency unit** (cents/paise/sen). Render `999 USD/MONTH` as `$9.99/month` — never assume a `.00` decimal (`¥100` is a hundred whole yen).
-- **Only call `mint_api_key` when the user explicitly asks** to create/mint a key. For other mutations (create plan, refund, deactivate coupon — not yet exposed), use the read tools to figure out what to do, then the `relipay` CLI or the Panel.
+- **Only call `mint_api_key` when the user explicitly asks** to create/mint a key. For other mutations (create plan, refund, deactivate coupon — not yet exposed), use the read tools to figure out what to do, then the `rekey` CLI or the Panel.
 - **Coupon discounts**: PERCENT uses basis-points × 10 (`1500` = 15%); AMOUNT uses the smallest currency unit.
 
 ## Links

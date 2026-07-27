@@ -1,11 +1,11 @@
 /**
  * QR SaaS HTTP server (Express). A real, runnable app:
  *
- *   POST /auth/sign-up            → ReliPay auth.signUp
- *   POST /auth/sign-in            → ReliPay auth.signIn
- *   GET  /auth/me                 → ReliPay auth.getCurrentUser
- *   POST /auth/refresh            → ReliPay auth.refresh
- *   POST /auth/sign-out           → ReliPay auth.signOut
+ *   POST /auth/sign-up            → Rekey auth.signUp
+ *   POST /auth/sign-in            → Rekey auth.signIn
+ *   GET  /auth/me                 → Rekey auth.getCurrentUser
+ *   POST /auth/refresh            → Rekey auth.refresh
+ *   POST /auth/sign-out           → Rekey auth.signOut
  *
  *   GET    /api/qrs               → list my QRs (scoped to active org if any)
  *   POST   /api/qrs               → create a dynamic QR (tier cap enforced)
@@ -14,16 +14,16 @@
  *   GET    /api/qrs/:id/qr.png    → the QR image encoding /q/:slug
  *   GET    /api/qrs/:id/analytics → scan analytics (Pro feature-flag gated)
  *
- *   GET  /api/billing/plans       → ReliPay billing.getPlans
+ *   GET  /api/billing/plans       → Rekey billing.getPlans
  *   GET  /api/billing/entitlements→ resolved entitlements (tier view)
- *   POST /api/billing/checkout    → ReliPay billing.createCheckout (upgrade)
+ *   POST /api/billing/checkout    → Rekey billing.createCheckout (upgrade)
  *
  *   GET  /q/:slug                 → PUBLIC: record a qr_scans usage event,
  *                                   then 302 to the current destination.
  *
- * Auth model: the client sends the ReliPay access token as a Bearer header;
+ * Auth model: the client sends the Rekey access token as a Bearer header;
  * an `x-organization-id` header opts a request into a team workspace. A browser
- * frontend would instead use @relipay/react with the public key to manage the
+ * frontend would instead use @rekey.dev/react with the public key to manage the
  * session and attach the token automatically.
  */
 
@@ -34,11 +34,11 @@ import { loadConfig } from './bootstrap.js';
 import { qrService, QrError, type Subject } from './qr.js';
 import { store } from './store.js';
 import { INDEX_HTML } from './ui.js';
-import { RelipayError } from '@relipay/node';
+import { RekeyError } from '@rekey.dev/node';
 import { ensureFreePlan } from './enroll.js';
 
 const config = loadConfig();
-const relipay = makeClient(config.secretKey);
+const rekey = makeClient(config.secretKey);
 const PORT = Number(process.env.PORT ?? 3000);
 const PUBLIC_BASE = process.env.PUBLIC_BASE ?? `http://localhost:${PORT}`;
 
@@ -57,7 +57,7 @@ app.get('/', (_req, res) => {
 app.get(
   '/api/config',
   handler(async (_req, res) => {
-    const me = await relipay.applications.me();
+    const me = await rekey.applications.me();
     res.json({
       organizationsEnabled: me.authConfig.organizationsEnabled,
       billingSubject: me.billingConfig.billingSubject,
@@ -65,12 +65,12 @@ app.get(
   }),
 );
 
-/** Resolve the ReliPay subject from the request (Bearer token + optional org). */
+/** Resolve the Rekey subject from the request (Bearer token + optional org). */
 async function authn(req: Request): Promise<Subject> {
   const header = req.header('authorization') ?? '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : '';
   if (!token) throw new QrError(401, 'UNAUTHENTICATED', 'Missing Bearer access token.');
-  const user = await relipay.auth.getCurrentUser(token);
+  const user = await rekey.auth.getCurrentUser(token);
   // An explicit header wins; otherwise fall back to the token's active org claim.
   const orgHeader = req.header('x-organization-id') ?? null;
   return {
@@ -81,7 +81,7 @@ async function authn(req: Request): Promise<Subject> {
 }
 
 /**
- * The ReliPay billing subject for credits/usage: the active org's shared pool
+ * The Rekey billing subject for credits/usage: the active org's shared pool
  * when inside a team workspace, else the personal end-user. (Owner+beneficiary
  * billing — org QRs meter + draw down against the org, not the individual.)
  */
@@ -91,19 +91,19 @@ function creditSubject(subject: Subject): { endUserId: string } | { organization
     : { endUserId: subject.endUserId };
 }
 
-/** Start of the current calendar month (UTC) — matches ReliPay's quota window. */
+/** Start of the current calendar month (UTC) — matches Rekey's quota window. */
 function monthStartUtc(): string {
   const now = new Date();
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
 }
 
-/** Wrap an async handler, funneling RelipayError / QrError to JSON responses. */
+/** Wrap an async handler, funneling RekeyError / QrError to JSON responses. */
 function handler(fn: (req: Request, res: Response) => Promise<void>) {
   return (req: Request, res: Response, next: NextFunction) => {
     fn(req, res).catch((e) => {
       if (e instanceof QrError) {
         res.status(e.status).json({ error: { code: e.code, message: e.message, fix: e.fix } });
-      } else if (e instanceof RelipayError) {
+      } else if (e instanceof RekeyError) {
         res.status(e.statusCode ?? 500).json({ error: { code: e.code, message: e.message, fix: e.fix } });
       } else {
         next(e);
@@ -112,19 +112,19 @@ function handler(fn: (req: Request, res: Response) => Promise<void>) {
   };
 }
 
-// ---------- Auth (thin pass-through to ReliPay) ----------
+// ---------- Auth (thin pass-through to Rekey) ----------
 
 app.post(
   '/auth/sign-up',
   handler(async (req, res) => {
     const { email, password } = req.body as { email: string; password: string };
-    const result = await relipay.auth.signUp({ email, password });
+    const result = await rekey.auth.signUp({ email, password });
     // Enroll the new user in the $0 Free plan so its USAGE quota (qr_scans) is
-    // actually enforced. ReliPay has no auto-assigned default plan — a freemium
+    // actually enforced. Rekey has no auto-assigned default plan — a freemium
     // tier must be a real ACTIVE subscription, even at amount 0, or
     // `includedQuotaFor` finds nothing and scans go uncapped (issue #63).
     // Best-effort + idempotent (see ensureFreePlan); never blocks sign-up.
-    await ensureFreePlan(relipay, config, result.accessToken);
+    await ensureFreePlan(rekey, config, result.accessToken);
     res.json(result);
   }),
 );
@@ -133,7 +133,7 @@ app.post(
   '/auth/sign-in',
   handler(async (req, res) => {
     const { email, password } = req.body as { email: string; password: string };
-    const result = await relipay.auth.signIn({ email, password });
+    const result = await rekey.auth.signIn({ email, password });
     res.json(result);
   }),
 );
@@ -142,7 +142,7 @@ app.get(
   '/auth/me',
   handler(async (req, res) => {
     const subject = await authn(req);
-    const user = await relipay.auth.getCurrentUser(subject.accessToken);
+    const user = await rekey.auth.getCurrentUser(subject.accessToken);
     res.json(user);
   }),
 );
@@ -151,7 +151,7 @@ app.post(
   '/auth/refresh',
   handler(async (req, res) => {
     const { refreshToken } = req.body as { refreshToken: string };
-    res.json(await relipay.auth.refresh(refreshToken));
+    res.json(await rekey.auth.refresh(refreshToken));
   }),
 );
 
@@ -159,7 +159,7 @@ app.post(
   '/auth/sign-out',
   handler(async (req, res) => {
     const { refreshToken } = req.body as { refreshToken: string };
-    res.json(await relipay.auth.signOut(refreshToken));
+    res.json(await rekey.auth.signOut(refreshToken));
   }),
 );
 
@@ -170,9 +170,9 @@ app.post(
     // Enumeration-safe: same shape whether or not the email exists. With email
     // transport configured the link is mailed and magicLinkToken is null; in the
     // demo (no transport) the raw token comes back so the UI can show the link.
-    // `{token}` is substituted with the raw token by ReliPay when it builds the
+    // `{token}` is substituted with the raw token by Rekey when it builds the
     // email link; we land it back on this UI which auto-consumes it (see below).
-    const result = await relipay.auth.requestMagicLink({
+    const result = await rekey.auth.requestMagicLink({
       email,
       signInUrl: `${PUBLIC_BASE}/?magic=1&token={token}`,
     });
@@ -184,7 +184,7 @@ app.post(
   '/auth/magic-link/verify',
   handler(async (req, res) => {
     const { token } = req.body as { token: string };
-    res.json(await relipay.auth.verifyMagicLink({ token }));
+    res.json(await rekey.auth.verifyMagicLink({ token }));
   }),
 );
 
@@ -194,7 +194,7 @@ app.get(
   '/api/qrs',
   handler(async (req, res) => {
     const subject = await authn(req);
-    const qrs = await qrService.list(relipay, subject);
+    const qrs = await qrService.list(rekey, subject);
     res.json({ qrs: qrs.map((q) => ({ ...q, shortUrl: `${PUBLIC_BASE}/q/${q.slug}` })) });
   }),
 );
@@ -204,7 +204,7 @@ app.post(
   handler(async (req, res) => {
     const subject = await authn(req);
     const { destination, title, slug } = req.body as { destination: string; title?: string; slug?: string };
-    const qr = await qrService.create(relipay, subject, { destination, title, slug });
+    const qr = await qrService.create(rekey, subject, { destination, title, slug });
     res.status(201).json({ ...qr, shortUrl: `${PUBLIC_BASE}/q/${qr.slug}` });
   }),
 );
@@ -214,7 +214,7 @@ app.patch(
   handler(async (req, res) => {
     const subject = await authn(req);
     const { destination } = req.body as { destination: string };
-    const qr = await qrService.updateDestination(relipay, subject, req.params.id!, destination);
+    const qr = await qrService.updateDestination(rekey, subject, req.params.id!, destination);
     res.json(qr);
   }),
 );
@@ -223,7 +223,7 @@ app.delete(
   '/api/qrs/:id',
   handler(async (req, res) => {
     const subject = await authn(req);
-    await qrService.remove(relipay, subject, req.params.id!);
+    await qrService.remove(rekey, subject, req.params.id!);
     res.status(204).end();
   }),
 );
@@ -242,7 +242,7 @@ app.get(
   '/api/qrs/:id/analytics',
   handler(async (req, res) => {
     const subject = await authn(req);
-    res.json(await qrService.analytics(relipay, subject, req.params.id!));
+    res.json(await qrService.analytics(rekey, subject, req.params.id!));
   }),
 );
 
@@ -251,7 +251,7 @@ app.get(
 app.get(
   '/api/billing/plans',
   handler(async (_req, res) => {
-    res.json({ plans: await relipay.billing.getPlans() });
+    res.json({ plans: await rekey.billing.getPlans() });
   }),
 );
 
@@ -259,7 +259,7 @@ app.get(
   '/api/billing/entitlements',
   handler(async (req, res) => {
     const subject = await authn(req);
-    const ent = await relipay.billing.getEntitlements(
+    const ent = await rekey.billing.getEntitlements(
       subject.accessToken,
       subject.organizationId ? { organizationId: subject.organizationId } : undefined,
     );
@@ -272,7 +272,7 @@ app.post(
   handler(async (req, res) => {
     const subject = await authn(req);
     const { planSlug, organizationId } = req.body as { planSlug: string; organizationId?: string };
-    const result = await relipay.billing.createCheckout(subject.accessToken, {
+    const result = await rekey.billing.createCheckout(subject.accessToken, {
       planSlug,
       // Land back on the app UI so the user sees their upgraded plan.
       successUrl: `${PUBLIC_BASE}/?upgraded=1`,
@@ -290,8 +290,8 @@ app.get(
   handler(async (req, res) => {
     const subject = await authn(req);
     const [balance, ledger] = await Promise.all([
-      relipay.credits.getBalance(creditSubject(subject)),
-      relipay.credits.listLedger(creditSubject(subject), 10),
+      rekey.credits.getBalance(creditSubject(subject)),
+      rekey.credits.listLedger(creditSubject(subject), 10),
     ]);
     res.json({ balance: balance.balance, ledger });
   }),
@@ -301,7 +301,7 @@ app.post(
   '/api/credits/buy',
   handler(async (req, res) => {
     const subject = await authn(req);
-    const result = await relipay.billing.createCheckout(subject.accessToken, {
+    const result = await rekey.billing.createCheckout(subject.accessToken, {
       planSlug: 'qr_bulk_pack',
       successUrl: `${PUBLIC_BASE}/?bought=credits`,
       cancelUrl: `${PUBLIC_BASE}/?buy=cancel`,
@@ -315,7 +315,7 @@ app.get(
   '/api/usage',
   handler(async (req, res) => {
     const subject = await authn(req);
-    const agg = await relipay.usage.aggregate({
+    const agg = await rekey.usage.aggregate({
       meterSlug: 'qr_scans',
       from: monthStartUtc(),
       ...creditSubject(subject),
@@ -324,13 +324,13 @@ app.get(
   }),
 );
 
-// ---------- Teams (ReliPay organizations) ----------
+// ---------- Teams (Rekey organizations) ----------
 
 app.get(
   '/api/orgs',
   handler(async (req, res) => {
     const subject = await authn(req);
-    const orgs = await relipay.organizations.listMine(subject.accessToken);
+    const orgs = await rekey.organizations.listMine(subject.accessToken);
     // The token's active-org claim tells the UI which workspace is current.
     res.json({ orgs, activeOrganizationId: subject.organizationId });
   }),
@@ -347,12 +347,12 @@ app.post(
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-+|-+$/g, '')
         .slice(0, 40) || `team-${Date.now()}`;
-    const result = await relipay.organizations.create(subject.accessToken, { name, slug: cleanSlug });
+    const result = await rekey.organizations.create(subject.accessToken, { name, slug: cleanSlug });
     // A team is its own billing subject (org QRs + scans meter against the org
     // pool). Enroll the new org in the $0 Free plan too, so org scans are capped
     // the same way personal scans are. The creator is OWNER, so buying for the
     // org (owner+beneficiary) is allowed. Best-effort + idempotent.
-    await ensureFreePlan(relipay, config, subject.accessToken, result.organization.id);
+    await ensureFreePlan(rekey, config, subject.accessToken, result.organization.id);
     res.status(201).json(result);
   }),
 );
@@ -363,7 +363,7 @@ app.post(
   '/api/orgs/:id/switch',
   handler(async (req, res) => {
     const subject = await authn(req);
-    res.json(await relipay.organizations.switch(subject.accessToken, req.params.id!));
+    res.json(await rekey.organizations.switch(subject.accessToken, req.params.id!));
   }),
 );
 
@@ -371,7 +371,7 @@ app.post(
   '/api/orgs/clear-active',
   handler(async (req, res) => {
     const subject = await authn(req);
-    res.json(await relipay.organizations.clearActive(subject.accessToken));
+    res.json(await rekey.organizations.clearActive(subject.accessToken));
   }),
 );
 
@@ -379,7 +379,7 @@ app.get(
   '/api/orgs/:id/members',
   handler(async (req, res) => {
     const subject = await authn(req);
-    res.json({ members: await relipay.organizations.listMembers(subject.accessToken, req.params.id!) });
+    res.json({ members: await rekey.organizations.listMembers(subject.accessToken, req.params.id!) });
   }),
 );
 
@@ -388,7 +388,7 @@ app.post(
   handler(async (req, res) => {
     const subject = await authn(req);
     const { email, role } = req.body as { email: string; role?: 'OWNER' | 'ADMIN' | 'MEMBER' };
-    const result = await relipay.organizations.invite(subject.accessToken, req.params.id!, {
+    const result = await rekey.organizations.invite(subject.accessToken, req.params.id!, {
       email,
       role: role ?? 'MEMBER',
     });
@@ -404,7 +404,7 @@ app.get(
   '/api/account/sessions',
   handler(async (req, res) => {
     const subject = await authn(req);
-    res.json({ sessions: await relipay.auth.listSessions(subject.accessToken) });
+    res.json({ sessions: await rekey.auth.listSessions(subject.accessToken) });
   }),
 );
 
@@ -412,7 +412,7 @@ app.delete(
   '/api/account/sessions/:id',
   handler(async (req, res) => {
     const subject = await authn(req);
-    res.json(await relipay.auth.revokeSession(subject.accessToken, req.params.id!));
+    res.json(await rekey.auth.revokeSession(subject.accessToken, req.params.id!));
   }),
 );
 
@@ -420,7 +420,7 @@ app.post(
   '/api/account/sign-out-everywhere',
   handler(async (req, res) => {
     const subject = await authn(req);
-    res.json(await relipay.auth.signOutEverywhere(subject.accessToken));
+    res.json(await rekey.auth.signOutEverywhere(subject.accessToken));
   }),
 );
 
@@ -435,13 +435,13 @@ app.get(
       return;
     }
     try {
-      const { destination } = await qrService.recordScan(relipay, qr);
+      const { destination } = await qrService.recordScan(rekey, qr);
       res.redirect(302, destination);
     } catch (e) {
-      // Over the monthly scan quota → ReliPay returns 402. Degrade gracefully:
+      // Over the monthly scan quota → Rekey returns 402. Degrade gracefully:
       // the destination still resolves but we surface a notice (a real product
       // might still redirect, or show an upgrade page — product choice).
-      if (e instanceof RelipayError && e.statusCode === 402) {
+      if (e instanceof RekeyError && e.statusCode === 402) {
         res
           .status(402)
           .type('html')
@@ -454,11 +454,11 @@ app.get(
 );
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'qr-saas', relipayApp: config.applicationSlug });
+  res.json({ status: 'ok', service: 'qr-saas', rekeyApp: config.applicationSlug });
 });
 
 app.listen(PORT, () => {
   console.log(`QR SaaS listening on ${PUBLIC_BASE}`);
-  console.log(`  ReliPay app: ${config.applicationSlug} @ ${config.apiUrl}`);
+  console.log(`  Rekey app: ${config.applicationSlug} @ ${config.apiUrl}`);
   console.log(`  Public short links: ${PUBLIC_BASE}/q/:slug`);
 });

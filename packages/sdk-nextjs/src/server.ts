@@ -3,7 +3,7 @@
  * and route handlers.
  *
  * Pattern:
- *   import { auth, signIn, signOut } from '@relipay/nextjs/server';
+ *   import { auth, signIn, signOut } from '@rekey.dev/nextjs/server';
  *
  *   // In a server component:
  *   const session = await auth(); // null when signed out, { user, accessToken } otherwise
@@ -21,8 +21,8 @@
 
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { ReliPay, RelipayError } from '@relipay/node';
-import type { EndUserDto } from '@relipay/shared-types';
+import { Rekey, RekeyError } from '@rekey.dev/node';
+import type { EndUserDto } from '@rekey.dev/shared-types';
 import {
   ACCESS_COOKIE,
   REFRESH_COOKIE,
@@ -30,17 +30,17 @@ import {
   REFRESH_COOKIE_OPTS,
 } from './cookies.js';
 
-let _client: ReliPay | null = null;
-function client(): ReliPay {
+let _client: Rekey | null = null;
+function client(): Rekey {
   if (_client) return _client;
   const apiUrl = process.env.RELIPAY_URL;
   const secretKey = process.env.RELIPAY_SECRET;
   if (!apiUrl || !secretKey) {
     throw new Error(
-      '@relipay/nextjs: RELIPAY_URL and RELIPAY_SECRET must be set on the server.',
+      '@rekey.dev/nextjs: RELIPAY_URL and RELIPAY_SECRET must be set on the server.',
     );
   }
-  _client = new ReliPay({ apiUrl, secretKey });
+  _client = new Rekey({ apiUrl, secretKey });
   return _client;
 }
 
@@ -66,7 +66,7 @@ export async function auth(): Promise<Session | null> {
       const user = await client().auth.getCurrentUser(access);
       return { user, accessToken: access };
     } catch (err) {
-      if (!(err instanceof RelipayError) || err.code !== 'USER_TOKEN_INVALID') {
+      if (!(err instanceof RekeyError) || err.code !== 'USER_TOKEN_INVALID') {
         throw err;
       }
     }
@@ -115,7 +115,7 @@ async function setSessionCookies(accessToken: string, refreshToken: string): Pro
  * Finalize a **browser** login into httpOnly session cookies.
  *
  * Use in a route handler when the client signed in with the publishable key
- * (via `@relipay/nextjs/client`) and POSTed you the resulting tokens. This is
+ * (via `@rekey.dev/nextjs/client`) and POSTed you the resulting tokens. This is
  * the secure hand-off: the tokens land in httpOnly cookies (out of JS), so the
  * rest of the app uses `auth()` exactly as it would for a server-action login.
  *
@@ -125,7 +125,7 @@ async function setSessionCookies(accessToken: string, refreshToken: string): Pro
  * @example
  * ```ts
  * // app/api/auth/session/route.ts
- * import { createSession } from '@relipay/nextjs/server';
+ * import { createSession } from '@rekey.dev/nextjs/server';
  * export async function POST(req: Request) {
  *   const { accessToken, refreshToken } = await req.json();
  *   await createSession({ accessToken, refreshToken });
@@ -172,7 +172,7 @@ export async function signIn(input: {
 
 /**
  * Server action: complete an MFA-required sign-in. Sets cookies on success.
- * Throws `RelipayError` with code `MFA_CODE_INVALID` /
+ * Throws `RekeyError` with code `MFA_CODE_INVALID` /
  * `MFA_CHALLENGE_INVALID` on failure — surface the error message to the
  * user and prompt to retry.
  */

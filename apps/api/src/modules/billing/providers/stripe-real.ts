@@ -181,7 +181,7 @@ export class RealStripeProvider implements BillingProvider {
     const created = await this.stripe.webhookEndpoints.create({
       url: publicUrl,
       enabled_events: enabledEvents,
-      description: 'ReliPay (auto-configured)',
+      description: 'Rekey (auto-configured)',
     });
     return { webhookId: created.id, ...(created.secret && { secret: created.secret }) };
   }

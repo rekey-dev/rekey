@@ -15,7 +15,7 @@
 
 import type { Application, EndUser, License, LicenseKind } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { generateLicenseKey, hashLicenseKey } from '../../lib/license-keys.js';
 
 export type PublicLicense = Omit<License, 'keyHash'>;
@@ -104,7 +104,7 @@ export const licensesService = {
 
   async issue(input: IssueInput): Promise<IssueResult> {
     if (input.kind === 'TIMED' && !input.expiresAt) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'LICENSE_EXPIRES_AT_REQUIRED',
         message: 'TIMED licenses must include `expiresAt`.',
@@ -112,7 +112,7 @@ export const licensesService = {
       });
     }
     if (input.kind === 'SEATS' && (!input.seatsAllowed || input.seatsAllowed < 1)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'LICENSE_SEATS_REQUIRED',
         message: 'SEATS licenses must include `seatsAllowed >= 1`.',
@@ -141,7 +141,7 @@ export const licensesService = {
   async revoke(applicationId: string, licenseId: string): Promise<PublicLicense> {
     const license = await prisma.license.findUnique({ where: { id: licenseId } });
     if (!license || license.applicationId !== applicationId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'LICENSE_NOT_FOUND',
         message: `License "${licenseId}" not found in this application.`,
@@ -186,7 +186,7 @@ export const licensesService = {
       license.applicationId !== applicationId ||
       license.organizationId !== organizationId
     ) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'LICENSE_NOT_FOUND',
         message: `Org-pooled license "${licenseId}" not found for this organization.`,
@@ -194,7 +194,7 @@ export const licensesService = {
       });
     }
     if (license.status === 'REVOKED' || license.revokedAt !== null) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 409,
         code: 'LICENSE_REVOKED',
         message: 'Cannot rotate the key of a revoked license.',

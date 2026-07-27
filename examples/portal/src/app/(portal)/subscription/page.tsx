@@ -6,7 +6,7 @@
 import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { requireSession } from '@/lib/session';
-import { relipay } from '@/lib/relipay';
+import { rekey } from '@/lib/relipay';
 import { cancelSubscriptionAction } from '@/lib/actions';
 import { planForSubscription, formatAmount, formatDate } from '@/lib/portal';
 import { StatusBadge } from '@/components/status-badge';
@@ -22,9 +22,9 @@ export default async function SubscriptionPage({
   const session = await requireSession();
   const params = await searchParams;
   const [subscription, plans, entitlements] = await Promise.all([
-    relipay.billing.getSubscription(session.accessToken),
-    relipay.billing.getPlans(),
-    relipay.billing.getEntitlements(session.accessToken),
+    rekey.billing.getSubscription(session.accessToken),
+    rekey.billing.getPlans(),
+    rekey.billing.getEntitlements(session.accessToken),
   ]);
   const plan = planForSubscription(plans, subscription);
   const cancelScheduled = Boolean(

@@ -1,6 +1,6 @@
 # Errors
 
-Every error from a ReliPay API or SDK has the same shape:
+Every error from a Rekey API or SDK has the same shape:
 
 ```json
 {
@@ -17,7 +17,7 @@ Every error from a ReliPay API or SDK has the same shape:
 
 **Read `error.fix` first.** It is the most actionable field. We treat the absence of a `fix` on any new error as a bug.
 
-Every response also carries an `X-Request-Id` header (and, on errors, `error.requestId`) — grep the server logs for it to find the matching backtrace. It is a UUID, unique per request across restarts and replicas. If you send your own `X-Request-Id`, ReliPay echoes it back so a trace spans your proxy and the API; the value is clamped to 64 characters of `[A-Za-z0-9._:@+=/-]` first, so anything longer or stranger comes back trimmed.
+Every response also carries an `X-Request-Id` header (and, on errors, `error.requestId`) — grep the server logs for it to find the matching backtrace. It is a UUID, unique per request across restarts and replicas. If you send your own `X-Request-Id`, Rekey echoes it back so a trace spans your proxy and the API; the value is clamped to 64 characters of `[A-Za-z0-9._:@+=/-]` first, so anything longer or stranger comes back trimmed.
 
 Retryable errors carry a `Retry-After` header **and** `error.retryAfterSeconds` (same value, in seconds): `RATE_LIMITED` (429), `TOO_MANY_FAILED_ATTEMPTS` / `MFA_TOO_MANY_ATTEMPTS` (429), `IDEMPOTENCY_KEY_IN_FLIGHT` (409), and `DEPENDENCY_UNAVAILABLE` (503). Honour it before retrying; nothing else in this document is worth retrying without a code change.
 
@@ -27,7 +27,7 @@ Retryable errors carry a `Retry-After` header **and** `error.retryAfterSeconds` 
 
 - Service code throws `RelipayError({ statusCode, code, message, fix, docs? })`.
 - Fastify's global error handler (`lib/error.ts`) turns it into the envelope above.
-- `@relipay/node` decodes the envelope into a typed `RelipayError` with `err.code`, `err.fix`, `err.docs`.
+- `@rekey.dev/node` decodes the envelope into a typed `RelipayError` with `err.code`, `err.fix`, `err.docs`.
 
 ## Authoring guidelines
 
@@ -51,7 +51,7 @@ throw new RelipayError({
   statusCode: 404,
   code: 'PLAN_NOT_FOUND',
   message: `Plan "${slug}" not found in application "${appId}".`,
-  fix: 'Run `relipay plans list` to see available plans, or create one with POST /api/v1/admin/applications/:id/plans.',
+  fix: 'Run `rekey plans list` to see available plans, or create one with POST /api/v1/admin/applications/:id/plans.',
 });
 ```
 
@@ -134,7 +134,7 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `INVALID_CREDENTIALS` | 401 | Sign-in failed (wrong email *or* wrong password — never disclosed which), or wrong `currentPassword` on change. | Show a generic "email or password is incorrect". |
 | `END_USER_ERASED` | 410 | The account was permanently erased on a GDPR data-subject request and can no longer authenticate. | Not recoverable — create a fresh account if the person returns. |
 | `END_USER_NOT_FOUND` | 404 | EndUser id unknown, or belongs to a different Application than the calling secret key. | Verify the id and that you're using the right Application's key. |
-| `USER_TOKEN_MISSING` | 401 | Per-user endpoint called without the `X-Relipay-User-Token` header. | Pass the user's access JWT as the per-user argument in the SDK. |
+| `USER_TOKEN_MISSING` | 401 | Per-user endpoint called without the `X-Rekey-User-Token` header. | Pass the user's access JWT as the per-user argument in the SDK. |
 | `USER_TOKEN_INVALID` | 401 | User JWT malformed, expired, or signed with a different secret. | Refresh the session (`auth.refresh`) and retry once. |
 | `USER_TOKEN_WRONG_APPLICATION` | 401 | JWT issued by a different Application than the calling secret key. **The cross-tenant guard.** | You're mixing credentials from two Applications — fix your config. |
 | `REFRESH_TOKEN_INVALID` | 401 | Refresh token unknown to the server (or not valid for session refresh). | Send the user through sign-in again. |
@@ -163,6 +163,8 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 |---|---|---|---|
 | `MFA_NOT_ENABLED` | 403 | MFA endpoints called but two-factor is not enabled for the Application. | Enable MFA in `authConfig` first. |
 | `MFA_NOT_INITIATED` | 400 | `/mfa/setup-confirm` called before `/mfa/setup`. | Call setup first; confirm with the code from the authenticator. |
+| `STEP_UP_REQUIRED` | 401 | A publishable-key caller tried a privileged self-service action (currently: enrolling a passkey) without re-proving identity. | Send `password` with the account password, or `code` with a current authenticator or unused backup code. Secret-key callers are exempt. |
+| `STEP_UP_UNAVAILABLE` | 400 | The account has neither a password nor enrolled MFA, so there is no second factor to confirm with. The access token is its only credential. | Have the user set a password or enroll MFA first, then retry. |
 | `MFA_CODE_INVALID` | 401 (sign-in verify) / 422 (setup-confirm) | TOTP or backup code didn't verify. | Prompt the user to retry; codes are time-based. |
 | `MFA_CHALLENGE_INVALID` | 401 | MFA challenge token invalid or past its 5-minute lifetime. | Restart sign-in to get a new challenge. |
 | `MFA_CHALLENGE_WRONG_APPLICATION` | 401 | Challenge token issued under a different Application. | Fix the credential mix-up. |
@@ -188,7 +190,7 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 
 | Code | HTTP | When | How to handle |
 |---|---|---|---|
-| `OAUTH_PROVIDER_UNKNOWN` | 404 | Provider name isn't one ReliPay knows. | Use a supported provider slug. |
+| `OAUTH_PROVIDER_UNKNOWN` | 404 | Provider name isn't one Rekey knows. | Use a supported provider slug. |
 | `OAUTH_PROVIDER_NOT_CONFIGURED` | 400 | Application (or operator panel) has no client id/secret for this provider. | Configure the provider's credentials first. |
 | `OAUTH_NOT_CONFIGURED` | 503 | Operator OAuth redirect base not configured on the deployment. | Set the panel OAuth env config. |
 | `OAUTH_NO_EMAIL` | 400 | Provider returned no email — can't create/sign in a user. | Ask the user to use a provider account with an email, or another method. |
@@ -229,7 +231,7 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 
 | Code | HTTP | When | How to handle |
 |---|---|---|---|
-| `PLAN_NOT_FOUND` | 404 | Plan slug unknown for this Application. | `relipay plans list` or `GET /billing/plans`. |
+| `PLAN_NOT_FOUND` | 404 | Plan slug unknown for this Application. | `rekey plans list` or `GET /billing/plans`. |
 | `PLAN_SLUG_INVALID` | 400 | Plan slug fails the regex (lowercase alphanumerics + `-` + `_`). | Fix the slug. |
 | `PLAN_SLUG_TAKEN` | 409 | Plan slug already exists for this Application. | Pick another slug. |
 | `PLAN_AMOUNT_INVALID` | 400 | Plan amount is negative. (Amount is the smallest currency unit — integers only.) | Pass an integer ≥ 0. |
@@ -320,7 +322,7 @@ Two directions — see the "Webhooks — two directions" section of [billing.md]
 | Code | HTTP | When | How to handle |
 |---|---|---|---|
 | `WEBHOOK_RAW_BODY_MISSING` | 400 | Internal — `fastify-raw-body` wasn't configured for the route. | Server bug; report it. |
-| `WEBHOOK_SIGNATURE_MISSING` | 401 | Inbound provider webhook (Stripe) arrived with no `stripe-signature` header. | Point the provider at the correct ReliPay endpoint; don't proxy through anything that strips headers. |
+| `WEBHOOK_SIGNATURE_MISSING` | 401 | Inbound provider webhook (Stripe) arrived with no `stripe-signature` header. | Point the provider at the correct Rekey endpoint; don't proxy through anything that strips headers. |
 | `WEBHOOK_SIGNATURE_INVALID` | 401 | Provider webhook signature didn't validate against the configured secret. | The webhook secret in the panel must match the provider dashboard's signing secret. |
 | `WEBHOOK_PAYLOAD_INVALID` | 400 | PayPal webhook body isn't a recognisable event. | Check the provider configuration. |
 | `WEBHOOK_ENDPOINT_NOT_FOUND` | 404 | Outbound-webhook endpoint id unknown in this Application. | List the Application's webhook endpoints. |
@@ -377,7 +379,7 @@ Gates who may create an operator account on this deployment — `OPERATOR_SIGNUP
 | `OPERATOR_INVITE_ALREADY_USED` | 409 | Revoking an invite that has already created an operator. | Manage the resulting operator account instead. |
 | `OPERATOR_INVITE_EXPIRY_IN_PAST` | 400 | Minting an invite with an `expiresAt` already in the past. | Pass a future timestamp, or omit it for a non-expiring key. |
 
-### SDK client-side codes (`@relipay/node`)
+### SDK client-side codes (`@rekey.dev/node`)
 
 Raised locally by the SDK before any network call:
 

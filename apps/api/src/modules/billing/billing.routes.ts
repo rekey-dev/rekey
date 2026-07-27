@@ -116,7 +116,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Returns null when there is no active/pending/past-due subscription. Pass ' +
           '`?organizationId=` (member-only) to read an organization\'s subscription on an ' +
-          'org-billed app. Requires the user JWT in X-Relipay-User-Token.',
+          'org-billed app. Requires the user JWT in X-Rekey-User-Token.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         querystring: { type: 'object', properties: { organizationId: { type: 'string' } } },
       },
@@ -154,7 +154,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Payment history for the authenticated end-user only — newest first, default 50 ' +
           '(max 100 via ?limit=). Each row carries a `receiptUrl` when the provider receipt ' +
-          'link is known, else null. Requires the user JWT in X-Relipay-User-Token.',
+          'link is known, else null. Requires the user JWT in X-Rekey-User-Token.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         querystring: {
           type: 'object',
@@ -189,7 +189,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           'with `cancelAt` set until the provider webhook terminates them). Pass ' +
           '`{"atPeriodEnd": false}` to cancel immediately. PENDING checkouts and ' +
           'subscriptions with no provider-side record are canceled locally right away. ' +
-          'Requires the user JWT in X-Relipay-User-Token.',
+          'Requires the user JWT in X-Rekey-User-Token.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         body: {
           type: 'object',

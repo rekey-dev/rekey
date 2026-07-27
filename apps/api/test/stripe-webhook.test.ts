@@ -211,7 +211,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
       url: '/api/v1/billing/checkout',
       headers: {
         authorization: `Bearer ${liveKey}`,
-        'x-relipay-user-token': endUserAccessToken,
+        'x-rekey-user-token': endUserAccessToken,
       },
       payload: {
         planSlug: 'pro_monthly',

@@ -117,7 +117,7 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
           {
             key: 'api-key',
             label: 'Mint your first API key',
-            description: 'The server-side credential your backend uses to call ReliPay.',
+            description: 'The server-side credential your backend uses to call Rekey.',
             href: firstApp ? `/applications/${firstApp.id}/api-keys` : createHref,
             done: (firstAppKeys ?? []).some((k) => k.revokedAt === null),
             hint: requiresAppHint,
@@ -210,7 +210,7 @@ export default async function ApplicationsPage({
       {onboarding && !onboarding.allDone && (
         <OnboardingChecklist
           steps={onboarding.steps}
-          storageKey={`relipay.onboarding.dismissed.${onboarding.tenantId}`}
+          storageKey={`rekey.onboarding.dismissed.${onboarding.tenantId}`}
         />
       )}
 
@@ -218,7 +218,7 @@ export default async function ApplicationsPage({
           "go live" pointer card (WP10). */}
       {onboarding && onboarding.allDone && apps[0] && (
         <ReadyToGoLive
-          storageKey={`relipay.ready.dismissed.${onboarding.tenantId}`}
+          storageKey={`rekey.ready.dismissed.${onboarding.tenantId}`}
           links={[
             {
               label: 'Quick start',

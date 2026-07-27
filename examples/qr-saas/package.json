@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Dynamic QR Codes SaaS — a sample integrator built on ReliPay (auth + billing + usage + entitlements + orgs).",
+  "description": "Dynamic QR Codes SaaS — a sample integrator built on Rekey (auth + billing + usage + entitlements + orgs).",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "bootstrap": "tsx src/bootstrap.ts",
@@ -11,7 +11,7 @@
     "serve": "tsx src/server.ts"
   },
   "dependencies": {
-    "@relipay/node": "workspace:*",
+    "@rekey.dev/node": "workspace:*",
     "express": "^4.21.2",
     "qrcode": "^1.5.4",
     "stripe": "^17.4.0"

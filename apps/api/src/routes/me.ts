@@ -1,7 +1,7 @@
 /**
  * GET /api/v1/me
  *
- * The first endpoint a fresh `@relipay/node` client should call to verify
+ * The first endpoint a fresh `@rekey.dev/node` client should call to verify
  * its credentials. Returns the Application the presented secret key resolves
  * to: `id`, `tenantId`, `name`, `slug`, `publicKey`, `createdAt`, and the
  * `authConfig` / `billingConfig` objects **whole** — not a filtered subset.

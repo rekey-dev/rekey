@@ -262,7 +262,7 @@ describe('Email pipeline', () => {
       url: '/api/v1/auth/send-verification',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': eu.accessToken,
+        'x-rekey-user-token': eu.accessToken,
       },
       // No `{token}` placeholder — the route's `format: uri` schema
       // rejects strings with curly braces. The service falls back to its
@@ -313,7 +313,7 @@ describe('Email pipeline', () => {
         url: '/api/v1/auth/send-verification',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': eu.accessToken,
+          'x-rekey-user-token': eu.accessToken,
         },
         payload: {},
       })
@@ -346,7 +346,7 @@ describe('Email pipeline', () => {
         url: '/api/v1/auth/send-verification',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': eu.accessToken,
+          'x-rekey-user-token': eu.accessToken,
         },
         payload: {},
       })
@@ -387,7 +387,7 @@ describe('Email pipeline', () => {
       url: '/api/v1/auth/send-verification',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': eu.accessToken,
+        'x-rekey-user-token': eu.accessToken,
       },
       payload: {},
     });

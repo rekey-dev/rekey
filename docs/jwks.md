@@ -1,6 +1,6 @@
 # JWKS / RS256 — offline access-token verification
 
-By default, end-user access tokens are **HS256**, signed with a per-Application key derived from the deployment's `JWT_SECRET`. That key is symmetric: anyone who can *verify* a token can also *mint* one, so it never leaves the API — your services confirm a session by round-tripping `relipay.auth.getCurrentUser(token)`.
+By default, end-user access tokens are **HS256**, signed with a per-Application key derived from the deployment's `JWT_SECRET`. That key is symmetric: anyone who can *verify* a token can also *mint* one, so it never leaves the API — your services confirm a session by round-tripping `rekey.auth.getCurrentUser(token)`.
 
 Opting an Application into **RS256** removes that round-trip. Access tokens are then signed with the deployment's RSA private key and verified against its **public** half, published at:
 
@@ -33,13 +33,13 @@ curl -X PATCH "$RELIPAY_URL/api/v1/tenant/applications/$APP_ID/auth-config" \
 
 Switching is non-breaking in both directions: the API verifies **both** algorithms (dispatched on the token header, strict per-alg allowlist), so outstanding HS256 tokens keep working after you switch and outstanding RS256 tokens keep working if you switch back. Only *newly minted* tokens change. RS256 tokens carry the signing key's `kid` in the JWT header.
 
-## Verifying tokens offline (`@relipay/node`)
+## Verifying tokens offline (`@rekey.dev/node`)
 
 ```ts
-import { verifyAccessToken } from '@relipay/node';
+import { verifyAccessToken } from '@rekey.dev/node';
 
 const claims = await verifyAccessToken(token, {
-  jwksUrl: 'https://relipay.example.com/.well-known/jwks.json',
+  jwksUrl: 'https://rekey.example.com/.well-known/jwks.json',
 });
 // claims: { typ: 'eu_access', sub, applicationId, oid?, iat, exp }
 if (claims.applicationId !== MY_RELIPAY_APP_ID) throw new Error('wrong application');

@@ -15,7 +15,7 @@
 
 import Stripe from 'stripe';
 import { env } from '../../../../../config/env.js';
-import { RelipayError } from '../../../../../lib/error.js';
+import { RekeyError } from '../../../../../lib/error.js';
 import { StripeStubProvider } from '../../stripe.js';
 import { RealStripeProvider } from '../../stripe-real.js';
 import type { StripeCredentials } from '../../../credentials.service.js';
@@ -107,7 +107,7 @@ function resolveApplication(req: RawWebhookReq): AppRef {
   if (applicationId) return { applicationId };
   // No slug and no metadata → nothing to scope credentials by. 401 — an
   // unverifiable request is unauthenticated.
-  throw new RelipayError({
+  throw new RekeyError({
     statusCode: 401,
     code: 'WEBHOOK_APPLICATION_UNRESOLVED',
     message: 'Stripe webhook carries no applicationId metadata and the URL has no app slug.',

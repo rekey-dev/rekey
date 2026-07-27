@@ -17,7 +17,7 @@
 
 import type { Application, DataMode, EndUser } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { hashPassword, verifyPassword } from '../../lib/passwords.js';
 import { checkPasswordBreached } from '../../lib/breached-password.js';
 import { env } from '../../config/env.js';
@@ -65,7 +65,7 @@ import {
   LOGIN_POLICY,
 } from '../../lib/brute-force.js';
 import type { WebAuthnCredential } from '@prisma/client';
-import { AuthConfigSchema } from '@relipay/shared-types';
+import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { assertSignupAllowed, signupAllowed, type AuthKind } from '../../lib/signup-policy.js';
 import { endUserRolesService } from '../end-user-roles/end-user-roles.service.js';
 import { mfaService } from '../mfa/mfa.service.js';
@@ -107,6 +107,32 @@ export interface SignInInput {
   mode?: DataMode;
 }
 
+/**
+ * The one body a PUBLISHABLE caller ever gets back from a
+ * "send a credential by email" endpoint, whatever actually happened.
+ *
+ * Unknown address, delivered, transport broken, no transport configured — all
+ * four return this. Anything that varies with account existence is an
+ * enumeration oracle, and a publishable key ships in browser bundles, so
+ * "reachable by an attacker" means "reachable by anyone who opens devtools".
+ *
+ * The booleans are deliberately not a report on what happened. A browser cannot
+ * act on them (it never receives a token), and the operator still gets the real
+ * outcome through the security event and the logs.
+ */
+const PUBLISHABLE_SEND_RESPONSE = {
+  delivered: true,
+  emailSent: true,
+  resetToken: null,
+} as const;
+
+/** Same, for the magic-link shape (the token field is named differently). */
+const PUBLISHABLE_MAGIC_LINK_RESPONSE = {
+  delivered: true,
+  emailSent: true,
+  magicLinkToken: null,
+} as const;
+
 /** Public-safe shape of an EndUser — `passwordHash` stripped. */
 export type PublicEndUser = Omit<EndUser, 'passwordHash'>;
 
@@ -131,7 +157,7 @@ function redact(user: EndUser): PublicEndUser {
  */
 function assertEndUserNotErased(user: Pick<EndUser, 'erasedAt'>): void {
   if (user.erasedAt !== null) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 410,
       code: 'END_USER_ERASED',
       message: 'This end-user has been erased (GDPR) and can no longer authenticate.',
@@ -142,7 +168,7 @@ function assertEndUserNotErased(user: Pick<EndUser, 'erasedAt'>): void {
 
 export interface AuthResult {
   endUser: PublicEndUser;
-  /** Short-lived access JWT. Pass via X-Relipay-User-Token. */
+  /** Short-lived access JWT. Pass via X-Rekey-User-Token. */
   accessToken: string;
   /** Absolute expiry timestamp of the access token. */
   accessTokenExpiresAt: Date;
@@ -245,7 +271,7 @@ export async function issueSessionOrMfaChallenge(
 function ensurePasswordMethodEnabled(application: Application): void {
   const config = AuthConfigSchema.parse(application.authConfig);
   if (!config.methods.includes('password')) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'AUTH_METHOD_DISABLED',
       message: 'Password sign-up/sign-in is not enabled for this application.',
@@ -281,7 +307,7 @@ async function ensurePasswordNotBreached(
   if (!config.passwordBreachCheckEnabled) return;
   const result = await checkPasswordBreached(password);
   if (result.breached) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'PASSWORD_BREACHED',
       message:
@@ -294,7 +320,7 @@ async function ensurePasswordNotBreached(
 function ensureMagicLinkMethodEnabled(application: Application): void {
   const config = AuthConfigSchema.parse(application.authConfig);
   if (!config.methods.includes('magic_link')) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'AUTH_METHOD_DISABLED',
       message: 'Magic-link sign-in is not enabled for this application.',
@@ -310,7 +336,7 @@ export const authService = {
     const config = AuthConfigSchema.parse(input.application.authConfig);
     assertSignupAllowed(config, input.authKind);
     if (input.password.length < config.passwordMinLength) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'PASSWORD_TOO_SHORT',
         message: `Password must be at least ${config.passwordMinLength} characters.`,
@@ -341,7 +367,7 @@ export const authService = {
       });
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 409,
           code: 'EMAIL_ALREADY_EXISTS',
           message: 'An end-user with that email already exists in this application.',
@@ -424,7 +450,7 @@ export const authService = {
       if (endUser && visible) {
         await registerFailure(lockScope, LOGIN_POLICY);
       }
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'INVALID_CREDENTIALS',
         message: 'Email or password is incorrect.',
@@ -463,7 +489,7 @@ export const authService = {
       input.application.tokenGeneration,
     );
     if (!claims) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'MFA_CHALLENGE_INVALID',
         message: 'MFA challenge token is invalid or expired.',
@@ -471,7 +497,7 @@ export const authService = {
       });
     }
     if (claims.applicationId !== input.application.id) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'MFA_CHALLENGE_WRONG_APPLICATION',
         message: 'MFA challenge token belongs to a different application.',
@@ -480,7 +506,7 @@ export const authService = {
     }
     const ok = await mfaService.verify({ endUserId: claims.sub, code: input.code });
     if (!ok) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'MFA_CODE_INVALID',
         message: 'TOTP or backup code did not verify.',
@@ -502,7 +528,7 @@ export const authService = {
   async refresh(application: Application, presentedRaw: string): Promise<AuthResult> {
     const outcome = await lookupRefreshToken(presentedRaw);
     if (outcome.kind === 'unknown') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'REFRESH_TOKEN_INVALID',
         message: 'Refresh token is unknown.',
@@ -517,7 +543,7 @@ export const authService = {
       // value from the compromised chain. Other devices for the same user
       // are forced to sign in again.
       await revokeAllForEndUser(outcome.token.endUserId);
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'REFRESH_TOKEN_REUSED',
         message:
@@ -526,7 +552,7 @@ export const authService = {
       });
     }
     if (outcome.kind === 'expired') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'REFRESH_TOKEN_EXPIRED',
         message: 'Refresh token has expired.',
@@ -534,7 +560,7 @@ export const authService = {
       });
     }
     if (outcome.token.applicationId !== application.id) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'REFRESH_TOKEN_WRONG_APPLICATION',
         message: 'Refresh token belongs to a different application.',
@@ -545,7 +571,7 @@ export const authService = {
     // valid at the per-app OAuth /token endpoint. Prevents cross-surface
     // confusion (an mcp_account token shouldn't mint a full session).
     if (outcome.token.kind !== 'session') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'REFRESH_TOKEN_INVALID',
         message: 'This refresh token is not valid for session refresh.',
@@ -565,7 +591,7 @@ export const authService = {
       // info AND keeping the chain live.
       if ((e as Error).message === 'REFRESH_TOKEN_RACE') {
         await revokeAllForEndUser(outcome.token.endUserId);
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 401,
           code: 'REFRESH_TOKEN_REUSED',
           message:
@@ -644,14 +670,21 @@ export const authService = {
   /**
    * Issue a password-reset token.
    *
-   * ENUMERATION CAVEAT — this does NOT fully hide whether an address has an
-   * account. The status code and shape are constant, and the timing is padded
-   * (see the unknown-user branch), but `delivered` is `false` for an unknown
-   * address and `true` for a known one, so a caller can still distinguish the
-   * two. This endpoint accepts the publishable key, which ships in browser
-   * code, so that oracle is reachable by anyone who reads a JS bundle. It is
-   * long-standing behaviour that the response contract exposes, not something
-   * to change silently — tracked rather than fixed here.
+   * ENUMERATION — a PUBLISHABLE caller always gets the same body, whatever
+   * happened: `{ delivered: true, emailSent: true, resetToken: null }`. That is
+   * the classic "if an account exists we have emailed it" response, and for a
+   * browser it is the only safe one: the key ships in a JS bundle, so anything
+   * that varies with account existence is an oracle anyone can read.
+   *
+   * Those two booleans therefore carry NO information for a publishable caller.
+   * They are not a report on what happened, and a browser cannot act on them
+   * anyway — it never receives a token in either case.
+   *
+   * A SECRET-key caller still gets the truth, because it needs it: the
+   * no-transport contract hands it the raw token to forward, so it must be able
+   * to tell "there is no such user" from "here is the token". A secret key is a
+   * server-side credential, so enumeration there is bounded by the customer's
+   * own backend rather than exposed to the internet.
    *
    * Delivery strategy:
    *   - If the Application has BYO Resend creds (or RESEND_DEFAULT_API_KEY
@@ -659,7 +692,7 @@ export const authService = {
    *     `{ delivered: true, emailSent: true, resetToken: null }`. The
    *     customer's server has no further work.
    *   - Otherwise (no transport configured) a SECRET-key caller gets the raw
-   *     token in `resetToken` — the legacy "ReliPay does not send email"
+   *     token in `resetToken` — the legacy "Rekey does not send email"
    *     contract where the customer's server forwards it via their own
    *     provider. A PUBLISHABLE-key caller never does: that key ships in
    *     browser code, so handing it a reset token is account takeover.
@@ -698,6 +731,8 @@ export const authService = {
       // existence-of-email side channel. Not bulletproof (requires lots more
       // work to fully neutralise), but raises the bar without much cost.
       await new Promise((r) => setTimeout(r, 50));
+      // A browser caller must not be able to tell this branch from a real send.
+      if (input.authKind === 'publishable') return PUBLISHABLE_SEND_RESPONSE;
       return { delivered: false, emailSent: false, resetToken: null };
     }
     const issued = await issueResetToken(input.application.id, endUser.id);
@@ -720,6 +755,9 @@ export const authService = {
       // the API caller. The user receives it in their inbox.
       return { delivered: true, emailSent: true, resetToken: null };
     }
+    // Everything below reports what actually happened, which is exactly what a
+    // publishable caller must not learn. Collapse it to the constant response;
+    // the security event still records the real outcome for the operator.
     if (outcome.kind === 'error') {
       // Send FAILED (bad key, quota, network) — withhold the token rather than
       // hand a live credential to whatever is logging responses.
@@ -736,6 +774,7 @@ export const authService = {
         endUserId: endUser.id,
         reason: outcome.message,
       });
+      if (input.authKind === 'publishable') return PUBLISHABLE_SEND_RESPONSE;
       return { delivered: true, emailSent: false, resetToken: null };
     }
     // No transport. The legacy contract hands the raw token back
@@ -745,9 +784,7 @@ export const authService = {
     // any end-user's password and sign in as them (full account takeover).
     // Browser-driven reset flows require configured email transport; without
     // it we report undelivered and withhold the token.
-    if (input.authKind === 'publishable') {
-      return { delivered: true, emailSent: false, resetToken: null };
-    }
+    if (input.authKind === 'publishable') return PUBLISHABLE_SEND_RESPONSE;
     return { delivered: true, emailSent: false, resetToken: issued.raw };
   },
 
@@ -763,7 +800,7 @@ export const authService = {
   }): Promise<{ ok: true }> {
     const config = AuthConfigSchema.parse(input.application.authConfig);
     if (input.newPassword.length < config.passwordMinLength) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'PASSWORD_TOO_SHORT',
         message: `Password must be at least ${config.passwordMinLength} characters.`,
@@ -774,7 +811,7 @@ export const authService = {
 
     const outcome = await lookupResetToken(input.token);
     if (outcome.kind === 'unknown') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'PASSWORD_RESET_TOKEN_INVALID',
         message: 'Reset token is unknown.',
@@ -782,7 +819,7 @@ export const authService = {
       });
     }
     if (outcome.kind === 'consumed') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'PASSWORD_RESET_TOKEN_USED',
         message: 'Reset token has already been used.',
@@ -790,7 +827,7 @@ export const authService = {
       });
     }
     if (outcome.kind === 'expired') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'PASSWORD_RESET_TOKEN_EXPIRED',
         message: 'Reset token has expired.',
@@ -798,7 +835,7 @@ export const authService = {
       });
     }
     if (outcome.token.applicationId !== input.application.id) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'PASSWORD_RESET_TOKEN_WRONG_APPLICATION',
         message: 'Reset token belongs to a different application.',
@@ -809,7 +846,7 @@ export const authService = {
     const consumed = await consumeResetToken(outcome.token);
     if (!consumed) {
       // Lost the race; another request beat us. Treat as already-used.
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'PASSWORD_RESET_TOKEN_USED',
         message: 'Reset token has already been used.',
@@ -870,7 +907,7 @@ export const authService = {
   }): Promise<{ ok: true }> {
     const config = AuthConfigSchema.parse(input.application.authConfig);
     if (input.newPassword.length < config.passwordMinLength) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'PASSWORD_TOO_SHORT',
         message: `Password must be at least ${config.passwordMinLength} characters.`,
@@ -881,7 +918,7 @@ export const authService = {
 
     const endUser = await prisma.endUser.findUnique({ where: { id: input.endUserId } });
     if (!endUser || endUser.applicationId !== input.application.id) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'END_USER_NOT_FOUND',
         message: 'End-user not found in this application.',
@@ -891,7 +928,7 @@ export const authService = {
 
     const ok = await verifyPassword(endUser.passwordHash, input.currentPassword);
     if (!ok) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'INVALID_CREDENTIALS',
         message: 'Current password is incorrect.',
@@ -984,9 +1021,11 @@ export const authService = {
     // existence — the same caveat as requestPasswordReset. Silent refusal and
     // padded timing narrow it; they do not close it.
     if (!endUser && !signupAllowed(config, input.authKind)) {
-      // Sleep to flatten the timing side channel, and return the same shape
-      // forgot-password uses for its unknown-address path.
+      // Sleep to flatten the timing side channel. A publishable caller gets the
+      // constant response so this refusal is indistinguishable from a real send;
+      // under the default `public` signup mode the branch is unreachable anyway.
       await new Promise((r) => setTimeout(r, 50));
+      if (input.authKind === 'publishable') return PUBLISHABLE_MAGIC_LINK_RESPONSE;
       return { delivered: false, emailSent: false, magicLinkToken: null };
     }
 
@@ -1021,6 +1060,7 @@ export const authService = {
         endUserId: endUser?.id ?? null,
         reason: outcome.message,
       });
+      if (input.authKind === 'publishable') return PUBLISHABLE_MAGIC_LINK_RESPONSE;
       return { delivered: true, emailSent: false, magicLinkToken: null };
     }
     // Same rule as requestPasswordReset, and the stakes are higher: a
@@ -1029,9 +1069,7 @@ export const authService = {
     // forward via its own provider, so it is only ever safe for a secret key.
     // A publishable key lives in browser code; handing it this token is
     // instant account takeover.
-    if (input.authKind === 'publishable') {
-      return { delivered: true, emailSent: false, magicLinkToken: null };
-    }
+    if (input.authKind === 'publishable') return PUBLISHABLE_MAGIC_LINK_RESPONSE;
     return { delivered: true, emailSent: false, magicLinkToken: issued.raw };
   },
 
@@ -1063,7 +1101,7 @@ export const authService = {
 
     const outcome = await lookupMagicLinkToken(input.token);
     if (outcome.kind === 'unknown') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'MAGIC_LINK_INVALID',
         message: 'Magic-link token is unknown.',
@@ -1071,7 +1109,7 @@ export const authService = {
       });
     }
     if (outcome.kind === 'consumed') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'MAGIC_LINK_USED',
         message: 'Magic-link token has already been used.',
@@ -1079,7 +1117,7 @@ export const authService = {
       });
     }
     if (outcome.kind === 'expired') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'MAGIC_LINK_EXPIRED',
         message: 'Magic-link token has expired.',
@@ -1087,7 +1125,7 @@ export const authService = {
       });
     }
     if (outcome.token.applicationId !== input.application.id) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'MAGIC_LINK_WRONG_APPLICATION',
         message: 'Magic-link token belongs to a different application.',
@@ -1105,7 +1143,7 @@ export const authService = {
       });
       if (consumed.count !== 1) {
         // Lost a race with another request; treat as already-used.
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 401,
           code: 'MAGIC_LINK_USED',
           message: 'Magic-link token has already been used.',
@@ -1119,7 +1157,7 @@ export const authService = {
           where: { id: outcome.token.endUserId },
         });
         if (existing.email !== outcome.token.email) {
-          throw new RelipayError({
+          throw new RekeyError({
             statusCode: 401,
             code: 'MAGIC_LINK_STALE',
             message:
@@ -1225,7 +1263,7 @@ export const authService = {
   }> {
     const endUser = await prisma.endUser.findUnique({ where: { id: input.endUserId } });
     if (!endUser || endUser.applicationId !== input.application.id) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'END_USER_NOT_FOUND',
         message: `EndUser "${input.endUserId}" not found in this application.`,
@@ -1233,7 +1271,7 @@ export const authService = {
       });
     }
     if (endUser.emailVerified) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'EMAIL_ALREADY_VERIFIED',
         message: 'This email is already verified.',
@@ -1291,7 +1329,7 @@ export const authService = {
   }): Promise<{ ok: true; endUser: PublicEndUser }> {
     const outcome = await lookupVerificationToken(input.token);
     if (outcome.kind === 'unknown') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'EMAIL_VERIFICATION_TOKEN_INVALID',
         message: 'Verification token is unknown.',
@@ -1299,7 +1337,7 @@ export const authService = {
       });
     }
     if (outcome.kind === 'consumed') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'EMAIL_VERIFICATION_TOKEN_USED',
         message: 'Verification token has already been used.',
@@ -1307,7 +1345,7 @@ export const authService = {
       });
     }
     if (outcome.kind === 'expired') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'EMAIL_VERIFICATION_TOKEN_EXPIRED',
         message: 'Verification token has expired.',
@@ -1315,7 +1353,7 @@ export const authService = {
       });
     }
     if (outcome.token.applicationId !== input.application.id) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'EMAIL_VERIFICATION_TOKEN_WRONG_APPLICATION',
         message: 'Verification token belongs to a different application.',
@@ -1328,7 +1366,7 @@ export const authService = {
     if (endUser.email !== outcome.token.email) {
       // Email changed since token was issued — verification belongs to a
       // stale address. Refuse rather than retroactively trust the old one.
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'EMAIL_VERIFICATION_STALE',
         message:
@@ -1339,7 +1377,7 @@ export const authService = {
     const consumed = await consumeVerificationToken(outcome.token);
     if (!consumed) {
       // Lost the race; treat as already-used.
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'EMAIL_VERIFICATION_TOKEN_USED',
         message: 'Verification token has already been used.',
@@ -1415,7 +1453,7 @@ export const authService = {
       where: { id: input.endUserId },
     });
     if (endUser.applicationId !== input.application.id) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'END_USER_NOT_FOUND',
         message: 'End-user not found in this application.',
@@ -1462,7 +1500,7 @@ export const authService = {
       expectedChallenge: input.expectedChallenge,
     });
     if (!verified.verified || !verified.registrationInfo) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'WEBAUTHN_REGISTRATION_FAILED',
         message: 'Passkey registration did not verify.',
@@ -1494,7 +1532,7 @@ export const authService = {
       if ((e as { code?: string }).code === 'P2002') {
         // Credential id already registered — should be caught by the
         // excludeCredentials list at /start, so this means a race.
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 409,
           code: 'WEBAUTHN_ALREADY_REGISTERED',
           message: 'This passkey is already registered.',
@@ -1568,7 +1606,7 @@ export const authService = {
     // The credential id the browser returned tells us which row to load.
     const credentialId = (input.response as { id?: string }).id;
     if (typeof credentialId !== 'string') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'WEBAUTHN_AUTH_INVALID',
         message: 'Authentication response is missing a credential id.',
@@ -1589,7 +1627,7 @@ export const authService = {
       where: { credentialId },
     });
     if (!credential || credential.applicationId !== input.application.id) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'WEBAUTHN_AUTH_INVALID',
         message: 'Passkey authentication failed.',
@@ -1604,7 +1642,7 @@ export const authService = {
       credential,
     });
     if (!verified.verified) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'WEBAUTHN_AUTH_INVALID',
         message: 'Passkey authentication failed.',
@@ -1673,7 +1711,7 @@ export const authService = {
   async getById(applicationId: string, endUserId: string): Promise<PublicEndUser> {
     const endUser = await prisma.endUser.findUnique({ where: { id: endUserId } });
     if (!endUser || endUser.applicationId !== applicationId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'END_USER_NOT_FOUND',
         message: `EndUser "${endUserId}" not found in this application.`,

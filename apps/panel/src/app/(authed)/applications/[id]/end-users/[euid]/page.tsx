@@ -344,8 +344,8 @@ export default async function EndUserDetailPage({
           </div>
           <p className="text-xs text-amber-800 dark:text-amber-300">
             Expires {formatDateTime(reveal.accessTokenExpiresAt)}. Use as{' '}
-            <code className="font-mono">X-Relipay-User-Token</code> against your customer app's
-            ReliPay-backed endpoints. ReliPay records this in <code className="font-mono">
+            <code className="font-mono">X-Rekey-User-Token</code> against your customer app's
+            Rekey-backed endpoints. Rekey records this in <code className="font-mono">
               impersonation_audits
             </code> with your operator id.
           </p>
@@ -624,7 +624,7 @@ export default async function EndUserDetailPage({
           <div>
             <h3 className="text-sm font-semibold text-[var(--color-fg)]">Export data (JSON)</h3>
             <p className="text-xs text-[var(--color-muted-fg)]">
-              OWNER / ADMIN only. Downloads everything ReliPay stores about this end-user — profile,
+              OWNER / ADMIN only. Downloads everything Rekey stores about this end-user — profile,
               identities, session metadata, billing, credits, usage, security events — as a single
               JSON document. Use it to answer GDPR / CCPA data-subject access requests (DSARs).
               Credential material (password hashes, token hashes, MFA secrets) is never included.

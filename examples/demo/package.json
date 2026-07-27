@@ -1,5 +1,5 @@
 {
-  "name": "relipay-demo",
+  "name": "rekey-demo",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -10,8 +10,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@relipay/node": "workspace:*",
-    "@relipay/shared-types": "workspace:*",
+    "@rekey.dev/node": "workspace:*",
+    "@rekey.dev/shared-types": "workspace:*",
     "next": "^15.5.18",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

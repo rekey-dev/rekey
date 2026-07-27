@@ -6,7 +6,7 @@
  * one (or none) the server-side router picks automatically.
  */
 
-import type { BillingProviderInfoDto } from '@relipay/react';
+import type { BillingProviderInfoDto } from '@rekey.dev/react';
 
 /**
  * Built-in fallback labels for the three bundled providers. The server's

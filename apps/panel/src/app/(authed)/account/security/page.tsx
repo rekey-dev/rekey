@@ -290,8 +290,8 @@ export default async function SecurityPage({
                   </div>
                   <div className="flex gap-2 pt-1">
                     <DownloadButton
-                      filename="relipay-backup-codes.txt"
-                      content={`ReliPay backup codes\nGenerated: ${new Date().toISOString()}\n\n${backups.join('\n')}\n\nEach code can be used ONCE if you lose access to your authenticator.\n`}
+                      filename="rekey-backup-codes.txt"
+                      content={`Rekey backup codes\nGenerated: ${new Date().toISOString()}\n\n${backups.join('\n')}\n\nEach code can be used ONCE if you lose access to your authenticator.\n`}
                       label="Download .txt"
                     />
                     <CopyButton value={backups.join('\n')} label="Copy all" />

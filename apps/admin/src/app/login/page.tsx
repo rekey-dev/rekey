@@ -7,11 +7,14 @@ import {
   clearLoginRateLimit,
   createSession,
   verifyKey,
+  isAdminKeyConfigured,
 } from '@/lib/auth';
 
 const ERROR_MESSAGES: Record<string, string> = {
   missing: 'Paste the SUPER_ADMIN_KEY to sign in.',
   invalid: 'That key does not match. Verify and try again.',
+  not_configured:
+    'This admin deployment has no SUPER_ADMIN_KEY set, so no key can sign in. Set it on the admin container and restart — nothing you paste here will work until then.',
   rate_limited: 'Too many attempts. Wait a few minutes and try again.',
   expired: 'Session expired. Sign in again.',
   signed_out: 'You have been signed out.',
@@ -28,6 +31,14 @@ async function signIn(formData: FormData): Promise<void> {
   'use server';
   const presented = String(formData.get('key') ?? '').trim();
   if (!presented) redirect('/login?error=missing');
+
+  // Check the deployment before blaming the operator. Without this, `verifyKey`
+  // throws on a missing key and Next renders a generic 500 — so a self-hoster who
+  // forgot the env var gets a crash page instead of the one sentence that fixes it.
+  if (!isAdminKeyConfigured()) {
+    console.error('[admin] login attempted but SUPER_ADMIN_KEY is not configured on this container');
+    redirect('/login?error=not_configured');
+  }
 
   const ip = await clientIp();
   const rate = checkAndCountLoginAttempt(ip);
@@ -76,7 +87,7 @@ export default async function LoginPage({
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/logo-mark.png" alt="" className="h-8 w-auto" />
           <div>
-            <p className="text-xs uppercase tracking-wider text-[var(--color-faint-fg)]">ReliPay</p>
+            <p className="text-xs uppercase tracking-wider text-[var(--color-faint-fg)]">Rekey</p>
             <h1 className="text-lg font-semibold leading-none">Super Admin</h1>
           </div>
         </div>

@@ -1,5 +1,5 @@
 {
-  "name": "@relipay/portal",
+  "name": "@rekey.dev/portal",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,8 +12,8 @@
     "lint": "echo \"(eslint not yet wired)\""
   },
   "dependencies": {
-    "@relipay/react": "workspace:*",
-    "@relipay/shared-types": "workspace:*",
+    "@rekey.dev/react": "workspace:*",
+    "@rekey.dev/shared-types": "workspace:*",
     "next": "^15.5.18",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

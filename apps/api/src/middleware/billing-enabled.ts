@@ -9,15 +9,15 @@
  */
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import { BillingConfigSchema } from '@relipay/shared-types';
-import { RelipayError } from '../lib/error.js';
+import { BillingConfigSchema } from '@rekey.dev/shared-types';
+import { RekeyError } from '../lib/error.js';
 
 export async function requireBillingEnabled(
   request: FastifyRequest,
   _reply: FastifyReply,
 ): Promise<void> {
   if (!request.application) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 500,
       code: 'INTERNAL_ERROR',
       message: 'requireBillingEnabled ran without an Application on the request.',
@@ -26,7 +26,7 @@ export async function requireBillingEnabled(
   }
   const config = BillingConfigSchema.parse(request.application.billingConfig);
   if (!config.enabled) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 403,
       code: 'BILLING_DISABLED',
       message: 'Billing is not enabled for this application.',

@@ -2,7 +2,7 @@ import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { requireUser } from '@/lib/session';
-import { relipay, RelipayError, getAccessToken } from '@/lib/relipay';
+import { rekey, RekeyError, getAccessToken } from '@/lib/relipay';
 
 async function change(formData: FormData): Promise<void> {
   'use server';
@@ -14,9 +14,9 @@ async function change(formData: FormData): Promise<void> {
   if (!currentPassword || !newPassword) redirect('/change-password?error=missing');
 
   try {
-    await relipay.auth.changePassword(accessToken, { currentPassword, newPassword });
+    await rekey.auth.changePassword(accessToken, { currentPassword, newPassword });
   } catch (err) {
-    if (err instanceof RelipayError) {
+    if (err instanceof RekeyError) {
       redirect(`/change-password?error=${encodeURIComponent(err.code)}`);
     }
     throw err;

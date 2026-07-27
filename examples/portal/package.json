@@ -1,5 +1,5 @@
 {
-  "name": "relipay-portal-selfhost-example",
+  "name": "rekey-portal-selfhost-example",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,9 +12,9 @@
     "lint": "echo \"(eslint not yet wired)\""
   },
   "dependencies": {
-    "@relipay/nextjs": "workspace:*",
-    "@relipay/node": "workspace:*",
-    "@relipay/shared-types": "workspace:*",
+    "@rekey.dev/nextjs": "workspace:*",
+    "@rekey.dev/node": "workspace:*",
+    "@rekey.dev/shared-types": "workspace:*",
     "next": "^15.5.18",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

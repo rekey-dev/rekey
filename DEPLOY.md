@@ -1,4 +1,4 @@
-# Deploying ReliPay (Dokploy)
+# Deploying Rekey (Dokploy)
 
 Deploys **api.relipay.dev** (API) + **panel.relipay.dev** (operator panel) +
 **admin.relipay.dev** (super-admin dashboard, read-only) +
@@ -9,7 +9,7 @@ are bundled in the compose.
 ## 0. Prerequisites (you)
 - **DNS** — A records → the Dokploy host IP, before deploying (Let's Encrypt needs them):
   - `api.relipay.dev`, `panel.relipay.dev`, `admin.relipay.dev`, `portal.relipay.dev`.
-- **Git source** — connect `EtherLabZ/ReliPay` to Dokploy (GitHub App or deploy key) if private.
+- **Git source** — connect `EtherLabZ/Rekey` to Dokploy (GitHub App or deploy key) if private.
 - **Secrets** — generate values for `.env.production` (see `.env.production.example`):
   ```sh
   echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)"
@@ -21,9 +21,9 @@ are bundled in the compose.
   ```
 
 ## 1. Create the Dokploy project + compose service
-- Project: **ReliPay** (production environment).
+- Project: **Rekey** (production environment).
 - Add a **Compose** service:
-  - Source: the `EtherLabZ/ReliPay` repo, branch `main`.
+  - Source: the `EtherLabZ/Rekey` repo, branch `main`.
   - Compose path: `docker-compose.prod.yml`.
 - Paste the generated secrets into the service **Environment**.
 
@@ -62,7 +62,24 @@ The `portal` service needs no per-app secret — it's the hosted multi-app porta
   cookie carries only the id, never the key.
 - Brute-force throttled at 5 attempts / 5 min / IP (in-memory).
 - The admin container needs the same `SUPER_ADMIN_KEY` env value as the api
-  service (set once in Dokploy → service → Environment).
+  service (set once in Dokploy → service → Environment). If it is missing, the
+  login page says so explicitly rather than rejecting the key you paste — no key
+  can work until the container has one.
+
+### Two operational quirks worth knowing
+- **Sessions live in memory, so a restart signs everyone out.** The admin app
+  keeps its opaque session ids in a process-local map. Redeploying or restarting
+  the container invalidates every session and operators paste the key again.
+  Acceptable for a single-replica read-only dashboard, and the reason it is not
+  Redis-backed is that adding a dependency to the tool you open *when Redis is
+  broken* is the wrong trade. If you ever run more than one admin replica this
+  becomes a real problem: sessions are not shared, so requests would bounce
+  between replicas and appear to sign you out at random. Run one replica.
+- **The session cookie is `Secure` whenever `NODE_ENV=production`.** If you build
+  with `NODE_ENV=production` but serve the admin app over plain HTTP, the browser
+  will refuse to send the cookie and login will appear to silently do nothing.
+  That failure is visible rather than dangerous, but it is confusing if you have
+  not seen it before. Serve the admin app over HTTPS.
 
 ## Customer portal (portal.relipay.dev)
 Lives at `apps/portal` — the **hosted, multi-app** customer billing portal where
@@ -87,13 +104,13 @@ reference at `examples/portal` (secret-key, one app per deploy). See
 `docs/portal.md`.
 
 ## SDK publish
-`@relipay/node` (+ `@relipay/shared-types`) publish to npm on a GitHub Release
+`@rekey.dev/node` (+ `@rekey.dev/shared-types`) publish to npm on a GitHub Release
 via `.github/workflows/release.yml`. Add an `NPM_TOKEN` repo secret (npm org
-`relipay`, automation token) and publish a release tagged `sdk-vX.Y.Z`.
+`rekey`, automation token) and publish a release tagged `sdk-vX.Y.Z`.
 
 ## Upgrading an existing deployment: required datastore passwords
 
-`docker-compose.yml` used to default Postgres to `POSTGRES_PASSWORD: relipay`
+`docker-compose.yml` used to default Postgres to `POSTGRES_PASSWORD: rekey`
 and publish both Postgres and Redis on `0.0.0.0`. That put a known-credential
 database on the public internet for anyone running on a VPS without a host
 firewall. Both are now bound to `127.0.0.1`, `POSTGRES_PASSWORD` and
@@ -110,7 +127,7 @@ webhook-retry jobs survive via the AOF volume; the DB poller backstops any gap.
 
 **Postgres will not pick up a new password on its own.** The official image only
 applies `POSTGRES_PASSWORD` when it *initialises* an empty data directory, so
-your existing volume keeps the old `relipay` password and compose will start
+your existing volume keeps the old `rekey` password and compose will start
 while the API fails to authenticate. Change it inside the database instead — no
 dump/restore, no downtime beyond a restart:
 
@@ -121,7 +138,7 @@ NEW_PW=$(openssl rand -hex 24)
 
 # 2. Rotate it in the running database, using the OLD credentials.
 docker compose exec postgres \
-  psql -U relipay -d relipay -c "ALTER USER relipay WITH PASSWORD '$NEW_PW';"
+  psql -U rekey -d rekey -c "ALTER USER rekey WITH PASSWORD '$NEW_PW';"
 
 # 3. Put $NEW_PW into POSTGRES_PASSWORD and DATABASE_URL in .env, then:
 docker compose --profile full up -d

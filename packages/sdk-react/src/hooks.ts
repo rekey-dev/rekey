@@ -3,7 +3,7 @@
  * agents) recognise them immediately.
  */
 
-import type { EndUserDto } from '@relipay/shared-types';
+import type { EndUserDto } from '@rekey.dev/shared-types';
 import { useRelipayContext } from './context.js';
 
 /**

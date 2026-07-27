@@ -30,8 +30,8 @@ const fontFeature = localFont({
 });
 
 export const metadata: Metadata = {
-  title: 'ReliPay Panel',
-  description: 'Operator panel for ReliPay — auth + billing administration.',
+  title: 'Rekey Panel',
+  description: 'Operator panel for Rekey — auth + billing administration.',
   // The panel is an authenticated application, not a search target — keep it
   // out of search indexes (also see robots.ts, which disallows crawling).
   robots: { index: false, follow: false },

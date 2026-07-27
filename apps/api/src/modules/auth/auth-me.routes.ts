@@ -2,12 +2,12 @@
  * GET /api/v1/auth/me
  *
  * Resolve the current end-user from ONLY the user access token
- * (`X-Relipay-User-Token`) — no Application secret key required.
+ * (`X-Rekey-User-Token`) — no Application secret key required.
  *
  * The access token is minted and signed by this API and carries
  * `{ sub, applicationId }`, so it is a sufficient credential for a read-only
  * "who am I" call (same posture as any bearer-token `/me`). This is the
- * endpoint browser SDKs (`@relipay/react`) use, since the browser must never
+ * endpoint browser SDKs (`@rekey.dev/react`) use, since the browser must never
  * hold the Application secret key.
  *
  * Registered as its own plugin (no `requireApiKey` hook) at the
@@ -16,12 +16,12 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { verifyUserAccessTokenAnyAlg, peekTokenApplicationId } from '../../lib/jwt.js';
 import { prisma } from '../../lib/prisma.js';
 import { authService } from './auth.service.js';
 
-const TOKEN_HEADER = 'x-relipay-user-token';
+const TOKEN_HEADER = 'x-rekey-user-token';
 
 export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
   app.get(
@@ -32,7 +32,7 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
         security: [{ userToken: [] }],
         summary: 'Get the current end-user (from the user token alone)',
         description:
-          'Resolves the end-user from the X-Relipay-User-Token JWT only — no Application secret ' +
+          'Resolves the end-user from the X-Rekey-User-Token JWT only — no Application secret ' +
           'key required. Intended for browser/client SDKs that hold only the user access token. ' +
           'Returns 401 USER_TOKEN_INVALID when the token is missing, expired, or malformed.',
       },
@@ -41,11 +41,11 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
       const header = req.headers[TOKEN_HEADER];
       const presented = typeof header === 'string' ? header : '';
       if (!presented) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 401,
           code: 'USER_TOKEN_MISSING',
-          message: 'This endpoint requires an X-Relipay-User-Token header (the user JWT).',
-          fix: 'After sign-in, pass the returned `token` via the X-Relipay-User-Token header.',
+          message: 'This endpoint requires an X-Rekey-User-Token header (the user JWT).',
+          fix: 'After sign-in, pass the returned `token` via the X-Rekey-User-Token header.',
         });
       }
 
@@ -53,7 +53,7 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
       // app's tokenGeneration to verify. Read the (unverified) applicationId
       // claim, load the app, then cryptographically verify — so the session
       // kill-switch (tokenGeneration bump) revokes these tokens here too.
-      const invalid = new RelipayError({
+      const invalid = new RekeyError({
         statusCode: 401,
         code: 'USER_TOKEN_INVALID',
         message: 'The user token is invalid, expired, or signed with a different secret.',

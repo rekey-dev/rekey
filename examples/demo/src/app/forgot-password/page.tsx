@@ -1,17 +1,17 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { relipay } from '@/lib/relipay';
+import { rekey } from '@/lib/relipay';
 
 async function requestReset(formData: FormData): Promise<void> {
   'use server';
   const email = String(formData.get('email') ?? '').trim();
   if (!email) redirect('/forgot-password?error=missing');
 
-  const result = await relipay.auth.requestPasswordReset({ email });
+  const result = await rekey.auth.requestPasswordReset({ email });
 
   // In a real app this is where you'd email `result.resetToken` to the user
-  // via SendGrid / Resend / SES / your provider of choice. ReliPay
+  // via SendGrid / Resend / SES / your provider of choice. Rekey
   // deliberately does NOT send email — the customer's app owns delivery.
   //
   // For the demo we just print the reset link to the dev console + carry it
@@ -55,7 +55,7 @@ export default async function ForgotPasswordPage({
             {demoToken && (
               <p className="text-xs">
                 <span className="font-medium">Demo only — </span>
-                ReliPay does not send email; in production your server emails the link.
+                Rekey does not send email; in production your server emails the link.
                 Click here:{' '}
                 <Link
                   href={`/reset-password?token=${encodeURIComponent(demoToken)}`}

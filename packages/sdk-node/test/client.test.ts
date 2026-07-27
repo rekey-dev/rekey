@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { ReliPay, RelipayError } from '../src/index.js';
+import { Rekey, RekeyError } from '../src/index.js';
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -16,23 +16,23 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
-describe('ReliPay constructor', () => {
+describe('Rekey constructor', () => {
   const fakeFetch = vi.fn();
 
   it('throws CONFIG_MISSING_API_URL when apiUrl is empty', () => {
-    expect(() => new ReliPay({ apiUrl: '', secretKey: 'rp_live_x' })).toThrow(
+    expect(() => new Rekey({ apiUrl: '', secretKey: 'rp_live_x' })).toThrow(
       expect.objectContaining({ code: 'CONFIG_MISSING_API_URL' }),
     );
   });
 
   it('throws CONFIG_INVALID_SECRET_KEY when key does not start with rp_', () => {
     expect(
-      () => new ReliPay({ apiUrl: 'https://x', secretKey: 'sk_live_definitely_stripe' }),
+      () => new Rekey({ apiUrl: 'https://x', secretKey: 'sk_live_definitely_stripe' }),
     ).toThrow(expect.objectContaining({ code: 'CONFIG_INVALID_SECRET_KEY' }));
   });
 
   it('strips trailing slash from apiUrl so request paths join cleanly', async () => {
-    const client = new ReliPay({
+    const client = new Rekey({
       apiUrl: 'https://api.example.com/',
       secretKey: 'rp_live_token',
       fetch: fakeFetch,
@@ -46,8 +46,8 @@ describe('ReliPay constructor', () => {
 });
 
 describe('applications.me()', () => {
-  function makeClient(fetchImpl: typeof fetch): ReliPay {
-    return new ReliPay({
+  function makeClient(fetchImpl: typeof fetch): Rekey {
+    return new Rekey({
       apiUrl: 'https://api.example.com',
       secretKey: 'rp_live_token',
       fetch: fetchImpl,
@@ -78,7 +78,7 @@ describe('applications.me()', () => {
     expect(me).toEqual({ id: 'app_1', slug: 'demo', name: 'Demo' });
   });
 
-  it('throws RelipayError carrying server-supplied code/message/fix', async () => {
+  it('throws RekeyError carrying server-supplied code/message/fix', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(
       jsonResponse(401, {
         success: false,
@@ -92,7 +92,7 @@ describe('applications.me()', () => {
     const client = makeClient(fetchSpy);
 
     await expect(client.applications.me()).rejects.toMatchObject({
-      name: 'RelipayError',
+      name: 'RekeyError',
       code: 'API_KEY_INVALID',
       fix: 'List your active keys with the panel; if needed, mint a new one.',
       statusCode: 401,
@@ -103,16 +103,16 @@ describe('applications.me()', () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response('plain text', { status: 502 }));
     const client = makeClient(fetchSpy);
 
-    const err = await client.applications.me().catch((e) => e as RelipayError);
-    expect(err).toBeInstanceOf(RelipayError);
+    const err = await client.applications.me().catch((e) => e as RekeyError);
+    expect(err).toBeInstanceOf(RekeyError);
     expect(err.code).toBe('UNKNOWN_ERROR');
     expect(err.statusCode).toBe(502);
   });
 });
 
 describe('auth.signUp / signIn / getCurrentUser', () => {
-  function makeClient(fetchImpl: typeof fetch): ReliPay {
-    return new ReliPay({
+  function makeClient(fetchImpl: typeof fetch): Rekey {
+    return new Rekey({
       apiUrl: 'https://api.example.com',
       secretKey: 'rp_live_token',
       fetch: fetchImpl,
@@ -192,8 +192,8 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     const [url, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
     expect(url).toBe('https://api.example.com/api/v1/billing/plans');
     expect(init.method).toBe('GET');
-    // No X-Relipay-User-Token on the public plan list.
-    expect((init.headers as Record<string, string>)['X-Relipay-User-Token']).toBeUndefined();
+    // No X-Rekey-User-Token on the public plan list.
+    expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBeUndefined();
     expect(plans).toHaveLength(1);
   });
 
@@ -205,7 +205,7 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     const sub = await client.billing.getSubscription('user.access.token');
     const [url, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
     expect(url).toBe('https://api.example.com/api/v1/billing/subscription');
-    expect((init.headers as Record<string, string>)['X-Relipay-User-Token']).toBe(
+    expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBe(
       'user.access.token',
     );
     expect(sub).toBeNull();
@@ -236,7 +236,7 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
       successUrl: 'https://x.example/ok',
       cancelUrl: 'https://x.example/cancel',
     });
-    expect((init.headers as Record<string, string>)['X-Relipay-User-Token']).toBe(
+    expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBe(
       'user.access.token',
     );
     expect(result.url).toMatch(/^https:\/\/checkout\.stripe\.example\//);
@@ -284,7 +284,7 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     });
     const [url, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
     expect(url).toBe('https://api.example.com/api/v1/billing/coupons/validate');
-    expect((init.headers as Record<string, string>)['X-Relipay-User-Token']).toBe(
+    expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBe(
       'user.access.token',
     );
     expect(r.discountAmount).toBe(499);
@@ -326,7 +326,7 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     expect(r).toEqual({ ok: true });
   });
 
-  it('changePassword passes the user JWT in X-Relipay-User-Token', async () => {
+  it('changePassword passes the user JWT in X-Rekey-User-Token', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(
       jsonResponse(200, { success: true, data: { ok: true } }),
     );
@@ -337,7 +337,7 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     });
     const [url, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
     expect(url).toBe('https://api.example.com/api/v1/auth/change-password');
-    expect((init.headers as Record<string, string>)['X-Relipay-User-Token']).toBe(
+    expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBe(
       'user.access.token',
     );
   });
@@ -352,13 +352,13 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     expect(url).toBe('https://api.example.com/api/v1/auth/sign-out-everywhere');
     expect(init.method).toBe('POST');
     expect(init.body).toBeUndefined();
-    expect((init.headers as Record<string, string>)['X-Relipay-User-Token']).toBe(
+    expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBe(
       'user.access.token',
     );
     expect(r.revokedCount).toBe(3);
   });
 
-  it('signIn surfaces INVALID_CREDENTIALS as a typed RelipayError', async () => {
+  it('signIn surfaces INVALID_CREDENTIALS as a typed RekeyError', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(
       jsonResponse(401, {
         success: false,
@@ -373,13 +373,13 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     await expect(
       client.auth.signIn({ email: 'a@b.co', password: 'wrong' }),
     ).rejects.toMatchObject({
-      name: 'RelipayError',
+      name: 'RekeyError',
       code: 'INVALID_CREDENTIALS',
       statusCode: 401,
     });
   });
 
-  it('getCurrentUser passes the JWT in X-Relipay-User-Token, not in Authorization', async () => {
+  it('getCurrentUser passes the JWT in X-Rekey-User-Token, not in Authorization', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(
       jsonResponse(200, {
         success: true,
@@ -394,7 +394,7 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     const headers = init.headers as Record<string, string>;
     // Authorization carries the SECRET key, not the user JWT — the user JWT goes in its own header.
     expect(headers.Authorization).toBe('Bearer rp_live_token');
-    expect(headers['X-Relipay-User-Token']).toBe('user.jwt.value');
+    expect(headers['X-Rekey-User-Token']).toBe('user.jwt.value');
   });
 });
 

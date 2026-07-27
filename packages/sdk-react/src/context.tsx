@@ -1,9 +1,9 @@
 /**
- * RelipayProvider — wraps the app, exposes user + signed-in state.
+ * RekeyProvider — wraps the app, exposes user + signed-in state.
  *
  * Two ways to feed it:
  *   1. Initial user + access token from your SSR (Next.js App Router server
- *      component): `<RelipayProvider initialUser={...} initialAccessToken={...}>`
+ *      component): `<RekeyProvider initialUser={...} initialAccessToken={...}>`
  *   2. Fetch on mount: pass only `accessToken` — the provider calls
  *      getCurrentUser on mount + on token change.
  *
@@ -14,21 +14,21 @@
  */
 
 import * as React from 'react';
-import type { EndUserDto } from '@relipay/shared-types';
-import { RelipayBrowserClient } from './client.js';
+import type { EndUserDto } from '@rekey.dev/shared-types';
+import { RekeyBrowserClient } from './client.js';
 
-export interface RelipayContextValue {
+export interface RekeyContextValue {
   user: EndUserDto | null;
   signedIn: boolean;
   loading: boolean;
-  client: RelipayBrowserClient;
+  client: RekeyBrowserClient;
   /** Manual refresh — re-fetch the current user. Useful after sign-in. */
   refresh: () => Promise<void>;
 }
 
-const Ctx = React.createContext<RelipayContextValue | null>(null);
+const Ctx = React.createContext<RekeyContextValue | null>(null);
 
-export interface RelipayProviderProps {
+export interface RekeyProviderProps {
   children: React.ReactNode;
   apiUrl: string;
   /**
@@ -43,21 +43,21 @@ export interface RelipayProviderProps {
   initialUser?: EndUserDto | null;
   /** Token to use for client-side calls. Provider re-fetches user when this changes. */
   accessToken?: string | null;
-  /** Override the /me-by-token endpoint your customer server proxies to ReliPay. */
+  /** Override the /me-by-token endpoint your customer server proxies to Rekey. */
   meEndpoint?: string;
 }
 
-export function RelipayProvider({
+export function RekeyProvider({
   children,
   apiUrl,
   publishableKey,
   initialUser = null,
   accessToken = null,
   meEndpoint,
-}: RelipayProviderProps): React.JSX.Element {
+}: RekeyProviderProps): React.JSX.Element {
   const client = React.useMemo(
     () =>
-      new RelipayBrowserClient({
+      new RekeyBrowserClient({
         apiUrl,
         ...(publishableKey !== undefined && { publishableKey }),
       }),
@@ -88,7 +88,7 @@ export function RelipayProvider({
     void refresh();
   }, [refresh]);
 
-  const value: RelipayContextValue = React.useMemo(
+  const value: RekeyContextValue = React.useMemo(
     () => ({ user, signedIn: user !== null, loading, client, refresh }),
     [user, loading, client, refresh],
   );
@@ -97,11 +97,11 @@ export function RelipayProvider({
 }
 
 /** Internal — use the public hooks instead. */
-export function useRelipayContext(): RelipayContextValue {
+export function useRelipayContext(): RekeyContextValue {
   const ctx = React.useContext(Ctx);
   if (!ctx) {
     throw new Error(
-      '@relipay/react: hooks must be used inside <RelipayProvider>. Wrap your app at the root.',
+      '@rekey.dev/react: hooks must be used inside <RekeyProvider>. Wrap your app at the root.',
     );
   }
   return ctx;

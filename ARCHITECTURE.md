@@ -1,13 +1,13 @@
-# ReliPay — Architecture
+# Rekey — Architecture
 
-A self-hostable auth + billing backend for SaaS / B2C apps. One ReliPay
+A self-hostable auth + billing backend for SaaS / B2C apps. One Rekey
 deployment serves many **Tenants** (your customers), each owning many
 **Applications** (their products), each owning many **EndUsers** (their
 end-users) plus **Plans / Coupons / Licenses / UsageMeters / etc.**
 
 There are two parallel auth pillars:
 
-- **Operators** — humans who run a Tenant via the ReliPay panel.
+- **Operators** — humans who run a Tenant via the Rekey panel.
 - **End-users** — people who sign into an Application through the SDKs.
 
 This document describes how the system is put together so you can find your
@@ -27,7 +27,7 @@ way around the code and extend it.
                                                                   │
                                                                   ▼
 ┌─────────────┐      ┌────────────────────────────────────────────────────────┐
-│   Operator  │      │                       ReliPay API                       │
+│   Operator  │      │                       Rekey API                       │
 │  (tenant    │      │                                                          │
 │   admin)    │      │   ┌──────────────────────┐  ┌───────────────────────┐   │
 │             │◀────▶│   │  Operator surface    │  │  End-user surface     │   │
@@ -68,13 +68,13 @@ way around the code and extend it.
                                                   ▲
                                                   │ 2. SDK call
                                                   │    (Application secret key +
-                                                  │     optional X-Relipay-User-Token)
+                                                  │     optional X-Rekey-User-Token)
                                                   │
                           ┌───────────────────────┴───────────────────────┐
                   ┌───────▼───────┐                                ┌───────▼───────┐
                   │  Customer's   │  3b. fetch on browser →        │  Customer's   │
-                  │   server      │      @relipay/react sends      │   browser     │
-                  │  (@relipay/   │      X-Relipay-User-Token      │  (@relipay/   │
+                  │   server      │      @rekey.dev/react sends      │   browser     │
+                  │  (@rekey.dev/   │      X-Rekey-User-Token      │  (@rekey.dev/   │
                   │   node /      │      direct from JWT cookie    │   react)      │
                   │   nextjs)     │                                │               │
                   └───────────────┘                                └───────────────┘
@@ -88,7 +88,7 @@ way around the code and extend it.
 
 2. **End-user SDK calls** carry the Application secret key
    (`Authorization: Bearer rp_live_…`) and, for per-user endpoints, an
-   end-user JWT (`X-Relipay-User-Token`). The middleware checks that (a) the
+   end-user JWT (`X-Rekey-User-Token`). The middleware checks that (a) the
    secret key resolves to an Application, (b) the key's `scopes` permit the
    route, and (c) the user JWT's `applicationId` claim matches.
 
@@ -98,17 +98,17 @@ way around the code and extend it.
    request path.
 
 3b. **Browser SDK** talks to the customer's own server (with cookies); that
-   server forwards to ReliPay via `@relipay/node`. The browser never holds the
+   server forwards to Rekey via `@rekey.dev/node`. The browser never holds the
    secret key.
 
 4a. **Outbound transactional email** via Resend — either a BYO key per
-   Application or the ReliPay-managed pool. When no transport is configured the
+   Application or the Rekey-managed pool. When no transport is configured the
    API returns the raw token to the caller instead (self-host fallback).
 
 4b. **Outbound webhooks** notify the customer's server of user-lifecycle events
    (`user.created`, `mfa.enabled`, `password.changed`, `session.revoked`,
    `email.verified`, …). HMAC-SHA256 signed as
-   `X-Relipay-Signature: t=<unix>,v1=<hex>`, with up to 5 retry attempts on
+   `X-Rekey-Signature: t=<unix>,v1=<hex>`, with up to 5 retry attempts on
    exponential backoff (30s / 2m / 10m / 1h / 4h).
 
 ---
@@ -117,11 +117,11 @@ way around the code and extend it.
 
 | Tier | Credential | Issued by | Used by | Scope |
 |---|---|---|---|---|
-| **Bootstrap admin** | `SUPER_ADMIN_KEY` env | the deployer | `relipay` CLI, first Tenant + Application bootstrap | global; `/api/v1/admin/*` only |
+| **Bootstrap admin** | `SUPER_ADMIN_KEY` env | the deployer | `rekey` CLI, first Tenant + Application bootstrap | global; `/api/v1/admin/*` only |
 | **Operator session** | `to_access` JWT + 30-day refresh | `/api/v1/tenant/auth/sign-in` | the panel | one Tenant (`tid`) + role (`rol`) |
-| **Application secret key** | `rp_live_*` / `rp_test_*` | operator via panel | customer's server (`@relipay/node`) | one Application; `scopes` array gates routes |
-| **Application public key** | `rp_pub_<slug>_*` | auto on Application create | customer's browser (`@relipay/react`) | identifier only — never carries privilege |
-| **End-user session** | `eu_access` JWT + 30-day refresh | `/api/v1/auth/sign-in` | customer's server forwards to ReliPay | one EndUser within one Application |
+| **Application secret key** | `rp_live_*` / `rp_test_*` | operator via panel | customer's server (`@rekey.dev/node`) | one Application; `scopes` array gates routes |
+| **Application public key** | `rp_pub_<slug>_*` | auto on Application create | customer's browser (`@rekey.dev/react`) | identifier only — never carries privilege |
+| **End-user session** | `eu_access` JWT + 30-day refresh | `/api/v1/auth/sign-in` | customer's server forwards to Rekey | one EndUser within one Application |
 | **MFA challenge token** | `eu_mfa_challenge` / `to_mfa_challenge` JWT (5 min) | sign-in when MFA enrolled | exchange at `/auth/mfa-verify` | not a session; bound to (user, application, time) |
 | **Magic-link token** | 32-byte CSPRNG, SHA-256 in DB (15 min) | `/auth/magic-link/request` | exchange at `/auth/magic-link/verify` | single use; auto-creates user on consume when sign-up enabled |
 | **Passkey credential** | WebAuthn credential id + COSE public key (`WebAuthnCredential`) | `/auth/passkey/register/*` | `/auth/passkey/authenticate/*` | Application `rpId` + `rpOrigins`; counter advances per assertion |
@@ -336,7 +336,7 @@ packages/
   sdk-node/                  — server SDK (Application secret key)
   sdk-react/                 — browser SDK (public key)
   sdk-nextjs/                — Next.js server-action + middleware helpers
-  cli/                       — relipay CLI
+  cli/                       — rekey CLI
   mcp/                       — Model Context Protocol surface
 prisma/
   schema.prisma              — single Prisma schema for the whole monorepo

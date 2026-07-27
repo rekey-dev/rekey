@@ -17,7 +17,7 @@
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { TenantRole } from '@prisma/client';
-import { RelipayError } from '../lib/error.js';
+import { RekeyError } from '../lib/error.js';
 import { verifyTenantAccessToken } from '../lib/tenant-jwt.js';
 import { prisma } from '../lib/prisma.js';
 import type { PublicTenantUser } from '../modules/tenant-auth/tenant-auth.service.js';
@@ -39,16 +39,16 @@ export async function requireTenantSession(
   const header = request.headers.authorization ?? '';
   const presented = header.startsWith('Bearer ') ? header.slice(7) : '';
   if (!presented) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 401,
       code: 'TENANT_SESSION_MISSING',
       message: 'This endpoint requires an Authorization: Bearer <accessToken> header.',
-      fix: 'Sign in to the ReliPay panel (or POST to /api/v1/tenant/auth/sign-in) and pass the returned accessToken.',
+      fix: 'Sign in to the Rekey panel (or POST to /api/v1/tenant/auth/sign-in) and pass the returned accessToken.',
     });
   }
   const claims = verifyTenantAccessToken(presented);
   if (!claims) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 401,
       code: 'TENANT_SESSION_INVALID',
       message: 'Operator session token is invalid, expired, or signed with a different secret.',
@@ -58,7 +58,7 @@ export async function requireTenantSession(
 
   const user = await prisma.tenantUser.findUnique({ where: { id: claims.sub } });
   if (!user) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 401,
       code: 'TENANT_SESSION_INVALID',
       message: 'Operator account no longer exists.',
@@ -75,7 +75,7 @@ export async function requireTenantSession(
     },
   });
   if (!membership) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 403,
       code: 'TENANT_MEMBERSHIP_REVOKED',
       message: 'You are no longer a member of this workspace.',
@@ -110,7 +110,7 @@ export function requireTenantRole(
 ): (req: FastifyRequest, _reply: FastifyReply) => Promise<void> {
   return async (req) => {
     if (!req.tenantRole) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 500,
         code: 'INTERNAL_ERROR',
         message: 'requireTenantRole used without requireTenantSession.',
@@ -118,7 +118,7 @@ export function requireTenantRole(
       });
     }
     if (!allowed.includes(req.tenantRole)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'TENANT_ROLE_INSUFFICIENT',
         message: `This action requires one of: ${allowed.join(', ')}. Your role: ${req.tenantRole}.`,

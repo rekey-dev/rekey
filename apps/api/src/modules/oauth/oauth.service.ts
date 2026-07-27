@@ -15,8 +15,8 @@
 
 import type { Application, DataMode } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
-import { AuthConfigSchema } from '@relipay/shared-types';
+import { RekeyError } from '../../lib/error.js';
+import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { assertSignupAllowed, type AuthKind } from '../../lib/signup-policy.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
 import { getOAuthProvider, buildAuthUrl as buildAuthUrlVia } from './providers/index.js';
@@ -58,7 +58,7 @@ function buildProviderConfig(
 ): OAuthProviderConfig {
   const pub = publicConfig(application, providerName);
   if (!pub) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'OAUTH_PROVIDER_NOT_CONFIGURED',
       message: `Application "${application.slug}" has no "${providerName}" OAuth config.`,
@@ -68,7 +68,7 @@ function buildProviderConfig(
   const secrets = decryptedSecrets(application);
   const providerSecrets = secrets[providerName];
   if (!providerSecrets) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'OAUTH_PROVIDER_NOT_CONFIGURED',
       message: `Application "${application.slug}" has no clientSecret for "${providerName}".`,
@@ -91,7 +91,7 @@ export const oauthService = {
   }): Promise<string> {
     const provider = getOAuthProvider(args.providerName);
     if (!provider) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'OAUTH_PROVIDER_UNKNOWN',
         message: `OAuth provider "${args.providerName}" is not registered.`,
@@ -127,7 +127,7 @@ export const oauthService = {
   }): Promise<OAuthSignInResult> {
     const provider = getOAuthProvider(args.providerName);
     if (!provider) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'OAUTH_PROVIDER_UNKNOWN',
         message: `OAuth provider "${args.providerName}" is not registered.`,
@@ -152,7 +152,7 @@ export const oauthService = {
       // different Application. Should never happen via normal flows but
       // guards against config errors.
       if (existing.applicationId !== args.application.id) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 401,
           code: 'OAUTH_IDENTITY_WRONG_APPLICATION',
           message: 'This provider account is already linked to a different Application.',
@@ -209,7 +209,7 @@ export const oauthService = {
         select: { id: true },
       });
       if (existingByEmail) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 401,
           code: 'OAUTH_EMAIL_NOT_VERIFIED',
           message:
@@ -227,7 +227,7 @@ export const oauthService = {
       args.authKind,
     );
     if (!identity.email) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'OAUTH_NO_EMAIL',
         message: `${args.providerName} did not return an email — cannot create a new user.`,
@@ -314,7 +314,7 @@ export const oauthService = {
   }): Promise<{ provider: string; providerAccountId: string; alreadyLinked: boolean }> {
     const provider = getOAuthProvider(args.providerName);
     if (!provider) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'OAUTH_PROVIDER_UNKNOWN',
         message: `OAuth provider "${args.providerName}" is not registered.`,
@@ -327,7 +327,7 @@ export const oauthService = {
     if (!identity.emailVerified) {
       // Same gate as the sign-in path. An unverified email cannot prove
       // the OAuth caller actually owns the mailbox — refuse to link.
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'OAUTH_EMAIL_NOT_VERIFIED',
         message: `${args.providerName} did not verify the email — refusing to link to your account.`,
@@ -353,7 +353,7 @@ export const oauthService = {
           alreadyLinked: true,
         };
       }
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 409,
         code: 'OAUTH_IDENTITY_TAKEN',
         message: 'This provider account is already linked to a different user.',
@@ -391,7 +391,7 @@ export const oauthService = {
   }): Promise<{ unlinked: boolean }> {
     const endUser = await prisma.endUser.findUnique({ where: { id: args.endUserId } });
     if (!endUser || endUser.applicationId !== args.application.id) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'END_USER_NOT_FOUND',
         message: 'End-user not found in this application.',
@@ -404,7 +404,7 @@ export const oauthService = {
     const remainingProviders = identities.filter((i) => i.provider !== args.providerName);
     const hasPassword = endUser.passwordHash !== null;
     if (!hasPassword && remainingProviders.length === 0) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 409,
         code: 'OAUTH_UNLINK_WOULD_LOCK_OUT',
         message: 'Unlinking this provider would leave the account with no way to sign in.',

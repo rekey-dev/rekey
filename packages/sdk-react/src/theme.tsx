@@ -3,7 +3,7 @@
  *
  * Design goals:
  *   - **No CSS framework.** The package ships a single `<style>` block keyed on
- *     CSS custom properties (`--relipay-*`). It works in any host app — Tailwind,
+ *     CSS custom properties (`--rekey-*`). It works in any host app — Tailwind,
  *     vanilla CSS, CSS-in-JS — because it depends on nothing but the cascade.
  *   - **Tokens, not classes.** Every colour / radius / spacing value the
  *     components use resolves to a custom property, so an integrator restyles the
@@ -16,7 +16,7 @@
  *     can target one part — e.g. `{ button: "my-cta" }` — without re-theming.
  *
  * The style block is injected exactly once per document (guarded by an id), and
- * every component is wrapped by `<Themed>` which establishes the `.relipay-root`
+ * every component is wrapped by `<Themed>` which establishes the `.rekey-root`
  * scope + applies variable overrides inline.
  */
 
@@ -24,7 +24,7 @@ import * as React from 'react';
 
 /** The token names an integrator may override. All optional. */
 export interface AppearanceVariables {
-  /** Brand / primary action colour. Default a ReliPay teal. */
+  /** Brand / primary action colour. Default a Rekey teal. */
   colorPrimary?: string;
   /** Text colour on top of `colorPrimary` (button labels). */
   colorPrimaryText?: string;
@@ -94,229 +94,229 @@ function normalizeAppearance(a: AppearanceProp | undefined): Appearance {
   return a;
 }
 
-const STYLE_ELEMENT_ID = 'relipay-react-styles';
+const STYLE_ELEMENT_ID = 'rekey-react-styles';
 
 /**
- * The default stylesheet. Everything is scoped under `.relipay-root` so it can
+ * The default stylesheet. Everything is scoped under `.rekey-root` so it can
  * never leak into the host app. Dark mode is expressed twice: once via the
- * `[data-relipay-theme="dark"]` attribute (explicit pin) and once via
- * `@media (prefers-color-scheme: dark)` guarded by `:not([data-relipay-theme])`
+ * `[data-rekey-theme="dark"]` attribute (explicit pin) and once via
+ * `@media (prefers-color-scheme: dark)` guarded by `:not([data-rekey-theme])`
  * (so an explicit light pin wins over the OS preference).
  */
 const STYLES = `
-.relipay-root {
-  --relipay-color-primary: #0d9488;
-  --relipay-color-primary-text: #ffffff;
-  --relipay-color-background: #ffffff;
-  --relipay-color-surface: #ffffff;
-  --relipay-color-text: #171717;
-  --relipay-color-text-muted: #737373;
-  --relipay-color-border: #e5e5e5;
-  --relipay-color-danger: #dc2626;
-  --relipay-radius: 12px;
-  --relipay-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --relipay-font-size: 14px;
-  --relipay-spacing: 8px;
+.rekey-root {
+  --rekey-color-primary: #0d9488;
+  --rekey-color-primary-text: #ffffff;
+  --rekey-color-background: #ffffff;
+  --rekey-color-surface: #ffffff;
+  --rekey-color-text: #171717;
+  --rekey-color-text-muted: #737373;
+  --rekey-color-border: #e5e5e5;
+  --rekey-color-danger: #dc2626;
+  --rekey-radius: 12px;
+  --rekey-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --rekey-font-size: 14px;
+  --rekey-spacing: 8px;
 
-  color: var(--relipay-color-text);
-  font-family: var(--relipay-font);
-  font-size: var(--relipay-font-size);
+  color: var(--rekey-color-text);
+  font-family: var(--rekey-font);
+  font-size: var(--rekey-font-size);
   box-sizing: border-box;
 }
-.relipay-root *, .relipay-root *::before, .relipay-root *::after { box-sizing: border-box; }
+.rekey-root *, .rekey-root *::before, .rekey-root *::after { box-sizing: border-box; }
 
-.relipay-root[data-relipay-theme="dark"] {
-  --relipay-color-background: #0a0a0a;
-  --relipay-color-surface: #171717;
-  --relipay-color-text: #f5f5f5;
-  --relipay-color-text-muted: #a3a3a3;
-  --relipay-color-border: #2e2e2e;
+.rekey-root[data-rekey-theme="dark"] {
+  --rekey-color-background: #0a0a0a;
+  --rekey-color-surface: #171717;
+  --rekey-color-text: #f5f5f5;
+  --rekey-color-text-muted: #a3a3a3;
+  --rekey-color-border: #2e2e2e;
 }
 @media (prefers-color-scheme: dark) {
-  .relipay-root:not([data-relipay-theme]) {
-    --relipay-color-background: #0a0a0a;
-    --relipay-color-surface: #171717;
-    --relipay-color-text: #f5f5f5;
-    --relipay-color-text-muted: #a3a3a3;
-    --relipay-color-border: #2e2e2e;
+  .rekey-root:not([data-rekey-theme]) {
+    --rekey-color-background: #0a0a0a;
+    --rekey-color-surface: #171717;
+    --rekey-color-text: #f5f5f5;
+    --rekey-color-text-muted: #a3a3a3;
+    --rekey-color-border: #2e2e2e;
   }
 }
 
-.relipay-card {
-  background: var(--relipay-color-surface);
-  border: 1px solid var(--relipay-color-border);
-  border-radius: var(--relipay-radius);
-  padding: calc(var(--relipay-spacing) * 3);
+.rekey-card {
+  background: var(--rekey-color-surface);
+  border: 1px solid var(--rekey-color-border);
+  border-radius: var(--rekey-radius);
+  padding: calc(var(--rekey-spacing) * 3);
   display: flex;
   flex-direction: column;
-  gap: calc(var(--relipay-spacing) * 1.5);
+  gap: calc(var(--rekey-spacing) * 1.5);
   max-width: 26rem;
 }
-.relipay-header { display: flex; flex-direction: column; gap: calc(var(--relipay-spacing) * 0.5); margin-bottom: var(--relipay-spacing); }
-.relipay-title { font-size: 1.25rem; font-weight: 600; margin: 0; }
-.relipay-subtitle { font-size: 0.875rem; color: var(--relipay-color-text-muted); margin: 0; }
-.relipay-label { font-size: 0.75rem; font-weight: 500; color: var(--relipay-color-text-muted); margin-bottom: calc(var(--relipay-spacing) * 0.5); display: block; }
-.relipay-field {
+.rekey-header { display: flex; flex-direction: column; gap: calc(var(--rekey-spacing) * 0.5); margin-bottom: var(--rekey-spacing); }
+.rekey-title { font-size: 1.25rem; font-weight: 600; margin: 0; }
+.rekey-subtitle { font-size: 0.875rem; color: var(--rekey-color-text-muted); margin: 0; }
+.rekey-label { font-size: 0.75rem; font-weight: 500; color: var(--rekey-color-text-muted); margin-bottom: calc(var(--rekey-spacing) * 0.5); display: block; }
+.rekey-field {
   display: flex; flex-direction: column;
 }
-.relipay-input {
+.rekey-input {
   width: 100%;
-  border: 1px solid var(--relipay-color-border);
-  border-radius: calc(var(--relipay-radius) - 4px);
-  background: var(--relipay-color-background);
-  color: var(--relipay-color-text);
-  padding: calc(var(--relipay-spacing) * 1.25) calc(var(--relipay-spacing) * 1.5);
+  border: 1px solid var(--rekey-color-border);
+  border-radius: calc(var(--rekey-radius) - 4px);
+  background: var(--rekey-color-background);
+  color: var(--rekey-color-text);
+  padding: calc(var(--rekey-spacing) * 1.25) calc(var(--rekey-spacing) * 1.5);
   font: inherit;
   outline: none;
   transition: border-color 0.15s;
 }
-.relipay-input:focus { border-color: var(--relipay-color-primary); }
-.relipay-btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: calc(var(--relipay-spacing) * 0.75);
-  border-radius: calc(var(--relipay-radius) - 4px);
-  padding: calc(var(--relipay-spacing) * 1.25) calc(var(--relipay-spacing) * 2);
+.rekey-input:focus { border-color: var(--rekey-color-primary); }
+.rekey-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: calc(var(--rekey-spacing) * 0.75);
+  border-radius: calc(var(--rekey-radius) - 4px);
+  padding: calc(var(--rekey-spacing) * 1.25) calc(var(--rekey-spacing) * 2);
   font: inherit; font-weight: 600;
   cursor: pointer; border: 1px solid transparent;
   text-decoration: none; line-height: 1.2;
   transition: background 0.15s, opacity 0.15s, border-color 0.15s;
 }
-.relipay-btn:disabled { opacity: 0.5; cursor: default; }
-.relipay-btn-primary { background: var(--relipay-color-primary); color: var(--relipay-color-primary-text); }
-.relipay-btn-primary:hover:not(:disabled) { filter: brightness(0.93); }
-.relipay-btn-secondary { background: transparent; color: var(--relipay-color-text); border-color: var(--relipay-color-border); }
-.relipay-btn-secondary:hover:not(:disabled) { background: var(--relipay-color-border); }
-.relipay-btn-danger { background: transparent; color: var(--relipay-color-danger); border-color: var(--relipay-color-danger); }
-.relipay-btn-danger:hover:not(:disabled) { background: var(--relipay-color-danger); color: #fff; }
-.relipay-btn-block { width: 100%; }
+.rekey-btn:disabled { opacity: 0.5; cursor: default; }
+.rekey-btn-primary { background: var(--rekey-color-primary); color: var(--rekey-color-primary-text); }
+.rekey-btn-primary:hover:not(:disabled) { filter: brightness(0.93); }
+.rekey-btn-secondary { background: transparent; color: var(--rekey-color-text); border-color: var(--rekey-color-border); }
+.rekey-btn-secondary:hover:not(:disabled) { background: var(--rekey-color-border); }
+.rekey-btn-danger { background: transparent; color: var(--rekey-color-danger); border-color: var(--rekey-color-danger); }
+.rekey-btn-danger:hover:not(:disabled) { background: var(--rekey-color-danger); color: #fff; }
+.rekey-btn-block { width: 100%; }
 
-.relipay-divider { display: flex; align-items: center; gap: var(--relipay-spacing); color: var(--relipay-color-text-muted); font-size: 0.75rem; margin: var(--relipay-spacing) 0; }
-.relipay-divider::before, .relipay-divider::after { content: ""; flex: 1; height: 1px; background: var(--relipay-color-border); }
+.rekey-divider { display: flex; align-items: center; gap: var(--rekey-spacing); color: var(--rekey-color-text-muted); font-size: 0.75rem; margin: var(--rekey-spacing) 0; }
+.rekey-divider::before, .rekey-divider::after { content: ""; flex: 1; height: 1px; background: var(--rekey-color-border); }
 
-.relipay-footer { font-size: 0.8125rem; color: var(--relipay-color-text-muted); text-align: center; margin-top: var(--relipay-spacing); }
-.relipay-link { color: var(--relipay-color-primary); text-decoration: none; cursor: pointer; background: none; border: none; font: inherit; padding: 0; }
-.relipay-link:hover { text-decoration: underline; }
+.rekey-footer { font-size: 0.8125rem; color: var(--rekey-color-text-muted); text-align: center; margin-top: var(--rekey-spacing); }
+.rekey-link { color: var(--rekey-color-primary); text-decoration: none; cursor: pointer; background: none; border: none; font: inherit; padding: 0; }
+.rekey-link:hover { text-decoration: underline; }
 
-.relipay-alert { border-radius: calc(var(--relipay-radius) - 4px); padding: calc(var(--relipay-spacing) * 1.25) calc(var(--relipay-spacing) * 1.5); font-size: 0.8125rem; border: 1px solid var(--relipay-color-border); }
-.relipay-alert-error { color: var(--relipay-color-danger); border-color: var(--relipay-color-danger); background: color-mix(in srgb, var(--relipay-color-danger) 8%, transparent); }
-.relipay-alert-info { color: var(--relipay-color-primary); border-color: var(--relipay-color-primary); background: color-mix(in srgb, var(--relipay-color-primary) 8%, transparent); }
+.rekey-alert { border-radius: calc(var(--rekey-radius) - 4px); padding: calc(var(--rekey-spacing) * 1.25) calc(var(--rekey-spacing) * 1.5); font-size: 0.8125rem; border: 1px solid var(--rekey-color-border); }
+.rekey-alert-error { color: var(--rekey-color-danger); border-color: var(--rekey-color-danger); background: color-mix(in srgb, var(--rekey-color-danger) 8%, transparent); }
+.rekey-alert-info { color: var(--rekey-color-primary); border-color: var(--rekey-color-primary); background: color-mix(in srgb, var(--rekey-color-primary) 8%, transparent); }
 
-.relipay-badge { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid var(--relipay-color-border); padding: 1px 10px; font-size: 0.6875rem; color: var(--relipay-color-text-muted); }
-.relipay-badge-primary { border-color: var(--relipay-color-primary); color: var(--relipay-color-primary); }
+.rekey-badge { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid var(--rekey-color-border); padding: 1px 10px; font-size: 0.6875rem; color: var(--rekey-color-text-muted); }
+.rekey-badge-primary { border-color: var(--rekey-color-primary); color: var(--rekey-color-primary); }
 
-.relipay-oauth-list { display: flex; flex-direction: column; gap: var(--relipay-spacing); }
+.rekey-oauth-list { display: flex; flex-direction: column; gap: var(--rekey-spacing); }
 
 /* UserButton */
-.relipay-userbtn { position: relative; display: inline-block; }
-.relipay-avatar {
+.rekey-userbtn { position: relative; display: inline-block; }
+.rekey-avatar {
   width: 2rem; height: 2rem; border-radius: 999px;
-  background: var(--relipay-color-primary); color: var(--relipay-color-primary-text);
+  background: var(--rekey-color-primary); color: var(--rekey-color-primary-text);
   display: inline-flex; align-items: center; justify-content: center;
   font-weight: 600; font-size: 0.8125rem; cursor: pointer; border: none; padding: 0;
 }
-.relipay-menu {
+.rekey-menu {
   position: absolute; right: 0; top: calc(100% + 6px); z-index: 50;
   min-width: 14rem;
-  background: var(--relipay-color-surface);
-  border: 1px solid var(--relipay-color-border);
-  border-radius: calc(var(--relipay-radius) - 2px);
+  background: var(--rekey-color-surface);
+  border: 1px solid var(--rekey-color-border);
+  border-radius: calc(var(--rekey-radius) - 2px);
   box-shadow: 0 8px 30px rgba(0,0,0,0.12);
-  padding: calc(var(--relipay-spacing) * 0.5);
+  padding: calc(var(--rekey-spacing) * 0.5);
   display: flex; flex-direction: column;
 }
-.relipay-menu-head { padding: var(--relipay-spacing) calc(var(--relipay-spacing) * 1.25); border-bottom: 1px solid var(--relipay-color-border); margin-bottom: calc(var(--relipay-spacing) * 0.5); }
-.relipay-menu-head-email { font-size: 0.8125rem; font-weight: 600; word-break: break-all; }
-.relipay-menu-item {
-  display: flex; align-items: center; gap: var(--relipay-spacing);
-  padding: calc(var(--relipay-spacing) * 1) calc(var(--relipay-spacing) * 1.25);
-  border-radius: calc(var(--relipay-radius) - 6px);
+.rekey-menu-head { padding: var(--rekey-spacing) calc(var(--rekey-spacing) * 1.25); border-bottom: 1px solid var(--rekey-color-border); margin-bottom: calc(var(--rekey-spacing) * 0.5); }
+.rekey-menu-head-email { font-size: 0.8125rem; font-weight: 600; word-break: break-all; }
+.rekey-menu-item {
+  display: flex; align-items: center; gap: var(--rekey-spacing);
+  padding: calc(var(--rekey-spacing) * 1) calc(var(--rekey-spacing) * 1.25);
+  border-radius: calc(var(--rekey-radius) - 6px);
   font: inherit; font-size: 0.8125rem; text-align: left;
-  background: none; border: none; cursor: pointer; color: var(--relipay-color-text);
+  background: none; border: none; cursor: pointer; color: var(--rekey-color-text);
   text-decoration: none; width: 100%;
 }
-.relipay-menu-item:hover { background: var(--relipay-color-border); }
-.relipay-menu-item-danger { color: var(--relipay-color-danger); }
+.rekey-menu-item:hover { background: var(--rekey-color-border); }
+.rekey-menu-item-danger { color: var(--rekey-color-danger); }
 
 /* Pricing table */
-.relipay-pricing { display: grid; gap: calc(var(--relipay-spacing) * 2); grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); max-width: none; }
-.relipay-plan {
-  background: var(--relipay-color-surface);
-  border: 1px solid var(--relipay-color-border);
-  border-radius: var(--relipay-radius);
-  padding: calc(var(--relipay-spacing) * 2.5);
-  display: flex; flex-direction: column; gap: var(--relipay-spacing);
+.rekey-pricing { display: grid; gap: calc(var(--rekey-spacing) * 2); grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); max-width: none; }
+.rekey-plan {
+  background: var(--rekey-color-surface);
+  border: 1px solid var(--rekey-color-border);
+  border-radius: var(--rekey-radius);
+  padding: calc(var(--rekey-spacing) * 2.5);
+  display: flex; flex-direction: column; gap: var(--rekey-spacing);
 }
-.relipay-plan-current { border-color: var(--relipay-color-primary); }
-.relipay-plan-name { font-weight: 600; }
-.relipay-price { font-size: 1.5rem; font-weight: 700; }
-.relipay-price-sub { font-size: 0.75rem; font-weight: 400; color: var(--relipay-color-text-muted); }
-.relipay-plan-cta { margin-top: auto; }
+.rekey-plan-current { border-color: var(--rekey-color-primary); }
+.rekey-plan-name { font-weight: 600; }
+.rekey-price { font-size: 1.5rem; font-weight: 700; }
+.rekey-price-sub { font-size: 0.75rem; font-weight: 400; color: var(--rekey-color-text-muted); }
+.rekey-plan-cta { margin-top: auto; }
 
 /* Provider picker ("Pay with…" radio cards) */
-.relipay-provider-group { gap: calc(var(--relipay-spacing) * 1); max-width: none; }
-.relipay-provider-list { display: flex; flex-wrap: wrap; gap: var(--relipay-spacing); }
-.relipay-provider-option {
-  display: inline-flex; align-items: center; gap: calc(var(--relipay-spacing) * 1);
-  border: 1px solid var(--relipay-color-border);
-  border-radius: calc(var(--relipay-radius) - 4px);
-  background: var(--relipay-color-background);
-  color: var(--relipay-color-text);
-  padding: calc(var(--relipay-spacing) * 1.25) calc(var(--relipay-spacing) * 1.75);
+.rekey-provider-group { gap: calc(var(--rekey-spacing) * 1); max-width: none; }
+.rekey-provider-list { display: flex; flex-wrap: wrap; gap: var(--rekey-spacing); }
+.rekey-provider-option {
+  display: inline-flex; align-items: center; gap: calc(var(--rekey-spacing) * 1);
+  border: 1px solid var(--rekey-color-border);
+  border-radius: calc(var(--rekey-radius) - 4px);
+  background: var(--rekey-color-background);
+  color: var(--rekey-color-text);
+  padding: calc(var(--rekey-spacing) * 1.25) calc(var(--rekey-spacing) * 1.75);
   font: inherit; font-weight: 500; cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
-.relipay-provider-option:hover { border-color: var(--relipay-color-primary); }
-.relipay-provider-option-selected {
-  border-color: var(--relipay-color-primary);
-  background: color-mix(in srgb, var(--relipay-color-primary) 8%, transparent);
+.rekey-provider-option:hover { border-color: var(--rekey-color-primary); }
+.rekey-provider-option-selected {
+  border-color: var(--rekey-color-primary);
+  background: color-mix(in srgb, var(--rekey-color-primary) 8%, transparent);
 }
 /* Visually hidden but still focusable + form-posting (zero-JS uncontrolled mode). */
-.relipay-provider-radio {
+.rekey-provider-radio {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
-.relipay-provider-dot {
+.rekey-provider-dot {
   width: 1rem; height: 1rem; border-radius: 999px; flex: none;
-  border: 2px solid var(--relipay-color-border);
+  border: 2px solid var(--rekey-color-border);
   transition: border-color 0.15s, box-shadow 0.15s;
 }
-.relipay-provider-option-selected .relipay-provider-dot {
-  border-color: var(--relipay-color-primary);
-  box-shadow: inset 0 0 0 3px var(--relipay-color-primary);
+.rekey-provider-option-selected .rekey-provider-dot {
+  border-color: var(--rekey-color-primary);
+  box-shadow: inset 0 0 0 3px var(--rekey-color-primary);
 }
 /* Keyboard focus ring on the (visually hidden) radio reflects onto the card. */
-.relipay-provider-option:focus-within {
-  outline: 2px solid var(--relipay-color-primary);
+.rekey-provider-option:focus-within {
+  outline: 2px solid var(--rekey-color-primary);
   outline-offset: 1px;
 }
 
 /* Org switcher */
-.relipay-select {
+.rekey-select {
   width: 100%;
-  border: 1px solid var(--relipay-color-border);
-  border-radius: calc(var(--relipay-radius) - 4px);
-  background: var(--relipay-color-background);
-  color: var(--relipay-color-text);
-  padding: calc(var(--relipay-spacing) * 1.25) calc(var(--relipay-spacing) * 1.5);
+  border: 1px solid var(--rekey-color-border);
+  border-radius: calc(var(--rekey-radius) - 4px);
+  background: var(--rekey-color-background);
+  color: var(--rekey-color-text);
+  padding: calc(var(--rekey-spacing) * 1.25) calc(var(--rekey-spacing) * 1.5);
   font: inherit;
 }
-.relipay-member-row {
-  display: flex; align-items: center; gap: var(--relipay-spacing);
-  border: 1px solid var(--relipay-color-border);
-  border-radius: calc(var(--relipay-radius) - 4px);
-  padding: var(--relipay-spacing) calc(var(--relipay-spacing) * 1.5);
+.rekey-member-row {
+  display: flex; align-items: center; gap: var(--rekey-spacing);
+  border: 1px solid var(--rekey-color-border);
+  border-radius: calc(var(--rekey-radius) - 4px);
+  padding: var(--rekey-spacing) calc(var(--rekey-spacing) * 1.5);
   font-size: 0.8125rem;
 }
-.relipay-spacer { margin-left: auto; }
-.relipay-spinner {
+.rekey-spacer { margin-left: auto; }
+.rekey-spinner {
   width: 1.25rem; height: 1.25rem; border-radius: 999px;
-  border: 2px solid var(--relipay-color-border);
-  border-top-color: var(--relipay-color-primary);
-  animation: relipay-spin 0.7s linear infinite;
+  border: 2px solid var(--rekey-color-border);
+  border-top-color: var(--rekey-color-primary);
+  animation: rekey-spin 0.7s linear infinite;
   display: inline-block;
 }
-@keyframes relipay-spin { to { transform: rotate(360deg); } }
-.relipay-row { display: flex; align-items: center; gap: var(--relipay-spacing); }
-.relipay-stack { display: flex; flex-direction: column; gap: var(--relipay-spacing); }
+@keyframes rekey-spin { to { transform: rotate(360deg); } }
+.rekey-row { display: flex; align-items: center; gap: var(--rekey-spacing); }
+.rekey-stack { display: flex; flex-direction: column; gap: var(--rekey-spacing); }
 `;
 
 /** Inject the stylesheet once per document. No-op on the server. */
@@ -335,18 +335,18 @@ function useInjectStyles(): void {
 function variablesToStyle(vars: AppearanceVariables | undefined): React.CSSProperties {
   if (!vars) return {};
   const s: Record<string, string> = {};
-  if (vars.colorPrimary) s['--relipay-color-primary'] = vars.colorPrimary;
-  if (vars.colorPrimaryText) s['--relipay-color-primary-text'] = vars.colorPrimaryText;
-  if (vars.colorBackground) s['--relipay-color-background'] = vars.colorBackground;
-  if (vars.colorSurface) s['--relipay-color-surface'] = vars.colorSurface;
-  if (vars.colorText) s['--relipay-color-text'] = vars.colorText;
-  if (vars.colorTextMuted) s['--relipay-color-text-muted'] = vars.colorTextMuted;
-  if (vars.colorBorder) s['--relipay-color-border'] = vars.colorBorder;
-  if (vars.colorDanger) s['--relipay-color-danger'] = vars.colorDanger;
-  if (vars.borderRadius) s['--relipay-radius'] = vars.borderRadius;
-  if (vars.fontFamily) s['--relipay-font'] = vars.fontFamily;
-  if (vars.fontSize) s['--relipay-font-size'] = vars.fontSize;
-  if (vars.spacing) s['--relipay-spacing'] = vars.spacing;
+  if (vars.colorPrimary) s['--rekey-color-primary'] = vars.colorPrimary;
+  if (vars.colorPrimaryText) s['--rekey-color-primary-text'] = vars.colorPrimaryText;
+  if (vars.colorBackground) s['--rekey-color-background'] = vars.colorBackground;
+  if (vars.colorSurface) s['--rekey-color-surface'] = vars.colorSurface;
+  if (vars.colorText) s['--rekey-color-text'] = vars.colorText;
+  if (vars.colorTextMuted) s['--rekey-color-text-muted'] = vars.colorTextMuted;
+  if (vars.colorBorder) s['--rekey-color-border'] = vars.colorBorder;
+  if (vars.colorDanger) s['--rekey-color-danger'] = vars.colorDanger;
+  if (vars.borderRadius) s['--rekey-radius'] = vars.borderRadius;
+  if (vars.fontFamily) s['--rekey-font'] = vars.fontFamily;
+  if (vars.fontSize) s['--rekey-font-size'] = vars.fontSize;
+  if (vars.spacing) s['--rekey-spacing'] = vars.spacing;
   return s as React.CSSProperties;
 }
 
@@ -375,7 +375,7 @@ export function useCx(): (base: string, slot?: AppearanceElement, extra?: string
 
 /**
  * Establishes the themed scope. Every public component wraps its tree in this:
- * it injects the stylesheet, sets `.relipay-root` + the theme attribute, and
+ * it injects the stylesheet, sets `.rekey-root` + the theme attribute, and
  * applies variable overrides inline. `className` is forwarded to the root so an
  * integrator can target the whole widget; `appearance.elements.root` is merged
  * in too.
@@ -395,14 +395,14 @@ export function Themed({
 }): React.JSX.Element {
   useInjectStyles();
   const resolved = normalizeAppearance(appearance);
-  const rootClass = ['relipay-root', resolved.elements?.root, className].filter(Boolean).join(' ');
+  const rootClass = ['rekey-root', resolved.elements?.root, className].filter(Boolean).join(' ');
   const mergedStyle: React.CSSProperties = { ...variablesToStyle(resolved.variables), ...style };
   return (
     <AppearanceCtx.Provider value={resolved}>
       <div
         className={rootClass}
         style={mergedStyle}
-        {...(resolved.baseTheme ? { 'data-relipay-theme': resolved.baseTheme } : {})}
+        {...(resolved.baseTheme ? { 'data-rekey-theme': resolved.baseTheme } : {})}
       >
         {children}
       </div>

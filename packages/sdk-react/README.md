@@ -1,14 +1,14 @@
-# `@relipay/react`
+# `@rekey.dev/react`
 
-The browser SDK for **[ReliPay](https://relipay.dev)** — React hooks **and drop-in UI components** for end-user auth, organizations, and billing.
+The browser SDK for **[Rekey](https://relipay.dev)** — React hooks **and drop-in UI components** for end-user auth, organizations, and billing.
 
-> **What is ReliPay?** An auth + billing backend for your SaaS: sign-in (password, magic-link, passkeys, OAuth, MFA), subscriptions, usage, credits, licenses, and teams — behind one API, multi-tenant, provider-agnostic. Docs: **[relipay.dev/docs](https://relipay.dev/docs)**. This package is its React/browser SDK; the server SDK is [`@relipay/node`](https://www.npmjs.com/package/@relipay/node).
+> **What is Rekey?** An auth + billing backend for your SaaS: sign-in (password, magic-link, passkeys, OAuth, MFA), subscriptions, usage, credits, licenses, and teams — behind one API, multi-tenant, provider-agnostic. Docs: **[relipay.dev/docs](https://relipay.dev/docs)**. This package is its React/browser SDK; the server SDK is [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node).
 
 It gives you Clerk-style components (`<SignIn>`, `<UserButton>`, `<PricingTable>`, …) plus the headless primitives (`useUser`, `<SignedIn>`, `<Protect>`) so you can ship auth/billing UI fast, or build your own.
 
 ```bash
-npm install @relipay/react
-# or: pnpm add @relipay/react   /   yarn add @relipay/react
+npm install @rekey.dev/react
+# or: pnpm add @rekey.dev/react   /   yarn add @rekey.dev/react
 ```
 
 > Peer dependency: `react@^18 || ^19`. No CSS framework required — the components ship their own tokens-based stylesheet.
@@ -22,13 +22,13 @@ The browser **never holds your Application secret key** (`rp_live_…` / `rp_tes
 Because of that, the components here are **render + delegate**:
 
 - They **read** auth state from `<RelipayProvider>` (which calls the user-token-only `GET /api/v1/auth/me`).
-- For **writes** — sign-in, sign-up, sign-out, create-org, invite, checkout — they call **your** server (a Next.js Server Action or a route handler) that runs [`@relipay/node`](https://www.npmjs.com/package/`@relipay/node`) with the secret key. This is exactly how Clerk's components talk to Clerk's backend; ReliPay just keeps that backend on _your_ server.
+- For **writes** — sign-in, sign-up, sign-out, create-org, invite, checkout — they call **your** server (a Next.js Server Action or a route handler) that runs [`@rekey.dev/node`](https://www.npmjs.com/package/`@rekey.dev/node`) with the secret key. This is exactly how Clerk's components talk to Clerk's backend; Rekey just keeps that backend on _your_ server.
 
 ```
 Browser (UI components, public)
    │  form submit / Server Action
    ▼
-Your server  ──@relipay/node + secret──►  ReliPay API
+Your server  ──@rekey.dev/node + secret──►  Rekey API
    │  sets the session cookie
    ▼
 SSR seeds <RelipayProvider> on the next render
@@ -40,12 +40,12 @@ So every component below that mutates something takes an `action` (or `actionUrl
 
 ## Setup: `<RelipayProvider>`
 
-Wrap your app once, seeded from your server session. With Next.js + [`@relipay/nextjs`](https://www.npmjs.com/package/`@relipay/nextjs`):
+Wrap your app once, seeded from your server session. With Next.js + [`@rekey.dev/nextjs`](https://www.npmjs.com/package/`@rekey.dev/nextjs`):
 
 ```tsx
 // app/layout.tsx (Server Component)
-import { auth } from '@relipay/nextjs/server';
-import { RelipayProvider } from '@relipay/react';
+import { auth } from '@rekey.dev/nextjs/server';
+import { RelipayProvider } from '@rekey.dev/react';
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   const session = await auth(); // { user, accessToken } | null
@@ -65,11 +65,11 @@ export default async function RootLayout({ children }: { children: React.ReactNo
 }
 ```
 
-`apiUrl` is your ReliPay deployment's base URL — **not a secret**. The `accessToken` is the end-user's JWT (safe to expose to client JS for the session; rotate it via cookie on the server).
+`apiUrl` is your Rekey deployment's base URL — **not a secret**. The `accessToken` is the end-user's JWT (safe to expose to client JS for the session; rotate it via cookie on the server).
 
 > **Publishable key vs secret key.** Your Application's publishable key (`rp_pub_…`) is a **real browser credential** — safe to ship in client code. The secret key (`rp_live_…` / `rp_test_…`) is server-only. There are two ways to drive auth from this SDK:
 >
-> 1. **Server-delegated (this README's prebuilt components).** Writes go to your Server Actions running [`@relipay/node`](https://www.npmjs.com/package/`@relipay/node`) with the secret key; the browser only reads auth state via the user JWT. Best when you already have a server.
+> 1. **Server-delegated (this README's prebuilt components).** Writes go to your Server Actions running [`@rekey.dev/node`](https://www.npmjs.com/package/`@rekey.dev/node`) with the secret key; the browser only reads auth state via the user JWT. Best when you already have a server.
 > 2. **Backendless.** Pass `publishableKey` to `<RelipayProvider>` and call the client's bootstrap methods (`client.signIn`, `signUp`, `requestMagicLink`, `verifyLicense`, `getPlans`) straight from the browser — no server required. The publishable key only identifies the app; the user still proves identity (password/passkey/token). See [Backendless mode](#backendless-mode).
 
 ## Backendless mode
@@ -86,7 +86,7 @@ For a pure SPA / mobile / desktop app with no backend, give the provider a `publ
 ```
 
 ```ts
-import { RelipayBrowserClient } from '@relipay/react';
+import { RelipayBrowserClient } from '@rekey.dev/react';
 
 const client = new RelipayBrowserClient({ apiUrl, publishableKey: 'rp_pub_…' });
 const out = await client.signIn({ email, password });   // → SignInOutcome (branch on mfaRequired)
@@ -100,7 +100,7 @@ Restrict where the key works via the Application's **CORS origin allowlist** (Pa
 
 ```tsx
 'use client';
-import { useUser, useRelipay } from '@relipay/react';
+import { useUser, useRelipay } from '@rekey.dev/react';
 
 function Profile() {
   const { user, signedIn, loading } = useUser();
@@ -126,7 +126,7 @@ Gate regions of your UI. No styling, no opinions.
 | `<Protect>` | the supplied entitlement / feature / role check passes |
 
 ```tsx
-import { SignedIn, SignedOut, RelipayLoading, RelipayLoaded, Protect } from '@relipay/react';
+import { SignedIn, SignedOut, RelipayLoading, RelipayLoaded, Protect } from '@rekey.dev/react';
 
 <RelipayLoading><Spinner /></RelipayLoading>
 <RelipayLoaded>
@@ -137,7 +137,7 @@ import { SignedIn, SignedOut, RelipayLoading, RelipayLoaded, Protect } from '@re
 
 ### `<Protect>` — gate by entitlement / feature / role
 
-Entitlements **resolve server-side** (`@relipay/node` `billing.getEntitlements`) — the browser never re-fetches them with a credential. Pass the resolved facts in via `authorization`; `<Protect>` renders the decision your server already made.
+Entitlements **resolve server-side** (`@rekey.dev/node` `billing.getEntitlements`) — the browser never re-fetches them with a credential. Pass the resolved facts in via `authorization`; `<Protect>` renders the decision your server already made.
 
 ```tsx
 // feature flag
@@ -166,11 +166,11 @@ Styled cards with email + password, optional magic-link, and optional OAuth butt
 
 ```tsx
 'use client';
-import { SignIn } from '@relipay/react';
+import { SignIn } from '@rekey.dev/react';
 import { signInAction, magicLinkAction, startGoogle } from '@/lib/actions';
 
 <SignIn
-  action={signInAction}            // (formData) => server-side relipay.auth.signIn(...)
+  action={signInAction}            // (formData) => server-side rekey.auth.signIn(...)
   magicLinkAction={magicLinkAction}
   oauthProviders={[{ provider: 'google', startAction: startGoogle }]}
   signUpUrl="/signup"
@@ -185,7 +185,7 @@ A matching server action looks like (Next.js App Router):
 ```ts
 // lib/actions.ts
 'use server';
-import { signIn } from '@relipay/nextjs/server';
+import { signIn } from '@rekey.dev/nextjs/server';
 import { redirect } from 'next/navigation';
 
 export async function signInAction(formData: FormData) {
@@ -306,7 +306,7 @@ Like `<PricingTable plans>`, the provider list is a **prop you fetch server-side
 
 ```tsx
 // Server component — fetch the list with the secret key, pass it down.
-const { providers } = await relipay.billing.getProviders(country); // country optional (ISO-3166 alpha-2)
+const { providers } = await rekey.billing.getProviders(country); // country optional (ISO-3166 alpha-2)
 
 <PricingTable
   plans={plans}                       // billing.getPlans() server-side
@@ -323,7 +323,7 @@ With `providers` passed, `<PricingTable>` renders the picker above the grid and 
 export async function checkoutAction(formData: FormData) {
   const planSlug = String(formData.get('planSlug'));
   const provider = formData.get('provider'); // 'stripe' | 'paypal' | 'razorpay' | null
-  const { url } = await relipay.billing.createCheckout(session.accessToken, {
+  const { url } = await rekey.billing.createCheckout(session.accessToken, {
     planSlug,
     successUrl, cancelUrl,
     ...(provider ? { provider: provider as BillingProvider } : {}), // omit → geo router picks
@@ -354,13 +354,13 @@ When your Application bills **per team** (Panel → Application → Billing → 
 - `<PricingTable orgGateBlocking={...}>` renders a **"team required"** gate instead of dead upgrade buttons.
 - Thread the active org into checkout with `hiddenFields={{ orgId }}` (your action passes it as `organizationId`, scoping the subscription to the team's shared pool).
 
-Resolve `billingSubject` server-side from `relipay.applications.me().billingConfig.billingSubject`.
+Resolve `billingSubject` server-side from `rekey.applications.me().billingConfig.billingSubject`.
 
 ---
 
 ## Theming
 
-Every component accepts an `appearance` prop and a `className`. Theming is **tokens-based** — a single stylesheet keyed on CSS custom properties (`--relipay-*`), injected once and scoped under `.relipay-root`, so it never leaks into your app and depends on no CSS framework.
+Every component accepts an `appearance` prop and a `className`. Theming is **tokens-based** — a single stylesheet keyed on CSS custom properties (`--rekey-*`), injected once and scoped under `.rekey-root`, so it never leaks into your app and depends on no CSS framework.
 
 ### Light / dark
 
@@ -396,7 +396,7 @@ Defaults follow `prefers-color-scheme`. Pin it explicitly:
 | `colorDanger` | destructive actions, errors |
 | `borderRadius`, `fontFamily`, `fontSize`, `spacing` | shape + typography |
 
-You can also set the `--relipay-*` variables in your own CSS for app-wide theming.
+You can also set the `--rekey-*` variables in your own CSS for app-wide theming.
 
 ### Per-element classes
 
@@ -415,7 +415,7 @@ Slots: `root`, `card`, `header`, `title`, `subtitle`, `label`, `input`, `button`
 
 ## Full example
 
-See [`examples/nextjs-saas`](../../examples/nextjs-saas) for a complete Next.js 15 app wiring every component — including the `/kitchen-sink` page (a live gallery) — against a real ReliPay Application with org-scoped billing.
+See [`examples/nextjs-saas`](../../examples/nextjs-saas) for a complete Next.js 15 app wiring every component — including the `/kitchen-sink` page (a live gallery) — against a real Rekey Application with org-scoped billing.
 
 ## Headless escape hatch
 
@@ -423,12 +423,12 @@ Need full control? Skip the components and use `useUser()` + the control primiti
 
 ---
 
-## About ReliPay
+## About Rekey
 
-ReliPay is a self-hostable **auth + billing backend for SaaS** — one API for sign-in, subscriptions, usage, credits, licenses, and teams.
+Rekey is a self-hostable **auth + billing backend for SaaS** — one API for sign-in, subscriptions, usage, credits, licenses, and teams.
 
 - Website + docs: **[relipay.dev](https://relipay.dev)** · [relipay.dev/docs](https://relipay.dev/docs)
-- Other SDKs: [`@relipay/node`](https://www.npmjs.com/package/@relipay/node) (server) · [`@relipay/nextjs`](https://www.npmjs.com/package/@relipay/nextjs) (Next.js) · [`@relipay/cli`](https://www.npmjs.com/package/@relipay/cli) · [`@relipay/mcp`](https://www.npmjs.com/package/@relipay/mcp) (MCP server)
+- Other SDKs: [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node) (server) · [`@rekey.dev/nextjs`](https://www.npmjs.com/package/@rekey.dev/nextjs) (Next.js) · [`@rekey.dev/cli`](https://www.npmjs.com/package/@rekey.dev/cli) · [`@rekey.dev/mcp`](https://www.npmjs.com/package/@rekey.dev/mcp) (MCP server)
 
 ## License
 

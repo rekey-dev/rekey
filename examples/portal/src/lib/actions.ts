@@ -1,20 +1,20 @@
 'use server';
 
 /**
- * Server Actions — every mutating ReliPay call lives behind the
+ * Server Actions — every mutating Rekey call lives behind the
  * `'use server'` boundary so the Application secret key never reaches the
  * browser. Follows the examples/nextjs-saas convention: read FormData, do
  * the work, redirect with `?status=` / `?error=` for the page to render.
- * RelipayError codes are surfaced verbatim.
+ * RekeyError codes are surfaced verbatim.
  */
 
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 // Importing ./env (via the named import) bridges RELIPAY_SECRET_KEY →
-// RELIPAY_SECRET before the @relipay/nextjs/server helpers build their client.
+// RELIPAY_SECRET before the @rekey.dev/nextjs/server helpers build their client.
 import { portalBaseUrl } from './env';
-import { signIn as nextSignIn, signOut as nextSignOut } from '@relipay/nextjs/server';
-import { relipay, RelipayError } from './relipay';
+import { signIn as nextSignIn, signOut as nextSignOut } from '@rekey.dev/nextjs/server';
+import { rekey, RekeyError } from './relipay';
 import { requireSession } from './session';
 import { cancelMySubscription } from './portal';
 
@@ -35,7 +35,7 @@ export async function signInAction(formData: FormData): Promise<void> {
       redirect('/login?error=MFA_REQUIRED');
     }
   } catch (err) {
-    if (err instanceof RelipayError) redirect(`/login?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof RekeyError) redirect(`/login?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
   redirect(next ?? '/subscription');
@@ -56,13 +56,13 @@ export async function requestMagicLinkAction(formData: FormData): Promise<void> 
   const email = String(formData.get('email') ?? '').trim();
   if (!email) redirect('/login?error=missing');
   try {
-    await relipay.auth.requestMagicLink({
+    await rekey.auth.requestMagicLink({
       email,
-      // {token} is substituted by ReliPay when it builds the email link.
+      // {token} is substituted by Rekey when it builds the email link.
       signInUrl: `${portalBaseUrl()}/api/auth/magic-link/verify?token={token}`,
     });
   } catch (err) {
-    if (err instanceof RelipayError) redirect(`/login?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof RekeyError) redirect(`/login?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
   redirect('/login?sent=1');
@@ -74,9 +74,9 @@ export async function changePasswordAction(formData: FormData): Promise<void> {
   if (!currentPassword || !newPassword) redirect('/account?error=missing');
   const session = await requireSession();
   try {
-    await relipay.auth.changePassword(session.accessToken, { currentPassword, newPassword });
+    await rekey.auth.changePassword(session.accessToken, { currentPassword, newPassword });
   } catch (err) {
-    if (err instanceof RelipayError) redirect(`/account?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof RekeyError) redirect(`/account?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
   // changePassword revokes every refresh token — the cookie session is dead.
@@ -94,14 +94,14 @@ export async function checkoutAction(formData: FormData): Promise<void> {
   if (!planSlug) redirect('/plans?error=missing-plan');
   const session = await requireSession();
   try {
-    const result = await relipay.billing.createCheckout(session.accessToken, {
+    const result = await rekey.billing.createCheckout(session.accessToken, {
       planSlug,
       successUrl: `${portalBaseUrl()}/subscription?checkout=success`,
       cancelUrl: `${portalBaseUrl()}/plans?checkout=canceled`,
     });
     if (result.url) redirect(result.url);
   } catch (err) {
-    if (err instanceof RelipayError) redirect(`/plans?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof RekeyError) redirect(`/plans?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
   redirect('/plans?error=NO_CHECKOUT_URL');
@@ -113,7 +113,7 @@ export async function cancelSubscriptionAction(): Promise<void> {
   try {
     await cancelMySubscription(session.accessToken);
   } catch (err) {
-    if (err instanceof RelipayError) {
+    if (err instanceof RekeyError) {
       redirect(`/subscription?error=${encodeURIComponent(err.code)}`);
     }
     throw err;

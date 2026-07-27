@@ -50,19 +50,19 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 FROM deps AS build
 COPY . .
 # Generate Prisma client + build everything via turbo
-RUN pnpm --filter @relipay/api exec prisma generate --schema ../../prisma/schema.prisma
-RUN pnpm --filter @relipay/shared-types build
+RUN pnpm --filter @rekey.dev/api exec prisma generate --schema ../../prisma/schema.prisma
+RUN pnpm --filter @rekey.dev/shared-types build
 # SDK packages must be built before the apps that import them from dist: the
-# hosted portal imports @relipay/react; @relipay/nextjs (examples) depends on
+# hosted portal imports @rekey.dev/react; @rekey.dev/nextjs (examples) depends on
 # node + react. panel/admin use raw fetch, so they need none of these.
 # Order matters: nextjs depends on node + react.
-RUN pnpm --filter @relipay/node build
-RUN pnpm --filter @relipay/react build
-RUN pnpm --filter @relipay/nextjs build
-RUN pnpm --filter @relipay/api build
-RUN pnpm --filter @relipay/panel build
-RUN pnpm --filter @relipay/portal build
-RUN pnpm --filter @relipay/admin build
+RUN pnpm --filter @rekey.dev/node build
+RUN pnpm --filter @rekey.dev/react build
+RUN pnpm --filter @rekey.dev/nextjs build
+RUN pnpm --filter @rekey.dev/api build
+RUN pnpm --filter @rekey.dev/panel build
+RUN pnpm --filter @rekey.dev/portal build
+RUN pnpm --filter @rekey.dev/admin build
 
 # ─── api-runtime ──────────────────────────────────────────────────────
 FROM base AS api-runtime
@@ -95,8 +95,8 @@ COPY packages/shared-types/package.json packages/shared-types/
 #     entirely (a delete in a later layer wouldn't shrink the image). Prisma +
 #     its engines stay.
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
-    pnpm install --frozen-lockfile --filter @relipay/api... --filter @relipay/shared-types \
- && pnpm --filter @relipay/api exec prisma generate --schema ../../prisma/schema.prisma \
+    pnpm install --frozen-lockfile --filter @rekey.dev/api... --filter @rekey.dev/shared-types \
+ && pnpm --filter @rekey.dev/api exec prisma generate --schema ../../prisma/schema.prisma \
  && rm -rf \
       node_modules/.pnpm/typescript@* node_modules/.pnpm/@types+* \
       node_modules/.pnpm/vitest@* node_modules/.pnpm/@vitest+* \
@@ -122,7 +122,7 @@ USER node
 # then receives the orchestrator's SIGTERM directly. Without `exec`, the shell
 # is PID 1 and doesn't forward the signal, so the API's graceful-shutdown
 # handler never fires and the final request-log batch is lost on every deploy.
-CMD ["sh", "-c", "pnpm --filter @relipay/api exec prisma migrate deploy --schema ../../prisma/schema.prisma && exec node apps/api/dist/index.js"]
+CMD ["sh", "-c", "pnpm --filter @rekey.dev/api exec prisma migrate deploy --schema ../../prisma/schema.prisma && exec node apps/api/dist/index.js"]
 
 # ─── panel-runtime ────────────────────────────────────────────────────
 FROM base AS panel-runtime

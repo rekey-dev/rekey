@@ -1,16 +1,16 @@
 import * as React from 'react';
 import { getWorkspaceContext } from '@/lib/session';
-import { relipay } from '@/lib/relipay';
+import { rekey } from '@/lib/relipay';
 import { AppShell } from '@/components/app-shell';
 import { revokeSessionAction, signOutEverywhereAction } from '@/lib/actions';
-import { mcpConnectionInfo } from '@relipay/nextjs';
+import { mcpConnectionInfo } from '@rekey.dev/nextjs';
 import { CopyField } from '@/components/copy-field';
 
 export default async function AccountPage(): Promise<React.JSX.Element> {
   const ctx = await getWorkspaceContext();
   const { session, entitlements } = ctx;
 
-  const sessions = await relipay.auth.listSessions(session.accessToken).catch(() => []);
+  const sessions = await rekey.auth.listSessions(session.accessToken).catch(() => []);
 
   // MCP connection helper — only meaningful if the app has MCP enabled, but the
   // string builder is pure, so we always render it as a "connect" affordance.
@@ -63,7 +63,7 @@ export default async function AccountPage(): Promise<React.JSX.Element> {
       <section className="card">
         <h3 className="font-semibold">Connect to Claude (MCP)</h3>
         <p className="text-xs text-neutral-500">
-          If this application has MCP enabled in the ReliPay panel, connect it to Claude with:
+          If this application has MCP enabled in the Rekey panel, connect it to Claude with:
         </p>
         <div className="mt-2 space-y-2">
           <CopyField label="MCP URL" value={mcp.url} />

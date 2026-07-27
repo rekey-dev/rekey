@@ -1,5 +1,5 @@
 /**
- * @relipay/shared-types
+ * @rekey.dev/shared-types
  *
  * Zod schemas + TypeScript types shared between the API and the SDKs.
  * Anything serialized over the wire lives here — never duplicate a shape.
@@ -12,14 +12,14 @@ import { z } from 'zod';
 // ============================================================================
 
 /**
- * The error envelope every ReliPay API response uses on failure.
+ * The error envelope every Rekey API response uses on failure.
  *
  * @example
  * ```ts
- * { code: 'PLAN_NOT_FOUND', message: 'Plan "pro" not found.', fix: 'Run `relipay plans list`.' }
+ * { code: 'PLAN_NOT_FOUND', message: 'Plan "pro" not found.', fix: 'Run `rekey plans list`.' }
  * ```
  */
-export const RelipayErrorSchema = z.object({
+export const RekeyErrorSchema = z.object({
   code: z.string(),
   message: z.string(),
   /** Concrete remediation a human or AI agent can act on. */
@@ -28,15 +28,15 @@ export const RelipayErrorSchema = z.object({
   docs: z.string().url().optional(),
 });
 /** The error envelope shape (just the data fields). */
-export type RelipayErrorShape = z.infer<typeof RelipayErrorSchema>;
+export type RekeyErrorShape = z.infer<typeof RekeyErrorSchema>;
 
 /**
- * The canonical SDK error. Both @relipay/node and @relipay/react re-export
- * this class, so `instanceof RelipayError` is consistent across packages.
+ * The canonical SDK error. Both @rekey.dev/node and @rekey.dev/react re-export
+ * this class, so `instanceof RekeyError` is consistent across packages.
  * Always carries a stable `code` and, when the server provided one, a concrete
  * `fix` — read `error.fix` first when debugging.
  */
-export class RelipayError extends Error implements RelipayErrorShape {
+export class RekeyError extends Error implements RekeyErrorShape {
   public readonly code: string;
   public readonly fix: string | undefined;
   public readonly docs: string | undefined;
@@ -45,9 +45,9 @@ export class RelipayError extends Error implements RelipayErrorShape {
   /** Server-assigned request id — share with support to find the log entry. */
   public readonly requestId: string | undefined;
 
-  constructor(error: RelipayErrorShape & { statusCode?: number; requestId?: string }) {
+  constructor(error: RekeyErrorShape & { statusCode?: number; requestId?: string }) {
     super(error.message);
-    this.name = 'RelipayError';
+    this.name = 'RekeyError';
     this.code = error.code;
     this.fix = error.fix;
     this.docs = error.docs;
@@ -59,7 +59,7 @@ export class RelipayError extends Error implements RelipayErrorShape {
 export const ApiResponseSchema = <T extends z.ZodTypeAny>(data: T) =>
   z.discriminatedUnion('success', [
     z.object({ success: z.literal(true), data }),
-    z.object({ success: z.literal(false), error: RelipayErrorSchema }),
+    z.object({ success: z.literal(false), error: RekeyErrorSchema }),
   ]);
 
 // ============================================================================
@@ -80,11 +80,11 @@ export type AuthMethod = z.infer<typeof AuthMethodSchema>;
 /**
  * Signature algorithm for END-USER access tokens minted by this Application.
  *
- *   - `HS256` (default) — per-app derived symmetric key. Only the ReliPay API
+ *   - `HS256` (default) — per-app derived symmetric key. Only the Rekey API
  *     can verify; customers round-trip `auth.getCurrentUser()`.
  *   - `RS256` — asymmetric. Tokens carry a `kid` header and verify against the
  *     deployment's public JWKS at `/.well-known/jwks.json`, enabling offline /
- *     edge verification (`verifyAccessToken` in @relipay/node). Refresh tokens,
+ *     edge verification (`verifyAccessToken` in @rekey.dev/node). Refresh tokens,
  *     MFA-challenge tokens, and operator tokens are unaffected.
  */
 export const TokenAlgSchema = z.enum(['HS256', 'RS256']);
@@ -309,7 +309,7 @@ export const AuthResultDtoSchema = z.object({
    */
   mfaEnrollmentRequired: z.boolean().optional(),
   endUser: EndUserDtoSchema,
-  /** Short-lived access JWT. Pass via X-Relipay-User-Token. */
+  /** Short-lived access JWT. Pass via X-Rekey-User-Token. */
   accessToken: z.string(),
   accessTokenExpiresAt: z.string().datetime(),
   /** Long-lived refresh token. Use to mint new access tokens via auth.refresh(). */
@@ -375,7 +375,7 @@ export const ForgotPasswordResultDtoSchema = z.object({
   /** True iff a real user existed and a token was minted. False is also returned when the email is unknown — never enumerate. */
   delivered: z.boolean(),
   /**
-   * True iff ReliPay sent the email itself (BYO Resend creds or
+   * True iff Rekey sent the email itself (BYO Resend creds or
    * RESEND_DEFAULT_* env configured). When true, `resetToken` is null and
    * no further action is needed from the caller.
    */
@@ -396,7 +396,7 @@ export const SendVerificationRequestSchema = z.object({
 export type SendVerificationRequest = z.infer<typeof SendVerificationRequestSchema>;
 
 export const SendVerificationResultDtoSchema = z.object({
-  /** True iff ReliPay sent the email via its transport. */
+  /** True iff Rekey sent the email via its transport. */
   emailSent: z.boolean(),
   /** Raw verification token; null when emailSent is true. */
   verificationToken: z.string().nullable(),
@@ -678,7 +678,7 @@ export const AccessConfigSchema = z.object({
 });
 export type AccessConfig = z.infer<typeof AccessConfigSchema>;
 
-/** RFC 7662 token-introspection response (subset ReliPay emits). */
+/** RFC 7662 token-introspection response (subset Rekey emits). */
 export const OAuthIntrospectionResponseSchema = z.object({
   active: z.boolean(),
   sub: z.string().optional(),
@@ -691,7 +691,7 @@ export const OAuthIntrospectionResponseSchema = z.object({
 });
 export type OAuthIntrospectionResponse = z.infer<typeof OAuthIntrospectionResponseSchema>;
 
-/** RFC 8414 authorization-server metadata (subset ReliPay emits for MCP). */
+/** RFC 8414 authorization-server metadata (subset Rekey emits for MCP). */
 export const OAuthAuthServerMetadataSchema = z.object({
   issuer: z.string(),
   authorization_endpoint: z.string(),
@@ -855,17 +855,17 @@ export const UsageAggregateDtoSchema = z.object({
 export type UsageAggregateDto = z.infer<typeof UsageAggregateDtoSchema>;
 
 // ============================================================================
-// Outbound webhooks — the events ReliPay POSTs to YOUR app
+// Outbound webhooks — the events Rekey POSTs to YOUR app
 // ============================================================================
 //
 // This registry mirrors the API's `KNOWN_WEBHOOK_EVENTS`
 // (apps/api/src/modules/webhooks/events.ts) exactly — same names, same order.
 // Subscribe an endpoint to specific events (or the `"*"` wildcard) via the
 // panel or POST /api/v1/tenant/applications/:id/webhooks. Verify inbound
-// deliveries with `verifyWebhookSignature` from `@relipay/node`.
+// deliveries with `verifyWebhookSignature` from `@rekey.dev/node`.
 
 /**
- * Every outbound webhook event ReliPay can emit, with a human/agent-readable
+ * Every outbound webhook event Rekey can emit, with a human/agent-readable
  * description. Use it to render event pickers, generate docs, or autocomplete
  * `events` arrays when registering endpoints.
  */
@@ -913,7 +913,7 @@ export const WEBHOOK_EVENTS = [
   },
   // Billing lifecycle — emitted from the provider inbound-webhook handlers when
   // LOCAL state actually transitions (a provider-event replay that changes
-  // nothing emits nothing). A provider retry after a 5xx on ReliPay's side may
+  // nothing emits nothing). A provider retry after a 5xx on Rekey's side may
   // still re-emit; consumers must dedupe on the envelope's `eventId`.
   {
     name: 'subscription.activated',
@@ -1041,7 +1041,7 @@ export type RetryWebhookDeliveryResultDto = z.infer<typeof RetryWebhookDeliveryR
 // ============================================================================
 //
 // These endpoints authenticate with an operator PANEL SESSION (tenant JWT) —
-// not an Application secret key — so the end-user SDKs (@relipay/node etc.)
+// not an Application secret key — so the end-user SDKs (@rekey.dev/node etc.)
 // deliberately do NOT expose them. The shapes live here so the panel, agents,
 // and any session-bearing automation share one definition.
 
@@ -1176,7 +1176,7 @@ export interface SecurityEventsListQuery {
 // ── GDPR / DSAR end-user data export ──
 //
 // GET /api/v1/tenant/applications/:id/end-users/:euid/export returns one JSON
-// document of everything ReliPay stores about an end-user (OWNER/ADMIN only).
+// document of everything Rekey stores about an end-user (OWNER/ADMIN only).
 // Credential material (password hashes, token hashes, MFA secrets, license key
 // hashes, passkey public keys) is never included. Several sections are capped
 // server-side; see `notes` in the document. Plain interfaces (no Zod) — this

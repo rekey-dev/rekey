@@ -5,7 +5,7 @@
  * access tokens are then signed with the deployment's ACTIVE RSA key (`kid`
  * in the JWT header) instead of the per-app derived HS256 secret, so
  * customers can verify sessions offline against `GET /.well-known/jwks.json`
- * (API gateways, edge middleware, `verifyAccessToken` in @relipay/node).
+ * (API gateways, edge middleware, `verifyAccessToken` in @rekey.dev/node).
  *
  * Key resolution, in priority order:
  *   1. env `JWT_RS256_PRIVATE_KEY` (PEM) — BYO key; nothing persisted. It is
@@ -38,7 +38,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from './prisma.js';
 import { env } from '../config/env.js';
 import { encryptJson, decryptJson } from './secrets.js';
-import type { JwkRsaPublic } from '@relipay/shared-types';
+import type { JwkRsaPublic } from '@rekey.dev/shared-types';
 
 export interface ActiveSigningKey {
   kid: string;

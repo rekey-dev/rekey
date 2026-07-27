@@ -1,17 +1,17 @@
 /**
- * ReliPay SDK + session-cookie helpers.
+ * Rekey SDK + session-cookie helpers.
  *
  * One module-level client (per Next dev/server lifecycle), used by every
  * server component, server action, and route handler in this demo. The
- * SDK only ever talks to ReliPay from the server — the browser never sees
+ * SDK only ever talks to Rekey from the server — the browser never sees
  * the secret key.
  *
  * Sessions live in two httpOnly cookies:
  *   - relipay_access  — short-lived (15 min) JWT, used as the user identifier
- *                       on per-user calls (X-Relipay-User-Token header).
+ *                       on per-user calls (X-Rekey-User-Token header).
  *   - relipay_refresh — long-lived (30 days) opaque token. When the access
  *                       token expires (the SDK throws USER_TOKEN_INVALID),
- *                       call relipay.auth.refresh() and rotate both cookies.
+ *                       call rekey.auth.refresh() and rotate both cookies.
  *
  * In a production app you'd probably wrap protected pages in a small helper
  * that catches USER_TOKEN_INVALID and refreshes automatically. The demo keeps
@@ -19,21 +19,21 @@
  */
 
 import { cookies } from 'next/headers';
-import { ReliPay, RelipayError } from '@relipay/node';
+import { Rekey, RekeyError } from '@rekey.dev/node';
 
 if (!process.env.RELIPAY_URL) {
   throw new Error('RELIPAY_URL is missing — copy .env.local.example or rerun the bootstrap script.');
 }
 if (!process.env.RELIPAY_SECRET) {
-  throw new Error('RELIPAY_SECRET is missing — get a key from the ReliPay panel and put it in .env.local.');
+  throw new Error('RELIPAY_SECRET is missing — get a key from the Rekey panel and put it in .env.local.');
 }
 
-export const relipay = new ReliPay({
+export const rekey = new Rekey({
   apiUrl: process.env.RELIPAY_URL,
   secretKey: process.env.RELIPAY_SECRET,
 });
 
-export { RelipayError };
+export { RekeyError };
 
 export const ACCESS_COOKIE = 'relipay_access';
 export const REFRESH_COOKIE = 'relipay_refresh';
@@ -47,7 +47,7 @@ export async function setSessionCookies(args: {
 }): Promise<void> {
   const jar = await cookies();
   const secure = process.env.NODE_ENV === 'production';
-  // Access token lifetime mirrors ReliPay's default (15 min). Browser clears
+  // Access token lifetime mirrors Rekey's default (15 min). Browser clears
   // when the cookie expires; refresh handles re-issuance.
   jar.set(ACCESS_COOKIE, args.accessToken, {
     httpOnly: true,

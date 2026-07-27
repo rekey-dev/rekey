@@ -51,7 +51,7 @@ describe('<PricingTable> — price formatting', () => {
   it('shows "Free" as the price for a zero-amount plan', () => {
     const { container } = render(<PricingTable plans={[FREE]} checkoutAction={noop} hideFreeCta={false} />);
     // The price slot (not the plan name) reads "Free".
-    expect(container.querySelector('.relipay-price')!.textContent).toContain('Free');
+    expect(container.querySelector('.rekey-price')!.textContent).toContain('Free');
   });
 
   it('formats a subscription price with the currency symbol and interval', () => {
