@@ -1,5 +1,5 @@
 /**
- * /kitchen-sink — a live gallery of every drop-in component from @relipay/react.
+ * /kitchen-sink — a live gallery of every drop-in component from @rekey.dev/react.
  *
  * This server component resolves the data the components need (the user's orgs,
  * the active team's members, the plan catalogue, entitlements, and the app's
@@ -8,13 +8,13 @@
  *
  * The point: the drop-in widgets compose with the app's existing server actions
  * — they are not a parallel, browser-side auth path. Every mutation flows
- * through @relipay/node on the server (secret key), never the browser.
+ * through @rekey.dev/node on the server (secret key), never the browser.
  */
 
 import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { getSession, getAppConfig, getActiveOrgId } from '@/lib/session';
-import { relipay, RelipayError } from '@/lib/relipay';
+import { rekey, RekeyError } from '@/lib/relipay';
 import {
   signInAction,
   signUpAction,
@@ -30,7 +30,7 @@ import type {
   OrganizationWithRoleDto,
   OrganizationMemberDto,
   PlanDto,
-} from '@relipay/node';
+} from '@rekey.dev/node';
 
 /** Magic-link Server Action used by the <SignIn> widget's magic-link form. */
 async function magicLinkAction(formData: FormData): Promise<void> {
@@ -39,7 +39,7 @@ async function magicLinkAction(formData: FormData): Promise<void> {
   if (!email) redirect('/kitchen-sink?error=missing');
   try {
     const base = process.env.APP_BASE_URL ?? 'http://localhost:3040';
-    const res = await relipay.auth.requestMagicLink({
+    const res = await rekey.auth.requestMagicLink({
       email,
       signInUrl: `${base}/api/auth/magic-link/verify?token={token}`,
     });
@@ -47,7 +47,7 @@ async function magicLinkAction(formData: FormData): Promise<void> {
       redirect(`/kitchen-sink?magic=${encodeURIComponent(res.magicLinkToken)}`);
     }
   } catch (err) {
-    if (err instanceof RelipayError) redirect(`/kitchen-sink?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof RekeyError) redirect(`/kitchen-sink?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
   redirect('/kitchen-sink?sent=1');
@@ -75,18 +75,18 @@ export default async function KitchenSinkPage({
   let currentPlanSlug: string | null = null;
   let features: Record<string, boolean | number | string> = {};
 
-  const plans: PlanDto[] = await relipay.billing.getPlans().catch(() => []);
+  const plans: PlanDto[] = await rekey.billing.getPlans().catch(() => []);
 
   if (session) {
     activeOrgId = await getActiveOrgId(session.accessToken);
-    organizations = await relipay.organizations.listMine(session.accessToken).catch(() => []);
+    organizations = await rekey.organizations.listMine(session.accessToken).catch(() => []);
     const active = organizations.find((o) => o.id === activeOrgId);
     activeOrgName = active?.name ?? null;
     viewerRole = active?.role;
     if (activeOrgId) {
-      members = await relipay.organizations.listMembers(session.accessToken, activeOrgId).catch(() => []);
+      members = await rekey.organizations.listMembers(session.accessToken, activeOrgId).catch(() => []);
     }
-    const ent = await relipay.billing
+    const ent = await rekey.billing
       .getEntitlements(session.accessToken, activeOrgId ? { organizationId: activeOrgId } : undefined)
       .catch(() => null);
     if (ent) {
@@ -99,7 +99,7 @@ export default async function KitchenSinkPage({
   return (
     <main className="mx-auto max-w-5xl px-4 py-8 space-y-6">
       <header className="space-y-1">
-        <h1 className="text-2xl font-bold text-relipay-700 dark:text-relipay-500">@relipay/react kitchen sink</h1>
+        <h1 className="text-2xl font-bold text-rekey-700 dark:text-rekey-500">@rekey.dev/react kitchen sink</h1>
         <p className="text-sm text-neutral-500">
           Every drop-in component, wired to this app&apos;s own Server Actions. App billing subject:{' '}
           <strong>{config.billingSubject}</strong>
@@ -113,12 +113,12 @@ export default async function KitchenSinkPage({
         </div>
       )}
       {sent && (
-        <div className="rounded-lg border border-relipay-600 bg-relipay-50 dark:bg-relipay-800/30 px-3 py-2 text-sm text-relipay-800 dark:text-relipay-100">
+        <div className="rounded-lg border border-rekey-600 bg-rekey-50 dark:bg-rekey-800/30 px-3 py-2 text-sm text-rekey-800 dark:text-rekey-100">
           Magic link sent — check your inbox.
         </div>
       )}
       {magicToken && (
-        <div className="rounded-lg border border-relipay-600 bg-relipay-50 dark:bg-relipay-800/30 px-3 py-2 text-sm text-relipay-800 dark:text-relipay-100">
+        <div className="rounded-lg border border-rekey-600 bg-rekey-50 dark:bg-rekey-800/30 px-3 py-2 text-sm text-rekey-800 dark:text-rekey-100">
           No email transport configured —{' '}
           <a className="underline" href={`/api/auth/magic-link/verify?token=${encodeURIComponent(magicToken)}`}>
             click here to sign in

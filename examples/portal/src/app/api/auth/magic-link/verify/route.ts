@@ -1,7 +1,7 @@
 /**
  * GET /api/auth/magic-link/verify?token=… — consume a magic-link token, set
  * the httpOnly session cookies, redirect into the portal. This is the URL
- * ReliPay templates into the email link (see requestMagicLinkAction).
+ * Rekey templates into the email link (see requestMagicLinkAction).
  * Mirrors examples/nextjs-saas.
  */
 
@@ -12,9 +12,9 @@ import {
   REFRESH_COOKIE,
   ACCESS_COOKIE_OPTS,
   REFRESH_COOKIE_OPTS,
-} from '@relipay/nextjs';
+} from '@rekey.dev/nextjs';
 import { portalBaseUrl } from '@/lib/env';
-import { relipay, RelipayError } from '@/lib/relipay';
+import { rekey, RekeyError } from '@/lib/relipay';
 
 export async function GET(req: Request): Promise<NextResponse> {
   const url = new URL(req.url);
@@ -24,7 +24,7 @@ export async function GET(req: Request): Promise<NextResponse> {
     return NextResponse.redirect(`${origin}/login?error=missing`);
   }
   try {
-    const outcome = await relipay.auth.verifyMagicLink({ token });
+    const outcome = await rekey.auth.verifyMagicLink({ token });
     if (outcome.mfaRequired) {
       // A consumed magic link IS a possession factor, but the API still asks
       // for the second factor — portal v1 punts (same as password sign-in).
@@ -35,7 +35,7 @@ export async function GET(req: Request): Promise<NextResponse> {
     jar.set(REFRESH_COOKIE, outcome.refreshToken, REFRESH_COOKIE_OPTS);
     return NextResponse.redirect(`${origin}/subscription`);
   } catch (err) {
-    const code = err instanceof RelipayError ? err.code : 'MAGIC_LINK_INVALID';
+    const code = err instanceof RekeyError ? err.code : 'MAGIC_LINK_INVALID';
     return NextResponse.redirect(`${origin}/login?error=${encodeURIComponent(code)}`);
   }
 }

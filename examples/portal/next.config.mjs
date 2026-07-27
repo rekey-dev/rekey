@@ -11,7 +11,7 @@ const nextConfig = {
   // Monorepo: trace dependencies from the workspace root so hoisted/workspace
   // packages resolve inside the standalone bundle.
   outputFileTracingRoot: path.join(__dirname, '../../'),
-  transpilePackages: ['@relipay/shared-types', '@relipay/node', '@relipay/nextjs'],
+  transpilePackages: ['@rekey.dev/shared-types', '@rekey.dev/node', '@rekey.dev/nextjs'],
   reactStrictMode: true,
 };
 export default nextConfig;

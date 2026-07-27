@@ -72,7 +72,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
   // no PAT pasting.
   const mcpJsonOAuth = `{
   "mcpServers": {
-    "relipay-operator": {
+    "rekey-operator": {
       "type": "http",
       "url": "${mcpUrl}",
       "oauth": {
@@ -86,7 +86,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
   // automation. Same MCP endpoint, just a static Bearer instead of OAuth.
   const mcpJsonPat = `{
   "mcpServers": {
-    "relipay-operator": {
+    "rekey-operator": {
       "type": "http",
       "url": "${mcpUrl}",
       "headers": {
@@ -106,8 +106,8 @@ export default function OperatorMcpPage(): React.JSX.Element {
   const introspectUrl = `${mcpUrl}/oauth/introspect`;
 
   // Claude Code CLI snippets — OAuth (preferred) + PAT (alternate).
-  const claudeCodeOAuth = `claude mcp add --transport http relipay-operator ${mcpUrl}`;
-  const claudeCodePat = `claude mcp add --transport http relipay-operator ${mcpUrl} \\
+  const claudeCodeOAuth = `claude mcp add --transport http rekey-operator ${mcpUrl}`;
+  const claudeCodePat = `claude mcp add --transport http rekey-operator ${mcpUrl} \\
   --header "Authorization: Bearer rp_op_<paste-your-token-here>"`;
 
   const curlInitialize = `curl -X POST ${mcpUrl} \\

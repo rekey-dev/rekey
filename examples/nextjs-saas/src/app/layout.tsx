@@ -6,9 +6,9 @@ import { RELIPAY_URL } from '@/lib/relipay';
 import { Providers } from '@/components/providers';
 
 export const metadata: Metadata = {
-  title: 'ReliPay SaaS — Next.js boilerplate',
+  title: 'Rekey SaaS — Next.js boilerplate',
   description:
-    'A complete Next.js 15 SaaS starter wired to ReliPay: auth, org-scoped billing, credits, usage metering, entitlements & teams.',
+    'A complete Next.js 15 SaaS starter wired to Rekey: auth, org-scoped billing, credits, usage metering, entitlements & teams.',
 };
 
 export default async function RootLayout({

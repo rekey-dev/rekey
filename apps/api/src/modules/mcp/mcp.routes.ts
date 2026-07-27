@@ -8,7 +8,7 @@
  * increments.
  *
  * Responses use the standard OAuth/RFC JSON shapes (top-level fields), NOT the
- * ReliPay `{ success, data }` envelope — MCP/OAuth clients expect the spec shape.
+ * Rekey `{ success, data }` envelope — MCP/OAuth clients expect the spec shape.
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -25,7 +25,7 @@ import {
 import { authRateLimit } from '../../lib/rate-limit.js';
 import { authService } from '../auth/auth.service.js';
 import { apiKeysService } from '../api-keys/api-keys.service.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { verifyMcpAccessToken } from '../../lib/jwt.js';
 import { handleMcpMessage, type JsonRpcMessage } from './mcp-server.js';
 
@@ -182,7 +182,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         security: [],
         summary: 'Authorization endpoint — login + consent page',
         description:
-          'Renders an HTML sign-in + consent form for a browser. No ReliPay credential — ' +
+          'Renders an HTML sign-in + consent form for a browser. No Rekey credential — ' +
           'the end user authenticates by submitting the form below.',
       },
     },
@@ -228,7 +228,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         security: [],
         summary: 'Submit login + consent',
         description:
-          "No ReliPay credential — the end user's email + password (+ MFA code) travel in " +
+          "No Rekey credential — the end user's email + password (+ MFA code) travel in " +
           'the form body and ARE the authentication.',
       },
     },
@@ -302,7 +302,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           endUserId = outcome.endUser.id;
         }
       } catch (err) {
-        return renderErr(err instanceof RelipayError ? err.message : 'Sign-in failed.', Boolean(mfaCode));
+        return renderErr(err instanceof RekeyError ? err.message : 'Sign-in failed.', Boolean(mfaCode));
       }
 
       const code = await mcpOAuthService.createAuthCode({
@@ -328,7 +328,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         security: [],
         summary: 'Token endpoint (RFC 6749 — authorization_code + refresh_token)',
         description:
-          'No ReliPay credential and no client secret: clients here are public and prove ' +
+          'No Rekey credential and no client secret: clients here are public and prove ' +
           'themselves with PKCE. The `code` + `code_verifier` (or `refresh_token`) in the ' +
           'form body are the credential.',
       },
@@ -391,7 +391,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           'handler verifies it and rejects a key belonging to any other Application with ' +
           '401 `invalid_client`. The publishable key is not accepted: introspection reveals ' +
           'token state. Intended for a customer running their own MCP server against ' +
-          "ReliPay-issued end-user MCP tokens.",
+          "Rekey-issued end-user MCP tokens.",
       },
     },
     async (req, reply) => {

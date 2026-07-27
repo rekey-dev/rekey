@@ -1,7 +1,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { relipay, RelipayError, setSessionCookies } from '@/lib/relipay';
+import { rekey, RekeyError, setSessionCookies } from '@/lib/relipay';
 
 async function signUp(formData: FormData): Promise<void> {
   'use server';
@@ -12,13 +12,13 @@ async function signUp(formData: FormData): Promise<void> {
   }
 
   try {
-    const result = await relipay.auth.signUp({ email, password });
+    const result = await rekey.auth.signUp({ email, password });
     await setSessionCookies({
       accessToken: result.accessToken,
       refreshToken: result.refreshToken,
     });
   } catch (err) {
-    if (err instanceof RelipayError) {
+    if (err instanceof RekeyError) {
       redirect(`/sign-up?error=${encodeURIComponent(err.code)}`);
     }
     throw err;

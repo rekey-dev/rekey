@@ -11,7 +11,7 @@ import {
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
 
-export const metadata: Metadata = { title: 'Two-factor authentication · ReliPay' };
+export const metadata: Metadata = { title: 'Two-factor authentication · Rekey' };
 
 /**
  * MFA challenge step for operator sign-in.

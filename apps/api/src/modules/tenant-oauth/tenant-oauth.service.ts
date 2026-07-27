@@ -1,5 +1,5 @@
 /**
- * Operator (panel) OAuth — social login for ReliPay OPERATORS, not end-users.
+ * Operator (panel) OAuth — social login for Rekey OPERATORS, not end-users.
  *
  * Distinct from `modules/oauth` (end-user social login), which is per-Application
  * (`Application.oauthConfig`, API-key-scoped, bound to `req.application`).
@@ -19,7 +19,7 @@
 
 import { env } from '../../config/env.js';
 import { panelBaseUrl } from '../../lib/panel-url.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { getOAuthProvider, buildAuthUrl as buildAuthUrlVia } from '../oauth/providers/index.js';
 import type { OAuthProviderConfig } from '../oauth/providers/index.js';
 import { tenantAuthService, type TenantSignInOutcome, type TenantDeviceContext } from '../tenant-auth/tenant-auth.service.js';
@@ -46,7 +46,7 @@ function providerCreds(provider: OperatorProvider): { clientId: string; clientSe
 function redirectUri(provider: OperatorProvider): string {
   const base = panelBaseUrl();
   if (!base) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 503,
       code: 'OAUTH_NOT_CONFIGURED',
       message: 'Operator OAuth redirect base is not configured.',
@@ -59,7 +59,7 @@ function redirectUri(provider: OperatorProvider): string {
 function configFor(provider: OperatorProvider): OAuthProviderConfig {
   const creds = providerCreds(provider);
   if (!creds) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'OAUTH_PROVIDER_NOT_CONFIGURED',
       message: `Operator OAuth provider "${provider}" is not configured on this deployment.`,
@@ -71,7 +71,7 @@ function configFor(provider: OperatorProvider): OAuthProviderConfig {
 
 function requireProvider(name: string): OperatorProvider {
   if (!isOperatorProvider(name)) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 404,
       code: 'OAUTH_PROVIDER_UNKNOWN',
       message: `"${name}" is not an operator OAuth provider.`,
@@ -93,7 +93,7 @@ export const tenantOAuthService = {
     const provider = requireProvider(args.provider);
     const impl = getOAuthProvider(provider);
     if (!impl) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'OAUTH_PROVIDER_UNKNOWN',
         message: `OAuth provider "${provider}" is not registered.`,
@@ -121,7 +121,7 @@ export const tenantOAuthService = {
     const provider = requireProvider(args.provider);
     const impl = getOAuthProvider(provider);
     if (!impl) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'OAUTH_PROVIDER_UNKNOWN',
         message: `OAuth provider "${provider}" is not registered.`,
@@ -130,7 +130,7 @@ export const tenantOAuthService = {
     }
     const identity = await impl.exchange({ config: configFor(provider), code: args.code });
     if (!identity.email) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'OAUTH_NO_EMAIL',
         message: `${provider} did not return an email — cannot sign in an operator.`,
@@ -138,7 +138,7 @@ export const tenantOAuthService = {
       });
     }
     if (!identity.emailVerified) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'OAUTH_EMAIL_NOT_VERIFIED',
         message: `${provider} did not verify the email — operator sign-in is refused.`,

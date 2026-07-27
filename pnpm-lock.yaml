@@ -95,7 +95,7 @@ importers:
       '@prisma/client':
         specifier: 6.10.1
         version: 6.10.1(prisma@6.10.1(typescript@5.9.3))(typescript@5.9.3)
-      '@relipay/shared-types':
+      '@rekey.dev/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
       '@simplewebauthn/server':
@@ -171,7 +171,7 @@ importers:
 
   apps/panel:
     dependencies:
-      '@relipay/shared-types':
+      '@rekey.dev/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
       '@simplewebauthn/browser':
@@ -220,10 +220,10 @@ importers:
 
   apps/portal:
     dependencies:
-      '@relipay/react':
+      '@rekey.dev/react':
         specifier: workspace:*
         version: link:../../packages/sdk-react
-      '@relipay/shared-types':
+      '@rekey.dev/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
       next:
@@ -260,10 +260,10 @@ importers:
 
   examples/demo:
     dependencies:
-      '@relipay/node':
+      '@rekey.dev/node':
         specifier: workspace:*
         version: link:../../packages/sdk-node
-      '@relipay/shared-types':
+      '@rekey.dev/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
       next:
@@ -300,16 +300,16 @@ importers:
 
   examples/nextjs-saas:
     dependencies:
-      '@relipay/nextjs':
+      '@rekey.dev/nextjs':
         specifier: workspace:*
         version: link:../../packages/sdk-nextjs
-      '@relipay/node':
+      '@rekey.dev/node':
         specifier: workspace:*
         version: link:../../packages/sdk-node
-      '@relipay/react':
+      '@rekey.dev/react':
         specifier: workspace:*
         version: link:../../packages/sdk-react
-      '@relipay/shared-types':
+      '@rekey.dev/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
       next:
@@ -346,13 +346,13 @@ importers:
 
   examples/portal:
     dependencies:
-      '@relipay/nextjs':
+      '@rekey.dev/nextjs':
         specifier: workspace:*
         version: link:../../packages/sdk-nextjs
-      '@relipay/node':
+      '@rekey.dev/node':
         specifier: workspace:*
         version: link:../../packages/sdk-node
-      '@relipay/shared-types':
+      '@rekey.dev/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
       next:
@@ -389,7 +389,7 @@ importers:
 
   examples/qr-saas:
     dependencies:
-      '@relipay/node':
+      '@rekey.dev/node':
         specifier: workspace:*
         version: link:../../packages/sdk-node
       express:
@@ -420,10 +420,10 @@ importers:
 
   packages/cli:
     dependencies:
-      '@relipay/node':
+      '@rekey.dev/node':
         specifier: workspace:*
         version: link:../sdk-node
-      '@relipay/shared-types':
+      '@rekey.dev/shared-types':
         specifier: workspace:*
         version: link:../shared-types
       commander:
@@ -445,7 +445,7 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.4
         version: 1.29.0(zod@3.25.76)
-      '@relipay/shared-types':
+      '@rekey.dev/shared-types':
         specifier: workspace:*
         version: link:../shared-types
       zod:
@@ -464,13 +464,13 @@ importers:
 
   packages/sdk-nextjs:
     dependencies:
-      '@relipay/node':
+      '@rekey.dev/node':
         specifier: workspace:*
         version: link:../sdk-node
-      '@relipay/react':
+      '@rekey.dev/react':
         specifier: workspace:*
         version: link:../sdk-react
-      '@relipay/shared-types':
+      '@rekey.dev/shared-types':
         specifier: workspace:*
         version: link:../shared-types
     devDependencies:
@@ -492,7 +492,7 @@ importers:
 
   packages/sdk-node:
     dependencies:
-      '@relipay/shared-types':
+      '@rekey.dev/shared-types':
         specifier: workspace:*
         version: link:../shared-types
       zod:
@@ -511,7 +511,7 @@ importers:
 
   packages/sdk-react:
     dependencies:
-      '@relipay/shared-types':
+      '@rekey.dev/shared-types':
         specifier: workspace:*
         version: link:../shared-types
     devDependencies:

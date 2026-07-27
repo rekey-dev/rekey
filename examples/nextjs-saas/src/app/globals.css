@@ -8,7 +8,7 @@
 
 body {
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #f9f5f3; /* cream — matches the ReliPay brand */
+  background: #f9f5f3; /* cream — matches the Rekey brand */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -24,7 +24,7 @@ body {
     @apply rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-5 shadow-sm;
   }
   .btn {
-    @apply inline-flex items-center justify-center rounded-lg bg-relipay-600 px-4 py-2 text-sm font-semibold text-white hover:bg-relipay-700 disabled:opacity-50 transition;
+    @apply inline-flex items-center justify-center rounded-lg bg-rekey-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rekey-700 disabled:opacity-50 transition;
   }
   .btn-ghost {
     @apply inline-flex items-center justify-center rounded-lg border border-neutral-300 dark:border-neutral-700 px-4 py-2 text-sm font-medium text-neutral-800 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition;
@@ -33,7 +33,7 @@ body {
     @apply inline-flex items-center justify-center rounded-lg border border-red-300 dark:border-red-800 px-3 py-1.5 text-sm font-medium text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 transition;
   }
   .field {
-    @apply w-full rounded-lg border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 px-3 py-2 text-sm outline-none focus:border-relipay-600;
+    @apply w-full rounded-lg border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 px-3 py-2 text-sm outline-none focus:border-rekey-600;
   }
   .label {
     @apply block text-xs font-medium text-neutral-500 mb-1;
@@ -42,6 +42,6 @@ body {
     @apply inline-flex items-center rounded-full border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 px-2.5 py-0.5 text-xs text-neutral-600 dark:text-neutral-400;
   }
   .pill-pro {
-    @apply border-relipay-600 text-relipay-700 dark:text-relipay-500;
+    @apply border-rekey-600 text-rekey-700 dark:text-rekey-500;
   }
 }

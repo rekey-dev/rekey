@@ -1,17 +1,17 @@
-# `@relipay/shared-types`
+# `@rekey.dev/shared-types`
 
-The Zod schemas + TypeScript types shared between the [ReliPay](https://relipay.dev) API and its SDKs. Anything serialized over the wire lives here, so there's a single source of truth for every shape.
+The Zod schemas + TypeScript types shared between the [Rekey](https://relipay.dev) API and its SDKs. Anything serialized over the wire lives here, so there's a single source of truth for every shape.
 
 ```bash
-npm i @relipay/shared-types
-# or: pnpm add @relipay/shared-types / yarn add @relipay/shared-types
+npm i @rekey.dev/shared-types
+# or: pnpm add @rekey.dev/shared-types / yarn add @rekey.dev/shared-types
 ```
 
 ## When you need this
 
-Most consumers **don't install this directly** — the types you'll use day-to-day are re-exported from [`@relipay/node`](../sdk-node), so `import { PlanDto, RelipayError } from '@relipay/node'` already works.
+Most consumers **don't install this directly** — the types you'll use day-to-day are re-exported from [`@rekey.dev/node`](../sdk-node), so `import { PlanDto, RelipayError } from '@rekey.dev/node'` already works.
 
-Reach for `@relipay/shared-types` when you want the **runtime Zod schemas** (not just the static types) — e.g. to validate a payload you received out-of-band, or to share validation between your own backend and a worker without pulling in the full server SDK. It has zero deps beyond `zod`.
+Reach for `@rekey.dev/shared-types` when you want the **runtime Zod schemas** (not just the static types) — e.g. to validate a payload you received out-of-band, or to share validation between your own backend and a worker without pulling in the full server SDK. It has zero deps beyond `zod`.
 
 ## Setup
 
@@ -23,7 +23,7 @@ import {
   PlanDtoSchema,
   type PlanDto,
   type AuthResultDto,
-} from '@relipay/shared-types';
+} from '@rekey.dev/shared-types';
 
 // Static type:
 function priceLabel(plan: PlanDto): string {
@@ -55,17 +55,17 @@ Each DTO ships as both a Zod schema (`…Schema`) and an inferred type. Highligh
 
 ## Gotchas
 
-- **`RelipayError` is the canonical class.** `@relipay/node` and `@relipay/react` re-export *this same* class, so `instanceof RelipayError` is consistent across packages.
+- **`RelipayError` is the canonical class.** `@rekey.dev/node` and `@rekey.dev/react` re-export *this same* class, so `instanceof RelipayError` is consistent across packages.
 - **Money is integer-only**, in the smallest currency unit (cents/paise/sen). `PlanDto.amount`, `CheckoutResultDto.discountAmount`, etc. are never floats.
 - **Coupon `amountOff`**: PERCENT is basis-points × 10 (`1500` = 15%); AMOUNT is the smallest currency unit.
 - **Discriminated unions**: branch on the discriminator before reading fields — `SignInOutcomeDto` on `mfaRequired`, `LicenseVerifyResultDto` on `ok`.
 - **`WEBHOOK_EVENTS` mirrors the API registry exactly** (names + order). Use it to render event pickers or autocomplete the `events` array when registering webhook endpoints; dedupe inbound deliveries on the envelope's `eventId`.
-- **Tenant/operator DTOs describe panel-session endpoints.** `/api/v1/tenant/*` authenticates with an operator session JWT (or a scoped `rp_op_…` PAT on the small `/tenant/operator/*` surface) — not an Application secret key — so `@relipay/node` deliberately has no methods for them. The types are here for panel-like consumers and agents.
+- **Tenant/operator DTOs describe panel-session endpoints.** `/api/v1/tenant/*` authenticates with an operator session JWT (or a scoped `rp_op_…` PAT on the small `/tenant/operator/*` surface) — not an Application secret key — so `@rekey.dev/node` deliberately has no methods for them. The types are here for panel-like consumers and agents.
 
 ## Links
 
 - Docs: [/docs](https://relipay.dev/docs) · [SDK guide](https://relipay.dev/docs/sdk) · [API reference](https://relipay.dev/docs/api) · [agent prompt](https://relipay.dev/docs/prompt)
-- Server SDK that re-exports these: [`@relipay/node`](../sdk-node)
+- Server SDK that re-exports these: [`@rekey.dev/node`](../sdk-node)
 
 ## License
 

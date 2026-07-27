@@ -4,7 +4,7 @@
  *
  * Header format mirrors Stripe / GitHub / Resend:
  *
- *   X-Relipay-Signature: t=<unix-ts>,v1=<hex>
+ *   X-Rekey-Signature: t=<unix-ts>,v1=<hex>
  *
  * The signature input is `${t}.${rawBody}` so a replayed-with-different-
  * timestamp delivery doesn't verify. Consumers should reject deliveries
@@ -33,8 +33,8 @@ import { isIP } from 'node:net';
  * service. The mitigation for that lives in the deployment (egress proxy
  * with IP allowlist); we provide the URL-level filter as defense-in-depth.
  *
- * **Self-hosters running ReliPay alongside their own internal services
- * must use an egress proxy or run ReliPay in an isolated network.** The
+ * **Self-hosters running Rekey alongside their own internal services
+ * must use an egress proxy or run Rekey in an isolated network.** The
  * URL-level filter only catches the obvious cases.
  */
 const PRIVATE_IPV4_RE =
@@ -130,7 +130,7 @@ export function signWebhook(input: SignaturePayload): {
  * `toleranceSeconds` of now (default 5 minutes). Constant-time on the
  * hash comparison.
  *
- * Not used by ReliPay's own infrastructure — provided for tests and as
+ * Not used by Rekey's own infrastructure — provided for tests and as
  * the canonical implementation customers can crib from.
  */
 export function verifyWebhookSignature(args: {

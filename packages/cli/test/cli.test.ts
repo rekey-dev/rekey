@@ -5,7 +5,7 @@
  *
  * The stub server is the cheapest way to exercise the full CLI path
  * (commander parsing, env handling, fetch, output rendering) without
- * standing up a real ReliPay API.
+ * standing up a real Rekey API.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -73,7 +73,7 @@ function startStubServer(): Promise<StubServer> {
   });
 }
 
-describe('relipay CLI', () => {
+describe('rekey CLI', () => {
   let stub: StubServer;
 
   beforeAll(async () => {
@@ -86,13 +86,13 @@ describe('relipay CLI', () => {
 
   // ---------- version ----------
 
-  it('relipay version → stdout: "0.0.0", exit 0', async () => {
+  it('rekey version → stdout: "0.0.0", exit 0', async () => {
     const r = await runCli(['version']);
     expect(r.code).toBe(0);
     expect(r.stdout.trim()).toBe('0.0.0');
   });
 
-  it('relipay version --json → emits JSON', async () => {
+  it('rekey version --json → emits JSON', async () => {
     const r = await runCli(['version', '--json']);
     expect(r.code).toBe(0);
     expect(JSON.parse(r.stdout)).toEqual({ version: '0.0.0' });
@@ -112,7 +112,7 @@ describe('relipay CLI', () => {
 
   it('doctor reports ok when API responds 200 to /health', async () => {
     stub.reset();
-    stub.setResponse('GET /health', 200, { status: 'ok', service: 'relipay-api' });
+    stub.setResponse('GET /health', 200, { status: 'ok', service: 'rekey-api' });
     const r = await runCli(['doctor', '--json'], {
       RELIPAY_URL: stub.url,
       SUPER_ADMIN_KEY: 'x'.repeat(40),
@@ -153,7 +153,7 @@ describe('relipay CLI', () => {
 
   // ---------- error envelope passthrough ----------
 
-  it('CLI surfaces RelipayError code/message/fix from the API to stderr', async () => {
+  it('CLI surfaces RekeyError code/message/fix from the API to stderr', async () => {
     stub.reset();
     stub.setResponse('GET /api/v1/admin/applications', 401, {
       success: false,

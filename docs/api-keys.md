@@ -1,17 +1,17 @@
 # API Keys
 
-ReliPay has **three** distinct credentials. Confusing them is the #1 cause of integration bugs. Pick by **where the code runs** and **what it needs to do**.
+Rekey has **three** distinct credentials. Confusing them is the #1 cause of integration bugs. Pick by **where the code runs** and **what it needs to do**.
 
 | Credential | Format | Lives in | Authorizes | Can it move money / touch other users? |
 |---|---|---|---|---|
 | **Publishable key** | `rp_pub_<slug>_<random>` | Browser, mobile, desktop — safe in client code | Public **bootstrap** only: sign-in/up, magic-link, passkey, license verify, plan listing | **No.** Identity, not authorization — grants nothing on its own |
 | **Secret key** | `rp_live_<rand>` / `rp_test_<rand>` | Your server only — never the browser | Everything for the whole Application | **Yes** — full app access. Treat like a DB password |
-| **`SUPER_ADMIN_KEY`** | 32+ hex chars (env var) | The ReliPay deployment itself | `/api/v1/admin/*` bootstrap (create tenants/apps) | Deployment-wide. Not Application-scoped |
+| **`SUPER_ADMIN_KEY`** | 32+ hex chars (env var) | The Rekey deployment itself | `/api/v1/admin/*` bootstrap (create tenants/apps) | Deployment-wide. Not Application-scoped |
 
 **How to choose:**
 
-- **Browser / mobile / desktop, signed-out user logging in or registering?** → publishable key (`@relipay/react`, or `@relipay/nextjs/client`). No backend required.
-- **Your server doing anything trusted** — billing checkout, usage, credits, reading a specific user's data, account management? → secret key (`@relipay/node`). Pass the end-user's JWT for per-user reads.
+- **Browser / mobile / desktop, signed-out user logging in or registering?** → publishable key (`@rekey.dev/react`, or `@rekey.dev/nextjs/client`). No backend required.
+- **Your server doing anything trusted** — billing checkout, usage, credits, reading a specific user's data, account management? → secret key (`@rekey.dev/node`). Pass the end-user's JWT for per-user reads.
 - **Provisioning tenants/apps at deploy time?** → `SUPER_ADMIN_KEY`.
 
 **Rule of thumb**: if it starts with `rp_pub_`, it's safe in HTML. If it starts with `rp_live_` or `rp_test_`, it must never reach a browser.
@@ -24,10 +24,10 @@ The publishable key is a **real browser credential** for the public-bootstrap ro
 
 It is **identity, not authorization**. It names the Application and asserts "legit public client"; it grants nothing on its own. Sign-in still requires the user's password / passkey / emailed token; license verify still requires the license key. That is why it is safe to ship in client code — exactly like Stripe's `pk_`, Supabase's anon key, or a Clerk publishable key.
 
-Pass it to `@relipay/react`:
+Pass it to `@rekey.dev/react`:
 
 ```tsx
-<RelipayProvider apiUrl="https://api.relipay.example.com" publishableKey="rp_pub_myapp-prod_…">
+<RelipayProvider apiUrl="https://api.rekey.example.com" publishableKey="rp_pub_myapp-prod_…">
   <App />
 </RelipayProvider>
 ```
@@ -61,7 +61,7 @@ The publishable key rotates with a **grace window** — see [api-key-rotation.md
 ## Creating a secret key
 
 ```bash
-curl -X POST https://relipay.example.com/api/v1/admin/applications/$APP_ID/api-keys \
+curl -X POST https://rekey.example.com/api/v1/admin/applications/$APP_ID/api-keys \
   -H "Authorization: Bearer $SUPER_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name": "Production server", "mode": "live"}'
@@ -112,7 +112,7 @@ API keys are 24 bytes of CSPRNG entropy — uncrackable by online brute force. A
 
 ## Verifying a key in your code
 
-When `@relipay/node` (or `curl`) sends `Authorization: Bearer rp_live_…`, ReliPay's middleware ([`apps/api/src/middleware/api-key-auth.ts`](../apps/api/src/middleware/api-key-auth.ts)) does:
+When `@rekey.dev/node` (or `curl`) sends `Authorization: Bearer rp_live_…`, Rekey's middleware ([`apps/api/src/middleware/api-key-auth.ts`](../apps/api/src/middleware/api-key-auth.ts)) does:
 
 1. Pre-filter on prefix (`rp_live_` / `rp_test_`). A `rp_pub_*` or anything else returns **401 `API_KEY_INVALID`** with a `fix` message pointing the caller at the right credential type.
 2. SHA-256 hash the raw value.
@@ -151,4 +151,4 @@ One caveat: email is unique per `(application, email)` **across** modes — the 
 
 ### What still needs a provider sandbox account
 
-ReliPay's test mode isolates *ReliPay's* data; it does not simulate a payment provider. To run a real end-to-end test checkout you still need sandbox credentials at the provider (Stripe `sk_test_…`, a PayPal sandbox app, Razorpay test keys) stored as billing credentials with `mode: test`. Without them, test-mode checkouts fail with `BILLING_MODE_MISMATCH` (or, when no credentials are configured at all, fall through to the dev stub provider). Provider webhooks from a sandbox account flow through the same per-app webhook endpoint and inherit the subscription's `TEST` mode.
+Rekey's test mode isolates *Rekey's* data; it does not simulate a payment provider. To run a real end-to-end test checkout you still need sandbox credentials at the provider (Stripe `sk_test_…`, a PayPal sandbox app, Razorpay test keys) stored as billing credentials with `mode: test`. Without them, test-mode checkouts fail with `BILLING_MODE_MISMATCH` (or, when no credentials are configured at all, fall through to the dev stub provider). Provider webhooks from a sandbox account flow through the same per-app webhook endpoint and inherit the subscription's `TEST` mode.

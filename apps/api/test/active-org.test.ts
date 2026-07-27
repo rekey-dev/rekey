@@ -90,7 +90,7 @@ describe('Active organization (oid claim)', () => {
       .inject({
         method: 'GET',
         url: '/api/v1/billing/entitlements',
-        headers: { ...key(), 'x-relipay-user-token': accessToken },
+        headers: { ...key(), 'x-rekey-user-token': accessToken },
       })
       .then((r) => r.json().data as { creditBalance: number });
 
@@ -98,7 +98,7 @@ describe('Active organization (oid claim)', () => {
     app.inject({
       method: 'POST',
       url: `/api/v1/users/me/organizations/${orgId}/switch`,
-      headers: { ...key(), 'x-relipay-user-token': accessToken },
+      headers: { ...key(), 'x-rekey-user-token': accessToken },
     });
 
   const refresh = (refreshToken: string) =>
@@ -123,7 +123,7 @@ describe('Active organization (oid claim)', () => {
       .inject({
         method: 'GET',
         url: '/api/v1/users/me/',
-        headers: { ...key(), 'x-relipay-user-token': switched.accessToken },
+        headers: { ...key(), 'x-rekey-user-token': switched.accessToken },
       })
       .then((r) => r.json().data as { activeOrganizationId: string | null });
     expect(me.activeOrganizationId).toBe(orgId);
@@ -152,7 +152,7 @@ describe('Active organization (oid claim)', () => {
       .inject({
         method: 'POST',
         url: '/api/v1/users/me/organizations/clear-active-organization',
-        headers: { ...key(), 'x-relipay-user-token': switched.accessToken },
+        headers: { ...key(), 'x-rekey-user-token': switched.accessToken },
       })
       .then((r) => r.json().data as Session);
     expect((await entitlements(cleared.accessToken)).creditBalance).toBe(7);

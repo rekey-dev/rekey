@@ -1,8 +1,8 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { getSession, getAppConfig } from '@/lib/session';
-import { relipay } from '@/lib/relipay';
-import type { PlanDto } from '@relipay/node';
+import { rekey } from '@/lib/relipay';
+import type { PlanDto } from '@rekey.dev/node';
 
 /** Format a plan's price for the pricing grid. */
 function priceLabel(p: PlanDto): string {
@@ -18,13 +18,13 @@ export default async function LandingPage(): Promise<React.JSX.Element> {
   // tells visitors whether billing is team-scoped.
   const [session, plans, config] = await Promise.all([
     getSession(),
-    relipay.billing.getPlans().catch(() => [] as PlanDto[]),
+    rekey.billing.getPlans().catch(() => [] as PlanDto[]),
     getAppConfig().catch(() => null),
   ]);
   const signedIn = session !== null;
 
   const features = [
-    ['Auth, batteries included', 'Email/password, magic links, password reset, multi-session management — all from @relipay/nextjs + @relipay/react.'],
+    ['Auth, batteries included', 'Email/password, magic links, password reset, multi-session management — all from @rekey.dev/nextjs + @rekey.dev/react.'],
     ['Org-scoped billing', 'Subscriptions, plan catalog, hosted checkout and upgrade flows that belong to a team, not just one user.'],
     ['Entitlements & usage', 'Gate features server-side on resolved entitlements; meter usage and enforce hard caps.'],
     ['Prepaid credits', 'Sell credit packs and draw them down per unit, with a shared org pool.'],
@@ -33,7 +33,7 @@ export default async function LandingPage(): Promise<React.JSX.Element> {
   return (
     <div className="min-h-screen">
       <header className="mx-auto max-w-5xl px-6 py-5 flex items-center">
-        <span className="font-bold text-relipay-700 dark:text-relipay-500">ReliPay SaaS</span>
+        <span className="font-bold text-rekey-700 dark:text-rekey-500">Rekey SaaS</span>
         <nav className="ml-auto flex items-center gap-3">
           {signedIn ? (
             <Link href="/dashboard" className="btn">Open dashboard</Link>
@@ -47,12 +47,12 @@ export default async function LandingPage(): Promise<React.JSX.Element> {
       </header>
 
       <section className="mx-auto max-w-5xl px-6 pt-12 pb-16 text-center">
-        <span className="pill">Next.js 15 · App Router · built on ReliPay</span>
+        <span className="pill">Next.js 15 · App Router · built on Rekey</span>
         <h1 className="mt-5 text-4xl sm:text-5xl font-bold tracking-tight">
           The SaaS starter with auth &amp; billing already wired
         </h1>
         <p className="mx-auto mt-5 max-w-2xl text-lg text-neutral-600 dark:text-neutral-400">
-          A complete, idiomatic Next.js example demonstrating the ReliPay SDK end to end —
+          A complete, idiomatic Next.js example demonstrating the Rekey SDK end to end —
           authentication, {config?.billingSubject === 'org' ? 'team-scoped ' : ''}billing,
           entitlement gating, usage metering, prepaid credits and organizations.
         </p>
@@ -104,7 +104,7 @@ export default async function LandingPage(): Promise<React.JSX.Element> {
 
       <footer className="border-t border-neutral-200 dark:border-neutral-800">
         <div className="mx-auto max-w-5xl px-6 py-8 text-sm text-neutral-500">
-          Reference app · auth + billing + usage powered by ReliPay
+          Reference app · auth + billing + usage powered by Rekey
           {config ? ` · application "${config.appName}"` : ''}.
         </div>
       </footer>

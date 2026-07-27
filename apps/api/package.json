@@ -1,5 +1,5 @@
 {
-  "name": "@relipay/api",
+  "name": "@rekey.dev/api",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -27,7 +27,7 @@
     "@fastify/swagger-ui": "^5.2.0",
     "@paypal/paypal-server-sdk": "^2.3.0",
     "@prisma/client": "6.10.1",
-    "@relipay/shared-types": "workspace:*",
+    "@rekey.dev/shared-types": "workspace:*",
     "@simplewebauthn/server": "^13.3.0",
     "@t3-oss/env-core": "^0.11.1",
     "argon2": "^0.41.1",

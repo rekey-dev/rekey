@@ -65,7 +65,7 @@ export default async function DunningPage({
       <div className="space-y-5">
         <SectionHeader
           title="Dunning"
-          description="Dunning recovers failed payments — ReliPay emails the customer and tracks recovery automatically."
+          description="Dunning recovers failed payments — Rekey emails the customer and tracks recovery automatically."
         />
         <BillingDisabledState applicationId={id} />
       </div>
@@ -113,7 +113,7 @@ export default async function DunningPage({
       <SectionHeader
         title="Dunning"
         count={`(${cases.length === 0 ? 0 : `${offset + 1}–${offset + cases.length}`})`}
-        description="Dunning recovers failed payments — ReliPay emails the customer and tracks recovery automatically. A case opens when a subscription goes past due, reminders go out on day 0/3/7, and the subscription is canceled on day 14 without recovery. Card retries themselves are driven by the billing provider."
+        description="Dunning recovers failed payments — Rekey emails the customer and tracks recovery automatically. A case opens when a subscription goes past due, reminders go out on day 0/3/7, and the subscription is canceled on day 14 without recovery. Card retries themselves are driven by the billing provider."
       />
 
       {!dunningEnabled && (
@@ -143,7 +143,7 @@ export default async function DunningPage({
       {!dunningEnabled && cases.length === 0 ? (
         <EmptyState
           title="Dunning is off"
-          description="Turn on failed-payment recovery to have ReliPay chase failed payments with reminder emails and auto-cancel unpaid subscriptions after 14 days."
+          description="Turn on failed-payment recovery to have Rekey chase failed payments with reminder emails and auto-cancel unpaid subscriptions after 14 days."
           action={
             <Link
               href={`/applications/${id}/billing`}

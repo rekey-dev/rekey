@@ -1,22 +1,22 @@
 /**
- * `relipay plans …` — Plan management.
+ * `rekey plans …` — Plan management.
  *
- *   relipay plans list --app <id> [--include-inactive]
- *   relipay plans create --app <id> --slug <slug> --name <name> --amount <int>
+ *   rekey plans list --app <id> [--include-inactive]
+ *   rekey plans create --app <id> --slug <slug> --name <name> --amount <int>
  *                        [--currency USD] [--interval MONTH|YEAR]
  *                        [--kind SUBSCRIPTION|LICENSE|USAGE|CREDIT]
  *                        [--license-kind PERPETUAL|TIMED|SEATS]
  *                        [--license-duration-days <int>] [--license-seats-allowed <int>]
  *                        [--meter-slug <slug>] [--price-per-unit-cents <int>]
  *                        [--credits-amount <int>]
- *   relipay plans set-active --app <id> --slug <slug> --active true|false
+ *   rekey plans set-active --app <id> --slug <slug> --active true|false
  *
  * Money is the smallest currency unit (cents) — never floats. The CLI
  * refuses fractional `--amount` / `--price-per-unit-cents` values to prevent
  * silent rounding bugs. Per-kind field requirements (LICENSE needs
  * --license-kind, TIMED needs a duration, USAGE needs a meter + per-unit
  * price, CREDIT needs --credits-amount) are validated server-side; the API
- * returns a typed RelipayError.
+ * returns a typed RekeyError.
  */
 
 import type { Command } from 'commander';
@@ -158,7 +158,7 @@ export function registerPlansCommand(program: Command): void {
       // Combination rules (e.g. LICENSE needs --license-kind, TIMED needs a
       // duration, USAGE needs a meter + per-unit price, CREDIT needs
       // --credits-amount) are enforced by the API; it returns a typed
-      // RelipayError we surface as-is.
+      // RekeyError we surface as-is.
       const licenseDurationDays = intOpt(
         opts.licenseDurationDays,
         '--license-duration-days',

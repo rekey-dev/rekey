@@ -25,7 +25,7 @@ export function ReadyToGoLive({
   storageKey,
 }: {
   links: ReadyLink[];
-  /** Per-workspace dismissal key, e.g. `relipay.ready.dismissed.<tenantId>`. */
+  /** Per-workspace dismissal key, e.g. `rekey.ready.dismissed.<tenantId>`. */
   storageKey: string;
 }): React.JSX.Element | null {
   const [visible, setVisible] = React.useState(false);

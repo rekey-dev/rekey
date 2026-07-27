@@ -69,7 +69,7 @@ const OrgInvParam = z.object({ id: z.string().min(1), invId: z.string().min(1) }
 /**
  * Routes mounted under `/api/v1/users/me/organizations`. Credential:
  * **publishable OR secret** key in `Authorization: Bearer`, AND the end-user
- * JWT in `X-Relipay-User-Token` — both, always.
+ * JWT in `X-Rekey-User-Token` — both, always.
  */
 export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Promise<void> {
   // End-user self-service team management — list/create orgs, members, invites,
@@ -261,7 +261,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           },
           token: result.rawToken,
           warning:
-            'Raw token shown ONCE. Share via your own channel — ReliPay does not send organisation-invitation email at this time (planned).',
+            'Raw token shown ONCE. Share via your own channel — Rekey does not send organisation-invitation email at this time (planned).',
         },
       });
     },

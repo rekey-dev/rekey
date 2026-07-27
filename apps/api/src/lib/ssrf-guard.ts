@@ -20,7 +20,7 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { env } from '../config/env.js';
-import { RelipayError } from './error.js';
+import { RekeyError } from './error.js';
 
 // IPv4 ranges that must never be reachable from a user-supplied URL:
 // private (10/8, 172.16/12, 192.168/16), loopback (127/8), link-local +
@@ -70,8 +70,8 @@ export interface SafeUrlOptions {
   allowPrivate?: boolean;
 }
 
-function blocked(reason: string): RelipayError {
-  return new RelipayError({
+function blocked(reason: string): RekeyError {
+  return new RekeyError({
     statusCode: 400,
     code: 'SSRF_BLOCKED',
     message: `Refusing to fetch this URL: ${reason}`,

@@ -6,7 +6,7 @@
  * Covers:
  *   - <SignedIn> / <SignedOut> switching on auth state (and staying neutral
  *     while loading — never flash protected UI during resolution).
- *   - <RelipayLoading> / <RelipayLoaded> mutual exclusivity.
+ *   - <RekeyLoading> / <RekeyLoaded> mutual exclusivity.
  *   - <Protect> gating by feature flag, role, and predicate — allow vs deny vs
  *     fallback — including the fail-closed posture when authorization is absent.
  */
@@ -22,7 +22,7 @@ vi.mock('../src/hooks.js', () => ({
 }));
 
 import { SignedIn, SignedOut } from '../src/components.js';
-import { Protect, RelipayLoading, RelipayLoaded } from '../src/control.js';
+import { Protect, RekeyLoading, RekeyLoaded } from '../src/control.js';
 
 beforeEach(() => setAuth({}));
 
@@ -64,13 +64,13 @@ describe('<SignedIn> / <SignedOut>', () => {
   });
 });
 
-describe('<RelipayLoading> / <RelipayLoaded>', () => {
+describe('<RekeyLoading> / <RekeyLoaded>', () => {
   it('shows Loading children while resolving and Loaded children after', () => {
     loading();
     const { rerender } = render(
       <>
-        <RelipayLoading><span>spinner</span></RelipayLoading>
-        <RelipayLoaded><span>app</span></RelipayLoaded>
+        <RekeyLoading><span>spinner</span></RekeyLoading>
+        <RekeyLoaded><span>app</span></RekeyLoaded>
       </>,
     );
     expect(screen.queryByText('spinner')).not.toBeNull();
@@ -79,8 +79,8 @@ describe('<RelipayLoading> / <RelipayLoaded>', () => {
     signedIn(); // loading -> false
     rerender(
       <>
-        <RelipayLoading><span>spinner</span></RelipayLoading>
-        <RelipayLoaded><span>app</span></RelipayLoaded>
+        <RekeyLoading><span>spinner</span></RekeyLoading>
+        <RekeyLoaded><span>app</span></RekeyLoaded>
       </>,
     );
     expect(screen.queryByText('spinner')).toBeNull();

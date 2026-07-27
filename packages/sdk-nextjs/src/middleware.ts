@@ -1,14 +1,14 @@
 /**
  * Next.js middleware helpers.
  *
- * `relipayMiddleware({ publicRoutes, signInUrl })` returns a middleware
+ * `rekeyMiddleware({ publicRoutes, signInUrl })` returns a middleware
  * function the user wires up in their `middleware.ts`. It:
  *   - Lets `publicRoutes` pass through unauthenticated.
  *   - For protected routes, requires the access cookie. Missing → redirect
  *     to `signInUrl` with a `next` query param so the user lands back here
  *     after sign-in.
  *
- * This middleware is intentionally simple — it does not call ReliPay over
+ * This middleware is intentionally simple — it does not call Rekey over
  * the network on every request. Token validity is verified the next time
  * the customer's server uses it via `auth()` or directly. The cookie's
  * presence is the gate; the cookie's *value* is checked deeper in the stack.
@@ -30,7 +30,7 @@ function matches(pathname: string, patterns: Array<string | RegExp>): boolean {
   );
 }
 
-export function relipayMiddleware(config: MiddlewareConfig = {}) {
+export function rekeyMiddleware(config: MiddlewareConfig = {}) {
   const publicRoutes = config.publicRoutes ?? [
     '/sign-in',
     '/sign-up',

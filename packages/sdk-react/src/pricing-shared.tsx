@@ -88,7 +88,7 @@ export function CheckoutFormBody({
   const cx = useCx();
   const slot = variant === 'primary' ? 'buttonPrimary' : 'buttonSecondary';
   const klass = cx(
-    `relipay-btn relipay-btn-${variant}${block ? ' relipay-btn-block' : ''}`,
+    `rekey-btn rekey-btn-${variant}${block ? ' rekey-btn-block' : ''}`,
     slot,
   );
   return (
@@ -107,7 +107,7 @@ export function CheckoutFormBody({
 export function DefaultOrgGate(): React.JSX.Element {
   const cx = useCx();
   return (
-    <div role="status" className={cx('relipay-alert relipay-alert-info', 'alert')}>
+    <div role="status" className={cx('rekey-alert rekey-alert-info', 'alert')}>
       This app bills per team. Create or switch to a team, then choose a plan.
     </div>
   );
@@ -142,7 +142,7 @@ export function PricingGrid({
   }
 
   return (
-    <div className={cx('relipay-pricing', 'card')}>
+    <div className={cx('rekey-pricing', 'card')}>
       {plans.map((plan) => {
         const price = formatPrice(plan);
         const isCurrent = currentPlanSlug != null && plan.slug === currentPlanSlug;
@@ -151,28 +151,28 @@ export function PricingGrid({
         return (
           <div
             key={plan.id}
-            className={cx(`relipay-plan${isCurrent ? ' relipay-plan-current' : ''}`, 'planCard')}
+            className={cx(`rekey-plan${isCurrent ? ' rekey-plan-current' : ''}`, 'planCard')}
           >
-            <div className={cx('relipay-plan-name', 'title')}>{plan.name}</div>
-            <div className={cx('relipay-price', 'price')}>
+            <div className={cx('rekey-plan-name', 'title')}>{plan.name}</div>
+            <div className={cx('rekey-price', 'price')}>
               {price.main}
-              {price.sub && <span className="relipay-price-sub"> {price.sub}</span>}
+              {price.sub && <span className="rekey-price-sub"> {price.sub}</span>}
             </div>
             {plan.description && (
-              <div className={cx('relipay-subtitle', 'subtitle')}>{plan.description}</div>
+              <div className={cx('rekey-subtitle', 'subtitle')}>{plan.description}</div>
             )}
             {plan.features && plan.features.length > 0 && (
-              <ul style={{ margin: 0, paddingLeft: '1.1em', fontSize: '0.8125rem', color: 'var(--relipay-color-text-muted)' }}>
+              <ul style={{ margin: 0, paddingLeft: '1.1em', fontSize: '0.8125rem', color: 'var(--rekey-color-text-muted)' }}>
                 {plan.features.map((f, i) => (
                   <li key={i}>{f}</li>
                 ))}
               </ul>
             )}
-            <div className="relipay-plan-cta">
+            <div className="rekey-plan-cta">
               {isCurrent ? (
-                <span className={cx('relipay-badge relipay-badge-primary', 'badge')}>Current plan</span>
+                <span className={cx('rekey-badge rekey-badge-primary', 'badge')}>Current plan</span>
               ) : isFree && hideFreeCta ? (
-                <span className={cx('relipay-badge', 'badge')}>—</span>
+                <span className={cx('rekey-badge', 'badge')}>—</span>
               ) : (
                 <CheckoutFormBody
                   planSlug={plan.slug}

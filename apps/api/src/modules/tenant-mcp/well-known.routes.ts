@@ -12,7 +12,7 @@
  *
  * The suffix-form routes in `oauth.routes.ts`
  * (`/api/v1/tenant/mcp/.well-known/...`) 404 for that construction, so connector
- * setup fails with "Couldn't register with Relipay's sign-in service". These
+ * setup fails with "Couldn't register with Rekey's sign-in service". These
  * routes serve the SAME metadata bodies at the path-insertion locations.
  *
  * Registered at the ROOT (no prefix) in `app.ts` — the well-known segment must

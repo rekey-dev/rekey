@@ -114,7 +114,7 @@ describe('test/live data isolation (roadmap §7)', () => {
     return app.inject({
       method: 'POST',
       url: '/api/v1/billing/checkout',
-      headers: { authorization: `Bearer ${key}`, 'x-relipay-user-token': userToken },
+      headers: { authorization: `Bearer ${key}`, 'x-rekey-user-token': userToken },
       payload: {
         planSlug,
         successUrl: 'https://app.example/ok',
@@ -186,7 +186,7 @@ describe('test/live data isolation (roadmap §7)', () => {
       app.inject({
         method: 'GET',
         url: '/api/v1/users/me/',
-        headers: { authorization: `Bearer ${key}`, 'x-relipay-user-token': token },
+        headers: { authorization: `Bearer ${key}`, 'x-rekey-user-token': token },
       });
 
     const crossedTest = await me(liveKey, test.accessToken);

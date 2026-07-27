@@ -1,5 +1,5 @@
 /**
- * Entitlements resolution — ALWAYS server-side, from ReliPay, never from local
+ * Entitlements resolution — ALWAYS server-side, from Rekey, never from local
  * state. Feature gating in this app reads `billing.getEntitlements()`:
  *
  *   - max QR codes  → features.max_qr_codes  (INT; Free default when absent)
@@ -11,7 +11,7 @@
  */
 
 import 'server-only';
-import { relipay } from './relipay';
+import { rekey } from './relipay';
 import { FEAT_ANALYTICS, FEAT_MAX_QRS, FREE_MAX_QRS } from './constants';
 
 export interface ResolvedEntitlements {
@@ -36,7 +36,7 @@ export async function resolveEntitlements(
   accessToken: string,
   organizationId: string | null,
 ): Promise<ResolvedEntitlements> {
-  const ent = await relipay.billing.getEntitlements(
+  const ent = await rekey.billing.getEntitlements(
     accessToken,
     organizationId ? { organizationId } : undefined,
   );

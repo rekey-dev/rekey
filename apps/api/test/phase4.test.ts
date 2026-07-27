@@ -274,7 +274,7 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
         url: '/api/v1/billing/checkout',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': b.endUserAccess,
+          'x-rekey-user-token': b.endUserAccess,
         },
         payload: {
           planSlug: 'pro',
@@ -296,7 +296,7 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
         url: '/api/v1/billing/checkout',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': b.endUserAccess,
+          'x-rekey-user-token': b.endUserAccess,
         },
         payload: {
           planSlug: 'pro',
@@ -315,7 +315,7 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
       url: '/api/v1/billing/checkout',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.endUserAccess,
+        'x-rekey-user-token': b.endUserAccess,
       },
       payload: {
         planSlug: 'pro',
@@ -384,7 +384,7 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
       url: '/api/v1/auth/mfa/setup',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.endUserAccess,
+        'x-rekey-user-token': b.endUserAccess,
       },
     });
     expect(setup.statusCode).toBe(201);
@@ -403,7 +403,7 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
       url: '/api/v1/auth/mfa/setup-confirm',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.endUserAccess,
+        'x-rekey-user-token': b.endUserAccess,
       },
       payload: { code },
     });
@@ -414,7 +414,7 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
       url: '/api/v1/auth/mfa/status',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': b.endUserAccess,
+        'x-rekey-user-token': b.endUserAccess,
       },
     });
     const sd = status.json().data as { enabled: boolean; remainingBackupCodes: number };
@@ -428,7 +428,7 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
       .inject({
         method: 'POST',
         url: '/api/v1/auth/mfa/setup',
-        headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': b.endUserAccess },
+        headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.endUserAccess },
       })
       .then((r) => r.json().data)) as { otpauthUrl: string; backupCodes: string[] };
     const secret = new URL(setup.otpauthUrl.replace('otpauth://', 'https://x/')).searchParams.get('secret')!;
@@ -436,7 +436,7 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
     await app.inject({
       method: 'POST',
       url: '/api/v1/auth/mfa/setup-confirm',
-      headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': b.endUserAccess },
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.endUserAccess },
       payload: { code },
     });
 
@@ -444,7 +444,7 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
     const c1 = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/mfa/challenge',
-      headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': b.endUserAccess },
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.endUserAccess },
       payload: { code: backup },
     });
     expect((c1.json().data as { ok: boolean }).ok).toBe(true);
@@ -452,7 +452,7 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
     const c2 = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/mfa/challenge',
-      headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': b.endUserAccess },
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.endUserAccess },
       payload: { code: backup },
     });
     expect((c2.json().data as { ok: boolean }).ok).toBe(false);

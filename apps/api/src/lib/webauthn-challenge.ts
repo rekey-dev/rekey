@@ -21,7 +21,7 @@
  */
 
 import { prisma } from './prisma.js';
-import { RelipayError } from './error.js';
+import { RekeyError } from './error.js';
 
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 
@@ -94,7 +94,7 @@ export async function consumeChallenge(args: ConsumeChallengeArgs): Promise<void
     data: { consumedAt: now },
   });
   if (claimed.count !== 1) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 401,
       code: 'WEBAUTHN_CHALLENGE_INVALID',
       message:

@@ -92,7 +92,7 @@ describe('Phase-1 security hardening', () => {
         url: '/api/v1/auth/mfa/setup',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': eu.accessToken,
+          'x-rekey-user-token': eu.accessToken,
         },
       })
       .then((r) => r.json().data as { otpauthUrl: string });
@@ -105,7 +105,7 @@ describe('Phase-1 security hardening', () => {
       url: '/api/v1/auth/mfa/setup-confirm',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': eu.accessToken,
+        'x-rekey-user-token': eu.accessToken,
       },
       payload: { code: totp.generate() },
     });
@@ -159,7 +159,7 @@ describe('Phase-1 security hardening', () => {
         url: '/api/v1/auth/mfa/setup',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': eu.accessToken,
+          'x-rekey-user-token': eu.accessToken,
         },
       })
       .then((r) => r.json().data as { otpauthUrl: string });
@@ -172,7 +172,7 @@ describe('Phase-1 security hardening', () => {
       url: '/api/v1/auth/mfa/setup-confirm',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': eu.accessToken,
+        'x-rekey-user-token': eu.accessToken,
       },
       payload: { code: totp.generate() },
     });
@@ -210,7 +210,7 @@ describe('Phase-1 security hardening', () => {
       .inject({
         method: 'POST',
         url: '/api/v1/auth/mfa/setup',
-        headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': eu.accessToken },
+        headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': eu.accessToken },
       })
       .then((r) => r.json().data as { otpauthUrl: string });
     const secret = new URL(
@@ -220,7 +220,7 @@ describe('Phase-1 security hardening', () => {
     await app.inject({
       method: 'POST',
       url: '/api/v1/auth/mfa/setup-confirm',
-      headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': eu.accessToken },
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': eu.accessToken },
       payload: { code: totp.generate() },
     });
     const challenge = await app
@@ -334,7 +334,7 @@ describe('Phase-1 security hardening', () => {
       url: '/api/v1/users/me/',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': token,
+        'x-rekey-user-token': token,
       },
     });
     expect(res.statusCode).toBe(401);
@@ -492,7 +492,7 @@ describe('Phase-1 security hardening', () => {
       url: '/api/v1/auth/sessions',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': eu.accessToken,
+        'x-rekey-user-token': eu.accessToken,
       },
     });
     expect(list.statusCode).toBe(200);
@@ -526,7 +526,7 @@ describe('Phase-1 security hardening', () => {
         url: '/api/v1/auth/sessions',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': secondSession.accessToken,
+          'x-rekey-user-token': secondSession.accessToken,
         },
       })
       .then((r) => r.json().data as Array<{ id: string; userAgent: string | null }>);
@@ -540,7 +540,7 @@ describe('Phase-1 security hardening', () => {
       url: `/api/v1/auth/sessions/${deviceA.id}`,
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': secondSession.accessToken,
+        'x-rekey-user-token': secondSession.accessToken,
       },
     });
     expect(del.statusCode).toBe(200);
@@ -552,7 +552,7 @@ describe('Phase-1 security hardening', () => {
       url: `/api/v1/auth/sessions/${deviceA.id}`,
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': secondSession.accessToken,
+        'x-rekey-user-token': secondSession.accessToken,
       },
     });
     expect(del2.json().data.revoked).toBe(false);
@@ -583,7 +583,7 @@ describe('Phase-1 security hardening', () => {
         url: '/api/v1/auth/sessions',
         headers: {
           authorization: `Bearer ${b.liveKey}`,
-          'x-relipay-user-token': userB.accessToken,
+          'x-rekey-user-token': userB.accessToken,
         },
       })
       .then((r) => (r.json().data as Array<{ id: string }>)[0]!);
@@ -594,7 +594,7 @@ describe('Phase-1 security hardening', () => {
       url: `/api/v1/auth/sessions/${userBSession.id}`,
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': userA.accessToken,
+        'x-rekey-user-token': userA.accessToken,
       },
     });
     expect(res.statusCode).toBe(200);
@@ -638,7 +638,7 @@ describe('Phase-1 security hardening', () => {
       url: '/api/v1/auth/oauth/google/link/complete',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': eu.accessToken,
+        'x-rekey-user-token': eu.accessToken,
       },
       payload: { code: 'mock-code' },
     });
@@ -651,7 +651,7 @@ describe('Phase-1 security hardening', () => {
       url: '/api/v1/auth/oauth/google/link/complete',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': eu.accessToken,
+        'x-rekey-user-token': eu.accessToken,
       },
       payload: { code: 'mock-code' },
     });
@@ -694,7 +694,7 @@ describe('Phase-1 security hardening', () => {
       url: '/api/v1/auth/oauth/google/link/complete',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': eu.accessToken,
+        'x-rekey-user-token': eu.accessToken,
       },
       payload: { code: 'mock-code' },
     });
@@ -740,7 +740,7 @@ describe('Phase-1 security hardening', () => {
       url: '/api/v1/auth/oauth/google',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': session.accessToken,
+        'x-rekey-user-token': session.accessToken,
       },
     });
     expect(res.statusCode).toBe(409);
@@ -762,7 +762,7 @@ describe('Phase-1 security hardening', () => {
       url: '/api/v1/auth/oauth/identities',
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-relipay-user-token': eu.accessToken,
+        'x-rekey-user-token': eu.accessToken,
       },
     });
     expect(res.statusCode).toBe(200);

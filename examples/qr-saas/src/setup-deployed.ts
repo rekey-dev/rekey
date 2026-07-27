@@ -1,8 +1,8 @@
 /**
- * Provision an EXISTING ReliPay Application with the QR product's billing
+ * Provision an EXISTING Rekey Application with the QR product's billing
  * (usage meter + Free/Pro/credit plans + entitlements). Unlike `bootstrap.ts`
  * (which creates a brand-new tenant + app), this targets an app you already
- * created in the panel — e.g. wiring the demo to a deployed ReliPay.
+ * created in the panel — e.g. wiring the demo to a deployed Rekey.
  *
  * Plan/meter/entitlement creation is OPERATOR-gated (the tenant REST API), so
  * the Application secret key can't do it. Supply a short-lived operator access

@@ -2,7 +2,7 @@
  * End-user sign-up policy — the single chokepoint that decides whether a
  * given request is allowed to CREATE a new end-user.
  *
- * Driven by `authConfig.signupMode` (see @relipay/shared-types):
+ * Driven by `authConfig.signupMode` (see @rekey.dev/shared-types):
  *   - `public`      — any caller may create users.
  *   - `secret_only` — only a server-side SECRET key may; a publishable
  *                     (`rp_pub_*`) request is refused. Sign-IN is unaffected —
@@ -17,8 +17,8 @@
  * defined at all real call sites.
  */
 
-import type { AuthConfig } from '@relipay/shared-types';
-import { RelipayError } from './error.js';
+import type { AuthConfig } from '@rekey.dev/shared-types';
+import { RekeyError } from './error.js';
 
 export type AuthKind = 'secret' | 'publishable';
 
@@ -47,7 +47,7 @@ export function assertSignupAllowed(
   authKind: AuthKind | undefined,
 ): void {
   if (config.signupMode === 'invite_only') {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 403,
       code: 'SIGNUP_DISABLED',
       message: 'Public sign-up is disabled for this application.',
@@ -55,7 +55,7 @@ export function assertSignupAllowed(
     });
   }
   if (config.signupMode === 'secret_only' && authKind === 'publishable') {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 403,
       code: 'SIGNUP_REQUIRES_SECRET_KEY',
       message:

@@ -14,7 +14,7 @@ import {
   sign as cryptoSign,
   type KeyObject,
 } from 'node:crypto';
-import { verifyAccessToken, _clearJwksCacheForTests, RelipayError } from '../src/index.js';
+import { verifyAccessToken, _clearJwksCacheForTests, RekeyError } from '../src/index.js';
 
 // ---------------------------------------------------------------------------
 // Key + token fixtures
@@ -183,7 +183,7 @@ describe('verifyAccessToken — rejections', () => {
       code: 'USER_TOKEN_INVALID',
     });
     const token = signRs256(claims(), keyA.privateKey, keyA.kid);
-    await expect(verifyAccessToken(token, { now })).rejects.toBeInstanceOf(RelipayError);
+    await expect(verifyAccessToken(token, { now })).rejects.toBeInstanceOf(RekeyError);
     await expect(verifyAccessToken(token, { now })).rejects.toMatchObject({
       code: 'CONFIG_MISSING_JWKS',
     });

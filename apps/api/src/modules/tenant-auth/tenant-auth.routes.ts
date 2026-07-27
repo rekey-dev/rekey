@@ -300,7 +300,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         tags: ['Tenant · Auth'],
         security: [],
-        summary: 'Request a password-reset token. ReliPay does not send email — caller forwards the token.',
+        summary: 'Request a password-reset token. Rekey does not send email — caller forwards the token.',
         body: {
           type: 'object',
           required: ['email'],
@@ -347,7 +347,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         tags: ['Tenant · Auth'],
         security: [],
-        summary: 'Request a passwordless sign-in token. ReliPay does not send email — caller forwards the token.',
+        summary: 'Request a passwordless sign-in token. Rekey does not send email — caller forwards the token.',
         body: {
           type: 'object',
           required: ['email'],

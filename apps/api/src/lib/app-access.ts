@@ -42,7 +42,7 @@
 import type { FastifyRequest } from 'fastify';
 import type { ApplicationRole } from '@prisma/client';
 import { prisma } from './prisma.js';
-import { RelipayError } from './error.js';
+import { RekeyError } from './error.js';
 
 export type AppAccessNeed = 'read' | 'write' | 'billing-write';
 
@@ -56,10 +56,10 @@ export interface AppAccess {
   level: 'workspace-admin' | 'legacy-member' | ApplicationRole;
 }
 
-function notFound(applicationId: string): RelipayError {
+function notFound(applicationId: string): RekeyError {
   // Don't disclose existence (in another tenant, or behind a missing grant) —
   // return the same code as "not found" to avoid being an enumeration oracle.
-  return new RelipayError({
+  return new RekeyError({
     statusCode: 404,
     code: 'APPLICATION_NOT_FOUND',
     message: `Application "${applicationId}" not found in this workspace.`,
@@ -67,10 +67,10 @@ function notFound(applicationId: string): RelipayError {
   });
 }
 
-function legacyWriteDenied(role: string): RelipayError {
+function legacyWriteDenied(role: string): RekeyError {
   // Same code/shape requireTenantRole(['OWNER','ADMIN']) used to emit for a
   // MEMBER hitting these routes — kept for client back-compat.
-  return new RelipayError({
+  return new RekeyError({
     statusCode: 403,
     code: 'TENANT_ROLE_INSUFFICIENT',
     message: `This action requires one of: OWNER, ADMIN. Your role: ${role}.`,
@@ -78,8 +78,8 @@ function legacyWriteDenied(role: string): RelipayError {
   });
 }
 
-function grantDenied(need: AppAccessNeed, granted: ApplicationRole): RelipayError {
-  return new RelipayError({
+function grantDenied(need: AppAccessNeed, granted: ApplicationRole): RekeyError {
+  return new RekeyError({
     statusCode: 403,
     code: 'APP_ACCESS_DENIED',
     message: `Your application role ${granted} does not allow this action (requires ${
@@ -122,7 +122,7 @@ export async function ensureAppAccess(
     membershipId = membership?.id;
   }
   if (!membershipId) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 500,
       code: 'INTERNAL_ERROR',
       message: 'ensureAppAccess used without requireTenantSession.',

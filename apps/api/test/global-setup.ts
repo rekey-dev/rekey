@@ -8,7 +8,7 @@
  * Test DB selection (in priority order):
  *   1. `TEST_DATABASE_URL` env var
  *   2. `DATABASE_URL` env var
- *   3. `postgresql://relipay:relipay@localhost:5432/relipay_test?schema=public`
+ *   3. `postgresql://rekey:rekey@localhost:5432/relipay_test?schema=public`
  *
  * In CI, the workflow exposes a fresh Postgres on localhost:5432 — option 3
  * is the canonical default and "just works".
@@ -27,7 +27,7 @@ function resolveTestDbUrl(): string {
   return (
     process.env.TEST_DATABASE_URL ??
     process.env.DATABASE_URL ??
-    'postgresql://relipay:relipay@localhost:5432/relipay_test?schema=public'
+    'postgresql://rekey:rekey@localhost:5432/relipay_test?schema=public'
   );
 }
 

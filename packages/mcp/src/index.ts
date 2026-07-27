@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * @relipay/mcp — Model Context Protocol server.
+ * @rekey.dev/mcp — Model Context Protocol server.
  *
- * Speaks MCP over stdio, exposing introspection tools for ReliPay
+ * Speaks MCP over stdio, exposing introspection tools for Rekey
  * (Applications, Plans, Coupons, API keys, Tenants) plus a single guarded
  * WRITE tool (`mint_api_key`). Designed to be wired into Claude Desktop,
  * Cursor, and Claude Code so an AI agent can answer "what plans does this app
@@ -37,9 +37,9 @@ const operatorToken = process.env.RELIPAY_OPERATOR_TOKEN ?? '';
 
 if (!apiUrl || (!adminKey && !operatorToken)) {
   process.stderr.write(
-    `[relipay-mcp] missing required env: RELIPAY_URL plus at least one credential ` +
+    `[rekey-mcp] missing required env: RELIPAY_URL plus at least one credential ` +
       `(SUPER_ADMIN_KEY for read tools and/or RELIPAY_OPERATOR_TOKEN for the keys:mint write tool).\n` +
-      `[relipay-mcp] fix: configure these in the MCP client (Claude Desktop config, Cursor MCP settings, …)\n`,
+      `[rekey-mcp] fix: configure these in the MCP client (Claude Desktop config, Cursor MCP settings, …)\n`,
   );
   process.exit(1);
 }
@@ -51,7 +51,7 @@ const client = new AdminClient({
 });
 
 const server = new Server(
-  { name: 'relipay-mcp', version: '0.0.0' },
+  { name: 'rekey-mcp', version: '0.0.0' },
   { capabilities: { tools: {} } },
 );
 

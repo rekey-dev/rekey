@@ -8,7 +8,7 @@
  *                 both humans and AI agents — read this first when debugging.
  *   - `docs`    — optional URL to the long-form explanation.
  *
- * The shape matches `@relipay/shared-types` `RelipayErrorSchema` so the
+ * The shape matches `@rekey.dev/shared-types` `RekeyErrorSchema` so the
  * SDK can decode without re-deriving.
  */
 
@@ -21,7 +21,7 @@ import {
 } from './dependency-outage.js';
 import { recordSecurityEvent } from './security-events.js';
 
-export interface RelipayErrorPayload {
+export interface RekeyErrorPayload {
   code: string;
   message: string;
   fix?: string;
@@ -41,7 +41,7 @@ export interface RelipayErrorPayload {
  * @example
  * ```ts
  * if (!tenant) {
- *   throw new RelipayError({
+ *   throw new RekeyError({
  *     statusCode: 404,
  *     code: 'TENANT_NOT_FOUND',
  *     message: `Tenant "${id}" not found.`,
@@ -51,16 +51,16 @@ export interface RelipayErrorPayload {
  * }
  * ```
  */
-export class RelipayError extends Error {
+export class RekeyError extends Error {
   public readonly statusCode: number;
   public readonly code: string;
   public readonly fix: string | undefined;
   public readonly docs: string | undefined;
   public readonly retryAfterSeconds: number | undefined;
 
-  constructor(args: RelipayErrorPayload & { statusCode?: number }) {
+  constructor(args: RekeyErrorPayload & { statusCode?: number }) {
     super(args.message);
-    this.name = 'RelipayError';
+    this.name = 'RekeyError';
     this.statusCode = args.statusCode ?? 400;
     this.code = args.code;
     this.fix = args.fix;
@@ -153,8 +153,8 @@ export function dependencyUnavailablePayload(subsystem: OutageSubsystem): {
  * envelope. Hides server-internal detail in production while keeping
  * `code` and a stable `message` clients can rely on.
  */
-export function relipayErrorHandler(
-  err: FastifyError | RelipayError | Error,
+export function rekeyErrorHandler(
+  err: FastifyError | RekeyError | Error,
   req: FastifyRequest,
   reply: FastifyReply,
 ): FastifyReply {
@@ -164,7 +164,7 @@ export function relipayErrorHandler(
   const requestId = req.id;
   reply.header('X-Request-Id', requestId);
 
-  if (err instanceof RelipayError) {
+  if (err instanceof RekeyError) {
     if (err.retryAfterSeconds !== undefined) {
       reply.header('Retry-After', String(err.retryAfterSeconds));
     }

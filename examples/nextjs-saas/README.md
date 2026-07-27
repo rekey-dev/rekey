@@ -1,7 +1,7 @@
-# ReliPay Next.js SaaS boilerplate
+# Rekey Next.js SaaS boilerplate
 
 A complete, idiomatic **Next.js 15 (App Router) + TypeScript + Tailwind** SaaS
-starter that demonstrates the ReliPay SDK **end to end**:
+starter that demonstrates the Rekey SDK **end to end**:
 
 - **Auth** — sign-up, sign-in, sign-out, magic links, password reset, and
   multi-session management (list / revoke / sign-out-everywhere).
@@ -16,16 +16,16 @@ It uses the three SDK layers the way they're meant to be used:
 
 | Layer | Package | Where |
 | --- | --- | --- |
-| Browser auth state | `@relipay/react` (`RelipayProvider`, `useUser`, `SignedIn/SignedOut`) | client components — **public key only** |
-| Cookie session + auth actions | `@relipay/nextjs/server` (`auth`, `signIn`, `signUp`, `signOut`) + `@relipay/nextjs/middleware` | server |
-| Everything else (billing, credits, usage, orgs, sessions) | `@relipay/node` | server only — **secret key**, never shipped to the browser |
+| Browser auth state | `@rekey.dev/react` (`RelipayProvider`, `useUser`, `SignedIn/SignedOut`) | client components — **public key only** |
+| Cookie session + auth actions | `@rekey.dev/nextjs/server` (`auth`, `signIn`, `signUp`, `signOut`) + `@rekey.dev/nextjs/middleware` | server |
+| Everything else (billing, credits, usage, orgs, sessions) | `@rekey.dev/node` | server only — **secret key**, never shipped to the browser |
 
 ## Org-scoped billing
 
 The deployed demo application (`qr`) is configured with
 `organizationsEnabled = true` and `billingConfig.billingSubject = 'org'`, so an
 individual cannot hold a subscription. The app reads this via
-`relipay.applications.me()` and **drives the UI from it**: when `billingSubject`
+`rekey.applications.me()` and **drives the UI from it**: when `billingSubject`
 is `'org'` the user must create or switch to a team before checkout. Without an
 active team, checkout returns `BILLING_ORGANIZATION_REQUIRED` — surfaced in the
 UI, and pre-empted by a gate on the dashboard / billing pages.
@@ -44,7 +44,7 @@ UI, and pre-empted by a gate on the dashboard / billing pages.
 
    ```bash
    pnpm install
-   pnpm --filter relipay-nextjs-saas dev
+   pnpm --filter rekey-nextjs-saas dev
    ```
 
    The app runs at **http://localhost:3040**.
@@ -52,8 +52,8 @@ UI, and pre-empted by a gate on the dashboard / billing pages.
 3. Typecheck / production build:
 
    ```bash
-   pnpm --filter relipay-nextjs-saas typecheck
-   pnpm --filter relipay-nextjs-saas build
+   pnpm --filter rekey-nextjs-saas typecheck
+   pnpm --filter rekey-nextjs-saas build
    ```
 
 ## Pages

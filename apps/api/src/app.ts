@@ -20,7 +20,7 @@ import { primeCorsOrigins, isRegisteredAppOrigin } from './lib/cors-origins.js';
 import { env, corsAllowedOrigins } from './config/env.js';
 import { healthRoutes } from './routes/health.js';
 import { jwksRoutes } from './routes/jwks.js';
-import { relipayErrorHandler } from './lib/error.js';
+import { rekeyErrorHandler } from './lib/error.js';
 import { requestIdFor } from './lib/request-id.js';
 import {
   authCeilingOptions,
@@ -289,9 +289,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     runFirst: true,
   });
 
-  // Error handler before any routes so hook-thrown RelipayError instances
+  // Error handler before any routes so hook-thrown RekeyError instances
   // hit our envelope, not Fastify's default error shape.
-  app.setErrorHandler(relipayErrorHandler);
+  app.setErrorHandler(rekeyErrorHandler);
 
   // Stamp the request id on EVERY response, not just error ones — docs/errors.md
   // promises it unconditionally, and a client that wants to log the id of a

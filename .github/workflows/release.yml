@@ -1,13 +1,13 @@
 name: Release SDK
 
-# Publish @relipay SDK packages to npm when a GitHub Release is published.
+# Publish @rekey SDK packages to npm when a GitHub Release is published.
 # Only packages whose version is NOT already on npm are published — so bump
 # just the package(s) you changed (and any that depend on them) and only those
 # go out; unchanged packages are skipped. Packages are walked in dependency
 # order so a new dependency publishes before its dependents (pnpm rewrites
 # each `workspace:*` to the published version).
 #
-# Requires repo secret NPM_TOKEN (npm org `relipay`, automation token).
+# Requires repo secret NPM_TOKEN (npm org `rekey`, automation token).
 # Prerelease versions (…-beta.N) publish under the `beta` dist-tag; stable
 # versions under `latest`.
 
@@ -19,10 +19,10 @@ jobs:
   publish:
     name: Publish SDK to npm
     # Only run from the public OSS repo — npm publishing is triggered by the
-    # GitHub Release that publish-public.yml creates on relipay-dev/relipay.
+    # GitHub Release that publish-public.yml creates on rekey-dev/rekey.
     # This guard prevents accidental double-publish if a Release is ever
     # created manually on the private repo.
-    if: github.repository == 'relipay-dev/relipay'
+    if: github.repository == 'rekey-dev/rekey'
     runs-on: ubuntu-latest
     permissions:
       contents: read

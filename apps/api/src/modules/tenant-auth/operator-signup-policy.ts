@@ -23,7 +23,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { prisma } from '../../lib/prisma.js';
 import { hashOperatorInviteToken } from '../../lib/operator-invite.js';
 
@@ -65,7 +65,7 @@ export async function resolveSignupInvite(
   if (mode === 'open') return null;
 
   if (mode === 'closed') {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 403,
       code: 'OPERATOR_SIGNUP_CLOSED',
       message: 'New operator registration is disabled on this deployment.',
@@ -76,7 +76,7 @@ export async function resolveSignupInvite(
   // mode === 'invite'
   const key = (rawKey ?? '').trim();
   if (!key) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 403,
       code: 'OPERATOR_INVITE_REQUIRED',
       message: 'Operator registration on this deployment is invite-only.',
@@ -90,7 +90,7 @@ export async function resolveSignupInvite(
   // Uniform error for unknown / revoked so a probe can't distinguish a wrong
   // key from a revoked one.
   if (!invite || invite.revokedAt) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 403,
       code: 'OPERATOR_INVITE_INVALID',
       message: 'That invite key is not valid.',
@@ -98,7 +98,7 @@ export async function resolveSignupInvite(
     });
   }
   if (invite.usedAt) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 409,
       code: 'OPERATOR_INVITE_USED',
       message: 'That invite key has already been used.',
@@ -106,7 +106,7 @@ export async function resolveSignupInvite(
     });
   }
   if (invite.expiresAt && invite.expiresAt.getTime() <= Date.now()) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 403,
       code: 'OPERATOR_INVITE_EXPIRED',
       message: 'That invite key has expired.',
@@ -138,7 +138,7 @@ export async function consumeSignupInvite(
     data: { usedAt: new Date(), usedByTenantUserId: tenantUserId },
   });
   if (res.count !== 1) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 409,
       code: 'OPERATOR_INVITE_USED',
       message: 'That invite key was just used by another sign-up.',

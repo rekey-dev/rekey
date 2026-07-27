@@ -45,7 +45,7 @@ describe('admin surface — end to end', () => {
     // here, and restarting the API cannot fix a Postgres or Redis outage.
     const res = await app.inject({ method: 'GET', url: '/health/live' });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ status: 'ok', service: 'relipay-api' });
+    expect(res.json()).toEqual({ status: 'ok', service: 'rekey-api' });
   });
 
   it('GET /health → ok, and reports which dependencies it checked', async () => {
@@ -55,7 +55,7 @@ describe('admin surface — end to end', () => {
     // `status: 'ok'` is load-bearing — existing monitors and the compose
     // healthcheck match on it.
     expect(body.status).toBe('ok');
-    expect(body.service).toBe('relipay-api');
+    expect(body.service).toBe('rekey-api');
     expect(body.db).toBe('ok');
     // Redis is absent in the test env, which is reported distinctly from down.
     expect(['ok', 'not_configured']).toContain(body.redis);

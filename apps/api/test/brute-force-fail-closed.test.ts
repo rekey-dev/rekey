@@ -75,7 +75,7 @@ describe('brute-force fails closed on a store outage', () => {
   });
 
   it('a genuine lockout still reports 429 with its own code, not 503', async () => {
-    // Regression guard on the wrapper: it must rethrow a RelipayError untouched
+    // Regression guard on the wrapper: it must rethrow a RekeyError untouched
     // rather than relabel a real lockout as a dependency outage.
     state.ttlValue = 42;
     await expect(

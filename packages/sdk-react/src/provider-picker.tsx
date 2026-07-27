@@ -30,7 +30,7 @@
 import * as React from 'react';
 import { Themed, useCx, type AppearanceProp } from './theme.js';
 import { PricingGrid, type PricingGridProps } from './pricing-shared.js';
-import type { BillingProvider } from '@relipay/shared-types';
+import type { BillingProvider } from '@rekey.dev/shared-types';
 
 /**
  * One selectable provider. Mirrors `BillingProviderInfoDto` (the shape
@@ -131,31 +131,31 @@ function ProviderPickerBody({
     <div
       role="radiogroup"
       aria-labelledby={label != null ? `${groupId}-label` : undefined}
-      className={cx('relipay-provider-group', 'card')}
+      className={cx('rekey-provider-group', 'card')}
     >
       {label != null && (
-        <div id={`${groupId}-label`} className={cx('relipay-label', 'label')}>
+        <div id={`${groupId}-label`} className={cx('rekey-label', 'label')}>
           {label}
         </div>
       )}
-      <div className="relipay-provider-list">
+      <div className="rekey-provider-list">
         {providers.map((opt) => {
           const isSelected = selected === opt.provider;
           return (
             <label
               key={opt.provider}
-              className={`relipay-provider-option${isSelected ? ' relipay-provider-option-selected' : ''}`}
+              className={`rekey-provider-option${isSelected ? ' rekey-provider-option-selected' : ''}`}
             >
               <input
                 type="radio"
-                className="relipay-provider-radio"
+                className="rekey-provider-radio"
                 name={name}
                 value={opt.provider}
                 checked={isSelected}
                 onChange={() => select(opt.provider)}
               />
-              <span className="relipay-provider-dot" aria-hidden="true" />
-              <span className="relipay-provider-name">{providerLabel(opt)}</span>
+              <span className="rekey-provider-dot" aria-hidden="true" />
+              <span className="rekey-provider-name">{providerLabel(opt)}</span>
             </label>
           );
         })}
@@ -177,7 +177,7 @@ function ProviderPickerBody({
  *
  * @example
  * ```tsx
- * // Server: const { providers } = await relipay.billing.getProviders(country);
+ * // Server: const { providers } = await rekey.billing.getProviders(country);
  * // The picker posts the selected provider as `provider` in this form's FormData.
  * <form action={checkoutAction}>
  *   <input type="hidden" name="planSlug" value="pro_monthly" />

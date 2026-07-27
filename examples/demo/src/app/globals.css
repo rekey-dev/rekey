@@ -5,8 +5,8 @@
 :root {
   color-scheme: light dark;
   /* Brand tokens — match the marketing + panel (teal on cream). */
-  --color-primary: #0d9488;        /* relipay-600 (teal) */
-  --color-primary-hover: #0f766e;  /* relipay-700 */
+  --color-primary: #0d9488;        /* rekey-600 (teal) */
+  --color-primary-hover: #0f766e;  /* rekey-700 */
 }
 
 body {

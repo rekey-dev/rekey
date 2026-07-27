@@ -36,7 +36,7 @@ For a pricing page that needs to show the discounted price before submit:
 // SDK
 try {
   const { discountAmount, amountAfterDiscount } =
-    await relipay.billing.validateCoupon(userAccessToken, {
+    await rekey.billing.validateCoupon(userAccessToken, {
       code: 'LAUNCH50',
       planSlug: 'pro_monthly',
     });
@@ -53,7 +53,7 @@ try {
 Pass `couponCode` to `createCheckout`:
 
 ```ts
-const { url, discountAmount } = await relipay.billing.createCheckout(userAccessToken, {
+const { url, discountAmount } = await rekey.billing.createCheckout(userAccessToken, {
   planSlug: 'pro_monthly',
   successUrl: 'https://app.example/ok',
   cancelUrl:  'https://app.example/cancel',

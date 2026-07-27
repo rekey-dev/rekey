@@ -1,7 +1,7 @@
 /**
- * @relipay/node SDK integration tests.
+ * @rekey.dev/node SDK integration tests.
  *
- * We drive the real `ReliPay` class against the in-process Fastify app via
+ * We drive the real `Rekey` class against the in-process Fastify app via
  * a fetch shim that pipes through `app.inject`. Every assertion is also a
  * contract check: if the SDK shape drifts from the server response, the
  * test breaks immediately.
@@ -13,7 +13,7 @@
  *   - licenses.verify (ok + invalid)
  *   - usage.record + aggregate
  *   - verifyWebhookSignature against a server-signed payload (round-trip)
- *   - RelipayError carries requestId from header or envelope
+ *   - RekeyError carries requestId from header or envelope
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -22,8 +22,8 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { signWebhook } from '../src/lib/webhook-signing.js';
 import {
-  ReliPay,
-  RelipayError,
+  Rekey,
+  RekeyError,
   verifyWebhookSignature,
 } from '../../../packages/sdk-node/src/index.js';
 
@@ -34,10 +34,10 @@ interface BootstrappedApp {
   liveKey: string;
 }
 
-describe('@relipay/node SDK integration', () => {
+describe('@rekey.dev/node SDK integration', () => {
   let app: FastifyInstance;
   let appA: BootstrappedApp;
-  let relipay: ReliPay;
+  let rekey: Rekey;
 
   beforeAll(async () => {
     app = await buildApp({ logger: false });
@@ -131,7 +131,7 @@ describe('@relipay/node SDK integration', () => {
 
   beforeEach(async () => {
     appA = await bootstrapApplication('sdk-test');
-    relipay = new ReliPay({
+    rekey = new Rekey({
       apiUrl: 'http://test.invalid',
       secretKey: appA.liveKey,
       fetch: makeFetch(),
@@ -141,54 +141,54 @@ describe('@relipay/node SDK integration', () => {
   // ---------- constructor / config guards ----------
 
   it('rejects construction without apiUrl', () => {
-    expect(() => new ReliPay({ apiUrl: '', secretKey: 'rp_live_x' })).toThrow(
+    expect(() => new Rekey({ apiUrl: '', secretKey: 'rp_live_x' })).toThrow(
       /apiUrl/,
     );
   });
 
   it('rejects construction with a non-rp_ secret', () => {
     expect(
-      () => new ReliPay({ apiUrl: 'http://x', secretKey: 'pk_live_x' }),
+      () => new Rekey({ apiUrl: 'http://x', secretKey: 'pk_live_x' }),
     ).toThrow(/secretKey/);
   });
 
   // ---------- applications + auth ----------
 
   it('applications.me returns the calling Application', async () => {
-    const me = await relipay.applications.me();
+    const me = await rekey.applications.me();
     expect(me.id).toBe(appA.applicationId);
     expect(me.slug).toBe('sdk-test');
   });
 
   it('signUp + signIn + getCurrentUser round-trip', async () => {
-    const signup = await relipay.auth.signUp({
+    const signup = await rekey.auth.signUp({
       email: 'sdk-user@example.com',
       password: 'pw-long-enough',
     });
     expect(signup.endUser.email).toBe('sdk-user@example.com');
 
-    const signin = await relipay.auth.signIn({
+    const signin = await rekey.auth.signIn({
       email: 'sdk-user@example.com',
       password: 'pw-long-enough',
     });
     expect(signin.mfaRequired).toBe(false);
     if (signin.mfaRequired) throw new Error('unreachable');
 
-    const me = await relipay.auth.getCurrentUser(signin.accessToken);
+    const me = await rekey.auth.getCurrentUser(signin.accessToken);
     expect(me.email).toBe('sdk-user@example.com');
   });
 
   it('verifyEmail consumes a fresh send-verification token', async () => {
-    const signup = await relipay.auth.signUp({
+    const signup = await rekey.auth.signUp({
       email: 'verify-me@example.com',
       password: 'pw-long-enough',
     });
 
-    const result = await relipay.auth.sendVerificationEmail(signup.accessToken);
+    const result = await rekey.auth.sendVerificationEmail(signup.accessToken);
     // No email transport configured → raw token returned to caller.
     expect(result.verificationToken).toBeTruthy();
 
-    const verified = await relipay.auth.verifyEmail({
+    const verified = await rekey.auth.verifyEmail({
       token: result.verificationToken!,
     });
     expect(verified.endUser.emailVerified).toBe(true);
@@ -199,58 +199,58 @@ describe('@relipay/node SDK integration', () => {
   it('organizations full lifecycle: create → invite → accept → setRole → leave', async () => {
     await enableOrganizations(appA.applicationId);
 
-    const owner = await relipay.auth.signUp({
+    const owner = await rekey.auth.signUp({
       email: 'owner@example.com',
       password: 'pw-long-enough',
     });
-    const invitee = await relipay.auth.signUp({
+    const invitee = await rekey.auth.signUp({
       email: 'invitee@example.com',
       password: 'pw-long-enough',
     });
 
-    const created = await relipay.organizations.create(owner.accessToken, {
+    const created = await rekey.organizations.create(owner.accessToken, {
       name: 'Acme',
       slug: 'acme',
     });
     expect(created.organization.slug).toBe('acme');
     expect(created.membership.role).toBe('OWNER');
 
-    const mine = await relipay.organizations.listMine(owner.accessToken);
+    const mine = await rekey.organizations.listMine(owner.accessToken);
     expect(mine).toHaveLength(1);
     expect(mine[0]!.role).toBe('OWNER');
 
-    const fetched = await relipay.organizations.get(
+    const fetched = await rekey.organizations.get(
       owner.accessToken,
       created.organization.id,
     );
     expect(fetched.id).toBe(created.organization.id);
 
-    const updated = await relipay.organizations.update(
+    const updated = await rekey.organizations.update(
       owner.accessToken,
       created.organization.id,
       { name: 'Acme Inc' },
     );
     expect(updated.name).toBe('Acme Inc');
 
-    const inv = await relipay.organizations.invite(
+    const inv = await rekey.organizations.invite(
       owner.accessToken,
       created.organization.id,
       { email: 'invitee@example.com', role: 'MEMBER' },
     );
     expect(inv.token).toBeTruthy();
 
-    await relipay.organizations.acceptInvitation(invitee.accessToken, {
+    await rekey.organizations.acceptInvitation(invitee.accessToken, {
       token: inv.token,
     });
 
-    const members = await relipay.organizations.listMembers(
+    const members = await rekey.organizations.listMembers(
       owner.accessToken,
       created.organization.id,
     );
     expect(members).toHaveLength(2);
     const inviteeMember = members.find((m) => m.email === 'invitee@example.com')!;
 
-    const promoted = await relipay.organizations.setMemberRole(
+    const promoted = await rekey.organizations.setMemberRole(
       owner.accessToken,
       created.organization.id,
       inviteeMember.endUserId,
@@ -258,8 +258,8 @@ describe('@relipay/node SDK integration', () => {
     );
     expect(promoted.role).toBe('ADMIN');
 
-    await relipay.organizations.leave(invitee.accessToken, created.organization.id);
-    const after = await relipay.organizations.listMembers(
+    await rekey.organizations.leave(invitee.accessToken, created.organization.id);
+    const after = await rekey.organizations.listMembers(
       owner.accessToken,
       created.organization.id,
     );
@@ -268,27 +268,27 @@ describe('@relipay/node SDK integration', () => {
 
   it('OWNER leave is refused via the SDK (billing is tied to the owner)', async () => {
     await enableOrganizations(appA.applicationId);
-    const owner = await relipay.auth.signUp({
+    const owner = await rekey.auth.signUp({
       email: 'lone-owner@example.com',
       password: 'pw-long-enough',
     });
-    const created = await relipay.organizations.create(owner.accessToken, {
+    const created = await rekey.organizations.create(owner.accessToken, {
       name: 'Solo',
       slug: 'solo',
     });
     try {
-      await relipay.organizations.leave(owner.accessToken, created.organization.id);
+      await rekey.organizations.leave(owner.accessToken, created.organization.id);
       throw new Error('should have thrown');
     } catch (err) {
-      expect(err).toBeInstanceOf(RelipayError);
-      expect((err as RelipayError).code).toBe('ORGANIZATION_OWNER_CANNOT_LEAVE');
+      expect(err).toBeInstanceOf(RekeyError);
+      expect((err as RekeyError).code).toBe('ORGANIZATION_OWNER_CANNOT_LEAVE');
     }
   });
 
   // ---------- licenses ----------
 
   it('licenses.verify returns ok=false for an unknown key (no throw)', async () => {
-    const result = await relipay.licenses.verify({
+    const result = await rekey.licenses.verify({
       key: 'rl-totally-bogus-key',
       machineFingerprint: 'mac-test-1',
     });
@@ -331,7 +331,7 @@ describe('@relipay/node SDK integration', () => {
       },
     });
 
-    const first = await relipay.licenses.verify({
+    const first = await rekey.licenses.verify({
       key: rawKey,
       machineFingerprint: 'mac-A',
       label: 'Test mac',
@@ -340,7 +340,7 @@ describe('@relipay/node SDK integration', () => {
     if (!first.ok) throw new Error('unreachable');
     expect(first.license.id).toBe(license.id);
 
-    const replay = await relipay.licenses.verify({
+    const replay = await rekey.licenses.verify({
       key: rawKey,
       machineFingerprint: 'mac-A',
     });
@@ -364,24 +364,24 @@ describe('@relipay/node SDK integration', () => {
         unit: 'tokens',
       },
     });
-    await relipay.usage.record({ meterSlug: 'tokens', quantity: 100 });
-    await relipay.usage.record({ meterSlug: 'tokens', quantity: 250 });
-    const agg = await relipay.usage.aggregate({ meterSlug: 'tokens' });
+    await rekey.usage.record({ meterSlug: 'tokens', quantity: 100 });
+    await rekey.usage.record({ meterSlug: 'tokens', quantity: 250 });
+    const agg = await rekey.usage.aggregate({ meterSlug: 'tokens' });
     expect(agg.total).toBe(350);
   });
 
   // ---------- error envelope ----------
 
-  it('RelipayError exposes statusCode + requestId', async () => {
+  it('RekeyError exposes statusCode + requestId', async () => {
     try {
-      await relipay.auth.signIn({
+      await rekey.auth.signIn({
         email: 'nope@example.com',
         password: 'whatever-long',
       });
       throw new Error('should have thrown');
     } catch (err) {
-      expect(err).toBeInstanceOf(RelipayError);
-      const re = err as RelipayError;
+      expect(err).toBeInstanceOf(RekeyError);
+      const re = err as RekeyError;
       expect(re.code).toBe('INVALID_CREDENTIALS');
       expect(re.statusCode).toBe(401);
       // Either envelope-side or header-side; both should be present.

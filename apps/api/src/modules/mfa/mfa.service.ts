@@ -12,7 +12,7 @@
 
 import type { Application, EndUser } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
 import {
   generateSecret,
@@ -72,7 +72,7 @@ export const mfaService = {
       where: { endUserId: args.endUserId },
     });
     if (!cred) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'MFA_NOT_INITIATED',
         message: 'Call /mfa/setup before /mfa/setup-confirm.',
@@ -84,7 +84,7 @@ export const mfaService = {
       // 422 (not 401): this is enrollment confirmation — the caller is already
       // authenticated, only the submitted TOTP is wrong. 401 would signal an
       // invalid session/credential and trip client-side "log out" handling.
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 422,
         code: 'MFA_CODE_INVALID',
         message: 'TOTP code did not verify.',
@@ -192,9 +192,16 @@ export const mfaService = {
       select: { enrolledAt: true },
     });
     if (args.requireCode && enrolled?.enrolledAt) {
+      // Keeps the historical MFA_CODE_INVALID code and message: clients switch on
+      // it, and this route has always demanded specifically a code. The shared
+      // `assertStepUp` in lib/step-up.ts is the generalised version used by
+      // passkey enrollment, which additionally accepts the account password —
+      // that is deliberately NOT accepted here. Someone who has stolen a session
+      // and knows the password should not be able to strip the factor that exists
+      // precisely to survive both.
       const ok = args.code ? await this.verify({ endUserId: args.endUserId, code: args.code }) : false;
       if (!ok) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 401,
           code: 'MFA_CODE_INVALID',
           message: 'Disabling MFA from a browser requires a current authenticator or backup code.',

@@ -14,9 +14,9 @@
 import type { FastifyInstance } from 'fastify';
 import type { Application } from '@prisma/client';
 import { z } from 'zod';
-import { AuthConfigSchema } from '@relipay/shared-types';
+import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { mfaService } from './mfa.service.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
@@ -29,7 +29,7 @@ function mfaPolicy(application: Application): 'off' | 'optional' | 'required' {
 }
 function assertMfaEnabled(application: Application): void {
   if (mfaPolicy(application) === 'off') {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 403,
       code: 'MFA_NOT_ENABLED',
       message: 'Two-factor authentication is not enabled for this Application.',
@@ -82,8 +82,8 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
       assertMfaEnabled(req.application!);
       const result = await mfaService.setup({
         endUser: { ...req.endUser!, passwordHash: null } as never,
-        // Keep "ReliPay" branded — could be made app-aware via Application.name later.
-        issuer: 'ReliPay',
+        // Keep "Rekey" branded — could be made app-aware via Application.name later.
+        issuer: 'Rekey',
       });
       return reply.status(201).send({
         success: true,
@@ -165,7 +165,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
       config: { rateLimit: authRateLimit(10) },
       // `code` is optional, so a caller with nothing to send may POST with no
       // body at all — which is exactly what `disableMfa(accessToken)` in
-      // @relipay/node does (it passes `undefined`, so the transport sets neither
+      // @rekey.dev/node does (it passes `undefined`, so the transport sets neither
       // Content-Type nor body). Declaring `schema.body` makes Fastify validate
       // `undefined` against `{type:'object'}` and answer 400 "body must be
       // object", which would have broken every published 1.0.0 SDK caller.

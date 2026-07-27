@@ -1,6 +1,6 @@
-# Contributing to ReliPay
+# Contributing to Rekey
 
-Thanks for your interest in ReliPay — a self-hostable, multi-tenant auth +
+Thanks for your interest in Rekey — a self-hostable, multi-tenant auth +
 billing backend. This guide covers local setup, the dev loop, and how to get a
 change merged.
 
@@ -16,8 +16,8 @@ should also read [AGENTS.md](AGENTS.md).
 ## Local setup
 
 ```bash
-git clone https://github.com/relipay-dev/relipay.git
-cd relipay
+git clone https://github.com/rekey-dev/rekey.git
+cd rekey
 pnpm install
 
 # Configure — the API refuses to boot without the required secrets.
@@ -93,7 +93,7 @@ ARCHITECTURE.md §6):
 
 ## Deploying
 
-ReliPay is a self-hostable monolith — `docker compose up` boots the whole
+Rekey is a self-hostable monolith — `docker compose up` boots the whole
 stack. For a production deployment (Traefik + TLS, env template, migrations),
 see **[DEPLOY.md](DEPLOY.md)**.
 

@@ -7,6 +7,8 @@ import {
   requireScope,
 } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
+import { assertStepUp } from '../../lib/step-up.js';
+import { mfaService } from '../mfa/mfa.service.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
 
@@ -716,7 +718,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
   app.post(
     '/passkey/register/start',
     {
-      // SECRET KEY ONLY — deliberately narrower than the rest of this plugin.
+      // Reachable from a browser, but only behind a STEP-UP.
       //
       // Enrolling a passkey is a persistent-takeover primitive: a passkey is a
       // strong factor that BYPASSES the MFA challenge (see auth.service.ts
@@ -725,24 +727,56 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
       // change-password nor sign-out-everywhere removes it — the victim would
       // have to notice a stranger's row in GET /passkeys.
       //
-      // That makes it strictly stronger than disabling MFA, which this plugin
-      // gates behind a step-up. Letting a stolen end-user token reach it from
-      // any host would be a worse hole than the blocked-flow it fixed, so
-      // enrollment stays behind the customer's backend until there is a real
-      // step-up design (re-auth before security-sensitive changes) to hang it
-      // on. Tracked as a follow-up.
-      onRequest: requireApiKey,
+      // This used to be secret-key-only for that reason, which was the safe
+      // holding position but not a fix: it made passkey enrollment unreachable
+      // from a browser-only app while doing nothing about a stolen token on a
+      // server-side one. lib/step-up.ts is the actual control — a publishable
+      // caller must re-prove identity with the account password or a current
+      // authenticator code, neither of which the access token carries.
       schema: {
         tags: ['Public · Auth'],
         summary: 'Begin a passkey registration ceremony for the current user',
         description:
           'Returns `{ options, expectedChallenge }`. Forward `options` to ' +
           '`navigator.credentials.create(...)` and POST the result back to ' +
-          '/passkey/register/complete along with the same `expectedChallenge`.',
-        security: [{ apiKey: [], userToken: [] }],
+          '/passkey/register/complete along with the same `expectedChallenge`.\n\n' +
+          'A **publishable**-key caller must also send a step-up proof: `password` ' +
+          '(the account password) or `code` (a current authenticator or unused ' +
+          'backup code). A passkey bypasses the MFA challenge at sign-in, so a ' +
+          'stolen access token alone must not be able to enroll one. Secret-key ' +
+          'callers are not required to step up — the customer backend is the gate.',
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
+        body: {
+          type: 'object',
+          properties: {
+            password: { type: 'string', minLength: 1, maxLength: 200 },
+            code: { type: 'string', minLength: 1, maxLength: 64 },
+          },
+        },
+      },
+      // `password`/`code` are optional, so a secret-key caller may POST no body.
+      // Fastify validates a missing body against the schema and answers 400
+      // "body must be object" — the same trap that broke mfa/disable.
+      preValidation: async (req) => {
+        if (req.body === undefined || req.body === null) req.body = {};
       },
     },
     async (req) => {
+      if (req.authKind === 'publishable') {
+        const proof = (req.body ?? {}) as { password?: unknown; code?: unknown };
+        await assertStepUp({
+          endUserId: req.endUser!.id,
+          action: 'enroll a passkey',
+          proof: {
+            ...(typeof proof.password === 'string' && { password: proof.password }),
+            ...(typeof proof.code === 'string' && { code: proof.code }),
+          },
+          verifyMfaCode: (a) => mfaService.verify(a),
+        });
+      }
       const result = await authService.passkeyRegisterStart({
         application: req.application!,
         endUserId: req.endUser!.id,
@@ -756,24 +790,19 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
     {
       // SECRET KEY ONLY — deliberately narrower than the rest of this plugin.
       //
-      // Enrolling a passkey is a persistent-takeover primitive: a passkey is a
-      // strong factor that BYPASSES the MFA challenge (see auth.service.ts
-      // `verifyPasskeyAuthentication`), so an attacker who enrolled one could
-      // sign in later with no password and no second factor. Neither
-      // change-password nor sign-out-everywhere removes it — the victim would
-      // have to notice a stranger's row in GET /passkeys.
-      //
-      // That makes it strictly stronger than disabling MFA, which this plugin
-      // gates behind a step-up. Letting a stolen end-user token reach it from
-      // any host would be a worse hole than the blocked-flow it fixed, so
-      // enrollment stays behind the customer's backend until there is a real
-      // step-up design (re-auth before security-sensitive changes) to hang it
-      // on. Tracked as a follow-up.
-      onRequest: requireApiKey,
+      // No step-up here, and that is not an oversight: the step-up happens at
+      // /passkey/register/start, and `consumeChallenge` binds this ceremony to it.
+      // The challenge is single-use and scoped to (application, endUserId), so a
+      // caller cannot invent one or replay somebody else's — it must have come
+      // from a start call that already proved identity. Demanding a second factor
+      // again here would only ask the user to re-enter a code mid-ceremony.
       schema: {
         tags: ['Public · Auth'],
         summary: 'Complete a passkey registration; stores the credential',
-        security: [{ apiKey: [], userToken: [] }],
+        security: [
+          { publishableKey: [], userToken: [] },
+          { apiKey: [], userToken: [] },
+        ],
         body: {
           type: 'object',
           required: ['response', 'expectedChallenge'],

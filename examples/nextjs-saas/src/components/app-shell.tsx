@@ -31,8 +31,8 @@ export function AppShell({
     <div className="min-h-screen">
       <header className="border-b border-neutral-200 dark:border-neutral-800 bg-white/70 dark:bg-neutral-950/70 backdrop-blur">
         <div className="mx-auto max-w-4xl px-4 py-3 flex items-center gap-4 flex-wrap">
-          <Link href="/dashboard" className="font-bold text-relipay-700 dark:text-relipay-500">
-            ReliPay SaaS
+          <Link href="/dashboard" className="font-bold text-rekey-700 dark:text-rekey-500">
+            Rekey SaaS
           </Link>
           <span className="pill">{workspaceLabel}</span>
           <span className={`pill ${isPro ? 'pill-pro' : ''}`}>{planLabel}</span>
@@ -52,7 +52,7 @@ export function AppShell({
               href={t.href}
               className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px ${
                 t.key === active
-                  ? 'border-relipay-600 text-relipay-700 dark:text-relipay-500'
+                  ? 'border-rekey-600 text-rekey-700 dark:text-rekey-500'
                   : 'border-transparent text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200'
               }`}
             >

@@ -31,7 +31,7 @@ export interface GeneratedBackupCodes {
 /**
  * Mint a new TOTP secret + the otpauth URI for QR.
  *
- * @param issuer  Display name in the authenticator app (e.g. "ReliPay")
+ * @param issuer  Display name in the authenticator app (e.g. "Rekey")
  * @param label   Account identifier (e.g. user email)
  */
 export function generateSecret(issuer: string, label: string): GeneratedSecret {

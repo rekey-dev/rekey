@@ -25,8 +25,8 @@ const fontFeature = localFont({
 });
 
 export const metadata: Metadata = {
-  title: 'ReliPay Super Admin',
-  description: 'Read-only super-admin dashboard for ReliPay operators.',
+  title: 'Rekey Super Admin',
+  description: 'Read-only super-admin dashboard for Rekey operators.',
   robots: { index: false, follow: false },
 };
 

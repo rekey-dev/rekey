@@ -9,13 +9,13 @@
 :root {
   color-scheme: light;
 
-  /* Brand — teal, matching the marketing site (relipay-* palette).
+  /* Brand — teal, matching the marketing site (rekey-* palette).
      Semantic error/danger states stay red (red-* utilities in components). */
-  --color-primary: #0d9488;        /* relipay-600 (teal) */
-  --color-primary-hover: #0f766e;  /* relipay-700 */
+  --color-primary: #0d9488;        /* rekey-600 (teal) */
+  --color-primary-hover: #0f766e;  /* rekey-700 */
   --color-primary-fg: #ffffff;
-  --color-primary-soft: #ccfbf1;   /* relipay-100 */
-  --color-primary-soft-fg: #115e59;/* relipay-800 */
+  --color-primary-soft: #ccfbf1;   /* rekey-100 */
+  --color-primary-soft-fg: #115e59;/* rekey-800 */
 
   /* Surfaces — cream-first, matching the marketing site. */
   --color-bg: #f9f5f3;             /* cream (marketing surface) */
@@ -42,8 +42,8 @@
   --color-muted-fg: #a3a3a3;     /* neutral-400 */
   --color-faint-fg: #6b6b6b;     /* lifted for legibility on dark */
   /* Brand reads better a touch brighter on dark surfaces. */
-  --color-primary: #14b8a6;      /* relipay-500 */
-  --color-primary-hover: #2dd4bf;/* relipay-400 */
+  --color-primary: #14b8a6;      /* rekey-500 */
+  --color-primary-hover: #2dd4bf;/* rekey-400 */
   --color-primary-soft: #0f2e2a; /* deep teal tint for soft fills */
   --color-primary-soft-fg: #5eead4;
 }

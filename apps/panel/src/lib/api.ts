@@ -51,7 +51,7 @@ function apiUrl(): string {
     throw new PanelApiError({
       code: 'PANEL_API_URL_MISSING',
       message: 'RELIPAY_URL is not set on the panel deployment.',
-      fix: 'Set RELIPAY_URL=https://your-relipay.example.com in the panel environment.',
+      fix: 'Set RELIPAY_URL=https://your-rekey.example.com in the panel environment.',
       statusCode: 500,
     });
   }

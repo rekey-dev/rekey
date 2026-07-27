@@ -1,11 +1,11 @@
 {
-  "name": "@relipay/mcp",
-  "version": "1.1.1",
+  "name": "@rekey.dev/mcp",
+  "version": "1.1.2",
   "license": "MIT",
-  "description": "Model Context Protocol server for ReliPay — lets Claude Desktop / Cursor / Claude Code introspect a deployment.",
+  "description": "Model Context Protocol server for Rekey — lets Claude Desktop / Cursor / Claude Code introspect a deployment.",
   "type": "module",
   "bin": {
-    "relipay-mcp": "./dist/index.js"
+    "rekey-mcp": "./dist/index.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -27,14 +27,14 @@
     "test": "vitest run"
   },
   "keywords": [
-    "relipay",
+    "rekey",
     "mcp",
     "model-context-protocol",
     "ai"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
-    "@relipay/shared-types": "workspace:*",
+    "@rekey.dev/shared-types": "workspace:*",
     "zod": "^3.23.8"
   },
   "devDependencies": {

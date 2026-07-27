@@ -52,7 +52,7 @@ export const env = createEnv({
     // unset; auto-registration refuses on a non-public (localhost) base.
     PUBLIC_WEBHOOK_BASE_URL: z.string().url().optional(),
 
-    // Public base URL of the ReliPay-hosted customer portal (Portal V2). Its
+    // Public base URL of the Rekey-hosted customer portal (Portal V2). Its
     // origin is auto-allowed for publishable-key requests from portal-enabled
     // apps (so operators don't hand-add it to corsOrigins) and folded into the
     // CORS union. Default is the production host.
@@ -67,7 +67,7 @@ export const env = createEnv({
     // Bootstrap admin credential. Required to create the first Tenant and
     // Application via /api/v1/admin/*. Once the panel ships, normal tenant
     // auth replaces this for day-to-day work — but you'll always need this
-    // for `relipay tenant create` and similar bootstrap commands.
+    // for `rekey tenant create` and similar bootstrap commands.
     // Generate with: openssl rand -hex 32
     SUPER_ADMIN_KEY: z.string().min(32),
 
@@ -82,9 +82,9 @@ export const env = createEnv({
     // Default transactional email transport (Resend).
     //
     // When set, Applications without BYO email credentials send via this
-    // shared account. ReliPay hosted production sets it; self-hosters leave
+    // shared account. Rekey hosted production sets it; self-hosters leave
     // it empty and the service returns raw tokens to callers (legacy
-    // "ReliPay does not send email" mode).
+    // "Rekey does not send email" mode).
     //
     // Generate from https://resend.com/api-keys. The from address must be
     // on a verified domain Resend has accepted.

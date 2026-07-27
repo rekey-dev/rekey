@@ -34,8 +34,8 @@ import {
   type VerifiedAuthenticationResponse,
 } from '@simplewebauthn/server';
 import type { AuthenticatorTransportFuture } from '@simplewebauthn/server';
-import { AuthConfigSchema } from '@relipay/shared-types';
-import { RelipayError } from './error.js';
+import { AuthConfigSchema } from '@rekey.dev/shared-types';
+import { RekeyError } from './error.js';
 
 export interface RpConfig {
   rpId: string;
@@ -51,7 +51,7 @@ export interface RpConfig {
 export function rpConfigForApplication(application: Application): RpConfig {
   const config = AuthConfigSchema.parse(application.authConfig);
   if (!config.webauthn) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'WEBAUTHN_NOT_CONFIGURED',
       message:

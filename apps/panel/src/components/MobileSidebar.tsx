@@ -78,7 +78,7 @@ export function MobileSidebar({ sidebar }: { sidebar: React.ReactNode }): React.
         <span className="inline-flex items-center gap-2">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/logo-mark.png" alt="" className="h-6 w-auto" />
-          <span className="text-sm font-semibold text-[var(--color-fg)]">ReliPay</span>
+          <span className="text-sm font-semibold text-[var(--color-fg)]">Rekey</span>
         </span>
       </div>
       {/* Spacer so page content clears the fixed top bar on mobile. */}

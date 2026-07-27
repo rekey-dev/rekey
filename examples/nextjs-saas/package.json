@@ -1,9 +1,9 @@
 {
-  "name": "relipay-nextjs-saas",
+  "name": "rekey-nextjs-saas",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Next.js 15 SaaS boilerplate demonstrating the ReliPay SDK end-to-end — auth, org-scoped billing, credits, usage, entitlements & teams.",
+  "description": "Next.js 15 SaaS boilerplate demonstrating the Rekey SDK end-to-end — auth, org-scoped billing, credits, usage, entitlements & teams.",
   "scripts": {
     "dev": "next dev -p 3040",
     "build": "next build",
@@ -12,10 +12,10 @@
     "lint": "echo \"(eslint not yet wired)\""
   },
   "dependencies": {
-    "@relipay/nextjs": "workspace:*",
-    "@relipay/node": "workspace:*",
-    "@relipay/react": "workspace:*",
-    "@relipay/shared-types": "workspace:*",
+    "@rekey.dev/nextjs": "workspace:*",
+    "@rekey.dev/node": "workspace:*",
+    "@rekey.dev/react": "workspace:*",
+    "@rekey.dev/shared-types": "workspace:*",
     "next": "^15.5.18",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

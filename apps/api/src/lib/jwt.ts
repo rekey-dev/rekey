@@ -32,7 +32,7 @@
 import jwt from 'jsonwebtoken';
 import { createHmac } from 'node:crypto';
 import type { Application } from '@prisma/client';
-import { AuthConfigSchema } from '@relipay/shared-types';
+import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { env } from '../config/env.js';
 import {
   getActiveSigningKey,
@@ -361,7 +361,7 @@ function verifyEndUserToken<TType extends EndUserTokenType>(
 /**
  * Verify a presented end-user access token. Returns claims on success,
  * `null` on any failure (bad signature, expired, malformed, wrong typ).
- * Never throws — callers map `null` to a `RelipayError`.
+ * Never throws — callers map `null` to a `RekeyError`.
  *
  * **Refuses non-access typ.** An MFA challenge token (`eu_mfa_challenge`)
  * presented here returns `null` — it must be exchanged via /auth/mfa-verify

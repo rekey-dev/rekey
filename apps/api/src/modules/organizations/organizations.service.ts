@@ -29,8 +29,8 @@
 import type { Organization, OrganizationMembership, OrganizationRole } from '@prisma/client';
 import { createHash, randomBytes } from 'node:crypto';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
-import { AuthConfigSchema } from '@relipay/shared-types';
+import { RekeyError } from '../../lib/error.js';
+import { AuthConfigSchema } from '@rekey.dev/shared-types';
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const INVITATION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
@@ -38,7 +38,7 @@ const INVITATION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 function ensureOrgsEnabled(application: { authConfig: unknown }): void {
   const config = AuthConfigSchema.parse(application.authConfig);
   if (!config.organizationsEnabled) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'ORGANIZATIONS_NOT_ENABLED',
       message: 'Organizations are not enabled for this Application.',
@@ -132,7 +132,7 @@ export const organizationsService = {
     ensureOrgsEnabled(args.application);
     const slug = args.slug.toLowerCase();
     if (!SLUG_RE.test(slug)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'ORGANIZATION_SLUG_INVALID',
         message: `Slug "${args.slug}" must be 1-40 chars of [a-z0-9-], start + end alphanumeric.`,
@@ -160,7 +160,7 @@ export const organizationsService = {
       });
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 409,
           code: 'ORGANIZATION_SLUG_TAKEN',
           message: `An organization with slug "${slug}" already exists in this application.`,
@@ -204,7 +204,7 @@ export const organizationsService = {
       include: { organization: true },
     });
     if (!m || m.organization.applicationId !== args.application.id) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'ORGANIZATION_NOT_MEMBER',
         message: 'You are not a member of this organization.',
@@ -265,7 +265,7 @@ export const organizationsService = {
   }): Promise<{ rawToken: string; invitation: InvitationDto }> {
     const actor = await this.requireMembership(args);
     if (!canManage(actor.role, args.role)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'ORGANIZATION_ROLE_INSUFFICIENT',
         message: `Your role (${actor.role}) cannot invite to ${args.role}.`,
@@ -278,7 +278,7 @@ export const organizationsService = {
       where: { organizationId: args.organizationId, endUser: { email } },
     });
     if (existing) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 409,
         code: 'ORGANIZATION_ALREADY_MEMBER',
         message: `${email} is already a member of this organization.`,
@@ -318,7 +318,7 @@ export const organizationsService = {
         include: { organization: true },
       });
       if (!inv || inv.revokedAt || inv.acceptedAt) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'ORGANIZATION_INVITATION_NOT_USABLE',
           message: 'Invitation is missing, revoked, or already accepted.',
@@ -326,7 +326,7 @@ export const organizationsService = {
         });
       }
       if (inv.expiresAt <= new Date()) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'ORGANIZATION_INVITATION_EXPIRED',
           message: 'Invitation has expired.',
@@ -335,7 +335,7 @@ export const organizationsService = {
       }
       if (inv.organization.applicationId !== args.application.id) {
         // Cross-Application: this invitation belongs to a different App.
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 401,
           code: 'ORGANIZATION_INVITATION_WRONG_APPLICATION',
           message: 'This invitation belongs to a different application.',
@@ -398,7 +398,7 @@ export const organizationsService = {
       where: { id: args.invitationId },
     });
     if (!inv || inv.organizationId !== args.organizationId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'ORGANIZATION_INVITATION_NOT_FOUND',
         message: 'Invitation not found.',
@@ -436,7 +436,7 @@ export const organizationsService = {
       },
     });
     if (!target) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'ORGANIZATION_MEMBER_NOT_FOUND',
         message: 'That user is not a member of this organization.',
@@ -444,7 +444,7 @@ export const organizationsService = {
       });
     }
     if (!canManage(actor.role, target.role) || !canManage(actor.role, args.newRole)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'ORGANIZATION_ROLE_INSUFFICIENT',
         message: `Your role (${actor.role}) cannot change a ${target.role} to ${args.newRole}.`,
@@ -457,7 +457,7 @@ export const organizationsService = {
         where: { organizationId: args.organizationId, role: 'OWNER' },
       });
       if (owners <= 1) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 409,
           code: 'ORGANIZATION_LAST_OWNER',
           message: 'Cannot demote the last OWNER. Promote another member to OWNER first.',
@@ -500,7 +500,7 @@ export const organizationsService = {
     if (!canManage(actor.role, target.role) && actor.endUserId !== target.endUserId) {
       // Self-removal is allowed (= "leave org"); otherwise enforce the
       // role hierarchy.
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'ORGANIZATION_ROLE_INSUFFICIENT',
         message: `Your role (${actor.role}) cannot remove a ${target.role}.`,
@@ -512,7 +512,7 @@ export const organizationsService = {
         where: { organizationId: args.organizationId, role: 'OWNER' },
       });
       if (owners <= 1) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 409,
           code: 'ORGANIZATION_LAST_OWNER',
           message: 'Cannot remove the last OWNER. Transfer ownership first.',
@@ -545,11 +545,11 @@ export const organizationsService = {
   }): Promise<{ removed: boolean }> {
     const membership = await this.requireMembership(args);
     if (membership.role === 'OWNER') {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 409,
         code: 'ORGANIZATION_OWNER_CANNOT_LEAVE',
         message: 'An OWNER cannot leave — payment and benefits are tied to the owner.',
-        fix: 'Transfer ownership first (via the Panel / ReliPay support), or demote yourself to ADMIN if there is another OWNER.',
+        fix: 'Transfer ownership first (via the Panel / Rekey support), or demote yourself to ADMIN if there is another OWNER.',
       });
     }
     return this.removeMember({
@@ -579,7 +579,7 @@ export const organizationsService = {
       include: { organization: true },
     });
     if (!m || m.organization.applicationId !== args.application.id) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'ORGANIZATION_NOT_MEMBER',
         message: 'You are not a member of this organization.',
@@ -620,7 +620,7 @@ export const organizationsService = {
   ): Promise<OrganizationMembership> {
     const m = await this.requireMembership(args);
     if (!allowed.includes(m.role)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'ORGANIZATION_ROLE_INSUFFICIENT',
         message: `This action requires one of: ${allowed.join(', ')}. Your role: ${m.role}.`,
@@ -717,7 +717,7 @@ export const organizationsService = {
   }): Promise<Organization> {
     const org = await prisma.organization.findUnique({ where: { id: args.organizationId } });
     if (!org || org.applicationId !== args.applicationId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'ORGANIZATION_NOT_FOUND',
         message: `Organization "${args.organizationId}" not found in this application.`,
@@ -742,7 +742,7 @@ export const organizationsService = {
   }): Promise<OrganizationDto> {
     const slug = args.slug.toLowerCase();
     if (!SLUG_RE.test(slug)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'ORGANIZATION_SLUG_INVALID',
         message: `Slug "${args.slug}" must be 1-40 chars of [a-z0-9-], start + end alphanumeric.`,
@@ -772,7 +772,7 @@ export const organizationsService = {
       return shape(org);
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 409,
           code: 'ORGANIZATION_SLUG_TAKEN',
           message: `An organization with slug "${slug}" already exists in this application.`,
@@ -824,7 +824,7 @@ export const organizationsService = {
       return { ...shapeMembership(m), email: endUser.email };
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 409,
           code: 'ORGANIZATION_ALREADY_MEMBER',
           message: 'That end-user is already a member of this organization.',
@@ -852,7 +852,7 @@ export const organizationsService = {
       },
     });
     if (!existing) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'ORGANIZATION_MEMBER_NOT_FOUND',
         message: 'That end-user is not a member of this organization.',
@@ -904,7 +904,7 @@ export const organizationsService = {
       select: { id: true, email: true, applicationId: true },
     });
     if (!eu || eu.applicationId !== applicationId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'END_USER_NOT_FOUND',
         message: `End-user "${endUserId}" not found in this application.`,

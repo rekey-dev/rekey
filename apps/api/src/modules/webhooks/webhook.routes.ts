@@ -28,7 +28,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { requireTenantSession } from '../../middleware/tenant-session.js';
 import { ensureAppAccess } from '../../lib/app-access.js';
 import { webhookService } from './webhook.service.js';
@@ -71,7 +71,7 @@ async function ensureEndpointInApp(applicationId: string, endpointId: string): P
     select: { applicationId: true },
   });
   if (!ep || ep.applicationId !== applicationId) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 404,
       code: 'WEBHOOK_ENDPOINT_NOT_FOUND',
       message: 'Webhook endpoint not found in this application.',
@@ -140,7 +140,7 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
         allowPrivate: env.WEBHOOK_ALLOW_PRIVATE_TARGETS ?? false,
       });
       if (!safety.ok) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'WEBHOOK_URL_UNSAFE',
           message: `Webhook URL is not allowed: ${safety.reason}`,
@@ -162,7 +162,7 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
           createdAt: result.endpoint.createdAt.toISOString(),
           secret: result.secret,
           warning:
-            'Store this secret now — it is shown exactly once. Use it to verify the X-Relipay-Signature header on inbound deliveries.',
+            'Store this secret now — it is shown exactly once. Use it to verify the X-Rekey-Signature header on inbound deliveries.',
         },
       });
     },
@@ -190,7 +190,7 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
           allowPrivate: env.WEBHOOK_ALLOW_PRIVATE_TARGETS ?? false,
         });
         if (!safety.ok) {
-          throw new RelipayError({
+          throw new RekeyError({
             statusCode: 400,
             code: 'WEBHOOK_URL_UNSAFE',
             message: `Webhook URL is not allowed: ${safety.reason}`,
@@ -317,7 +317,7 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
       await ensureEndpointInApp(id, endpointId);
       const queued = await webhookService.retryDelivery(id, endpointId, deliveryId);
       if (!queued) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 404,
           code: 'WEBHOOK_DELIVERY_NOT_FOUND',
           message: 'Delivery not found in this endpoint (or it already succeeded).',

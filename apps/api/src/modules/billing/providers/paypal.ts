@@ -72,9 +72,9 @@ export class RealPaypalProvider implements BillingProvider {
 
   async ensurePlanRegistered(plan: Plan): Promise<ProviderPlanRef> {
     // PayPal subscriptions need a Product first, then a billing Plan referencing it.
-    // We create-or-reuse a single product per ReliPay Application slug to keep things tidy.
+    // We create-or-reuse a single product per Rekey Application slug to keep things tidy.
     const token = await this.accessToken();
-    const productId = `RELIPAY-PROD-${plan.applicationId.slice(0, 18)}`;
+    const productId = `REKEY-PROD-${plan.applicationId.slice(0, 18)}`;
     // Try create the product (idempotent via PayPal-Request-Id).
     await fetch(`${this.base}/v1/catalogs/products`, {
       method: 'POST',
@@ -85,14 +85,14 @@ export class RealPaypalProvider implements BillingProvider {
       },
       body: JSON.stringify({
         id: productId,
-        name: `ReliPay App ${plan.applicationId}`,
+        name: `Rekey App ${plan.applicationId}`,
         type: 'SERVICE',
         category: 'SOFTWARE',
       }),
     });
     // Ignore non-2xx — most commonly 422 "ALREADY_EXISTS" which we want.
 
-    const requestId = `RELIPAY-PLAN-${plan.id}`;
+    const requestId = `REKEY-PLAN-${plan.id}`;
     const interval = plan.interval === 'YEAR' ? 'YEAR' : 'MONTH';
     const valueMajor = (plan.amount / 100).toFixed(2);
     const planRes = await fetch(`${this.base}/v1/billing/plans`, {
@@ -136,7 +136,7 @@ export class RealPaypalProvider implements BillingProvider {
       paypalPlanId = (await this.ensurePlanRegistered(input.plan)).providerPlanId;
     }
 
-    const requestId = `RELIPAY-SUB-${randomUUID()}`;
+    const requestId = `REKEY-SUB-${randomUUID()}`;
     const subRes = await fetch(`${this.base}/v1/billing/subscriptions`, {
       method: 'POST',
       headers: {
@@ -186,7 +186,7 @@ export class RealPaypalProvider implements BillingProvider {
    */
   async createOneTimeCheckout(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
     const token = await this.accessToken();
-    const requestId = `RELIPAY-ORDER-${randomUUID()}`;
+    const requestId = `REKEY-ORDER-${randomUUID()}`;
     const valueMajor = (input.plan.amount / 100).toFixed(2);
     const res = await fetch(`${this.base}/v2/checkout/orders`, {
       method: 'POST',
@@ -289,7 +289,7 @@ export class RealPaypalProvider implements BillingProvider {
     await fetch(`${this.base}/v1/billing/subscriptions/${providerSubId}/cancel`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason: 'Cancelled via ReliPay' }),
+      body: JSON.stringify({ reason: 'Cancelled via Rekey' }),
     });
   }
 }

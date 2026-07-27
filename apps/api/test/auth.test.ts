@@ -3,7 +3,7 @@
  *
  * The cross-app guard is the load-bearing assertion: a JWT issued by
  * Application A must NOT be acceptable when presented through a secret
- * key for Application B. Without this property, ReliPay's multi-tenancy
+ * key for Application B. Without this property, Rekey's multi-tenancy
  * leaks at the user-data layer.
  */
 
@@ -241,7 +241,7 @@ describe('EndUser auth — POST /sign-up, POST /sign-in, GET /users/me', () => {
       url: '/api/v1/users/me/',
       headers: {
         authorization: `Bearer ${appA.liveKey}`,
-        'x-relipay-user-token': accessToken,
+        'x-rekey-user-token': accessToken,
       },
     });
     expect(res.statusCode).toBe(200);
@@ -265,7 +265,7 @@ describe('EndUser auth — POST /sign-up, POST /sign-in, GET /users/me', () => {
       url: '/api/v1/users/me/',
       headers: {
         authorization: `Bearer ${appA.liveKey}`,
-        'x-relipay-user-token': 'not.a.jwt',
+        'x-rekey-user-token': 'not.a.jwt',
       },
     });
     expect(res.statusCode).toBe(401);
@@ -288,7 +288,7 @@ describe('EndUser auth — POST /sign-up, POST /sign-in, GET /users/me', () => {
       url: '/api/v1/users/me/',
       headers: {
         authorization: `Bearer ${appB.liveKey}`,
-        'x-relipay-user-token': accessToken,
+        'x-rekey-user-token': accessToken,
       },
     });
     expect(res.statusCode).toBe(401);

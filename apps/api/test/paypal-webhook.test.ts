@@ -113,7 +113,7 @@ describe('PayPal webhook', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/checkout',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-relipay-user-token': accessToken },
+      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': accessToken },
       payload: {
         planSlug,
         provider: 'paypal',

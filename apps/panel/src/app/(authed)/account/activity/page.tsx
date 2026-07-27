@@ -32,7 +32,7 @@ export default async function AccountActivityPage({
       <div>
         <h1 className="text-2xl font-semibold">My requests</h1>
         <p className="text-sm text-neutral-600 dark:text-neutral-500 mt-1">
-          Recent requests made to the ReliPay API under your operator session — the panel issues
+          Recent requests made to the Rekey API under your operator session — the panel issues
           these on your behalf as you navigate. Newest first. Captured best-effort and capped to
           your most recent requests.
         </p>

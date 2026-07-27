@@ -1,5 +1,5 @@
 /**
- * One-time ReliPay provisioning for the QR SaaS — what a real integrator does
+ * One-time Rekey provisioning for the QR SaaS — what a real integrator does
  * once in the panel before shipping. Idempotent-ish: re-running creates a new
  * tenant (unique email each run) so it always starts clean.
  *
@@ -18,7 +18,7 @@
  *      QR bulk pack (CREDIT, $19) granting 500 credits.
  *   7. Mint a live secret key + read the public key.
  *
- * Persists everything to .data/relipay-config.json for the server + demo.
+ * Persists everything to .data/rekey-config.json for the server + demo.
  */
 
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
@@ -41,7 +41,7 @@ import {
   PRO_SCANS_PER_MONTH,
 } from './constants.js';
 
-const CONFIG_PATH = process.env.QR_CONFIG_PATH ?? join(process.cwd(), '.data', 'relipay-config.json');
+const CONFIG_PATH = process.env.QR_CONFIG_PATH ?? join(process.cwd(), '.data', 'rekey-config.json');
 /** BYO Stripe webhook secret — only used to sign offline test events locally. */
 export const STRIPE_WEBHOOK_SECRET = 'whsec_qr_saas_local_test_secret';
 
@@ -60,7 +60,7 @@ export interface QrSaasConfig {
 
 export function loadConfig(): QrSaasConfig {
   if (!existsSync(CONFIG_PATH)) {
-    throw new Error(`No ReliPay config at ${CONFIG_PATH}. Run \`pnpm bootstrap\` first.`);
+    throw new Error(`No Rekey config at ${CONFIG_PATH}. Run \`pnpm bootstrap\` first.`);
   }
   return JSON.parse(readFileSync(CONFIG_PATH, 'utf8')) as QrSaasConfig;
 }
@@ -75,7 +75,7 @@ export async function bootstrap(): Promise<QrSaasConfig> {
   const operatorEmail = `founder+${suffix}@qrco.dev`;
   const log = (s: string) => console.log(`  • ${s}`);
 
-  console.log('Bootstrapping ReliPay for the QR SaaS...');
+  console.log('Bootstrapping Rekey for the QR SaaS...');
 
   // 1. Tenant operator sign-up.
   const session = await TenantAdmin.signUp(RELIPAY_URL, {

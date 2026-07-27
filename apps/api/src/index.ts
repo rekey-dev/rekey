@@ -13,7 +13,7 @@ async function main(): Promise<void> {
     app = await buildApp();
   } catch (err) {
     // No app logger yet (failure during construction) — write to stderr.
-    console.error('[relipay-api] failed to start:', (err as Error).message);
+    console.error('[rekey-api] failed to start:', (err as Error).message);
     process.exit(1);
   }
   // Warm (or first-generate) the RS256 signing key + JWKS snapshot so the
@@ -32,7 +32,7 @@ async function main(): Promise<void> {
   registerGracefulShutdown(app);
   try {
     await app.listen({ host: env.HOST, port: env.PORT });
-    app.log.info(`relipay-api listening on http://${env.HOST}:${env.PORT} — docs at /docs`);
+    app.log.info(`rekey-api listening on http://${env.HOST}:${env.PORT} — docs at /docs`);
   } catch (err) {
     app.log.error({ err }, 'failed to start');
     process.exit(1);

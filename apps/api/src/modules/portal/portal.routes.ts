@@ -1,7 +1,7 @@
 /**
  * Hosted customer portal — public config endpoint.
  *
- * `GET /api/v1/portal/config/:slug` is how the ReliPay-hosted portal
+ * `GET /api/v1/portal/config/:slug` is how the Rekey-hosted portal
  * (portal.relipay.dev/<slug>) bootstraps itself: given the slug from the URL,
  * it returns the **public** facts a browser portal needs — the app name, its
  * **publishable** key (public by design), whether billing is on, and branding.
@@ -16,8 +16,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
-import { BillingConfigSchema } from '@relipay/shared-types';
+import { RekeyError } from '../../lib/error.js';
+import { BillingConfigSchema } from '@rekey.dev/shared-types';
 
 const SlugParam = z.object({ slug: z.string().min(1).max(120) });
 
@@ -45,7 +45,7 @@ export async function portalConfigRoutes(app: FastifyInstance): Promise<void> {
       const { slug } = SlugParam.parse(req.params);
       const application = await prisma.application.findUnique({ where: { slug } });
       if (!application || !application.hostedPortalEnabled) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 404,
           code: 'PORTAL_NOT_FOUND',
           message: 'No hosted portal is available for this address.',

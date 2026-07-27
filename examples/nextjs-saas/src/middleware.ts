@@ -1,14 +1,14 @@
 /**
- * Route protection via @relipay/nextjs/middleware.
+ * Route protection via @rekey.dev/nextjs/middleware.
  *
  * Public routes pass through; everything else requires the access cookie's
  * presence (cheap, no network). Missing → redirect to /login?next=… . Token
  * *validity* is checked deeper, when a server component calls auth().
  */
 
-import { relipayMiddleware } from '@relipay/nextjs/middleware';
+import { rekeyMiddleware } from '@rekey.dev/nextjs/middleware';
 
-export default relipayMiddleware({
+export default rekeyMiddleware({
   signInUrl: '/login',
   publicRoutes: [
     '/',

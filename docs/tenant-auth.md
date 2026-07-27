@@ -1,6 +1,6 @@
 # Operator Auth + Team Workspaces
 
-This is how **operators** (the humans who use the ReliPay panel) sign in and manage their workspaces. It is distinct from **end-user auth** (`docs/auth.md`) — that's how the customers' users sign into the customers' apps.
+This is how **operators** (the humans who use the Rekey panel) sign in and manage their workspaces. It is distinct from **end-user auth** (`docs/auth.md`) — that's how the customers' users sign into the customers' apps.
 
 ## Mental model
 

@@ -353,7 +353,7 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
           invitation: result.invitation,
           /** Raw token. Even when emailSent is true we still return it so operators can re-share manually if delivery fails. */
           token: result.rawToken,
-          /** True if ReliPay sent the invitation email via the default Resend pool. False otherwise (caller forwards manually). */
+          /** True if Rekey sent the invitation email via the default Resend pool. False otherwise (caller forwards manually). */
           emailSent: result.emailSent,
           warning: result.emailSent
             ? 'The invitation email was sent. The raw token is still here in case you need to re-share manually — it is shown only once.'

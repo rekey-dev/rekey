@@ -26,7 +26,7 @@
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { TenantRole } from '@prisma/client';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { prisma } from '../../lib/prisma.js';
 import { hashOperatorToken, isOperatorToken } from '../../lib/operator-token.js';
 import {
@@ -42,8 +42,8 @@ declare module 'fastify' {
   }
 }
 
-function unauthorized(): RelipayError {
-  return new RelipayError({
+function unauthorized(): RekeyError {
+  return new RekeyError({
     statusCode: 401,
     code: 'OPERATOR_MCP_UNAUTHORIZED',
     message: 'Operator MCP requires Authorization: Bearer rp_op_… (PAT) OR an OAuth access token.',

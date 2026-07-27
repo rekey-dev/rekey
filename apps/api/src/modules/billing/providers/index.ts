@@ -13,7 +13,7 @@
  */
 
 import type { Application } from '@prisma/client';
-import { RelipayError } from '../../../lib/error.js';
+import { RekeyError } from '../../../lib/error.js';
 import { StripeStubProvider } from './stripe.js';
 import { RealStripeProvider } from './stripe-real.js';
 import { PaypalStubProvider, RealPaypalProvider } from './paypal.js';
@@ -49,7 +49,7 @@ export async function getProviderForApplication(
     case 'paypal': {
       const row = await billingCredentialsService.loadDecryptedWithMode(application.id, 'paypal');
       if (!row) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'BILLING_PROVIDER_NOT_CONFIGURED',
           message: `Billing provider "paypal" is not configured for this Application.`,
@@ -64,7 +64,7 @@ export async function getProviderForApplication(
     case 'razorpay': {
       const creds = await billingCredentialsService.loadDecrypted(application.id, 'razorpay');
       if (!creds) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'BILLING_PROVIDER_NOT_CONFIGURED',
           message: `Billing provider "razorpay" is not configured for this Application.`,
@@ -128,7 +128,7 @@ export async function pickProvider(args: {
   const requireTestCreds = args.dataMode === 'TEST';
   const enabled = requireTestCreds ? allEnabled.filter((p) => p.mode === 'test') : allEnabled;
   if (requireTestCreds && enabled.length === 0) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'BILLING_MODE_MISMATCH',
       message:
@@ -143,7 +143,7 @@ export async function pickProvider(args: {
     const match = enabled.find((p) => p.provider === args.preferred);
     if (match) return match.provider;
     if (requireTestCreds && allEnabled.some((p) => p.provider === args.preferred)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'BILLING_MODE_MISMATCH',
         message:
@@ -152,7 +152,7 @@ export async function pickProvider(args: {
         fix: `Store sandbox credentials for "${args.preferred}" (mode: test), or use a live key.`,
       });
     }
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'BILLING_PROVIDER_NOT_AVAILABLE',
       message: `Requested provider "${args.preferred}" is not configured or is disabled for this Application.`,

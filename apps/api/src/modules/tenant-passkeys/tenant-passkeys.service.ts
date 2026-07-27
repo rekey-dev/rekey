@@ -16,7 +16,7 @@
 
 import type { TenantUser } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import {
   buildTenantRegistrationOptions,
   verifyTenantRegistration,
@@ -120,7 +120,7 @@ export const tenantPasskeysService = {
       expectedChallenge: args.expectedChallenge,
     });
     if (!verified.verified || !verified.registrationInfo) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'PASSKEY_REGISTRATION_FAILED',
         message: 'Passkey registration ceremony did not verify.',
@@ -138,7 +138,7 @@ export const tenantPasskeysService = {
       where: { credentialId },
     });
     if (dupe) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 409,
         code: 'PASSKEY_ALREADY_REGISTERED',
         message: 'This authenticator is already registered.',
@@ -182,7 +182,7 @@ export const tenantPasskeysService = {
   }): Promise<AuthSessionResult> {
     const credentialId = (args.response as { id?: string }).id;
     if (!credentialId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'PASSKEY_RESPONSE_INVALID',
         message: 'Passkey response is missing a credential id.',
@@ -201,7 +201,7 @@ export const tenantPasskeysService = {
       where: { credentialId },
     });
     if (!credential) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'PASSKEY_UNKNOWN',
         message: 'No operator account matches that passkey.',
@@ -214,7 +214,7 @@ export const tenantPasskeysService = {
       credential,
     });
     if (!verified.verified) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 401,
         code: 'PASSKEY_AUTHENTICATION_FAILED',
         message: 'Passkey authentication did not verify.',
@@ -234,7 +234,7 @@ export const tenantPasskeysService = {
     });
     const memberships = await loadMemberships(user.id);
     if (memberships.length === 0) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'NO_TENANT_MEMBERSHIPS',
         message: 'Your account is not a member of any workspace.',
@@ -264,7 +264,7 @@ export const tenantPasskeysService = {
       where: { id: args.passkeyId },
     });
     if (!cred || cred.tenantUserId !== args.tenantUserId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'PASSKEY_NOT_FOUND',
         message: 'That passkey is not registered to this account.',

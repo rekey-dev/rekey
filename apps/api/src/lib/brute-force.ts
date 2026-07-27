@@ -30,7 +30,7 @@
 
 import type { Redis } from 'ioredis';
 import { getRedis } from './redis.js';
-import { dependencyUnavailablePayload, RelipayError } from './error.js';
+import { dependencyUnavailablePayload, RekeyError } from './error.js';
 
 export interface BruteForcePolicy {
   /** Failures within the window before the scope locks. */
@@ -119,13 +119,13 @@ function noteStoreFailure(op: string, err: unknown): void {
 /**
  * Turn a store error into the 503 the caller should answer with.
  *
- * Rethrows a RelipayError untouched so a genuine 429 lockout (thrown by
+ * Rethrows a RekeyError untouched so a genuine 429 lockout (thrown by
  * `assertNotLocked` itself) is not relabelled as an outage.
  */
 function asDependencyFailure(op: string, err: unknown): never {
-  if (err instanceof RelipayError) throw err;
+  if (err instanceof RekeyError) throw err;
   noteStoreFailure(op, err);
-  throw new RelipayError(dependencyUnavailablePayload('redis'));
+  throw new RekeyError(dependencyUnavailablePayload('redis'));
 }
 
 /** Process-local fallback used only in tests (no Redis). */
@@ -165,7 +165,7 @@ function store(): CounterStore {
   // REDIS_URL, so reaching here in production is a bug — say so rather than
   // quietly running unprotected.
   if (process.env.NODE_ENV === 'production') {
-    throw new RelipayError(dependencyUnavailablePayload('redis'));
+    throw new RekeyError(dependencyUnavailablePayload('redis'));
   }
   if (!memory) memory = new MemoryStore();
   return memory;
@@ -267,7 +267,7 @@ export async function assertNotLocked(
     asDependencyFailure('lockTtl', err);
   }
   if (ttl > 0) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 429,
       code,
       message: `Too many attempts. Try again in ${ttl}s.`,

@@ -1,7 +1,7 @@
 /**
  * Password reset token issuance + verification.
  *
- * **ReliPay does not send email.** `requestPasswordReset` returns the raw
+ * **Rekey does not send email.** `requestPasswordReset` returns the raw
  * token to the calling server, which then emails (or SMSes, or pushes) it
  * to the user via its own provider. This keeps us out of the
  * email-deliverability business and lets each customer own their from-address

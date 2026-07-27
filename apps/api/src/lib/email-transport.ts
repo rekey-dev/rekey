@@ -7,8 +7,8 @@
  *      send via the Application's own provider (Resend API or SMTP) using
  *      the operator-configured `from` address from `emailConfig`.
  *
- *   2. `RESEND_DEFAULT_API_KEY` env set → send via the ReliPay-managed
- *      Resend pool using `RESEND_DEFAULT_FROM`. Hosted ReliPay turns this
+ *   2. `RESEND_DEFAULT_API_KEY` env set → send via the Rekey-managed
+ *      Resend pool using `RESEND_DEFAULT_FROM`. Hosted Rekey turns this
  *      on; self-hosters leave it off.
  *
  *   3. Neither → return `{ kind: 'no_transport' }`. The auth flows that
@@ -239,7 +239,7 @@ async function sendVia(
   }
 }
 
-/** Send via the ReliPay-managed default Resend pool. */
+/** Send via the Rekey-managed default Resend pool. */
 async function sendDefaultResend(input: SendInput): Promise<SendOutcome> {
   if (!env.RESEND_DEFAULT_API_KEY || !env.RESEND_DEFAULT_FROM) {
     return { kind: 'no_transport' };

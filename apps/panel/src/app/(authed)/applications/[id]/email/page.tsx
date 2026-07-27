@@ -96,7 +96,7 @@ const TRANSPORT_BLURB: Record<Transport, string> = {
   byo_resend: 'Using your own Resend account. Templates are sent from the address below.',
   byo_smtp: 'Using your own SMTP server. Templates are sent from the address below.',
   default_resend:
-    'Falling back to the ReliPay-managed Resend pool. To use your own brand and unlock higher quotas, configure BYO credentials.',
+    'Falling back to the Rekey-managed Resend pool. To use your own brand and unlock higher quotas, configure BYO credentials.',
   none:
     'No transport configured. /forgot-password and /send-verification fall back to returning the raw token to the caller for manual delivery.',
 };
@@ -226,7 +226,7 @@ export default async function EmailPage({
           <div>
             <h2 className="text-base font-semibold">Templates</h2>
             <p className="text-xs text-[var(--color-muted-fg)]">
-              Customize per-event subject + body, or leave the ReliPay defaults.
+              Customize per-event subject + body, or leave the Rekey defaults.
             </p>
           </div>
         </header>

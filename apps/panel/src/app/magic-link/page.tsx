@@ -7,14 +7,14 @@ import { SubmitButton } from '@/components/SubmitButton';
 import { AuthCard } from '@/components/AuthCard';
 import { Banner } from '@/components/Banner';
 
-export const metadata: Metadata = { title: 'Email me a sign-in link · ReliPay' };
+export const metadata: Metadata = { title: 'Email me a sign-in link · Rekey' };
 
 async function request(formData: FormData): Promise<void> {
   'use server';
   const email = String(formData.get('email') ?? '').trim();
   if (!email) redirect('/magic-link?error=missing');
   // Enumeration-safe: the API returns the same shape regardless of whether the
-  // email maps to an operator. ReliPay doesn't send operator email, so the raw
+  // email maps to an operator. Rekey doesn't send operator email, so the raw
   // token comes back for the caller to forward (mirrors forgot-password).
   let result: { delivered: boolean; token: string | null };
   try {

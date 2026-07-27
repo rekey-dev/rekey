@@ -11,14 +11,14 @@ import {
   ACCESS_COOKIE,
   REFRESH_COOKIE,
   getRefreshToken,
-  relipay,
+  rekey,
 } from '@/lib/relipay';
 
 export async function GET(req: NextRequest): Promise<Response> {
   // Best-effort revoke on the API side. Idempotent — unknown tokens 200.
   const refresh = await getRefreshToken();
   if (refresh) {
-    await relipay.auth.signOut(refresh).catch(() => undefined);
+    await rekey.auth.signOut(refresh).catch(() => undefined);
   }
 
   const reason = req.nextUrl.searchParams.get('reason');

@@ -2,11 +2,11 @@
  * Theming system — the appearance contract every widget exposes.
  *
  * Two mechanisms must keep working or every integrator's branding breaks:
- *   1. `appearance.variables` → inline `--relipay-*` CSS custom properties on the
+ *   1. `appearance.variables` → inline `--rekey-*` CSS custom properties on the
  *      themed root (so overriding a handful of tokens restyles the whole kit).
  *   2. `appearance.elements[slot]` → an extra className merged onto that slot via
  *      `useCx()` (Clerk's per-element override pattern).
- * Plus: light/dark pinning via `data-relipay-theme`, the once-per-document style
+ * Plus: light/dark pinning via `data-rekey-theme`, the once-per-document style
  * injection, and `className` forwarding to the root.
  */
 
@@ -17,17 +17,17 @@ import { Themed, useCx } from '../src/theme.js';
 /** Probe component: renders a node whose className is driven by `useCx`. */
 function Probe(): React.JSX.Element {
   const cx = useCx();
-  return <button className={cx('relipay-btn relipay-btn-primary', 'buttonPrimary')}>go</button>;
+  return <button className={cx('rekey-btn rekey-btn-primary', 'buttonPrimary')}>go</button>;
 }
 
 function root(container: HTMLElement): HTMLElement {
-  const el = container.querySelector('.relipay-root');
-  if (!el) throw new Error('no .relipay-root rendered');
+  const el = container.querySelector('.rekey-root');
+  if (!el) throw new Error('no .rekey-root rendered');
   return el as HTMLElement;
 }
 
 describe('appearance.variables → CSS custom properties', () => {
-  it('maps each variable onto the matching --relipay-* custom property', () => {
+  it('maps each variable onto the matching --rekey-* custom property', () => {
     const { container } = render(
       <Themed
         appearance={{
@@ -44,11 +44,11 @@ describe('appearance.variables → CSS custom properties', () => {
       </Themed>,
     );
     const style = root(container).style;
-    expect(style.getPropertyValue('--relipay-color-primary')).toBe('#6d28d9');
-    expect(style.getPropertyValue('--relipay-color-background')).toBe('#faf5ff');
-    expect(style.getPropertyValue('--relipay-radius')).toBe('8px');
-    expect(style.getPropertyValue('--relipay-font')).toBe('Inter, sans-serif');
-    expect(style.getPropertyValue('--relipay-spacing')).toBe('10px');
+    expect(style.getPropertyValue('--rekey-color-primary')).toBe('#6d28d9');
+    expect(style.getPropertyValue('--rekey-color-background')).toBe('#faf5ff');
+    expect(style.getPropertyValue('--rekey-radius')).toBe('8px');
+    expect(style.getPropertyValue('--rekey-font')).toBe('Inter, sans-serif');
+    expect(style.getPropertyValue('--rekey-spacing')).toBe('10px');
   });
 
   it('sets no custom properties when no variables are supplied', () => {
@@ -57,7 +57,7 @@ describe('appearance.variables → CSS custom properties', () => {
         <Probe />
       </Themed>,
     );
-    expect(root(container).style.getPropertyValue('--relipay-color-primary')).toBe('');
+    expect(root(container).style.getPropertyValue('--rekey-color-primary')).toBe('');
   });
 });
 
@@ -69,8 +69,8 @@ describe('appearance.elements → per-slot classNames', () => {
       </Themed>,
     );
     const btn = container.querySelector('button')!;
-    expect(btn.classList.contains('relipay-btn')).toBe(true);
-    expect(btn.classList.contains('relipay-btn-primary')).toBe(true);
+    expect(btn.classList.contains('rekey-btn')).toBe(true);
+    expect(btn.classList.contains('rekey-btn-primary')).toBe(true);
     expect(btn.classList.contains('my-cta')).toBe(true);
   });
 
@@ -81,7 +81,7 @@ describe('appearance.elements → per-slot classNames', () => {
       </Themed>,
     );
     const el = root(container);
-    expect(el.classList.contains('relipay-root')).toBe(true);
+    expect(el.classList.contains('rekey-root')).toBe(true);
     expect(el.classList.contains('rooty')).toBe(true);
     expect(el.classList.contains('host-class')).toBe(true);
   });
@@ -92,27 +92,27 @@ describe('appearance.elements → per-slot classNames', () => {
         <Probe />
       </Themed>,
     );
-    expect(container.querySelector('button')!.className).toBe('relipay-btn relipay-btn-primary');
+    expect(container.querySelector('button')!.className).toBe('rekey-btn rekey-btn-primary');
   });
 });
 
 describe('light / dark pinning', () => {
-  it('pins dark via the string shorthand → data-relipay-theme="dark"', () => {
+  it('pins dark via the string shorthand → data-rekey-theme="dark"', () => {
     const { container } = render(
       <Themed appearance="dark">
         <Probe />
       </Themed>,
     );
-    expect(root(container).getAttribute('data-relipay-theme')).toBe('dark');
+    expect(root(container).getAttribute('data-rekey-theme')).toBe('dark');
   });
 
-  it('pins light via the object form → data-relipay-theme="light"', () => {
+  it('pins light via the object form → data-rekey-theme="light"', () => {
     const { container } = render(
       <Themed appearance={{ baseTheme: 'light' }}>
         <Probe />
       </Themed>,
     );
-    expect(root(container).getAttribute('data-relipay-theme')).toBe('light');
+    expect(root(container).getAttribute('data-rekey-theme')).toBe('light');
   });
 
   it('omits the theme attribute when unset (so the OS preference wins)', () => {
@@ -121,7 +121,7 @@ describe('light / dark pinning', () => {
         <Probe />
       </Themed>,
     );
-    expect(root(container).hasAttribute('data-relipay-theme')).toBe(false);
+    expect(root(container).hasAttribute('data-rekey-theme')).toBe(false);
   });
 });
 
@@ -133,8 +133,8 @@ describe('stylesheet injection', () => {
         <Themed><Probe /></Themed>
       </>,
     );
-    const styles = document.querySelectorAll('#relipay-react-styles');
+    const styles = document.querySelectorAll('#rekey-react-styles');
     expect(styles.length).toBe(1);
-    expect(styles[0]!.textContent).toContain('--relipay-color-primary');
+    expect(styles[0]!.textContent).toContain('--rekey-color-primary');
   });
 });

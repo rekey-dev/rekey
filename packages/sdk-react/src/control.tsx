@@ -6,7 +6,7 @@
  *
  * IMPORTANT (security model): `<Protect>` does NOT fetch entitlements from the
  * API — the browser holds only the user JWT, and entitlement resolution is a
- * server concern (`@relipay/node` `billing.getEntitlements`, resolved against
+ * server concern (`@rekey.dev/node` `billing.getEntitlements`, resolved against
  * the secret key). The customer resolves entitlements server-side and passes the
  * resolved facts down (e.g. via the provider seed, a prop, or React context of
  * their own). `<Protect>` renders a *decision the server already made*. This
@@ -19,7 +19,7 @@ import { useUser } from './hooks.js';
 
 /**
  * The entitlement facts `<Protect>` checks against. Resolve these server-side
- * (via `@relipay/node billing.getEntitlements`) and hand them to the component.
+ * (via `@rekey.dev/node billing.getEntitlements`) and hand them to the component.
  * All optional — pass whichever your gate needs.
  */
 export interface ProtectAuthorization {
@@ -111,21 +111,21 @@ export function Protect({
 
 /**
  * Renders children only while the provider is resolving the session — the
- * `<ClerkLoading>` equivalent. Pair with `<RelipayLoaded>`.
+ * `<ClerkLoading>` equivalent. Pair with `<RekeyLoaded>`.
  *
  * @example
  * ```tsx
- * <RelipayLoading><Spinner /></RelipayLoading>
- * <RelipayLoaded><App /></RelipayLoaded>
+ * <RekeyLoading><Spinner /></RekeyLoading>
+ * <RekeyLoaded><App /></RekeyLoaded>
  * ```
  */
-export function RelipayLoading({ children }: { children: React.ReactNode }): React.JSX.Element | null {
+export function RekeyLoading({ children }: { children: React.ReactNode }): React.JSX.Element | null {
   const { loading } = useUser();
   return loading ? <>{children}</> : null;
 }
 
 /** Renders children once the provider has resolved the session (the `<ClerkLoaded>` equivalent). */
-export function RelipayLoaded({ children }: { children: React.ReactNode }): React.JSX.Element | null {
+export function RekeyLoaded({ children }: { children: React.ReactNode }): React.JSX.Element | null {
   const { loading } = useUser();
   return loading ? null : <>{children}</>;
 }

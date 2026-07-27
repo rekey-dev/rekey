@@ -1,4 +1,4 @@
-# AGENTS.md — ReliPay
+# AGENTS.md — Rekey
 
 For AI coding agents (Claude Code, Cursor, Codex, …) working in this repo.
 Humans: start with [README.md](README.md) and [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -43,7 +43,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { requireTenantSession } from '../../middleware/tenant-session.js';
 import { ensureAppAccess } from '../../lib/app-access.js';
 import { emailService } from './email.service.js';
@@ -287,7 +287,7 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
       const { id, eventKey } = EventParam.parse(req.params);
       await ensureAppAccess(req, id, 'read');
       if (!isKnownEvent(eventKey)) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 404,
           code: 'EMAIL_EVENT_UNKNOWN',
           message: `Email event "${eventKey}" is not in the registry.`,
@@ -315,7 +315,7 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
       await ensureAppAccess(req, id, 'write');
       const body = UpsertTemplateBody.parse(req.body);
       if (!isKnownEvent(eventKey)) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 404,
           code: 'EMAIL_EVENT_UNKNOWN',
           message: `Email event "${eventKey}" is not in the registry.`,

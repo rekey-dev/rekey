@@ -1,7 +1,7 @@
 /**
  * Per-Application OAuth 2.1 authorization server for MCP.
  *
- * ReliPay acts as the AS that MCP clients (Claude Code, Claude Desktop, …)
+ * Rekey acts as the AS that MCP clients (Claude Code, Claude Desktop, …)
  * authenticate an Application's end-users against, then connect to the hosted
  * MCP server at `/api/v1/mcp/<slug>`. Standards:
  *   - RFC 8414  authorization-server metadata
@@ -14,9 +14,9 @@
 
 import type { Application } from '@prisma/client';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { AuthConfigSchema } from '@relipay/shared-types';
+import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
 import { issueMcpAccessToken, verifyMcpAccessToken, type McpAccessClaims } from '../../lib/jwt.js';
 import {
@@ -31,9 +31,9 @@ export const MCP_SCOPE = 'mcp:account';
 const AUTH_CODE_TTL_MS = 60 * 1000; // 60s, single-use.
 
 /**
- * OAuth error (RFC 6749 §5.2). Carried distinctly from RelipayError because the
+ * OAuth error (RFC 6749 §5.2). Carried distinctly from RekeyError because the
  * token endpoint must emit the `{ error, error_description }` shape OAuth
- * clients parse — not the ReliPay envelope.
+ * clients parse — not the Rekey envelope.
  */
 export class OAuthError extends Error {
   constructor(
@@ -79,7 +79,7 @@ export function mcpIssuer(slug: string): string {
 export async function resolveMcpApp(slug: string): Promise<Application> {
   const app = await prisma.application.findUnique({ where: { slug } });
   if (!app || !AuthConfigSchema.parse(app.authConfig).mcpEnabled) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 404,
       code: 'MCP_NOT_FOUND',
       message: 'No MCP server is available at this path.',
@@ -162,7 +162,7 @@ export const mcpOAuthService = {
   ): Promise<Record<string, unknown>> {
     const redirectUris = input.redirectUris.map((u) => u.trim()).filter(Boolean);
     if (redirectUris.length === 0 || redirectUris.length > 20) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'INVALID_REDIRECT_URI',
         message: 'redirect_uris must contain between 1 and 20 entries.',
@@ -171,7 +171,7 @@ export const mcpOAuthService = {
     }
     for (const uri of redirectUris) {
       if (!isAcceptableRedirectUri(uri)) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 400,
           code: 'INVALID_REDIRECT_URI',
           message: `redirect_uri "${uri}" is not acceptable.`,

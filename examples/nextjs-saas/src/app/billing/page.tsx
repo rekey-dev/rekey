@@ -1,12 +1,12 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { getWorkspaceContext } from '@/lib/session';
-import { relipay } from '@/lib/relipay';
+import { rekey } from '@/lib/relipay';
 import { AppShell } from '@/components/app-shell';
 import { Banner } from '@/components/banner';
 import { checkoutAction, buyCreditsAction } from '@/lib/actions';
 import { PLAN_PRO } from '@/lib/constants';
-import type { PlanDto, SubscriptionDto, CreditLedgerEntryDto } from '@relipay/node';
+import type { PlanDto, SubscriptionDto, CreditLedgerEntryDto } from '@rekey.dev/node';
 
 function priceLabel(p: PlanDto): string {
   if (p.amount === 0) return 'Free';
@@ -37,13 +37,13 @@ export default async function BillingPage({
 
   // Plans are public. Subscription + credit ledger are per-subject.
   const [plans, subscription, ledger] = await Promise.all([
-    relipay.billing.getPlans().catch(() => [] as PlanDto[]),
+    rekey.billing.getPlans().catch(() => [] as PlanDto[]),
     orgGateBlocking
       ? Promise.resolve(null)
-      : relipay.billing.getSubscription(session.accessToken).catch(() => null as SubscriptionDto | null),
+      : rekey.billing.getSubscription(session.accessToken).catch(() => null as SubscriptionDto | null),
     orgGateBlocking
       ? Promise.resolve([] as CreditLedgerEntryDto[])
-      : relipay.credits
+      : rekey.credits
           .listLedger(activeOrgId ? { organizationId: activeOrgId } : { endUserId: session.user.id }, 8)
           .catch(() => [] as CreditLedgerEntryDto[]),
   ]);

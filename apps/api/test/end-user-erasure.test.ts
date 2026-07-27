@@ -333,7 +333,7 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
     const before = await app.inject({
       method: 'GET',
       url: '/api/v1/users/me/',
-      headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': accessToken },
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': accessToken },
     });
     expect(before.statusCode).toBe(200);
 
@@ -367,7 +367,7 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
     const me = await app.inject({
       method: 'GET',
       url: '/api/v1/users/me/',
-      headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': accessToken },
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': accessToken },
     });
     expect(me.statusCode).toBe(410);
     expect(me.json().error.code).toBe('END_USER_ERASED');

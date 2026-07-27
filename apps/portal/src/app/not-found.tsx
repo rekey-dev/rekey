@@ -4,7 +4,7 @@
  * portal. The API answers both cases identically (existence-hiding), so this
  * page can't tell them apart and deliberately doesn't try.
  *
- * Audience is the merchant's customer, not the operator: no ReliPay branding
+ * Audience is the merchant's customer, not the operator: no Rekey branding
  * beyond a footer credit, no error codes, and none of the API's operator "fix"
  * hint ("enable the portal in Panel → …") — that text is for the operator.
  *
@@ -29,7 +29,7 @@ export default function NotFound(): React.JSX.Element {
           link.
         </p>
       </Card>
-      <p className="mt-8 text-center text-xs text-[var(--color-muted-fg)]">Powered by ReliPay</p>
+      <p className="mt-8 text-center text-xs text-[var(--color-muted-fg)]">Powered by Rekey</p>
     </div>
   );
 }

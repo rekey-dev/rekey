@@ -1,16 +1,16 @@
-# relipay-demo
+# rekey-demo
 
-Reference Next.js 15 app demonstrating end-to-end auth via [`@relipay/node`](../../packages/sdk-node).
+Reference Next.js 15 app demonstrating end-to-end auth via [`@rekey.dev/node`](../../packages/sdk-node).
 
-> **Not** a published package — it consumes `@relipay/node` as a `workspace:*` dependency, so it tracks whatever is built locally in this monorepo.
+> **Not** a published package — it consumes `@rekey.dev/node` as a `workspace:*` dependency, so it tracks whatever is built locally in this monorepo.
 
 ## What it demonstrates
 
-- **Sign-up** (`/sign-up`) — email + password, server action calls `relipay.auth.signUp`, stores access + refresh tokens in httpOnly cookies, redirects to `/dashboard`.
-- **Sign-in** (`/sign-in`) — server action calls `relipay.auth.signIn`. Surface `INVALID_CREDENTIALS` → friendly message.
-- **Dashboard** (`/dashboard`) — protected. Resolves the current user via `relipay.auth.getCurrentUser(accessToken)` with **auto-refresh on expiry** (see `src/lib/session.ts`).
+- **Sign-up** (`/sign-up`) — email + password, server action calls `rekey.auth.signUp`, stores access + refresh tokens in httpOnly cookies, redirects to `/dashboard`.
+- **Sign-in** (`/sign-in`) — server action calls `rekey.auth.signIn`. Surface `INVALID_CREDENTIALS` → friendly message.
+- **Dashboard** (`/dashboard`) — protected. Resolves the current user via `rekey.auth.getCurrentUser(accessToken)` with **auto-refresh on expiry** (see `src/lib/session.ts`).
 - **Change password** (`/change-password`) — authenticated; revokes other sessions on success.
-- **Forgot password** (`/forgot-password`) — calls `relipay.auth.requestPasswordReset`. ReliPay returns the reset token — **the calling app must email it**. The demo prints the link to the dev console + carries it via querystring (so you can click through without an email setup); a real app would hand the token to SendGrid / Resend / SES.
+- **Forgot password** (`/forgot-password`) — calls `rekey.auth.requestPasswordReset`. Rekey returns the reset token — **the calling app must email it**. The demo prints the link to the dev console + carries it via querystring (so you can click through without an email setup); a real app would hand the token to SendGrid / Resend / SES.
 - **Reset password** (`/reset-password?token=…`) — single-use, kills all existing sessions on success.
 - **Sign-out** — revokes the current refresh token, clears cookies.
 - **Sign-out everywhere** — revokes every refresh token for the user.
@@ -22,7 +22,7 @@ Two httpOnly cookies — `relipay_access` (15 min) and `relipay_refresh` (30 day
 ## Run locally
 
 Prerequisites:
-- ReliPay API running (postgres + API + panel)
+- Rekey API running (postgres + API + panel)
 - Copy `.env.example` → `.env.local` and set `RELIPAY_URL` (the API base) and
   `RELIPAY_SECRET` (an Application secret key, `rp_live_…` / `rp_test_…`)
 
@@ -42,7 +42,7 @@ pnpm dev
 
 ## What this demo deliberately doesn't show (yet)
 
-- **Billing UI.** The SDK exposes `relipay.billing.getPlans/createCheckout/validateCoupon`, but a hosted-checkout flow against the stub provider would just open a placeholder URL. Real Stripe integration ships in Phase 3 of ReliPay; the billing page lands then.
-- **Client-side widgets.** Everything here is server-rendered. A `@relipay/react` package with `<SignIn />` / `<UserButton />` ships in Phase 3.
-- **Email delivery** for password reset. ReliPay deliberately doesn't send email — your app calls SendGrid/Resend/SES with the returned token. The demo prints to console.
+- **Billing UI.** The SDK exposes `rekey.billing.getPlans/createCheckout/validateCoupon`, but a hosted-checkout flow against the stub provider would just open a placeholder URL. Real Stripe integration ships in Phase 3 of Rekey; the billing page lands then.
+- **Client-side widgets.** Everything here is server-rendered. A `@rekey.dev/react` package with `<SignIn />` / `<UserButton />` ships in Phase 3.
+- **Email delivery** for password reset. Rekey deliberately doesn't send email — your app calls SendGrid/Resend/SES with the returned token. The demo prints to console.
 - **OAuth providers** (Google/GitHub). Server side is stubbed; flows ship later.

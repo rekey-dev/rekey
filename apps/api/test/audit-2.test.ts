@@ -183,7 +183,7 @@ describe('Audit-2 regression', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/checkout',
-      headers: { authorization: `Bearer ${b.liveKey}`, 'x-relipay-user-token': b.userAccess },
+      headers: { authorization: `Bearer ${b.liveKey}`, 'x-rekey-user-token': b.userAccess },
       payload: {
         planSlug: 'pro',
         successUrl: 'https://x.example/ok',
@@ -313,7 +313,7 @@ describe('Audit-2 regression', () => {
     expect(isWebhookUrlSafe('gopher://example.com/').ok).toBe(false);
     // Public hosts pass.
     expect(isWebhookUrlSafe('https://example.com/hook').ok).toBe(true);
-    expect(isWebhookUrlSafe('https://api.acme.io/relipay').ok).toBe(true);
+    expect(isWebhookUrlSafe('https://api.acme.io/rekey').ok).toBe(true);
     // Escape hatch.
     expect(isWebhookUrlSafe('http://127.0.0.1/hook', { allowPrivate: true }).ok).toBe(true);
   });

@@ -216,7 +216,7 @@ describe('billing scaffold', () => {
       url: '/api/v1/billing/subscription',
       headers: {
         authorization: `Bearer ${liveKey}`,
-        'x-relipay-user-token': accessToken,
+        'x-rekey-user-token': accessToken,
       },
     });
     expect(res.statusCode).toBe(200);
@@ -232,7 +232,7 @@ describe('billing scaffold', () => {
       url: '/api/v1/billing/checkout',
       headers: {
         authorization: `Bearer ${liveKey}`,
-        'x-relipay-user-token': accessToken,
+        'x-rekey-user-token': accessToken,
       },
       payload: {
         planSlug: 'pro_monthly',
@@ -257,7 +257,7 @@ describe('billing scaffold', () => {
       url: '/api/v1/billing/checkout',
       headers: {
         authorization: `Bearer ${liveKey}`,
-        'x-relipay-user-token': accessToken,
+        'x-rekey-user-token': accessToken,
       },
       payload: {
         planSlug: 'ghost_plan',
@@ -284,7 +284,7 @@ describe('billing scaffold', () => {
       url: '/api/v1/billing/checkout',
       headers: {
         authorization: `Bearer ${liveKey}`,
-        'x-relipay-user-token': accessToken,
+        'x-rekey-user-token': accessToken,
       },
       payload: {
         planSlug: 'old',
@@ -305,7 +305,7 @@ describe('billing scaffold', () => {
       url: '/api/v1/billing/checkout',
       headers: {
         authorization: `Bearer ${liveKey}`,
-        'x-relipay-user-token': accessToken,
+        'x-rekey-user-token': accessToken,
       },
       payload: {
         planSlug: 'pro_monthly',
@@ -318,7 +318,7 @@ describe('billing scaffold', () => {
       url: '/api/v1/billing/checkout',
       headers: {
         authorization: `Bearer ${liveKey}`,
-        'x-relipay-user-token': accessToken,
+        'x-rekey-user-token': accessToken,
       },
       payload: {
         planSlug: 'pro_monthly',

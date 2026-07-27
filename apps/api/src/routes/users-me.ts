@@ -1,7 +1,7 @@
 /**
  * GET /api/v1/users/me
  *
- * Returns the EndUser identified by the JWT in `X-Relipay-User-Token`, scoped to
+ * Returns the EndUser identified by the JWT in `X-Rekey-User-Token`, scoped to
  * the Application identified by the key in `Authorization`.
  *
  * This is the per-user counterpart to `/api/v1/me`, which returns the
@@ -42,7 +42,7 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
         summary: 'Get the current end-user (resolved from the user JWT)',
         description:
           'Requires an Application key (publishable or secret, Authorization header) AND the ' +
-          'user JWT (X-Relipay-User-Token header). Callable from a browser with the publishable ' +
+          'user JWT (X-Rekey-User-Token header). Callable from a browser with the publishable ' +
           'key, since the JWT is the authorizer and the response is that user\'s own record. ' +
           'Refuses to return data if the JWT was issued by a different Application than the ' +
           'key represents. Note `GET /api/v1/me` is different: it returns the Application, ' +

@@ -166,12 +166,12 @@ export default async function TemplateEditorPage({
           <p className="text-xs text-[var(--color-muted-fg)]">
             {template.customised
               ? 'Customized for this Application. Revert to drop your changes.'
-              : 'Showing the ReliPay default. Save to customize.'}
+              : 'Showing the Rekey default. Save to customize.'}
           </p>
         </div>
         {template.customised && (
           <form action={revertBound}>
-            <ConfirmButton confirm="Revert this template to the ReliPay default? Your custom subject + body will be lost.">
+            <ConfirmButton confirm="Revert this template to the Rekey default? Your custom subject + body will be lost.">
               Revert to default
             </ConfirmButton>
           </form>

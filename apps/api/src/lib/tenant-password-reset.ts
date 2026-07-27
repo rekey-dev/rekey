@@ -1,7 +1,7 @@
 /**
  * Tenant-operator password reset tokens.
  *
- * Mirrors `lib/password-reset.ts` for the operator side. ReliPay still
+ * Mirrors `lib/password-reset.ts` for the operator side. Rekey still
  * doesn't send email — the bootstrap flow returns the raw token so the
  * deploying organisation can hand it off to whatever mailer they like
  * (or, in dev, click through directly).

@@ -22,7 +22,7 @@
 import type { Application, TenantRole } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { env } from '../../config/env.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 import { applicationsService } from '../applications/applications.service.js';
 import { plansService } from '../plans/plans.service.js';
@@ -45,7 +45,7 @@ async function membershipIdInTenant(tenantId: string, tenantUserId: string): Pro
     where: { tenantUserId_tenantId: { tenantUserId, tenantId } },
   });
   if (!membership) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 404,
       code: 'MEMBERSHIP_NOT_FOUND',
       message: `No member with tenantUserId "${tenantUserId}" in this workspace.`,
@@ -67,7 +67,7 @@ async function membershipIdInTenant(tenantId: string, tenantUserId: string): Pro
 async function loadAppInTenant(tenantId: string, applicationId: string): Promise<Application> {
   const app = await prisma.application.findUnique({ where: { id: applicationId } });
   if (!app || app.tenantId !== tenantId) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 404,
       code: 'APPLICATION_NOT_FOUND',
       message: `Application "${applicationId}" not found in this workspace.`,
@@ -593,7 +593,7 @@ export const operatorWriteTools: OperatorTool[] = [
         select: { applicationId: true },
       });
       if (!sub) {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 404,
           code: 'SUBSCRIPTION_NOT_FOUND',
           message: `Subscription "${subscriptionId}" not found in this workspace.`,

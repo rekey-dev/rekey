@@ -33,8 +33,8 @@ import type {
 } from '@prisma/client';
 import type { FastifyBaseLogger } from 'fastify';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
-import { BillingConfigSchema } from '@relipay/shared-types';
+import { RekeyError } from '../../lib/error.js';
+import { BillingConfigSchema } from '@rekey.dev/shared-types';
 import { creditsService } from '../credits/credits.service.js';
 import { licensesService } from '../licenses/licenses.service.js';
 
@@ -148,7 +148,7 @@ export const entitlementsService = {
   async remove(planId: string, id: string): Promise<{ removed: boolean }> {
     const row = await prisma.planEntitlement.findUnique({ where: { id } });
     if (!row || row.planId !== planId) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'PLAN_ENTITLEMENT_NOT_FOUND',
         message: 'Entitlement not found on this plan.',
@@ -169,7 +169,7 @@ export const entitlementsService = {
     licenseKind?: LicenseKind | null;
   }): void {
     const bad = (message: string, fix: string): never => {
-      throw new RelipayError({ statusCode: 400, code: 'PLAN_ENTITLEMENT_INVALID', message, fix });
+      throw new RekeyError({ statusCode: 400, code: 'PLAN_ENTITLEMENT_INVALID', message, fix });
     };
     switch (args.kind) {
       case 'FEATURE':

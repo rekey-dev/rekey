@@ -13,9 +13,9 @@ const nextConfig = {
   // bundle resolves hoisted/workspace packages correctly.
   outputFileTracingRoot: path.join(__dirname, '../../'),
   // Workspace package transpilation isn't needed today (we only import types
-  // from @relipay/shared-types), but keep this here so future use of
+  // from @rekey.dev/shared-types), but keep this here so future use of
   // workspace runtime helpers Just Works.
-  transpilePackages: ['@relipay/shared-types'],
+  transpilePackages: ['@rekey.dev/shared-types'],
   reactStrictMode: true,
 };
 export default nextConfig;

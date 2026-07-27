@@ -42,7 +42,7 @@ function startStub(): Promise<Stub> {
   });
 }
 
-describe('@relipay/mcp tool registry', () => {
+describe('@rekey.dev/mcp tool registry', () => {
   let stub: Stub;
   let client: AdminClient;
 
@@ -213,7 +213,7 @@ describe('@relipay/mcp tool registry', () => {
     expect(out).toMatchObject({ apiKey: { id: 'key_2' }, rawKey: 'rp_live_secret2' });
   });
 
-  it('translates RelipayError envelopes into AdminApiError with code + fix', async () => {
+  it('translates RekeyError envelopes into AdminApiError with code + fix', async () => {
     stub.reset();
     stub.set('GET /api/v1/admin/applications/app_missing', 404, {
       success: false,

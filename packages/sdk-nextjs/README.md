@@ -1,12 +1,12 @@
-# `@relipay/nextjs`
+# `@rekey.dev/nextjs`
 
-[ReliPay](https://relipay.dev) helpers for the **Next.js App Router** (14/15): route-gating middleware, server-side `auth()` / `signIn()` / `signUp()` / `signOut()`, and an httpOnly cookie session — built on top of [`@relipay/node`](../sdk-node).
+[Rekey](https://relipay.dev) helpers for the **Next.js App Router** (14/15): route-gating middleware, server-side `auth()` / `signIn()` / `signUp()` / `signOut()`, and an httpOnly cookie session — built on top of [`@rekey.dev/node`](../sdk-node).
 
 > **For AI coding agents:** start at [AGENTS.md](./AGENTS.md).
 
 ```bash
-npm i @relipay/nextjs
-# or: pnpm add @relipay/nextjs / yarn add @relipay/nextjs
+npm i @rekey.dev/nextjs
+# or: pnpm add @rekey.dev/nextjs / yarn add @rekey.dev/nextjs
 ```
 
 ## Setup
@@ -23,18 +23,18 @@ NEXT_PUBLIC_RELIPAY_URL=https://api.relipay.dev
 NEXT_PUBLIC_RELIPAY_PUBLIC_KEY=rp_pub_…   # Application publishable key
 ```
 
-> **Never ship the secret key to the browser.** `@relipay/nextjs/server` pulls
+> **Never ship the secret key to the browser.** `@rekey.dev/nextjs/server` pulls
 > Node-only deps and reads `RELIPAY_SECRET`; importing it from a Client
 > Component or middleware will fail to bundle (that's the safety net working).
-> Browser code uses the **publishable** key via `@relipay/nextjs/client`.
+> Browser code uses the **publishable** key via `@rekey.dev/nextjs/client`.
 
 ### Three entrypoints
 
 | Import | Runtime | Credential | Use case |
 | --- | --- | --- | --- |
-| `@relipay/nextjs/middleware` | **Edge** | none (cookie presence) | Gate routes in `middleware.ts` (cheap, no network). |
-| `@relipay/nextjs/server` | **Node** | secret key | `auth()`, `signIn()`, `signUp()`, `createSession()` + your `@relipay/node` API calls. |
-| `@relipay/nextjs/client` | **Browser** | publishable key | `relipayBrowser()` — sign-in/up, magic-link, passkey, license verify, plans from a Client Component, no backend round-trip. |
+| `@rekey.dev/nextjs/middleware` | **Edge** | none (cookie presence) | Gate routes in `middleware.ts` (cheap, no network). |
+| `@rekey.dev/nextjs/server` | **Node** | secret key | `auth()`, `signIn()`, `signUp()`, `createSession()` + your `@rekey.dev/node` API calls. |
+| `@rekey.dev/nextjs/client` | **Browser** | publishable key | `relipayBrowser()` — sign-in/up, magic-link, passkey, license verify, plans from a Client Component, no backend round-trip. |
 
 The split keeps the Edge bundle small and the secret key out of the browser — the `/client` module only imports the publishable-key browser client.
 
@@ -50,7 +50,7 @@ Both are valid; pick per app:
 **1. Gate routes — `middleware.ts`:**
 
 ```ts
-import { relipayMiddleware } from '@relipay/nextjs/middleware';
+import { relipayMiddleware } from '@rekey.dev/nextjs/middleware';
 
 export default relipayMiddleware({
   signInUrl: '/login',
@@ -65,7 +65,7 @@ export const config = {
 **2. Read the session — any server component:**
 
 ```tsx
-import { auth } from '@relipay/nextjs/server';
+import { auth } from '@rekey.dev/nextjs/server';
 
 export default async function Dashboard() {
   const session = await auth(); // { user, accessToken } | null
@@ -79,7 +79,7 @@ export default async function Dashboard() {
 ```ts
 'use server';
 import { redirect } from 'next/navigation';
-import { signIn } from '@relipay/nextjs/server';
+import { signIn } from '@rekey.dev/nextjs/server';
 
 export async function signInAction(fd: FormData) {
   const outcome = await signIn({
@@ -91,7 +91,7 @@ export async function signInAction(fd: FormData) {
 }
 ```
 
-For everything `@relipay/nextjs` doesn't cover (billing, credits, usage, orgs, password reset, sessions), construct a [`@relipay/node`](../sdk-node) client in a server-only module and call it from server actions / route handlers — passing `session.accessToken` for per-user reads.
+For everything `@rekey.dev/nextjs` doesn't cover (billing, credits, usage, orgs, password reset, sessions), construct a [`@rekey.dev/node`](../sdk-node) client in a server-only module and call it from server actions / route handlers — passing `session.accessToken` for per-user reads.
 
 ## Publishable login → secret-key API routes
 
@@ -101,7 +101,7 @@ The browser logs the user in with the **publishable** key; the resulting tokens 
 
 ```tsx
 'use client';
-import { relipayBrowser } from '@relipay/nextjs/client';
+import { relipayBrowser } from '@rekey.dev/nextjs/client';
 import { useRouter } from 'next/navigation';
 
 export function LoginForm() {
@@ -140,7 +140,7 @@ export function LoginForm() {
 
 ```ts
 // app/api/auth/session/route.ts
-import { createSession } from '@relipay/nextjs/server';
+import { createSession } from '@rekey.dev/nextjs/server';
 
 export async function POST(req: Request) {
   const { accessToken, refreshToken } = await req.json();
@@ -154,10 +154,10 @@ export async function POST(req: Request) {
 
 ```ts
 // app/api/credits/route.ts
-import { auth } from '@relipay/nextjs/server';
-import { ReliPay } from '@relipay/node';
+import { auth } from '@rekey.dev/nextjs/server';
+import { Rekey } from '@rekey.dev/node';
 
-const relipay = new ReliPay({
+const rekey = new Rekey({
   apiUrl: process.env.RELIPAY_URL!,
   secretKey: process.env.RELIPAY_SECRET!,   // secret key — server-only
 });
@@ -165,7 +165,7 @@ const relipay = new ReliPay({
 export async function GET() {
   const session = await auth();             // from the httpOnly cookies
   if (!session) return new Response('Unauthorized', { status: 401 });
-  const balance = await relipay.credits.getBalance({ endUserId: session.user.id });
+  const balance = await rekey.credits.getBalance({ endUserId: session.user.id });
   return Response.json(balance);
 }
 ```
@@ -174,30 +174,30 @@ After this, `middleware.ts` and `auth()` work identically to the server-action p
 
 ## Core API
 
-### `@relipay/nextjs/middleware`
+### `@rekey.dev/nextjs/middleware`
 | Export | Description |
 | --- | --- |
 | `relipayMiddleware({ publicRoutes?, signInUrl? })` | Middleware that lets `publicRoutes` through and redirects unauthenticated requests to `signInUrl?next=…`. Gates on cookie *presence*; validity is checked deeper via `auth()`. |
 | `MiddlewareConfig` | Type for the config object. |
 
-### `@relipay/nextjs/server`
+### `@rekey.dev/nextjs/server`
 | Export | Description |
 | --- | --- |
 | `auth()` | Resolve the session from cookies. Tries the access token, refreshes-and-rotates once on expiry, returns `null` only when both fail. |
 | `signIn({ email, password })` | Returns `{ kind: 'session' }` (cookies set) or `{ kind: 'mfa_required', mfaChallengeToken }` (**no cookies** — collect a code and complete via `mfaVerify`). |
 | `mfaVerify({ mfaChallengeToken, code })` | Complete an MFA-required sign-in; sets cookies on success. |
 | `signUp({ email, password, metadata? })` | Create the user + start a session (always sets cookies). |
-| `createSession({ accessToken, refreshToken })` | Set the httpOnly session cookies from tokens a **browser** login produced. Use in a route handler to finalize a `@relipay/nextjs/client` sign-in. |
+| `createSession({ accessToken, refreshToken })` | Set the httpOnly session cookies from tokens a **browser** login produced. Use in a route handler to finalize a `@rekey.dev/nextjs/client` sign-in. |
 | `signOut(redirectTo?)` | Revoke the refresh token + clear cookies; optionally redirect. |
 | `Session` / `SignInOutcome` | Session + sign-in result types. |
 
-### `@relipay/nextjs/client` (browser — publishable key)
+### `@rekey.dev/nextjs/client` (browser — publishable key)
 | Export | Description |
 | --- | --- |
 | `relipayBrowser({ apiUrl?, publishableKey? })` | Browser client configured from `NEXT_PUBLIC_RELIPAY_URL` + `NEXT_PUBLIC_RELIPAY_PUBLIC_KEY` (or overrides). Methods: `signIn`, `signUp`, `mfaVerify`, `requestMagicLink`, `verifyMagicLink`, `startPasskeyAuthentication`, `verifyPasskeyAuthentication`, `getPlans`, `verifyLicense`. |
-| `RelipayBrowserClient` | The underlying class, re-exported from `@relipay/react`. |
+| `RelipayBrowserClient` | The underlying class, re-exported from `@rekey.dev/react`. |
 
-### `@relipay/nextjs` (root)
+### `@rekey.dev/nextjs` (root)
 | Export | Description |
 | --- | --- |
 | `mcpConnectionInfo({ apiUrl, appSlug })` | Build the MCP URL + `claude mcp add` command to render a "Connect to Claude" button (pure string-building). |
@@ -215,11 +215,11 @@ Both are `sameSite=lax` and `secure` in production only (so local `http://localh
 ## Gotchas
 
 - **`auth()` can only rotate from a server action or route handler.** Next.js forbids server components from writing cookies, so a stale-access read in a server component returns `null` instead of refreshing. Trigger `auth()` from the action driving the page, or accept the redirect.
-- **Entitlements are resolved server-side.** Gate features by calling `relipay.billing.getEntitlements(session.accessToken, …)` from a server module — never from client state.
-- **`billingSubject: 'org'` requires an `organizationId`.** On a per-team-billing Application, `createCheckout` without one throws `BILLING_ORGANIZATION_REQUIRED`. Read the live config via `relipay.applications.me()` and gate the checkout UI on it.
+- **Entitlements are resolved server-side.** Gate features by calling `rekey.billing.getEntitlements(session.accessToken, …)` from a server module — never from client state.
+- **`billingSubject: 'org'` requires an `organizationId`.** On a per-team-billing Application, `createCheckout` without one throws `BILLING_ORGANIZATION_REQUIRED`. Read the live config via `rekey.applications.me()` and gate the checkout UI on it.
 - **Switching active org returns a fresh token pair** — write both back into `ACCESS_COOKIE` / `REFRESH_COOKIE` with the exported opts, or later reads use the stale org view.
-- **Checkout activation is async — and not your webhook.** Subscriptions flip to ACTIVE when the provider (Stripe/PayPal) calls **ReliPay's** webhook endpoint, which the operator configures in the panel; your Next.js app never receives or verifies that traffic. Re-fetch `getSubscription` / `getEntitlements` on your `successUrl` page. (The SDK's `verifyWebhookSignature` is only for webhooks ReliPay sends to *your* app — user-lifecycle events; see `docs/billing.md`.)
-- **Don't import `@relipay/nextjs/server` from a Client Component or middleware** — it pulls Node-only deps.
+- **Checkout activation is async — and not your webhook.** Subscriptions flip to ACTIVE when the provider (Stripe/PayPal) calls **Rekey's** webhook endpoint, which the operator configures in the panel; your Next.js app never receives or verifies that traffic. Re-fetch `getSubscription` / `getEntitlements` on your `successUrl` page. (The SDK's `verifyWebhookSignature` is only for webhooks Rekey sends to *your* app — user-lifecycle events; see `docs/billing.md`.)
+- **Don't import `@rekey.dev/nextjs/server` from a Client Component or middleware** — it pulls Node-only deps.
 
 ## Links
 

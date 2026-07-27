@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * `relipay` — command-line interface.
+ * `rekey` — command-line interface.
  *
  * Two design rules drive everything in here (per PLAN.md §2.5 "AI-first DX"):
  *
  *   1. **Every command runs non-interactively when given enough flags.**
- *      No required prompts. An AI agent can call `relipay apps create
+ *      No required prompts. An AI agent can call `rekey apps create
  *      --tenant tn_xxx --name "MyApp" --slug myapp --json` and parse the
  *      output without ever needing a TTY.
  *
@@ -25,9 +25,9 @@ import { registerVersionCommand } from './commands/version.js';
 const program = new Command();
 
 program
-  .name('relipay')
+  .name('rekey')
   .description(
-    'ReliPay command-line interface. Pass --json on any command for machine-readable output. ' +
+    'Rekey command-line interface. Pass --json on any command for machine-readable output. ' +
       'See packages/cli/AGENTS.md for the full agent-facing contract.',
   )
   .option('--api-url <url>', 'Override RELIPAY_URL', process.env.RELIPAY_URL)

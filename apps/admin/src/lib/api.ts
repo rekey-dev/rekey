@@ -6,7 +6,7 @@
  * NEVER returned to the browser, NEVER cached in a global, and NEVER read
  * from a cookie. The browser only carries the opaque session id (see auth.ts).
  *
- * Every response is unwrapped from ReliPay's `{success:true,data}` envelope.
+ * Every response is unwrapped from Rekey's `{success:true,data}` envelope.
  * On a non-2xx we throw `AdminApiError` so server-component pages can render
  * an inline error rather than crashing the route.
  */

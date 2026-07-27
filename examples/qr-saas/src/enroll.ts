@@ -1,7 +1,7 @@
 /**
  * Free-plan enrollment.
  *
- * ReliPay has **no** auto-assigned default plan: a subscription only becomes
+ * Rekey has **no** auto-assigned default plan: a subscription only becomes
  * ACTIVE when the billing provider's webhook fires (see
  * apps/api/.../webhooks/stripe.handler.ts — checkout creates a PENDING row,
  * the webhook flips it ACTIVE + provisions entitlements). There is no $0/free
@@ -23,8 +23,8 @@
  * cap duplication, and identical to how Pro is enforced.
  */
 
-import type { ReliPay } from '@relipay/node';
-import { RelipayError } from '@relipay/node';
+import type { Rekey } from '@rekey.dev/node';
+import { RekeyError } from '@rekey.dev/node';
 import type { QrSaasConfig } from './bootstrap.js';
 import { completeCheckoutViaWebhook } from './stripe-webhook.js';
 import { PLAN_FREE } from './constants.js';
@@ -36,13 +36,13 @@ import { PLAN_FREE } from './constants.js';
  * bought for that org (owner+beneficiary), so the quota pools to the team.
  */
 export async function activatePlan(
-  relipay: ReliPay,
+  rekey: Rekey,
   config: QrSaasConfig,
   accessToken: string,
   planSlug: string,
   organizationId?: string,
 ): Promise<void> {
-  const checkout = await relipay.billing.createCheckout(accessToken, {
+  const checkout = await rekey.billing.createCheckout(accessToken, {
     planSlug,
     successUrl: 'https://qr.example/ok',
     cancelUrl: 'https://qr.example/cancel',
@@ -73,7 +73,7 @@ export async function activatePlan(
  * or a team workspace): also pass `organizationId` so the org pool is enrolled.
  */
 export async function ensureFreePlan(
-  relipay: ReliPay,
+  rekey: Rekey,
   config: QrSaasConfig,
   accessToken: string,
   organizationId?: string,
@@ -83,16 +83,16 @@ export async function ensureFreePlan(
     // current subscription means we're done; for an org we check the org's
     // resolved entitlements (no "current sub" endpoint for the pool).
     if (organizationId) {
-      const ent = await relipay.billing.getEntitlements(accessToken, { organizationId });
+      const ent = await rekey.billing.getEntitlements(accessToken, { organizationId });
       if (ent.entitlements.length > 0) return;
     } else {
-      const sub = await relipay.billing.getSubscription(accessToken);
+      const sub = await rekey.billing.getSubscription(accessToken);
       if (sub) return;
     }
-    await activatePlan(relipay, config, accessToken, PLAN_FREE, organizationId);
+    await activatePlan(rekey, config, accessToken, PLAN_FREE, organizationId);
   } catch (e) {
     // Don't let enrollment failure break sign-up / org creation. Log + move on.
-    const reason = e instanceof RelipayError ? `${e.code}: ${e.message}` : String(e);
+    const reason = e instanceof RekeyError ? `${e.code}: ${e.message}` : String(e);
     console.warn(`[qr-saas] free-plan enrollment skipped: ${reason}`);
   }
 }

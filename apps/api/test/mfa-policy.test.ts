@@ -75,7 +75,7 @@ describe('end-user MFA policy', () => {
     app.inject({
       method: 'POST',
       url: '/api/v1/auth/mfa/setup',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-relipay-user-token': euAccess },
+      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': euAccess },
     });
 
   const signIn = () =>
@@ -115,7 +115,7 @@ describe('end-user MFA policy', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/auth/mfa/status',
-      headers: { authorization: `Bearer ${liveKey}`, 'x-relipay-user-token': euAccess },
+      headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': euAccess },
     });
     expect((res.json().data as { policy: string }).policy).toBe('required');
   });

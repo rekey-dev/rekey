@@ -29,7 +29,7 @@ API at `http://localhost:3030`. Docs at `http://localhost:3030/docs`. OpenAPI JS
 
 ```bash
 curl http://localhost:3030/health
-# → {"status":"ok","service":"relipay-api"}
+# → {"status":"ok","service":"rekey-api"}
 ```
 
 ## 2 — Create your first Tenant
@@ -82,15 +82,15 @@ Save the `rawKey` from the response. You will not see it again — only its hash
 
 ```ts
 // my-app/server.ts
-import { ReliPay } from '@relipay/node';
+import { Rekey } from '@rekey.dev/node';
 
-const relipay = new ReliPay({
+const rekey = new Rekey({
   apiUrl: 'http://localhost:3030',
   secretKey: process.env.RELIPAY_SECRET!, // the rawKey from step 4
 });
 
 // Smoke test — verifies your credentials and prints which Application you're connected to.
-const me = await relipay.applications.me();
+const me = await rekey.applications.me();
 console.log(`Connected to "${me.name}" (${me.slug})`);
 ```
 
@@ -107,18 +107,18 @@ If this returns 200, your secret key is valid and you're pointed at the right de
 ## 6 — Sign up your first end-user
 
 ```ts
-const { endUser, accessToken, refreshToken } = await relipay.auth.signUp({
+const { endUser, accessToken, refreshToken } = await rekey.auth.signUp({
   email: 'alice@example.com',
   password: 'correct-horse-battery-staple',
 });
 
 // Subsequent per-user calls take the SHORT-LIVED access token.
-const me = await relipay.auth.getCurrentUser(accessToken);
+const me = await rekey.auth.getCurrentUser(accessToken);
 console.log(me.email); // → "alice@example.com"
 
 // When the access expires (~15 min later), exchange the refresh for a new pair.
 // The presented refresh is single-use — store the new one immediately.
-const next = await relipay.auth.refresh(refreshToken);
+const next = await rekey.auth.refresh(refreshToken);
 ```
 
 Or via curl:
@@ -132,14 +132,14 @@ ACCESS=$(echo "$RESPONSE" | jq -r .data.accessToken)
 
 curl http://localhost:3030/api/v1/users/me/ \
   -H "Authorization: Bearer $RELIPAY_SECRET" \
-  -H "X-Relipay-User-Token: $ACCESS"
+  -H "X-Rekey-User-Token: $ACCESS"
 ```
 
 See [docs/auth.md](auth.md) for the full auth model — access vs refresh tokens, the cross-application guard, replay protection, and how `Application.authConfig` shapes what's allowed. Billing methods land in the next slice.
 
 ## 7 — Password reset & magic links: branch on `emailSent`
 
-`auth.requestPasswordReset` and `auth.requestMagicLink` (and `auth.sendVerificationEmail`) return **different shapes depending on whether ReliPay could send the email itself** (BYO Resend credentials on the Application, or `RESEND_DEFAULT_*` env). They never throw for an unknown email — enumeration-safe by design.
+`auth.requestPasswordReset` and `auth.requestMagicLink` (and `auth.sendVerificationEmail`) return **different shapes depending on whether Rekey could send the email itself** (BYO Resend credentials on the Application, or `RESEND_DEFAULT_*` env). They never throw for an unknown email — enumeration-safe by design.
 
 | Case | `delivered` | `emailSent` | token field (`resetToken` / `magicLinkToken`) | Your job |
 |---|---|---|---|---|
@@ -148,13 +148,13 @@ See [docs/auth.md](auth.md) for the full auth model — access vs refresh tokens
 | Unknown email | `false` | `false` | `null` | Nothing. Show the same "check your inbox" UI — never reveal. |
 
 ```ts
-const result = await relipay.auth.requestPasswordReset({
+const result = await rekey.auth.requestPasswordReset({
   email,
   resetUrl: 'https://yourapp.com/reset?token={token}', // {token} is substituted
 });
 
 if (!result.emailSent && result.resetToken) {
-  // No ReliPay email transport — forward the token yourself.
+  // No Rekey email transport — forward the token yourself.
   await sendgrid.send({
     to: email,
     subject: 'Reset your password',
@@ -173,4 +173,4 @@ if (!result.emailSent && result.resetToken) {
 - [`docs/api-keys.md`](api-keys.md) — the three credential types and how they differ
 - [`docs/api-key-rotation.md`](api-key-rotation.md) — leaked-key drill + rotation cadence
 - [`docs/errors.md`](errors.md) — error envelope + the complete code reference
-- [`AGENTS.md`](../AGENTS.md) — agent-specific guidance for adding code or adding ReliPay to other projects
+- [`AGENTS.md`](../AGENTS.md) — agent-specific guidance for adding code or adding Rekey to other projects

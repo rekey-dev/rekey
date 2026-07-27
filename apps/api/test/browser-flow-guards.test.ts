@@ -6,7 +6,7 @@
  * end-user JWT, which is bound to the Application and enforces test/live
  * isolation. The secret tier added no authorization the session didn't carry;
  * it only forbade the one credential a browser is allowed to hold (`rp_pub_*`),
- * making the flow unreachable from `@relipay/react` and asymmetric with its own
+ * making the flow unreachable from `@rekey.dev/react` and asymmetric with its own
  * siblings (MFA challenge but no MFA enrollment; passkey sign-in but no passkey
  * enrollment; create/list invites but never accept one; …).
  *
@@ -145,7 +145,7 @@ describe('browser-reachable end-user self-service flows', () => {
     app.inject({
       method,
       url,
-      headers: { authorization: `Bearer ${ctx.publicKey}`, 'x-relipay-user-token': token },
+      headers: { authorization: `Bearer ${ctx.publicKey}`, 'x-rekey-user-token': token },
       ...(payload !== undefined && { payload }),
     });
 
@@ -277,7 +277,7 @@ describe('browser-reachable end-user self-service flows', () => {
       const res = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/mfa/disable',
-        headers: { authorization: `Bearer ${ctx.liveKey}`, 'x-relipay-user-token': ctx.userToken },
+        headers: { authorization: `Bearer ${ctx.liveKey}`, 'x-rekey-user-token': ctx.userToken },
       });
       expect(res.statusCode).toBe(200);
     });
@@ -322,23 +322,29 @@ describe('browser-reachable end-user self-service flows', () => {
       expect(changePassword.statusCode).toBe(200);
     });
 
-    it('passkey registration stays SECRET-key only, unlike its siblings', async () => {
-      // The deliberate exception to this whole file. Every other flow here moved
-      // to the publishable key because the end-user session was already the real
-      // authorizer. Passkey ENROLLMENT did not, because a passkey bypasses the
-      // MFA challenge: a stolen access token that can enroll one buys persistent
-      // account takeover that neither a password change nor sign-out-everywhere
-      // revokes. So a browser is refused on the credential, by design.
-      const browser = await asBrowser('POST', '/api/v1/auth/passkey/register/start', {});
-      expect(browser.statusCode).toBe(401);
-      expect(browser.json().error.code).toBe('API_KEY_INVALID');
+    it('passkey registration is browser-reachable, but only behind a step-up', async () => {
+      // This used to be secret-key-only, which was a holding position rather than
+      // a fix: it made enrollment unreachable from a browser-only app while doing
+      // nothing about a stolen token on a server-side one. A passkey bypasses the
+      // MFA challenge, so the real control is re-proving identity — see
+      // lib/step-up.ts and test/step-up-passkey.test.ts.
+      const noProof = await asBrowser('POST', '/api/v1/auth/passkey/register/start', {});
+      expect(noProof.statusCode).toBe(401);
+      expect(noProof.json().error.code).toBe('STEP_UP_REQUIRED');
 
-      // A secret key reaches the route and fails on CONFIG instead, proving the
-      // 401 above is the key tier talking and not a broken route.
+      const withProof = await asBrowser('POST', '/api/v1/auth/passkey/register/start', {
+        password: PASSWORD,
+      });
+      // No WebAuthn config on this app, so it refuses on CONFIG — which proves the
+      // step-up passed and the ceremony was reached.
+      expect(withProof.statusCode).toBe(400);
+      expect(withProof.json().error.code).toBe('WEBAUTHN_NOT_CONFIGURED');
+
+      // A secret key is exempt: the customer backend is the trusted gate.
       const server = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/passkey/register/start',
-        headers: { authorization: `Bearer ${ctx.liveKey}`, 'x-relipay-user-token': ctx.userToken },
+        headers: { authorization: `Bearer ${ctx.liveKey}`, 'x-rekey-user-token': ctx.userToken },
         payload: {},
       });
       expect(server.statusCode).toBe(400);
@@ -448,7 +454,7 @@ describe('browser-reachable end-user self-service flows', () => {
       const res = await app.inject({
         method: 'POST',
         url: '/api/v1/billing/coupons/validate',
-        headers: { authorization: `Bearer ${authOnlyKey}`, 'x-relipay-user-token': ctx.userToken },
+        headers: { authorization: `Bearer ${authOnlyKey}`, 'x-rekey-user-token': ctx.userToken },
         payload: { code: 'FIFTEEN', planSlug: 'pro_monthly' },
       });
       expect(res.statusCode).toBe(403);

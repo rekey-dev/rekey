@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * Client-side provider boundary. Mounts @relipay/react's <RelipayProvider> so
+ * Client-side provider boundary. Mounts @rekey.dev/react's <RekeyProvider> so
  * client components can call useUser() / render <SignedIn> / <SignedOut>.
  *
  * The provider is seeded from the SERVER session (initialUser + accessToken)
@@ -10,8 +10,8 @@
  */
 
 import * as React from 'react';
-import { RelipayProvider } from '@relipay/react';
-import type { EndUserDto } from '@relipay/react';
+import { RekeyProvider } from '@rekey.dev/react';
+import type { EndUserDto } from '@rekey.dev/react';
 
 export function Providers({
   children,
@@ -25,8 +25,8 @@ export function Providers({
   accessToken: string | null;
 }): React.JSX.Element {
   return (
-    <RelipayProvider apiUrl={apiUrl} initialUser={initialUser} accessToken={accessToken}>
+    <RekeyProvider apiUrl={apiUrl} initialUser={initialUser} accessToken={accessToken}>
       {children}
-    </RelipayProvider>
+    </RekeyProvider>
   );
 }

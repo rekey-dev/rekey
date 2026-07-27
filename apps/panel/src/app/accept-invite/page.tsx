@@ -24,7 +24,7 @@ import { AuthCard } from '@/components/AuthCard';
 import { formatDateTime } from '@/lib/date';
 import { Banner } from '@/components/Banner';
 
-export const metadata: Metadata = { title: 'Accept invitation · ReliPay' };
+export const metadata: Metadata = { title: 'Accept invitation · Rekey' };
 
 interface PreviewDto {
   tenantId: string;

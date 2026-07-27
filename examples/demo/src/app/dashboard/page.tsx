@@ -2,13 +2,13 @@ import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { requireUser } from '@/lib/session';
-import { getAccessToken, relipay } from '@/lib/relipay';
+import { getAccessToken, rekey } from '@/lib/relipay';
 
 async function signOutEverywhere(): Promise<void> {
   'use server';
   const access = await getAccessToken();
   if (access) {
-    await relipay.auth.signOutEverywhere(access).catch(() => undefined);
+    await rekey.auth.signOutEverywhere(access).catch(() => undefined);
   }
   redirect('/sign-out?reason=signed-out-everywhere');
 }
@@ -34,8 +34,8 @@ export default async function Dashboard(): Promise<React.JSX.Element> {
   const me = await requireUser();
   const access = (await getAccessToken())!;
   const [plans, subscription] = await Promise.all([
-    relipay.billing.getPlans().catch(() => []),
-    relipay.billing.getSubscription(access).catch(() => null),
+    rekey.billing.getPlans().catch(() => []),
+    rekey.billing.getSubscription(access).catch(() => null),
   ]);
   const currentPlan = subscription
     ? plans.find((p) => p.id === subscription.planId) ?? null
@@ -46,7 +46,7 @@ export default async function Dashboard(): Promise<React.JSX.Element> {
       <header className="border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950">
         <div className="mx-auto max-w-4xl px-6 py-3 flex items-center justify-between">
           <Link href="/" className="font-semibold">
-            ReliPay Demo
+            Rekey Demo
           </Link>
           <nav className="flex items-center gap-4 text-sm">
             <Link href="/dashboard" className="font-medium">Dashboard</Link>
@@ -180,7 +180,7 @@ export default async function Dashboard(): Promise<React.JSX.Element> {
 
         <p className="text-xs text-neutral-500">
           Server-rendered. The user is resolved via{' '}
-          <code>relipay.auth.getCurrentUser(accessToken)</code> with auto-refresh
+          <code>rekey.auth.getCurrentUser(accessToken)</code> with auto-refresh
           delegated to <code>/refresh-session</code> (a Route Handler).
         </p>
       </div>

@@ -83,7 +83,7 @@ describe('end-user billing portal surface', () => {
 
   const userHeaders = (accessToken: string): Record<string, string> => ({
     authorization: `Bearer ${liveKey}`,
-    'x-relipay-user-token': accessToken,
+    'x-rekey-user-token': accessToken,
   });
 
   // ---------------------------------------------------------------------
@@ -411,7 +411,7 @@ describe('end-user billing portal surface', () => {
       url: '/api/v1/billing/subscription/cancel',
       headers: {
         authorization: `Bearer ${readOnlyKey.rawKey}`,
-        'x-relipay-user-token': accessToken,
+        'x-rekey-user-token': accessToken,
       },
       payload: {},
     });

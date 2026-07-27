@@ -51,12 +51,12 @@ jobs:
           RELIPAY_URL: https://api.relipay.dev
           RELIPAY_SECRET: rp_live_ci_build_stub_not_used_at_runtime
         # Exclude the demo: it's an example app whose server components fetch a
-        # live ReliPay backend during `next build`, so it can't be statically
+        # live Rekey backend during `next build`, so it can't be statically
         # built in CI. It's typechecked (no backend needed) in the next step.
-        run: pnpm -r --workspace-concurrency=1 --filter='!relipay-demo' build
+        run: pnpm -r --workspace-concurrency=1 --filter='!rekey-demo' build
 
       - name: Typecheck the demo app
-        run: pnpm --filter relipay-demo typecheck
+        run: pnpm --filter rekey-demo typecheck
 
       - name: Typecheck the QR-SaaS example
         run: pnpm --filter qr-saas typecheck
@@ -64,27 +64,27 @@ jobs:
       - name: Start Postgres
         run: |
           docker run -d --name pg \
-            -e POSTGRES_USER=relipay -e POSTGRES_PASSWORD=relipay -e POSTGRES_DB=relipay \
+            -e POSTGRES_USER=rekey -e POSTGRES_PASSWORD=rekey -e POSTGRES_DB=rekey \
             -p 5432:5432 postgres:16-alpine
           # pg_isready returns OK once the socket binds, but the POSTGRES_DB
           # init can still be running. Poll the actual DB until psql succeeds.
           for i in {1..30}; do
-            if docker exec pg psql -U relipay -d relipay -c 'SELECT 1' >/dev/null 2>&1; then
+            if docker exec pg psql -U rekey -d rekey -c 'SELECT 1' >/dev/null 2>&1; then
               echo "postgres ready after ${i}s"
               break
             fi
             sleep 1
           done
-          docker exec pg psql -U relipay -d relipay -c "CREATE DATABASE relipay_test;"
+          docker exec pg psql -U rekey -d rekey -c "CREATE DATABASE relipay_test;"
 
       - name: Verify migrations apply
         run: |
-          DATABASE_URL=postgresql://relipay:relipay@localhost:5432/relipay?schema=public \
+          DATABASE_URL=postgresql://rekey:rekey@localhost:5432/rekey?schema=public \
             pnpm exec prisma migrate deploy --schema prisma/schema.prisma
 
       - name: Run tests (all workspaces)
         env:
-          TEST_DATABASE_URL: postgresql://relipay:relipay@localhost:5432/relipay_test?schema=public
+          TEST_DATABASE_URL: postgresql://rekey:rekey@localhost:5432/relipay_test?schema=public
           # Vitest's global-setup applies migrations against TEST_DATABASE_URL; the
           # admin/me/auth suites read these values from the environment.
           SUPER_ADMIN_KEY: test-admin-key-test-admin-key-test-admin-key

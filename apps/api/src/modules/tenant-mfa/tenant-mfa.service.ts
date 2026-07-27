@@ -5,7 +5,7 @@
  */
 
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
 import {
   generateSecret,
@@ -20,7 +20,7 @@ export const tenantMfaService = {
     otpauthUrl: string;
     backupCodes: string[];
   }> {
-    const secret = generateSecret(args.issuer ?? 'ReliPay Panel', args.email);
+    const secret = generateSecret(args.issuer ?? 'Rekey Panel', args.email);
     const backups = generateBackupCodes();
     await prisma.tenantMfaCredential.upsert({
       where: { tenantUserId: args.tenantUserId },
@@ -44,7 +44,7 @@ export const tenantMfaService = {
       where: { tenantUserId: args.tenantUserId },
     });
     if (!cred) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'MFA_NOT_INITIATED',
         message: 'Call /mfa/setup before /mfa/setup-confirm.',
@@ -56,7 +56,7 @@ export const tenantMfaService = {
       // 422 (not 401): the operator's *session* is valid — only the submitted
       // code is wrong. A 401 here makes the panel's api() client treat the
       // session as expired and log the operator out mid-enrollment.
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 422,
         code: 'MFA_CODE_INVALID',
         message: 'TOTP code did not verify.',

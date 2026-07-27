@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { applicationsService } from './applications.service.js';
 import { requireSuperAdmin } from '../../middleware/admin-auth.js';
-import { BillingProviderSchema } from '@relipay/shared-types';
+import { BillingProviderSchema } from '@rekey.dev/shared-types';
 import { PaginationQuery, parsePagination, paginationJsonSchema } from '../../lib/pagination.js';
 
 const CreateApplicationBody = z.object({

@@ -1,12 +1,12 @@
 /**
  * Portal-specific API surface — thin typed wrappers over the two end-user
- * billing endpoints that don't have first-class @relipay/node methods yet
+ * billing endpoints that don't have first-class @rekey.dev/node methods yet
  * (added for the portal: GET /billing/payments, POST /billing/subscription/cancel),
  * plus display helpers shared by the pages.
  */
 
 import 'server-only';
-import type { PlanDto, SubscriptionDto } from '@relipay/shared-types';
+import type { PlanDto, SubscriptionDto } from '@rekey.dev/shared-types';
 import { getRelipay } from './relipay';
 
 /** Row shape returned by GET /api/v1/billing/payments (end-user scoped). */
@@ -27,7 +27,7 @@ export interface PortalPayment {
 export async function listMyPayments(accessToken: string, limit?: number): Promise<PortalPayment[]> {
   const qs = limit !== undefined ? `?limit=${limit}` : '';
   return getRelipay().request<PortalPayment[]>('GET', `/api/v1/billing/payments${qs}`, undefined, {
-    'X-Relipay-User-Token': accessToken,
+    'X-Rekey-User-Token': accessToken,
   });
 }
 
@@ -40,7 +40,7 @@ export async function cancelMySubscription(
     'POST',
     '/api/v1/billing/subscription/cancel',
     { ...(opts?.atPeriodEnd !== undefined && { atPeriodEnd: opts.atPeriodEnd }) },
-    { 'X-Relipay-User-Token': accessToken },
+    { 'X-Rekey-User-Token': accessToken },
   );
 }
 

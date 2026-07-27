@@ -28,7 +28,7 @@
 
 import { prisma } from '../../lib/prisma.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
 import { applicationsService } from '../applications/applications.service.js';
 import { getModule, credentialRulesSchema } from './providers/registry.js';
@@ -102,7 +102,7 @@ function inferMode(provider: BillingProviderName, data: unknown): 'test' | 'live
 function requireModule(provider: string): ProviderModule {
   const module = getModule(provider);
   if (!module) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'BILLING_PROVIDER_UNKNOWN',
       message: `"${provider}" is not a registered billing provider.`,
@@ -124,7 +124,7 @@ function unwrap<P extends BillingProviderName>(
     // row predates the new one, or (b) the row is corrupted. Either way
     // we cannot safely fall through to a billing call — refuse with a
     // 500-class error that points operators at the re-enter path.
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 500,
       code: 'BILLING_CREDENTIALS_DECRYPT_FAILED',
       message: `Stored credentials for "${expected}" cannot be decrypted: ${(e as Error).message}`,
@@ -132,7 +132,7 @@ function unwrap<P extends BillingProviderName>(
     });
   }
   if (decrypted === null || typeof decrypted !== 'object') {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 500,
       code: 'BILLING_CREDENTIALS_SHAPE_INVALID',
       message: `Stored credentials for "${expected}" decrypted to a non-object — corruption suspected.`,
@@ -143,7 +143,7 @@ function unwrap<P extends BillingProviderName>(
   if ('provider' in decrypted && 'data' in decrypted) {
     const w = decrypted as { provider: string; data: unknown };
     if (w.provider !== expected) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 500,
         code: 'BILLING_CREDENTIALS_PROVIDER_MISMATCH',
         message: `Stored credentials are for "${w.provider}" but row is keyed under "${expected}".`,
@@ -283,7 +283,7 @@ export const billingCredentialsService = {
     if (!parsed.success) {
       const issue = parsed.error.issues[0]!;
       const fix = (issue as { params?: { fix?: string } }).params?.fix;
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'BILLING_CREDENTIALS_INVALID',
         message: issue.message,
@@ -368,7 +368,7 @@ export const billingCredentialsService = {
     // would register a dead endpoint. In dev/test we allow it (stub provider,
     // or operator-supplied ngrok tunnel).
     if (env.NODE_ENV === 'production' && /\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:|\/|$)/.test(base)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'BILLING_WEBHOOK_BASE_NOT_PUBLIC',
         message: `Webhook auto-config needs a public URL, but the base is "${base}".`,
@@ -377,7 +377,7 @@ export const billingCredentialsService = {
     }
     const current = await this.loadDecrypted(applicationId, provider);
     if (!current) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'BILLING_CREDENTIALS_NOT_CONFIGURED',
         message: `Configure ${provider} credentials before auto-registering its webhook.`,
@@ -390,7 +390,7 @@ export const billingCredentialsService = {
     const { getProviderForApplication } = await import('./providers/index.js');
     const inst = await getProviderForApplication(application, provider);
     if (!inst.registerWebhook) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'BILLING_WEBHOOK_AUTOCONFIG_UNSUPPORTED',
         message: `Automatic webhook configuration isn't supported for "${provider}".`,
@@ -405,7 +405,7 @@ export const billingCredentialsService = {
     try {
       result = await inst.registerWebhook(url);
     } catch (e) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 502,
         code: 'BILLING_WEBHOOK_REGISTRATION_FAILED',
         message: `The ${provider} API rejected webhook registration: ${(e as Error).message}`,

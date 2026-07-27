@@ -5,7 +5,7 @@
  * registration only attaches schemas, so no DB/Redis connection happens.
  * Feeds the marketing-site API reference (apps/marketing/public/openapi.json).
  *
- *   pnpm --filter @relipay/api openapi:dump        # -> marketing/public
+ *   pnpm --filter @rekey.dev/api openapi:dump        # -> marketing/public
  *   tsx scripts/dump-openapi.mts [outfile]
  *
  * Spec generation does no I/O, but the API's env loader validates required

@@ -14,7 +14,7 @@ import { AuthCard } from '@/components/AuthCard';
 import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
 
-export const metadata: Metadata = { title: 'Create your workspace · ReliPay' };
+export const metadata: Metadata = { title: 'Create your workspace · Rekey' };
 
 /**
  * Only follow a post-auth `next` target that is a local path: must start

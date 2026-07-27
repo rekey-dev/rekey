@@ -6,7 +6,7 @@
 
 import type { ReactNode } from 'react';
 import { requireSession } from '@/lib/session';
-import { relipay } from '@/lib/relipay';
+import { rekey } from '@/lib/relipay';
 import { checkoutAction } from '@/lib/actions';
 import { planForSubscription, formatAmount } from '@/lib/portal';
 import { Banner } from '@/components/banner';
@@ -29,8 +29,8 @@ export default async function PlansPage({
   const session = await requireSession();
   const params = await searchParams;
   const [plans, subscription] = await Promise.all([
-    relipay.billing.getPlans(),
-    relipay.billing.getSubscription(session.accessToken),
+    rekey.billing.getPlans(),
+    rekey.billing.getSubscription(session.accessToken),
   ]);
   const currentPlan = planForSubscription(plans, subscription);
   // The portal sells recurring plans; one-off CREDIT/LICENSE packs still

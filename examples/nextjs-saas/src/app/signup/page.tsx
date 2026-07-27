@@ -18,8 +18,8 @@ export default async function SignupPage({
     <main className="min-h-screen grid place-items-center px-6 py-12">
       <div className="w-full max-w-md space-y-5">
         <div className="text-center">
-          <Link href="/" className="font-bold text-relipay-700 dark:text-relipay-500">
-            ReliPay SaaS
+          <Link href="/" className="font-bold text-rekey-700 dark:text-rekey-500">
+            Rekey SaaS
           </Link>
           <h1 className="mt-3 text-2xl font-semibold">Create your account</h1>
           <p className="mt-1 text-sm text-neutral-500">It&apos;s free to start.</p>

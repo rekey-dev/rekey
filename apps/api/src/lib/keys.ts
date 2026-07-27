@@ -4,12 +4,12 @@
  * Two key formats:
  *
  *   - **Public key** (browser-safe): `rp_pub_<slug>_<random16>`
- *     One per Application. Shipped to the browser by `@relipay/react`. The
+ *     One per Application. Shipped to the browser by `@rekey.dev/react`. The
  *     SDK uses it to call public, unauthenticated-from-server endpoints
  *     (sign-in widgets, plan listing, etc.).
  *
  *   - **Secret key** (server-only): `rp_<live|test>_<random32>`
- *     Many per Application. Used by `@relipay/node` for trusted server-side
+ *     Many per Application. Used by `@rekey.dev/node` for trusted server-side
  *     calls. Stored as SHA-256 hash; the raw key is shown to the user
  *     exactly once at creation.
  *

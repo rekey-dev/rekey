@@ -19,7 +19,7 @@ import {
   type VerifiedAuthenticationResponse,
   type AuthenticatorTransportFuture,
 } from '@simplewebauthn/server';
-import { RelipayError } from './error.js';
+import { RekeyError } from './error.js';
 
 export interface PanelRpConfig {
   rpId: string;
@@ -41,7 +41,7 @@ export function panelRpConfig(): PanelRpConfig {
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
     if (rpOrigins.length === 0) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'WEBAUTHN_NOT_CONFIGURED',
         message: 'PANEL_WEBAUTHN_RP_ORIGINS resolved to no valid origins.',
@@ -59,7 +59,7 @@ export function panelRpConfig(): PanelRpConfig {
   const derived = deriveRpFromCors();
   if (derived) return derived;
 
-  throw new RelipayError({
+  throw new RekeyError({
     statusCode: 400,
     code: 'WEBAUTHN_NOT_CONFIGURED',
     message:
@@ -109,7 +109,7 @@ function deriveRpFromCors(): PanelRpConfig | null {
   return {
     rpId,
     rpOrigins: rpOrigins.length > 0 ? rpOrigins : [chosen.origin],
-    rpName: process.env.PANEL_WEBAUTHN_RP_NAME ?? 'ReliPay Panel',
+    rpName: process.env.PANEL_WEBAUTHN_RP_NAME ?? 'Rekey Panel',
   };
 }
 

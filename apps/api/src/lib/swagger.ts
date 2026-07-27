@@ -32,7 +32,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
   await app.register(swagger, {
     openapi: {
       info: {
-        title: 'ReliPay API',
+        title: 'Rekey API',
         description:
           'Self-hostable authentication + billing + admin REST API. All money is in ' +
           'integer minor units (cents). Every error carries a `code`, human `message`, ' +
@@ -50,7 +50,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
           'key is, plus the privileged surface it cannot reach (usage, credits, ' +
           'licenses, coupon redemption, session/user administration). Never ship it to ' +
           'a browser.\n' +
-          '- **End-user JWT** (`X-Relipay-User-Token`) — sent *in addition to* one of ' +
+          '- **End-user JWT** (`X-Rekey-User-Token`) — sent *in addition to* one of ' +
           'the two keys above on routes that act on behalf of a signed-in end user. ' +
           'You get it from the `token` in a sign-in response.\n' +
           '- **Operator session** (`Authorization: Bearer` access token) — for the ' +
@@ -90,7 +90,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
               'over that one Application; the `rp_test_` / `rp_live_` prefix also picks ' +
               "the request's test-or-live data mode.\n\n" +
               '**Where from:** Panel → Application → API Keys (shown once at mint time). ' +
-              'Used by `@relipay/node`.\n\n' +
+              'Used by `@rekey.dev/node`.\n\n' +
               '**Where used:** every non-admin, non-operator route. Some keys are minted ' +
               'with narrow scopes (`auth:read`, `auth:write`, `billing:read`, ' +
               '`billing:write`, `webhooks:read`); when a route needs a specific scope its ' +
@@ -124,7 +124,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
           userToken: {
             type: 'apiKey',
             in: 'header',
-            name: 'X-Relipay-User-Token',
+            name: 'X-Rekey-User-Token',
             description:
               '**What:** the end-user access JWT — proof that a specific end user of your ' +
               'Application is signed in. It is a *second* credential: send it **together ' +
@@ -143,7 +143,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
             scheme: 'bearer',
             description:
               '**What:** an **operator** (workspace-member) session access token — the ' +
-              'credential the ReliPay panel uses. Scoped to one workspace plus the ' +
+              'credential the Rekey panel uses. Scoped to one workspace plus the ' +
               "operator's live role in it (OWNER / ADMIN / MEMBER).\n\n" +
               '**Where from:** `POST /api/v1/tenant/auth/sign-in` (or the passkey / OAuth ' +
               'equivalents) returns `accessToken`; refresh it at ' +

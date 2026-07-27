@@ -165,7 +165,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   github: 'Continue with GitHub',
 };
 
-export const metadata: Metadata = { title: 'Sign in · ReliPay' };
+export const metadata: Metadata = { title: 'Sign in · Rekey' };
 
 const ERROR_MESSAGES: Record<string, string> = {
   missing: 'Email and password are required.',
@@ -215,7 +215,7 @@ export default async function LoginPage({
 
   return (
     <AuthCard
-      title="Sign in to ReliPay"
+      title="Sign in to Rekey"
       subtitle="Operator account — manage Applications, billing, and team."
     >
       <TrackView event={AnalyticsEvent.LoginPageView} />

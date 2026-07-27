@@ -1,9 +1,9 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import type { PlanDto } from '@relipay/node';
+import type { PlanDto } from '@rekey.dev/node';
 import { requireUser } from '@/lib/session';
-import { getAccessToken, relipay, RelipayError } from '@/lib/relipay';
+import { getAccessToken, rekey, RekeyError } from '@/lib/relipay';
 
 async function startCheckout(formData: FormData): Promise<void> {
   'use server';
@@ -14,7 +14,7 @@ async function startCheckout(formData: FormData): Promise<void> {
 
   const origin = process.env.PUBLIC_DEMO_URL ?? 'http://localhost:3032';
   try {
-    const { url } = await relipay.billing.createCheckout(access, {
+    const { url } = await rekey.billing.createCheckout(access, {
       planSlug,
       successUrl: `${origin}/billing?status=ok`,
       cancelUrl: `${origin}/billing?status=cancel`,
@@ -22,7 +22,7 @@ async function startCheckout(formData: FormData): Promise<void> {
     });
     redirect(url);
   } catch (err) {
-    if (err instanceof RelipayError) {
+    if (err instanceof RekeyError) {
       redirect(`/billing?error=${encodeURIComponent(err.code)}`);
     }
     throw err;
@@ -38,7 +38,7 @@ const ERR: Record<string, string> = {
   COUPON_REDEMPTION_LIMIT_REACHED: 'That coupon has reached its redemption cap.',
   COUPON_USER_LIMIT_REACHED: "You've already redeemed this coupon the maximum number of times.",
   BILLING_PROVIDER_NOT_CONFIGURED:
-    'Billing is not configured for this Application. Add Stripe credentials in the ReliPay panel.',
+    'Billing is not configured for this Application. Add Stripe credentials in the Rekey panel.',
 };
 
 function formatMoney(amount: number, currency: string): string {
@@ -100,8 +100,8 @@ export default async function BillingPage({
   const status = typeof sp.status === 'string' ? sp.status : undefined;
 
   const [plans, subscription] = await Promise.all([
-    relipay.billing.getPlans().catch(() => []),
-    relipay.billing.getSubscription(access).catch(() => null),
+    rekey.billing.getPlans().catch(() => []),
+    rekey.billing.getSubscription(access).catch(() => null),
   ]);
 
   return (
@@ -160,7 +160,7 @@ export default async function BillingPage({
           <h2 className="text-sm font-medium">Plans</h2>
           {plans.length === 0 ? (
             <p className="text-sm text-neutral-500">
-              No plans configured for this Application yet. Add some in the ReliPay panel
+              No plans configured for this Application yet. Add some in the Rekey panel
               (<code>/applications/&lt;id&gt;/plans</code>) and they'll appear here.
             </p>
           ) : (
@@ -215,8 +215,8 @@ export default async function BillingPage({
         </section>
 
         <p className="text-xs text-neutral-500 pt-4">
-          Plans come from <code>relipay.billing.getPlans()</code>. Checkout via{' '}
-          <code>relipay.billing.createCheckout(token, &#123; planSlug, successUrl, cancelUrl &#125;)</code>.
+          Plans come from <code>rekey.billing.getPlans()</code>. Checkout via{' '}
+          <code>rekey.billing.createCheckout(token, &#123; planSlug, successUrl, cancelUrl &#125;)</code>.
           Activation arrives over the Stripe webhook — not synchronously.
         </p>
       </div>

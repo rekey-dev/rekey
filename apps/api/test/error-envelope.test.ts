@@ -2,7 +2,7 @@
  * Error envelope, over real HTTP.
  *
  * Assembled on a minimal Fastify instance that mirrors app.ts's wiring
- * (formbody + rate limiter + the media-type gate + `relipayErrorHandler`)
+ * (formbody + rate limiter + the media-type gate + `rekeyErrorHandler`)
  * instead of `buildApp()`. The pieces under test are the framework seams —
  * the rate-limit plugin's error path, Fastify's own content-type and
  * validation errors, and the hook stage the auth limiter runs at — and pinning
@@ -16,7 +16,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import formbody from '@fastify/formbody';
-import { relipayErrorHandler } from '../src/lib/error.js';
+import { rekeyErrorHandler } from '../src/lib/error.js';
 import { requestIdFor } from '../src/lib/request-id.js';
 import {
   authCeilingKey,
@@ -66,7 +66,7 @@ async function harness(options: HarnessOptions = {}): Promise<FastifyInstance> {
     errorResponseBuilder: rateLimitError,
   });
   await instance.register(formbody);
-  instance.setErrorHandler(relipayErrorHandler);
+  instance.setErrorHandler(rekeyErrorHandler);
 
   instance.addHook('onRequest', async (_req, reply) => {
     reply.header('X-Request-Id', _req.id);
@@ -411,7 +411,7 @@ describe('unsupported media types', () => {
     const res = await instance.inject({
       method: 'POST',
       url: '/plain',
-      headers: { 'content-type': 'application/vnd.relipay+json' },
+      headers: { 'content-type': 'application/vnd.rekey+json' },
       payload: '{"a":1}',
     });
     // Fastify has no parser registered for the vendor type, so it answers its

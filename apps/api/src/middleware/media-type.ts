@@ -21,7 +21,7 @@
  */
 
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { RelipayError } from '../lib/error.js';
+import { RekeyError } from '../lib/error.js';
 
 declare module 'fastify' {
   interface FastifyContextConfig {
@@ -66,7 +66,7 @@ export async function rejectUnsupportedMediaType(
   if (mediaType === 'application/json' || mediaType.endsWith('+json')) return;
   if (mediaType === FORM_MEDIA_TYPE && req.routeOptions.config?.acceptsForm === true) return;
 
-  throw new RelipayError({
+  throw new RekeyError({
     statusCode: 415,
     code: 'UNSUPPORTED_MEDIA_TYPE',
     message: `This endpoint does not accept "${mediaType}" bodies.`,

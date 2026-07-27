@@ -5,7 +5,7 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        relipay: {
+        rekey: {
           50: '#f0fdfa',
           100: '#ccfbf1',
           500: '#14b8a6',

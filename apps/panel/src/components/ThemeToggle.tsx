@@ -11,7 +11,7 @@
 import * as React from 'react';
 
 export type Theme = 'light' | 'dark' | 'system';
-export const THEME_KEY = 'relipay-theme';
+export const THEME_KEY = 'rekey-theme';
 
 /** Inline-script body for the root layout — runs before paint to avoid FOUC. */
 export const THEME_INIT = `(function(){try{var t=localStorage.getItem('${THEME_KEY}')||'system';var d=t==='dark'||(t==='system'&&window.matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.classList.toggle('dark',d);}catch(e){}})();`;

@@ -81,7 +81,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       },
     },
     async () => {
-      return { status: 'ok', service: 'relipay-api' };
+      return { status: 'ok', service: 'rekey-api' };
     },
   );
 
@@ -127,14 +127,14 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       if (!report.ready) {
         return reply.status(503).send({
           status: 'degraded',
-          service: 'relipay-api',
+          service: 'rekey-api',
           db: report.db,
           redis: report.redis,
         });
       }
       // `status: 'ok'` retained verbatim — existing monitors and the compose
       // healthcheck match on it.
-      return { status: 'ok', service: 'relipay-api', db: report.db, redis: report.redis };
+      return { status: 'ok', service: 'rekey-api', db: report.db, redis: report.redis };
     },
   );
 }

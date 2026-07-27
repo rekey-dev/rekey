@@ -1164,7 +1164,7 @@ export const adminMetricsService = {
 
   /**
    * Outstanding prepaid credits — `SUM(CreditBalance.balance)`. Credits are
-   * unit-less in ReliPay's model (each Application decides what a credit
+   * unit-less in Rekey's model (each Application decides what a credit
    * means in its own product), so this is a unit-less count, NOT cents.
    * Operator reads this as "how many prepaid units have been bought but
    * not yet consumed across all applications." Per-app breakdown returns

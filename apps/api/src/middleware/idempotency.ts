@@ -44,7 +44,7 @@ import { createHash } from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
-import { RelipayError } from '../lib/error.js';
+import { RekeyError } from '../lib/error.js';
 import { decryptJson, encryptJson } from '../lib/secrets.js';
 
 declare module 'fastify' {
@@ -73,8 +73,8 @@ function fingerprint(body: unknown): string {
     .digest('hex');
 }
 
-const inFlightError = (): RelipayError =>
-  new RelipayError({
+const inFlightError = (): RekeyError =>
+  new RekeyError({
     statusCode: 409,
     code: 'IDEMPOTENCY_KEY_IN_FLIGHT',
     message: 'A request with this Idempotency-Key is still being processed.',
@@ -97,7 +97,7 @@ export async function idempotencyPreHandler(
   const raw = req.headers['idempotency-key'];
   if (raw === undefined) return;
   if (Array.isArray(raw) || raw.length === 0 || raw.length > MAX_KEY_LENGTH) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'IDEMPOTENCY_KEY_INVALID',
       message: `The Idempotency-Key header must be a single value of 1–${MAX_KEY_LENGTH} characters.`,
@@ -172,7 +172,7 @@ export async function idempotencyPreHandler(
       existing.path !== path ||
       existing.requestHash !== requestHash
     ) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 409,
         code: 'IDEMPOTENCY_KEY_REUSED',
         message:

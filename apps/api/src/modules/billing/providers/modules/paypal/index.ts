@@ -23,7 +23,7 @@
  * PaypalCredentials in credentials.service.ts).
  */
 
-import { RelipayError } from '../../../../../lib/error.js';
+import { RekeyError } from '../../../../../lib/error.js';
 import { PaypalStubProvider, RealPaypalProvider, verifyPaypalWebhook } from '../../paypal.js';
 import type { PaypalCredentials } from '../../../credentials.service.js';
 import type {
@@ -101,7 +101,7 @@ function resolveApplication(req: RawWebhookReq): AppRef {
   // resolving anything, and resolveApplication is the only pre-verify step.
   const p = req.payload as PaypalEventPayload | null;
   if (!p || typeof p !== 'object' || typeof p.id !== 'string' || typeof p.event_type !== 'string') {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'WEBHOOK_PAYLOAD_INVALID',
       message: 'PayPal webhook body is not a recognisable event.',
@@ -111,7 +111,7 @@ function resolveApplication(req: RawWebhookReq): AppRef {
   // Slug-scoped only: PayPal verification requires the per-app webhook id,
   // so the slug is mandatory.
   if (req.params.slug) return { slug: req.params.slug };
-  throw new RelipayError({
+  throw new RekeyError({
     statusCode: 401,
     code: 'WEBHOOK_APPLICATION_UNRESOLVED',
     message: 'PayPal webhook URL carries no application slug.',

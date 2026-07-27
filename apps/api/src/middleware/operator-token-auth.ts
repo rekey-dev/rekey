@@ -28,7 +28,7 @@
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { TenantRole } from '@prisma/client';
-import { RelipayError } from '../lib/error.js';
+import { RekeyError } from '../lib/error.js';
 import { prisma } from '../lib/prisma.js';
 import { hashOperatorToken, type OperatorTokenScope } from '../lib/operator-token.js';
 
@@ -41,8 +41,8 @@ declare module 'fastify' {
 
 /** Shared 401 for every "this PAT can't authenticate" case. Deliberately uniform
  * so unknown / revoked / expired tokens are indistinguishable to a caller. */
-function unauthorized(): RelipayError {
-  return new RelipayError({
+function unauthorized(): RekeyError {
+  return new RekeyError({
     statusCode: 401,
     code: 'OPERATOR_TOKEN_INVALID',
     message: 'Operator personal-access-token is missing, invalid, revoked, or expired.',
@@ -85,7 +85,7 @@ export async function resolveOperatorToken(
     },
   });
   if (!membership) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 403,
       code: 'TENANT_MEMBERSHIP_REVOKED',
       message: 'The operator behind this token is no longer a member of its workspace.',
@@ -130,7 +130,7 @@ export function requireOperatorScope(
 ): (req: FastifyRequest, _reply: FastifyReply) => Promise<void> {
   return async (req) => {
     if (!req.operatorTokenScopes) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 500,
         code: 'INTERNAL_ERROR',
         message: 'requireOperatorScope used without resolveOperatorToken.',
@@ -138,7 +138,7 @@ export function requireOperatorScope(
       });
     }
     if (!req.operatorTokenScopes.includes(scope)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 403,
         code: 'OPERATOR_SCOPE_INSUFFICIENT',
         message: `This action requires the '${scope}' scope. Your token's scopes: ${req.operatorTokenScopes.join(', ') || '(none)'}.`,

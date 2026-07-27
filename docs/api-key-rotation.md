@@ -87,14 +87,14 @@ Keys never auto-rotate. Rotation is always an explicit operator action.
 
 ### Outbound webhook signing secrets
 
-Each webhook endpoint you register (the ones ReliPay signs and sends to **your** app — see [billing.md](billing.md)) has its own signing secret, also shown once at creation. To rotate:
+Each webhook endpoint you register (the ones Rekey signs and sends to **your** app — see [billing.md](billing.md)) has its own signing secret, also shown once at creation. To rotate:
 
 ```bash
 curl -X POST "$RELIPAY_URL/api/v1/tenant/applications/$APP_ID/webhooks/$ENDPOINT_ID/rotate-secret" \
   -H "Authorization: Bearer $OPERATOR_ACCESS_TOKEN"
 ```
 
-The new raw secret is returned once. Note this is a **hard cutover** — deliveries are signed with the new secret immediately, so update `RELIPAY_WEBHOOK_SECRET` on your receiver right away; deliveries verified against the old secret in between will fail your `verifyWebhookSignature` check and be retried by ReliPay's delivery worker.
+The new raw secret is returned once. Note this is a **hard cutover** — deliveries are signed with the new secret immediately, so update `RELIPAY_WEBHOOK_SECRET` on your receiver right away; deliveries verified against the old secret in between will fail your `verifyWebhookSignature` check and be retried by Rekey's delivery worker.
 
 ### Provider credentials (Stripe / PayPal / Razorpay)
 

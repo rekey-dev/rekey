@@ -9,7 +9,7 @@ import { usageService } from './usage.service.js';
 import { requireApiKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireBillingEnabled } from '../../middleware/billing-enabled.js';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
 
 const RecordBody = z.object({
@@ -37,7 +37,7 @@ async function assertSubjectInApp(
   mode?: import('@prisma/client').DataMode,
 ): Promise<void> {
   if (subject.endUserId && subject.organizationId) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 400,
       code: 'USAGE_SUBJECT_AMBIGUOUS',
       message: 'Pass at most one of endUserId or organizationId.',
@@ -50,7 +50,7 @@ async function assertSubjectInApp(
       select: { id: true },
     });
     if (!org) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'ORGANIZATION_NOT_FOUND',
         message: `Organization "${subject.organizationId}" not found in this Application.`,
@@ -63,7 +63,7 @@ async function assertSubjectInApp(
       select: { id: true },
     });
     if (!eu) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'END_USER_NOT_FOUND',
         message: `End-user "${subject.endUserId}" not found in this Application.`,

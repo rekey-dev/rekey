@@ -12,7 +12,7 @@
 
 import type { UsageMeter, UsageRecord } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { RelipayError } from '../../lib/error.js';
+import { RekeyError } from '../../lib/error.js';
 import { entitlementsService } from '../billing/entitlements.service.js';
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$/;
@@ -49,7 +49,7 @@ export const usageService = {
     unit: string;
   }): Promise<UsageMeter> {
     if (!SLUG_RE.test(args.slug)) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'USAGE_METER_SLUG_INVALID',
         message: `Meter slug "${args.slug}" must be lowercase alphanumerics + - / _.`,
@@ -60,7 +60,7 @@ export const usageService = {
       return await prisma.usageMeter.create({ data: args });
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
-        throw new RelipayError({
+        throw new RekeyError({
           statusCode: 409,
           code: 'USAGE_METER_SLUG_TAKEN',
           message: `A meter with slug "${args.slug}" already exists.`,
@@ -76,7 +76,7 @@ export const usageService = {
       where: { applicationId_slug: { applicationId, slug } },
     });
     if (!meter) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'USAGE_METER_NOT_FOUND',
         message: `Meter "${slug}" not found.`,
@@ -96,7 +96,7 @@ export const usageService = {
       where: { applicationId_slug: { applicationId, slug } },
     });
     if (!meter) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'USAGE_METER_NOT_FOUND',
         message: `Meter "${slug}" not found.`,
@@ -125,7 +125,7 @@ export const usageService = {
       where: { applicationId_slug: { applicationId: args.applicationId, slug: args.meterSlug } },
     });
     if (!meter) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'USAGE_METER_NOT_FOUND',
         message: `Meter "${args.meterSlug}" not found in this application.`,
@@ -133,7 +133,7 @@ export const usageService = {
       });
     }
     if (!meter.active) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 400,
         code: 'USAGE_METER_INACTIVE',
         message: `Meter "${args.meterSlug}" is currently inactive — records are not accepted.`,
@@ -201,7 +201,7 @@ export const usageService = {
             });
             const used = agg._sum.quantity ?? 0;
             if (used + args.quantity > included) {
-              throw new RelipayError({
+              throw new RekeyError({
                 statusCode: 402,
                 code: 'USAGE_QUOTA_EXCEEDED',
                 message: `Included quota for meter "${args.meterSlug}" exhausted: ${used}/${included} units used this period, cannot add ${args.quantity}.`,
@@ -232,7 +232,7 @@ export const usageService = {
       where: { applicationId_slug: { applicationId: args.applicationId, slug: args.meterSlug } },
     });
     if (!meter) {
-      throw new RelipayError({
+      throw new RekeyError({
         statusCode: 404,
         code: 'USAGE_METER_NOT_FOUND',
         message: `Meter "${args.meterSlug}" not found.`,

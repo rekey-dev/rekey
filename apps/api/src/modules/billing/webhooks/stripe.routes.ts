@@ -44,7 +44,7 @@ export async function stripeWebhookRoutes(app: FastifyInstance): Promise<void> {
           '**No bearer auth — the provider signature IS the authentication.** Do not send an ' +
           '`Authorization` header; the request is authenticated by verifying the raw body ' +
           "against the Application's own webhook signing secret. `security: []` here means " +
-          '"no ReliPay credential", not "unprotected".',
+          '"no Rekey credential", not "unprotected".',
         params: { type: 'object', properties: { slug: { type: 'string' } }, required: ['slug'] },
       },
     },

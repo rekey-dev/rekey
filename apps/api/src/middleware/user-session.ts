@@ -3,7 +3,7 @@
  *
  * Used in addition to `requireApiKey` on routes that act on behalf of a
  * specific end-user (e.g. `GET /api/v1/users/me`). The calling server
- * passes the user's JWT in `X-Relipay-User-Token` (separate header from
+ * passes the user's JWT in `X-Rekey-User-Token` (separate header from
  * `Authorization`, which carries the Application secret key).
  *
  * **Cross-application guard.** The JWT carries `applicationId`. We require
@@ -15,7 +15,7 @@
  */
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import { RelipayError } from '../lib/error.js';
+import { RekeyError } from '../lib/error.js';
 import { verifyUserAccessTokenAnyAlg } from '../lib/jwt.js';
 import { authService, type PublicEndUser } from '../modules/auth/auth.service.js';
 
@@ -32,7 +32,7 @@ declare module 'fastify' {
   }
 }
 
-const TOKEN_HEADER = 'x-relipay-user-token';
+const TOKEN_HEADER = 'x-rekey-user-token';
 
 export async function requireUserSession(
   request: FastifyRequest,
@@ -40,7 +40,7 @@ export async function requireUserSession(
 ): Promise<void> {
   if (!request.application) {
     // Programming error — this hook must run after `requireApiKey`.
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 500,
       code: 'INTERNAL_ERROR',
       message: 'requireUserSession ran without an Application on the request.',
@@ -51,11 +51,11 @@ export async function requireUserSession(
   const tokenHeader = request.headers[TOKEN_HEADER];
   const presented = typeof tokenHeader === 'string' ? tokenHeader : '';
   if (!presented) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 401,
       code: 'USER_TOKEN_MISSING',
-      message: 'This endpoint requires an X-Relipay-User-Token header (the user JWT).',
-      fix: 'After sign-in, pass the returned `token` to ReliPay via the X-Relipay-User-Token header.',
+      message: 'This endpoint requires an X-Rekey-User-Token header (the user JWT).',
+      fix: 'After sign-in, pass the returned `token` to Rekey via the X-Rekey-User-Token header.',
     });
   }
 
@@ -69,7 +69,7 @@ export async function requireUserSession(
     request.application.tokenGeneration,
   );
   if (!claims) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 401,
       code: 'USER_TOKEN_INVALID',
       message: 'The user token is invalid, expired, or signed with a different secret.',
@@ -80,7 +80,7 @@ export async function requireUserSession(
   if (claims.applicationId !== request.application.id) {
     // The token was issued by a different Application — refuse to act on it
     // even if the JWT signature is valid. This is the cross-tenant guard.
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 401,
       code: 'USER_TOKEN_WRONG_APPLICATION',
       message: 'The user token belongs to a different application.',
@@ -94,7 +94,7 @@ export async function requireUserSession(
   // runs through here, so a single check makes TEST users invisible to live
   // keys and vice versa — even with a perfectly valid user JWT.
   if (request.dataMode && endUser.mode !== request.dataMode) {
-    throw new RelipayError({
+    throw new RekeyError({
       statusCode: 403,
       code: 'DATA_MODE_MISMATCH',
       message:

@@ -4,7 +4,7 @@
  * that opted into `authConfig.tokenAlg = "RS256"`.
  *
  * Public + unauthenticated by design: it serves only PUBLIC key material,
- * and offline verifiers (API gateways, edge middleware, @relipay/node's
+ * and offline verifiers (API gateways, edge middleware, @rekey.dev/node's
  * `verifyAccessToken`) must reach it without credentials. Registered at the
  * root (no /api/v1 prefix) — the well-known path is a fixed location per
  * RFC 8615.
