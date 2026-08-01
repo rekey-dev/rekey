@@ -9,6 +9,7 @@ import {
   type PlanRow,
 } from '@/lib/api';
 import { SavedBanner } from '@/components/SavedBanner';
+import { keyPrefixFor } from '@/components/EnvironmentBadge';
 
 /**
  * Application overview — the landing page when an operator picks an
@@ -158,7 +159,8 @@ export default async function ApplicationOverviewPage({
               <Link href={`/applications/${id}/api-keys`} className="text-[var(--color-fg)] hover:underline">
                 Mint an API key
               </Link>{' '}
-              and drop it into your server: <code className="font-mono text-xs">RELIPAY_SECRET=rp_live_…</code>
+              and drop it into your server:{' '}
+              <code className="font-mono text-xs">REKEY_SECRET={keyPrefixFor(app.environment)}…</code>
             </li>
             <li>
               Wire <code className="font-mono text-xs">@rekey.dev/node</code> on your backend (or one of the React/Next SDKs on the frontend).

@@ -12,9 +12,13 @@
  *   2. **User JWT** (per call). Once signed in, per-user reads use the short
  *      lived access token via the `X-Rekey-User-Token` header.
  *
- * The secret key (`rp_live_*`) NEVER belongs in the browser — money and
- * account-management routes reject the publishable key and require it
- * server-side via `@rekey.dev/node`.
+ * The secret key (`rp_live_*` / `rp_test_*`) NEVER belongs in the browser. Note
+ * what that does and does not rule out: the self-service tier — checkout,
+ * cancel own subscription, own entitlements, own payments, own orgs — runs on
+ * the publishable key PLUS the user's own token and acts only on that user's
+ * resources, which is what makes a backendless portal possible. What stays
+ * secret-key-only is the operator/tenant surface and any read across users; use
+ * `@rekey.dev/node` from your server for those.
  *
  * `apiUrl` is required. Bring-your-own fetch is supported for SSR/SSE shims
  * and tests.
@@ -66,7 +70,7 @@ export interface PortalPaymentDto {
   receiptUrl: string | null;
 }
 
-export interface ReliPayBrowserConfig {
+export interface RekeyBrowserConfig {
   apiUrl: string;
   /**
    * Publishable key (`rp_pub_…`) for this Application. Required to use the
@@ -91,7 +95,7 @@ export class RekeyBrowserClient {
   private readonly publishableKey: string | undefined;
   private readonly fetchImpl: typeof fetch;
 
-  constructor(config: ReliPayBrowserConfig) {
+  constructor(config: RekeyBrowserConfig) {
     if (!config.apiUrl) {
       throw new RekeyError({
         code: 'CONFIG_MISSING_API_URL',

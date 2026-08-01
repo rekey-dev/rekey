@@ -1,6 +1,8 @@
 # `@rekey.dev/nextjs`
 
-[Rekey](https://relipay.dev) helpers for the **Next.js App Router** (14/15): route-gating middleware, server-side `auth()` / `signIn()` / `signUp()` / `signOut()`, and an httpOnly cookie session — built on top of [`@rekey.dev/node`](../sdk-node).
+> **ReliPay is now Rekey.** This package was previously published as the equivalent `@relipay/*` package, which is deprecated. Env vars renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read — set `REKEY_*`). relipay.dev (the old domain) will redirect to rekey.dev after the domain migration.
+
+[Rekey](https://rekey.dev) helpers for the **Next.js App Router** (14/15): route-gating middleware, server-side `auth()` / `signIn()` / `signUp()` / `signOut()`, and an httpOnly cookie session — built on top of [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node).
 
 > **For AI coding agents:** start at [AGENTS.md](./AGENTS.md).
 
@@ -15,16 +17,16 @@ Two credentials, two homes. The **secret key** powers the server (`auth()`, API 
 
 ```bash
 # Server-only (never NEXT_PUBLIC_):
-RELIPAY_URL=https://api.relipay.dev
-RELIPAY_SECRET=rp_live_…              # Application secret key (Panel → Application → API Keys)
+REKEY_URL=https://api.rekey.dev
+REKEY_SECRET=rp_live_…              # Application secret key (Panel → Application → API Keys)
 
 # Browser-safe (exposed to client bundle):
-NEXT_PUBLIC_RELIPAY_URL=https://api.relipay.dev
-NEXT_PUBLIC_RELIPAY_PUBLIC_KEY=rp_pub_…   # Application publishable key
+NEXT_PUBLIC_REKEY_URL=https://api.rekey.dev
+NEXT_PUBLIC_REKEY_PUBLIC_KEY=rp_pub_…   # Application publishable key
 ```
 
 > **Never ship the secret key to the browser.** `@rekey.dev/nextjs/server` pulls
-> Node-only deps and reads `RELIPAY_SECRET`; importing it from a Client
+> Node-only deps and reads `REKEY_SECRET`; importing it from a Client
 > Component or middleware will fail to bundle (that's the safety net working).
 > Browser code uses the **publishable** key via `@rekey.dev/nextjs/client`.
 
@@ -34,7 +36,7 @@ NEXT_PUBLIC_RELIPAY_PUBLIC_KEY=rp_pub_…   # Application publishable key
 | --- | --- | --- | --- |
 | `@rekey.dev/nextjs/middleware` | **Edge** | none (cookie presence) | Gate routes in `middleware.ts` (cheap, no network). |
 | `@rekey.dev/nextjs/server` | **Node** | secret key | `auth()`, `signIn()`, `signUp()`, `createSession()` + your `@rekey.dev/node` API calls. |
-| `@rekey.dev/nextjs/client` | **Browser** | publishable key | `relipayBrowser()` — sign-in/up, magic-link, passkey, license verify, plans from a Client Component, no backend round-trip. |
+| `@rekey.dev/nextjs/client` | **Browser** | publishable key | `rekeyBrowser()` — sign-in/up, magic-link, passkey, license verify, plans from a Client Component, no backend round-trip. |
 
 The split keeps the Edge bundle small and the secret key out of the browser — the `/client` module only imports the publishable-key browser client.
 
@@ -50,9 +52,9 @@ Both are valid; pick per app:
 **1. Gate routes — `middleware.ts`:**
 
 ```ts
-import { relipayMiddleware } from '@rekey.dev/nextjs/middleware';
+import { rekeyMiddleware } from '@rekey.dev/nextjs/middleware';
 
-export default relipayMiddleware({
+export default rekeyMiddleware({
   signInUrl: '/login',
   publicRoutes: ['/', '/login', '/signup', '/forgot-password', '/api/auth'],
 });
@@ -91,7 +93,7 @@ export async function signInAction(fd: FormData) {
 }
 ```
 
-For everything `@rekey.dev/nextjs` doesn't cover (billing, credits, usage, orgs, password reset, sessions), construct a [`@rekey.dev/node`](../sdk-node) client in a server-only module and call it from server actions / route handlers — passing `session.accessToken` for per-user reads.
+For everything `@rekey.dev/nextjs` doesn't cover (billing, credits, usage, orgs, password reset, sessions), construct a [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node) client in a server-only module and call it from server actions / route handlers — passing `session.accessToken` for per-user reads.
 
 ## Publishable login → secret-key API routes
 
@@ -101,7 +103,7 @@ The browser logs the user in with the **publishable** key; the resulting tokens 
 
 ```tsx
 'use client';
-import { relipayBrowser } from '@rekey.dev/nextjs/client';
+import { rekeyBrowser } from '@rekey.dev/nextjs/client';
 import { useRouter } from 'next/navigation';
 
 export function LoginForm() {
@@ -110,7 +112,7 @@ export function LoginForm() {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     // signUp for register; signIn for login — both publishable-key authorized.
-    const out = await relipayBrowser().signIn({
+    const out = await rekeyBrowser().signIn({
       email: String(fd.get('email')),
       password: String(fd.get('password')),
     });
@@ -158,8 +160,8 @@ import { auth } from '@rekey.dev/nextjs/server';
 import { Rekey } from '@rekey.dev/node';
 
 const rekey = new Rekey({
-  apiUrl: process.env.RELIPAY_URL!,
-  secretKey: process.env.RELIPAY_SECRET!,   // secret key — server-only
+  apiUrl: process.env.REKEY_URL!,
+  secretKey: process.env.REKEY_SECRET!,   // secret key — server-only
 });
 
 export async function GET() {
@@ -170,14 +172,14 @@ export async function GET() {
 }
 ```
 
-After this, `middleware.ts` and `auth()` work identically to the server-action path — the only difference is *where the login call ran* (browser vs server). Plans + license verification can also run straight from the browser: `relipayBrowser().getPlans()`, `relipayBrowser().verifyLicense({ key, machineFingerprint })`.
+After this, `middleware.ts` and `auth()` work identically to the server-action path — the only difference is *where the login call ran* (browser vs server). Plans + license verification can also run straight from the browser: `rekeyBrowser().getPlans()`, `rekeyBrowser().verifyLicense({ key, machineFingerprint })`.
 
 ## Core API
 
 ### `@rekey.dev/nextjs/middleware`
 | Export | Description |
 | --- | --- |
-| `relipayMiddleware({ publicRoutes?, signInUrl? })` | Middleware that lets `publicRoutes` through and redirects unauthenticated requests to `signInUrl?next=…`. Gates on cookie *presence*; validity is checked deeper via `auth()`. |
+| `rekeyMiddleware({ publicRoutes?, signInUrl? })` | Middleware that lets `publicRoutes` through and redirects unauthenticated requests to `signInUrl?next=…`. Gates on cookie *presence*; validity is checked deeper via `auth()`. |
 | `MiddlewareConfig` | Type for the config object. |
 
 ### `@rekey.dev/nextjs/server`
@@ -194,8 +196,8 @@ After this, `middleware.ts` and `auth()` work identically to the server-action p
 ### `@rekey.dev/nextjs/client` (browser — publishable key)
 | Export | Description |
 | --- | --- |
-| `relipayBrowser({ apiUrl?, publishableKey? })` | Browser client configured from `NEXT_PUBLIC_RELIPAY_URL` + `NEXT_PUBLIC_RELIPAY_PUBLIC_KEY` (or overrides). Methods: `signIn`, `signUp`, `mfaVerify`, `requestMagicLink`, `verifyMagicLink`, `startPasskeyAuthentication`, `verifyPasskeyAuthentication`, `getPlans`, `verifyLicense`. |
-| `RelipayBrowserClient` | The underlying class, re-exported from `@rekey.dev/react`. |
+| `rekeyBrowser({ apiUrl?, publishableKey? })` | Browser client configured from `NEXT_PUBLIC_REKEY_URL` + `NEXT_PUBLIC_REKEY_PUBLIC_KEY` (or overrides). Methods: `signIn`, `signUp`, `mfaVerify`, `requestMagicLink`, `verifyMagicLink`, `startPasskeyAuthentication`, `verifyPasskeyAuthentication`, `getPlans`, `verifyLicense`. |
+| `RekeyBrowserClient` | The underlying class, re-exported from `@rekey.dev/react`. |
 
 ### `@rekey.dev/nextjs` (root)
 | Export | Description |
@@ -207,8 +209,8 @@ After this, `middleware.ts` and `auth()` work identically to the server-action p
 
 Two httpOnly cookies, set by `signIn` / `signUp`:
 
-- `relipay_access` — 15 min (matches access-token lifetime).
-- `relipay_refresh` — 30 days.
+- `rekey_access` — 15 min (matches access-token lifetime).
+- `rekey_refresh` — 30 days.
 
 Both are `sameSite=lax` and `secure` in production only (so local `http://localhost` dev still works).
 
@@ -223,8 +225,8 @@ Both are `sameSite=lax` and `secure` in production only (so local `http://localh
 
 ## Links
 
-- Docs: [/docs](https://relipay.dev/docs) · [SDK guide](https://relipay.dev/docs/sdk) · [API reference](https://relipay.dev/docs/api) · [agent prompt](https://relipay.dev/docs/prompt)
-- Example: [`examples/nextjs-saas`](../../examples/nextjs-saas) — a complete App Router SaaS using this package end-to-end.
+- Docs: [/docs](https://rekey.dev/docs) · [SDK guide](https://rekey.dev/docs/sdk) · [API reference](https://rekey.dev/docs/api) · [agent prompt](https://rekey.dev/docs/prompt)
+- Example: [`examples/nextjs-saas`](https://github.com/rekey-dev/rekey/blob/main/examples/nextjs-saas) — a complete App Router SaaS using this package end-to-end.
 
 ## License
 

@@ -27,9 +27,9 @@ import { RekeyBrowserClient } from '@rekey.dev/react';
 export { RekeyBrowserClient } from '@rekey.dev/react';
 
 export interface RekeyBrowserOptions {
-  /** Override the API URL. Defaults to `process.env.NEXT_PUBLIC_RELIPAY_URL`. */
+  /** Override the API URL. Defaults to `process.env.NEXT_PUBLIC_REKEY_URL`. */
   apiUrl?: string;
-  /** Override the publishable key. Defaults to `process.env.NEXT_PUBLIC_RELIPAY_PUBLIC_KEY`. */
+  /** Override the publishable key. Defaults to `process.env.NEXT_PUBLIC_REKEY_PUBLIC_KEY`. */
   publishableKey?: string;
 }
 
@@ -60,16 +60,16 @@ export function rekeyBrowser(opts: RekeyBrowserOptions = {}): RekeyBrowserClient
   const usingEnvDefaults = opts.apiUrl === undefined && opts.publishableKey === undefined;
   if (usingEnvDefaults && _cached) return _cached;
 
-  const apiUrl = opts.apiUrl ?? process.env.NEXT_PUBLIC_RELIPAY_URL;
-  const publishableKey = opts.publishableKey ?? process.env.NEXT_PUBLIC_RELIPAY_PUBLIC_KEY;
+  const apiUrl = opts.apiUrl ?? process.env.NEXT_PUBLIC_REKEY_URL;
+  const publishableKey = opts.publishableKey ?? process.env.NEXT_PUBLIC_REKEY_PUBLIC_KEY;
   if (!apiUrl) {
     throw new Error(
-      '@rekey.dev/nextjs/client: NEXT_PUBLIC_RELIPAY_URL is not set (or pass { apiUrl }).',
+      '@rekey.dev/nextjs/client: NEXT_PUBLIC_REKEY_URL is not set (or pass { apiUrl }).',
     );
   }
   if (!publishableKey) {
     throw new Error(
-      '@rekey.dev/nextjs/client: NEXT_PUBLIC_RELIPAY_PUBLIC_KEY is not set (or pass { publishableKey }). ' +
+      '@rekey.dev/nextjs/client: NEXT_PUBLIC_REKEY_PUBLIC_KEY is not set (or pass { publishableKey }). ' +
         'Copy the publishable key (rp_pub_…) from Panel → Application. Never put the secret key in the browser.',
     );
   }

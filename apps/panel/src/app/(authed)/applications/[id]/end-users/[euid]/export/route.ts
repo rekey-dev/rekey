@@ -17,9 +17,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string; euid: string }> },
 ): Promise<Response> {
   const { id, euid } = await params;
-  const base = process.env.RELIPAY_URL?.replace(/\/$/, '');
+  const base = process.env.REKEY_URL?.replace(/\/$/, '');
   if (!base) {
-    return new Response('RELIPAY_URL is not configured on the panel deployment.', { status: 500 });
+    return new Response('REKEY_URL is not configured on the panel deployment.', { status: 500 });
   }
   const jar = await cookies();
   const access = jar.get(ACCESS_COOKIE)?.value;

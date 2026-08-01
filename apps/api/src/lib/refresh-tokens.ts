@@ -45,6 +45,13 @@ export interface IssueRefreshTokenOptions {
   kind?: 'session' | 'mcp';
   /** For `kind: 'mcp'` — the OAuth client_id the token is bound to. */
   clientId?: string | null;
+  /**
+   * For `kind: 'mcp'` — the scopes granted at consent (space-separated,
+   * RFC 6749). The refresh grant re-issues this exact string, so a chain can
+   * never widen (or drop) what the end-user approved. Sessions have no scope
+   * and leave it null.
+   */
+  scope?: string | null;
   /** Active organization for this session — re-emitted as the `oid` claim on refresh. */
   activeOrganizationId?: string | null;
 }
@@ -77,6 +84,7 @@ export async function issueRefreshToken(
       ip,
       kind: options.kind ?? 'session',
       clientId: options.clientId ?? null,
+      scope: options.scope ?? null,
       activeOrganizationId: options.activeOrganizationId ?? null,
     },
   });
@@ -143,9 +151,12 @@ export async function rotateRefreshToken(
         // the rotation transaction is keyed off `presented.id`.
         userAgent: presented.userAgent,
         ip: presented.ip,
-        // Carry the surface + client binding forward across rotations.
+        // Carry the surface + client binding forward across rotations, and the
+        // granted scope with them — a rotation is a re-issue of the SAME grant,
+        // so it must not be an opportunity to change what it covers.
         kind: presented.kind,
         clientId: presented.clientId,
+        scope: presented.scope,
         // Carry the active org forward so it survives refresh (the refresh
         // handler re-confirms membership and clears it if the user left).
         activeOrganizationId: presented.activeOrganizationId,
@@ -185,10 +196,15 @@ export async function revokeAllForEndUser(endUserId: string): Promise<number> {
 }
 
 /**
- * Revoke every active refresh token for an Application — the per-app session
- * kill-switch. Pair with an `Application.tokenGeneration` bump so live access
- * tokens (signed with the old derived key) also die immediately, not just the
- * refresh tokens. Returns the count revoked.
+ * Revoke every active refresh token for an Application. Returns the count revoked.
+ *
+ * UNUSED — do not reach for this as the session kill-switch. That is
+ * `applicationsService.rotateSessions` (route `POST /tenant/applications/:id/
+ * rotate-sessions`), which bumps `Application.tokenGeneration` AND revokes the
+ * refresh tokens in ONE transaction. Doing the two halves separately is the
+ * failure mode worth avoiding: revoke without the bump and outstanding access
+ * tokens keep working for up to 15 minutes; bump without the revoke and clients
+ * refresh straight back in.
  */
 export async function revokeAllForApplication(applicationId: string): Promise<number> {
   const result = await prisma.refreshToken.updateMany({

@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { Modal } from '@/components/Modal';
@@ -43,7 +42,6 @@ async function createMeter(applicationId: string, formData: FormData): Promise<v
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/usage`);
   redirect(`/applications/${applicationId}/usage?created=${slug}`);
 }
 
@@ -58,7 +56,6 @@ async function setMeterActive(
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/usage-meters/${encodeURIComponent(slug)}`,
     body: { active },
   });
-  revalidatePath(`/applications/${applicationId}/usage`);
   redirect(`/applications/${applicationId}/usage`);
 }
 
@@ -68,7 +65,6 @@ async function deleteMeter(applicationId: string, slug: string): Promise<void> {
     method: 'DELETE',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/usage-meters/${encodeURIComponent(slug)}`,
   });
-  revalidatePath(`/applications/${applicationId}/usage`);
   redirect(`/applications/${applicationId}/usage`);
 }
 

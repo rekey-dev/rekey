@@ -61,8 +61,9 @@ describe('PayPal webhook', () => {
     liveKey = key.rawKey;
 
     // BYO PayPal creds so the webhook route resolves + checkout can route to paypal.
-    await billingCredentialsService.upsertPaypal(
+    await billingCredentialsService.upsertCredentials(
       applicationId,
+      'paypal',
       { clientId: 'cid', clientSecret: 'csecret', webhookId: 'WH-TEST' },
       { enabled: true, mode: 'test' },
     );

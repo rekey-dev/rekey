@@ -24,7 +24,7 @@ export async function adminRequest<T>(args: RequestArgs): Promise<T> {
     fail(args.ctx, {
       code: 'CLI_API_URL_MISSING',
       message: 'No Rekey API URL configured.',
-      fix: 'Set RELIPAY_URL in your environment, or pass --api-url=https://your-rekey.example.',
+      fix: 'Set REKEY_URL in your environment, or pass --api-url=https://your-rekey.example.',
     });
   }
   if (!args.ctx.adminKey) {

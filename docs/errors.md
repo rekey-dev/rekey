@@ -9,7 +9,7 @@ Every error from a Rekey API or SDK has the same shape:
     "code": "TENANT_NOT_FOUND",
     "message": "Tenant \"ckxxx\" not found.",
     "fix": "List tenants with GET /api/v1/admin/tenants to see valid ids.",
-    "docs": "https://relipay.dev/errors/TENANT_NOT_FOUND",
+    "docs": "https://rekey.dev/errors/TENANT_NOT_FOUND",
     "requestId": "9f1c0a3e-8b47-4d21-9f0e-2c5a7b13d840"
   }
 }
@@ -25,9 +25,9 @@ Retryable errors carry a `Retry-After` header **and** `error.retryAfterSeconds` 
 
 ## How errors propagate
 
-- Service code throws `RelipayError({ statusCode, code, message, fix, docs? })`.
+- Service code throws `RekeyError({ statusCode, code, message, fix, docs? })`.
 - Fastify's global error handler (`lib/error.ts`) turns it into the envelope above.
-- `@rekey.dev/node` decodes the envelope into a typed `RelipayError` with `err.code`, `err.fix`, `err.docs`.
+- `@rekey.dev/node` decodes the envelope into a typed `RekeyError` with `err.code`, `err.fix`, `err.docs`.
 
 ## Authoring guidelines
 
@@ -47,7 +47,7 @@ throw new Error('not found');
 Good error:
 
 ```ts
-throw new RelipayError({
+throw new RekeyError({
   statusCode: 404,
   code: 'PLAN_NOT_FOUND',
   message: `Plan "${slug}" not found in application "${appId}".`,
@@ -92,7 +92,11 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 |---|---|---|---|
 | `ADMIN_AUTH_MISSING` | 401 | `/api/v1/admin/*` called without `Authorization: Bearer <SUPER_ADMIN_KEY>`. | Send the deployment's `SUPER_ADMIN_KEY` as a bearer token. |
 | `ADMIN_AUTH_INVALID` | 401 | The presented admin key doesn't match `SUPER_ADMIN_KEY`. | Check the env value on the deployment you're actually targeting. |
+| `PANEL_URL_NOT_CONFIGURED` | 503 | Operator MCP consent needs `PANEL_URL`, which has no default — a default would send your operators to Rekey's panel. | Set `PANEL_URL` to your panel origin on the API and restart. |
+| `ADMIN_IP_NOT_ALLOWED` | 403 | This deployment sets `ADMIN_IP_ALLOWLIST` and the request came from an address outside it. Raised *before* the key is examined, so it says nothing about whether the key was valid. | Call from an allowed address, or add yours to `ADMIN_IP_ALLOWLIST` and restart the API. Behind a proxy, check `TRUSTED_PROXIES` — otherwise every request appears to come from the proxy. |
 | `TENANT_NOT_FOUND` | 404 | Tenant id doesn't exist (admin routes, workspace lookups). | List tenants with `GET /api/v1/admin/tenants`. |
+| `TENANT_QUOTA_EXCEEDED` | 403 | Creating a **new** end-user would put the workspace over a limit set in `Tenant.limits` (see [concepts.md → Workspace limits](concepts.md#workspace-limits)). Existing end-users are unaffected — sign-in never returns this. | Raise the ceiling via `PUT /api/v1/admin/tenants/:id/limits` (super-admin only), or free capacity by deleting/erasing end-users. |
+| `INVALID_TENANT_LIMITS` | 400 | The `PUT /api/v1/admin/tenants/:id/limits` body has an unknown key or an out-of-range value. Unknown keys are rejected rather than ignored, so a typo can't silently leave a workspace uncapped. | Send only documented limit keys; `{}` clears every limit. |
 
 ### API keys & request auth
 
@@ -108,9 +112,7 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `API_KEY_LIMIT_REACHED` | 400 | Application already has 25 active keys. | Revoke unused keys before creating more. |
 | `API_KEY_NOT_FOUND` | 404 | Key id doesn't exist or belongs to a different Application. | List the Application's keys to find the right id. |
 | `API_KEY_EXPIRY_IN_PAST` | 400 | `expiresAt` on key creation is already in the past. | Pass a future timestamp or omit it. |
-| `DATA_MODE_MISMATCH` | 403 | A valid end-user JWT was presented through a secret key of the other test/live mode (test and live data are isolated — see [api-keys.md → Test mode](api-keys.md#test-mode)). | Use a key whose mode matches the user (`rp_test_…` for test users, `rp_live_…` for live users). |
 | `SIGNUP_REQUIRES_SECRET_KEY` | 403 | Sign-up was called with a publishable key on an Application whose signup posture is `secret_only`. | Call sign-up server-side with a secret key; keep the publishable key for browser sign-in. |
-| `TEST_API_KEYS_DISABLED` | 400 | Minting a test-mode API key while test keys are disabled on the deployment. | Mint a live key (`rp_live_…`). Billing test mode is configured separately. |
 
 ### Applications
 
@@ -132,7 +134,10 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `PASSWORD_BREACHED` | 400 | Password appears in known breach corpora (k-anonymity check). | Ask the user for a different password. |
 | `EMAIL_ALREADY_EXISTS` | 409 | Sign-up hit the `(applicationId, email)` unique constraint (also operator sign-up). | Route the user to sign-in / password reset instead. |
 | `INVALID_CREDENTIALS` | 401 | Sign-in failed (wrong email *or* wrong password — never disclosed which), or wrong `currentPassword` on change. | Show a generic "email or password is incorrect". |
-| `END_USER_ERASED` | 410 | The account was permanently erased on a GDPR data-subject request and can no longer authenticate. | Not recoverable — create a fresh account if the person returns. |
+| `EMAIL_NOT_VERIFIED` | 403 | The Application sets `authConfig.requireEmailVerification` and this end-user's address is still unconfirmed. Raised wherever a session would be minted — **sign-up** (the account IS created, and the verification mail IS sent; only the session is refused), sign-in, MFA verification, org switching and **refresh**. Always after a credential verified, so it is neither an account-existence oracle nor a failed attempt against the lockout. | Tell the user to click the link in their verification email. There is no session to re-send from (`POST /api/v1/auth/send-verification` needs one), so the ways back in are that email, a magic link if enabled, or an operator marking the address verified from the panel. Never show "wrong password". |
+| `END_USER_ERASED` | 410 | The account was permanently erased on a GDPR data-subject request and can no longer authenticate. The per-Application OAuth/OIDC surface enforces the same rule in the OAuth dialect instead: `invalid_grant` at the token endpoint, `invalid_token` at `/userinfo` and the MCP endpoint. | Not recoverable — create a fresh account if the person returns. |
+| `METADATA_KEY_RESERVED` | 400 | A metadata write named the reserved `oidc` key from an end-user session or a publishable key. That namespace holds the OIDC identity claims the Application asserts about the user, so only the operator may write it. | Store your own profile fields under any other key. To set claims, use a secret key or `PATCH /api/v1/tenant/applications/:id/end-users/:endUserId`. |
+| `METADATA_TOO_LARGE` | 400 | `EndUser.metadata` would exceed 16KB serialized. Enforced on every writer — sign-up, the self-service PATCH (measured *after* the merge) and the operator end-user routes. | Keep large values (files, documents, long text) in your own storage and store a reference here. |
 | `END_USER_NOT_FOUND` | 404 | EndUser id unknown, or belongs to a different Application than the calling secret key. | Verify the id and that you're using the right Application's key. |
 | `USER_TOKEN_MISSING` | 401 | Per-user endpoint called without the `X-Rekey-User-Token` header. | Pass the user's access JWT as the per-user argument in the SDK. |
 | `USER_TOKEN_INVALID` | 401 | User JWT malformed, expired, or signed with a different secret. | Refresh the session (`auth.refresh`) and retry once. |
@@ -199,7 +204,9 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `OAUTH_IDENTITY_WRONG_APPLICATION` | 401 | Provider account already linked under a different Application. | Fix the credential mix-up. |
 | `OAUTH_UNLINK_WOULD_LOCK_OUT` | 409 | Unlinking would leave the account with no sign-in method. | Add a password or another provider before unlinking. |
 | `INVALID_REDIRECT_URI` | 400 | MCP OAuth dynamic registration: `redirect_uris` empty, >20 entries, or a URI fails validation. | Register 1–20 valid redirect URIs. |
-| `MCP_NOT_FOUND` | 404 | No MCP server at this path. | Check the Application slug in the MCP URL. |
+| `CLIENT_REGISTRATION_DISABLED` | 403 | `POST /oauth/register` on an Application with `authConfig.dynamicClientRegistration = false`. The endpoint exists and the Application is real; the operator has closed registration, and `registration_endpoint` is absent from both discovery documents. | Ask the operator to register your redirect URIs and issue a `client_id`, or to re-open registration. |
+| `MCP_NOT_FOUND` | 404 | No MCP server at this path — the Application is missing, or neither `mcpEnabled` nor (for the shared OAuth endpoints) `oidcEnabled` is set. | Check the Application slug in the MCP URL, and the toggle. |
+| `OIDC_NOT_FOUND` | 404 | No OpenID Provider at this path (`/.well-known/openid-configuration`, `/oauth/userinfo`). The Application is missing or `oidcEnabled` is off. | Set `authConfig.oidcEnabled = true`, and check the slug. |
 | `OPERATOR_MCP_UNAUTHORIZED` | 401 | Operator MCP called without a PAT (`rp_op_…`) or OAuth access token. | Pass a valid operator credential. |
 | `MCP_GRANT_INVALID` | 400 | Operator-MCP consent POST (`/oauth/grant`) body didn't parse. | Send the OAuth params the authorize redirect carried, plus `tenant_id` and `approve`. |
 | `MCP_GRANT_INVALID_CLIENT` | 400 | Consent named an unknown `client_id`, or a `redirect_uri` that client never registered. Deliberately not a redirect — we don't bounce to an unvalidated URI. | The client must complete RFC 7591 registration first. |
@@ -215,9 +222,8 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `PROVIDER_CANCEL_FAILED` | 502 | Deleting an end-user was refused because the payment provider would not cancel their still-active subscription. The user was NOT deleted. | Cancel it in the provider dashboard, or fix the stored credentials, then retry. To satisfy an erasure request without waiting on the provider, use the erase endpoint — it tombstones the user and does not block. |
 | `BILLING_PROVIDER_SWITCH_BLOCKED` | 409 | User already has an active subscription on this plan via a different provider. | Cancel the existing subscription first, or keep the same provider. |
 | `BILLING_PROVIDER_NOT_AVAILABLE` | 400 | Checkout requested a provider that isn't enabled for this Application. | Omit `provider` (geo router picks) or use one from `billing.getProviders()`. |
-| `BILLING_MODE_MISMATCH` | 400 | Checkout started with a test-mode secret key, but the configured billing credentials are live-only (test checkouts must use a sandbox provider account — see [api-keys.md → Test mode](api-keys.md#test-mode)). | Store sandbox credentials (`mode: test`) for a provider in the panel, or use a live key. |
-| `BILLING_PROVIDER_NOT_CONFIGURED` | 400 | The configured provider has no usable setup (e.g. PayPal/Razorpay without credentials). | Configure BYO credentials for the provider in the panel. |
-| `BILLING_CREDENTIALS_NOT_CONFIGURED` | 400/503 | Webhook auto-registration without credentials (400), or a provider webhook arrived for an Application with no BYO credentials / webhook secret (503). | Set the provider credentials + webhook secret in the panel. |
+| `BILLING_CREDENTIALS_MODE_CONTRADICTED` | 400 | The submitted `mode` disagrees with what the credential itself says (e.g. an `sk_live_…` key sent as `mode: test`). The key decides — the provider SDK authenticates with the key, not with our label. | Send the credentials for the mode you meant, or omit `mode` and let it be read from the key. |
+| `BILLING_CREDENTIALS_NOT_CONFIGURED` | 400/503 | No credentials for the provider — on checkout, on webhook auto-registration (400), or when a provider webhook arrives for an Application with no BYO credentials / webhook secret (503). There is no stub fallback in any environment. | Set the provider credentials + webhook secret in the panel. |
 | `BILLING_CREDENTIALS_INVALID` | 400 | Submitted credentials fail shape validation (wrong fields for the provider). | Match the documented per-provider body shape. |
 | `BILLING_CREDENTIALS_DECRYPT_FAILED` | 500 | Stored credentials can't be decrypted (e.g. `ENCRYPTION_KEY` changed). | Re-save the credentials; keep `ENCRYPTION_KEY` stable. |
 | `BILLING_CREDENTIALS_PROVIDER_MISMATCH` / `BILLING_CREDENTIALS_SHAPE_INVALID` | 500 | Stored credentials are internally inconsistent. | Re-save the provider credentials. |
@@ -225,6 +231,7 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `BILLING_WEBHOOK_BASE_NOT_PUBLIC` | 400 | Webhook auto-config needs a public base URL but the deployment's base is private/localhost. | Use a public URL (or a tunnel in dev). |
 | `BILLING_WEBHOOK_REGISTRATION_FAILED` | 502 | The provider's API rejected webhook registration. | Read the message; fix credentials/permissions at the provider, retry. |
 | `BILLING_PROVIDER_UNKNOWN` | 400 | A provider name that isn't in the module registry at all (distinct from `BILLING_PROVIDER_NOT_AVAILABLE`, which is a real provider this Application hasn't enabled). | Use a registered provider name. |
+| `BILLING_DISCOUNT_UNSUPPORTED` | 400 | Checkout carried a `couponCode`, but the provider it routed to cannot apply a discount on that flow (PayPal and Razorpay: recurring subscriptions). Nothing is charged and nothing is redeemed. | Retry without the coupon, or pass an explicit `provider` that supports it — see `capabilities.discounts` in `GET /billing/providers`. |
 | `SUBSCRIPTION_NOT_FOUND` | 404 | Subscription id unknown in this Application/workspace. | List subscriptions to get a valid id. |
 
 ### Billing — plans & entitlements
@@ -249,13 +256,17 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 |---|---|---|---|
 | `COUPON_NOT_FOUND` | 404 | Code unknown for this Application (or no active auto-apply match). | Check the code; list coupons in the panel. |
 | `COUPON_CODE_INVALID` | 400 | Create — code fails the regex (alphanumerics + `_-`, ≤ 40 chars). | Fix the code. |
-| `COUPON_AMOUNT_INVALID` | 400 | Create — `amountOff` < 0, or PERCENT > 10000 (basis-points × 10). | Fix the amount. |
+| `COUPON_AMOUNT_INVALID` | 400 | Create — `amountOff` < 0, or PERCENT > 10000 (basis points). | Fix the amount. |
 | `COUPON_CODE_TAKEN` | 409 | Create — `(applicationId, code)` collision. | Pick another code. |
 | `COUPON_INACTIVE` | 400 | Validate — `active === false`. | Surface "coupon not valid" to the user. |
 | `COUPON_NOT_YET_STARTED` / `COUPON_EXPIRED` | 400 | Validate — outside the `startsAt`/`endsAt` window. | Surface to the user. |
 | `COUPON_NOT_APPLICABLE` | 400 | Validate — plan slug not in the coupon's `planSlugs`. | Surface to the user. |
 | `COUPON_CURRENCY_MISMATCH` | 400 | Validate — AMOUNT coupon in a different currency than the plan. | Surface to the user. |
 | `COUPON_REDEMPTION_LIMIT_REACHED` / `COUPON_USER_LIMIT_REACHED` | 400 | Validate — total / per-user redemption cap hit. | Surface to the user. |
+| `COUPON_NO_DISCOUNT` | 400 | Checkout — the discount rounds down to zero at this price (a small PERCENT coupon on a cheap plan). | Use a coupon worth at least one unit of the plan currency. Nothing is redeemed. |
+| `COUPON_FULL_DISCOUNT_UNSUPPORTED` | 400 | Checkout — the coupon covers 100% of a ONE-TIME purchase, and no provider will check out a zero-value order. | Use a smaller coupon, or grant the credits/licence directly. (A 100% coupon on a recurring plan is fine.) |
+| `COUPON_DISCOUNT_EXCEEDS_PRICE` | 500 | Checkout — the discount came out larger than the plan. This is a Rekey bug; the coupon service is supposed to clamp it. | Report it with the coupon code and plan slug. |
+| `COUPON_PROVIDER_REJECTED` | 502 | Checkout — the payment provider refused to create the ad-hoc discount object (currency or amount restrictions on the operator's account). Nothing is charged and nothing is redeemed. | Retry without the coupon, or check the provider account. Previously surfaced as an opaque 500. |
 
 ### Usage (metering)
 
@@ -343,6 +354,7 @@ Two directions — see the "Webhooks — two directions" section of [billing.md]
 | `NOT_A_MEMBER` | 403 | switch-workspace targeted a tenant the user doesn't belong to. | Pick a workspace from the memberships list. |
 | `TENANT_USER_NOT_FOUND` | 404 | Operator account lookup miss. | Check the id. |
 | `WORKSPACE_NAME_INVALID` | 400 | Workspace name not 2–80 characters. | Fix the name. |
+| `WORKSPACE_CREATION_DISABLED` | 403 | This deployment sets `WORKSPACE_CREATION=disabled`, so a signed-in operator cannot create additional workspaces. Creation only — switching, listing and renaming are unaffected. | Ask the deployment administrator to create the workspace, or set `WORKSPACE_CREATION=open` (the default) and restart the API. |
 | `INVITE_TARGET_ALREADY_MEMBER` | 409 | Inviting someone already in the workspace. | Treat as success in UI. |
 | `INVITATION_NOT_FOUND` / `INVITATION_REVOKED` / `INVITATION_ALREADY_ACCEPTED` / `INVITATION_EXPIRED` / `INVITATION_NOT_USABLE` | 404 / 400 | Invitation lookup or consumption failures. | Re-issue the invitation. |
 | `INVITATION_EMAIL_MISMATCH` | 403 | Invitation was issued to a different email than the accepting account. | Sign in with the invited address. |
@@ -385,7 +397,7 @@ Raised locally by the SDK before any network call:
 
 | Code | When | How to handle |
 |---|---|---|
-| `CONFIG_MISSING_API_URL` | Constructor — `apiUrl` was empty. | Set `RELIPAY_URL`. |
+| `CONFIG_MISSING_API_URL` | Constructor — `apiUrl` was empty. | Set `REKEY_URL`. |
 | `CONFIG_INVALID_SECRET_KEY` | Constructor — `secretKey` didn't start with `rp_`. | Use the Application secret key, not the admin key or public key. |
 
 Add new codes here when you introduce them. The list is the spec for client compatibility.

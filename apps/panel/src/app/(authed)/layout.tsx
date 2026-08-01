@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import {
   ACCESS_COOKIE,
@@ -18,6 +17,38 @@ import { CommandPalette } from '@/components/CommandPalette';
 import { DependencyBanner } from '@/components/DependencyBanner';
 import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
+
+// ─── Why no server action in the panel calls revalidatePath ──────────────
+//
+// Every mutating action here ends in `redirect()`, and pairing the two is
+// what made the panel go blank after "create API key" and "create webhook":
+// the operator's row was written, but the page rendered nothing until they
+// hit refresh by hand.
+//
+// The mechanism is a guard in Next's client router. While a redirect from a
+// server action is in flight, RedirectBoundary renders `null` for the whole
+// subtree — not loading.tsx, not error.tsx, literally an empty page. Normally
+// nobody sees that window, because the router seeds its prefetch cache with
+// the RSC payload the action just rendered and the transition commits on the
+// spot. But it only seeds when the action didn't revalidate; calling
+// revalidatePath flips that flag off, so the redirect has to go back over the
+// network for a fresh payload, and the page is blank for the whole round-trip
+// (vercel/next.js#73317).
+//
+// Dropping revalidatePath costs us nothing, because there was never a cache
+// for it to clear. This layout awaits cookies(), which makes every authed
+// route dynamic — no Full Route Cache entry exists. `src/lib/api.ts` fetches
+// with `cache: 'no-store'` — no Data Cache entries either. And the router
+// wipes its client-side prefetch cache after *any* server action that returns
+// flight data, revalidated or not. The one genuine cache in the panel is the
+// 15-second dependency-banner probe in `api.ts`, which nothing here was
+// invalidating on purpose anyway.
+//
+// So: in this app, `revalidatePath` + `redirect` in the same action is all
+// cost and no benefit. If you need an action to refresh data *without*
+// navigating, keep revalidatePath and return a result instead of redirecting
+// — see `apps/admin/src/app/(authed)/operator-invites/actions.ts` for that
+// shape.
 
 async function signOut(): Promise<void> {
   'use server';
@@ -40,7 +71,6 @@ async function switchWorkspace(formData: FormData): Promise<void> {
     body: { tenantId },
   });
   await setSessionCookies({ accessToken: result.accessToken, refreshToken: result.refreshToken });
-  revalidatePath('/applications');
   redirect('/applications?e=ws_switched');
 }
 
@@ -60,7 +90,6 @@ async function createWorkspace(formData: FormData): Promise<void> {
     body: { tenantId: created.id },
   });
   await setSessionCookies({ accessToken: switched.accessToken, refreshToken: switched.refreshToken });
-  revalidatePath('/applications');
   redirect('/applications?e=ws_created');
 }
 

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Multi-stage build for ReliPay (api + panel + portal + admin).
+# Multi-stage build for Rekey (api + panel + portal + admin).
 #
 # Stages:
 #   base    — pnpm + corepack on a slim node image
@@ -10,17 +10,22 @@
 #             slim image. Each app is its own runtime stage; pick with `--target`.
 #
 # Build:
-#   docker build -t relipay-api .                          (default = api)
-#   docker build -t relipay-panel --target=panel-runtime .
-#   docker build -t relipay-portal --target=portal-runtime .
-#   docker build -t relipay-admin --target=admin-runtime .
+#   docker build -t rekey-api .                          (default = api)
+#   docker build -t rekey-panel --target=panel-runtime \
+#     --build-arg NEXT_PUBLIC_API_URL=https://api.example.com \
+#     --build-arg NEXT_PUBLIC_APP_URL=https://panel.example.com .
+#   (NEXT_PUBLIC_* have no defaults — they compile into the bundle, so a default
+#    would be a Rekey URL nobody could override at runtime. Marketing REQUIRES
+#    both and its build fails without them, deliberately.)
+#   docker build -t rekey-portal --target=portal-runtime .
+#   docker build -t rekey-admin --target=admin-runtime .
 #
 # Or use docker-compose.yml which builds each with shared build cache.
 #
 # The api image runs `prisma migrate deploy` on start (idempotent) before
 # booting the server, so a fresh database is migrated automatically.
 
-ARG NODE_VERSION=20.10.0
+ARG NODE_VERSION=24.15.0
 
 # ─── base ─────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-slim AS base
@@ -60,9 +65,36 @@ RUN pnpm --filter @rekey.dev/node build
 RUN pnpm --filter @rekey.dev/react build
 RUN pnpm --filter @rekey.dev/nextjs build
 RUN pnpm --filter @rekey.dev/api build
-RUN pnpm --filter @rekey.dev/panel build
+# NEXT_PUBLIC_* are baked into client bundles at BUILD time, so they must be
+# declared before any Next.js app builds (they once sat after the panel build,
+# so only marketing ever saw them).
+#
+# None of these has a default, deliberately. A default here is a Rekey-owned
+# value compiled into the bundle, which cannot then be overridden at runtime —
+# the self-host compose passes no build args, so a default silently shipped
+# `api.rekey.dev` into every self-hosted panel and made the "unset" handling in
+# the app unreachable. Our own deploy supplies them in
+# docker-compose.{panel,marketing}.yml; self-hosters pass their own or get the
+# app's explicit unconfigured state.
+ARG NEXT_PUBLIC_API_URL=
+ARG NEXT_PUBLIC_APP_URL=
+# No defaults for these two, deliberately. NEXT_PUBLIC_GA_MEASUREMENT_ID must
+# never default to Rekey's own property (a self-hosted panel would ship its
+# operators' behaviour to us), and NEXT_PUBLIC_PORTAL_URL must never default to
+# Rekey's hosted portal (a self-hoster would be shown someone else's origin as
+# the place to send THEIR customers). Our own deploy sets both explicitly in
+# docker-compose.panel.yml.
+ARG NEXT_PUBLIC_GA_MEASUREMENT_ID=
+ARG NEXT_PUBLIC_PORTAL_URL=
+ARG NEXT_PUBLIC_CHATWOOT_TOKEN=
+ARG NEXT_PUBLIC_AHREFS_KEY=
+RUN NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL \
+    NEXT_PUBLIC_GA_MEASUREMENT_ID=$NEXT_PUBLIC_GA_MEASUREMENT_ID \
+    NEXT_PUBLIC_PORTAL_URL=$NEXT_PUBLIC_PORTAL_URL \
+    pnpm --filter @rekey.dev/panel build
 RUN pnpm --filter @rekey.dev/portal build
 RUN pnpm --filter @rekey.dev/admin build
+
 
 # ─── api-runtime ──────────────────────────────────────────────────────
 FROM base AS api-runtime
@@ -149,9 +181,9 @@ CMD ["node", "apps/panel/server.js"]
 # Hosted multi-app customer portal (Portal V2) at port 3050. Same Next
 # standalone pattern as panel-runtime — copies the traced bundle in, no pnpm
 # install. ONE deployment serves every opted-in Application, resolved by the
-# <slug> in the URL (portal.relipay.dev/<slug>). It holds NO per-app secret key:
+# <slug> in the URL (portal.rekey.dev/<slug>). It holds NO per-app secret key:
 # it identifies each app by its publishable key + authorizes users with their
-# own token. Needs only RELIPAY_URL (+ PORTAL_BASE_URL). See docs/portal.md.
+# own token. Needs only REKEY_URL (+ PORTAL_BASE_URL). See docs/portal.md.
 FROM base AS portal-runtime
 ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
@@ -172,7 +204,7 @@ USER node
 CMD ["node", "apps/portal/server.js"]
 
 # ─── admin-runtime ────────────────────────────────────────────────────
-# Super-admin read-only dashboard at admin.relipay.dev. Same Next standalone
+# Super-admin read-only dashboard at admin.rekey.dev. Same Next standalone
 # pattern as panel-runtime — copies the traced bundle in, no pnpm install.
 # Auth = SUPER_ADMIN_KEY at the env layer; cookie carries an opaque session id.
 FROM base AS admin-runtime
@@ -188,4 +220,5 @@ COPY --from=build --chown=node:node /app/apps/admin/public apps/admin/public
 EXPOSE 3034
 USER node
 CMD ["node", "apps/admin/server.js"]
+
 

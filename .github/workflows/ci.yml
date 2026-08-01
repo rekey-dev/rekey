@@ -9,84 +9,146 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Three independent jobs instead of one serial one. Build (306s) and tests
+# (300s) used to run back to back in a single job, so wall-clock was their sum.
+# They share no state, so they now run in parallel and the slowest sets the
+# time. Typecheck is split out because it is the fastest signal by far — a type
+# error surfaces in about a minute instead of after a full Next build.
 jobs:
-  build:
-    name: Build & typecheck
+  typecheck:
+    name: Typecheck
     runs-on: ubuntu-latest
-    # Headroom for the growing suite; test runtime is also cut by cheap Argon2
-    # params under vitest (see lib/passwords.ts). Was 10 — the suite crossed it.
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9.12.0 }
+      - uses: actions/setup-node@v4
         with:
-          version: 9.12.0
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # apps/api imports @prisma/client types that only exist after generate.
+      - run: pnpm exec prisma generate --schema prisma/schema.prisma
+      - uses: ./.github/actions/turbo-cache
+      # turbo, not `pnpm -r`. Every workspace consumes its dependencies from
+      # dist, and turbo.json already declares `typecheck: dependsOn ^build`, so
+      # turbo builds exactly those first. Hand-listing the packages here is how
+      # the previous version of this file broke: miss one and tsc reports a
+      # cascade of phantom "cannot find module" errors in unrelated files.
+      - run: pnpm exec turbo run typecheck
 
-      - name: Install
-        run: pnpm install --frozen-lockfile
-
-      # Generate Prisma client before tsc — apps/api imports @prisma/client
-      # types that only exist after generate.
-      - name: Generate Prisma client
-        run: pnpm exec prisma generate --schema prisma/schema.prisma
-
-      - name: Build all packages (also typechecks)
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
         env:
-          # marketing app validates NEXT_PUBLIC_* at build time (t3-env).
-          NEXT_PUBLIC_API_URL: https://api.relipay.dev
-          NEXT_PUBLIC_APP_URL: https://relipay.dev
-          SKIP_ENV_VALIDATION: "true"
-          # The nextjs-saas example's server-only module reads these on import;
-          # without them `next build`'s page-data collection blows up while
-          # rendering /_not-found. Values are stubs — the runtime never uses
-          # them (the example isn't deployed from CI).
-          RELIPAY_URL: https://api.relipay.dev
-          RELIPAY_SECRET: rp_live_ci_build_stub_not_used_at_runtime
-        # Exclude the demo: it's an example app whose server components fetch a
-        # live Rekey backend during `next build`, so it can't be statically
-        # built in CI. It's typechecked (no backend needed) in the next step.
-        run: pnpm -r --workspace-concurrency=1 --filter='!rekey-demo' build
+          POSTGRES_USER: rekey
+          POSTGRES_PASSWORD: rekey
+          POSTGRES_DB: rekey
+        ports: ['5432:5432']
+        # A service container with a healthcheck replaces the hand-rolled
+        # `docker run` + poll loop: the job does not start until Postgres
+        # actually answers queries.
+        options: >-
+          --health-cmd "pg_isready -U rekey"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9.12.0 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec prisma generate --schema prisma/schema.prisma
+      - uses: ./.github/actions/turbo-cache
 
-      - name: Typecheck the demo app
-        run: pnpm --filter rekey-demo typecheck
+      # Build the libraries in parallel FIRST so the serial test run below hits
+      # warm turbo cache for its `^build` dependencies instead of rebuilding
+      # them one at a time. No app bundles: the suites import packages/* from
+      # dist and never the panel/portal/admin/marketing builds.
+      #
+      # dist is load-bearing, not an optimisation: without it ~74 test files
+      # fail to LOAD, and vitest reports that as a smaller passing count rather
+      # than an error — a green-looking run proving nothing.
+      - name: Build test dependencies
+        run: pnpm exec turbo run build --filter="./packages/*"
 
-      - name: Typecheck the QR-SaaS example
-        run: pnpm --filter qr-saas typecheck
-
-      - name: Start Postgres
-        run: |
-          docker run -d --name pg \
-            -e POSTGRES_USER=rekey -e POSTGRES_PASSWORD=rekey -e POSTGRES_DB=rekey \
-            -p 5432:5432 postgres:16-alpine
-          # pg_isready returns OK once the socket binds, but the POSTGRES_DB
-          # init can still be running. Poll the actual DB until psql succeeds.
-          for i in {1..30}; do
-            if docker exec pg psql -U rekey -d rekey -c 'SELECT 1' >/dev/null 2>&1; then
-              echo "postgres ready after ${i}s"
-              break
-            fi
-            sleep 1
-          done
-          docker exec pg psql -U rekey -d rekey -c "CREATE DATABASE relipay_test;"
+      - name: Create test database
+        run: PGPASSWORD=rekey psql -h localhost -U rekey -d rekey -c "CREATE DATABASE rekey_test;"
 
       - name: Verify migrations apply
         run: |
           DATABASE_URL=postgresql://rekey:rekey@localhost:5432/rekey?schema=public \
             pnpm exec prisma migrate deploy --schema prisma/schema.prisma
 
-      - name: Run tests (all workspaces)
+      # concurrency=1 is deliberate and must stay: every suite shares ONE
+      # database and truncates between files, so two packages testing at once
+      # eat each other's fixtures. This is the one place serialisation is
+      # correctness, not slowness — do not "optimise" it.
+      - name: Run tests
         env:
-          TEST_DATABASE_URL: postgresql://rekey:rekey@localhost:5432/relipay_test?schema=public
-          # Vitest's global-setup applies migrations against TEST_DATABASE_URL; the
-          # admin/me/auth suites read these values from the environment.
+          TEST_DATABASE_URL: postgresql://rekey:rekey@localhost:5432/rekey_test?schema=public
           SUPER_ADMIN_KEY: test-admin-key-test-admin-key-test-admin-key
           JWT_SECRET: test-jwt-secret-test-jwt-secret-test-jwt-secret
-        run: pnpm -r --workspace-concurrency=1 test
+        run: pnpm exec turbo run test --concurrency=1
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9.12.0 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec prisma generate --schema prisma/schema.prisma
+      - uses: ./.github/actions/turbo-cache
+
+      # Next caches compilation between runs; without this every build is cold.
+      - name: Cache Next.js builds
+        uses: actions/cache@v4
+        with:
+          path: apps/*/.next/cache
+          key: next-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          restore-keys: |
+            next-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
+            next-${{ runner.os }}-
+
+      # Only the SHIPPED apps. Examples are typechecked by the typecheck job but
+      # no longer `next build`-ed: they are reference integrations, not deployed
+      # artifacts, and they were roughly a third of this step. The trade-off is
+      # real — `next build` catches server-component and static-generation
+      # errors tsc does not — so if an example is ever deployed, add it back.
+      #
+      # turbo pulls each app's workspace dependencies in via `^build`, so the
+      # packages/* dists exist before any Next build starts. Filtering with raw
+      # `pnpm --filter` instead skips that graph and fails with "Can't resolve
+      # '@rekey.dev/react'". No concurrency limit: unlike the tests these share
+      # no state, and serialising five Next builds was the single largest cost
+      # in the old pipeline.
+      - name: Build shipped apps
+        # Deliberately example.com, not rekey.dev. These compile into the
+        # client bundles, this file is mirrored to the public repo, and CI
+        # artifacts are never deployed — real values are passed as Docker build
+        # args at deploy time. Baking our own host in here would put a
+        # Rekey-owned default back into the open-source tree, which is exactly
+        # what #249 removed.
+        env:
+          NEXT_PUBLIC_API_URL: https://api.example.com
+          NEXT_PUBLIC_APP_URL: https://example.com
+        run: >-
+          pnpm exec turbo run build
+          --filter=@rekey.dev/api --filter=@rekey.dev/panel
+          --filter=@rekey.dev/portal --filter=@rekey.dev/admin

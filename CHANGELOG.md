@@ -4,6 +4,631 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.0.0-rc.1
+
+### Fixed (security): eight findings across the new auth surfaces
+
+An adversarial review of the three things that merged into this release within
+an hour of each other — `PATCH /api/v1/users/me`, the OpenID Provider, and the
+two email-verification switches — reproduced eight defects against a running
+server. Most came from their **interaction**: the OIDC provider was designed on
+the assumption that only an operator writes `EndUser.metadata`, which stopped
+being true the moment the self-service PATCH route existed.
+
+Read the two behaviour changes marked **breaking** below if you enabled
+`oidcEnabled` from a pre-release build; nothing else needs action.
+
+- **`requireEmailVerification` no longer misses sign-up.** It guarded sign-in
+  only, so with the flag on `POST /auth/sign-up` returned 201 with a working
+  access token and a 30-day refresh chain — to exactly the population the flag
+  exists for. The gate moved to the single point every session is minted, so it
+  now covers sign-up, sign-in, MFA verification, organization switching **and
+  refresh**. Sign-up still creates the account and still sends the verification
+  mail (now regardless of `sendVerificationEmailOnSignUp`, which could otherwise
+  strand a new account with no way in); what it no longer returns is a session,
+  answering 403 `EMAIL_NOT_VERIFIED` instead. Re-checking on refresh means
+  switching the flag on ends unconfirmed sessions within one access-token
+  lifetime rather than after 30 days.
+- **BREAKING: the OIDC `email` scope now requires `requireEmailVerification`.**
+  The provider was issuing `id_token`s carrying
+  `"email": "…", "email_verified": false` for addresses nobody had proved, and
+  relying parties that key local accounts on `email` routinely ignore
+  `email_verified` — account takeover at every one of them. Rather than assert
+  what it cannot stand behind, an Application that does not require verified
+  addresses no longer offers the scope at all: `scopes_supported` and
+  `claims_supported` both omit it in the discovery documents, and a request for
+  `openid email` is granted `openid`. Where the scope IS granted,
+  `email_verified` is now always `true`. Turn `requireEmailVerification` on to
+  get the claim back.
+- **BREAKING: OIDC `profile` claims moved to a reserved namespace.** They were
+  read from the top level of `EndUser.metadata`, which the self-service PATCH
+  route lets the end-user write: one request setting
+  `preferred_username: "admin"` put that value verbatim into the `id_token` and
+  `/userinfo`, and Grafana, Gitea, Argo CD, Vault, Nextcloud and Keycloak
+  brokering all match local accounts on that claim. Claims now come from
+  `metadata.oidc`, which is refused with 400 `METADATA_KEY_RESERVED` on every
+  end-user-reachable write (`PATCH /users/me`, and sign-up with a publishable
+  key) and writable with a secret key or the operator end-user routes. **Move
+  your claims under `metadata.oidc`** — top-level `name`/`picture` are no longer
+  emitted. One reserved namespace rather than five reserved claim names, so the
+  self-service route can still edit the app's own `name` and `picture`. `picture`
+  must now be an `https:` URL, and each claim is length-bounded.
+- **An unsatisfiable scope request is `invalid_scope`, not a full grant.** The
+  "client sent no scope" fallback fired on `granted.length === 0` whatever had
+  been requested, so an Application with MCP on and OIDC **off** answered
+  `scope=openid` — a request to sign someone in — with a working `mcp:account`
+  token that reached `tools/list`. `scope=admin root` did the same. Only a
+  request naming no `scope` parameter at all now falls back, which is the
+  pre-OIDC MCP behaviour it was for.
+- **A GDPR-erased end-user is refused on the OAuth/OIDC surface too.** The
+  erasure check had landed on `/userinfo` alone: `tools/call get_profile`
+  returned the user's metadata, `grant_type=refresh_token` returned a fresh
+  access token, and a code minted pre-erasure still redeemed into an `id_token`.
+  All four paths now enforce it. Erasure additionally hard-deletes unredeemed
+  authorization codes (it already deleted refresh tokens of every kind).
+- **The 16KB `metadata` ceiling applies to every writer.** It was enforced in
+  `updateSelf` only, so a 200KB blob posted at sign-up was stored and then
+  permanently bricked that user's own PATCH route — the cap is measured
+  post-merge, so every later write failed on bytes they could no longer remove.
+  Sign-up and both operator end-user routes now apply it. Separately, each OIDC
+  claim is bounded when read: a 120KB `name` produced a 164,620-byte `id_token`
+  and a 122KB `/userinfo` response.
+- **Magic-link sign-in keeps the proof it collects.** `emailVerified: true` was
+  set on the create branch only, so an existing user who signed in by magic link
+  got a session while the flag stayed false — bypassing the verification gate,
+  and shipping `email_verified: false` to relying parties forever. It is now set
+  for existing users too (the stale-email guard is what makes that sound). This
+  makes true the claim `shared-types` already made: "magic-link and OAuth
+  sign-in each carry their own proof of the address".
+- **New `authConfig.dynamicClientRegistration`, default `true`.** RFC 7591 open
+  registration is defensible for MCP, whose clients self-register, and normally
+  is not for a public OpenID Provider, where it lets anyone stand up a client
+  with an attacker-chosen `client_name` and get a password prompt on the
+  operator's own issuer origin. Set it to `false` once your relying parties are
+  registered: `POST /oauth/register` then answers 403
+  `CLIENT_REGISTRATION_DISABLED` and `registration_endpoint` disappears from
+  both discovery documents. It defaults on because there is no operator-side
+  client-creation surface yet, so `false` would break every deployment with MCP
+  enabled and leave a new OpenID Provider unable to onboard anyone.
+
+New error codes: `METADATA_KEY_RESERVED` (400) and
+`CLIENT_REGISTRATION_DISABLED` (403). `EMAIL_NOT_VERIFIED` (403) is now also
+returned by `POST /auth/sign-up` and `POST /auth/refresh`.
+
+### Fixed (money): a single-use coupon could be redeemed forever on one-time purchases
+
+**A coupon with `maxRedemptions: 1` discounted an unlimited number of one-off
+checkouts.** Redemption was recorded in exactly one place — the successful-payment
+webhook applier — and no provider emits a payment event for a one-time flow.
+Stripe's `mode: 'payment'` session produces no invoice, and PayPal's
+`PAYMENT.CAPTURE.COMPLETED` was registered with the provider but had no handler,
+so it was acknowledged and discarded. The buyer genuinely paid less, credits were
+granted, and `payments = 0, couponRedemption = 0`. The same code then discounted
+their next purchase, and the one after that.
+
+**One-time revenue also produced no `Payment` row at all**, so it appeared in no
+payment listing, no revenue figure and no operator dashboard.
+
+- Redemption is now recorded where fulfilment happens (checkout completion /
+  order approval), as well as at payment success, and is **idempotent per
+  (coupon, checkout session)** via a new unique index. Recurring flows are
+  unaffected in count; one-time flows now record the one redemption they always
+  owed.
+- **Stripe** one-time checkouts write a SUCCEEDED `Payment` from the completion
+  event itself (`payment_intent`, `amount_total`, gated on `payment_status:
+  'paid'`) rather than from a newly subscribed `payment_intent.succeeded` — that
+  event also fires for every invoice payment and would double-count against
+  `invoice.paid` under a second provider id.
+- **PayPal** `PAYMENT.CAPTURE.COMPLETED` is now translated, matched to the local
+  row by the originating order id.
+- **New column** `CouponRedemption.checkoutSessionId` + `discountAmount`
+  (migration `20260801160000_coupon_redemption_per_checkout_session`). Existing
+  rows keep NULL and are unaffected by the new index.
+
+Operators who have run coupons on CREDIT packs or perpetual licences should
+expect redemption counts to start rising, and should reconcile past one-time
+sales against what the processor actually collected.
+
+### Fixed (money): a renewal could be lost entirely because of a coupon
+
+**A recurring coupon was redeemed again on every renewal, and once its limit was
+reached the renewal payment was silently discarded.** `Subscription.metadata.couponId`
+was stamped at checkout and never cleared, so every invoice redeemed it — while
+the provider coupon is `duration: 'once'` and only ever discounted invoice #1.
+Two consequences:
+
+- **Accounting.** Two invoices produced two redemption rows for one discount, and
+  the operator's coupon stats multiplied the discount by the number of periods a
+  customer stayed.
+- **Money.** With `maxRedemptionsPerUser: 1` — an ordinary configuration — the
+  redemption threw from *inside* the payment transaction and rolled it back. The
+  renewal webhook answered 500: the charge had settled at the provider, but there
+  was no `Payment` row, the status and period were not mirrored, entitlements
+  were not re-provisioned (credits not refilled, TIMED licences not extended),
+  dunning did not recover, and the provider retried the poisoned event until it
+  gave up.
+
+Redemption now runs **after** the payment commits, never inside its transaction,
+and reports a limit failure instead of raising it. `couponsService.recordRedemption`
+is replaced by `redeemForCheckout`, which returns an outcome rather than throwing.
+
+### Fixed (money): completing an older checkout session recorded nothing
+
+The local subscription is upserted per (application, end-user, plan), and
+`metadata.checkoutSessionId` was overwritten each time — but a Stripe Checkout
+Session stays completable for about 24 hours, and so does the ad-hoc coupon
+minted with it. A buyer who reopened checkout and then paid on the **first** tab
+matched no local row: 200 OK, subscription still PENDING, no payment, no
+redemption, no trace of a sale that really happened.
+
+The row now remembers every session it has issued (bounded), and every lookup
+matches any of them. Each session carries its own coupon, so completing an older
+session redeems the code that session was priced with — not whichever code was
+typed most recently.
+
+### Fixed: an ACTIVE subscriber was downgraded to PENDING just for opening checkout
+
+`createCheckoutSession` set `status: 'PENDING'` unconditionally on the existing
+row. PENDING is not an entitling status, so an ACTIVE (or PAST_DUE) subscriber who
+merely pressed Upgrade — or typed a coupon into the form now shown to *existing*
+subscribers — lost entitlement on the spot, with no provider event having
+happened. A checkout record is not a lifecycle event; only the provider's webhook
+moves a paying subscription between states. A lapsed (CANCELED/EXPIRED) row still
+returns to PENDING, which is what PENDING is for.
+
+### Fixed: a dunning customer lost the entitlements they had paid for
+
+`isEntitledStatus` counts PAST_DUE, `getCurrentSubscription` returns it, and the
+whole point of the dunning window is to give the customer time to fix their card
+— but `resolveForEndUser` filtered on ACTIVE only. The first failed charge
+therefore stripped every feature flag they had bought, days or weeks before they
+had actually run out of chances to pay. `includedQuotaFor` had the same gap read
+the other way round: a dunning customer became **unmetered** rather than
+under-entitled. Both now honour ACTIVE and PAST_DUE.
+
+### Fixed: a per-subscription entitlement override could not add anything
+
+`Subscription.entitlementOverrides` is how a bespoke deal is sold without minting
+a private plan, but it could only rewrite an entitlement the plan already
+carried. For the case it exists for — the plan does not describe this customer —
+setting an override changed nothing at all. A **FEATURE** override can now add a
+missing entitlement, with its `valueType` inferred from the value. Adding a
+CREDIT / LICENSE / USAGE entitlement remains a plan-level decision: those
+materialize real grants, and a bare number does not say what to grant.
+
+### Fixed: coupon errors from the provider surfaced as a 500
+
+A Stripe rejection while minting the ad-hoc checkout coupon escaped as an opaque
+500, indistinguishable from an outage, so the one thing the caller could act on
+— drop the code and buy at full price — never reached them. It is now
+`COUPON_PROVIDER_REJECTED` (502). The coupon's `redeem_by` also gained an hour of
+slack over the session's own ~24h expiry, so a last-minute completion is timed
+out by the session rather than losing a race with its own discount, and a coupon
+minted for a session that then failed to create is deleted rather than left live.
+
+### Fixed (money): coupon discounts never reached the payment provider
+
+**Every coupon applied at checkout charged the buyer the full price.** Checkout
+validated the code, stamped `discountAmount` on the Subscription, returned it in
+the checkout response, and redeemed the coupon when the payment landed — while
+handing the provider a checkout input with no discount in it. Stripe, PayPal and
+Razorpay were all told the full plan amount. Rekey's own books recorded a
+discount that never happened, and the redemption was consumed for nothing.
+
+This is a **behaviour change on what customers are charged.** After upgrading, a
+checkout carrying a valid `couponCode` charges the discounted amount. Operators
+who have been running coupons should expect their revenue per discounted
+checkout to drop to what the coupon always said it would be, and should reconcile
+past discounted checkouts against what the processor actually collected.
+
+- **`CheckoutSessionInput.discount`** (`billing/providers/types.ts`) carries the
+  resolved discount — amount in the smallest currency unit, currency, coupon id
+  and code — into `createCheckoutSession` / `createOneTimeCheckout`. Optional, so
+  a provider implementation written before this keeps compiling; a provider that
+  cannot apply it must throw rather than ignore it.
+- **`ProviderModule.capabilities.discounts`** (`{ oneTime, recurring }`,
+  optional) declares what a provider can discount, and is exposed on
+  `GET /api/v1/billing/providers` and in `BillingProviderCapabilitiesSchema`
+  (`@rekey.dev/shared-types`). **Absent means "cannot"** — a module that says
+  nothing gets the coupon refused rather than dropped.
+- **Stripe** applies the discount as an ad-hoc Coupon on the Checkout Session for
+  both flows (`amount_off`, `duration: 'once'`, single redemption, short expiry),
+  so the buyer sees a subtotal and a discount line and the operator's Stripe
+  records carry the Rekey coupon id.
+- **PayPal** itemises the discount on one-time orders
+  (`amount.breakdown.discount`, Orders v2). **Recurring PayPal checkouts with a
+  coupon are now refused** with `BILLING_DISCOUNT_UNSUPPORTED` (400): Subscriptions
+  v1 has no per-subscription discount, and the inline `plan` override would cut
+  the price of *every* period against a single recorded redemption.
+- **Razorpay** creates the one-time payment link for the net amount, recording
+  the code in `notes`. **Recurring Razorpay checkouts with a coupon are refused**
+  for the same reason — Offers are dashboard-created and not per-checkout.
+- **New refusals**, both before anything is written or charged:
+  `COUPON_NO_DISCOUNT` (400, the discount floors to zero) and
+  `COUPON_FULL_DISCOUNT_UNSUPPORTED` (400, 100% off a one-time purchase — no
+  provider checks out a zero-value order, and fulfilment hangs off a payment
+  event that would never fire). 100% off a recurring plan is still allowed where
+  the provider supports recurring discounts.
+- **Marketing checkout** (rekey.dev) grew a collapsed "Have a coupon?" field on
+  the upgrade form, with an optional Apply that prices the coupon through
+  `POST /billing/coupons/validate` and shows what the first invoice will be
+  before the buyer leaves for the provider.
+- `docs/coupons.md` was corrected: it still claimed redemptions are recorded at
+  apply-time, which stopped being true when that moved to payment-success.
+
+### Breaking: test/live data modes removed, replaced by Application environments
+
+"Test" meant three unrelated things in Rekey: a `DataMode` stamped on rows, a
+mode on stored billing credentials, and a stub billing provider. Only the second
+was coherent. `DataMode` covered `EndUser`, `Subscription` and `Payment` and
+nothing else — so a "test" end-user still held real licences, burned real
+credits, wrote real usage rows, joined real organizations, and fired real
+outbound webhooks. The isolation the docs promised was not implemented. Rather
+than extend a leaky flag across every model, isolation moves to the boundary
+that was already real everywhere: the Application.
+
+- **Removed `DataMode` entirely.** The `mode` column is dropped from `EndUser`,
+  `Subscription` and `Payment`, and the enum is dropped from the database. This
+  migration is destructive and the TEST/LIVE label on existing rows is not
+  recoverable.
+- **Removed the `mode` field from every payload that carried it**: operator
+  end-user and payment listings, dunning cases, and the outbound webhook
+  bodies for `user.*`, `subscription.*`, `payment.*` and `dunning.*`. Consumers
+  reading `data.user.mode` (or the equivalent on the other events) must drop
+  the field.
+- **Removed the `?mode=TEST|LIVE` filter** from `GET /tenant/applications/:id/end-users`
+  and `GET /tenant/applications/:id/payments`, and the `mode` argument from the
+  operator MCP `recent_payments` / `recent_subscriptions` tools (those tools now
+  report the Application's `environment` per row instead).
+- **Removed error codes `DATA_MODE_MISMATCH`, `BILLING_MODE_MISMATCH` and
+  `TEST_API_KEYS_DISABLED`.** Nothing raises them.
+- **Added `Application.environment`** — `PRODUCTION | STAGING | DEVELOPMENT`,
+  defaulting to `DEVELOPMENT`. It appears on every Application read surface and
+  in `ApplicationDtoSchema` (`@rekey.dev/shared-types`), and is set at creation
+  (`POST /api/v1/tenant/applications`). It is **immutable afterwards** — there
+  is no endpoint that changes it, and no update path writes the column. Going
+  live means creating a `PRODUCTION` Application, not converting an existing
+  one. Note the new Application starts empty: plans, coupons, meters and
+  webhook endpoints are not copied, and there is no clone flow yet.
+- **API key prefixes are now derived, not chosen.** The `mode` field is removed
+  from the body of every key-mint route (`POST /api/v1/admin/applications/:id/api-keys`,
+  `POST /api/v1/tenant/applications/:id/api-keys`,
+  `POST /api/v1/tenant/operator/applications/:id/api-keys`) and from the MCP
+  `mint_api_key` tool. A `PRODUCTION` Application mints `rp_live_…`; `STAGING`
+  and `DEVELOPMENT` mint `rp_test_…`. The prefix is descriptive only —
+  no behaviour depends on it. Existing keys are unaffected.
+- **Environment does NOT restrict which billing credentials an Application may
+  hold.** Store live keys against a `DEVELOPMENT` Application if testing against
+  a live processor is deliberately what you want — it is your processor account.
+  (An earlier iteration of this branch enforced production-only-live /
+  non-production-only-test and it was removed before release: PayPal sandbox and
+  live client ids are byte-identical, so the rule could only ever hold for two
+  of the three providers, and a safety property that silently does not apply to
+  one provider is worse than none. Non-production abuse is a quota/rate-limit
+  concern instead.)
+
+### Breaking: stub billing providers removed
+
+- **`StripeStubProvider`, `PaypalStubProvider` and `RazorpayStubProvider` are
+  deleted.** Every provider now talks to the real processor. An Application with
+  no credentials for the chosen provider fails with 400
+  `BILLING_CREDENTIALS_NOT_CONFIGURED` — in **every** environment, development
+  included. Previously Stripe silently fell back to a stub that returned a
+  plausible checkout URL, so an integration could look complete while no money
+  could ever move.
+- **`BILLING_PROVIDER_NOT_CONFIGURED` is no longer raised** by the provider
+  factory; the missing-credentials case is `BILLING_CREDENTIALS_NOT_CONFIGURED`
+  for all three providers.
+- **Removed the `REKEY_BILLING_FORCE_STUB` environment variable** and its
+  production boot-guard. Setting it now does nothing.
+- `pickProvider` no longer falls back to `billingConfig.provider` when an
+  Application has no enabled credentials; it raises
+  `BILLING_CREDENTIALS_NOT_CONFIGURED`.
+
+- **Revenue numbers change on upgrade.** Per-application billing stats used to
+  count `LIVE` rows only. With the column gone they count everything, so any
+  subscriptions and payments previously stamped `TEST` now contribute to MRR,
+  active-subscription counts, 30-day revenue and the 12-month series for their
+  Application. Nothing is lost or double-counted, but expect a one-time step in
+  the dashboard.
+- **New error code** `BILLING_CREDENTIALS_MODE_CONTRADICTED`: the submitted
+  `mode` contradicts what the key material says, and the key wins. The stored
+  mode must not be a lie — the provider SDK authenticates with the key and
+  ignores this column, so a live key recorded as `test` would make the panel,
+  revenue stats and dunning all report something false.
+- **`mode` on a credential write is now advisory at most.** For providers whose
+  keys state their own mode (Stripe `sk_live_`/`sk_test_`, Razorpay
+  `rzp_live_`/`rzp_test_`) the key decides and a contradicting `mode` in the
+  request body is rejected. An explicit `mode` is honoured only where detection
+  is impossible (PayPal). Callers that relied on labelling a live key as `test`
+  will now get a 400 — that combination was never safe.
+- **Plan creation no longer requires Stripe credentials.** `POST .../plans`
+  registers eagerly with Stripe only when the Application actually has Stripe
+  configured; PayPal-/Razorpay-only Applications create plans locally and
+  register at first checkout, as they already did for those providers.
+
+Self-hosters: **read `DEPLOY.md` → "Upgrading: Application environments" before
+deploying** — migrations self-apply on `api` container start, so this one runs
+without prompting. In short: after `prisma migrate deploy`, every existing
+Application is `DEVELOPMENT`, and environment is immutable through the API — so
+correct the ones serving real traffic **in SQL** (the UPDATE is in DEPLOY.md)
+before minting new keys. Existing keys and stored credentials keep working
+either way; only the prefix of newly minted keys depends on it.
+
+### Breaking: `RELIPAY_*` environment-variable fallback removed
+
+1.1.2 renamed every environment variable `RELIPAY_*` → `REKEY_*` and kept the
+old name as a fallback read, noting the fallback would go in the next major.
+This is that major.
+
+- **`RELIPAY_URL`, `RELIPAY_SECRET`, `RELIPAY_OPERATOR_TOKEN`,
+  `NEXT_PUBLIC_RELIPAY_URL` and `NEXT_PUBLIC_RELIPAY_PUBLIC_KEY` are no longer
+  read anywhere.** Set the `REKEY_*` equivalent. Affected surfaces: the panel
+  (`apps/panel`, incl. the audit-log and end-user export proxies), the admin app,
+  the hosted portal, `@rekey.dev/nextjs` (both `/server` and `/client`),
+  `@rekey.dev/cli` and `@rekey.dev/mcp`.
+- **What an operator must do**: rename the variable in every `.env` file,
+  compose file and hosting dashboard before deploying. Nothing else changes —
+  the values are identical.
+- Every site fails **loudly** when the variable is absent, which is why this was
+  safe to remove: the panel raises `PANEL_API_URL_MISSING`, the admin app
+  `ADMIN_API_URL_MISSING`, the portal and `@rekey.dev/nextjs` throw on first use,
+  the MCP server exits 1 with a message naming `REKEY_URL`, and the CLI reports
+  the missing `--api-url`. There is no path where a stale `RELIPAY_*` name
+  silently points at the wrong thing.
+
+### Breaking: deprecated billing-credential helpers removed
+
+- **`billingCredentialsService.upsertStripe` / `.upsertPaypal` /
+  `.upsertRazorpay` are deleted.** They were thin, `@deprecated`-tagged wrappers
+  over `upsertCredentials(applicationId, provider, data, options)` since the
+  provider-modules work (P3). Internal API only — no HTTP route, SDK export or
+  MCP tool signature changes, so there is nothing for an operator to do. Callers
+  inside this repo (including the operator MCP `set_billing_credentials` tool)
+  now use `upsertCredentials` directly.
+- `mfaService.confirm` now **requires** its `application` argument. It was
+  optional for callers that predate the enrollment notification, and when absent
+  the "two-factor was turned on" email and the `mfa.enabled` webhook were both
+  silently skipped. Internal API only; the single caller always passed it.
+
+### Fixed: the operator panel reported every end-user as "not locked"
+
+Account lockout moved to the Redis brute-force limiter several releases ago, but
+`GET /api/v1/tenant/applications/:id/end-users/:euid` — the payload behind the
+panel's end-user detail page — still described lock state in terms of the
+`EndUser` columns the limiter had stopped writing. The lock badge therefore read
+"Lockout: none" for **every** account, including one the API was actively
+refusing with 429 `TOO_MANY_FAILED_ATTEMPTS`. An operator investigating a
+"locked out of my account" report was shown the opposite of the truth, and had
+no working way to confirm a lockout from the panel.
+
+- `lockedUntil` and `failedSignInAttempts` on that endpoint (and on the
+  GDPR/DSAR export document, where `EndUserExportProfile` in
+  `@rekey.dev/shared-types` declares them) now come from the limiter itself.
+  `lockedUntil` is the lock's real expiry; below the lock threshold
+  `failedSignInAttempts` is the live counter. Both fields are unchanged in name
+  and type — nothing to update on the consumer side.
+- `failedSignInAttempts` reports the policy threshold (10) while an account is
+  locked, because the limiter consumes its counter at the moment it sets the
+  lock. That is a documented floor on the failures that tripped the lock, not a
+  surviving count — the same convention the super-admin locked-accounts list
+  already used.
+- Erasing an end-user now also drops their brute-force lock. The limiter's key
+  embeds the address in plaintext (`bf:lock:eu:login:<appId>:<email>`) and the
+  super-admin locked-accounts dashboard enumerates those keys, so an erasure
+  used to leave the "erased" email readable there for the rest of its 15-minute
+  TTL.
+
+The super-admin `/locked-accounts` list and its overview KPI were already
+sourced from Redis and are unaffected.
+
+### Breaking: `EndUser.failed_sign_in_attempts` and `locked_until` dropped
+
+**Destructive migration.** Both columns are dropped from `end_users`. Nothing
+had written them since lockout moved to Redis, so no lockout state is lost —
+every value in them was a stale zero/null. They are removed rather than left in
+place because they had become a trap: they read as authoritative and were the
+direct cause of the panel bug above. Lock state now has exactly one source, the
+limiter. Read it via `getScopeLockState` (single account) or
+`scanActiveLoginLocks` (enumerate) — never from a row.
+
+`TenantUser` and the MFA-credential tables keep their own `locked_until`
+columns; those are live and untouched.
+
+### Kept deliberately (reviewed for removal in this major, and retained)
+
+These look like removable back-compat shims and are not. Each is now documented
+in place with the breakage that justifies it, so the question does not have to
+be re-litigated:
+
+- **The pre-SMTP email credential shape** `{ resend: { apiKey } }`
+  (`normalizeCredentials`). The blobs are encrypted with `ENCRYPTION_KEY`, so no
+  SQL migration can rewrite them, and the failure mode is silent: an Application
+  configured before the multi-provider transport landed would just stop
+  delivering its own verification and password-reset mail.
+- **The wrapped `{provider, data}` billing-credential shape.** Same
+  encrypted-at-rest problem, on the money path.
+- **`authConfig.signupEnabled`.** Removing the legacy boolean → `signupMode`
+  derivation would make an Application stored as `{ signupEnabled: false }`
+  fall back to `public` — silently re-opening sign-up on an app the operator
+  closed.
+- **The per-provider webhook URLs** (`/api/v1/billing/webhook/{stripe,paypal,razorpay}`).
+  They remain permanent aliases into the generic pipeline. Operators have pasted
+  them into live provider dashboards; unregistering them 404s a real endpoint
+  until the provider disables it, and subscriptions stop activating with nothing
+  visible on the Rekey side.
+- **`Tenant.ownerEmail`.** Its schema comment claimed it was kept for
+  back-compat; that was wrong. It is required by the bootstrap admin path,
+  written by operator signup and workspace-create, and read by the super-admin
+  tenant list and its search predicate. The comment now says what it is (the
+  address captured at creation) and what it is not (the current owner — that is
+  `TenantMembership.role = OWNER`).
+- **The `["*"]` API-key scope.** Also mislabelled as legacy: it is still
+  `DEFAULT_SCOPES`, so every key minted without an explicit `scopes` array gets
+  it. Comments corrected in three places.
+
+### Breaking: Node 22+ required
+
+- **The runtime floor moves from Node 20 to Node 22.** Node 20 left LTS, and
+  GitHub Actions had already begun forcing our workflows onto a newer runtime.
+  The Docker images now build on Node 24 (current LTS), CI runs Node 24, and
+  the root `engines` field requires `>=22.0.0`.
+- **The six published packages now declare `engines: { node: ">=22.0.0" }`.**
+  They previously declared nothing at all, so npm gave consumers no signal
+  about which runtime they needed. Installing on Node 20 will now warn (or
+  fail, under `engine-strict`). The floor is 22 rather than 24 deliberately:
+  22 is the oldest LTS line still receiving security fixes, and the SDKs do
+  not use anything newer.
+### Added: an Application can be an OpenID Connect provider
+
+Rekey could already *consume* a third-party IdP (the `oidc` OAuth provider). It
+can now *be* one. Off by default; opt in per Application with
+`authConfig.oidcEnabled = true` (`PATCH /api/v1/tenant/applications/:id/auth-config`).
+Full guide in [docs/oidc-provider.md](docs/oidc-provider.md).
+
+- **No new authorization server.** The per-Application OAuth 2.1 AS that fronts
+  the hosted MCP server *is* the OpenID Provider — same issuer
+  (`/api/v1/mcp/<slug>`), same client registry, same authorization-code + PKCE
+  grant. OIDC adds a discovery document, an `id_token`, and `/oauth/userinfo`.
+- **No new signing key.** ID Tokens are RS256, signed with the deployment's
+  existing active key and verifiable against the existing
+  `GET /.well-known/jwks.json`.
+- **`/.well-known/openid-configuration`** is served in both the suffix form OIDC
+  Discovery 1.0 mandates and the path-insertion form RFC 8414 §3.1 defines, next
+  to the existing OAuth metadata. Every advertised capability is implemented;
+  unsupported features (`request`, `request_uri`, the `claims` parameter,
+  `prompt=none`, implicit/hybrid flows) are advertised as unsupported and
+  refused at the authorization endpoint with the spec's own error code.
+- **`nonce` is supported end to end** and replayed into the ID Token, which also
+  carries `auth_time` and `at_hash`. `sub` is the `EndUser` id — stable per user
+  and, because `EndUser` rows are per-Application, never shared across
+  Applications.
+- **`/oauth/userinfo`** (GET + POST) returns `sub` plus only what the granted
+  scopes authorise. `profile` claims are read from the reserved
+  `EndUser.metadata.oidc` namespace through a strict allowlist of standard OIDC
+  claim names, so app-internal keys in that blob are never emitted. (This
+  shipped reading the top level of `metadata`; see the security entry at the top
+  of this release for why it moved before the release was cut.)
+- **`oidcEnabled` and `mcpEnabled` are independent.** Either mounts the shared
+  grant endpoints; each resource still gates itself. Enabling single sign-on no
+  longer requires also exposing an MCP tool server over your users' accounts.
+
+Two behaviour changes on the existing MCP surface fall out of this, both
+tightening:
+
+- **The MCP JSON-RPC endpoint now requires the `mcp:account` scope**, returning
+  403 `insufficient_scope` without it. Previously any valid access token from
+  the AS was accepted whatever its scope. Clients that requested `mcp:account`
+  (or no scope at all, which still defaults to it) are unaffected; a token minted
+  with an unrecognised scope string is not.
+- **The refresh grant re-issues the scope that was actually granted** instead of
+  hard-coding `mcp:account`. The granted scope is now stored on the
+  authorization code and carried down the refresh-token chain, so a grant can no
+  longer widen across a refresh. Refresh tokens issued before this release have
+  no recorded scope and are read as `mcp:account` — exactly what they used to be
+  re-issued with.
+- Requested scopes are now intersected with what the Application supports and
+  the remainder dropped (RFC 6749 §3.3) rather than echoed onto the token. A
+  non-empty authorization request with no grantable scope left is refused with
+  `invalid_scope`; only a request naming no `scope` at all falls back to
+  `mcp:account`. (As shipped, the fallback fired for both — see the security
+  entry at the top of this release.)
+
+New error code `OIDC_NOT_FOUND` (404) for the OIDC-only paths on an Application
+that has not enabled OIDC.
+
+### Added: optional IP allowlist on the admin surface
+
+- **`ADMIN_IP_ALLOWLIST`** (comma-separated IPs and/or CIDRs, v4 and v6) gates
+  `/api/v1/admin/*` by network position. Unset — the default — changes nothing.
+  When set, a request from any other address is refused with 403
+  `ADMIN_IP_NOT_ALLOWED` **before** the key is examined, so the refusal reveals
+  nothing about whether the caller's key was valid.
+- Why it is worth setting: `SUPER_ADMIN_KEY` is a single shared secret covering
+  every tenant and application in the deployment, so a leak is total. Pinning
+  the admin surface to known addresses means a leaked key is not by itself
+  sufficient. It is defence in depth, not a replacement for the key.
+- Behind a reverse proxy set `TRUSTED_PROXIES` as well, or every request will
+  appear to originate from the proxy and the allowlist will match the wrong
+  thing.
+- A malformed entry **fails the boot** rather than producing a gate that
+  silently matches nothing — the failure mode where an operator believes they
+  are protected while the list is effectively empty.
+
+### Fixed: `rekey version` and the MCP handshake reported `0.0.0`
+
+Both packages carried the version as a source literal that release never
+touched, so the CLI printed `0.0.0` and `rekey-mcp` announced `0.0.0` in its
+`initialize` handshake for the whole 1.x line — anything logging or gating on
+either saw a version that was never published. Both now read `version` from
+their own `package.json` at runtime, so a release cannot leave them stale
+again.
+
+### Added: email verification is configurable per Application
+
+Email verification existed as plumbing — a token, a `/auth/send-verification`
+endpoint, an `emailVerified` column — with nothing wired to either end. Sign-up
+never sent the mail, and the column gated nothing. Two `authConfig` switches
+close both halves, each settable from Panel → Application → Auth, the
+`PATCH /api/v1/tenant/applications/:id/auth-config` body, and the operator MCP
+`update_auth_config` tool.
+
+- **`sendVerificationEmailOnSignUp`, default `true`.** Password sign-up now
+  sends the `email_verification` mail alongside `welcome` instead of expecting
+  the customer's server to call `sendVerificationEmail` itself. **This changes
+  behaviour for existing Applications**: they start sending a second email at
+  sign-up. Set it to `false` to keep the old behaviour. Delivery is
+  fire-and-forget on the same contract as the welcome mail — an Application
+  with no email transport logs a `no_transport` send, and no delivery failure
+  can fail an account creation.
+- **`requireEmailVerification`, default `false`.** When on, password sign-in
+  refuses a user whose address is unconfirmed with **403 `EMAIL_NOT_VERIFIED`**
+  (new code) instead of issuing a session. Deliberately not
+  `INVALID_CREDENTIALS`: the password was right, and an app that cannot say why
+  sends the user round the password-reset loop forever. The check runs after
+  the password verifies, so it is neither an account-existence oracle nor a
+  failed attempt against the lockout counter — a user waiting on their link
+  cannot lock themselves out by retrying.
+- Magic-link and OAuth sign-in satisfy the gate rather than skip it: each proves
+  the address and records `emailVerified: true`, so neither sends a verification
+  mail nor is blocked.
+- Note before enabling the gate: it applies to accounts that already exist, and
+  a blocked user cannot re-send their own link (`/auth/send-verification`
+  requires a session). Operators can mark an address verified from
+  Panel → Application → End-users.
+- The two bullets above are the corrected form. As first written this entry said
+  the gate covered password **sign-in** only and that already-issued refresh
+  tokens kept working — both were true of the code and both were the bug. See
+  the security entry at the top of this release.
+
+### Added: `subscription.*` webhooks carry the resolved entitlements
+
+- **`data.subscription.entitlements`** is now on every outbound
+  `subscription.activated` / `subscription.canceled` / `subscription.past_due`
+  delivery: the entitlements that subscription grants, with its
+  `entitlementOverrides` already applied. Same array shape
+  `GET /api/v1/billing/entitlements` returns, so the same parsing works on both.
+- Additive — nothing was removed or renamed, and a consumer that ignores the
+  field is unaffected.
+- Why: `planSlug` cannot answer "how much did this customer buy". A
+  per-subscription override is how a bespoke quantity is sold without minting a
+  private plan, so two subscribers on one plan can hold different amounts. A
+  consumer provisioning off the slug therefore provisioned the wrong thing for
+  exactly the customers who had paid for something different — and, holding no
+  user token, had no way to go and ask.
+- Provision against `entitlements`; keep using `planSlug` for display.
+
+### Other
+
+- Removed `ProviderModule.createProvider`. The provider-module spec proposed it
+  so a module could own its outbound construction, all three modules
+  implemented it, and nothing ever called it — outbound providers are built by
+  `getProviderForApplication` in `providers/index.ts`, which was never migrated
+  onto the hook. Internal only: no published type, endpoint or payload changes.
+- Environment variables renamed `RELIPAY_*` → `REKEY_*` across the API, panel, admin, portal, SDKs, CLI, and MCP server. As of 2.0.0 the old names are no longer read — see the breaking entry above.
+- CI test database renamed `relipay_test` → `rekey_test`; default transactional-email from-name is now "Rekey".
+- Removed a dead `seoTags` block from the marketing site's content data. It was superseded by `landingContent.seo` and had no readers.
+
 ## 1.1.2
 
 ReliPay is now **Rekey**. This release moves the SDK packages to their new

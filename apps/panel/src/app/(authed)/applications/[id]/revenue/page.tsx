@@ -88,7 +88,7 @@ export default async function BillingOverviewPage({
     <div className="space-y-5">
       <SectionHeader
         title="Billing overview"
-        description="Revenue and subscription health for this application. Amounts reflect what the provider settled, after any coupon discount. Live mode data only — test-mode subscriptions and payments are excluded."
+        description="Revenue and subscription health for this application. Amounts reflect what the provider settled, after any coupon discount. Whether that is real money depends on the billing credentials this application has stored, not on its environment label."
       />
 
       {stats && (
@@ -150,7 +150,7 @@ export default async function BillingOverviewPage({
                 stats.monthlyRevenue.reduce((s, m) => s + m.amountCents, 0),
                 currency,
               )}{' '}
-              total · live mode data
+              total
             </span>
           </div>
           <RevenueBarChart data={stats.monthlyRevenue} currency={currency} />
@@ -211,8 +211,6 @@ export default async function BillingOverviewPage({
                       <Badge tone={PAYMENT_STATUS_TONE[p.status]} dot>
                         {PAYMENT_STATUS_LABEL[p.status]}
                       </Badge>
-                      {/* Recent payments span both modes — flag sandbox rows. */}
-                      {p.mode === 'TEST' && <Badge tone="info">TEST</Badge>}
                     </span>
                   </TD>
                   <TD muted className="max-w-[16rem] truncate text-xs" title={p.description ?? undefined}>

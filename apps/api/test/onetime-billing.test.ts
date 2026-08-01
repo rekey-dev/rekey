@@ -3,13 +3,14 @@
  *
  * CREDIT packs + perpetual (non-TIMED) LICENSE plans must go through the
  * provider's ONE-TIME flow (no recurring subscription); SUBSCRIPTION + TIMED
- * LICENSE plans recur. Under NODE_ENV=test the stub provider tags the two
+ * LICENSE plans recur. Under NODE_ENV=test the provider fake tags the two
  * paths with distinguishable URLs + the local row carries `metadata.oneTime`.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { configureSandboxStripe } from './fakes/billing-credentials.js';
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -61,6 +62,7 @@ describe('one-time vs recurring checkout', () => {
         payload: { email: `eu-${slug}@example.com`, password: PASSWORD },
       })
       .then((r) => (r.json().data as { accessToken: string }).accessToken);
+    await configureSandboxStripe(applicationId);
   });
 
   const createPlan = (body: Record<string, unknown>) =>

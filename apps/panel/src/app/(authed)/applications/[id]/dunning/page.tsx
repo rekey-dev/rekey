@@ -232,8 +232,6 @@ export default async function DunningPage({
                     <Badge tone={STATUS_TONE[c.status]} dot>
                       {STATUS_LABEL[c.status]}
                     </Badge>
-                    {/* Test/live isolation: flag sandbox dunning cases (mirrors payments). */}
-                    {c.mode === 'TEST' && <Badge tone="info">TEST</Badge>}
                   </span>
                 </TD>
                 <TD align="right" mono>

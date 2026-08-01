@@ -43,18 +43,10 @@ const ConsumeBody = z
   })
   .refine(exactlyOneSubject, subjectRefine);
 
-/**
- * Validate + resolve the subject against the calling Application.
- *
- * Test/live isolation: when `mode` is set (it always is on these secret-key
- * routes), an end-user of the OTHER mode is invisible — a test key cannot
- * draw down a live user's credits. Organizations carry no mode in v1 (their
- * members do), so org subjects are only Application-scoped.
- */
+/** Validate + resolve the subject against the calling Application. */
 async function resolveSubject(
   applicationId: string,
   input: { endUserId?: string | undefined; organizationId?: string | undefined },
-  mode?: import('@prisma/client').DataMode,
 ): Promise<{ subject: CreditSubjectInput; label: { endUserId?: string; organizationId?: string } }> {
   if (input.organizationId) {
     const org = await prisma.organization.findFirst({
@@ -72,7 +64,7 @@ async function resolveSubject(
     return { subject: { organizationId: input.organizationId }, label: { organizationId: input.organizationId } };
   }
   const eu = await prisma.endUser.findFirst({
-    where: { id: input.endUserId!, applicationId, ...(mode !== undefined && { mode }) },
+    where: { id: input.endUserId!, applicationId },
     select: { id: true },
   });
   if (!eu) {
@@ -80,7 +72,7 @@ async function resolveSubject(
       statusCode: 404,
       code: 'END_USER_NOT_FOUND',
       message: `End-user "${input.endUserId}" not found in this Application.`,
-      fix: 'Pass the id of an end-user that belongs to this Application (and matches the key\'s test/live mode).',
+      fix: 'Pass the id of an end-user that belongs to the Application this key names.',
     });
   }
   return { subject: { endUserId: input.endUserId! }, label: { endUserId: input.endUserId! } };
@@ -114,7 +106,7 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const applicationId = req.application!.id;
-      const { subject, label } = await resolveSubject(applicationId, BalanceQuery.parse(req.query), req.dataMode);
+      const { subject, label } = await resolveSubject(applicationId, BalanceQuery.parse(req.query));
       const balance = await creditsService.getBalance(applicationId, subject);
       return { success: true, data: { applicationId, ...label, balance } };
     },
@@ -153,7 +145,7 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
     async (req) => {
       const applicationId = req.application!.id;
       const body = ConsumeBody.parse(req.body);
-      const { subject } = await resolveSubject(applicationId, body, req.dataMode);
+      const { subject } = await resolveSubject(applicationId, body);
       const result = await creditsService.consume({
         applicationId,
         ...subject,
@@ -191,7 +183,7 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
     async (req) => {
       const applicationId = req.application!.id;
       const q = LedgerQuery.parse(req.query);
-      const { subject } = await resolveSubject(applicationId, q, req.dataMode);
+      const { subject } = await resolveSubject(applicationId, q);
       const entries = await creditsService.listLedger(applicationId, subject, {
         limit: q.limit ?? 50,
         ...(q.offset !== undefined && { offset: q.offset }),

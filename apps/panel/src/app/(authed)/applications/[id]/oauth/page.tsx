@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
 import { Modal } from '@/components/Modal';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
@@ -104,7 +103,6 @@ async function setOauth(applicationId: string, formData: FormData): Promise<void
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/oauth`);
   redirect(`/applications/${applicationId}/oauth?saved=${provider}`);
 }
 
@@ -114,7 +112,6 @@ async function removeOauth(applicationId: string, provider: string): Promise<voi
     method: 'DELETE',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/oauth-config/${encodeURIComponent(provider)}`,
   });
-  revalidatePath(`/applications/${applicationId}/oauth`);
   redirect(`/applications/${applicationId}/oauth`);
 }
 

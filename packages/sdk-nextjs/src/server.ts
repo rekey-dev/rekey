@@ -13,8 +13,8 @@
  *   await signOut();                     // revokes refresh + clears cookies
  *
  * The helpers expect:
- *   - `process.env.RELIPAY_URL` (the API URL)
- *   - `process.env.RELIPAY_SECRET` (the Application secret key, server-only)
+ *   - `process.env.REKEY_URL` (the API URL)
+ *   - `process.env.REKEY_SECRET` (the Application secret key, server-only)
  *
  * Pure server module — never bundled to the browser.
  */
@@ -33,11 +33,11 @@ import {
 let _client: Rekey | null = null;
 function client(): Rekey {
   if (_client) return _client;
-  const apiUrl = process.env.RELIPAY_URL;
-  const secretKey = process.env.RELIPAY_SECRET;
+  const apiUrl = process.env.REKEY_URL;
+  const secretKey = process.env.REKEY_SECRET;
   if (!apiUrl || !secretKey) {
     throw new Error(
-      '@rekey.dev/nextjs: RELIPAY_URL and RELIPAY_SECRET must be set on the server.',
+      '@rekey.dev/nextjs: REKEY_URL and REKEY_SECRET must be set on the server.',
     );
   }
   _client = new Rekey({ apiUrl, secretKey });
@@ -94,7 +94,7 @@ export async function auth(): Promise<Session | null> {
  * must collect a TOTP / backup code and call `mfaVerify` to complete.
  *
  * No cookies are set on the `mfa_required` branch — the challenge token is
- * NOT a session and must never land in `relipay_access`.
+ * NOT a session and must never land in `rekey_access`.
  */
 export type SignInOutcome =
   | { kind: 'session'; session: Session }

@@ -1,0 +1,27 @@
+# Shared turbo cache, used by all three CI jobs.
+#
+# turbo keys its cache on the hash of each task's inputs, so a package whose
+# sources did not change replays its previous output instead of rebuilding. The
+# three jobs overlap heavily — every one of them builds packages/* — so a hit
+# here is what stops the same tsc runs happening three times per push.
+#
+# TURBO_CACHE_DIR is pinned rather than left to the default: turbo resolves the
+# default relative to the workspace root, which differs between a plain
+# checkout and a git worktree, and actions/cache needs a fixed path.
+name: turbo cache
+description: Restore and save the local turbo task cache
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TURBO_CACHE_DIR=${{ github.workspace }}/.turbo/cache" >> "$GITHUB_ENV"
+    - uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.turbo/cache
+        # Scoped per job: the jobs run different task sets, and a single shared
+        # key would have them race to overwrite each other's cache on save.
+        key: turbo-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+        restore-keys: |
+          turbo-${{ runner.os }}-${{ github.job }}-
+          turbo-${{ runner.os }}-

@@ -20,7 +20,7 @@ const ACCESS_MAX_AGE = 60 * 15; // 15 min — mirrors setSessionCookies
 const REFRESH_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 
 // Relative Location — the browser resolves it against the public URL it's on
-// (panel.relipay.dev), NOT `req.url`, which behind a proxy is the internal bind
+// (panel.rekey.dev), NOT `req.url`, which behind a proxy is the internal bind
 // address (e.g. 0.0.0.0:3031). NextResponse.redirect requires an absolute URL,
 // so emit the header directly.
 function seeOther(path: string): NextResponse {

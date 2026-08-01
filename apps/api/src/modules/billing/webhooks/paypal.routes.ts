@@ -12,7 +12,7 @@
  * shared appliers.
  *
  * PayPal verification is ONLINE (one outbound call), unlike Stripe's
- * offline HMAC; the test/stub skip is the PIPELINE's centralized gate,
+ * offline HMAC; the test skip is the PIPELINE's centralized gate,
  * keyed on capabilities.onlineVerify and never active in production. There
  * is no global (non-slug) endpoint: verification requires the per-app
  * webhook id, so the slug is mandatory.

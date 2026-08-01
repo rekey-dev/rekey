@@ -300,7 +300,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         tags: ['Tenant · Auth'],
         security: [],
-        summary: 'Request a password-reset token. Rekey does not send email — caller forwards the token.',
+        summary: 'Request a password reset. Emailed to the operator; the raw token is returned only in dev or with no email transport.',
         body: {
           type: 'object',
           required: ['email'],
@@ -347,7 +347,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         tags: ['Tenant · Auth'],
         security: [],
-        summary: 'Request a passwordless sign-in token. Rekey does not send email — caller forwards the token.',
+        summary: 'Request a passwordless sign-in link. Emailed to the operator; the raw token is returned only in dev or with no email transport.',
         body: {
           type: 'object',
           required: ['email'],
@@ -670,7 +670,9 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
         security: [{ tenantSession: [] }],
         summary: 'Revoke one of the operator\'s personal-access-tokens. Idempotent.',
         description:
-          'Requires the **OWNER or ADMIN** workspace role.',
+          'No workspace role required — revocation is scoped to the calling operator, so this ' +
+          'can only ever kill your own token. Deliberately looser than minting: an operator ' +
+          'downgraded to MEMBER must still be able to revoke a PAT they already hold.',
         params: {
           type: 'object',
           required: ['id'],

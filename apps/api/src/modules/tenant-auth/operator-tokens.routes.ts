@@ -30,8 +30,11 @@ import { recordSecurityEvent, requestContext } from '../../lib/security-events.j
 
 /**
  * Make sure the named application belongs to the workspace the PAT is bound to.
- * Mirrors `tenant-applications.ensureAppInTenant` — same "not found" code for a
- * cross-tenant app so a PAT can't be used as a tenant-enumeration oracle.
+ * Same "not found" code for a cross-tenant app as the operator-session surface,
+ * so a PAT can't be used as a tenant-enumeration oracle. That surface has since
+ * moved to `lib/app-access.ts` `ensureAppAccess`, which additionally enforces
+ * per-Application grants; this local helper only checks tenant ownership,
+ * because a PAT's authority comes from its scopes, not from a membership row.
  */
 async function ensureAppInTenant(applicationId: string, tenantId: string): Promise<void> {
   const app = await applicationsService.get(applicationId);
@@ -49,7 +52,6 @@ const AppParam = z.object({ id: z.string().min(1) });
 
 const MintKeyBody = z.object({
   name: z.string().min(1).max(120),
-  mode: z.enum(['live', 'test']).default('live'),
   scopes: z.array(z.string()).default([]),
   expiresAt: z.string().datetime().optional(),
 });
@@ -113,7 +115,6 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
           required: ['name'],
           properties: {
             name: { type: 'string', minLength: 1, maxLength: 120 },
-            mode: { type: 'string', enum: ['live', 'test'], default: 'live' },
             scopes: { type: 'array', items: { type: 'string' } },
             expiresAt: { type: 'string', format: 'date-time' },
           },
@@ -127,7 +128,6 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
       const result = await apiKeysService.create({
         applicationId: id,
         name: body.name,
-        mode: body.mode,
         scopes: body.scopes,
         ...(body.expiresAt !== undefined && { expiresAt: new Date(body.expiresAt) }),
       });
@@ -142,7 +142,6 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
         metadata: {
           apiKeyId: result.apiKey.id,
           name: body.name,
-          mode: body.mode,
           scopes: body.scopes,
           via: 'operator_pat',
         },

@@ -27,9 +27,9 @@ It is **identity, not authorization**. It names the Application and asserts "leg
 Pass it to `@rekey.dev/react`:
 
 ```tsx
-<RelipayProvider apiUrl="https://api.rekey.example.com" publishableKey="rp_pub_myapp-prod_…">
+<RekeyProvider apiUrl="https://api.rekey.example.com" publishableKey="rp_pub_myapp-prod_…">
   <App />
-</RelipayProvider>
+</RekeyProvider>
 ```
 
 ```ts
@@ -41,14 +41,22 @@ const lic = await client.verifyLicense({ key, machineFingerprint });
 
 ### What the publishable key can and cannot do
 
-| Allowed (public-bootstrap) | Rejected (secret key only) |
+| Allowed | Rejected (secret key only) |
 |---|---|
-| `auth`: sign-up, sign-in, mfa-verify, refresh, sign-out, forgot/reset/verify-email, magic-link, passkey authenticate | billing checkout, subscription cancel, usage record, credits consume |
-| `oauth`: provider start + callback | license **issuance**, org management |
-| `licenses/verify` | account management (change-password, list/revoke passkeys + sessions) |
-| `billing/plans` (catalogue) | `GET /me`, `billing/providers` |
+| `auth`: sign-up, sign-in, mfa-verify, refresh, sign-out, forgot/reset/verify-email, magic-link, passkey authenticate | `GET /me` (credential self-inspection) |
+| `oauth`: provider start + callback | `usage/record` + `usage/aggregate` |
+| `licenses/verify` | `credits/*` (balance, consume, ledger) |
+| `billing/plans` + `billing/providers` (catalogue) | |
+| † account management: change-password, list/revoke passkeys + sessions, sign-out-everywhere | |
+| † self-service billing: entitlements, payments, checkout, subscription cancel | |
+| † org management (`users/me/organizations/*`) | |
+| ‡ passkey **enrollment** (`passkey/register/*`) | |
 
-Reaching a secret-only route with a publishable key returns **401 `API_KEY_INVALID`** — those routes use `requireApiKey`, which rejects `rp_pub_*` outright. A publishable request can never structurally reach them.
+† These additionally require the end-user's own JWT (`requireUserSession`), and that JWT — not the key — is the authorizer: every one of them acts solely on `request.endUser`. That is what lets a browser-only portal manage a team and take a payment with no secret key at all (Portal V2, see [specs/hosted-portal.md](specs/hosted-portal.md)).
+
+‡ Publishable callers must additionally **step up** — send `password`, or a current TOTP / unused backup `code` — at `passkey/register/start`. A passkey bypasses the MFA challenge at sign-in, and neither a password change nor sign-out-everywhere removes one, so a stolen access token alone must not be able to enroll it. `/complete` needs no second proof: the single-use challenge binds it to the `/start` that already stepped up. Secret-key callers skip step-up, because the customer's backend is the gate.
+
+The gate is **route membership, not scope**. A publishable key is accepted only on routes that opted into `requirePublishableOrSecretKey`; `requireScope` returns early for a publishable caller rather than consulting scopes. Presenting one on a `requireApiKey` route returns **401 `API_KEY_INVALID`**. So widening the publishable set is a deliberate per-route decision — and a breaking one for tenants relying on `ipAllowlist`, which only constrains the secret-key path.
 
 ### Origin allowlist
 
@@ -64,7 +72,7 @@ The publishable key rotates with a **grace window** — see [api-key-rotation.md
 curl -X POST https://rekey.example.com/api/v1/admin/applications/$APP_ID/api-keys \
   -H "Authorization: Bearer $SUPER_ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "Production server", "mode": "live"}'
+  -d '{"name": "Production server"}'
 ```
 
 Response:
@@ -88,6 +96,8 @@ Response:
 ```
 
 **Save `rawKey` immediately.** It is not in the database — only the SHA-256 hash is. There is no recovery path other than minting a new key.
+
+There is no `mode` in the request body. The `rp_live_` / `rp_test_` prefix follows the **Application's environment** — see [Environments](#environments) — so the example above returns `rp_live_…` only if `$APP_ID` is a `PRODUCTION` application.
 
 ## Storage model
 
@@ -132,23 +142,40 @@ The first endpoint to use this middleware is **`GET /api/v1/me`** — used by SD
 - Never compare keys with `===`. Use the indexed-lookup path or `timingSafeEqualHex` from `lib/keys.ts`.
 - Never put a secret key in client-side code. Browser code uses the **public key** only.
 
-## Test mode
+## Environments
 
-A secret key's `mode` (`live` / `test`) is more than a prefix: test and live data are **parallel universes** (roadmap §7 v1). Every `EndUser`, `Subscription`, and `Payment` row carries a `mode` column (`TEST` / `LIVE`), stamped at creation from the calling key, and the public API scopes by it.
+An Application carries an `environment`: `PRODUCTION`, `STAGING`, or `DEVELOPMENT`. New applications are `DEVELOPMENT` unless you say otherwise, because going live should be a deliberate act rather than a default.
 
-### What test mode isolates
+**The Application is the isolation boundary.** Every row in Rekey — end-users, subscriptions, payments, licences, credits, usage, organizations, webhook endpoints — carries an `applicationId`. So "keep my rehearsals away from my customers" is *use a second Application*, not *flip a mode on the same one*.
 
-- **Sign-ups**: a user created through an `rp_test_` key is stamped `TEST` (password, magic-link, and OAuth sign-up paths alike). `rp_live_` keys (and rows that predate the feature) are `LIVE`.
-- **Auth**: a live key cannot sign in, refresh, or read a test user, and vice versa. Wrong-mode sign-ins get the same **401 `INVALID_CREDENTIALS`** as a nonexistent email (no enumeration); presenting a valid user JWT through a wrong-mode key gets **403 `DATA_MODE_MISMATCH`**.
-- **Subjects**: credits balance/consume/ledger and usage record/aggregate refuse end-user subjects of the other mode (`END_USER_NOT_FOUND`).
-- **Checkout**: a test-key checkout only selects billing credentials stored with `mode: test` (a sandbox provider account) and stamps the Subscription/Payments `TEST`. If only live credentials are configured, checkout fails with **400 `BILLING_MODE_MISMATCH`**. `billing.getProviders()` through a test key lists only test-mode providers.
-- **Revenue stats**: the operator Billing Overview / revenue dashboard counts **live data only** — test subscriptions and payments never inflate MRR or payment volume.
-- **Dunning**: cases inherit the subscription's mode. TEST cases run the same day-0/3/7/14 state machine but log reminders (`metadata.reminders[].outcome = "skipped_test_mode"`) instead of emailing the end-user.
-- **Operator surfaces**: the panel and tenant API see **both** modes; list payloads carry `mode`, rows show a `TEST` badge, and lists accept a `?mode=TEST|LIVE` filter.
-- **Outbound webhooks**: `user.*`, `subscription.*`, `payment.*`, and `dunning.*` payloads include the object's `mode` so consumers can branch.
+Rekey used to have a per-key `test`/`live` data mode instead. It was removed on 2026-07-30: it stamped only three models, so a "test" end-user still held real licences, burned real credits, wrote real usage rows and fired real webhooks. The isolation it advertised did not exist. Environments replace it with a boundary that was already real.
 
-One caveat: email is unique per `(application, email)` **across** modes — the same address cannot exist as both a test and a live user.
+### What the environment actually controls
 
-### What still needs a provider sandbox account
+- **Billing credentials.** An Application's environment does not restrict which provider credentials it may hold — store live keys against a `DEVELOPMENT` Application if that is deliberately what you want to test against. What Rekey does guarantee is that the stored `mode` is not a lie: where the key states its own mode (Stripe `sk_live_`/`sk_test_`, Razorpay `rzp_live_`/`rzp_test_`) that is what gets recorded, and a contradicting `mode` in the request is refused with **400 `BILLING_CREDENTIALS_MODE_CONTRADICTED`**. PayPal credentials cannot be told apart, so there the declared mode is taken as given.
+- **Key prefixes.** A `PRODUCTION` app mints `rp_live_…`; `STAGING` and `DEVELOPMENT` mint `rp_test_…`. You do not choose this at mint time. The prefix is a label for humans — so a key pasted into a chat window is identifiable at a glance — and nothing in the API branches on it beyond "is this shaped like a secret key".
 
-Rekey's test mode isolates *Rekey's* data; it does not simulate a payment provider. To run a real end-to-end test checkout you still need sandbox credentials at the provider (Stripe `sk_test_…`, a PayPal sandbox app, Razorpay test keys) stored as billing credentials with `mode: test`. Without them, test-mode checkouts fail with `BILLING_MODE_MISMATCH` (or, when no credentials are configured at all, fall through to the dev stub provider). Provider webhooks from a sandbox account flow through the same per-app webhook endpoint and inherit the subscription's `TEST` mode.
+That is the whole list. The environment is not a filter: it does not hide rows, scope queries, or change what any endpoint returns.
+
+### Going live
+
+You don't. The Application does not move — you make a new one.
+
+`environment` is fixed when the Application is created and there is no endpoint that changes it afterwards. Going to production means creating a second Application with `environment: "PRODUCTION"`, storing your live provider credentials on it, and pointing your production deployment at its keys. The development Application keeps working, unchanged, for the next round of work.
+
+```bash
+curl -X POST https://rekey.example.com/api/v1/tenant/applications \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Northwind (production)", "slug": "northwind-prod", "environment": "PRODUCTION"}'
+```
+
+This is more work than flipping a field, and that is the trade. A mutable environment means every already-stored credential can be invalidated later by the Application changing underneath it — so every transition needs its own guard, and the one nobody writes is the one that ships a PRODUCTION app still holding sandbox keys: live-looking in every UI, charging nothing, discovered at reconciliation. Immutability removes the category.
+
+What it costs you honestly: the new Application starts empty. Plans, coupons, meters, webhook endpoints and end-users do not come with it, and there is **no copy/clone flow yet** — you re-create the catalogue against the production Application. If that becomes the painful part, say so; a guided clone is deliberately not built until someone needs it.
+
+### You still need a provider sandbox account
+
+An environment is a Rekey-side property. It does not simulate a payment provider. To run an end-to-end checkout against a `DEVELOPMENT` or `STAGING` Application you need real sandbox credentials from the provider (Stripe `sk_test_…`, a PayPal sandbox app, Razorpay test keys) stored as that app's billing credentials.
+
+There is no fallback if you skip that. Checkout without configured credentials fails with **400 `BILLING_CREDENTIALS_NOT_CONFIGURED`** in every environment, development included. Rekey used to substitute a stub provider that returned a plausible-looking checkout URL, which meant an integration could look finished while no money could ever move; that stub was deleted along with the data modes.

@@ -145,4 +145,114 @@ describe('Plan entitlements + provisioner', () => {
     await entitlementsService.provision({ subscription: sub });
     expect(await creditsService.getBalance(appId, { endUserId: euId })).toBe(100);
   });
+
+  describe('entitlementOverrides', () => {
+    /** A subscription on a bare SUBSCRIPTION plan, with the given overrides. */
+    async function subscribeWithOverrides(
+      overrides: Record<string, unknown>,
+      opts?: { planEntitlement?: Record<string, unknown>; status?: 'ACTIVE' | 'PAST_DUE' },
+    ): Promise<{ euId: string }> {
+      const planId = await makePlan('team', { kind: 'SUBSCRIPTION' });
+      if (opts?.planEntitlement) await putEntitlement('team', opts.planEntitlement);
+      const euId = await makeEndUser(`ovr-${Math.random().toString(36).slice(2, 7)}@example.com`);
+      await prisma.subscription.create({
+        data: {
+          applicationId: appId,
+          endUserId: euId,
+          planId,
+          status: opts?.status ?? 'ACTIVE',
+          provider: 'stripe',
+          entitlementOverrides: overrides as never,
+        },
+      });
+      return { euId };
+    }
+
+    it('ADDS a FEATURE the plan does not carry', async () => {
+      // The documented remedy for a customer who has outgrown their plan is an
+      // override on their subscription. It could only ever rewrite a row the
+      // plan already had — so for the common case, a plan carrying no such row
+      // at all, setting the override changed precisely nothing and the
+      // customer stayed capped. Both directions were reproduced.
+      const { euId } = await subscribeWithOverrides({ 'FEATURE:max_workspaces': 3 });
+
+      const resolved = await entitlementsService.resolveForEndUser(appId, euId);
+      expect(resolved.features.max_workspaces).toBe(3);
+    });
+
+    it('still overrides a FEATURE the plan does carry', async () => {
+      const { euId } = await subscribeWithOverrides(
+        { 'FEATURE:max_workspaces': 7 },
+        { planEntitlement: { kind: 'FEATURE', key: 'max_workspaces', valueType: 'INT', value: '1' } },
+      );
+
+      const resolved = await entitlementsService.resolveForEndUser(appId, euId);
+      expect(resolved.features.max_workspaces).toBe(7);
+    });
+
+    it('types an added FEATURE by its value, so consumers get a number and not a string', async () => {
+      const { euId } = await subscribeWithOverrides({
+        'FEATURE:seats': 12,
+        'FEATURE:beta': 'true',
+        'FEATURE:tier': 'gold',
+      });
+
+      const resolved = await entitlementsService.resolveForEndUser(appId, euId);
+      expect(resolved.features).toMatchObject({ seats: 12, beta: true, tier: 'gold' });
+    });
+
+    it('will NOT add a stateful entitlement — those materialize real grants', async () => {
+      // A CREDIT/LICENSE/USAGE override is a bare number, so adding one would
+      // mean inventing a licenceKind and a rollover policy and then handing out
+      // whatever they turned out to mean. Adding those stays a plan decision.
+      const { euId } = await subscribeWithOverrides({
+        'CREDIT:': 500,
+        'LICENSE:': 5,
+        'USAGE:api_calls': 1000,
+      });
+
+      const resolved = await entitlementsService.resolveForEndUser(appId, euId);
+      expect(resolved.entitlements).toHaveLength(0);
+      expect(await entitlementsService.includedQuotaFor(appId, { endUserId: euId }, 'api_calls')).toBeNull();
+    });
+  });
+
+  it('a PAST_DUE subscriber keeps the entitlements they bought (the dunning window)', async () => {
+    // `isEntitledStatus` counts PAST_DUE, `getCurrentSubscription` returns it,
+    // the portal shows the plan, and the whole point of dunning is to give the
+    // customer time to fix their card. Resolving for ACTIVE only contradicted
+    // all of that: the first failed charge silently stripped every feature
+    // they had paid for, so a buyer of a three-workspace allowance was capped
+    // at the default of one while their subscription was still live.
+    const planId = await makePlan('team', { kind: 'SUBSCRIPTION' });
+    await putEntitlement('team', { kind: 'FEATURE', key: 'max_workspaces', valueType: 'INT', value: '3' });
+    await putEntitlement('team', { kind: 'USAGE', key: 'api_calls', quantity: 1000 });
+    const euId = await makeEndUser(`dunning-${Math.random().toString(36).slice(2, 7)}@example.com`);
+    const sub = await prisma.subscription.create({
+      data: { applicationId: appId, endUserId: euId, planId, status: 'ACTIVE', provider: 'stripe' },
+    });
+
+    await prisma.subscription.update({ where: { id: sub.id }, data: { status: 'PAST_DUE' } });
+
+    const resolved = await entitlementsService.resolveForEndUser(appId, euId);
+    expect(resolved.features.max_workspaces).toBe(3);
+    // Read the other way round, the same gap made a dunning customer UNMETERED
+    // rather than under-entitled: no USAGE entitlement found resolves to
+    // "uncapped".
+    expect(await entitlementsService.includedQuotaFor(appId, { endUserId: euId }, 'api_calls')).toBe(1000);
+  });
+
+  it('a CANCELED subscriber does not', async () => {
+    // The fix must not over-apply: cancellation is terminal and is exactly
+    // where entitlement stops.
+    const planId = await makePlan('team', { kind: 'SUBSCRIPTION' });
+    await putEntitlement('team', { kind: 'FEATURE', key: 'max_workspaces', valueType: 'INT', value: '3' });
+    const euId = await makeEndUser(`gone-${Math.random().toString(36).slice(2, 7)}@example.com`);
+    await prisma.subscription.create({
+      data: { applicationId: appId, endUserId: euId, planId, status: 'CANCELED', provider: 'stripe' },
+    });
+
+    const resolved = await entitlementsService.resolveForEndUser(appId, euId);
+    expect(resolved.features.max_workspaces).toBeUndefined();
+  });
 });

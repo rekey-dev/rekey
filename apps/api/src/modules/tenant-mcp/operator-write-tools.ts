@@ -13,10 +13,14 @@
  * validation, slug rules, provider registration, and secret generation behave
  * identically to the panel. Every successful write emits a `securityEvent`.
  *
- * Phase 1 is deliberately reversible-only. Destructive / financial operations
- * (delete application, refund, cancel subscription, remove member, rotate
- * webhook secret) are intentionally NOT exposed here — they belong behind a
- * stronger gate / explicit confirmation in a later phase.
+ * Most tools here are reversible. The two that are not — `configure_billing_provider`
+ * (the secret travels through the MCP client) and `cancel_subscription`
+ * (irreversible) — carry `admin: true`, which demands the `mcp:operator:admin`
+ * scope on top of the role check rather than plain write capability.
+ * `remove_member` is exposed as an ordinary write tool because re-inviting undoes
+ * it. Still deliberately absent: delete application, refund, and webhook-secret
+ * rotation — no undo, and no confirmation step an agent can be trusted to have
+ * surfaced to a human.
  */
 
 import type { Application, TenantRole } from '@prisma/client';
@@ -139,11 +143,26 @@ export const operatorWriteTools: OperatorTool[] = [
         methods: { type: 'array', items: { type: 'string' } },
         passwordMinLength: { type: 'integer', minimum: 6, maximum: 256 },
         redirectUrls: { type: 'array', items: { type: 'string' } },
+        appUrl: {
+          type: ['string', 'null'],
+          description:
+            'Base URL of the customer application that transactional emails link back to. ' +
+            'Null or "" clears it; with nothing resolvable the email CTA button is omitted.',
+        },
         organizationsEnabled: { type: 'boolean' },
         signupMode: { type: 'string', enum: ['public', 'secret_only', 'invite_only'] },
         mfa: { type: 'string', enum: ['off', 'optional', 'required'] },
         mcpEnabled: { type: 'boolean' },
         passwordBreachCheckEnabled: { type: 'boolean' },
+        sendVerificationEmailOnSignUp: {
+          type: 'boolean',
+          description: 'Send the verification email automatically on password sign-up. Default true.',
+        },
+        requireEmailVerification: {
+          type: 'boolean',
+          description:
+            'Refuse password sign-in until the end-user confirms their address (403 EMAIL_NOT_VERIFIED). Default false; applies to existing unverified accounts immediately.',
+        },
       },
       required: ['applicationId'],
       additionalProperties: false,
@@ -156,6 +175,9 @@ export const operatorWriteTools: OperatorTool[] = [
           passwordMinLength: Number(args.passwordMinLength),
         }),
         ...(args.redirectUrls !== undefined && { redirectUrls: args.redirectUrls as string[] }),
+        ...(args.appUrl !== undefined && {
+          appUrl: args.appUrl === null ? null : String(args.appUrl),
+        }),
         ...(args.organizationsEnabled !== undefined && {
           organizationsEnabled: args.organizationsEnabled === true,
         }),
@@ -166,6 +188,12 @@ export const operatorWriteTools: OperatorTool[] = [
         ...(args.mcpEnabled !== undefined && { mcpEnabled: args.mcpEnabled === true }),
         ...(args.passwordBreachCheckEnabled !== undefined && {
           passwordBreachCheckEnabled: args.passwordBreachCheckEnabled === true,
+        }),
+        ...(args.sendVerificationEmailOnSignUp !== undefined && {
+          sendVerificationEmailOnSignUp: args.sendVerificationEmailOnSignUp === true,
+        }),
+        ...(args.requireEmailVerification !== undefined && {
+          requireEmailVerification: args.requireEmailVerification === true,
         }),
       };
       const updated = await applicationsService.updateAuthConfig({ applicationId: app.id, patch });
@@ -392,7 +420,14 @@ export const operatorWriteTools: OperatorTool[] = [
         invitedByRole: ctx.role,
         email: String(args.email),
         role: String(args.role) as TenantRole,
-        inviteUrl: `${env.PANEL_URL.replace(/\/$/, '')}/accept-invite?token={token}`,
+        // PANEL_URL has no default (a Rekey default would email a self-hoster's
+        // operators a link to OUR panel). Without it we cannot build a usable
+        // invite link, so omit the key entirely rather than send a broken one
+        // — `exactOptionalPropertyTypes` means an explicit undefined is not the
+        // same as absent.
+        ...(env.PANEL_URL
+          ? { inviteUrl: `${env.PANEL_URL.replace(/\/$/, '')}/accept-invite?token={token}` }
+          : {}),
       });
       audit(ctx, 'workspace.member_invited', null, {
         email: result.invitation.email,
@@ -534,14 +569,16 @@ export const operatorWriteTools: OperatorTool[] = [
         ...(mode !== undefined && { mode }),
       };
       if (provider === 'stripe') {
-        await billingCredentialsService.upsertStripe(
+        await billingCredentialsService.upsertCredentials(
           app.id,
+          'stripe',
           { apiKey: String(args.apiKey ?? ''), webhookSecret: String(args.webhookSecret ?? '') },
           options,
         );
       } else if (provider === 'paypal') {
-        await billingCredentialsService.upsertPaypal(
+        await billingCredentialsService.upsertCredentials(
           app.id,
+          'paypal',
           {
             clientId: String(args.clientId ?? ''),
             clientSecret: String(args.clientSecret ?? ''),
@@ -550,8 +587,9 @@ export const operatorWriteTools: OperatorTool[] = [
           options,
         );
       } else {
-        await billingCredentialsService.upsertRazorpay(
+        await billingCredentialsService.upsertCredentials(
           app.id,
+          'razorpay',
           {
             keyId: String(args.keyId ?? ''),
             keySecret: String(args.keySecret ?? ''),

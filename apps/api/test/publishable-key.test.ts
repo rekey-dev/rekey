@@ -82,10 +82,8 @@ describe('Publishable-key auth', () => {
   it('201: sign-up succeeds with a publishable key (no backend needed)', async () => {
     const res = await signUp(publicKey, 'pub@example.com');
     expect(res.statusCode).toBe(201);
-    const data = res.json().data as { endUser: { applicationId: string; mode: string } };
+    const data = res.json().data as { endUser: { applicationId: string } };
     expect(data.endUser.applicationId).toBe(applicationId);
-    // Publishable keys are LIVE-only.
-    expect(data.endUser.mode).toBe('LIVE');
   });
 
   it('201: sign-up still works with a secret key on the same route', async () => {

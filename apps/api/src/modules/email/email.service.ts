@@ -33,7 +33,12 @@ import {
   type EmailEventKey,
 } from './events.js';
 import { DEFAULT_TEMPLATES } from './defaults/index.js';
-import { renderTemplate, pickEventVariables, htmlToPlainText } from './render.js';
+import {
+  renderTemplate,
+  renderHtmlBody,
+  pickEventVariables,
+  htmlToPlainText,
+} from './render.js';
 
 export interface ResolvedTemplate {
   subject: string;
@@ -89,7 +94,7 @@ export async function renderForEvent(
   const tpl = await resolveTemplate(applicationId, eventKey);
   const vars = pickEventVariables(eventKey, variables);
   const subject = renderTemplate(tpl.subject, vars, { escape: false });
-  const html = renderTemplate(tpl.bodyHtml, vars, { escape: true });
+  const html = renderHtmlBody(tpl.bodyHtml, vars);
   const text = tpl.bodyText
     ? renderTemplate(tpl.bodyText, vars, { escape: false })
     : htmlToPlainText(html);
@@ -146,7 +151,7 @@ export async function dispatchSystem(input: {
   const def = DEFAULT_TEMPLATES[input.eventKey];
   const vars = pickEventVariables(input.eventKey, input.variables);
   const subject = renderTemplate(def.subject, vars, { escape: false });
-  const html = renderTemplate(def.html, vars, { escape: true });
+  const html = renderHtmlBody(def.html, vars);
   const text = def.text
     ? renderTemplate(def.text, vars, { escape: false })
     : htmlToPlainText(html);

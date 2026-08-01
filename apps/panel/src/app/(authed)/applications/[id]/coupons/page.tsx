@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { api, PanelApiError, type ApplicationRow, type CouponRow } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -35,7 +34,7 @@ async function createCoupon(applicationId: string, formData: FormData): Promise<
   if (!code || !amountOffRaw) {
     redirect(`/applications/${applicationId}/coupons?error=missing&newCoupon=1`);
   }
-  // PERCENT: amountOff is basis-points × 10 (1500 = 15%). UI accepts a percent (e.g. 15) and converts.
+  // PERCENT: amountOff is basis points (percent × 100; the service divides by 10000) (1500 = 15%). UI accepts a percent (e.g. 15) and converts.
   let amountOff: number;
   if (discountType === 'PERCENT') {
     const pct = Number(amountOffRaw);
@@ -74,7 +73,6 @@ async function createCoupon(applicationId: string, formData: FormData): Promise<
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/coupons`);
   redirect(`/applications/${applicationId}/coupons?created=${encodeURIComponent(code)}&e=coupon_created`);
 }
 
@@ -89,7 +87,6 @@ async function setCouponActive(
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/coupons/${encodeURIComponent(code)}`,
     body: { active },
   });
-  revalidatePath(`/applications/${applicationId}/coupons`);
   redirect(`/applications/${applicationId}/coupons`);
 }
 

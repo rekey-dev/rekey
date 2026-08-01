@@ -25,10 +25,10 @@ export class AdminApiError extends Error {
 }
 
 function apiUrl(): string {
-  const url = process.env.RELIPAY_URL;
+  const url = process.env.REKEY_URL;
   if (!url) {
     throw new AdminApiError({
-      message: 'RELIPAY_URL not set on the admin deployment.',
+      message: 'REKEY_URL not set on the admin deployment.',
       statusCode: 500,
       code: 'ADMIN_API_URL_MISSING',
     });
@@ -88,7 +88,7 @@ export async function adminGet<T>(path: string): Promise<T> {
  *
  * Errors are logged to stderr (`console.warn`) so they reach the container's
  * structured logs even though the page renders an empty/"could not load"
- * state. Without this, a misconfigured `RELIPAY_URL` or a stale
+ * state. Without this, a misconfigured `REKEY_URL` or a stale
  * `SUPER_ADMIN_KEY` looked identical to "zero data" to the operator.
  */
 export async function adminGetSafe<T>(path: string): Promise<T | null> {
@@ -298,6 +298,12 @@ export interface ApplicationSummaryRow {
   tenantName: string;
   name: string;
   slug: string;
+  /**
+   * Fixed at creation and immutable. Drives the prefix of the application's
+   * secret keys and nothing else — in particular it does NOT restrict which
+   * billing credentials the application may hold.
+   */
+  environment: 'PRODUCTION' | 'STAGING' | 'DEVELOPMENT';
   endUserCount: number;
   activeSubscriptions: number;
   apiRequestsLast24h: number;

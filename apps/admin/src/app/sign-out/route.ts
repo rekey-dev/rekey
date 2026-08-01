@@ -8,7 +8,7 @@ import { destroySession } from '@/lib/auth';
  * bounces to /login.
  *
  * POST-only is the CSRF guard. A GET handler here would let any third party
- * log the operator out by embedding `<img src="https://admin.relipay.dev/sign-out">`
+ * log the operator out by embedding `<img src="https://admin.rekey.dev/sign-out">`
  * on a page the operator visits. SameSite=Strict on the cookie prevents the
  * sign-out from doing damage (the request would arrive with no session
  * cookie), but the redirect to /login would still kick the operator out of

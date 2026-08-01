@@ -1,7 +1,6 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { api, PanelApiError } from '@/lib/api';
 import { Modal } from '@/components/Modal';
@@ -47,6 +46,10 @@ const ERR: Record<string, string> = {
   APPLICATION_NOT_FOUND: 'Application not found.',
 };
 
+// These actions deliberately redirect without revalidatePath — pairing the two
+// is what blanked this page after an endpoint was added. Reasoning in
+// `(authed)/layout.tsx`.
+
 async function createEndpoint(applicationId: string, formData: FormData): Promise<void> {
   'use server';
   const url = String(formData.get('url') ?? '').trim();
@@ -72,14 +75,13 @@ async function createEndpoint(applicationId: string, formData: FormData): Promis
   }
   // One-time signing secret via a short-lived httpOnly cookie, not the URL.
   const jar = await cookies();
-  jar.set('relipay_reveal_whsec', secret, {
+  jar.set('rekey_reveal_whsec', secret, {
     httpOnly: true,
     sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',
     path: `/applications/${applicationId}/webhooks`,
     maxAge: 120,
   });
-  revalidatePath(`/applications/${applicationId}/webhooks`);
   redirect(
     `/applications/${applicationId}/webhooks?created=1&e=webhook_created`,
   );
@@ -91,7 +93,6 @@ async function deleteEndpoint(applicationId: string, endpointId: string): Promis
     method: 'DELETE',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/webhooks/${encodeURIComponent(endpointId)}`,
   });
-  revalidatePath(`/applications/${applicationId}/webhooks`);
   redirect(`/applications/${applicationId}/webhooks?removed=1`);
 }
 
@@ -102,7 +103,6 @@ async function toggleEndpoint(applicationId: string, endpointId: string, enabled
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/webhooks/${encodeURIComponent(endpointId)}`,
     body: { enabled },
   });
-  revalidatePath(`/applications/${applicationId}/webhooks`);
   redirect(`/applications/${applicationId}/webhooks?toggled=1`);
 }
 
@@ -116,7 +116,7 @@ export default async function WebhooksPage({
   const { id } = await params;
   const sp = await searchParams;
   const created = typeof sp.created === 'string';
-  const secret = (await cookies()).get('relipay_reveal_whsec')?.value ?? null;
+  const secret = (await cookies()).get('rekey_reveal_whsec')?.value ?? null;
   const removed = typeof sp.removed === 'string';
   const toggled = typeof sp.toggled === 'string';
   const error = typeof sp.error === 'string' ? sp.error : undefined;
@@ -189,11 +189,11 @@ export default async function WebhooksPage({
         New to webhooks? The{' '}
         <a
           className="underline hover:text-[var(--color-fg)]"
-          href="https://relipay.dev/docs/webhooks"
+          href="https://rekey.dev/docs/webhooks"
           target="_blank"
           rel="noopener noreferrer"
         >
-          payload &amp; verification guide on relipay.dev/docs/webhooks
+          payload &amp; verification guide on rekey.dev/docs/webhooks
         </a>{' '}
         covers the JSON envelope Rekey sends, the full event list, and how to verify the{' '}
         <code className="font-mono">X-Rekey-Signature</code> header in your handler.

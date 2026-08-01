@@ -90,20 +90,6 @@ export async function requireUserSession(
 
   const endUser = await authService.getById(request.application.id, claims.sub);
 
-  // Test/live isolation chokepoint (roadmap §7): every end-user-scoped route
-  // runs through here, so a single check makes TEST users invisible to live
-  // keys and vice versa — even with a perfectly valid user JWT.
-  if (request.dataMode && endUser.mode !== request.dataMode) {
-    throw new RekeyError({
-      statusCode: 403,
-      code: 'DATA_MODE_MISMATCH',
-      message:
-        `This user belongs to ${endUser.mode === 'TEST' ? 'test' : 'live'} mode, but the calling ` +
-        `secret key is a ${request.dataMode === 'TEST' ? 'test' : 'live'} key. Test and live data are isolated.`,
-      fix: 'Use a secret key of the matching mode (rp_test_… for test users, rp_live_… for live users).',
-    });
-  }
-
   request.endUser = endUser;
   if (claims.oid) request.activeOrganizationId = claims.oid;
 }

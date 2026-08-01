@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 /* Design tokens — same vocabulary as apps/panel (see /design.md), but a
-   NEUTRAL theme: this surface is customer-facing, so it carries no ReliPay
+   NEUTRAL theme: this surface is customer-facing, so it carries no Rekey
    brand color. The primary is near-black; operators can re-skin later by
    overriding these variables (branding is a follow-up, docs/portal.md).
    Use via `bg-[var(--color-primary)]`, `border-[var(--color-border)]`, etc. */

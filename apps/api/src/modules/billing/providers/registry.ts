@@ -126,9 +126,9 @@ function keyList(fields: CredentialField[]): string {
 }
 
 /**
- * Semantic credential rules derived from `credentialSchema` — the generic
- * replacement for the hand-written upsertStripe/Paypal/Razorpay validators
- * (P3). Field order and precedence mirror the legacy code exactly:
+ * Semantic credential rules derived from `credentialSchema` — the single
+ * validator for every provider (P3; it replaced hand-written per-provider
+ * ones, removed in 2.0.0). Field order and precedence:
  *
  *   - `pattern` is checked first per field (required fields always; optional
  *    fields only when non-blank — a blank optional webhook field means

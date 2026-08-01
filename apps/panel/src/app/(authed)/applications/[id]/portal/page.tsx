@@ -6,7 +6,10 @@ import { SectionHeader } from '@/components/Card';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
 
-const PORTAL_BASE = (process.env.NEXT_PUBLIC_PORTAL_URL ?? 'https://portal.relipay.dev').replace(/\/$/, '');
+// No fallback to Rekey's own hosted portal: on a self-hosted deployment that
+// would show the operator a URL pointing at someone else's infrastructure for
+// THEIR customers. Unset is surfaced to the operator instead.
+const PORTAL_BASE = (process.env.NEXT_PUBLIC_PORTAL_URL || '<set NEXT_PUBLIC_PORTAL_URL>').replace(/\/$/, '');
 const PORTAL_HOST = PORTAL_BASE.replace(/^https?:\/\//, '');
 
 async function patchPortal(applicationId: string, body: Record<string, unknown>, flag: string): Promise<void> {

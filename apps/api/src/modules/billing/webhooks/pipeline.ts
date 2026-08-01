@@ -119,18 +119,14 @@ export async function handleBillingProviderWebhook(
   // --- Signature verification -------------------------------------------
   // Centralized test-skip, in ONE place — never per-module. Only ONLINE
   // verification (a call to the provider's API, e.g. PayPal) is skipped
-  // under tests/stub mode; offline-HMAC providers verify even in tests,
-  // which sign their fixtures with the app's stored secret. NEVER skipped
-  // in production: the explicit !isProduction guard reproduces the legacy
-  // paypal.routes gate exactly — a runtime flag must not be able to turn a
-  // forgeable webhook into a trusted one even if a production process
-  // somehow carries RELIPAY_BILLING_FORCE_STUB (env.ts also refuses to
-  // boot that combination).
+  // under NODE_ENV=test; offline-HMAC providers verify even in tests, which
+  // sign their fixtures with the app's stored secret. NEVER skipped in
+  // production: the explicit !isProduction guard reproduces the legacy
+  // paypal.routes gate exactly, so nothing a running process can be handed
+  // turns a forgeable webhook into a trusted one.
   const isProduction = process.env.NODE_ENV === 'production';
   const skipVerification =
-    module.capabilities.onlineVerify &&
-    !isProduction &&
-    (process.env.NODE_ENV === 'test' || process.env.RELIPAY_BILLING_FORCE_STUB === 'true');
+    module.capabilities.onlineVerify && !isProduction && process.env.NODE_ENV === 'test';
   if (!skipVerification) {
     const result = await module.webhook.verify(req, creds, { mode: credsRow!.mode });
     if (!result.ok) {

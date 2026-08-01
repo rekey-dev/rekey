@@ -5,9 +5,12 @@
  * create` CLI). They are *not* end-user-mutable. Each Application owns its
  * own plan catalogue; slugs are unique per-Application.
  *
- * On create we also call the Application's BillingProvider to register the
- * plan upstream (Stripe → Product+Price; PayPal → Plan; etc.) and stash
- * the returned id back into `Plan.metadata` for reconciliation.
+ * On create we register the plan with **Stripe** (Product+Price) and stash the
+ * price id in `Plan.metadata` for reconciliation — but only when Stripe
+ * credentials already exist for the Application. PayPal and Razorpay register
+ * lazily at first checkout instead. Making the call unconditional broke plan
+ * creation outright for PayPal-only and Razorpay-only operators once the stub
+ * providers were deleted; see the note on `create` below.
  */
 
 import type { Plan, PlanInterval, PlanKind, LicenseKind, Application } from '@prisma/client';
@@ -15,6 +18,7 @@ import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { applicationsService } from '../applications/applications.service.js';
 import { getProviderForApplication } from '../billing/providers/index.js';
+import { billingCredentialsService } from '../billing/credentials.service.js';
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$/;
 
@@ -182,16 +186,22 @@ export const plansService = {
       throw e;
     }
 
-    // Register the plan upstream and persist the provider id back into metadata.
-    // We do this *after* the local insert so a provider failure doesn't leave
-    // half-state — the plan exists locally but is `active = true` only after
-    // registration succeeds. (For the stub today this always succeeds; for
-    // real Stripe it could fail and we'd need to handle that.)
-    // Eagerly register against Stripe (the legacy single-provider default).
-    // Other providers register lazily on first checkout — `Plan.metadata`
-    // gains keys for each provider as they're used. Eager fan-out across
-    // every configured provider is a future optimization; lazy is fine
-    // because the provider stub is idempotent.
+    // Eagerly register the plan against Stripe — the legacy single-provider
+    // default — and persist the provider id into metadata. After the local
+    // insert, so a provider failure leaves a usable local Plan rather than
+    // half-state.
+    //
+    // ONLY when Stripe is actually configured. This used to be unconditional,
+    // which was harmless while a stub absorbed the call and became a bug the
+    // moment the stub was deleted: a PayPal-only or Razorpay-only operator
+    // could no longer create any plan at all, and the error they got named
+    // Stripe — a provider they had deliberately not set up. Other providers
+    // already register lazily on first checkout (`Plan.metadata` gains a key
+    // per provider as they are used), so skipping here costs nothing but a
+    // first-checkout round-trip.
+    if (!(await billingCredentialsService.isConfigured(input.applicationId, 'stripe'))) {
+      return plan;
+    }
     const provider = await getProviderForApplication(application, 'stripe');
     const providerRef = await provider.ensurePlanRegistered(plan);
     return prisma.plan.update({

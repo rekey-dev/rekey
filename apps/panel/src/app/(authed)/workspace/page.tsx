@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { api, PanelApiError, type MeDto } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
@@ -35,7 +34,6 @@ async function renameWorkspace(formData: FormData): Promise<void> {
     }
     throw err;
   }
-  revalidatePath('/workspace');
   redirect('/workspace?renamed=1');
 }
 
@@ -72,7 +70,7 @@ export default async function WorkspaceSettingsPage({
   const isOwner = me.activeRole === 'OWNER';
 
   const supportMailto =
-    'mailto:support@relipay.dev?subject=Workspace+deletion+request' +
+    'mailto:support@rekey.dev?subject=Workspace+deletion+request' +
     `&body=${encodeURIComponent(`Please delete workspace "${workspace.name}" (${workspace.id}).`)}`;
 
   return (
@@ -177,7 +175,7 @@ export default async function WorkspaceSettingsPage({
               <p className="mt-0.5 text-xs text-[var(--color-muted-fg)]">
                 Email{' '}
                 <a href={supportMailto} className="underline hover:text-[var(--color-fg)]">
-                  support@relipay.dev
+                  support@rekey.dev
                 </a>{' '}
                 from the OWNER address — we'll confirm and schedule it within one business day. We
                 never delete a workspace without that email.

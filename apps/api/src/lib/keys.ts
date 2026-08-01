@@ -47,7 +47,13 @@ export function generatePublicKey(slug: string): string {
  * Generate a secret API key. Returns the raw key (show to user once) and
  * the SHA-256 hash (store in DB).
  *
- * @param mode `"live"` for production keys, `"test"` for sandbox keys.
+ * The `rp_live_` / `rp_test_` prefix is **descriptive, not behavioural**: it
+ * says which kind of Application the key belongs to (see `AppEnvironment`) so
+ * a key pasted into a chat window is identifiable at a glance. Nothing in the
+ * API branches on it beyond "is this shaped like a secret key". Isolation is
+ * the Application boundary — see docs/api-keys.md.
+ *
+ * @param mode `"live"` for keys of a PRODUCTION app, `"test"` for the rest.
  *
  * @example
  * ```ts
@@ -88,7 +94,7 @@ export function timingSafeEqualHex(a: string, b: string): boolean {
 }
 
 /** True if the value looks like one of our key formats. Cheap pre-filter. */
-export function isRelipayKey(value: string): boolean {
+export function isRekeyKey(value: string): boolean {
   return (
     value.startsWith(`${PUBLIC_KEY_PREFIX}_`) ||
     value.startsWith(`${SECRET_KEY_LIVE_PREFIX}_`) ||

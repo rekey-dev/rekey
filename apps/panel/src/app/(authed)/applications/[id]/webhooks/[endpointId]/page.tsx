@@ -1,7 +1,6 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { api } from '@/lib/api';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -44,14 +43,13 @@ async function rotateSecret(applicationId: string, endpointId: string): Promise<
   });
   // One-time secret via a short-lived httpOnly cookie, not the URL.
   const jar = await cookies();
-  jar.set('relipay_reveal_whsec', result.secret, {
+  jar.set('rekey_reveal_whsec', result.secret, {
     httpOnly: true,
     sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',
     path: `/applications/${applicationId}/webhooks/${endpointId}`,
     maxAge: 120,
   });
-  revalidatePath(`/applications/${applicationId}/webhooks/${endpointId}`);
   redirect(`/applications/${applicationId}/webhooks/${endpointId}?rotated=1`);
 }
 
@@ -65,7 +63,6 @@ async function retryDelivery(
     method: 'POST',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/webhooks/${encodeURIComponent(endpointId)}/deliveries/${encodeURIComponent(deliveryId)}/retry`,
   });
-  revalidatePath(`/applications/${applicationId}/webhooks/${endpointId}`);
   redirect(`/applications/${applicationId}/webhooks/${endpointId}?retried=1`);
 }
 
@@ -85,7 +82,7 @@ export default async function WebhookDetailPage({
   const { id, endpointId } = await params;
   const sp = await searchParams;
   const rotated = typeof sp.rotated === 'string';
-  const rotatedSecret = (await cookies()).get('relipay_reveal_whsec')?.value ?? null;
+  const rotatedSecret = (await cookies()).get('rekey_reveal_whsec')?.value ?? null;
   const retried = typeof sp.retried === 'string';
 
   const [endpoints, deliveries] = await Promise.all([

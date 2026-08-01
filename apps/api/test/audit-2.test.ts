@@ -15,6 +15,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { configureSandboxStripe } from './fakes/billing-credentials.js';
 import { prisma } from '../src/lib/prisma.js';
 import { isWebhookUrlSafe, verifyWebhookSignature, signWebhook } from '../src/lib/webhook-signing.js';
 
@@ -82,6 +83,7 @@ describe('Audit-2 regression', () => {
             endUser: { id: string };
           },
       );
+    await configureSandboxStripe(application.id);
     return {
       applicationId: application.id,
       liveKey: key.rawKey,
@@ -198,7 +200,7 @@ describe('Audit-2 regression', () => {
     expect(redemptions).toBe(0);
   });
 
-  it('coupon recordRedemption is idempotent on (couponId, paymentId) — webhook replay-safe', async () => {
+  it('coupon redemption is idempotent per checkout session — webhook replay-safe', async () => {
     const b = await bootstrap('coup-idem');
     await app.inject({
       method: 'POST',
@@ -211,27 +213,23 @@ describe('Audit-2 regression', () => {
     });
     const { couponsService } = await import('../src/modules/coupons/coupons.service.js');
 
-    await couponsService.recordRedemption({
+    const args = {
       couponId: coupon.id,
       applicationId: b.applicationId,
       endUserId: b.userId,
+      checkoutSessionId: 'cs_idem_001',
       paymentId: 'pay_idem_001',
-    });
+    };
+    await expect(couponsService.redeemForCheckout(args)).resolves.toEqual({ recorded: true });
 
-    // Replay (same paymentId) — should hit the unique index and throw P2002,
-    // which we surface as the Prisma error code.
-    let err: { code?: string } | null = null;
-    try {
-      await couponsService.recordRedemption({
-        couponId: coupon.id,
-        applicationId: b.applicationId,
-        endUserId: b.userId,
-        paymentId: 'pay_idem_001',
-      });
-    } catch (e) {
-      err = e as { code?: string };
-    }
-    expect(err?.code).toBe('P2002');
+    // Replay. The idempotency key is the CHECKOUT SESSION, not the payment:
+    // a one-time sale has no payment event at all, and a recurring one has a
+    // fresh invoice id every period for the same single discount. Reported,
+    // not thrown — the callers are webhook appliers writing money.
+    await expect(couponsService.redeemForCheckout(args)).resolves.toEqual({
+      recorded: false,
+      reason: 'already-redeemed',
+    });
 
     // Still only one redemption row.
     expect(
@@ -239,7 +237,7 @@ describe('Audit-2 regression', () => {
     ).toBe(1);
   });
 
-  it('coupon recordRedemption with a parallel race: only `limit` succeed, rest fail with the right code', async () => {
+  it('coupon redemption with a parallel race: only `limit` succeed, rest report the right code', async () => {
     const b = await bootstrap('coup-toctou');
     await app.inject({
       method: 'POST',
@@ -257,9 +255,9 @@ describe('Audit-2 regression', () => {
     });
     const { couponsService } = await import('../src/modules/coupons/coupons.service.js');
 
-    // 10 concurrent redemptions, each with a distinct paymentId so the
-    // (couponId, paymentId) unique index doesn't block them. Each comes
-    // from a different "user" too so the per-user limit is never the
+    // 10 concurrent redemptions, each for a distinct checkout session so the
+    // (couponId, checkoutSessionId) unique index doesn't block them. Each
+    // comes from a different "user" too so the per-user limit is never the
     // gate — global maxRedemptions is.
     const eu = await prisma.endUser.createMany({
       data: Array.from({ length: 10 }, (_, i) => ({
@@ -274,24 +272,25 @@ describe('Audit-2 regression', () => {
       take: 10,
       orderBy: { createdAt: 'desc' },
     });
-    const results = await Promise.allSettled(
+    const results = await Promise.all(
       users.map((u, i) =>
-        couponsService.recordRedemption({
+        couponsService.redeemForCheckout({
           couponId: coupon.id,
           applicationId: b.applicationId,
           endUserId: u.id,
+          checkoutSessionId: `cs_toctou_${i}`,
           paymentId: `pay_toctou_${i}`,
         }),
       ),
     );
-    const ok = results.filter((r) => r.status === 'fulfilled').length;
-    const rejected = results.filter((r) => r.status === 'rejected') as Array<
-      PromiseRejectedResult & { reason: { code?: string } }
-    >;
+    const ok = results.filter((r) => r.recorded).length;
+    const refused = results.filter((r) => !r.recorded);
     expect(ok).toBe(3);
-    expect(rejected).toHaveLength(7);
-    for (const r of rejected) {
-      expect(r.reason.code).toBe('COUPON_REDEMPTION_LIMIT_REACHED');
+    expect(refused).toHaveLength(7);
+    for (const r of refused) {
+      // A limit refusal is REPORTED rather than raised — the callers are
+      // webhook appliers that must not have a payment rolled back under them.
+      expect(r).toMatchObject({ reason: 'limit-reached', code: 'COUPON_REDEMPTION_LIMIT_REACHED' });
     }
     expect(await prisma.couponRedemption.count({ where: { couponId: coupon.id } })).toBe(3);
   });
@@ -340,17 +339,10 @@ describe('Audit-2 regression', () => {
 
   it('billing credentials with corrupted ciphertext fail-loud at unwrap, not silent', async () => {
     const b = await bootstrap('creds-bad');
-    // Insert a row with garbage ciphertext to simulate corruption / key rotation.
-    await prisma.billingCredentials.create({
-      data: {
-        applicationId: b.applicationId,
-        provider: 'stripe',
-        mode: 'live',
-        enabled: true,
-        ciphertext: 'v1.deadbeef.deadbeef.deadbeef',
-        countries: [],
-        priority: 100,
-      },
+    // Corrupt the stored ciphertext to simulate key rotation / bit rot.
+    await prisma.billingCredentials.update({
+      where: { applicationId_provider: { applicationId: b.applicationId, provider: 'stripe' } },
+      data: { ciphertext: 'v1.deadbeef.deadbeef.deadbeef' },
     });
     const { billingCredentialsService } = await import('../src/modules/billing/credentials.service.js');
     await expect(billingCredentialsService.loadDecrypted(b.applicationId, 'stripe')).rejects.toMatchObject({

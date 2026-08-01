@@ -128,8 +128,16 @@ export interface SendLogMeta {
 
 /**
  * Coerce a decrypted credential blob into the discriminated `EmailCredentials`
- * shape. Accepts both the new discriminated form and the legacy
+ * shape. Accepts both the current discriminated form and the pre-SMTP
  * `{ resend: { apiKey } }`. Returns `null` when nothing usable is present.
+ *
+ * The legacy branch is KEPT deliberately (reviewed for removal in 2.0.0). The
+ * blobs are encrypted with ENCRYPTION_KEY, so no SQL migration can rewrite
+ * them — conversion would need a bespoke key-holding backfill script. And the
+ * failure mode of dropping it is silent: `null` here falls through to the
+ * default transport, so an Application whose Resend key was stored before the
+ * SMTP change would simply stop delivering its own verification and
+ * password-reset mail with no error anywhere. Six lines is cheaper than that.
  */
 export function normalizeCredentials(raw: unknown): EmailCredentials | null {
   if (!raw || typeof raw !== 'object') return null;

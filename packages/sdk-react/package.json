@@ -1,7 +1,10 @@
 {
   "name": "@rekey.dev/react",
-  "version": "1.1.2",
+  "version": "2.0.0-rc.1",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "description": "Rekey React hooks + components — useUser, SignedIn/SignedOut, sign-in / sign-up forms.",
   "type": "module",
   "main": "./dist/index.js",

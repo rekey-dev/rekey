@@ -4,7 +4,7 @@
  *
  * Read tools authenticate with the admin key. The one WRITE tool
  * (`mint_api_key`) authenticates instead with a SCOPED operator
- * personal-access-token (`RELIPAY_OPERATOR_TOKEN`) and is rejected server-side
+ * personal-access-token (`REKEY_OPERATOR_TOKEN`) and is rejected server-side
  * unless that PAT carries the `keys:mint` scope — default-deny, so an agent
  * can't mint production keys unless explicitly granted. See AGENTS.md.
  */
@@ -48,10 +48,6 @@ const MintApiKeyArgs = z.object({
   name: z
     .string()
     .describe('Human label for the key, shown in lists (e.g. "ci-deploy", "agent-worker").'),
-  mode: z
-    .enum(['live', 'test'])
-    .optional()
-    .describe('"live" (default) or "test". Test keys hit sandbox billing providers.'),
   scopes: z
     .array(z.string())
     .optional()
@@ -121,7 +117,7 @@ export const tools: Array<ToolDefinition<z.ZodRawShape>> = [
   {
     name: 'list_coupons',
     description:
-      'List discount coupons for an Application. PERCENT discounts use basis-points × 10 (1500 = 15%); AMOUNT discounts use the smallest currency unit.',
+      'List discount coupons for an Application. PERCENT discounts use basis points (1500 = 15%); AMOUNT discounts use the smallest currency unit.',
     inputSchema: ListCouponsArgs,
     execute: (c, args) =>
       c.request(
@@ -182,7 +178,7 @@ export const tools: Array<ToolDefinition<z.ZodRawShape>> = [
     name: 'mint_api_key',
     description:
       'WRITE: Mint a new secret API key (rp_live_…/rp_test_…) for an Application. The raw key is returned exactly ONCE — surface it to the user immediately and tell them it cannot be recovered. ' +
-      'Authenticates as a SCOPED operator via RELIPAY_OPERATOR_TOKEN (not the admin key); the token must carry the `keys:mint` scope and belong to the workspace that owns the Application, or the call is rejected. ' +
+      'Authenticates as a SCOPED operator via REKEY_OPERATOR_TOKEN (not the admin key); the token must carry the `keys:mint` scope and belong to the workspace that owns the Application, or the call is rejected. ' +
       'Use this only when the user explicitly asks to create/mint an API key.',
     inputSchema: MintApiKeyArgs,
     execute: (c, args) =>
@@ -191,7 +187,6 @@ export const tools: Array<ToolDefinition<z.ZodRawShape>> = [
         `/api/v1/tenant/operator/applications/${encodeURIComponent(args.applicationId)}/api-keys`,
         {
           name: args.name,
-          ...(args.mode !== undefined ? { mode: args.mode } : {}),
           ...(args.scopes !== undefined ? { scopes: args.scopes } : {}),
         },
       ),

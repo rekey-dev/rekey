@@ -19,6 +19,7 @@
 
 import { prisma } from '../../../lib/prisma.js';
 import { webhookService } from '../../webhooks/webhook.service.js';
+import { entitlementsService } from '../entitlements.service.js';
 
 export type SubscriptionEventType =
   | 'subscription.activated'
@@ -36,6 +37,20 @@ export type DunningEventType =
  * Emit a subscription lifecycle event. Re-reads the row (joined to its plan)
  * so the payload reflects the post-transition state — the read happens in the
  * background, off the inbound handler's critical path.
+ *
+ * The payload carries `entitlements`: what this subscription actually grants,
+ * with its per-subscription overrides applied. The plan slug alone does not
+ * answer that — two subscribers on the same plan can hold different quantities
+ * via `entitlementOverrides` — so a consumer acting on the grant (provisioning
+ * seats, sizing a quota) would otherwise have to follow up with an API call it
+ * has no user token for. Shape matches `GET /billing/entitlements`'
+ * `entitlements` array so the same parsing works on both.
+ *
+ * Deliberately no `features` map here. The one on `/billing/entitlements` is a
+ * union across every subscription the subject holds (booleans OR-true, numbers
+ * max); a per-subscription map of the same name would look like that and mean
+ * something narrower, which is the kind of resemblance that gets acted on
+ * wrongly. One representation, and it is the unambiguous one.
  */
 export function emitSubscriptionEvent(type: SubscriptionEventType, subscriptionId: string): void {
   void (async () => {
@@ -46,6 +61,10 @@ export function emitSubscriptionEvent(type: SubscriptionEventType, subscriptionI
       },
     });
     if (!sub) return; // Deleted out from under us — nothing to announce.
+    // A plan whose entitlements cannot be resolved (deleted out from under us)
+    // must not swallow the whole event: the status transition is the news, and
+    // an empty list is honest about what we could establish.
+    const entitlements = await entitlementsService.resolveForSubscription(sub).catch(() => []);
     await webhookService.emit({
       applicationId: sub.applicationId,
       type,
@@ -55,8 +74,6 @@ export function emitSubscriptionEvent(type: SubscriptionEventType, subscriptionI
           endUserId: sub.endUserId,
           organizationId: sub.beneficiaryOrgId,
           status: sub.status,
-          // Test/live isolation: 'TEST' for sandbox checkouts (rp_test_* key).
-          mode: sub.mode,
           provider: sub.provider,
           planSlug: sub.plan.slug,
           planName: sub.plan.name,
@@ -64,6 +81,7 @@ export function emitSubscriptionEvent(type: SubscriptionEventType, subscriptionI
           amount: sub.plan.amount,
           currency: sub.plan.currency,
           interval: sub.plan.interval,
+          entitlements,
           currentPeriodEnd: sub.currentPeriodEnd?.toISOString() ?? null,
           canceledAt: sub.canceledAt?.toISOString() ?? null,
           createdAt: sub.createdAt.toISOString(),
@@ -96,8 +114,6 @@ export function emitPaymentEvent(type: PaymentEventType, paymentId: string): voi
           amount: payment.amount,
           currency: payment.currency,
           status: payment.status,
-          // Test/live isolation: inherited from the subscription at creation.
-          mode: payment.mode,
           providerPaymentId: payment.providerPaymentId,
           description: payment.description,
           createdAt: payment.createdAt.toISOString(),
@@ -117,7 +133,7 @@ export function emitDunningEvent(type: DunningEventType, dunningCaseId: string):
     const dunningCase = await prisma.dunningCase.findUnique({
       where: { id: dunningCaseId },
       include: {
-        subscription: { select: { mode: true, plan: { select: { slug: true, name: true } } } },
+        subscription: { select: { plan: { select: { slug: true, name: true } } } },
       },
     });
     if (!dunningCase) return;
@@ -131,8 +147,6 @@ export function emitDunningEvent(type: DunningEventType, dunningCaseId: string):
           endUserId: dunningCase.endUserId,
           organizationId: dunningCase.organizationId,
           status: dunningCase.status,
-          // Test/live isolation: a case inherits its subscription's mode.
-          mode: dunningCase.subscription.mode,
           planSlug: dunningCase.subscription.plan.slug,
           planName: dunningCase.subscription.plan.name,
           failedAttempts: dunningCase.failedAttempts,

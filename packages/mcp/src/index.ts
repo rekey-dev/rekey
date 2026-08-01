@@ -9,12 +9,12 @@
  * have?" or mint a fresh API key without screenshots.
  *
  * Read tools use `SUPER_ADMIN_KEY` (global scope). The write tool uses a SCOPED
- * operator personal-access-token (`RELIPAY_OPERATOR_TOKEN`, an `rp_op_…` token)
+ * operator personal-access-token (`REKEY_OPERATOR_TOKEN`, an `rp_op_…` token)
  * and is rejected server-side unless that PAT carries the `keys:mint` scope —
  * default-deny, so an agent can't mutate production unless explicitly granted.
  *
  * At least ONE credential is required. An agent that should only mint keys can
- * run with `RELIPAY_OPERATOR_TOKEN` alone (no master key) — read tools then fail
+ * run with `REKEY_OPERATOR_TOKEN` alone (no master key) — read tools then fail
  * closed with `READ_REQUIRES_ADMIN_KEY`. Configure `SUPER_ADMIN_KEY` too to
  * enable the global read/introspection tools.
  */
@@ -28,17 +28,18 @@ import {
 import { zodToJsonSchema } from './lib/zod-to-json-schema.js';
 import { AdminClient, AdminApiError } from './client.js';
 import { tools } from './tools.js';
+import { VERSION } from './version.js';
 
-const apiUrl = process.env.RELIPAY_URL ?? '';
+const apiUrl = process.env.REKEY_URL ?? '';
 const adminKey = process.env.SUPER_ADMIN_KEY ?? '';
 // Optional: only required by the `mint_api_key` write tool. Read tools work
 // without it. When absent, the write tool fails closed with a clear error.
-const operatorToken = process.env.RELIPAY_OPERATOR_TOKEN ?? '';
+const operatorToken = process.env.REKEY_OPERATOR_TOKEN ?? '';
 
 if (!apiUrl || (!adminKey && !operatorToken)) {
   process.stderr.write(
-    `[rekey-mcp] missing required env: RELIPAY_URL plus at least one credential ` +
-      `(SUPER_ADMIN_KEY for read tools and/or RELIPAY_OPERATOR_TOKEN for the keys:mint write tool).\n` +
+    `[rekey-mcp] missing required env: REKEY_URL plus at least one credential ` +
+      `(SUPER_ADMIN_KEY for read tools and/or REKEY_OPERATOR_TOKEN for the keys:mint write tool).\n` +
       `[rekey-mcp] fix: configure these in the MCP client (Claude Desktop config, Cursor MCP settings, …)\n`,
   );
   process.exit(1);
@@ -51,7 +52,7 @@ const client = new AdminClient({
 });
 
 const server = new Server(
-  { name: 'rekey-mcp', version: '0.0.0' },
+  { name: 'rekey-mcp', version: VERSION },
   { capabilities: { tools: {} } },
 );
 

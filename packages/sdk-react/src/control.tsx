@@ -4,14 +4,14 @@
  * `<SignedIn>` / `<SignedOut>` already live in `components.tsx`; this module adds
  * the loading-gate pair and the entitlement/role gate `<Protect>`.
  *
- * IMPORTANT (security model): `<Protect>` does NOT fetch entitlements from the
- * API — the browser holds only the user JWT, and entitlement resolution is a
- * server concern (`@rekey.dev/node` `billing.getEntitlements`, resolved against
- * the secret key). The customer resolves entitlements server-side and passes the
- * resolved facts down (e.g. via the provider seed, a prop, or React context of
- * their own). `<Protect>` renders a *decision the server already made*. This
- * mirrors the "entitlements always resolve server-side, never trust the browser"
- * rule the Next/QR examples established.
+ * IMPORTANT (security model): `<Protect>` does NOT fetch entitlements. Not
+ * because it couldn't — `/billing/entitlements` accepts the publishable key plus
+ * the user's own token, and `RekeyBrowserClient.getEntitlements` is that call —
+ * but because a UI gate must render a decision, not make one. The customer
+ * resolves entitlements (server-side via `@rekey.dev/node`, or in the browser for
+ * a purely cosmetic gate) and passes the resolved facts down as props/context.
+ * Whatever `<Protect>` hides is still reachable by anyone who edits the DOM, so
+ * the *enforcing* check has to live on the customer's server regardless.
  */
 
 import * as React from 'react';

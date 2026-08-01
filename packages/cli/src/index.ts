@@ -30,7 +30,7 @@ program
     'Rekey command-line interface. Pass --json on any command for machine-readable output. ' +
       'See packages/cli/AGENTS.md for the full agent-facing contract.',
   )
-  .option('--api-url <url>', 'Override RELIPAY_URL', process.env.RELIPAY_URL)
+  .option('--api-url <url>', 'Override REKEY_URL', process.env.REKEY_URL)
   .option('--admin-key <key>', 'Override SUPER_ADMIN_KEY', process.env.SUPER_ADMIN_KEY)
   .option('--json', 'Emit machine-readable JSON on stdout (errors still go to stderr).')
   .showHelpAfterError();

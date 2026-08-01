@@ -9,7 +9,12 @@
  * Webhook verification uses HMAC-SHA256 of the raw body with the webhook
  * secret — see modules/razorpay/index.ts (the ProviderModule).
  *
- * Stub is preserved for tests / missing-creds dev runs.
+ * There is NO stub. Missing credentials throw
+ * `BILLING_CREDENTIALS_NOT_CONFIGURED` in every environment, dev included — the
+ * stub providers were deleted precisely because "no payment processor
+ * configured" silently succeeding everywhere but production is the opposite of
+ * what a billing system should do. Tests substitute the fakes in
+ * `test/fakes/billing-providers.ts` via a module mock in `test/setup.ts`.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -22,6 +27,7 @@ import type {
   CheckoutSessionResult,
   ProviderPlanRef,
 } from './types.js';
+import { discountUnsupported } from './discount.js';
 import type { RazorpayCredentials } from '../credentials.service.js';
 
 export class RealRazorpayProvider implements BillingProvider {
@@ -47,12 +53,21 @@ export class RealRazorpayProvider implements BillingProvider {
         amount: plan.amount,
         currency: plan.currency,
       },
-      notes: { relipay_plan_id: plan.id, relipay_slug: plan.slug },
+      notes: { rekey_plan_id: plan.id, rekey_slug: plan.slug },
     });
     return { providerPlanId: (created as { id: string }).id };
   }
 
   async createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
+    if (input.discount) {
+      // A Razorpay subscription bills straight off the plan. The only discount
+      // surface is an Offer (`offer_id`), created in the dashboard rather than
+      // through the API and never per-checkout; `addons` only ADD to a cycle.
+      // There is no honest way to take an ad-hoc amount off one period, so the
+      // coupon is refused rather than silently billed at full price.
+      // `checkout-discount.ts` normally refuses first — this is the backstop.
+      throw discountUnsupported(this.name, 'recurring');
+    }
     const meta = (input.plan.metadata as Record<string, unknown> | null) ?? {};
     const rzpMeta = (meta.razorpay as { planId?: string } | undefined) ?? {};
     let rzpPlanId = rzpMeta.planId;
@@ -68,8 +83,8 @@ export class RealRazorpayProvider implements BillingProvider {
       total_count: input.plan.interval === 'YEAR' ? 10 : 120,
       customer_notify: 1,
       notes: {
-        relipay_end_user_id: input.endUser.id,
-        relipay_plan_id: input.plan.id,
+        rekey_end_user_id: input.endUser.id,
+        rekey_plan_id: input.plan.id,
       },
     });
     // Razorpay returns a `short_url` users hit to authorize. Wrap with our
@@ -84,6 +99,11 @@ export class RealRazorpayProvider implements BillingProvider {
    * One-time purchase via a Razorpay Payment Link (single charge, no
    * subscription). Returns the hosted `short_url`. Fulfillment lands on the
    * `payment_link.paid` webhook (modules/razorpay translate → apply.ts).
+   *
+   * A payment link has no discount field — the amount is ours to name — so a
+   * coupon IS the smaller amount. That charges correctly but loses the reason,
+   * which is why the code goes into `notes`: the operator opening the link in
+   * their Razorpay dashboard needs to see why it is not the plan price.
    */
   async createOneTimeCheckout(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
     // The razorpay SDK's paymentLink.create types are over-strict (demand
@@ -91,16 +111,20 @@ export class RealRazorpayProvider implements BillingProvider {
     // signature, same posture as plans/subscriptions create above.
     const create = this.client.paymentLink.create as (body: unknown) => Promise<unknown>;
     const link = (await create({
-      amount: input.plan.amount,
+      amount: input.plan.amount - (input.discount?.amount ?? 0),
       currency: input.plan.currency,
       accept_partial: false,
       description: input.plan.name,
       callback_url: input.successUrl,
       callback_method: 'get',
       notes: {
-        relipay_application_id: input.application.id,
-        relipay_end_user_id: input.endUser.id,
-        relipay_plan_id: input.plan.id,
+        rekey_application_id: input.application.id,
+        rekey_end_user_id: input.endUser.id,
+        rekey_plan_id: input.plan.id,
+        ...(input.discount && {
+          rekey_coupon_code: input.discount.code,
+          rekey_discount_amount: String(input.discount.amount),
+        }),
       },
     })) as { id: string; short_url: string };
     return { url: link.short_url, sessionId: link.id };
@@ -110,26 +134,5 @@ export class RealRazorpayProvider implements BillingProvider {
     const providerSubId = input.subscription.providerSubId;
     if (!providerSubId) return;
     await this.client.subscriptions.cancel(providerSubId, !input.atPeriodEnd /* cancel_at_cycle_end */);
-  }
-}
-
-/** Fallback used in tests / when creds are missing. Deterministic stub URLs. */
-export class RazorpayStubProvider implements BillingProvider {
-  readonly name = 'razorpay';
-  async ensurePlanRegistered(plan: Plan): Promise<ProviderPlanRef> {
-    return { providerPlanId: `plan_stub_${plan.slug}` };
-  }
-  async createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
-    const sessionId = `sub_stub_${randomUUID().replace(/-/g, '').slice(0, 14)}`;
-    const url = `${input.successUrl}${input.successUrl.includes('?') ? '&' : '?'}stub_provider=razorpay&stub_session=${sessionId}`;
-    return { url, sessionId };
-  }
-  async createOneTimeCheckout(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
-    const sessionId = `plink_stub_${randomUUID().replace(/-/g, '').slice(0, 14)}`;
-    const url = `${input.successUrl}${input.successUrl.includes('?') ? '&' : '?'}stub_provider=razorpay&stub_plink=${sessionId}`;
-    return { url, sessionId };
-  }
-  async cancelSubscription(_input: CancelSubscriptionInput): Promise<void> {
-    /* no-op */
   }
 }

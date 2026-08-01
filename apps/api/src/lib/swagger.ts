@@ -64,7 +64,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
         version: '1.1.1',
       },
       servers: [
-        { url: 'https://api.relipay.dev', description: 'Production' },
+        { url: 'https://api.rekey.dev', description: 'Production' },
         { url: 'http://localhost:3030', description: 'Local development' },
       ],
       components: {
@@ -87,8 +87,9 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
             bearerFormat: 'rp_live_… / rp_test_…',
             description:
               '**What:** an Application-scoped **secret** key. Full server-side authority ' +
-              'over that one Application; the `rp_test_` / `rp_live_` prefix also picks ' +
-              "the request's test-or-live data mode.\n\n" +
+              'over that one Application. The `rp_test_` / `rp_live_` prefix follows the ' +
+              "Application's `environment` and is descriptive only — nothing branches on " +
+              'it. Isolation is the Application boundary.\n\n' +
               '**Where from:** Panel → Application → API Keys (shown once at mint time). ' +
               'Used by `@rekey.dev/node`.\n\n' +
               '**Where used:** every non-admin, non-operator route. Some keys are minted ' +
@@ -116,10 +117,13 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
               'Rotating it leaves the previous key valid for a grace window so clients ' +
               'can redeploy.\n\n' +
               '**Where used:** only the public-bootstrap surface — routes guarded by ' +
-              '`requirePublishableOrSecretKey`. It is structurally rejected by every ' +
-              'privileged route, so it can never reach money or administrative writes. ' +
-              'API-key scopes do not apply to it (route membership is the gate). ' +
-              'Publishable requests always read **live** data.',
+              '`requirePublishableOrSecretKey`. A `requireApiKey` route rejects it with 401 ' +
+              '`API_KEY_INVALID`; operator and admin routes use their own credentials and ' +
+              'their own codes. API-key scopes do not apply to it — route membership ' +
+              'is the gate. Where it does reach self-service billing or account ' +
+              'management, the end-user\'s own token is required alongside it and is ' +
+              'what authorizes the call; it never reaches administrative writes or ' +
+              'another user\'s data.',
           },
           userToken: {
             type: 'apiKey',

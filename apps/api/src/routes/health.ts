@@ -35,8 +35,10 @@ async function checkDependencies(app: FastifyInstance): Promise<DependencyReport
     db = 'unreachable';
   }
 
-  // Redis is required at boot (see lib/redis.ts) but the rate limiter now
-  // fails open, so the API can still serve reads while Redis is down —
+  // Redis is required at boot — enforced by `assertRedisReachable` in
+  // modules/webhooks/webhook.queue.ts, not by lib/redis.ts (which returns null
+  // and swallows errors). The global rate limiter fails open, though, so the API
+  // can still serve reads while Redis is down —
   // degraded, not dead. Report it so an operator can see which half is sick
   // instead of guessing from a generic 500.
   let redis: DependencyReport['redis'] = 'not_configured';

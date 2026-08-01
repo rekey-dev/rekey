@@ -1,7 +1,6 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import {
   api,
   PanelApiError,
@@ -44,7 +43,6 @@ async function createOrg(applicationId: string, formData: FormData): Promise<voi
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/organizations`);
   redirect(`/applications/${applicationId}/organizations?created=${encodeURIComponent(slug)}`);
 }
 
@@ -61,7 +59,6 @@ async function deleteOrg(applicationId: string, orgId: string): Promise<void> {
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/organizations`);
   redirect(`/applications/${applicationId}/organizations?deleted=1`);
 }
 

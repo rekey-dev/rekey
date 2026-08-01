@@ -8,8 +8,9 @@ name: Release SDK
 # each `workspace:*` to the published version).
 #
 # Requires repo secret NPM_TOKEN (npm org `rekey`, automation token).
-# Prerelease versions (…-beta.N) publish under the `beta` dist-tag; stable
-# versions under `latest`.
+# Alpha and beta versions publish under the `beta` dist-tag; release
+# candidates and stable versions publish under `latest` — see the comment on
+# the publish step for why an RC takes `latest`.
 
 on:
   release:
@@ -37,7 +38,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
@@ -50,7 +51,17 @@ jobs:
       # Publish ONLY packages whose version isn't already on npm. Walk in
       # dependency order (shared-types → node → react/mcp → nextjs/cli) so a new
       # dependency lands before its dependents. pnpm ignores publishConfig.tag,
-      # so derive --tag per package: prerelease (…-N) → `beta`, else `latest`.
+      # so derive --tag per package.
+      #
+      # Release candidates take `latest`, not `beta`. `latest` is what a bare
+      # `npm i @rekey.dev/node` resolves to, and it should point at the SDK that
+      # matches the API we actually run. Leaving it on the previous major while
+      # an RC is deployed hands every new install an SDK that no longer speaks
+      # to the live API. Existing `^1` dependents are unaffected either way:
+      # semver ranges never match a prerelease, so this only moves the default
+      # for people installing fresh — which is precisely who needs the RC.
+      # Alpha and beta versions are still `beta`; those are not meant to be the
+      # default install.
       - name: Publish changed packages to npm
         run: |
           set -e
@@ -61,7 +72,11 @@ jobs:
               echo "skip $name@$ver — already on npm"
               continue
             fi
-            case "$ver" in *-*) tag=beta;; *) tag=latest;; esac
+            case "$ver" in
+              *-rc.*)  tag=latest;;
+              *-*)     tag=beta;;
+              *)       tag=latest;;
+            esac
             echo "publish $name@$ver (dist-tag $tag)"
             pnpm --filter "$name" publish --no-git-checks --access public --tag "$tag"
           done

@@ -36,8 +36,8 @@ async function runDoctorChecks(ctx: OutputContext): Promise<Check[]> {
     checks.push({
       name: 'api-url',
       status: 'fail',
-      message: 'RELIPAY_URL is not set.',
-      fix: 'Set RELIPAY_URL in your environment, or pass --api-url=https://your-rekey.example.',
+      message: 'REKEY_URL is not set.',
+      fix: 'Set REKEY_URL in your environment, or pass --api-url=https://your-rekey.example.',
     });
   } else {
     checks.push({ name: 'api-url', status: 'ok', message: `using ${ctx.apiUrl}` });

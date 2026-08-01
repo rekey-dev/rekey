@@ -5,14 +5,18 @@
  *     verify → session. Auto-creates user when sign-up is enabled.
  *   - HIBP breached-password refusal at sign-up (mocked via fetch stub).
  *   - Per-user account lockout after N failed sign-ins; lockout returns
- *     429 + Retry-After, then expires lazily.
+ *     429 + Retry-After, then expires on the limiter key's TTL — and the
+ *     operator end-user detail page reports the same lock the limiter is
+ *     enforcing (it used to report "none" for every account; see the last
+ *     test in this file).
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { checkPasswordBreached } from '../src/lib/breached-password.js';
+import { clearFailures, euLoginLockScope, LOGIN_POLICY } from '../src/lib/brute-force.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -88,6 +92,29 @@ describe('Audit-3 feature additions', () => {
       liveKey: key.rawKey,
       tenantAccess: ts.accessToken,
     };
+  }
+
+  async function endUserId(b: Bootstrapped, email: string): Promise<string> {
+    const row = await prisma.endUser.findUniqueOrThrow({
+      where: { applicationId_email: { applicationId: b.applicationId, email } },
+      select: { id: true },
+    });
+    return row.id;
+  }
+
+  /** The payload the operator panel's end-user detail page renders. */
+  async function operatorDetail(
+    b: Bootstrapped,
+    euid: string,
+  ): Promise<{ failedSignInAttempts: number; lockedUntil: string | null }> {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/tenant/applications/${b.applicationId}/end-users/${euid}`,
+      headers: { authorization: `Bearer ${b.tenantAccess}` },
+    });
+    expect(res.statusCode).toBe(200);
+    return (res.json().data as { endUser: { failedSignInAttempts: number; lockedUntil: string | null } })
+      .endUser;
   }
 
   // ---------- Magic-link sign-in ----------
@@ -340,19 +367,21 @@ describe('Audit-3 feature additions', () => {
       payload: { email: 'reset-target@example.com', password: 'pw-one-two-three' },
     });
     expect(ok.statusCode).toBe(200);
-    const u = await prisma.endUser.findUniqueOrThrow({
-      where: {
-        applicationId_email: {
-          applicationId: b.applicationId,
-          email: 'reset-target@example.com',
-        },
-      },
-    });
-    expect(u.failedSignInAttempts).toBe(0);
-    expect(u.lockedUntil).toBeNull();
+    // Asserted through the operator surface rather than a column read: the
+    // counter lives in the brute-force limiter, and the operator panel is the
+    // only place a human ever sees it.
+    const eu = await endUserId(b, 'reset-target@example.com');
+    const detail = await operatorDetail(b, eu);
+    expect(detail.failedSignInAttempts).toBe(0);
+    expect(detail.lockedUntil).toBeNull();
   });
 
-  it('expired lockout is cleared lazily on next failed attempt', async () => {
+  it('a lockout expires on its own TTL — no lazy clear, no correct password refused', async () => {
+    // This used to write `lockedUntil` in the past and check that sign-in
+    // succeeded. That column had no reader, so the test proved nothing: it
+    // would have passed against a permanently locked account. Lock expiry is
+    // now the limiter key's TTL, so the honest way to test it is to move the
+    // clock past the window.
     const b = await bootstrap('lockout-expire');
     await prisma.application.update({
       where: { id: b.applicationId },
@@ -367,34 +396,147 @@ describe('Audit-3 feature additions', () => {
         } as never,
       },
     });
-    const su = await app
-      .inject({
-        method: 'POST',
-        url: '/api/v1/auth/sign-up',
-        headers: { authorization: `Bearer ${b.liveKey}` },
-        payload: { email: 'expire-target@example.com', password: 'pw-one-two-three' },
-      })
-      .then((r) => r.json().data as { endUser: { id: string } });
-
-    // Force a lockout state with expiry in the past — simulates the
-    // 15-minute window elapsing without writing a wall-clock waiter.
-    await prisma.endUser.update({
-      where: { id: su.endUser.id },
-      data: {
-        failedSignInAttempts: 0,
-        lockedUntil: new Date(Date.now() - 1000),
-      },
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/sign-up',
+      headers: { authorization: `Bearer ${b.liveKey}` },
+      payload: { email: 'expire-target@example.com', password: 'pw-one-two-three' },
     });
 
-    // Correct password should now succeed; the expired lockout is
-    // cleared on the way through.
-    const res = await app.inject({
+    for (let i = 0; i < LOGIN_POLICY.threshold; i++) {
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/sign-in',
+        headers: { authorization: `Bearer ${b.liveKey}` },
+        payload: { email: 'expire-target@example.com', password: 'wrong-' + i },
+      });
+    }
+    const locked = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/sign-in',
       headers: { authorization: `Bearer ${b.liveKey}` },
       payload: { email: 'expire-target@example.com', password: 'pw-one-two-three' },
     });
-    expect(res.statusCode).toBe(200);
+    expect(locked.statusCode).toBe(429);
+
+    // Only Date is faked — setTimeout/argon2/Prisma I/O stay real.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + (LOGIN_POLICY.lockSec + 1) * 1000);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/sign-in',
+        headers: { authorization: `Bearer ${b.liveKey}` },
+        payload: { email: 'expire-target@example.com', password: 'pw-one-two-three' },
+      });
+      expect(res.statusCode).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ---------- Lockout state as the OPERATOR sees it ----------
+
+  it('the operator end-user detail reports the lock the limiter is actually enforcing', async () => {
+    // The bug: `lockedUntil` / `failedSignInAttempts` were columns that nothing
+    // had written since lockout moved to Redis, and the detail endpoint didn't
+    // even select them — so the panel rendered "Lockout: none" for every
+    // account, including one the API was actively refusing with 429. An
+    // operator handling a "locked out of my account" report was shown the
+    // opposite of the truth. Both fields now come from the limiter, so this
+    // test drives REAL failed sign-ins and reads the operator surface back.
+    const b = await bootstrap('lockout-operator-view');
+    await prisma.application.update({
+      where: { id: b.applicationId },
+      data: {
+        authConfig: {
+          methods: ['password'],
+          passwordMinLength: 8,
+          redirectUrls: [],
+          organizationsEnabled: false,
+          signupEnabled: true,
+          passwordBreachCheckEnabled: false,
+        } as never,
+      },
+    });
+    const email = 'operator-view-target@example.com';
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/sign-up',
+      headers: { authorization: `Bearer ${b.liveKey}` },
+      payload: { email, password: 'pw-one-two-three' },
+    });
+    const euid = await endUserId(b, email);
+
+    const fresh = await operatorDetail(b, euid);
+    expect(fresh.lockedUntil).toBeNull();
+    expect(fresh.failedSignInAttempts).toBe(0);
+
+    // Part-way to the threshold: the live counter is visible, still unlocked.
+    for (let i = 0; i < 3; i++) {
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/sign-in',
+        headers: { authorization: `Bearer ${b.liveKey}` },
+        payload: { email, password: 'wrong-' + i },
+      });
+    }
+    const partial = await operatorDetail(b, euid);
+    expect(partial.failedSignInAttempts).toBe(3);
+    expect(partial.lockedUntil).toBeNull();
+
+    // Over the threshold: the API refuses sign-in...
+    for (let i = 3; i < LOGIN_POLICY.threshold; i++) {
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/sign-in',
+        headers: { authorization: `Bearer ${b.liveKey}` },
+        payload: { email, password: 'wrong-' + i },
+      });
+    }
+    const refused = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/sign-in',
+      headers: { authorization: `Bearer ${b.liveKey}` },
+      payload: { email, password: 'pw-one-two-three' },
+    });
+    expect(refused.statusCode).toBe(429);
+
+    // ...and the operator now sees that same lock. This is the assertion that
+    // fails on the old code: it returned `undefined`, which the panel rendered
+    // as "none".
+    const lockedView = await operatorDetail(b, euid);
+    expect(lockedView.lockedUntil).not.toBeNull();
+    expect(new Date(lockedView.lockedUntil!).getTime()).toBeGreaterThan(Date.now());
+    // The retry-after the limiter quoted and the operator's expiry agree.
+    const retryAfterSec = Number(refused.headers['retry-after']);
+    const remainingSec = (new Date(lockedView.lockedUntil!).getTime() - Date.now()) / 1000;
+    expect(Math.abs(remainingSec - retryAfterSec)).toBeLessThanOrEqual(2);
+    // Locked ⇒ the counter was consumed setting the lock, so we report the
+    // documented floor rather than an invented survivor count.
+    expect(lockedView.failedSignInAttempts).toBe(LOGIN_POLICY.threshold);
+
+    // The DSAR export publishes the same two fields (they are declared on the
+    // shared-types `EndUserExportProfile`), so they must agree.
+    // The DSAR document is served as a raw attachment, not in the `{data}`
+    // envelope.
+    const exportRes = await app.inject({
+      method: 'GET',
+      url: `/api/v1/tenant/applications/${b.applicationId}/end-users/${euid}/export`,
+      headers: { authorization: `Bearer ${b.tenantAccess}` },
+    });
+    expect(exportRes.statusCode).toBe(200);
+    const exported = JSON.parse(exportRes.body) as {
+      endUser: { failedSignInAttempts: number; lockedUntil: string | null };
+    };
+    expect(exported.endUser.failedSignInAttempts).toBe(LOGIN_POLICY.threshold);
+    expect(exported.endUser.lockedUntil).not.toBeNull();
+
+    // A successful sign-in after the lock clears takes the badge with it.
+    await clearFailures(euLoginLockScope(b.applicationId, email));
+    const cleared = await operatorDetail(b, euid);
+    expect(cleared.lockedUntil).toBeNull();
+    expect(cleared.failedSignInAttempts).toBe(0);
   });
 
   afterAll(async () => {

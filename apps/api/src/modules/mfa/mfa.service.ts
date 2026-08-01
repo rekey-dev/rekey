@@ -4,8 +4,11 @@
  * Three-step enrollment:
  *   1. POST /mfa/setup        → returns otpauth URI + 10 backup codes (one-time-show)
  *   2. POST /mfa/setup-confirm { code } → user proves they scanned the QR; we set `enrolledAt`
- *   3. From now on, sign-in returns an `mfaRequired` flag instead of a session;
- *      the client follows up with POST /mfa/challenge { code } to complete sign-in.
+ *   3. From now on, sign-in returns `mfaRequired` + an `mfaChallengeToken`
+ *      instead of a session; the client completes it at
+ *      POST /api/v1/auth/mfa-verify { mfaChallengeToken, code }. (Not
+ *      /mfa/challenge — that route needs an existing session and is step-up for
+ *      sensitive actions, not sign-in completion.)
  *
  * Backup codes are consumed by removing the matching hash from the stored array.
  */
@@ -65,8 +68,13 @@ export const mfaService = {
   async confirm(args: {
     endUserId: string;
     code: string;
-    /** Application is optional only because some legacy callers don't pass it; the email is skipped when absent. */
-    application?: Application;
+    /**
+     * Required: enrollment sends a security-critical "2FA was turned on"
+     * notification, and both the email template and the outbound webhook are
+     * Application-scoped. Making it non-optional means a new caller cannot
+     * silently skip that notification.
+     */
+    application: Application;
   }): Promise<{ ok: true }> {
     const cred = await prisma.mfaCredential.findUnique({
       where: { endUserId: args.endUserId },
@@ -99,31 +107,29 @@ export const mfaService = {
 
     // Security-critical confirmation: notify the user that 2FA was turned
     // on. Fire-and-forget — a delivery failure must not block enrollment.
-    if (args.application) {
-      const endUser = await prisma.endUser.findUnique({
-        where: { id: args.endUserId },
-        select: { email: true },
-      });
-      if (endUser) {
-        void emailService
-          .dispatch({
-            application: args.application,
-            eventKey: 'mfa_enabled',
-            to: endUser.email,
-            variables: {
-              userEmail: endUser.email,
-              enabledAtIso: enabledAt.toISOString(),
-            },
-          })
-          .catch(() => undefined);
-        void webhookService
-          .emit({
-            applicationId: args.application.id,
-            type: 'mfa.enabled',
-            data: { userId: args.endUserId, email: endUser.email, enabledAt: enabledAt.toISOString() },
-          })
-          .catch(() => undefined);
-      }
+    const endUser = await prisma.endUser.findUnique({
+      where: { id: args.endUserId },
+      select: { email: true },
+    });
+    if (endUser) {
+      void emailService
+        .dispatch({
+          application: args.application,
+          eventKey: 'mfa_enabled',
+          to: endUser.email,
+          variables: {
+            userEmail: endUser.email,
+            enabledAtIso: enabledAt.toISOString(),
+          },
+        })
+        .catch(() => undefined);
+      void webhookService
+        .emit({
+          applicationId: args.application.id,
+          type: 'mfa.enabled',
+          data: { userId: args.endUserId, email: endUser.email, enabledAt: enabledAt.toISOString() },
+        })
+        .catch(() => undefined);
     }
 
     return { ok: true };

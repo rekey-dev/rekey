@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
 import { CopyButton } from '@/components/CopyButton';
 import { PageHeader } from '@/components/PageHeader';
@@ -13,10 +12,13 @@ import { Banner } from '@/components/Banner';
 
 // Fallback only — the public MCP URL is authoritative from the API
 // (`app.mcpUrl`, derived server-side from PUBLIC_WEBHOOK_BASE_URL). The panel's
-// own RELIPAY_URL is the in-cluster host (e.g. http://api:3030), so never
+// own REKEY_URL is the in-cluster host (e.g. http://api:3030), so never
 // display it.
 function fallbackBase(): string {
-  const base = process.env.NEXT_PUBLIC_API_URL ?? 'https://api.example.com';
+  // A visible sentinel, not '' — an empty base yields a RELATIVE url that looks
+  // plausible in a copied snippet and then fails somewhere else entirely.
+  const base = process.env.NEXT_PUBLIC_API_URL;
+  if (!base) return '<set NEXT_PUBLIC_API_URL>';
   return base.replace(/\/$/, '');
 }
 
@@ -38,7 +40,6 @@ async function setMcpEnabled(applicationId: string, enabled: boolean): Promise<v
   // reflects the new state immediately — without this the client Router Cache
   // serves the stale "Off"/"Live" render and the change only "sticks" after a
   // manual refresh.
-  revalidatePath(`/applications/${applicationId}/mcp`);
   redirect(`/applications/${applicationId}/mcp?saved=1`);
 }
 
@@ -146,12 +147,17 @@ export default async function McpPage({
             <li>Mounts the MCP JSON-RPC endpoint at <code>{mcpUrl}</code>.</li>
             <li>Mounts the OAuth 2.1 + PKCE authorization server alongside it.</li>
             <li>Publishes RFC 8414 + RFC 9728 discovery metadata so clients auto-discover.</li>
-            <li>Accepts RFC 7591 dynamic client registration (public clients, PKCE, no secret).</li>
+            <li>
+              Accepts RFC 7591 dynamic client registration (public clients, PKCE, no secret). MCP
+              clients register themselves, so this stays open by default; close it with{' '}
+              <code>authConfig.dynamicClientRegistration = false</code> once your clients exist —
+              worth doing if this Application is also an OpenID Provider.
+            </li>
           </ul>
           <p className="mt-3 text-xs text-[var(--color-muted-fg)]">
             See the{' '}
-            <a className="underline" href="https://relipay.dev/docs/mcp" target="_blank" rel="noopener noreferrer">
-              full integration guide on relipay.dev/docs/mcp
+            <a className="underline" href="https://rekey.dev/docs/mcp" target="_blank" rel="noopener noreferrer">
+              full integration guide on rekey.dev/docs/mcp
             </a>{' '}
             for the OAuth flow walk-through.
           </p>
@@ -375,8 +381,8 @@ export default async function McpPage({
             <h2 className="text-sm font-semibold text-[var(--color-fg)]">Further reading</h2>
             <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
               <li>
-                <a className="text-[var(--color-primary)] underline" href="https://relipay.dev/docs/mcp" target="_blank" rel="noopener noreferrer">
-                  relipay.dev/docs/mcp
+                <a className="text-[var(--color-primary)] underline" href="https://rekey.dev/docs/mcp" target="_blank" rel="noopener noreferrer">
+                  rekey.dev/docs/mcp
                 </a>{' '}— operator-facing concept guide + Claude Code / Desktop / Cursor walkthroughs.
               </li>
               <li>

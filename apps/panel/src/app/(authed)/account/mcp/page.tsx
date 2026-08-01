@@ -57,9 +57,12 @@ function DefRow({
 }
 
 // Mirror of `app/applications/[id]/mcp/page.tsx`'s fallback — never display the
-// in-cluster RELIPAY_URL; the public API origin is the operator-facing one.
+// in-cluster REKEY_URL; the public API origin is the operator-facing one.
 function publicApiBase(): string {
-  const base = process.env.NEXT_PUBLIC_API_URL ?? 'https://api.relipay.dev';
+  // Sentinel rather than '': an empty base makes the snippet below a relative
+  // path that fails confusingly instead of obviously.
+  const base = process.env.NEXT_PUBLIC_API_URL;
+  if (!base) return '<set NEXT_PUBLIC_API_URL>';
   return base.replace(/\/$/, '');
 }
 

@@ -10,7 +10,13 @@
  * Creates:
  *   1. A Tenant.
  *   2. An Application under that Tenant.
- *   3. A live API key for the new Application.
+ *   3. The first API key for that Application.
+ *
+ * The key's prefix follows the Application's `environment`, which the
+ * super-admin create route does not accept — so this always produces an
+ * `rp_test_` key on a DEVELOPMENT app. Environment is fixed at creation with no
+ * promotion path, so a PRODUCTION Application has to be created from the panel
+ * (or `POST /api/v1/tenant/applications`, which does take `environment`).
  *
  * Returns all three. The raw API key is shown ONCE — store it immediately.
  */
@@ -72,7 +78,7 @@ export function registerInitCommand(program: Command): void {
         ctx,
         method: 'POST',
         path: `/api/v1/admin/applications/${application.id}/api-keys`,
-        body: { name: opts.apiKeyName ?? 'cli', mode: 'live' },
+        body: { name: opts.apiKeyName ?? 'cli' },
       });
 
       ok(ctx, { tenant, application, apiKey: keyResp }, (d) => {

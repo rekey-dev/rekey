@@ -23,7 +23,8 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { tombstoneEmail } from '../src/modules/tenant-applications/end-user-erasure.service.js';
-import { StripeStubProvider } from '../src/modules/billing/providers/stripe.js';
+import { euLoginLockScope, getScopeLockState, LOGIN_POLICY } from '../src/lib/brute-force.js';
+import { FakeStripeProvider } from './fakes/billing-providers.js';
 
 interface Bootstrapped {
   applicationId: string;
@@ -400,6 +401,33 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
     }
   });
 
+  it('erasure drops the brute-force lock, which holds the address in plaintext', async () => {
+    // The tombstone update used to zero `failedSignInAttempts` / `lockedUntil`
+    // on the row. Lockout has been in Redis for several releases, so that
+    // erased nothing — and the limiter's key is
+    // `bf:lock:eu:login:<appId>:<email>`, i.e. it holds the ERASED address in
+    // plaintext for up to the 15-minute lock TTL, where the super-admin
+    // locked-accounts dashboard enumerates it. An erasure that leaves the email
+    // in a key an operator UI reads back is not an erasure.
+    const b = await bootstrap('lockclear');
+    const email = 'lockclear@example.com';
+    const { euid } = await signUpUser(b, email);
+
+    const scope = euLoginLockScope(b.applicationId, email);
+    for (let i = 0; i < LOGIN_POLICY.threshold; i++) {
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/sign-in',
+        headers: { authorization: `Bearer ${b.liveKey}` },
+        payload: { email, password: 'wrong-' + i },
+      });
+    }
+    expect((await getScopeLockState(scope))?.lockedForSec).toBeGreaterThan(0);
+
+    expect((await erase(b, euid)).statusCode).toBe(200);
+    expect(await getScopeLockState(scope)).toEqual({ lockedForSec: null, failuresInWindow: 0 });
+  });
+
   it('is idempotent — erasing an already-erased user is a no-op', async () => {
     const b = await bootstrap('idem');
     const { euid } = await signUpUser(b, 'idem@example.com');
@@ -523,7 +551,7 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
       const subId = await seedProviderSub(b, euid, 'plain');
 
       const cancelSpy = vi
-        .spyOn(StripeStubProvider.prototype, 'cancelSubscription')
+        .spyOn(FakeStripeProvider.prototype, 'cancelSubscription')
         .mockResolvedValue(undefined);
 
       await prisma.webhookEndpoint.create({
@@ -584,7 +612,7 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
       await seedProviderSub(b, euid, 'fail');
 
       const cancelSpy = vi
-        .spyOn(StripeStubProvider.prototype, 'cancelSubscription')
+        .spyOn(FakeStripeProvider.prototype, 'cancelSubscription')
         .mockRejectedValue(new Error('stripe down'));
 
       const res = await app.inject({
@@ -618,7 +646,7 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
       const { euid } = await signUpUser(b, 'ecancelfail@example.com');
       await seedProviderSub(b, euid, 'erasefail');
 
-      vi.spyOn(StripeStubProvider.prototype, 'cancelSubscription').mockRejectedValue(
+      vi.spyOn(FakeStripeProvider.prototype, 'cancelSubscription').mockRejectedValue(
         new Error('stripe down'),
       );
 
@@ -634,7 +662,7 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
       const subId = await seedProviderSub(b, euid, 'erase');
 
       const cancelSpy = vi
-        .spyOn(StripeStubProvider.prototype, 'cancelSubscription')
+        .spyOn(FakeStripeProvider.prototype, 'cancelSubscription')
         .mockResolvedValue(undefined);
 
       const res = await erase(b, euid);

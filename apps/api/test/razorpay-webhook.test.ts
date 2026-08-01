@@ -68,8 +68,9 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
       .then((r) => r.json().data as { id: string });
     applicationId = application.id;
 
-    await billingCredentialsService.upsertRazorpay(
+    await billingCredentialsService.upsertCredentials(
       applicationId,
+      'razorpay',
       { keyId: 'rzp_test_ci', keySecret: 'secret_ci', webhookSecret: WEBHOOK_SECRET },
       { enabled: true, mode: 'test' },
     );
@@ -171,7 +172,7 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
       where: { applicationId_slug: { applicationId, slug: 'pro_monthly' } },
     });
     const endUser = await prisma.endUser.create({
-      data: { applicationId, email: `rzp-${checkoutSessionId}@example.com`, mode: 'TEST' },
+      data: { applicationId, email: `rzp-${checkoutSessionId}@example.com` },
     });
     return prisma.subscription.create({
       data: {
@@ -180,7 +181,6 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
         planId: plan.id,
         provider: 'razorpay',
         status: 'PENDING',
-        mode: 'TEST',
         metadata: { checkoutSessionId },
       },
       select: { id: true },
@@ -245,7 +245,7 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
     });
     await prisma.planEntitlement.create({ data: { planId: plan.id, kind: 'CREDIT', key: '', quantity: 500 } });
     const endUser = await prisma.endUser.create({
-      data: { applicationId, email: 'rzp-credit@example.com', mode: 'TEST' },
+      data: { applicationId, email: 'rzp-credit@example.com' },
     });
     await prisma.subscription.create({
       data: {
@@ -254,7 +254,6 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
         planId: plan.id,
         provider: 'razorpay',
         status: 'PENDING',
-        mode: 'TEST',
         metadata: { checkoutSessionId: 'sub_credit' },
       },
     });
@@ -346,7 +345,7 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
       where: { applicationId_slug: { applicationId, slug: 'pro_monthly' } },
     });
     const endUser = await prisma.endUser.create({
-      data: { applicationId, email: 'rzp-link@example.com', mode: 'TEST' },
+      data: { applicationId, email: 'rzp-link@example.com' },
     });
     const sub = await prisma.subscription.create({
       data: {
@@ -355,7 +354,6 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
         planId: plan.id,
         provider: 'razorpay',
         status: 'PENDING',
-        mode: 'TEST',
         metadata: { checkoutSessionId: 'plink_1', oneTime: true },
       },
     });

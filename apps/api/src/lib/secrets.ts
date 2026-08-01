@@ -8,9 +8,12 @@
  * Format on disk: `v1.<iv-hex>.<authTag-hex>.<ciphertext-hex>`. The version
  * prefix lets us rotate the algorithm later without breaking old rows.
  *
- * If `ENCRYPTION_KEY` isn't set (dev), we fall back to `plain.<json>` so
- * the deployment still functions — but the dev console gets a loud warning
- * (env.ts emits it once at boot). DO NOT ship to prod without the key.
+ * If `ENCRYPTION_KEY` isn't set we fall back to `plain.<json>` so a dev
+ * deployment still functions. Production cannot reach that branch: `config/env.ts`
+ * throws at boot when `NODE_ENV=production` and the key is absent, because
+ * plaintext provider credentials at rest is exactly the kind of exposure nobody
+ * notices. Note there is NO warning on the dev path — a mis-set `NODE_ENV` will
+ * write `plain.` rows silently.
  */
 
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';

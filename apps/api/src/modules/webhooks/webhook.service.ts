@@ -44,11 +44,18 @@ import {
 } from './events.js';
 import { randomBytes } from 'node:crypto';
 
+// Total attempts, the first one included — so 4 retries, not 5.
 const MAX_ATTEMPTS = 5;
-// Exponential backoff in seconds: 30s, 2m, 10m, 1h, 4h. Total ~5h before
-// we give up — long enough that transient downtime is forgiven, short
-// enough that a permanently-broken endpoint doesn't hold rows in PENDING
-// forever.
+// Exponential backoff in seconds, indexed by `attempts - 1`. Only the first
+// FOUR entries are reachable: `attempts >= MAX_ATTEMPTS` marks the delivery
+// FAILED before index 4 is ever read, so the real budget is
+// 30s + 2m + 10m + 1h ≈ 72 minutes and the trailing 4h is dead.
+//
+// That is a bug, not a design: the intent was ~5h of forgiveness for transient
+// downtime while still not holding rows PENDING forever. Fixing it means either
+// MAX_ATTEMPTS = 6 or dropping the 14400 — a behaviour change, so it is not being
+// done in a comments-only pass. Don't "clean up" the unreachable entry without
+// deciding which of the two the intent was.
 const RETRY_DELAYS_SECONDS = [30, 120, 600, 3600, 14400];
 const REQUEST_TIMEOUT_MS = 10_000;
 // Max stored response-body bytes. We stop READING at this point too (not

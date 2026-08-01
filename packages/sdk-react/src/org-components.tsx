@@ -4,9 +4,12 @@
  *
  * ── Data + mutation model ──
  *
- * The org endpoints (`/api/v1/users/me/organizations/*`) are secret-key guarded,
- * so the browser cannot list orgs / members or mutate them directly. As with the
- * auth widgets, these components are **render + delegate**:
+ * The org endpoints (`/api/v1/users/me/organizations/*`) take a publishable OR
+ * secret key plus the end-user's own JWT, so a browser *can* drive them
+ * directly — `RekeyBrowserClient.listOrganizations` does. As with the auth
+ * widgets these components still are **render + delegate**, because the
+ * customer's server is where the session cookie lives and where org state is
+ * already resolved for SSR:
  *
  *   - READ data (the user's orgs, the active org id, a team's members/invites)
  *     comes in as PROPS that the customer resolves server-side via `@rekey.dev/node`

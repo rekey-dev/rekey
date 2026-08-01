@@ -40,8 +40,10 @@ async function load(): Promise<void> {
       }
     }
   }
-  // The shared hosted-portal host serves every opted-in app from one origin.
-  if (anyPortal) next.add(portalBaseOrigin());
+  // The shared hosted-portal host serves every opted-in app from one origin —
+  // when this deployment runs one at all (PUBLIC_PORTAL_URL has no default).
+  const portalOrigin = portalBaseOrigin();
+  if (anyPortal && portalOrigin) next.add(portalOrigin);
   cache = next;
   loadedAt = Date.now();
 }

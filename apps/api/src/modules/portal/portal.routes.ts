@@ -2,7 +2,7 @@
  * Hosted customer portal — public config endpoint.
  *
  * `GET /api/v1/portal/config/:slug` is how the Rekey-hosted portal
- * (portal.relipay.dev/<slug>) bootstraps itself: given the slug from the URL,
+ * (portal.rekey.dev/<slug>) bootstraps itself: given the slug from the URL,
  * it returns the **public** facts a browser portal needs — the app name, its
  * **publishable** key (public by design), whether billing is on, and branding.
  * No secret material. Unauthenticated by design (the portal is signed-out at

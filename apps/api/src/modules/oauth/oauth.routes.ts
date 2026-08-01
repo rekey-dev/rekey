@@ -94,8 +94,6 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
           userAgent: typeof ua === 'string' && ua.length > 0 ? ua : null,
           ip: req.ip || null,
         },
-        // A callback that creates the user stamps the calling key's mode.
-        ...(req.dataMode !== undefined && { mode: req.dataMode }),
         // Signup policy: refuse OAuth-first user creation via a pub key in
         // `secret_only` apps (and entirely in `invite_only`).
         ...(req.authKind !== undefined && { authKind: req.authKind }),

@@ -4,7 +4,7 @@
  */
 
 import type { EndUserDto } from '@rekey.dev/shared-types';
-import { useRelipayContext } from './context.js';
+import { useRekeyContext } from './context.js';
 
 /**
  * The current end-user, or `null` if signed out. Check `user` for null first,
@@ -12,9 +12,11 @@ import { useRelipayContext } from './context.js';
  *
  * @example
  * ```tsx
- * const { user, signedIn, loading } = useUser();
+ * const { user, loading } = useUser();
  * if (loading) return <Spinner />;
- * if (!signedIn) return <SignedOut />;
+ * // Narrow on `user`, not `signedIn` — the boolean is a sibling field and
+ * // does not narrow the union for TypeScript.
+ * if (!user) return <a href="/sign-in">Sign in</a>;
  * return <p>Hi {user.email}</p>;
  * ```
  */
@@ -23,7 +25,7 @@ export function useUser(): {
   signedIn: boolean;
   loading: boolean;
 } {
-  const ctx = useRelipayContext();
+  const ctx = useRekeyContext();
   return { user: ctx.user, signedIn: ctx.signedIn, loading: ctx.loading };
 }
 
@@ -32,9 +34,9 @@ export function useUser(): {
  * round-trip the customer's server handles, so the provider re-fetches
  * the latest user state.
  */
-export function useRelipay(): {
+export function useRekey(): {
   refresh: () => Promise<void>;
 } {
-  const ctx = useRelipayContext();
+  const ctx = useRekeyContext();
   return { refresh: ctx.refresh };
 }

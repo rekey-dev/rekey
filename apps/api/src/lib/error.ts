@@ -46,7 +46,7 @@ export interface RekeyErrorPayload {
  *     code: 'TENANT_NOT_FOUND',
  *     message: `Tenant "${id}" not found.`,
  *     fix: 'List tenants with GET /api/v1/admin/tenants, or create one with POST.',
- *     docs: 'https://relipay.dev/errors/TENANT_NOT_FOUND',
+ *     docs: 'https://rekey.dev/errors/TENANT_NOT_FOUND',
  *   });
  * }
  * ```

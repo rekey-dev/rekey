@@ -2,7 +2,6 @@ import * as React from 'react';
 import Link from 'next/link';
 import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import {
   api,
   PanelApiError,
@@ -80,7 +79,6 @@ async function createUser(applicationId: string, formData: FormData): Promise<vo
       });
     } catch (err) {
       if (err instanceof PanelApiError) {
-        revalidatePath(`/applications/${applicationId}/end-users`);
         redirect(
           `/applications/${applicationId}/end-users?created=${encodeURIComponent(email)}&orgError=${encodeURIComponent(err.code)}`,
         );
@@ -88,7 +86,6 @@ async function createUser(applicationId: string, formData: FormData): Promise<vo
       throw err;
     }
   }
-  revalidatePath(`/applications/${applicationId}/end-users`);
   redirect(`/applications/${applicationId}/end-users?created=${encodeURIComponent(email)}`);
 }
 
@@ -124,7 +121,6 @@ async function updateUser(applicationId: string, euid: string, formData: FormDat
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/end-users`);
   redirect(`/applications/${applicationId}/end-users?updated=${encodeURIComponent(euid)}`);
 }
 
@@ -134,7 +130,6 @@ async function deleteUser(applicationId: string, euid: string): Promise<void> {
     method: 'DELETE',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/end-users/${encodeURIComponent(euid)}`,
   });
-  revalidatePath(`/applications/${applicationId}/end-users`);
   redirect(`/applications/${applicationId}/end-users`);
 }
 
@@ -158,7 +153,6 @@ async function createRole(applicationId: string, formData: FormData): Promise<vo
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/end-users`);
   redirect(`/applications/${applicationId}/end-users?roleCreated=${encodeURIComponent(name)}`);
 }
 
@@ -169,7 +163,6 @@ async function setRoleDefault(applicationId: string, name: string): Promise<void
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/end-user-roles/${encodeURIComponent(name)}`,
     body: { isDefault: true },
   });
-  revalidatePath(`/applications/${applicationId}/end-users`);
   redirect(`/applications/${applicationId}/end-users`);
 }
 
@@ -188,7 +181,6 @@ async function deleteRole(applicationId: string, name: string, formData: FormDat
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/end-users`);
   redirect(`/applications/${applicationId}/end-users?roleDeleted=${encodeURIComponent(name)}`);
 }
 
@@ -463,11 +455,7 @@ export default async function EndUsersPage({
               {users.map((u) => (
                 <TR key={u.id} hover>
                   <TD>
-                    <span className="inline-flex items-center gap-1.5">
-                      {u.email}
-                      {/* Test/live isolation: flag sandbox users (rp_test_* sign-ups). */}
-                      {u.mode === 'TEST' && <Badge tone="info">TEST</Badge>}
-                    </span>
+                    {u.email}
                   </TD>
                   <TD>
                     <Badge tone="neutral" mono>{u.role}</Badge>

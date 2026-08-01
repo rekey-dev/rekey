@@ -28,13 +28,10 @@ const RecordBody = z.object({
 });
 
 /** Validate the optional usage subject (end-user OR org, not both) against
- *  the calling Application. Usage may also be subject-less (app-level).
- *  Test/live isolation: when `mode` is set, end-users of the other mode are
- *  invisible (orgs carry no mode in v1). */
+ *  the calling Application. Usage may also be subject-less (app-level). */
 async function assertSubjectInApp(
   applicationId: string,
   subject: { endUserId?: string | undefined; organizationId?: string | undefined },
-  mode?: import('@prisma/client').DataMode,
 ): Promise<void> {
   if (subject.endUserId && subject.organizationId) {
     throw new RekeyError({
@@ -59,7 +56,7 @@ async function assertSubjectInApp(
     }
   } else if (subject.endUserId) {
     const eu = await prisma.endUser.findFirst({
-      where: { id: subject.endUserId, applicationId, ...(mode !== undefined && { mode }) },
+      where: { id: subject.endUserId, applicationId },
       select: { id: true },
     });
     if (!eu) {
@@ -67,7 +64,7 @@ async function assertSubjectInApp(
         statusCode: 404,
         code: 'END_USER_NOT_FOUND',
         message: `End-user "${subject.endUserId}" not found in this Application.`,
-        fix: 'Pass the id of an end-user that belongs to this Application (and matches the key\'s test/live mode).',
+        fix: 'Pass the id of an end-user that belongs to the Application this key names.',
       });
     }
   }
@@ -110,8 +107,8 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
         tags: ['Public · Usage'],
         summary: 'Record a usage event against a named meter',
         description:
-          'Requires an Application **secret** key with the `billing:write` scope (or the ' +
-          'legacy `*`). The publishable key is rejected — call this from your server.',
+          'Requires an Application **secret** key with the `billing:write` scope (or ' +
+          '`*`, the mint default). The publishable key is rejected — call this from your server.',
         security: [{ apiKey: [] }],
         body: {
           type: 'object',
@@ -137,7 +134,7 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       const body = RecordBody.parse(req.body);
-      await assertSubjectInApp(req.application!.id, body, req.dataMode);
+      await assertSubjectInApp(req.application!.id, body);
       const record = await usageService.record({
         applicationId: req.application!.id,
         meterSlug: body.meterSlug,
@@ -179,7 +176,7 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const q = AggregateQuery.parse(req.query);
-      await assertSubjectInApp(req.application!.id, q, req.dataMode);
+      await assertSubjectInApp(req.application!.id, q);
       const result = await usageService.aggregate({
         applicationId: req.application!.id,
         meterSlug: q.meterSlug,

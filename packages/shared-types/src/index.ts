@@ -63,6 +63,58 @@ export const ApiResponseSchema = <T extends z.ZodTypeAny>(data: T) =>
   ]);
 
 // ============================================================================
+// Workspace limits — the optional ceilings stored in Tenant.limits (Json column).
+// ============================================================================
+
+/**
+ * Per-workspace (Tenant) resource ceilings.
+ *
+ * Every key is optional and nullable, and **absent / null means unlimited**.
+ * `Tenant.limits` itself is nullable too, so a deployment that never sets a
+ * limit is unconstrained — which is what every existing self-host install is.
+ *
+ * The object shape (rather than a bare number) is deliberate: new limits are
+ * added as new optional keys, no migration and no breaking change for anyone
+ * already storing a subset.
+ *
+ * Rekey attaches no pricing meaning to these numbers. They are a mechanism —
+ * a multi-team self-host uses them to stop one workspace from consuming the
+ * whole deployment; anything that maps a subscription onto them lives outside
+ * this codebase.
+ *
+ * @example
+ * ```ts
+ * TenantLimitsSchema.parse({ maxActiveEndUsers: 100 }); // capped
+ * TenantLimitsSchema.parse({ maxActiveEndUsers: null }); // explicitly unlimited
+ * TenantLimitsSchema.parse({});                          // unlimited
+ * ```
+ */
+export const TenantLimitsSchema = z.object({
+  /**
+   * Maximum non-erased EndUsers across **all** Applications in the workspace.
+   * Counted tenant-wide, not per-Application. When the workspace is at or over
+   * this number, creating a *new* end-user fails with `TENANT_QUOTA_EXCEEDED`;
+   * end-users that already exist keep signing in normally.
+   */
+  maxActiveEndUsers: z.number().int().min(0).nullable().optional(),
+
+  /**
+   * Maximum Applications in the workspace whose `environment` is `PRODUCTION`.
+   * STAGING and DEVELOPMENT Applications are never counted, so a workspace at
+   * its ceiling can still create as many non-production Applications as it
+   * likes. Creating a *new* production Application over the line fails with
+   * `TENANT_QUOTA_EXCEEDED`; production Applications that already exist keep
+   * serving traffic.
+   *
+   * `Application.environment` is write-once (set at create, never updated), so
+   * a workspace cannot dodge this by creating a DEVELOPMENT app and promoting
+   * it later.
+   */
+  maxProductionApps: z.number().int().min(0).nullable().optional(),
+});
+export type TenantLimits = z.infer<typeof TenantLimitsSchema>;
+
+// ============================================================================
 // Application config — the per-app settings stored in Application.authConfig
 // and Application.billingConfig (Json columns).
 // ============================================================================
@@ -96,6 +148,23 @@ export const AuthConfigSchema = z.object({
   passwordMinLength: z.number().int().min(8).default(8),
   /** Where to send the user after sign-in / sign-up. */
   redirectUrls: z.array(z.string().url()),
+  /**
+   * Base URL of the CUSTOMER's own application — the origin transactional
+   * emails link back to (`{{appUrl}}` in the welcome mail, and the base for
+   * the reset / verify / magic-link URLs when the SDK caller doesn't supply
+   * one explicitly).
+   *
+   * Optional on purpose, and there is no default: an unset value means "we
+   * cannot build a link," and the templates then render NO call-to-action
+   * button rather than a dead one. Never populate this with a placeholder
+   * domain — a button pointing somewhere wrong is worse than no button.
+   *
+   * Lives in `authConfig` (a jsonb column) rather than `emailConfig` because
+   * `emailConfig` is rewritten wholesale whenever transport credentials are
+   * saved, and because the inference fallback reads `redirectUrls`, its
+   * neighbour here. No migration needed.
+   */
+  appUrl: z.string().url().optional(),
   /** If true, organisations / teams are enabled for this application. */
   organizationsEnabled: z.boolean().default(false),
   /**
@@ -104,6 +173,14 @@ export const AuthConfigSchema = z.object({
    * `signupMode: 'invite_only'`; `true` ⇔ `'public'`. A value of
    * `'secret_only'` still reports `signupEnabled: true` (signup IS enabled,
    * just restricted to secret keys). Prefer reading `signupMode`.
+   *
+   * KEPT deliberately in 2.0.0 despite the "legacy" label. `authConfig` is a
+   * JSON column, so an Application configured before `signupMode` existed has
+   * `{ signupEnabled: false }` and no mode. The transform below is the only
+   * thing that reads that as `invite_only`; without it the fallback becomes
+   * `'public'` and sign-up silently re-opens on an Application the operator
+   * deliberately closed. That is a security regression triggered by a comment
+   * cleanup, so this field outlives the major.
    */
   signupEnabled: z.boolean().optional(),
   /**
@@ -140,6 +217,38 @@ export const AuthConfigSchema = z.object({
    */
   passwordBreachCheckEnabled: z.boolean().default(true),
   /**
+   * If true (default), password sign-up sends the `email_verification` mail
+   * *in addition to* `welcome`, so a new account gets its confirmation link
+   * without the customer's server calling `/auth/send-verification` itself.
+   * Best-effort in exactly the way the welcome mail is: a delivery failure is
+   * logged and dropped, never rolled back into the account creation.
+   *
+   * Only the password path sends it. Magic-link sign-IN and sign-UP both set
+   * `emailVerified: true` (consuming the link IS the proof of the mailbox) and
+   * an OAuth-first sign-up carries the provider's own `email_verified` claim —
+   * neither has anything left for us to verify.
+   *
+   * Ignored while `requireEmailVerification` is on: the link is then the only
+   * way into the account, so sign-up sends it regardless of this switch. A
+   * toggle that can strand every new registration is not a toggle.
+   */
+  sendVerificationEmailOnSignUp: z.boolean().default(true),
+  /**
+   * If true, an end-user whose `emailVerified` is still false gets NO session:
+   * sign-up, sign-in, MFA verification, org switching and refresh all refuse
+   * with 403 `EMAIL_NOT_VERIFIED`. Default false: switching it on locks out
+   * every already-registered account that never confirmed its address, so it
+   * stays the operator's deliberate act rather than something a version bump
+   * does to them.
+   *
+   * Enforced at the session chokepoint, not per credential. Magic-link and
+   * OAuth sign-in each carry their own proof of the address and mark it
+   * verified, so they pass the gate rather than bypass it. Refresh re-checks,
+   * so flipping the switch on ends the sessions of users who never confirmed
+   * within one access-token lifetime instead of after 30 days.
+   */
+  requireEmailVerification: z.boolean().default(false),
+  /**
    * If true, this Application exposes a hosted MCP (Model Context Protocol)
    * server at `/api/v1/mcp/<slug>`, fronted by a per-app OAuth 2.1
    * authorization server (dynamic client registration + authorization-code +
@@ -148,6 +257,46 @@ export const AuthConfigSchema = z.object({
    * while off, the MCP + OAuth endpoints 404.
    */
   mcpEnabled: z.boolean().default(false),
+  /**
+   * If true, this Application acts as an OpenID Connect **provider**. The
+   * per-app authorization server that MCP already fronts additionally serves
+   * `/.well-known/openid-configuration`, issues an `id_token` whenever the
+   * `openid` scope is granted, and exposes `/oauth/userinfo`. Off by default —
+   * while off the OIDC endpoints 404 AND `openid`/`profile`/`email` are not
+   * grantable, so no ID Token can be minted for the Application at all.
+   *
+   * Deliberately independent of `mcpEnabled`. Either toggle alone mounts the
+   * shared authorization endpoints (authorize / token / register / introspect);
+   * each RESOURCE then gates itself — the MCP JSON-RPC endpoint needs
+   * `mcpEnabled` plus the `mcp:account` scope, `/userinfo` needs `oidcEnabled`
+   * plus `openid`. An operator who wants single-sign-on must not have to expose
+   * an MCP tool server over their users' account data to get it.
+   *
+   * The `email` scope additionally requires `requireEmailVerification`. Without
+   * it Rekey has no proof of the address and will not assert one to a relying
+   * party — `scopes_supported` omits `email`, and so does `claims_supported`.
+   */
+  oidcEnabled: z.boolean().default(false),
+  /**
+   * If true (default), anyone may register an OAuth client against this
+   * Application's authorization server with `POST /oauth/register` (RFC 7591
+   * open registration, rate-limited, public clients only). With it off that
+   * endpoint answers 403 `CLIENT_REGISTRATION_DISABLED` and neither discovery
+   * document advertises `registration_endpoint`; existing clients keep working.
+   *
+   * Default on because MCP clients (Claude Code, Claude Desktop, …) register
+   * themselves as the first step of connecting and there is no operator-side
+   * client-creation surface yet — a default of `false` would silently break
+   * every deployment that already has MCP switched on and would leave a
+   * freshly-enabled OpenID Provider with no way to onboard a relying party at
+   * all. Turn it off once your relying parties are registered, which is the
+   * posture a public IdP wants: open registration lets anyone stand up a rogue
+   * client with an attacker-chosen `client_name` and get a password prompt
+   * rendered on the operator's own issuer origin. (`client_name` is escaped and
+   * the consent screen is accurate, so this is a phishing surface rather than a
+   * credential-theft one — hence a control to harden with, not a default.)
+   */
+  dynamicClientRegistration: z.boolean().default(true),
   /**
    * Signature algorithm for end-user ACCESS tokens. `HS256` (default) keeps
    * today's per-app derived-secret behaviour. `RS256` signs new access tokens
@@ -243,11 +392,30 @@ export type BillingConfig = z.infer<typeof BillingConfigSchema>;
 // Public DTOs — what the API actually returns over the wire.
 // ============================================================================
 
+/**
+ * What an Application *is*. The Application is the isolation boundary in
+ * Rekey — every domain row carries an `applicationId` — so "keep experiments
+ * away from customers" means "use a second Application", and this field says
+ * which of the two you are holding.
+ *
+ * It does NOT restrict which billing credentials the Application may hold —
+ * live provider keys on a `DEVELOPMENT` Application are allowed, because
+ * deliberately testing against a live processor is a real workflow and it is
+ * your processor account. Environment is a label, the unit deployments are
+ * billed and quota'd by, and what the API-key prefix is derived from.
+ *
+ * Set at creation and **immutable** — no endpoint changes it. To go live you
+ * create a `PRODUCTION` Application rather than converting this one.
+ */
+export const AppEnvironmentSchema = z.enum(['PRODUCTION', 'STAGING', 'DEVELOPMENT']);
+export type AppEnvironment = z.infer<typeof AppEnvironmentSchema>;
+
 export const ApplicationDtoSchema = z.object({
   id: z.string(),
   tenantId: z.string(),
   name: z.string(),
   slug: z.string(),
+  environment: AppEnvironmentSchema,
   publicKey: z.string(),
   authConfig: AuthConfigSchema,
   billingConfig: BillingConfigSchema,
@@ -598,6 +766,14 @@ export const BillingProviderCapabilitiesSchema = z.object({
   autoWebhookRegister: z.boolean(),
   periodRotationEvents: z.boolean(),
   onlineVerify: z.boolean(),
+  /**
+   * Whether an ad-hoc coupon discount can be applied, per flow. Optional
+   * because a provider module may predate the field — and absent means
+   * "cannot", never "unknown, try it": a checkout that sends a coupon to a
+   * provider that drops it charges the buyer full price. Use it to hide the
+   * coupon field when the only provider on offer cannot honour one.
+   */
+  discounts: z.object({ oneTime: z.boolean(), recurring: z.boolean() }).optional(),
 });
 export type BillingProviderCapabilities = z.infer<typeof BillingProviderCapabilitiesSchema>;
 
@@ -631,7 +807,7 @@ export const CouponDtoSchema = z.object({
   applicationId: z.string(),
   code: z.string(),
   discountType: CouponDiscountTypeSchema,
-  /** PERCENT: basis-points × 10 (1500 = 15.00%). AMOUNT: smallest currency unit. */
+  /** PERCENT: basis points (1500 = 15.00%). AMOUNT: smallest currency unit. */
   amountOff: z.number().int().min(0),
   currency: z.string().nullable(),
   planSlugs: z.array(z.string()),
@@ -915,10 +1091,15 @@ export const WEBHOOK_EVENTS = [
   // LOCAL state actually transitions (a provider-event replay that changes
   // nothing emits nothing). A provider retry after a 5xx on Rekey's side may
   // still re-emit; consumers must dedupe on the envelope's `eventId`.
+  //
+  // Every `subscription.*` payload carries `data.subscription.entitlements` —
+  // what THAT subscription grants, with its per-subscription overrides applied.
+  // Act on it rather than on the plan slug: two subscribers on one plan can
+  // hold different quantities, and the slug cannot tell you so.
   {
     name: 'subscription.activated',
     description:
-      'A provider webhook transitioned a Subscription to ACTIVE. Payload: `data.subscription` with ids, plan slug/name/kind, amount/currency/interval, and period end.',
+      'A provider webhook transitioned a Subscription to ACTIVE. Payload: `data.subscription` with ids, plan slug/name/kind, amount/currency/interval, the resolved `entitlements` array, and period end.',
   },
   {
     name: 'subscription.canceled',
@@ -1189,7 +1370,21 @@ export interface EndUserExportProfile {
   emailVerified: boolean;
   role: string;
   metadata: Record<string, unknown> | null;
+  /**
+   * Failures counted against this end-user's sign-in scope right now.
+   *
+   * Sourced from the Redis brute-force limiter, which is where lockout has
+   * lived since it moved off the `EndUser` row. The limiter clears its counter
+   * the moment it sets a lock, so a LOCKED account reports the policy
+   * threshold (10) — the documented floor on what tripped the lock, not a
+   * surviving count. Below the threshold this is the live counter.
+   */
   failedSignInAttempts: number;
+  /**
+   * When the current sign-in lockout expires, or `null` when not locked.
+   * Reconstructed from the lock's remaining TTL, so it moves with the limiter
+   * instead of being a snapshot.
+   */
   lockedUntil: string | null;
   createdAt: string;
   updatedAt: string;

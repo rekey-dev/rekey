@@ -7,7 +7,7 @@ Next.js 15 admin panel for Rekey deployments.
 ## Run
 
 ```bash
-RELIPAY_URL=http://localhost:3030 pnpm --filter @rekey.dev/panel dev
+REKEY_URL=http://localhost:3030 pnpm --filter @rekey.dev/panel dev
 # → http://localhost:3031
 ```
 
@@ -22,7 +22,7 @@ pnpm --filter @rekey.dev/panel start
 
 ## Required env
 
-- `RELIPAY_URL` — base URL of the Rekey API
+- `REKEY_URL` — base URL of the Rekey API
 
 ## Routes
 

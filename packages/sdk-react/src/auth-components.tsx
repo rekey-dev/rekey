@@ -3,14 +3,21 @@
  *
  * ── Why these take server actions instead of calling the API ──
  *
- * Every `/api/v1/auth/*` endpoint on Rekey is guarded by the secret-key
- * middleware (`requireApiKey`), which **explicitly rejects public keys**. The
- * browser must never hold the secret key, so these widgets cannot POST
- * credentials to Rekey directly. Instead — exactly like Clerk's components
- * talk to Clerk's FAPI — they delegate writes to *your* server: you pass a
- * Server Action (or a route URL) and the widget renders the form/buttons around
- * it. Your action runs `@rekey.dev/node` server-side (with the secret) and rotates
- * the session cookie; the provider then reflects the new user on the next load.
+ * Not because the browser *can't* reach the API — the signed-out bootstrap
+ * routes (sign-up, sign-in, mfa-verify, magic-link, passkey-authenticate,
+ * refresh, password reset) accept the Application's publishable key via
+ * `requirePublishableOrSecretKey`, and `RekeyBrowserClient` in client.ts is
+ * exactly that path. These widgets delegate anyway, for two reasons that still
+ * hold: your server is where the httpOnly session cookie lives (a token in JS
+ * is a token an XSS can read), and the *authenticated* half of `/auth/*` —
+ * password change, MFA enrollment, passkey registration — is secret-key-only.
+ *
+ * So — exactly like Clerk's components talk to Clerk's FAPI — they delegate
+ * writes to *your* server: you pass a Server Action (or a route URL) and the
+ * widget renders the form/buttons around it. Your action runs `@rekey.dev/node`
+ * server-side (with the secret) and rotates the session cookie; the provider
+ * then reflects the new user on the next load. Reach for `RekeyBrowserClient`
+ * instead when you genuinely have no backend.
  *
  * Two integration styles, pick per prop:
  *   - `action`: a function (Next.js Server Action) wired to `<form action={…}>`.

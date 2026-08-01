@@ -94,14 +94,16 @@ describe('Outbound billing webhook events', () => {
       .then((r) => r.json().data as { id: string });
 
     if (provider === 'stripe') {
-      await billingCredentialsService.upsertStripe(
+      await billingCredentialsService.upsertCredentials(
         application.id,
+        'stripe',
         { apiKey: 'sk_test_for_ci_only', webhookSecret: WEBHOOK_SECRET },
         { enabled: true, mode: 'test' },
       );
     } else {
-      await billingCredentialsService.upsertPaypal(
+      await billingCredentialsService.upsertCredentials(
         application.id,
+        'paypal',
         { clientId: 'cid', clientSecret: 'csecret', webhookId: 'WH-TEST' },
         { enabled: true, mode: 'test' },
       );
@@ -488,6 +490,91 @@ describe('Outbound billing webhook events', () => {
       const envelope = pastDue[0]!.payload as { data: { subscription: { id: string; status: string } } };
       expect(envelope.data.subscription.id).toBe(sub.id);
       expect(envelope.data.subscription.status).toBe('PAST_DUE');
+    });
+  });
+
+  // ------------------------------------------------- entitlements on payload
+
+  /**
+   * `data.subscription.entitlements` — what the subscription actually grants.
+   *
+   * The plan slug cannot answer that: `entitlementOverrides` is how a bespoke
+   * quantity is sold without minting a private plan, so two subscribers on one
+   * plan can hold different amounts. A consumer that provisions off the slug
+   * therefore provisions the wrong thing for exactly the customers who paid for
+   * something different, and it has no user token with which to go and ask.
+   */
+  describe('resolved entitlements on the payload', () => {
+    interface WithEntitlements {
+      data: {
+        subscription: {
+          entitlements: Array<{ kind: string; key: string; valueType: string | null; value: string | null }>;
+        };
+      };
+    }
+
+    async function activate(
+      slug: string,
+      opts: { entitlementOverrides?: Record<string, unknown> } = {},
+    ): Promise<WithEntitlements> {
+      const b = await bootstrap(slug, 'stripe');
+      await prisma.planEntitlement.create({
+        data: { planId: b.planId, kind: 'FEATURE', key: 'max_widgets', valueType: 'INT', value: '2' },
+      });
+      await prisma.subscription.create({
+        data: {
+          applicationId: b.applicationId,
+          endUserId: b.endUserId,
+          planId: b.planId,
+          status: 'PENDING',
+          metadata: { checkoutSessionId: `cs_${slug}` },
+          ...(opts.entitlementOverrides !== undefined && {
+            entitlementOverrides: opts.entitlementOverrides,
+          }),
+        },
+      });
+
+      const { payload, headers } = stripeSigned({
+        id: `evt_${slug}`,
+        object: 'event',
+        type: 'checkout.session.completed',
+        data: {
+          object: {
+            id: `cs_${slug}`,
+            subscription: `sub_${slug}`,
+            metadata: { applicationId: b.applicationId },
+          },
+        },
+      });
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/billing/webhook/stripe/${slug}`,
+        headers,
+        payload,
+      });
+      expect(res.statusCode).toBe(200);
+
+      const deliveries = await waitForDeliveries(b.endpointId, 'subscription.activated', 1);
+      expect(deliveries).toHaveLength(1);
+      return deliveries[0]!.payload as unknown as WithEntitlements;
+    }
+
+    it("carries the plan's entitlement rows", async () => {
+      const envelope = await activate('obe-ent-plan');
+      expect(envelope.data.subscription.entitlements).toContainEqual(
+        expect.objectContaining({ kind: 'FEATURE', key: 'max_widgets', valueType: 'INT', value: '2' }),
+      );
+    });
+
+    it("applies the subscription's overrides, not the plan's raw value", async () => {
+      // The whole reason the slug is not enough. A consumer reading this
+      // payload must see 5, which is what this customer bought.
+      const envelope = await activate('obe-ent-override', {
+        entitlementOverrides: { 'FEATURE:max_widgets': 5 },
+      });
+      expect(envelope.data.subscription.entitlements).toContainEqual(
+        expect.objectContaining({ key: 'max_widgets', value: '5' }),
+      );
     });
   });
 });

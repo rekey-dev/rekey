@@ -2,7 +2,11 @@
 
 The billing surface in Rekey is intentionally provider-agnostic. Stripe, PayPal, and Razorpay all sit behind one `BillingProvider` interface; an Application picks one in its `billingConfig.provider`.
 
-> **Status (today)**: all three providers are real — `RealStripeProvider` (stripe SDK), `RealPaypalProvider` (REST), `RealRazorpayProvider` (razorpay SDK). Inbound webhook ingestion is live for Stripe and PayPal (signature-verified, with a durable `WebhookEvent` idempotency table) and drives the subscription state machine end-to-end. The deterministic stub providers run only under `NODE_ENV=test` / `RELIPAY_BILLING_FORCE_STUB=true`, or — for Stripe — when no BYO credentials are configured; PayPal / Razorpay require credentials (else `BILLING_PROVIDER_NOT_CONFIGURED`).
+> **Status (today)**: all three providers are real — `RealStripeProvider` (stripe SDK), `RealPaypalProvider` (REST), `RealRazorpayProvider` (razorpay SDK). Inbound webhook ingestion is live for all three (signature-verified, with a durable `WebhookEvent` idempotency table) and drives the subscription state machine end-to-end. There are no stub providers: every provider talks to the real processor, and an Application with no credentials configured gets `BILLING_CREDENTIALS_NOT_CONFIGURED` in every environment, dev included. An Application's `environment` does not restrict which credentials it may hold; the recorded `mode` is read from the key where the provider's key format states it. See [api-keys.md → Environments](api-keys.md#environments).
+
+> **How strong that constraint is, honestly.** The stored `mode` is read from the key material wherever the key states it: Stripe (`sk_live_` / `sk_test_`) and Razorpay (`rzp_live_` / `rzp_test_`). For those two, mislabelling is refused (`BILLING_CREDENTIALS_MODE_CONTRADICTED`), so the recorded mode is never a lie about what the key will actually do. Note this is a truthfulness guarantee, not a restriction: a live Stripe key may be stored against a development Application — it will simply be recorded, correctly, as `live`.
+>
+> **PayPal warning.** A PayPal sandbox client id is byte-indistinguishable from a live one, so Rekey cannot verify the `mode` you declare for PayPal credentials — it is recorded exactly as given, and nothing downstream will catch a mistake. Pasting **live** PayPal credentials into an Application you think of as a sandbox means that Application takes real money. For Stripe and Razorpay the mode is read from the key itself and a contradicting declaration is refused, so this is the one provider where the label is taken on trust. Treat PayPal credentials with the care nothing here can give you.
 
 ## Concepts
 
@@ -29,13 +33,16 @@ interface BillingProvider {
   readonly name: string;                                                 // "stripe" | "paypal" | "razorpay"
   ensurePlanRegistered(plan: Plan): Promise<{ providerPlanId: string }>;  // Stripe Product+Price, PayPal Plan, …
   createCheckoutSession(input: CheckoutSessionInput): Promise<{ url: string; sessionId: string }>;
+  createOneTimeCheckout(input: OneTimeCheckoutInput): Promise<{ url: string; sessionId: string }>;
   cancelSubscription(input: CancelSubscriptionInput): Promise<void>;
+  captureOneTime?(input: CaptureOneTimeInput): Promise<...>;   // PayPal Orders v2 only
+  registerWebhook?(input: RegisterWebhookInput): Promise<...>; // Razorpay has no create-webhook API
 }
 ```
 
 The interface expresses the **intersection** of capabilities. Provider-specific data (Stripe `tax_behavior`, PayPal `setup_fee`, …) lives in `metadata: Json` on `Plan` / `Subscription` / `Payment`. **Resist surfacing provider-only concepts at the top level.** That's the seam.
 
-`getProviderForApplication(application)` is the only call site that picks a provider. Don't `new StripeStubProvider()` anywhere else — go through the registry in `modules/billing/providers/index.ts`.
+`getProviderForApplication(application, providerName)` is the only call site that picks a provider. Don't construct a provider class anywhere else — go through the registry in `modules/billing/providers/index.ts`.
 
 ## Admin endpoints
 
@@ -47,13 +54,13 @@ POST   /api/v1/admin/applications/:id/plans
 PATCH  /api/v1/admin/applications/:id/plans/:slug         { active: boolean }
 ```
 
-Creating a plan triggers `BillingProvider.ensurePlanRegistered()` synchronously; the returned provider id is persisted into `Plan.metadata.{provider}`.
+Creating a plan calls `ensurePlanRegistered()` **only when the Application already has Stripe credentials stored**; the returned price id is persisted into `Plan.metadata.stripe`. PayPal and Razorpay register the plan lazily at first checkout. Making the call unconditional used to be fine when a stub always answered — once the stubs were deleted it meant a PayPal-only or Razorpay-only operator could not create a plan at all, and the error named Stripe, a provider they had never configured.
 
 There is **no delete endpoint by design**. Plans referenced by historical Subscriptions need to live forever for accounting. Use `setActive(false)` to retire — that's the only way out.
 
 ## Public endpoints
 
-API key required (`Authorization: Bearer rp_live_…`). Some additionally require the user JWT.
+Publishable **or** secret key (`Authorization: Bearer rp_pub_…` / `rp_live_…`). The user-scoped ones additionally require the end-user JWT in `X-Rekey-User-Token`, and that token — not the key — is what authorizes them; see [api-keys.md](api-keys.md).
 
 ```
 GET   /api/v1/billing/plans                                  — Application key only (pricing pages)
@@ -145,7 +152,7 @@ Rekey is in the middle of **two separate webhook flows**, and they have nothing 
 
 ### (a) Webhooks Rekey sends to YOUR app
 
-Register an endpoint (URL + event list, `"*"` for all) in the panel or via `POST /api/v1/tenant/applications/:id/webhooks`. The response includes the endpoint's signing `secret` exactly once — store it (e.g. as `RELIPAY_WEBHOOK_SECRET`).
+Register an endpoint (URL + event list, `"*"` for all) in the panel or via `POST /api/v1/tenant/applications/:id/webhooks`. The response includes the endpoint's signing `secret` exactly once — store it (e.g. as `REKEY_WEBHOOK_SECRET`).
 
 Every delivery is a JSON envelope `{ eventId, occurredAt, type, applicationId, data }`, signed with a `t=<unix-ts>,v1=<hmac-sha256-hex>` header named `X-Rekey-Signature`. Verify it against the **raw body bytes** before trusting anything:
 
@@ -157,7 +164,7 @@ app.post('/webhooks/rekey', { config: { rawBody: true } }, async (req, reply) =>
   const ok = verifyWebhookSignature({
     header: req.headers['x-rekey-signature'] as string,
     payload: req.rawBody!,            // raw bytes — reserialized JSON breaks the HMAC
-    secret: process.env.RELIPAY_WEBHOOK_SECRET!,
+    secret: process.env.REKEY_WEBHOOK_SECRET!,
   });
   if (!ok) return reply.status(401).send();
 
@@ -174,6 +181,15 @@ Failed deliveries retry with exponential backoff (30s → 2m → 10m → 1h → 
 The canonical event list ships in code as `WEBHOOK_EVENTS` (an array of `{ name, description }`) and `KNOWN_WEBHOOK_EVENTS` (just the names) from `@rekey.dev/node` / `@rekey.dev/shared-types`, with the `WebhookEventType` union and `WebhookEventEnvelope<TData>` envelope type — use them to autocomplete an endpoint's `events` array or render an event picker.
 
 > The outbound registry covers the auth/user lifecycle **and** the billing lifecycle: `subscription.activated` / `subscription.canceled` / `subscription.past_due` fire when a provider webhook actually transitions the local Subscription's status, and `payment.succeeded` / `payment.failed` fire when a Payment row is recorded. Payloads carry the ids, plan slug, and amount/currency/status under `data.subscription` / `data.payment`. Events are emitted only on a real state change — a replayed provider event that changes nothing emits nothing — but a provider retry after a 5xx on Rekey's side may re-emit, so **dedupe on the envelope's `eventId`** (which retried deliveries reuse) before acting.
+>
+> `data.subscription.entitlements` carries what that subscription grants — the same array shape `GET /api/v1/billing/entitlements` returns, with the subscription's `entitlementOverrides` already applied. Provision against it rather than against `planSlug`: an override is how a bespoke quantity is sold without minting a private plan, so two subscribers on the same plan can be entitled to different amounts and the slug cannot tell you which.
+>
+> ```ts
+> // "How many widgets did this customer buy?" — plan default, or their override.
+> const seats = event.data.subscription.entitlements
+>   .find((e) => e.kind === 'FEATURE' && e.key === 'max_widgets');
+> const allowance = seats?.valueType === 'INT' ? Number(seats.value) : 0;
+> ```
 
 ### (b) Provider webhooks (Stripe/PayPal) that REKEY receives
 
@@ -187,7 +203,7 @@ Stripe ──signed event──> Rekey  (POST /webhook/stripe/<app-slug>)
                             ├─ resolve Application by slug; load its BYO webhook secret (none → 503)
                             ├─ verify HMAC against THAT app's webhook secret (bad → 401)
                             ├─ insert WebhookEvent row (P2002 = dup, skip)
-                            ├─ dispatch by event type (stripe.handler.ts)
+                            ├─ translate via providers/modules/stripe/index.ts
                             └─ persist processed_at OR processing_error
                             ▼
                        always returns 200 (after sig check)

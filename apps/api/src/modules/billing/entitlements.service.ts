@@ -30,6 +30,7 @@ import type {
   PlanEntitlementKind,
   Prisma,
   Subscription,
+  SubscriptionStatus,
 } from '@prisma/client';
 import type { FastifyBaseLogger } from 'fastify';
 import { prisma } from '../../lib/prisma.js';
@@ -56,6 +57,24 @@ async function loadDefaultPlan(applicationId: string): Promise<Plan | null> {
   if (!slug) return null;
   return prisma.plan.findFirst({ where: { applicationId, slug, active: true } });
 }
+
+/**
+ * Subscription statuses that entitle the subscriber to what they bought.
+ *
+ * PAST_DUE is one of them. A card retry failing is the START of the dunning
+ * window, not the end of the subscription — the provider is still retrying,
+ * `getCurrentSubscription` still returns the row, the portal still shows the
+ * plan, and dunning exists precisely to give the customer time to fix it.
+ * Resolving entitlements for ACTIVE only contradicted all of that: the first
+ * failed charge silently stripped every feature flag the customer had paid
+ * for, days or weeks before they had actually run out of chances to pay. A
+ * customer who bought a three-workspace allowance was reduced to the default
+ * of one while their subscription was still, by every other measure, live.
+ *
+ * CANCELED and EXPIRED are terminal and are correctly excluded; PENDING is a
+ * checkout that never completed and never entitled anyone.
+ */
+const ENTITLING_STATUSES: SubscriptionStatus[] = ['ACTIVE', 'PAST_DUE'];
 
 export interface ResolvedEntitlement {
   kind: PlanEntitlementKind;
@@ -208,6 +227,21 @@ export const entitlementsService = {
   },
 
   /**
+   * What ONE subscription actually grants: its plan's entitlements with that
+   * subscription's `entitlementOverrides` applied on top.
+   *
+   * The plan-level view (`resolveForPlan`) is not what a subscriber holds —
+   * a per-subscription override is how a bespoke deal is sold without minting a
+   * private plan, and reading the plan alone silently ignores it. Every caller
+   * that asks "what did THIS buyer purchase" wants this one; `provision` and
+   * `resolveForEndUser` already compose the same two steps inline.
+   */
+  async resolveForSubscription(sub: Subscription): Promise<ResolvedEntitlement[]> {
+    const plan = await prisma.plan.findUniqueOrThrow({ where: { id: sub.planId } });
+    return applyOverrides(await this.resolveForPlan(plan), sub.entitlementOverrides);
+  },
+
+  /**
    * Materialize a subscription's plan entitlements onto the subscriber.
    * Idempotent per (subscription, period) — safe under webhook replay + renewal.
    *
@@ -330,7 +364,8 @@ export const entitlementsService = {
   },
 
   /**
-   * Resolve the entitlements a subject currently holds across ACTIVE subs.
+   * Resolve the entitlements a subject currently holds across their ENTITLING
+   * subscriptions.
    *
    * Default (no `organizationId`): the **end-user view** — unions the user's
    * own subscriptions with subscriptions whose beneficiary is an org they
@@ -342,6 +377,8 @@ export const entitlementsService = {
    * checked by the caller/route.)
    *
    * Feature flags merge: booleans OR-true, numbers max, strings last-wins.
+   *
+   * PAST_DUE counts as entitling here — see ENTITLING_STATUSES.
    */
   async resolveForEndUser(
     applicationId: string,
@@ -356,7 +393,11 @@ export const entitlementsService = {
     let subject: { endUserId?: string; organizationId?: string };
     if (opts?.organizationId) {
       subs = await prisma.subscription.findMany({
-        where: { applicationId, beneficiaryOrgId: opts.organizationId, status: 'ACTIVE' },
+        where: {
+          applicationId,
+          beneficiaryOrgId: opts.organizationId,
+          status: { in: ENTITLING_STATUSES },
+        },
         include: { plan: true },
       });
       subject = { organizationId: opts.organizationId };
@@ -369,7 +410,7 @@ export const entitlementsService = {
       subs = await prisma.subscription.findMany({
         where: {
           applicationId,
-          status: 'ACTIVE',
+          status: { in: ENTITLING_STATUSES },
           OR: [{ endUserId }, ...(orgIds.length > 0 ? [{ beneficiaryOrgId: { in: orgIds } }] : [])],
         },
         include: { plan: true },
@@ -435,9 +476,24 @@ export const entitlementsService = {
     subject: { endUserId?: string | undefined; organizationId?: string | undefined },
     meterSlug: string,
   ): Promise<number | null> {
+    // Same ENTITLING_STATUSES as resolveForEndUser, and for the same reason
+    // read the other way round: dropping a dunning customer's subscription
+    // here does not cap them harder, it makes them UNMETERED (no USAGE
+    // entitlement found → null → uncapped). Neither losing the quota they
+    // bought nor being handed unlimited consumption is the right answer to a
+    // card that has not been retried to exhaustion yet.
     const where: Prisma.SubscriptionWhereInput = subject.organizationId
-      ? { applicationId, beneficiaryOrgId: subject.organizationId, status: 'ACTIVE' }
-      : { applicationId, endUserId: subject.endUserId!, beneficiaryOrgId: null, status: 'ACTIVE' };
+      ? {
+          applicationId,
+          beneficiaryOrgId: subject.organizationId,
+          status: { in: ENTITLING_STATUSES },
+        }
+      : {
+          applicationId,
+          endUserId: subject.endUserId!,
+          beneficiaryOrgId: null,
+          status: { in: ENTITLING_STATUSES },
+        };
     const subs = await prisma.subscription.findMany({ where, include: { plan: true } });
     let total = 0;
     let capped = false;
@@ -490,9 +546,43 @@ function synthesizeLegacy(plan: Plan): ResolvedEntitlement[] {
 }
 
 /**
+ * Infer the `valueType` of a FEATURE override the plan has no row for.
+ *
+ * Only needed when an override ADDS an entitlement (see below): an override
+ * that lands on an existing row inherits that row's declared type. The
+ * ordering matters — `"true"` must not be read as a string, and `"50"` must
+ * not be read as a string either, because `parseFeatureValue` is what every
+ * consumer reads through and a mistyped INT resolves to a string the caller
+ * cannot compare.
+ */
+function inferFeatureValueType(value: string): EntitlementValueType {
+  if (value === 'true' || value === 'false') return 'BOOL';
+  return Number.isInteger(Number(value)) && value.trim() !== '' ? 'INT' : 'STRING';
+}
+
+/**
  * Apply a subscription's sparse overrides over the plan's entitlements. Keys
  * are "KIND:key" → for FEATURE the override is the value, for the stateful
- * kinds it's the quantity. Only existing entitlements are overridden (no add).
+ * kinds it's the quantity.
+ *
+ * ## A FEATURE override may ADD a row the plan does not carry
+ *
+ * It could not, and that quietly made the documented remedy for a hit
+ * allowance a no-op: `entitlementOverrides` is how a bespoke deal is sold
+ * without minting a private plan, but a plan that carries no
+ * `FEATURE:max_workspaces` row had nothing to override, so setting one
+ * changed nothing at all and the customer stayed capped. "Only overrides what
+ * already exists" also makes the mechanism useless for exactly the case it
+ * exists for — the plan the operator is trying to deviate from is by
+ * definition the one that does not describe this customer.
+ *
+ * ADD is FEATURE-only on purpose. A CREDIT, LICENSE or USAGE entitlement is
+ * MATERIALIZED by `provision` — it grants credits, issues a licence key, sets
+ * a seat count — and the override value is a bare number, so inventing one
+ * would mean inventing a `licenseKind` and a `rollover` policy too and then
+ * handing out whatever they turned out to mean. A FEATURE is resolved at read
+ * time and materializes nothing, so an added one can only ever answer a
+ * question. Adding a stateful kind stays a plan-level decision.
  */
 function applyOverrides(
   base: ResolvedEntitlement[],
@@ -500,11 +590,29 @@ function applyOverrides(
 ): ResolvedEntitlement[] {
   if (!overridesJson || typeof overridesJson !== 'object') return base;
   const overrides = overridesJson as Record<string, unknown>;
-  return base.map((e) => {
+  const applied = base.map((e) => {
     const o = overrides[`${e.kind}:${e.key}`];
     if (o === undefined) return e;
     if (e.kind === 'FEATURE') return { ...e, value: String(o) };
     const q = Number(o);
     return Number.isFinite(q) ? { ...e, quantity: q } : e;
   });
+
+  const present = new Set(base.map((e) => `${e.kind}:${e.key}`));
+  for (const [key, value] of Object.entries(overrides)) {
+    if (present.has(key) || !key.startsWith('FEATURE:')) continue;
+    const featureKey = key.slice('FEATURE:'.length);
+    if (!featureKey || value === null || value === undefined) continue;
+    const asString = String(value);
+    applied.push({
+      kind: 'FEATURE',
+      key: featureKey,
+      valueType: inferFeatureValueType(asString),
+      value: asString,
+      quantity: null,
+      licenseKind: null,
+      rollover: false,
+    });
+  }
+  return applied;
 }

@@ -1,7 +1,6 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { api, PanelApiError } from '@/lib/api';
 import { EmailEditorClient } from '@/components/EmailEditorClient';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -65,7 +64,6 @@ async function saveTemplate(applicationId: string, eventKey: string, formData: F
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/email/${encodeURIComponent(eventKey)}`);
   redirect(`/applications/${applicationId}/email/${encodeURIComponent(eventKey)}?saved=1`);
 }
 
@@ -75,7 +73,6 @@ async function revertTemplate(applicationId: string, eventKey: string): Promise<
     method: 'DELETE',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/email-templates/${encodeURIComponent(eventKey)}`,
   });
-  revalidatePath(`/applications/${applicationId}/email/${encodeURIComponent(eventKey)}`);
   redirect(`/applications/${applicationId}/email/${encodeURIComponent(eventKey)}?reverted=1`);
 }
 
@@ -97,7 +94,6 @@ async function testSend(applicationId: string, eventKey: string, formData: FormD
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/email/${encodeURIComponent(eventKey)}`);
   redirect(`/applications/${applicationId}/email/${encodeURIComponent(eventKey)}?test=sent`);
 }
 

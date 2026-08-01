@@ -2,10 +2,11 @@
  * Stripe ProviderModule (docs/specs/billing-provider-modules.md, P1).
  *
  * Bundles what used to be spread across stripe.routes.ts (signature
- * verification), stripe.handler.ts (event-type dispatch + status map), the
- * provider factory (stub-vs-real selection), and credentials.service.ts
- * (credential shape) into one self-describing descriptor. Every mapping
- * here is a straight port — the CI webhook tests pin the behavior.
+ * verification), stripe.handler.ts (event-type dispatch + status map), and
+ * credentials.service.ts (credential shape) into one self-describing
+ * descriptor. Every mapping here is a straight port — the CI webhook tests pin
+ * the behavior. Outbound provider construction is NOT here: that stayed in
+ * providers/index.ts (see the note on `ProviderModule`).
  *
  * Credential JSON keys (`apiKey`, `webhookSecret`) match the stored
  * encrypted blobs exactly — zero data migration (see StripeCredentials in
@@ -14,13 +15,10 @@
  */
 
 import Stripe from 'stripe';
-import { env } from '../../../../../config/env.js';
 import { RekeyError } from '../../../../../lib/error.js';
-import { StripeStubProvider } from '../../stripe.js';
-import { RealStripeProvider } from '../../stripe-real.js';
-import type { StripeCredentials } from '../../../credentials.service.js';
 import type {
   AppRef,
+  CheckoutCompletedEvent,
   DomainBillingEvent,
   LocalSubscriptionStatus,
   ProviderModule,
@@ -31,11 +29,13 @@ import type {
   VerifyResult,
 } from '../../module-types.js';
 
-// Stripe doesn't need a real API key just to verify webhook signatures —
-// `webhooks.constructEvent` is offline HMAC. Use a placeholder if
-// STRIPE_API_KEY isn't set, since Stripe's constructor requires one even
-// when we won't make outbound calls.
-const stripeForVerification = new Stripe(env.STRIPE_API_KEY ?? 'sk_for_verify_only', {
+// Verifying a webhook signature is offline HMAC — `webhooks.constructEvent`
+// makes no network call and never authenticates. The SDK constructor demands
+// *a* key regardless, so this client is built with a fixed placeholder. There
+// is deliberately no deployment-level Stripe key to configure: the money path
+// uses each Application's own BYO credentials, and a deployment-wide key would
+// be a cross-tenant trust boundary.
+const stripeForVerification = new Stripe('sk_signature_verification_only', {
   apiVersion: '2024-11-20.acacia' as Stripe.LatestApiVersion,
 });
 
@@ -142,6 +142,55 @@ async function verify(req: RawWebhookReq, creds: Record<string, string>, _ctx: V
 }
 
 /**
+ * The charge a ONE-TIME (`mode: 'payment'`) checkout session settled, in the
+ * shape `CheckoutCompletedEvent.payment` takes — or null when this completion
+ * carries no charge of its own.
+ *
+ * Why this rides on the completion rather than on its own event type: a
+ * `mode: 'payment'` session produces no invoice, so none of the invoice events
+ * we subscribe to ever fire for it and one-time revenue had no `Payment` row
+ * anywhere in Rekey. The obvious repair — subscribing `payment_intent.succeeded`
+ * — is worse than it looks: that event ALSO fires for every invoice payment on
+ * every subscription (so it would double-count against `invoice.paid` under a
+ * different provider id), and its payload has no checkout-session or
+ * subscription reference to match the local row by. The session has all three:
+ * the payment intent, the amount actually charged after the coupon, and a
+ * `payment_status` that says whether money really moved.
+ *
+ * `mode: 'subscription'` sessions return null on purpose — their money is
+ * `invoice.paid`'s to record, and recording it twice under two provider ids is
+ * exactly the double-count this avoids.
+ */
+function oneTimeCharge(
+  session: Stripe.Checkout.Session,
+): { payment: NonNullable<CheckoutCompletedEvent['payment']> } | null {
+  if (session.mode !== 'payment') return null;
+  // `unpaid` happens on delayed-notification methods; the money is not ours
+  // until `checkout.session.async_payment_succeeded`, which we do not consume.
+  // `no_payment_required` is a zero-value session, which checkout-discount.ts
+  // refuses to create in the first place.
+  if (session.payment_status !== 'paid') return null;
+  const paymentIntentId =
+    typeof session.payment_intent === 'string'
+      ? session.payment_intent
+      : session.payment_intent?.id ?? null;
+  // Fall back to the session id when the intent is not expanded: the point is
+  // a stable, unique provider reference for the idempotency index, and the
+  // session id is one. Losing the payment row entirely is the worse outcome.
+  const providerPaymentId = paymentIntentId ?? session.id;
+  return {
+    payment: {
+      providerPaymentId,
+      // `amount_total` is what the buyer was charged — net of the ad-hoc
+      // coupon, which is the number that has to appear in revenue.
+      amount: session.amount_total,
+      currency: session.currency ?? null,
+      description: null,
+    },
+  };
+}
+
+/**
  * Port of the stripe.handler.ts dispatch switch: the same 5 handled event
  * types, translated to normalized domain events. Everything else → null
  * (logged + acked upstream). Application scoping stays payload-metadata
@@ -171,6 +220,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
             typeof session.subscription === 'string'
               ? session.subscription
               : session.subscription?.id ?? null,
+          ...(oneTimeCharge(session) ?? {}),
           raw: payload,
         },
       ];
@@ -292,6 +342,11 @@ export const stripeModule: ProviderModule = {
     autoWebhookRegister: true,
     periodRotationEvents: true,
     onlineVerify: false,
+    // Both hosted flows take `discounts: [{ coupon }]` on the Checkout
+    // Session, so an ad-hoc Coupon minted per checkout covers each. On a
+    // subscription the coupon is created `duration: 'once'`, which is what a
+    // single recorded redemption actually buys — see stripe-real.ts.
+    discounts: { oneTime: true, recurring: true },
   },
   credentialSchema: [
     {
@@ -316,22 +371,15 @@ export const stripeModule: ProviderModule = {
       webhookRole: 'secret',
     },
   ],
-  inferMode(creds) {
-    // Legacy inference (credentials.service.ts pre-P3): sk_live_ → live,
-    // anything else → test.
-    return (creds.apiKey ?? '').startsWith('sk_live_') ? 'live' : 'test';
-  },
-  createProvider(creds) {
-    // Same selection the factory (providers/index.ts) applies for the
-    // creds-present case: tests and RELIPAY_BILLING_FORCE_STUB short-circuit
-    // the real SDK so nothing hits the network; production uses the real SDK
-    // unconditionally. (The no-creds → stub fallback stays in the factory —
-    // a module is only asked to build a provider from actual credentials.)
-    const typed = creds as unknown as StripeCredentials;
-    if (process.env.NODE_ENV === 'test' || process.env.RELIPAY_BILLING_FORCE_STUB === 'true') {
-      return new StripeStubProvider(typed);
-    }
-    return new RealStripeProvider(typed);
+  detectMode(creds) {
+    // Stripe secret keys are self-describing. Anything else — a restricted
+    // key, a typo, a future prefix — is `null`, NOT 'test': claiming "test"
+    // for a key we don't recognise is how a live credential ends up stored
+    // against a development application.
+    const apiKey = creds.apiKey ?? '';
+    if (apiKey.startsWith('sk_live_')) return 'live';
+    if (apiKey.startsWith('sk_test_')) return 'test';
+    return null;
   },
   webhook: {
     resolveApplication,

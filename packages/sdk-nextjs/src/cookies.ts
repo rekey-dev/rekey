@@ -4,8 +4,8 @@
  * (no Node-only deps, no `node:crypto`).
  */
 
-export const ACCESS_COOKIE = 'relipay_access';
-export const REFRESH_COOKIE = 'relipay_refresh';
+export const ACCESS_COOKIE = 'rekey_access';
+export const REFRESH_COOKIE = 'rekey_refresh';
 
 export interface CookieOptions {
   httpOnly?: boolean;

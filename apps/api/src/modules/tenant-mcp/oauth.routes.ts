@@ -194,6 +194,18 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
           buildRedirect(q.data.redirect_uri, { error: 'invalid_request' }, q.data.state),
         );
       }
+      // PANEL_URL has no default — a Rekey default would send a self-hoster's
+      // operators to OUR panel to approve THEIR consent. Without it there is
+      // nowhere to send them, so refuse explicitly: `new URL(path, undefined)`
+      // throws a bare "Invalid URL" that says nothing about the cause.
+      if (!env.PANEL_URL) {
+        throw new RekeyError({
+          statusCode: 503,
+          code: 'PANEL_URL_NOT_CONFIGURED',
+          message: 'Operator MCP consent needs PANEL_URL to be set on the API.',
+          fix: 'Set PANEL_URL to your panel origin (e.g. https://panel.example.com) and restart the API.',
+        });
+      }
       const consent = new URL('/mcp-consent', env.PANEL_URL);
       for (const [k, v] of Object.entries(q.data)) {
         if (v !== undefined) consent.searchParams.set(k, String(v));

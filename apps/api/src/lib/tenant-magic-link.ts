@@ -1,11 +1,14 @@
 /**
  * Tenant-operator magic-link (passwordless sign-in) tokens.
  *
- * Mirrors `lib/tenant-password-reset.ts`. Rekey doesn't send operator email —
- * the request flow returns the raw token so the deploying org hands it off to
- * whatever mailer they use (or, in dev, clicks through directly). Distinct from
- * the reset token because /verify mints a SESSION (it does not change a
- * password), and it's shorter-lived.
+ * Mirrors `lib/tenant-password-reset.ts`. This module only mints and consumes;
+ * delivery is `tenantAuthService.requestMagicLink`, which emails the link via the
+ * deployment-wide transport (`emailService.dispatchSystem`) and returns
+ * `token: null`. The raw token comes back to the caller only under the
+ * `REKEY_DEV_ECHO_AUTH_TOKENS` dev flag (refused at boot in production) or when
+ * no transport is configured at all. Distinct from the reset token because
+ * /verify mints a SESSION (it does not change a password), and it's
+ * shorter-lived.
  *
  * 15-minute lifetime, single-use, hash-only DB.
  */

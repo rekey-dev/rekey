@@ -283,9 +283,6 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         ...(body.provider !== undefined && { provider: body.provider as BillingProviderName }),
         ...(country !== undefined && { country }),
         ...(body.organizationId !== undefined && { beneficiaryOrgId: body.organizationId }),
-        // Test/live isolation: TEST checkouts only select sandbox credentials
-        // and stamp the Subscription with mode TEST.
-        ...(req.dataMode !== undefined && { dataMode: req.dataMode }),
       });
       return {
         success: true,
@@ -303,7 +300,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
   // Front-ends use this to render a "Pay with..." picker. No user session
   // needed; this is the same trust level as /plans, so it accepts the
   // PUBLISHABLE key too (a browser-only / hosted-portal checkout can fetch the
-  // picker list directly). Publishable callers see LIVE-mode providers only.
+  // picker list directly).
   app.get(
     '/providers',
     {
@@ -319,11 +316,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const country = countryFromRequest(req.headers);
-      const all = await billingCredentialsService.listEnabled(req.application!.id, country);
-      // Test/live isolation: a test key's checkout can only use test-mode
-      // (sandbox) credentials, so the picker only shows those. Live keys see
-      // every enabled provider — the historical behavior.
-      const visible = req.dataMode === 'TEST' ? all.filter((p) => p.mode === 'test') : all;
+      const visible = await billingCredentialsService.listEnabled(req.application!.id, country);
       return {
         success: true,
         data: {

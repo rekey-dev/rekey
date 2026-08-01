@@ -8,11 +8,14 @@
  * On success, attaches:
  *   - request.tenantUser  — the operator (PublicTenantUser)
  *   - request.tenantId    — the active workspace id (from the JWT's `tid`)
- *   - request.tenantRole  — the role within that workspace (from `rol`)
+ *   - request.tenantRole  — the LIVE role within that workspace
  *
- * `tenantRole` is taken straight from the token. Membership might have
- * been changed since the token was issued (role downgraded, user removed),
- * so role-gated services should re-check against the DB before mutating.
+ * `tenantRole` is re-read from `tenant_memberships` on every request; the
+ * token's `rol` claim is ignored. A role downgrade or removal therefore takes
+ * effect immediately (removal → 403 `TENANT_MEMBERSHIP_REVOKED`) instead of
+ * waiting out the 15-minute access token. That costs one indexed lookup per
+ * request, which is cheaper than every role-gated service having to remember to
+ * re-check for itself.
  */
 
 import type { FastifyRequest, FastifyReply } from 'fastify';

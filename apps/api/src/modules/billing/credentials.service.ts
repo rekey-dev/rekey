@@ -7,12 +7,13 @@
  * encrypted via lib/secrets.ts.
  *
  * **Reads decrypt; never expose ciphertext or plaintext on any HTTP
- * response.** The route layer returns only `{provider, configured, enabled,
- * countries, priority}` shapes — see `statusList` below.
+ * response.** The route layer returns only `CredentialsStatus` shapes —
+ * `{provider, configured, enabled, mode, countries, priority, webhookConfigured}`
+ * — see `list` below.
  *
  * Credential shapes are declared by each provider module's
  * `credentialSchema` (providers/modules/<name>/), and this service is
- * generic over them (P3): validation, mode inference, and the
+ * generic over them (P3): validation, mode detection, and the
  * webhook-configured check all derive from the registry. The stored JSON
  * keys are pinned by the registry-integrity test — zero data migration:
  *   stripe   → { apiKey: 'sk_live_…', webhookSecret: 'whsec_…' }
@@ -24,19 +25,30 @@
  * `{provider, data}` shape (because that's what the old codepath encrypted).
  * `loadDecrypted` accepts both — wrapped and unwrapped — and unwraps
  * transparently. New writes encrypt only the inner `data`.
+ *
+ * The unwrap is KEPT deliberately (reviewed for removal in 2.0.0): the blobs
+ * are ENCRYPTION_KEY-encrypted so no SQL migration can rewrite them, and
+ * without it a wrapped row yields `{provider, data}` where `{apiKey, …}` is
+ * expected — the provider SDK would then authenticate with `undefined` and
+ * the operator's money path would fail at the processor, not here.
  */
 
 import { prisma } from '../../lib/prisma.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
 import { RekeyError } from '../../lib/error.js';
-import { env } from '../../config/env.js';
-import { applicationsService } from '../applications/applications.service.js';
 import { getModule, credentialRulesSchema } from './providers/registry.js';
 import type { ProviderModule } from './providers/module-types.js';
 
 export type BillingProviderName = 'stripe' | 'paypal' | 'razorpay';
 
-/** @deprecated P3 — shapes are declared by the provider modules' `credentialSchema`; kept for typed callers. */
+/**
+ * Typed handles on the three built-in credential shapes. The *authoritative*
+ * declaration is each module's `credentialSchema` (that is what validates and
+ * what the registry-integrity test pins); these exist so the `Real*Provider`
+ * constructors take something better than `Record<string, string>`. Not
+ * deprecated — the deprecated `upsertStripe`/`upsertPaypal`/`upsertRazorpay`
+ * wrappers that once paired with them were removed in 2.0.0.
+ */
 export type StripeCredentials = {
   apiKey: string;
   webhookSecret: string;
@@ -62,6 +74,33 @@ export type CredentialsByProvider = {
 
 export type BillingMode = 'test' | 'live';
 
+/**
+ * Credential mode (`test` | `live`) is descriptive, not a permission.
+ *
+ * It is NOT constrained by the Application's environment. An operator may
+ * store live credentials against a DEVELOPMENT Application if that is what
+ * they want to do — deliberately testing against a live processor is a real
+ * workflow, and it is their processor account and their customers.
+ *
+ * We tried the opposite (a PRODUCTION-only-live / non-production-only-test
+ * rule) and removed it, because it could only ever be enforced for two of the
+ * three providers: PayPal sandbox and live client ids are byte-identical, so
+ * nothing here can tell them apart. A safety property that silently does not
+ * apply to one provider is worse than no property, because operators
+ * generalise from the two where it does.
+ *
+ * What we DO enforce is that the stored mode is not a lie — see `resolveMode`.
+ * Where the key states its own mode (Stripe `sk_live_`/`sk_test_`, Razorpay
+ * `rzp_live_`/`rzp_test_`) that is what gets stored, because the provider SDK
+ * reads the key and ignores this column: a live key labelled `test` would make
+ * the panel, the revenue stats and dunning all report something false about
+ * the operator's own money. Where the key cannot say (PayPal), the operator's
+ * declaration is taken as given.
+ *
+ * Abuse of non-production Applications is a quota/rate-limit problem, handled
+ * on that axis rather than by refusing credentials.
+ */
+
 export interface CredentialsStatus {
   provider: BillingProviderName;
   configured: boolean;
@@ -80,7 +119,7 @@ export interface CredentialsStatus {
  * hand-written version made). A provider without a registered module or a
  * `webhookRole` field can never verify inbound webhooks → false.
  */
-function hasWebhookConfigured(provider: BillingProviderName, data: unknown): boolean {
+export function hasWebhookConfigured(provider: BillingProviderName, data: unknown): boolean {
   const field = getModule(provider)?.credentialSchema.find((f) => f.webhookRole);
   if (!field) return false;
   const v = ((data ?? {}) as Record<string, unknown>)[field.key];
@@ -88,14 +127,51 @@ function hasWebhookConfigured(provider: BillingProviderName, data: unknown): boo
 }
 
 /**
- * Best-effort mode inference, delegated to the module's optional
- * `inferMode` hook (Stripe: `sk_live_`, Razorpay: `rzp_live_`); modules
- * without one (PayPal — no shape distinction) default to 'test'.
- *
- * Operators can always override with `options.mode` at upsert time.
+ * Read the mode out of the key material, when the provider's credentials say
+ * so. `null` means "this provider's credentials carry no marker, or the shape
+ * is unrecognised" — see `ProviderModule.detectMode`.
  */
-function inferMode(provider: BillingProviderName, data: unknown): 'test' | 'live' {
-  return getModule(provider)?.inferMode?.((data ?? {}) as Record<string, string>) ?? 'test';
+function detectMode(provider: BillingProviderName, data: unknown): BillingMode | null {
+  return getModule(provider)?.detectMode?.((data ?? {}) as Record<string, string>) ?? null;
+}
+
+/**
+ * Decide the mode a credential row is stored under.
+ *
+ * **The key wins over the label.** If the credential material states its own
+ * mode, that is what we store, and a contradicting `options.mode` is a hard
+ * refusal rather than a silent override. This is the whole load-bearing point:
+ * the provider SDK authenticates with the *key*, never with our label, so a
+ * `mode: 'test'` sticker on an `sk_live_…` key would leave the panel's badge,
+ * the revenue stats and dunning all reporting a real Stripe account as
+ * sandbox. Refusing is also strictly more useful than silently correcting — an
+ * operator who typed the wrong one wants to know.
+ *
+ * Note the scope of that: `mode` records what the key IS, it does not decide
+ * what the key is ALLOWED to be. The Application's environment does not
+ * constrain it (see the header comment above).
+ *
+ * An explicit label only decides when detection is structurally impossible
+ * (PayPal: a sandbox client id is byte-indistinguishable from a live one).
+ * With neither, we store `test` — least privilege, and the reading that
+ * understates rather than overstates what a figure means.
+ */
+function resolveMode(
+  provider: BillingProviderName,
+  data: unknown,
+  requested: BillingMode | undefined,
+): BillingMode {
+  const detected = detectMode(provider, data);
+  if (detected === null) return requested ?? 'test';
+  if (requested !== undefined && requested !== detected) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'BILLING_CREDENTIALS_MODE_CONTRADICTED',
+      message: `These ${provider} credentials are ${detected} credentials, but they were submitted as \`mode: ${requested}\`.`,
+      fix: `The key itself decides — ${provider} keys state their mode, and the provider SDK reads the key, not the label. Submit the ${requested} credentials, or drop \`mode\` and let it be read from the key.`,
+    });
+  }
+  return detected;
 }
 
 /** Resolve a registered module or 400 — providers only exist via the registry. */
@@ -184,6 +260,19 @@ export const billingCredentialsService = {
         webhookConfigured,
       };
     });
+  },
+
+  /**
+   * Is this provider configured at all for the Application? A bare existence
+   * check — no decryption, no enabled/mode filtering — for callers that only
+   * need to know whether reaching for a provider instance would throw.
+   */
+  async isConfigured(applicationId: string, provider: BillingProviderName): Promise<boolean> {
+    const row = await prisma.billingCredentials.findUnique({
+      where: { applicationId_provider: { applicationId, provider } },
+      select: { applicationId: true },
+    });
+    return row !== null;
   },
 
   /**
@@ -294,33 +383,6 @@ export const billingCredentialsService = {
     await this.upsertRaw(applicationId, provider, data, options);
   },
 
-  /** @deprecated P3 — use `upsertCredentials(applicationId, 'stripe', data)`. */
-  async upsertStripe(
-    applicationId: string,
-    data: StripeCredentials,
-    options?: { countries?: string[]; priority?: number; enabled?: boolean; mode?: BillingMode },
-  ): Promise<void> {
-    await this.upsertCredentials(applicationId, 'stripe', { ...data }, options);
-  },
-
-  /** @deprecated P3 — use `upsertCredentials(applicationId, 'paypal', data)`. */
-  async upsertPaypal(
-    applicationId: string,
-    data: PaypalCredentials,
-    options?: { countries?: string[]; priority?: number; enabled?: boolean; mode?: BillingMode },
-  ): Promise<void> {
-    await this.upsertCredentials(applicationId, 'paypal', { ...data }, options);
-  },
-
-  /** @deprecated P3 — use `upsertCredentials(applicationId, 'razorpay', data)`. */
-  async upsertRazorpay(
-    applicationId: string,
-    data: RazorpayCredentials,
-    options?: { countries?: string[]; priority?: number; enabled?: boolean; mode?: BillingMode },
-  ): Promise<void> {
-    await this.upsertCredentials(applicationId, 'razorpay', { ...data }, options);
-  },
-
   async upsertRaw(
     applicationId: string,
     provider: BillingProviderName,
@@ -329,7 +391,7 @@ export const billingCredentialsService = {
   ): Promise<void> {
     const ciphertext = encryptJson(data);
     const countries = (options?.countries ?? []).map((c) => c.toUpperCase().trim()).filter(Boolean);
-    const mode = options?.mode ?? inferMode(provider, data);
+    const mode = resolveMode(provider, data, options?.mode);
     await prisma.billingCredentials.upsert({
       where: { applicationId_provider: { applicationId, provider } },
       create: {
@@ -351,76 +413,6 @@ export const billingCredentialsService = {
     });
   },
 
-  /**
-   * Auto-configure the provider's webhook via its API: create the endpoint at
-   * our public per-app URL, then persist the returned signing secret (Stripe)
-   * / webhook id (PayPal) back into the stored credentials — removing the
-   * manual dashboard paste. Idempotent at the provider (reuses the existing
-   * endpoint for the same URL).
-   */
-  async registerWebhook(
-    applicationId: string,
-    provider: BillingProviderName,
-    appSlug: string,
-  ): Promise<{ provider: BillingProviderName; webhookConfigured: boolean; url: string }> {
-    const base = (env.PUBLIC_WEBHOOK_BASE_URL ?? env.API_URL).replace(/\/$/, '');
-    // In production the provider must be able to reach us — a localhost base
-    // would register a dead endpoint. In dev/test we allow it (stub provider,
-    // or operator-supplied ngrok tunnel).
-    if (env.NODE_ENV === 'production' && /\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:|\/|$)/.test(base)) {
-      throw new RekeyError({
-        statusCode: 400,
-        code: 'BILLING_WEBHOOK_BASE_NOT_PUBLIC',
-        message: `Webhook auto-config needs a public URL, but the base is "${base}".`,
-        fix: 'Set PUBLIC_WEBHOOK_BASE_URL to your internet-reachable API origin, then retry.',
-      });
-    }
-    const current = await this.loadDecrypted(applicationId, provider);
-    if (!current) {
-      throw new RekeyError({
-        statusCode: 400,
-        code: 'BILLING_CREDENTIALS_NOT_CONFIGURED',
-        message: `Configure ${provider} credentials before auto-registering its webhook.`,
-        fix: `Save the ${provider} API keys first, then auto-configure the webhook.`,
-      });
-    }
-    const url = `${base}/api/v1/billing/webhook/${provider}/${appSlug}`;
-    const application = await applicationsService.get(applicationId);
-    // Dynamic import breaks the providers/index ↔ credentials.service cycle.
-    const { getProviderForApplication } = await import('./providers/index.js');
-    const inst = await getProviderForApplication(application, provider);
-    if (!inst.registerWebhook) {
-      throw new RekeyError({
-        statusCode: 400,
-        code: 'BILLING_WEBHOOK_AUTOCONFIG_UNSUPPORTED',
-        message: `Automatic webhook configuration isn't supported for "${provider}".`,
-        fix: 'Configure the webhook manually in the provider dashboard, then paste the secret/id.',
-      });
-    }
-    // The provider API call can fail for reasons outside our control — most
-    // commonly invalid credentials (e.g. PayPal 401 invalid_client), but also
-    // rate limits or transient network errors. Surface a clean, actionable
-    // error instead of bubbling a raw 500.
-    let result: { secret?: string; webhookId?: string };
-    try {
-      result = await inst.registerWebhook(url);
-    } catch (e) {
-      throw new RekeyError({
-        statusCode: 502,
-        code: 'BILLING_WEBHOOK_REGISTRATION_FAILED',
-        message: `The ${provider} API rejected webhook registration: ${(e as Error).message}`,
-        fix: 'Most often the provider credentials are wrong or for the other mode (e.g. live keys with mode=test). Re-check the API key / client secret + mode, then retry.',
-      });
-    }
-    const merged = {
-      ...current,
-      ...(result.secret !== undefined && { webhookSecret: result.secret }),
-      ...(result.webhookId !== undefined && { webhookId: result.webhookId }),
-    };
-    await this.upsertRaw(applicationId, provider, merged);
-    return { provider, webhookConfigured: hasWebhookConfigured(provider, merged), url };
-  },
-
   async setEnabled(
     applicationId: string,
     provider: BillingProviderName,
@@ -432,14 +424,29 @@ export const billingCredentialsService = {
     });
   },
 
+  /**
+   * Relabel a stored credential's mode. Same rule as the upsert: if the stored
+   * key material states its mode, this cannot contradict it — otherwise
+   * `setMode` would be a second door to the exact hole `resolveMode` closes.
+   */
   async setMode(
     applicationId: string,
     provider: BillingProviderName,
     mode: BillingMode,
   ): Promise<void> {
+    const current = await this.loadDecrypted(applicationId, provider);
+    if (current === null) {
+      throw new RekeyError({
+        statusCode: 404,
+        code: 'BILLING_CREDENTIALS_NOT_CONFIGURED',
+        message: `No ${provider} credentials are stored for this Application.`,
+        fix: `Save the ${provider} credentials first; the mode is read from them.`,
+      });
+    }
+    const resolved = resolveMode(provider, current, mode);
     await prisma.billingCredentials.update({
       where: { applicationId_provider: { applicationId, provider } },
-      data: { mode },
+      data: { mode: resolved },
     });
   },
 

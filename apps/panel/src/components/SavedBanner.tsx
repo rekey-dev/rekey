@@ -7,15 +7,15 @@
  * library, no client state store), but the banner itself is now a small
  * client island that:
  *
- *   1. strips the query param via `router.replace` right after mount, so
- *      refresh / back / copy-paste of the URL doesn't re-show stale success;
+ *   1. strips the query param right after mount, so refresh / back /
+ *      copy-paste of the URL doesn't re-show stale success;
  *   2. offers an explicit dismiss (×) button;
  *   3. auto-fades after ~5s (visual fade then unmount). Hovering pauses
  *      nothing — 5s is long enough to read a one-liner.
  */
 
 import * as React from 'react';
-import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { usePathname, useSearchParams } from 'next/navigation';
 
 export function SavedBanner({
   message,
@@ -25,14 +25,20 @@ export function SavedBanner({
   message: string;
   params?: string[];
 }): React.JSX.Element | null {
-  const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [visible, setVisible] = React.useState(true);
   const [fading, setFading] = React.useState(false);
 
   // Strip the success params from the URL without adding a history entry.
+  // Deliberately a native history edit rather than `router.replace`: tidying
+  // the address bar is all this ever wanted, and Next 15 reflects a native
+  // replaceState back into useSearchParams. `router.replace` would instead
+  // start a second navigation on top of the one the server action's redirect
+  // is already running — and the RedirectBoundary renders nothing while a
+  // redirect is in flight, so racing it is what made pages go blank.
   React.useEffect(() => {
+    if (typeof window === 'undefined') return;
     const next = new URLSearchParams(searchParams.toString());
     let changed = false;
     for (const p of params) {
@@ -43,7 +49,7 @@ export function SavedBanner({
     }
     if (changed) {
       const qs = next.toString();
-      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+      window.history.replaceState(null, '', qs ? `${pathname}?${qs}` : pathname);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

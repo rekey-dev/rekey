@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import {
   api,
   PanelApiError,
@@ -88,13 +87,11 @@ async function createPlan(applicationId: string, formData: FormData): Promise<vo
       });
     } catch (err) {
       if (err instanceof PanelApiError) {
-        revalidatePath(`/applications/${applicationId}/plans`);
         redirect(`/applications/${applicationId}/plans?created=${slug}&entError=${encodeURIComponent(err.code)}`);
       }
       throw err;
     }
   }
-  revalidatePath(`/applications/${applicationId}/plans`);
   redirect(`/applications/${applicationId}/plans?created=${slug}&e=plan_created`);
 }
 
@@ -105,7 +102,6 @@ async function setPlanActive(applicationId: string, slug: string, active: boolea
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/plans/${encodeURIComponent(slug)}`,
     body: { active },
   });
-  revalidatePath(`/applications/${applicationId}/plans`);
   redirect(`/applications/${applicationId}/plans`);
 }
 
@@ -145,7 +141,6 @@ async function addEntitlement(applicationId: string, slug: string, formData: For
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/plans`);
   redirect(`/applications/${applicationId}/plans?entSaved=${encodeURIComponent(slug)}`);
 }
 
@@ -155,7 +150,6 @@ async function removeEntitlement(applicationId: string, slug: string, entId: str
     method: 'DELETE',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/plans/${encodeURIComponent(slug)}/entitlements/${encodeURIComponent(entId)}`,
   });
-  revalidatePath(`/applications/${applicationId}/plans`);
   redirect(`/applications/${applicationId}/plans`);
 }
 

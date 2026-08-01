@@ -5,11 +5,35 @@
  * isolated. We use `TRUNCATE ... RESTART IDENTITY CASCADE` to also reset
  * sequences and follow FK chains — slightly heavier than per-table DELETE
  * but a lot less code than carefully ordering deletes.
+ *
+ * It also installs the FAKE billing providers. The shipped factory only ever
+ * returns real, network-talking providers and throws when an Application has
+ * no credentials — deliberately, see `providers/index.ts`. Tests must not
+ * reach api.stripe.com, so the seam is here in test-land rather than a
+ * `NODE_ENV === 'test'` branch in the product. `pickProvider` and
+ * `countryFromRequest` keep their real implementations: routing logic is
+ * under test, the network call is not.
  */
 
-import { afterAll, beforeEach } from 'vitest';
+import { afterAll, beforeEach, vi } from 'vitest';
 import { prisma } from '../src/lib/prisma.js';
 import { getRedis } from '../src/lib/redis.js';
+import { fakeProviderFor } from './fakes/billing-providers.js';
+
+vi.mock('../src/modules/billing/providers/index.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../src/modules/billing/providers/index.js')>();
+  return {
+    ...actual,
+    // A `vi.fn`, not a bare arrow: tests need to assert on the call log —
+    // "plan creation did not ask for a provider" is only checkable that way,
+    // and a mock that silently answers is exactly how the Stripe-required
+    // regression stayed invisible.
+    getProviderForApplication: vi.fn(async (_application: unknown, provider: string) =>
+      fakeProviderFor(provider),
+    ),
+  };
+});
 
 const DOMAIN_TABLES = [
   'idempotency_keys',

@@ -21,18 +21,18 @@ Via the API:
 
 ```bash
 # Operator session (panel credentials):
-curl -X DELETE "$RELIPAY_URL/api/v1/tenant/applications/$APP_ID/api-keys/$KEY_ID" \
+curl -X DELETE "$REKEY_URL/api/v1/tenant/applications/$APP_ID/api-keys/$KEY_ID" \
   -H "Authorization: Bearer $OPERATOR_ACCESS_TOKEN"
 
 # Or with the bootstrap admin key:
-curl -X DELETE "$RELIPAY_URL/api/v1/admin/applications/$APP_ID/api-keys/$KEY_ID" \
+curl -X DELETE "$REKEY_URL/api/v1/admin/applications/$APP_ID/api-keys/$KEY_ID" \
   -H "Authorization: Bearer $SUPER_ADMIN_KEY"
 ```
 
 Don't know which key id leaked? List them and match on `keyPrefix` (the first characters of the raw key, e.g. `rp_live_aBcD`):
 
 ```bash
-curl "$RELIPAY_URL/api/v1/tenant/applications/$APP_ID/api-keys" \
+curl "$REKEY_URL/api/v1/tenant/applications/$APP_ID/api-keys" \
   -H "Authorization: Bearer $OPERATOR_ACCESS_TOKEN"
 ```
 
@@ -41,10 +41,10 @@ Yes — this takes your integration down until step 3. That is the correct trade
 ### 2. Mint the replacement
 
 ```bash
-curl -X POST "$RELIPAY_URL/api/v1/tenant/applications/$APP_ID/api-keys" \
+curl -X POST "$REKEY_URL/api/v1/tenant/applications/$APP_ID/api-keys" \
   -H "Authorization: Bearer $OPERATOR_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name": "Production server (rotated 2026-06-10)", "mode": "live"}'
+  -d '{"name": "Production server (rotated 2026-06-10)"}'
 ```
 
 Copy `data.rawKey` from the response **now** — it is shown exactly once. Put a date in the `name` so the key list tells you when each credential was last rotated.
@@ -53,16 +53,16 @@ If your agent tooling mints keys, the [MCP server](mcp.md)'s `mint_api_key` tool
 
 ### 3. Deploy the new key
 
-Update `RELIPAY_SECRET` in your secret store / deployment env and roll your servers. Because old and new keys can be active simultaneously, the zero-downtime order is: mint new → deploy → revoke old. In a confirmed-leak emergency, prefer revoke-first (step 1) and eat the brief outage.
+Update `REKEY_SECRET` in your secret store / deployment env and roll your servers. Because old and new keys can be active simultaneously, the zero-downtime order is: mint new → deploy → revoke old. In a confirmed-leak emergency, prefer revoke-first (step 1) and eat the brief outage.
 
 ### 4. Verify the old key is dead and the new key works
 
 ```bash
 # New key — expect 200 with your Application's slug:
-curl "$RELIPAY_URL/api/v1/me/" -H "Authorization: Bearer $NEW_KEY"
+curl "$REKEY_URL/api/v1/me/" -H "Authorization: Bearer $NEW_KEY"
 
 # Old key — expect 401 API_KEY_INVALID:
-curl "$RELIPAY_URL/api/v1/me/" -H "Authorization: Bearer $OLD_KEY"
+curl "$REKEY_URL/api/v1/me/" -H "Authorization: Bearer $OLD_KEY"
 ```
 
 Also check `lastUsedAt` on the revoked key in the panel over the next hours — continued attempts after revocation tell you someone was actively using it.
@@ -90,18 +90,18 @@ Keys never auto-rotate. Rotation is always an explicit operator action.
 Each webhook endpoint you register (the ones Rekey signs and sends to **your** app — see [billing.md](billing.md)) has its own signing secret, also shown once at creation. To rotate:
 
 ```bash
-curl -X POST "$RELIPAY_URL/api/v1/tenant/applications/$APP_ID/webhooks/$ENDPOINT_ID/rotate-secret" \
+curl -X POST "$REKEY_URL/api/v1/tenant/applications/$APP_ID/webhooks/$ENDPOINT_ID/rotate-secret" \
   -H "Authorization: Bearer $OPERATOR_ACCESS_TOKEN"
 ```
 
-The new raw secret is returned once. Note this is a **hard cutover** — deliveries are signed with the new secret immediately, so update `RELIPAY_WEBHOOK_SECRET` on your receiver right away; deliveries verified against the old secret in between will fail your `verifyWebhookSignature` check and be retried by Rekey's delivery worker.
+The new raw secret is returned once. Note this is a **hard cutover** — deliveries are signed with the new secret immediately, so update `REKEY_WEBHOOK_SECRET` on your receiver right away; deliveries verified against the old secret in between will fail your `verifyWebhookSignature` check and be retried by Rekey's delivery worker.
 
 ### Provider credentials (Stripe / PayPal / Razorpay)
 
 BYO provider credentials and the provider webhook secret are write-only (AES-256-GCM encrypted at rest; no GET returns plaintext). Rotating them is a re-`PUT`:
 
 ```bash
-curl -X PUT "$RELIPAY_URL/api/v1/tenant/applications/$APP_ID/billing-credentials/stripe" \
+curl -X PUT "$REKEY_URL/api/v1/tenant/applications/$APP_ID/billing-credentials/stripe" \
   -H "Authorization: Bearer $OPERATOR_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"data": {"apiKey": "sk_live_NEW…", "webhookSecret": "whsec_NEW…"}}'
@@ -133,7 +133,7 @@ The slug is preserved (`rp_pub_<slug>_<random>`) — only the random tail change
 ### Rotate via the API
 
 ```bash
-curl -X POST "$RELIPAY_URL/api/v1/tenant/applications/$APP_ID/rotate-public-key" \
+curl -X POST "$REKEY_URL/api/v1/tenant/applications/$APP_ID/rotate-public-key" \
   -H "Authorization: Bearer $OPERATOR_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"graceDays": 30}'   # 1–90, default 30

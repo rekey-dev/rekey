@@ -21,8 +21,10 @@
  * credentials), so a Redis outage degrades the product rather than taking it
  * down.
  *
- * The one exception is `clearFailures`. Failing to clear a counter leaves a
- * scope MORE restricted, never less, so an error there is safe to swallow.
+ * Two functions are exceptions, both because neither can widen access.
+ * `clearFailures` failing leaves a scope MORE restricted, never less.
+ * `getScopeLockState` reads lock state for operator surfaces to DISPLAY and
+ * gates nothing — see its own docblock.
  *
  * In tests (no Redis) an in-memory store backs the same logic so the regression
  * tests are deterministic without an external dependency.
@@ -60,6 +62,12 @@ interface CounterStore {
    * which released every already-locked account during an outage.
    */
   lockTtl(key: string): Promise<number>;
+  /**
+   * Current value of a counter key, or 0 when it is absent/expired. THROWS on
+   * a store error; the one read-only caller (`getScopeLockState`) decides what
+   * to do with that, since it drives a display rather than a credential gate.
+   */
+  count(key: string): Promise<number>;
   /** Best-effort. Failing to clear leaves a scope more restricted, not less. */
   clear(keys: string[]): Promise<void>;
 }
@@ -81,13 +89,19 @@ class RedisStore implements CounterStore {
     const t = await this.r.ttl(key);
     return t > 0 ? t : 0;
   }
+  async count(key: string): Promise<number> {
+    const raw = await this.r.get(key);
+    if (raw === null) return 0;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
   async clear(keys: string[]): Promise<void> {
     try {
       await this.r.del(...keys);
     } catch (err) {
       // Deliberately swallowed: see the fail-closed note on this module. A
       // stale counter can only over-restrict, and the TTL removes it anyway.
-      noteStoreFailure('clear', err);
+      noteStoreFailure('clear', err, 'a counter or lock will linger until its TTL');
     }
   }
 }
@@ -103,7 +117,15 @@ class RedisStore implements CounterStore {
 const lastLoggedAt = new Map<string, number>();
 const STORE_FAILURE_LOG_INTERVAL_MS = 60_000;
 
-function noteStoreFailure(op: string, err: unknown): void {
+function noteStoreFailure(
+  op: string,
+  err: unknown,
+  // The consequence is passed in rather than assumed: most operations here fail
+  // closed, but `clear`/`clearFailures` and the display-only `getScopeLockState`
+  // fail open, and a log line that told an operator "auth is refusing attempts"
+  // while auth was in fact serving would send them looking in the wrong place.
+  consequence = 'auth is refusing attempts until it recovers',
+): void {
   const now = Date.now();
   const previous = lastLoggedAt.get(op) ?? 0;
   if (now - previous < STORE_FAILURE_LOG_INTERVAL_MS) return;
@@ -111,7 +133,7 @@ function noteStoreFailure(op: string, err: unknown): void {
   // console rather than the Fastify logger: this module has no request context,
   // and the message must not carry the connection string from the raw error.
   console.error(
-    `[brute-force] store operation "${op}" failed; auth is refusing attempts until it recovers`,
+    `[brute-force] store operation "${op}" failed; ${consequence}`,
     err instanceof Error ? err.message : String(err),
   );
 }
@@ -150,6 +172,11 @@ class MemoryStore implements CounterStore {
     if (!e || e.expiresAt <= now) return 0;
     return Math.ceil((e.expiresAt - now) / 1000);
   }
+  async count(key: string): Promise<number> {
+    const e = this.m.get(key);
+    if (!e || e.expiresAt <= Date.now()) return 0;
+    return e.value;
+  }
   async clear(keys: string[]): Promise<void> {
     for (const k of keys) this.m.delete(k);
   }
@@ -178,15 +205,80 @@ function keysFor(scope: string): { fail: string; lock: string } {
 }
 
 /**
- * Scope prefix for end-user password sign-in lockouts. MUST mirror the scope
- * built by `loginLockScope()` in modules/auth/auth.service.ts, which is
- * `eu:login:${applicationId}:${email}`. Kept here so the super-admin dashboard
- * can ENUMERATE active end-user locks — the individual `bf:lock:*` TTL keys
- * aren't otherwise discoverable, which is why the old `EndUser.lockedUntil`
- * KPI silently read zero after lockout moved to Redis. If the auth-service
- * scope format changes, change this too.
+ * Scope prefix for end-user password sign-in lockouts.
+ *
+ * Kept here so the super-admin dashboard can ENUMERATE active end-user locks —
+ * the individual `bf:lock:*` TTL keys aren't otherwise discoverable, which is
+ * why the old `EndUser.lockedUntil` KPI silently read zero after lockout moved
+ * to Redis.
  */
 export const EU_LOGIN_LOCK_SCOPE_PREFIX = 'eu:login:';
+
+/**
+ * THE scope for an end-user's password sign-in lockout.
+ *
+ * This used to be a private `loginLockScope()` in auth.service.ts, duplicated
+ * as a prefix constant here. Every reader of a lock has to derive the key
+ * byte-for-byte the way the writer did or the lookup silently answers "not
+ * locked" — the exact failure mode that made the operator panel report the
+ * opposite of the truth. One exported builder, one lowercasing rule, so a
+ * divergence is impossible rather than merely documented.
+ *
+ * The email is lowercased because sign-in looks the row up
+ * case-insensitively; scoping on the raw input would give an attacker a fresh
+ * counter per capitalisation of the same address.
+ */
+export function euLoginLockScope(applicationId: string, email: string): string {
+  return `${EU_LOGIN_LOCK_SCOPE_PREFIX}${applicationId}:${email.toLowerCase()}`;
+}
+
+/** Live lockout state of one scope, for read-only operator surfaces. */
+export interface ScopeLockState {
+  /** Remaining lock duration in seconds. `null` when the scope is NOT locked. */
+  lockedForSec: number | null;
+  /**
+   * Failures recorded in the current window.
+   *
+   * `registerFailure` deletes this counter at the instant it sets the lock, so
+   * a locked scope reads 0 here. `lockedForSec` is the lockout signal; this is
+   * only the "how close is this account to locking" number.
+   */
+  failuresInWindow: number;
+}
+
+/**
+ * Read one scope's lockout state. `null` means "could not tell".
+ *
+ * The companion to `scanActiveLoginLocks` (which enumerates) and
+ * `assertNotLocked` (which enforces): this answers "is THIS scope locked, and
+ * for how long" without throwing a 429 at the caller, for operator surfaces
+ * that display lock state rather than gate on it.
+ *
+ * **Fail-OPEN, deliberately, and the only read in this module that is.** The
+ * fail-closed rule at the top of the file protects the credential path: a lock
+ * we cannot read must never be treated as absent *when deciding whether to let
+ * someone in*. This function decides nothing — it renders a badge in the
+ * operator panel. Propagating the error would 503 an entire end-user detail
+ * page because Redis blipped, and it cannot open a hole: `assertNotLocked`
+ * still refuses every sign-in attempt during the same outage, so the account
+ * this returns `null` for is in practice *more* locked, not less. Callers must
+ * still distinguish `null` from "not locked" rather than flattening it.
+ */
+export async function getScopeLockState(scope: string): Promise<ScopeLockState | null> {
+  const { fail, lock } = keysFor(scope);
+  try {
+    const s = store();
+    const [ttl, failures] = await Promise.all([s.lockTtl(lock), s.count(fail)]);
+    return { lockedForSec: ttl > 0 ? ttl : null, failuresInWindow: failures };
+  } catch (err) {
+    noteStoreFailure(
+      'getScopeLockState',
+      err,
+      'operator surfaces cannot show lock state (sign-in itself still fails closed)',
+    );
+    return null;
+  }
+}
 
 export interface ActiveLoginLock {
   applicationId: string;
@@ -312,6 +404,6 @@ export async function clearFailures(scope: string): Promise<void> {
   try {
     await store().clear([fail, lock]);
   } catch (err) {
-    noteStoreFailure('clearFailures', err);
+    noteStoreFailure('clearFailures', err, 'a counter or lock will linger until its TTL');
   }
 }

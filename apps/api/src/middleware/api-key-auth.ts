@@ -15,7 +15,7 @@
  */
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import type { ApiKey, Application, DataMode } from '@prisma/client';
+import type { ApiKey, Application } from '@prisma/client';
 import { apiKeysService } from '../modules/api-keys/api-keys.service.js';
 import { prisma } from '../lib/prisma.js';
 import { RekeyError } from '../lib/error.js';
@@ -38,14 +38,6 @@ declare module 'fastify' {
      *     gate: a pub key can never reach a secret-only route).
      */
     authKind?: 'secret' | 'publishable';
-    /**
-     * Test/live data mode of this request, derived from the presented secret
-     * key's prefix (`rp_test_*` → TEST, `rp_live_*` → LIVE). End-user-scoped
-     * surfaces read/write only rows of this mode (roadmap §7); operator
-     * surfaces (tenant sessions — no API key, so this stays unset) see both.
-     * Publishable requests are always LIVE (no test public key exists).
-     */
-    dataMode?: DataMode;
   }
 }
 
@@ -132,8 +124,6 @@ export async function requireApiKey(
   request.application = application;
   request.apiKey = verified.apiKey;
   request.authKind = 'secret';
-  // The key's mode is encoded in its prefix at mint time and immutable.
-  request.dataMode = verified.apiKey.keyPrefix.startsWith('rp_test_') ? 'TEST' : 'LIVE';
 
   // Fire-and-forget lastUsedAt update. Never block the request on this — at
   // worst we record one less timestamp under load.
@@ -148,7 +138,7 @@ export async function requireApiKey(
  * Auth for routes a **browser client** must be able to reach. Accepts EITHER:
  *
  *   - a server-side secret key (`rp_live_*`/`rp_test_*`) — delegates to
- *     `requireApiKey`, identical behaviour (scopes, IP allowlist, dataMode); or
+ *     `requireApiKey`, identical behaviour (scopes, IP allowlist); or
  *   - a browser **publishable** key (`rp_pub_*`) — a real credential here.
  *
  * The publishable key is **identity, not authorization**: it names the
@@ -161,8 +151,9 @@ export async function requireApiKey(
  *      license key.
  *   2. **End-user self-service** (MFA enrollment, passkey/session management,
  *      change-password, OAuth linking, org/team management, coupon validate) —
- *      gated by `requireUserSession`, which verifies the end-user JWT against
- *      *this* Application and enforces test/live isolation. That session is
+ *      gated by `requireUserSession`, which verifies the end-user JWT's
+ *      signature and `typ`, and that its `applicationId` claim matches *this*
+ *      Application — nothing beyond that. That session is
  *      strictly stronger than the secret key here: it names the single user the
  *      route may act on. Demanding a secret key on top adds no authorization,
  *      it only forbids the credential a browser is allowed to hold — which
@@ -261,8 +252,6 @@ export async function requirePublishableOrSecretKey(
 
   request.application = application;
   request.authKind = 'publishable';
-  // Publishable keys have no test/live split — always LIVE data.
-  request.dataMode = 'LIVE';
 }
 
 /**
@@ -308,9 +297,11 @@ export function hasScope(
  * hook that runs **after** `requireApiKey` and refuses with 403 if the
  * presented key lacks the required scope (or an implying scope).
  *
- * Keys minted with the legacy default `["*"]` accept everything; new
- * narrower keys (`["auth:read"]`) get rejected from write endpoints with
- * a clear `API_KEY_SCOPE_INSUFFICIENT` code.
+ * `["*"]` accepts everything. This is not a legacy artefact — it is still
+ * `DEFAULT_SCOPES` in api-keys.service.ts, so every key minted without an
+ * explicit `scopes` array gets it. Narrower keys (`["auth:read"]`) get
+ * rejected from write endpoints with a clear `API_KEY_SCOPE_INSUFFICIENT`
+ * code.
  *
  * @example
  * ```ts

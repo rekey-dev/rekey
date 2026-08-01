@@ -15,7 +15,6 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { api, PanelApiError } from '@/lib/api';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
@@ -37,7 +36,18 @@ interface EndUserDetailDto {
     emailVerified: boolean;
     role: string;
     metadata: unknown;
+    /**
+     * Both from the API's Redis brute-force limiter, not a column on the row.
+     * They were declared here long before the endpoint actually returned them,
+     * which is why the lockout badge below used to read "none" for every
+     * account — including ones the API was refusing with 429.
+     *
+     * `failedSignInAttempts` is the live counter while under the threshold, and
+     * the threshold itself once locked (the counter is consumed setting the
+     * lock, so no exact count survives).
+     */
     failedSignInAttempts: number;
+    /** Lock expiry, or null when not locked. */
     lockedUntil: string | null;
     /** GDPR tombstone — set once the user has been erased. */
     erasedAt: string | null;
@@ -131,7 +141,7 @@ function statusTone(s: string): BadgeTone {
   return STATUS_TONE[s] ?? 'neutral';
 }
 
-const IMPERSONATE_COOKIE = 'relipay_impersonate_reveal';
+const IMPERSONATE_COOKIE = 'rekey_impersonate_reveal';
 const IMPERSONATE_COOKIE_MAX_AGE = 60 * 6; // 6 min — slightly outlives the 5-min token so the page can re-render.
 
 async function impersonate(
@@ -171,7 +181,6 @@ async function impersonate(
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/end-users/${euid}`);
   redirect(`/applications/${applicationId}/end-users/${euid}?impersonated=1`);
 }
 
@@ -200,7 +209,6 @@ async function grantCredits(
     }
     throw err;
   }
-  revalidatePath(base);
   redirect(`${base}?credited=1`);
 }
 
@@ -218,7 +226,6 @@ async function eraseUser(applicationId: string, euid: string): Promise<void> {
     }
     throw err;
   }
-  revalidatePath(base);
   redirect(`${base}?erased=1`);
 }
 
@@ -391,8 +398,20 @@ export default async function EndUserDetailPage({
             </dd>
           </div>
           <div>
-            <dt className="text-xs text-[var(--color-muted-fg)]">Failed sign-in attempts</dt>
-            <dd className="text-[var(--color-fg)]">{detail.endUser.failedSignInAttempts}</dd>
+            <dt
+              className="text-xs text-[var(--color-muted-fg)]"
+              title={
+                lockedNow
+                  ? 'At least this many failures tripped the lockout. The counter is consumed when the lock is set, so this is the threshold, not a live count.'
+                  : 'Failures in the current 15-minute window. Resets on a successful sign-in.'
+              }
+            >
+              Failed sign-in attempts
+            </dt>
+            <dd className="text-[var(--color-fg)]">
+              {lockedNow ? '≥ ' : ''}
+              {detail.endUser.failedSignInAttempts}
+            </dd>
           </div>
           <div>
             <dt className="text-xs text-[var(--color-muted-fg)]">Lockout</dt>

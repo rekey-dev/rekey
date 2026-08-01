@@ -4,7 +4,7 @@
  * Operators can save provider credentials WITHOUT a webhook secret/id, then
  * call register-webhook to have Rekey create the endpoint via the provider
  * API and store the secret (Stripe) / id (PayPal). Under NODE_ENV=test the
- * stub providers return deterministic values so this is verifiable offline.
+ * provider fakes return deterministic values so this is verifiable offline.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';

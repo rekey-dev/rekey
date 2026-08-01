@@ -8,7 +8,7 @@
  * Test DB selection (in priority order):
  *   1. `TEST_DATABASE_URL` env var
  *   2. `DATABASE_URL` env var
- *   3. `postgresql://rekey:rekey@localhost:5432/relipay_test?schema=public`
+ *   3. `postgresql://rekey:rekey@localhost:5432/rekey_test?schema=public`
  *
  * In CI, the workflow exposes a fresh Postgres on localhost:5432 — option 3
  * is the canonical default and "just works".
@@ -27,7 +27,7 @@ function resolveTestDbUrl(): string {
   return (
     process.env.TEST_DATABASE_URL ??
     process.env.DATABASE_URL ??
-    'postgresql://rekey:rekey@localhost:5432/relipay_test?schema=public'
+    'postgresql://rekey:rekey@localhost:5432/rekey_test?schema=public'
   );
 }
 
@@ -41,6 +41,12 @@ export default async function setup(): Promise<void> {
   process.env.DATABASE_URL = dbUrl;
   process.env.JWT_SECRET ??= 'test'.repeat(8);
   process.env.SUPER_ADMIN_KEY ??= 'admin'.repeat(7);
+  // PANEL_URL and PUBLIC_PORTAL_URL have no defaults in env.ts — a Rekey
+  // default would point a self-hoster's operators and end users at our
+  // infrastructure. The suite exercises the flows that build those links
+  // (operator MCP consent, hosted-portal CORS), so it supplies its own.
+  process.env.PANEL_URL ??= 'https://panel.test.invalid';
+  process.env.PUBLIC_PORTAL_URL ??= 'https://portal.test.invalid';
   process.env.PORT ??= '0';
   // Webhook tests register a 127.0.0.1 listener — flip the SSRF guard's
   // private-target gate so they keep working. Production deployments

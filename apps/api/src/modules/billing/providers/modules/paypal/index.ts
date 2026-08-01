@@ -24,7 +24,7 @@
  */
 
 import { RekeyError } from '../../../../../lib/error.js';
-import { PaypalStubProvider, RealPaypalProvider, verifyPaypalWebhook } from '../../paypal.js';
+import { verifyPaypalWebhook } from '../../paypal.js';
 import type { PaypalCredentials } from '../../../credentials.service.js';
 import type {
   AppRef,
@@ -49,6 +49,9 @@ interface PaypalEventPayload {
     // PAYMENT.SALE.* uses { amount: { total, currency } }; subscription
     // resources omit amount.
     amount?: { total?: string; value?: string; currency_code?: string; currency?: string };
+    // PAYMENT.CAPTURE.* (Orders v2) is the only place the originating order id
+    // appears — the capture resource's own `id` is the CAPTURE, not the order.
+    supplementary_data?: { related_ids?: { order_id?: string } };
   };
 }
 
@@ -147,8 +150,9 @@ async function verify(
 
 /**
  * Port of the paypal.handler.ts dispatch switch — the same 7 handled event
- * types translated to normalized domain events. Everything else → null
- * (logged + acked upstream).
+ * types translated to normalized domain events, plus
+ * `PAYMENT.CAPTURE.COMPLETED` (registered with PayPal from the start, never
+ * handled). Everything else → null (logged + acked upstream).
  */
 function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | null {
   const event = payload as PaypalEventPayload;
@@ -292,6 +296,56 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
       });
       return events;
     }
+    // The money leg of a ONE-TIME purchase (Orders v2). It has been registered
+    // with PayPal since webhook auto-configuration existed but had no case
+    // here, so it fell to `default: null` and one-off revenue produced no
+    // `Payment` row at all — the order was captured and fulfilled by
+    // CHECKOUT.ORDER.APPROVED above and then simply never appeared in
+    // anybody's books.
+    //
+    // Matched to the local row by the ORDER id out of `supplementary_data`,
+    // not by the capture id: `metadata.checkoutSessionId` holds the order.
+    // `firstPeriod: true` pins the re-provision to the 'initial' anchor so it
+    // collides with the grant the approval already made — a one-off purchase
+    // has no periods to refill.
+    case 'PAYMENT.CAPTURE.COMPLETED': {
+      const amount = paypalAmountToMinor(
+        resource?.amount?.value ?? resource?.amount?.total,
+        ctx.log,
+        { eventId: providerEventId },
+      );
+      if (amount === null) {
+        ctx.log.warn({ eventId: providerEventId }, 'capture.completed: no usable amount — skipping payment row');
+        return [];
+      }
+      if (!applicationIdMatches(resource, applicationId)) {
+        ctx.log.warn({ eventId: providerEventId }, 'capture.completed: app mismatch on custom_id');
+        return [];
+      }
+      const orderId = resource?.supplementary_data?.related_ids?.order_id;
+      const currency = (
+        resource?.amount?.currency_code ??
+        resource?.amount?.currency ??
+        'USD'
+      ).toUpperCase();
+      return [
+        {
+          type: 'payment.succeeded',
+          providerEventId,
+          applicationId,
+          providerPaymentId: resource?.id ?? providerEventId,
+          // A capture belongs to an order, never to a billing agreement —
+          // recurring money arrives as PAYMENT.SALE.COMPLETED above.
+          providerSubscriptionId: null,
+          ...(orderId !== undefined && { checkoutSessionId: orderId }),
+          amount,
+          currency,
+          description: null,
+          firstPeriod: true,
+          raw: payload,
+        },
+      ];
+    }
     case 'PAYMENT.SALE.DENIED':
     case 'PAYMENT.SALE.REVERSED': {
       const amount =
@@ -327,8 +381,9 @@ export const paypalModule: ProviderModule = {
   display: {
     label: 'PayPal',
     docsUrl: 'https://developer.paypal.com/api/rest/webhooks/',
-    // Global fallback alongside Stripe; lower preference (see pickProvider's
-    // ambient default: stripe if available, else paypal).
+    // Suggested only. Global (no country restriction) at a higher `priority`
+    // number than Stripe, so if both are saved with these defaults Stripe wins —
+    // but nothing applies them automatically; `pickProvider` reads the row.
     defaultCountries: [],
     priority: 110,
   },
@@ -342,9 +397,20 @@ export const paypalModule: ProviderModule = {
     // via subscription.period_advanced.
     periodRotationEvents: false,
     // Signature verification calls PayPal's API — the pipeline's
-    // centralized gate skips it under NODE_ENV=test /
-    // RELIPAY_BILLING_FORCE_STUB (never in production).
+    // centralized gate skips it under NODE_ENV=test (never in production).
     onlineVerify: true,
+    // Orders v2 takes a real discount line (`amount.breakdown.discount`), so
+    // one-off purchases discount cleanly. Subscriptions v1 does not: the only
+    // per-subscription price control is the inline `plan` override at create
+    // time, and that can only restate the pricing_scheme of a cycle the plan
+    // already declares. Ours declare one REGULAR cycle with `total_cycles: 0`,
+    // so "take 20% off the first month" comes out as "take 20% off every
+    // month, forever" — against a single recorded redemption and a single
+    // `discountAmount`. Refusing the coupon is the honest answer; charging a
+    // permanently wrong price is just a different lie from charging full price.
+    // Doing this properly needs an intro TRIAL cycle minted onto the plan,
+    // which is a plan-registration feature, not a checkout one.
+    discounts: { oneTime: true, recurring: false },
   },
   credentialSchema: [
     {
@@ -368,14 +434,6 @@ export const paypalModule: ProviderModule = {
       webhookRole: 'id',
     },
   ],
-  createProvider(creds, ctx) {
-    // Same selection the factory (providers/index.ts) applies for the
-    // creds-present case; mode picks the sandbox vs live base URL.
-    if (process.env.NODE_ENV === 'test' || process.env.RELIPAY_BILLING_FORCE_STUB === 'true') {
-      return new PaypalStubProvider();
-    }
-    return new RealPaypalProvider(creds as unknown as PaypalCredentials, ctx.mode);
-  },
   webhook: {
     resolveApplication,
     verify,

@@ -1,11 +1,14 @@
 /**
  * Password reset token issuance + verification.
  *
- * **Rekey does not send email.** `requestPasswordReset` returns the raw
- * token to the calling server, which then emails (or SMSes, or pushes) it
- * to the user via its own provider. This keeps us out of the
- * email-deliverability business and lets each customer own their from-address
- * branding.
+ * This module only mints, looks up and consumes tokens — it does not deliver
+ * them. `authService.requestPasswordReset` hands the raw token to
+ * `emailService.dispatch` first; only when no transport is configured does it
+ * fall back to returning the raw token to the calling *server* (and never to a
+ * publishable-key caller, which runs in the browser). That fallback is the
+ * original "Rekey does not send email" contract, kept so a self-host with no
+ * Resend key still works and so customers who want their own from-address
+ * branding and deliverability can keep owning it.
  *
  * Storage matches RefreshToken: SHA-256 hash, hash-only DB. Single-use:
  * `consumedAt` is set on first successful reset.

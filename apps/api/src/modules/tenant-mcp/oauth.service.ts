@@ -35,7 +35,11 @@ export const OPERATOR_MCP_WRITE_SCOPE = 'mcp:operator:write';
  * the operator must approve it on the consent screen, separately from write.
  */
 export const OPERATOR_MCP_ADMIN_SCOPE = 'mcp:operator:admin';
-/** Back-compat alias (read). Several call sites still import this name. */
+/**
+ * Unused alias for the read scope — zero importers in this repo. Kept only so an
+ * external consumer of the pre-tiering name doesn't break on upgrade; safe to
+ * delete once 2.0.0 is out.
+ */
 export const OPERATOR_MCP_SCOPE = OPERATOR_MCP_READ_SCOPE;
 /** Every scope this AS recognises, in metadata-advertised order. */
 export const OPERATOR_MCP_SCOPES_SUPPORTED = [

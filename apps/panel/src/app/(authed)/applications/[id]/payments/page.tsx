@@ -188,13 +188,9 @@ export default async function PaymentsPage({
                   {formatMoney(p.amount, p.currency)}
                 </TD>
                 <TD>
-                  <span className="inline-flex items-center gap-1.5">
-                    <Badge tone={STATUS_TONE[p.status]} dot>
-                      {p.status}
-                    </Badge>
-                    {/* Test/live isolation: flag sandbox payments (test-mode checkouts). */}
-                    {p.mode === 'TEST' && <Badge tone="info">TEST</Badge>}
-                  </span>
+                  <Badge tone={STATUS_TONE[p.status]} dot>
+                    {p.status}
+                  </Badge>
                 </TD>
                 <TD muted className="max-w-[16rem] truncate text-xs" title={p.description ?? undefined}>
                   {p.description ?? '—'}

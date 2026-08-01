@@ -10,8 +10,8 @@ import { RekeyBrowserClient } from '@rekey.dev/react';
 import { rekeyApiUrl } from './env';
 import { getPortalConfig } from './config';
 
-const ACCESS = 'relipay_portal_access';
-const REFRESH = 'relipay_portal_refresh';
+const ACCESS = 'rekey_portal_access';
+const REFRESH = 'rekey_portal_refresh';
 const ACCESS_MAX_AGE = 60 * 15; // 15 min
 const REFRESH_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 

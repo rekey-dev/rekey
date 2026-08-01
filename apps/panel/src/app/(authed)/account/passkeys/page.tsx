@@ -8,7 +8,6 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { api, PanelApiError } from '@/lib/api';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -82,7 +81,6 @@ async function completeRegistration(formData: FormData): Promise<void> {
     throw err;
   }
   await setFlash('Passkey registered.');
-  revalidatePath('/account/passkeys');
   redirect('/account/passkeys');
 }
 
@@ -100,7 +98,6 @@ async function deletePasskey(id: string): Promise<void> {
     throw err;
   }
   await setFlash('Passkey removed.');
-  revalidatePath('/account/passkeys');
   redirect('/account/passkeys');
 }
 

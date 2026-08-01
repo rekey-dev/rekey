@@ -27,10 +27,15 @@
  * /.well-known/jwks.json) and carry `kid` + `gen`. Verifiers accept both via
  * `verifyUserAccessTokenAnyAlg` (strict per-alg dispatch — see its docblock).
  * MFA-challenge, MCP, and impersonation tokens stay HS256 regardless.
+ *
+ * OIDC ID Tokens (`issueIdToken`) are the exception that is ALWAYS RS256: they
+ * are read by third-party relying parties that only ever see our JWKS, never a
+ * shared secret. They are assertions ABOUT an authentication, not credentials
+ * for this API — nothing here verifies one.
  */
 
 import jwt from 'jsonwebtoken';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import type { Application } from '@prisma/client';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { env } from '../config/env.js';
@@ -51,10 +56,12 @@ import {
  *      on the `applicationId` claim check.
  *   2. **Instant per-app session kill-switch.** Bumping `Application.tokenGeneration`
  *      changes the derived key, so every previously-issued access/challenge
- *      token for that app fails verification immediately. Pair it with a
- *      refresh-token purge (see tenant-applications `rotateSessionSecret`) for a
- *      full "log everyone out now" control. No new key material lives at rest —
- *      only a non-secret integer counter on the Application row.
+ *      token for that app fails verification immediately. The bump alone leaves
+ *      refresh tokens usable, so `applicationsService.rotateSessions` (route
+ *      `POST /tenant/applications/:id/rotate-sessions`) does both in ONE
+ *      transaction — that is the full "log everyone out now" control; don't
+ *      hand-roll the halves. No new key material lives at rest — only a
+ *      non-secret integer counter on the Application row.
  *
  * NB: after first deploy of this scheme, tokens minted under the old global
  * secret stop verifying — end-users transparently re-mint via refresh (the
@@ -307,6 +314,130 @@ export function verifyMcpAccessToken(
   } catch {
     return null;
   }
+}
+
+/**
+ * ID Token lifetime. Short on purpose: an ID Token is a statement that "this
+ * user authenticated at auth_time", consumed by the relying party during the
+ * callback it was minted for. Nothing re-presents it later — RPs mint their own
+ * session from it — so a long window only widens the replay surface. Ten
+ * minutes leaves generous room for clock skew on the RP side.
+ */
+const ID_TOKEN_LIFETIME_SECONDS = 10 * 60;
+
+export interface IssueIdTokenArgs {
+  /** OIDC issuer — the per-Application authorization-server URL. */
+  issuer: string;
+  /** `sub`. The EndUser id, which is already unique per Application. */
+  endUserId: string;
+  /** `aud`. The OAuth client the token was issued to. */
+  clientId: string;
+  /** Deployment RSA key from lib/signing-keys.ts — the SAME key as the JWKS. */
+  key: ActiveSigningKey;
+  /** `auth_time` — when the end-user actually authenticated. */
+  authTime: Date;
+  /** `nonce` from the authentication request, when the client sent one. */
+  nonce?: string | undefined;
+  /**
+   * The access token issued in the same response. Present → `at_hash` is
+   * emitted, binding the two halves together (OIDC Core §3.1.3.6). Optional in
+   * the code flow, included anyway: it is the cheap half of the defence against
+   * an attacker swapping in an access token from a different grant.
+   */
+  accessToken?: string | undefined;
+  /**
+   * Scope-gated identity claims (email, name, …). The CALLER decides what the
+   * granted scopes allow; this function never reads the user record, so it
+   * cannot leak a claim nobody asked for.
+   *
+   * Structural claims are stripped — see `RESERVED_ID_TOKEN_CLAIMS`.
+   */
+  claims?: Record<string, unknown> | undefined;
+  lifetimeSeconds?: number;
+}
+
+/**
+ * Claim names `issueIdToken` refuses to take from its caller.
+ *
+ * Two groups, both load-bearing. The JWT/OIDC structural claims (`iss`, `sub`,
+ * `aud`, …) are what a relying party's identity decision rests on. `typ`,
+ * `applicationId` and `gen` are what `verifyMcpAccessToken` authenticates an
+ * ACCESS token by — the three checks that stop an ID Token being presented as
+ * one, which is otherwise a cross-application account takeover because both
+ * come out of the same grant.
+ *
+ * Today the only source of `claims` is `identityClaims`, whose own allowlist
+ * cannot produce any of these. That is one allowlist deep, in a file whose
+ * values come from `EndUser.metadata`, and the next person to widen it will not
+ * be thinking about `typ`. Stripping here makes the property structural instead
+ * of a coincidence between two files.
+ */
+const RESERVED_ID_TOKEN_CLAIMS = new Set([
+  'iss',
+  'sub',
+  'aud',
+  'exp',
+  'iat',
+  'nbf',
+  'jti',
+  'auth_time',
+  'nonce',
+  'at_hash',
+  'typ',
+  'applicationId',
+  'gen',
+  'imp',
+  'scope',
+]);
+
+/**
+ * Mint an OpenID Connect ID Token (OIDC Core §2), signed RS256 with the
+ * deployment's active JWKS key so any relying party can verify it offline
+ * against `GET /.well-known/jwks.json`.
+ *
+ * `sub` is the EndUser id. That is stable for the life of the account and
+ * scoped to one Application by construction (`EndUser` rows are per-app), so
+ * the same human signing into two Applications on one deployment presents two
+ * unrelated subject identifiers under two different issuers — a pairwise
+ * pseudonym scheme would add nothing here.
+ *
+ * No `gen` claim (unlike RS256 access tokens): bumping `tokenGeneration` is a
+ * session kill-switch, and an ID Token is not a session — it is a record of an
+ * authentication that did happen, already consumed by the time a bump lands.
+ */
+export function issueIdToken(args: IssueIdTokenArgs): { token: string; expiresAt: Date } {
+  const lifetime = args.lifetimeSeconds ?? ID_TOKEN_LIFETIME_SECONDS;
+  const safeClaims = Object.fromEntries(
+    Object.entries(args.claims ?? {}).filter(([k]) => !RESERVED_ID_TOKEN_CLAIMS.has(k)),
+  );
+  const token = jwt.sign(
+    {
+      ...safeClaims,
+      sub: args.endUserId,
+      auth_time: Math.floor(args.authTime.getTime() / 1000),
+      ...(args.nonce !== undefined && { nonce: args.nonce }),
+      ...(args.accessToken !== undefined && { at_hash: accessTokenHash(args.accessToken) }),
+    },
+    args.key.privatePem,
+    {
+      expiresIn: lifetime,
+      algorithm: 'RS256',
+      keyid: args.key.kid,
+      issuer: args.issuer,
+      audience: args.clientId,
+    },
+  );
+  return { token, expiresAt: new Date(Date.now() + lifetime * 1000) };
+}
+
+/**
+ * `at_hash` (OIDC Core §3.1.3.6): base64url of the left-most half of the
+ * SHA-256 digest of the ASCII access token. SHA-256 because the ID Token is
+ * signed RS256 — the hash always follows the signing algorithm's digest.
+ */
+function accessTokenHash(accessToken: string): string {
+  const digest = createHash('sha256').update(accessToken, 'ascii').digest();
+  return digest.subarray(0, digest.length / 2).toString('base64url');
 }
 
 const DEFAULT_IMPERSONATION_LIFETIME_SECONDS = 5 * 60;
