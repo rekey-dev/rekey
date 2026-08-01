@@ -4,7 +4,7 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
-## 2.0.0-rc.2
+## 2.0.0-rc.3
 
 ### Fixed: the Developer section was unreachable on a phone
 

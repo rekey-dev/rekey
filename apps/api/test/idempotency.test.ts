@@ -82,6 +82,60 @@ describe('idempotency-key middleware', () => {
       payload: { amount },
     });
 
+  /**
+   * The same call as `grant`, from a second operator who is a MEMBER of the
+   * SAME workspace rather than its OWNER.
+   *
+   * Signing that operator up would give them their own workspace and a
+   * different scope either way — which is exactly how a first version of this
+   * test passed against the vulnerable code. They have to be re-pointed at the
+   * owner's workspace with the MEMBER role for the collision to be possible at
+   * all.
+   */
+  const grantAsMember = async (amount: number, headers: Record<string, string> = {}) => {
+    const slug = `mem-${Math.random().toString(36).slice(2, 8)}`;
+    const memberAccess = await app
+      .inject({
+        method: 'POST',
+        url: '/api/v1/tenant/auth/sign-up',
+        payload: {
+          email: `mem-${slug}@example.com`,
+          password: 'pw-one-two-three',
+          workspaceName: `WS ${slug}`,
+        },
+      })
+      .then((r) => r.json().data as { accessToken: string })
+      .then((d) => d.accessToken);
+
+    const ownerMembership = await prisma.tenantMembership.findFirstOrThrow({
+      where: { role: 'OWNER' },
+      orderBy: { createdAt: 'asc' },
+    });
+    const memberUser = await prisma.tenantUser.findFirstOrThrow({
+      where: { email: `mem-${slug}@example.com` },
+    });
+    await prisma.tenantMembership.updateMany({
+      where: { tenantUserId: memberUser.id },
+      data: { tenantId: ownerMembership.tenantId, role: 'MEMBER' },
+    });
+
+    return app.inject({
+      method: 'POST',
+      url: `/api/v1/tenant/applications/${applicationId}/api-keys`,
+      headers: { authorization: `Bearer ${memberAccess}`, ...headers },
+      payload: { name: `k-${amount}` },
+    });
+  };
+
+  /** The OWNER's version of the same ADMIN-gated mint. */
+  const mintAsOwner = (name: string, headers: Record<string, string> = {}) =>
+    app.inject({
+      method: 'POST',
+      url: `/api/v1/tenant/applications/${applicationId}/api-keys`,
+      headers: { authorization: `Bearer ${tenantAccess}`, ...headers },
+      payload: { name },
+    });
+
   const ledgerCount = (appId = applicationId) =>
     prisma.creditLedger.count({ where: { applicationId: appId } });
 
@@ -91,8 +145,18 @@ describe('idempotency-key middleware', () => {
     expect(res.headers['idempotency-replayed']).toBeUndefined();
     expect(await ledgerCount()).toBe(1);
 
+    // The scope is the effective ACTOR, not just the workspace — an
+    // Application- or tenant-wide scope let a lower-privileged member replay a
+    // higher-privileged member's response, because a replay short-circuits
+    // before the route's role guard ever runs.
+    const membership = await prisma.tenantMembership.findFirstOrThrow();
     const row = await prisma.idempotencyKey.findUnique({
-      where: { scopeKey_key: { scopeKey: `tenant:${(await prisma.tenant.findFirstOrThrow()).id}`, key: 'op-1' } },
+      where: {
+        scopeKey_key: {
+          scopeKey: `tenant:${membership.tenantId}:member:${membership.id}`,
+          key: 'op-1',
+        },
+      },
     });
     expect(row).not.toBeNull();
     expect(row!.responseStatus).toBe(201);
@@ -289,5 +353,41 @@ describe('idempotency-key middleware', () => {
     expect((first.json().data as { applied: boolean }).applied).toBe(true);
     expect((second.json().data as { applied: boolean }).applied).toBe(false);
     expect(await creditsService.getBalance(applicationId, { endUserId })).toBe(60);
+  });
+  /**
+   * The property the escalation fix establishes: two different actors in ONE
+   * workspace never share a cache slot.
+   *
+   * Honest scoping note — this asserts the invariant, not the end-to-end
+   * exploit. The exploit was proven separately by an adversarial reviewer
+   * against `POST /:id/api-keys`: a workspace MEMBER whose own mint returned
+   * 403 replayed an OWNER's key and received the plaintext key with
+   * `scopes: ['*']`, because the replay lives in an instance-level
+   * `preHandler` that runs BEFORE route-level guards and before the handler
+   * body. Reproducing that end to end needs a member who holds app access but
+   * not the role, which this file's fixture does not build — so rather than
+   * ship a test that passes against the vulnerable code (an earlier draft of
+   * this one did, twice), it pins the scope directly.
+   */
+  it('two members of one workspace never share a cache slot', async () => {
+    await mintAsOwner('owner-key', { 'idempotency-key': 'shared-key' });
+
+    const rows = await prisma.idempotencyKey.findMany({ where: { key: 'shared-key' } });
+    expect(rows).toHaveLength(1);
+
+    const membership = await prisma.tenantMembership.findFirstOrThrow({ where: { role: 'OWNER' } });
+    // The workspace id alone must NOT be the scope — that is the bug.
+    expect(rows[0]!.scopeKey).not.toBe(`tenant:${membership.tenantId}`);
+    expect(rows[0]!.scopeKey).toBe(`tenant:${membership.tenantId}:member:${membership.id}`);
+  });
+
+  it('an authorization refusal is never cached', async () => {
+    // A cached 403 let a low-privileged caller pre-seed a key so the legitimate
+    // higher-privileged request replayed the refusal instead of executing.
+    const refused = await grantAsMember(1, { 'idempotency-key': 'poison' });
+    expect([401, 403, 404]).toContain(refused.statusCode);
+
+    const row = await prisma.idempotencyKey.findFirst({ where: { key: 'poison' } });
+    expect(row?.responseStatus ?? null).toBeNull();
   });
 });

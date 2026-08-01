@@ -1,3 +1,5 @@
+'use client';
+
 /**
  * Headless wrappers — render-prop style components.
  *

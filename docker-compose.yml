@@ -96,7 +96,10 @@ services:
       # private key in the database — a published default means anyone holding
       # a stolen dump can decrypt all of it. Compose fails the interpolation if
       # it is unset, which is the intended outcome.
-      ENCRYPTION_KEY:    ${ENCRYPTION_KEY:?generate one with: openssl rand -hex 32}
+      # Quoted: the `:?` message contains a colon-space, which YAML reads as a
+      # nested mapping and rejects. Unquoted, this made every `docker compose`
+      # command on the repo fail — including quickstart step one.
+      ENCRYPTION_KEY:    "${ENCRYPTION_KEY:?generate one with openssl rand -hex 32}"
       SUPER_ADMIN_KEY:   ${SUPER_ADMIN_KEY:-change-me-in-prod}
       API_URL:           http://api:3030
       # Public panel origin — the operator MCP OAuth authorize endpoint

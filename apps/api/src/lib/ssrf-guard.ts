@@ -29,92 +29,126 @@ import { RekeyError } from './error.js';
 const PRIVATE_IPV4_RE =
   /^(?:10\.|127\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[0-1])\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|0\.|22[4-9]\.|2[3-5]\d\.)/;
 
+/**
+ * Parse any textual IP to its bytes — 4 for v4, 16 for v6 — or null.
+ *
+ * Everything below range-checks these bytes. The previous implementation
+ * compared STRINGS, and string comparison lost twice: first to the
+ * translation prefixes that embed an IPv4 address (`64:ff9b::7f00:1` does not
+ * look like loopback), and then, after that was patched, to the uncompressed
+ * spelling of the very same address — `0:0:0:0:0:ffff:127.0.0.1` sailed past a
+ * check that only recognised `::ffff:127.0.0.1`.
+ *
+ * That second miss was reachable: `assertSafeHost` takes a raw host string and
+ * `dns.lookup` returns a literal IP verbatim, so nothing normalised it on the
+ * way in, and an operator could open a real SMTP session to loopback. Bytes
+ * have no spellings.
+ */
+function ipToBytes(ip: string): Uint8Array | null {
+  const version = isIP(ip);
+  if (version === 4) {
+    const parts = ip.split('.').map((n) => Number(n));
+    if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+      return null;
+    }
+    return Uint8Array.from(parts);
+  }
+  if (version !== 6) return null;
+
+  let text = ip.toLowerCase();
+  // A trailing dotted quad (::ffff:127.0.0.1) — rewrite it to two hex groups.
+  const dotted = text.match(/^(.*:)(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) {
+    const quad = dotted[2]!.split('.').map(Number);
+    if (quad.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    const hi = ((quad[0]! << 8) | quad[1]!).toString(16);
+    const lo = ((quad[2]! << 8) | quad[3]!).toString(16);
+    text = `${dotted[1]}${hi}:${lo}`;
+  }
+
+  const [head, tail] = text.split('::') as [string, string | undefined];
+  const headGroups = head ? head.split(':').filter(Boolean) : [];
+  const tailGroups = tail ? tail.split(':').filter(Boolean) : [];
+  const fill = 8 - headGroups.length - tailGroups.length;
+  if (tail === undefined && headGroups.length !== 8) return null;
+  if (tail !== undefined && fill < 0) return null;
+
+  const groups =
+    tail === undefined
+      ? headGroups
+      : [...headGroups, ...Array<string>(fill).fill('0'), ...tailGroups];
+
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 8; i++) {
+    const value = parseInt(groups[i]!, 16);
+    if (Number.isNaN(value) || value < 0 || value > 0xffff) return null;
+    bytes[i * 2] = value >> 8;
+    bytes[i * 2 + 1] = value & 0xff;
+  }
+  return bytes;
+}
+
+/** Reserved / non-routable IPv4, checked numerically. */
+function isPrivateV4Bytes(b: Uint8Array): boolean {
+  const [a, second] = [b[0]!, b[1]!];
+  if (a === 0 || a === 10 || a === 127) return true;                 // this-network, RFC1918, loopback
+  if (a === 172 && second >= 16 && second <= 31) return true;        // RFC1918
+  if (a === 192 && second === 168) return true;                      // RFC1918
+  if (a === 169 && second === 254) return true;                      // link-local, incl. cloud metadata
+  if (a === 100 && second >= 64 && second <= 127) return true;       // CGNAT
+  if (a >= 224) return true;                                         // multicast + reserved + broadcast
+  // Ranges that are not "private" but are never a legitimate destination.
+  if (a === 192 && second === 0 && b[2] === 0) return true;          // 192.0.0.0/24 (incl. NAT64 discovery)
+  if (a === 192 && second === 0 && b[2] === 2) return true;          // TEST-NET-1
+  if (a === 198 && (second === 18 || second === 19)) return true;    // benchmarking
+  if (a === 198 && second === 51 && b[2] === 100) return true;       // TEST-NET-2
+  if (a === 203 && second === 0 && b[2] === 113) return true;        // TEST-NET-3
+  return false;
+}
+
 export function isPrivateIpv4(ip: string): boolean {
-  if (PRIVATE_IPV4_RE.test(ip + '.')) return true;
-  // Reserved ranges that are not "private" in the RFC 1918 sense but are never
-  // a legitimate webhook or SMTP destination, and are routable enough to be
-  // useful to an attacker probing a network. 192.0.0.0/24 in particular holds
-  // the NAT64 discovery addresses.
-  return /^(192\.0\.0\.|198\.1[89]\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.)/.test(ip);
+  const b = ipToBytes(ip);
+  return b !== null && b.length === 4 && isPrivateV4Bytes(b);
 }
 
 export function isPrivateIpv6(ip: string): boolean {
-  const h = ip.toLowerCase();
-  if (
-    h === '::1' || // loopback
-    h === '::' || // unspecified
-    h.startsWith('fc') || // unique-local fc00::/7
-    h.startsWith('fd') ||
-    h.startsWith('fe8') || // link-local fe80::/10
-    h.startsWith('fe9') ||
-    h.startsWith('fea') ||
-    h.startsWith('feb') ||
-    h.startsWith('fec') || // deprecated site-local fec0::/10
-    h.startsWith('fed') ||
-    h.startsWith('fee') ||
-    h.startsWith('fef') ||
-    h.startsWith('::ffff:') // IPv4-mapped — the v4 check runs first in isPrivateIp
-  ) {
-    return true;
-  }
-
-  // Transition and translation prefixes that EMBED an IPv4 address. Each of
-  // these was a full bypass: the guard compared strings, so `64:ff9b::7f00:1`
-  // did not look loopback even though it routes to 127.0.0.1 on any NAT64
-  // deployment — and `64:ff9b::/96` is the RFC 6052 well-known prefix, which
-  // is standard on IPv6-only Kubernetes clusters. `64:ff9b::a9fe:a9fe` would
-  // have reached the cloud metadata service.
-  const embedded = embeddedIpv4(h);
-  return embedded !== null && isPrivateIpv4(embedded);
+  const b = ipToBytes(ip);
+  return b !== null && b.length === 16 && isPrivateV6Bytes(b);
 }
 
-/**
- * The IPv4 address embedded in a translation/transition IPv6 address, or null.
- *
- * Covers NAT64 (`64:ff9b::/96` and `64:ff9b:1::/48`), IPv4-compatible
- * (`::a.b.c.d`, deprecated but still routed by some stacks) and 6to4
- * (`2002:V4ADDR::/16`). Accepts both the dotted-quad and hex-group spellings,
- * because `new URL` normalizes `[64:ff9b::127.0.0.1]` to `64:ff9b::7f00:1`.
- */
-function embeddedIpv4(h: string): string | null {
-  const quadFrom = (g1: string, g2: string): string => {
-    const a = parseInt(g1, 16);
-    const b = parseInt(g2, 16);
-    if (Number.isNaN(a) || Number.isNaN(b)) return '';
-    return `${a >> 8}.${a & 0xff}.${b >> 8}.${b & 0xff}`;
-  };
+function isPrivateV6Bytes(b: Uint8Array): boolean {
+  const allZeroThrough = (n: number): boolean => b.slice(0, n).every((x) => x === 0);
+  // Local aliases so `noUncheckedIndexedAccess` doesn't force a `!` on every byte.
+  const b0 = b[0] ?? 0;
+  const b1 = b[1] ?? 0;
 
-  // 6to4 embeds the v4 in the FIRST two groups, so it must be checked before
-  // anything that looks at the tail — `2002:7f00:1::` has no trailing groups
-  // at all, which is exactly how it slipped through a tail-first version.
-  if (h.startsWith('2002:')) {
-    const m = h.match(/^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})/);
-    return m ? quadFrom(m[1]!, m[2]!) || null : null;
+  // ::1 loopback and :: unspecified
+  if (allZeroThrough(15) && (b[15] === 1 || b[15] === 0)) return true;
+  if (b0 === 0xff) return true;                                  // multicast ff00::/8
+  if ((b0 & 0xfe) === 0xfc) return true;                         // unique-local fc00::/7
+  if (b0 === 0xfe && (b1 & 0xc0) === 0x80) return true;        // link-local fe80::/10
+  if (b0 === 0xfe && (b1 & 0xc0) === 0xc0) return true;        // deprecated site-local fec0::/10
+
+  // Forms that EMBED an IPv4 address — decode and judge the embedded address,
+  // rather than blocking the prefix, so legitimate public v4 reached this way
+  // keeps working.
+  const embedded = (o: number): Uint8Array => b.slice(o, o + 4);
+  // IPv4-mapped ::ffff:0:0/96 and IPv4-compatible ::/96
+  if (allZeroThrough(10) && b[10] === 0xff && b[11] === 0xff) return isPrivateV4Bytes(embedded(12));
+  if (allZeroThrough(12)) return isPrivateV4Bytes(embedded(12));
+  // NAT64 64:ff9b::/96 (RFC 6052 well-known prefix)
+  if (b0 === 0x00 && b1 === 0x64 && b[2] === 0xff && b[3] === 0x9b) {
+    return isPrivateV4Bytes(embedded(12));
   }
-
-  const isTranslation = h.startsWith('64:ff9b:') || /^::(?!ffff:)/.test(h);
-  if (!isTranslation || h === '::' || h === '::1') return null;
-
-  // Both spellings: `new URL` normalizes [64:ff9b::127.0.0.1] to 64:ff9b::7f00:1,
-  // but the dotted form still arrives from callers that skip URL parsing.
-  const dotted = h.match(/:(\d+\.\d+\.\d+\.\d+)$/);
-  if (dotted) return dotted[1]!;
-
-  const tail = h.match(/([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  return tail ? quadFrom(tail[1]!, tail[2]!) || null : null;
+  // 6to4 2002::/16 — the v4 lives in bytes 2..5
+  if (b0 === 0x20 && b1 === 0x02) return isPrivateV4Bytes(embedded(2));
+  return false;
 }
 
 export function isPrivateIp(ip: string): boolean {
-  const version = isIP(ip);
-  if (version === 4) return isPrivateIpv4(ip);
-  if (version === 6) {
-    const h = ip.toLowerCase();
-    // IPv4-mapped IPv6 (::ffff:a.b.c.d) — validate the embedded v4.
-    const mapped = h.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (mapped) return isPrivateIpv4(mapped[1]!);
-    return isPrivateIpv6(h);
-  }
-  return false;
+  const b = ipToBytes(ip);
+  if (b === null) return false;
+  return b.length === 4 ? isPrivateV4Bytes(b) : isPrivateV6Bytes(b);
 }
 
 export interface SafeUrlOptions {

@@ -61,7 +61,6 @@ import type {
 // The canonical error class lives in shared-types; import it for internal use
 // and re-export below so @rekey.dev/node's public surface is unchanged.
 import { RekeyError } from '@rekey.dev/shared-types';
-import { createRequire } from 'node:module';
 
 export type {
   ApplicationDto,
@@ -1299,7 +1298,25 @@ export interface EntitlementsDto {
  * runtimes that can otherwise use the rest of the client.
  */
 function nodeCrypto(): typeof import('node:crypto') {
-  return createRequire(import.meta.url)('node:crypto') as typeof import('node:crypto');
+  // `process.getBuiltinModule` (Node 22.3+, and this package's floor is 22)
+  // resolves a builtin synchronously with NO static import — which is the
+  // whole point. The previous fix used `createRequire`, correct for CJS
+  // interop but imported from 'node:module' at module scope, so merely
+  // IMPORTING the package failed on edge runtimes with
+  // `Failed to load external module node:module`. That defeated the laziness
+  // this function's own comment says it exists to preserve: before, edge
+  // consumers could import the client and use every fetch-based method, and
+  // only calling signature verification would fail.
+  const get = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process
+    ?.getBuiltinModule;
+  const mod = typeof get === 'function' ? get('node:crypto') : undefined;
+  if (!mod) {
+    throw new Error(
+      'Signature verification needs Node crypto, which is unavailable in this runtime. ' +
+        'Run verifyWebhookSignature / verifyAccessToken (RS256) on a Node server, not an edge runtime.',
+    );
+  }
+  return mod as typeof import('node:crypto');
 }
 
 /**

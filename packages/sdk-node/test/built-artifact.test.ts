@@ -122,4 +122,24 @@ describe('the published ESM artifact', () => {
 
     expect(out).toBe('0');
   });
+  it('has no static node: import at module scope — the edge-runtime contract', () => {
+    // The client is documented as usable on edge runtimes for every
+    // fetch-based method; only signature verification needs Node crypto, and
+    // it loads that lazily. A STATIC `node:*` import at module scope breaks
+    // `import` itself there, which is how rc.2 shipped a package that was
+    // unimportable on edge: the crypto fix reached for `createRequire` and
+    // pulled in `node:module` at the top of the file.
+    const out = runEsm(`
+      import { readFileSync } from 'node:fs';
+      const src = readFileSync(${JSON.stringify(distEntry)}, 'utf8');
+      // Strip comments first — the explanation of this very bug names the module.
+      const code = src
+        .replace(/\\/\\*[\\s\\S]*?\\*\\//g, '')
+        .replace(/^\\s*\\/\\/.*$/gm, '');
+      const statics = code.match(/^\\s*import[^;]*from\\s*['"]node:[^'"]+['"]/gm) ?? [];
+      console.log(statics.length === 0 ? 'none' : statics.join(' | '));
+    `);
+
+    expect(out).toBe('none');
+  });
 });

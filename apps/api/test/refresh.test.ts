@@ -145,7 +145,10 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
     expect(replay.statusCode).toBe(401);
     expect(replay.json().error.code).toBe('REFRESH_TOKEN_REUSED');
 
-    // The live replacement must now also be rejected — family revocation.
+    // The live replacement must now also be rejected — family revocation. It
+    // reports REVOKED rather than REUSED because *it* was never replayed: the
+    // family kill revoked it outright, so `replacedById` is null. What matters
+    // is that it is dead, which the DB invariant below pins.
     const afterFamily = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/refresh',
@@ -153,7 +156,7 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
       payload: { refreshToken: replacement },
     });
     expect(afterFamily.statusCode).toBe(401);
-    expect(afterFamily.json().error.code).toBe('REFRESH_TOKEN_REUSED');
+    expect(afterFamily.json().error.code).toBe('REFRESH_TOKEN_REVOKED');
 
     // DB invariant: every refresh row for this user is revoked.
     const live = await prisma.refreshToken.count({
@@ -253,8 +256,11 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
       payload: { refreshToken },
     });
     expect(res.statusCode).toBe(401);
-    // After sign-out the token is revoked, so the kind is "revoked" → REUSED code.
-    expect(['REFRESH_TOKEN_REUSED', 'REFRESH_TOKEN_INVALID']).toContain(
+    // Sign-out is a DELIBERATE revocation (`replacedById === null`), so it is
+    // REVOKED, not REUSED — and critically it does not revoke the user's other
+    // sessions. Reuse of a *rotated* token is the compromise signal and still
+    // burns the whole chain; see the REPLAY GUARD cases above.
+    expect(['REFRESH_TOKEN_REVOKED', 'REFRESH_TOKEN_INVALID']).toContain(
       res.json().error.code,
     );
   });

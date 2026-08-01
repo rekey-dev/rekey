@@ -1,3 +1,5 @@
+'use client';
+
 /**
  * Control components — the "render this region iff …" primitives, Clerk-shaped.
  *

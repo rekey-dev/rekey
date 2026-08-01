@@ -1,3 +1,5 @@
+'use client';
+
 /**
  * Public hooks. Idiomatic React with a familiar shape, so developers (and AI
  * agents) recognise them immediately.
