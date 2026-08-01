@@ -10,13 +10,23 @@
  */
 
 import type { FastifyRequest } from 'fastify';
+import type { SecurityEventType } from '@rekey.dev/shared-types';
 import { prisma } from './prisma.js';
 
 export type SecurityActorType = 'operator' | 'end_user' | 'system';
 
 export interface SecurityEventInput {
-  /** Dotted event name, e.g. "operator.sign_in", "app.sessions_rotated". */
-  type: string;
+  /**
+   * Dotted event name, e.g. "operator.sign_in", "app.sessions_rotated".
+   *
+   * Typed against the union in `@rekey.dev/shared-types`, which is also what
+   * the operator panel labels events from. It used to be a bare `string`, and
+   * a bare `string` on both sides is how the panel ended up rendering 44 of
+   * the 54 types as raw keys: nothing connected an emit site to the list of
+   * things anyone could display. Adding an event now means adding it there,
+   * with a label, or this does not compile.
+   */
+  type: SecurityEventType;
   actorType: SecurityActorType;
   actorId?: string | null;
   tenantId?: string | null;

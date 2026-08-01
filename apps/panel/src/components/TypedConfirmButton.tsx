@@ -18,6 +18,7 @@
  */
 
 import * as React from 'react';
+import { ModalHeader, dialogChromeCls } from '@/components/Modal';
 
 interface Props {
   /** The exact string the operator must type to confirm. Usually the slug or name. */
@@ -90,18 +91,21 @@ export function TypedConfirmButton({
         ref={dialogRef}
         aria-labelledby={titleId}
         aria-describedby={descId}
-        className="m-auto h-fit w-[calc(100vw-2rem)] max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 text-[var(--color-fg)] backdrop:bg-black/50"
+        // Same chrome as every other modal — see the note on `dialogChromeCls`.
+        className={dialogChromeCls('sm')}
         onClick={(e) => {
           if (e.target === dialogRef.current) close();
         }}
       >
-        <h2 id={titleId} className="text-base font-semibold">
-          {title}
-        </h2>
-        <p id={descId} className="text-sm text-neutral-600 dark:text-neutral-400 mt-1">
-          {description}
-        </p>
-        <p className="text-sm mt-3">
+        <ModalHeader
+          titleId={titleId}
+          descId={descId}
+          title={title}
+          description={description}
+          onClose={close}
+        />
+        <div className="p-6">
+        <p className="text-sm">
           Type{' '}
           <code className="font-mono px-1.5 py-0.5 rounded bg-[var(--color-surface-muted)] border border-[var(--color-border)]">
             {expected}
@@ -134,6 +138,7 @@ export function TypedConfirmButton({
           >
             {confirmLabel ?? triggerLabel}
           </button>
+        </div>
         </div>
       </dialog>
     </>

@@ -60,7 +60,7 @@ import { refreshCorsOrigins } from '../../lib/cors-origins.js';
 import { mcpIssuer } from '../mcp/oauth.service.js';
 import { eraseEndUser } from './end-user-erasure.service.js';
 import { billingService } from '../billing/billing.service.js';
-import { webhookService } from '../webhooks/webhook.service.js';
+import { emitDetached } from '../webhooks/webhook.service.js';
 import { euLoginLockScope, getScopeLockState, LOGIN_POLICY } from '../../lib/brute-force.js';
 
 // Per-route access control: `ensureAppAccess(req, appId, need)` replaces the
@@ -537,6 +537,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     async (req) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'write');
+      // `.strict()`, not the zod default. Every key here is optional, so a
+      // non-strict object accepted `{ dunningEnabld: true }`, silently dropped
+      // it, and answered 200 — an operator turning dunning on, being told it
+      // worked, and getting nothing. A patch body whose keys are all optional
+      // has no shape left to fail on except the key names, so those have to be
+      // the check. Unknown keys now surface as 400 VALIDATION_ERROR naming the
+      // offender (see the ZodError branch in lib/error.ts).
       const body = z
         .object({
           enabled: z.boolean().optional(),
@@ -544,6 +551,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           billingSubject: z.enum(['user', 'org']).optional(),
           defaultPlanSlug: z.string().min(1).nullable().optional(),
         })
+        .strict()
         .parse(req.body ?? {});
       // Reject a typo'd free-tier slug so it can't silently disable the tier.
       if (typeof body.defaultPlanSlug === 'string') {
@@ -2378,13 +2386,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
 
       // Outbound webhook — `user.deleted` (registered event). Fire-and-forget,
       // same contract as `user.created` / `user.erased`.
-      void webhookService
-        .emit({
-          applicationId: params.id,
-          type: 'user.deleted',
-          data: { user: { id: params.euid } },
-        })
-        .catch(() => undefined);
+      emitDetached({
+        applicationId: params.id,
+        type: 'user.deleted',
+        data: { user: { id: params.euid } },
+      });
 
       return { success: true, data: { removed: true } };
     },

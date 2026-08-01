@@ -13,6 +13,7 @@
  */
 
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
+import { ZodError } from 'zod';
 import {
   classifyDependencyOutage,
   shouldRecordOutageEvent,
@@ -123,6 +124,61 @@ export function normalizeFastifyError(rawCode: string | undefined): {
   return { code: rawCode, fix: FALLBACK_4XX_FIX };
 }
 
+/**
+ * Cap on how many field errors a validation response enumerates.
+ *
+ * A schema can produce one issue per field, and an object with many optional
+ * keys can generate dozens from a single bad request. Ten is more than enough
+ * to fix the call, and bounds a response body a caller controls the size of.
+ */
+const MAX_VALIDATION_ISSUES = 10;
+
+/**
+ * Turn a `ZodError` into the 400 envelope.
+ *
+ * This exists because the handler had no ZodError branch at all, so a raw
+ * ZodError fell through to the generic 500 — and most of the routes that parse
+ * with zod in the handler (every `/admin/metrics/*` endpoint among them)
+ * declare no Fastify `querystring` schema, which makes that parse the ONLY
+ * validator. `?limit=500`, `?sort=bogus` or `?order=sideways` therefore
+ * answered `500 INTERNAL_ERROR` with "share this request id with support": a
+ * server error for the caller's own typo, pointing them at the one place that
+ * cannot help.
+ *
+ * `path` is the dotted field path (`""` for a whole-body failure) and
+ * `message` is zod's own text, which already reads well ("Expected number,
+ * received nan", "Unrecognized key(s) in object: 'dunningEnabld'"). Neither
+ * can carry server internals — both are derived from the schema and the
+ * caller's own input.
+ */
+function zodErrorPayload(err: ZodError): {
+  code: string;
+  message: string;
+  fix: string;
+  issues: Array<{ path: string; message: string }>;
+} {
+  const issues = err.issues.slice(0, MAX_VALIDATION_ISSUES).map((i) => ({
+    path: i.path.join('.'),
+    message: i.message,
+  }));
+  const omitted = err.issues.length - issues.length;
+  const first = issues[0];
+  return {
+    code: 'VALIDATION_ERROR',
+    message:
+      first === undefined
+        ? 'The request did not match the expected shape.'
+        : first.path === ''
+          ? first.message
+          : `${first.path}: ${first.message}`,
+    fix:
+      omitted > 0
+        ? `Fix the fields listed in \`issues\` (${omitted} further problem${omitted === 1 ? '' : 's'} not shown) and retry.`
+        : 'Fix the fields listed in `issues` and retry.',
+    issues,
+  };
+}
+
 /** How long we tell a client to wait out a dependency outage. */
 const DEPENDENCY_RETRY_AFTER_SECONDS = 5;
 
@@ -176,6 +232,29 @@ export function rekeyErrorHandler(
         ...(err.fix !== undefined && { fix: err.fix }),
         ...(err.docs !== undefined && { docs: err.docs }),
         ...(err.retryAfterSeconds !== undefined && { retryAfterSeconds: err.retryAfterSeconds }),
+        requestId,
+      },
+    });
+  }
+
+  // A schema parse that failed is the CALLER's error, not ours. Checked before
+  // the Fastify branch because a ZodError carries no `statusCode` at all and
+  // would otherwise fall all the way through to the 500 below.
+  if (err instanceof ZodError) {
+    const payload = zodErrorPayload(err);
+    // `info`, not `error`: a rejected request is normal traffic. Logging it at
+    // error level is how a route that 400s on a typo ends up in an alert.
+    req.log.info(
+      { requestId, issues: payload.issues, route: req.routeOptions?.url ?? req.url },
+      'request failed schema validation',
+    );
+    return reply.status(400).send({
+      success: false,
+      error: {
+        code: payload.code,
+        message: payload.message,
+        fix: payload.fix,
+        issues: payload.issues,
         requestId,
       },
     });

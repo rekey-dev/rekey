@@ -14,26 +14,41 @@ system map.
 
 ```bash
 pnpm install
-cp .env.example .env            # fill JWT_SECRET, SUPER_ADMIN_KEY, ENCRYPTION_KEY
+cp .env.example .env            # fill POSTGRES_PASSWORD, REDIS_PASSWORD, JWT_SECRET,
+                                # SUPER_ADMIN_KEY, ENCRYPTION_KEY — then paste the two
+                                # datastore passwords into DATABASE_URL / REDIS_URL
 docker compose up -d postgres redis
 pnpm db:migrate:deploy
 pnpm dev                        # API on :3030, panel on :3031
+```
+
+Then bootstrap in one call:
+
+```bash
+REKEY_URL=http://localhost:3030 SUPER_ADMIN_KEY=<from .env> \
+  npx @rekey.dev/cli init --tenant-name Acme --owner-email ops@acme.example \
+                          --app-name "Acme Prod" --app-slug acme-prod --json
 ```
 
 ## Commands
 
 | Command | What |
 |---|---|
-| `pnpm dev` | run all apps in watch mode (turbo) |
-| `pnpm build` | build every workspace |
+| `pnpm dev` | generate the Prisma client, build workspace deps, run all apps in watch mode (loads `.env`) |
+| `pnpm build` | generate the Prisma client, then build every workspace |
 | `pnpm test` | run the vitest suites |
 | `pnpm lint` / `pnpm typecheck` | lint / typecheck all workspaces |
+| `pnpm db:generate` | generate the Prisma client |
 | `pnpm db:migrate` | create + apply a dev migration |
 | `pnpm db:migrate:deploy` | apply pending migrations (no prompt) |
 | `pnpm db:studio` | open Prisma Studio |
 
+The `db:*` scripts run Prisma from the repo root, which is what makes them read
+the root `.env`. Running them from `apps/api` reads `apps/api/.env` instead —
+a file this repo does not ship.
+
 The API container also runs `prisma migrate deploy` on boot, so a fresh DB is
-migrated automatically under `docker compose up`.
+migrated automatically under `docker compose --profile full up`.
 
 ## Conventions (do not violate without explicit instruction)
 

@@ -11,7 +11,7 @@ import { formatMoney } from '@/lib/format';
 import { formatDateTime } from '@/lib/date';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
-import { Badge, type BadgeTone } from '@/components/Badge';
+import { StatusPill } from '@/components/StatusPill';
 import { EmptyState } from '@/components/EmptyState';
 
 /**
@@ -21,21 +21,6 @@ import { EmptyState } from '@/components/EmptyState';
  * sign-up trend), and the most recent payments with a link to the full
  * Payments tab.
  */
-
-const PAYMENT_STATUS_TONE: Record<PaymentRow['status'], BadgeTone> = {
-  SUCCEEDED: 'success',
-  PENDING: 'warning',
-  FAILED: 'danger',
-  REFUNDED: 'neutral',
-};
-
-/** Friendly labels for display — the raw enum still comes from the API. */
-const PAYMENT_STATUS_LABEL: Record<PaymentRow['status'], string> = {
-  SUCCEEDED: 'Succeeded',
-  PENDING: 'Pending',
-  FAILED: 'Failed',
-  REFUNDED: 'Refunded',
-};
 
 export default async function BillingOverviewPage({
   params,
@@ -207,11 +192,7 @@ export default async function BillingOverviewPage({
                     {formatMoney(p.amount, p.currency)}
                   </TD>
                   <TD>
-                    <span className="inline-flex items-center gap-1.5">
-                      <Badge tone={PAYMENT_STATUS_TONE[p.status]} dot>
-                        {PAYMENT_STATUS_LABEL[p.status]}
-                      </Badge>
-                    </span>
+                    <StatusPill status={p.status} />
                   </TD>
                   <TD muted className="max-w-[16rem] truncate text-xs" title={p.description ?? undefined}>
                     {p.description ?? '—'}

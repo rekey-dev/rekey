@@ -1,3 +1,5 @@
+'use client';
+
 /**
  * Shared, presentational pieces for the billing widgets.
  *

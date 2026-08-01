@@ -1,3 +1,5 @@
+'use client';
+
 /**
  * Billing widgets — `<PricingTable>` and `<CheckoutButton>`, Clerk-shaped.
  *

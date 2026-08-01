@@ -30,12 +30,17 @@ const PRIVATE_IPV4_RE =
   /^(?:10\.|127\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[0-1])\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|0\.|22[4-9]\.|2[3-5]\d\.)/;
 
 export function isPrivateIpv4(ip: string): boolean {
-  return PRIVATE_IPV4_RE.test(ip + '.');
+  if (PRIVATE_IPV4_RE.test(ip + '.')) return true;
+  // Reserved ranges that are not "private" in the RFC 1918 sense but are never
+  // a legitimate webhook or SMTP destination, and are routable enough to be
+  // useful to an attacker probing a network. 192.0.0.0/24 in particular holds
+  // the NAT64 discovery addresses.
+  return /^(192\.0\.0\.|198\.1[89]\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.)/.test(ip);
 }
 
 export function isPrivateIpv6(ip: string): boolean {
   const h = ip.toLowerCase();
-  return (
+  if (
     h === '::1' || // loopback
     h === '::' || // unspecified
     h.startsWith('fc') || // unique-local fc00::/7
@@ -44,8 +49,59 @@ export function isPrivateIpv6(ip: string): boolean {
     h.startsWith('fe9') ||
     h.startsWith('fea') ||
     h.startsWith('feb') ||
-    h.startsWith('::ffff:') // IPv4-mapped — defer to the v4 check below
-  );
+    h.startsWith('fec') || // deprecated site-local fec0::/10
+    h.startsWith('fed') ||
+    h.startsWith('fee') ||
+    h.startsWith('fef') ||
+    h.startsWith('::ffff:') // IPv4-mapped — the v4 check runs first in isPrivateIp
+  ) {
+    return true;
+  }
+
+  // Transition and translation prefixes that EMBED an IPv4 address. Each of
+  // these was a full bypass: the guard compared strings, so `64:ff9b::7f00:1`
+  // did not look loopback even though it routes to 127.0.0.1 on any NAT64
+  // deployment — and `64:ff9b::/96` is the RFC 6052 well-known prefix, which
+  // is standard on IPv6-only Kubernetes clusters. `64:ff9b::a9fe:a9fe` would
+  // have reached the cloud metadata service.
+  const embedded = embeddedIpv4(h);
+  return embedded !== null && isPrivateIpv4(embedded);
+}
+
+/**
+ * The IPv4 address embedded in a translation/transition IPv6 address, or null.
+ *
+ * Covers NAT64 (`64:ff9b::/96` and `64:ff9b:1::/48`), IPv4-compatible
+ * (`::a.b.c.d`, deprecated but still routed by some stacks) and 6to4
+ * (`2002:V4ADDR::/16`). Accepts both the dotted-quad and hex-group spellings,
+ * because `new URL` normalizes `[64:ff9b::127.0.0.1]` to `64:ff9b::7f00:1`.
+ */
+function embeddedIpv4(h: string): string | null {
+  const quadFrom = (g1: string, g2: string): string => {
+    const a = parseInt(g1, 16);
+    const b = parseInt(g2, 16);
+    if (Number.isNaN(a) || Number.isNaN(b)) return '';
+    return `${a >> 8}.${a & 0xff}.${b >> 8}.${b & 0xff}`;
+  };
+
+  // 6to4 embeds the v4 in the FIRST two groups, so it must be checked before
+  // anything that looks at the tail — `2002:7f00:1::` has no trailing groups
+  // at all, which is exactly how it slipped through a tail-first version.
+  if (h.startsWith('2002:')) {
+    const m = h.match(/^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})/);
+    return m ? quadFrom(m[1]!, m[2]!) || null : null;
+  }
+
+  const isTranslation = h.startsWith('64:ff9b:') || /^::(?!ffff:)/.test(h);
+  if (!isTranslation || h === '::' || h === '::1') return null;
+
+  // Both spellings: `new URL` normalizes [64:ff9b::127.0.0.1] to 64:ff9b::7f00:1,
+  // but the dotted form still arrives from callers that skip URL parsing.
+  const dotted = h.match(/:(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) return dotted[1]!;
+
+  const tail = h.match(/([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  return tail ? quadFrom(tail[1]!, tail[2]!) || null : null;
 }
 
 export function isPrivateIp(ip: string): boolean {
@@ -84,6 +140,42 @@ function blocked(reason: string): RekeyError {
  * `SSRF_BLOCKED` for a non-http(s) scheme, a loopback hostname, a DNS failure,
  * or any resolved address in a private/loopback/link-local range.
  */
+/**
+ * Reject a host:port pair that resolves anywhere non-public.
+ *
+ * Same DNS-level check as `assertSafeUrl`, minus the URL parsing — for
+ * protocols that are not http(s) and therefore have no URL to parse. Today
+ * that is operator-supplied SMTP, which was previously connected to with no
+ * check at all: a workspace admin could point it at `127.0.0.1:6379` or
+ * `169.254.169.254:80`, trigger a test send, and read the connection outcome
+ * back out of the API response. That is an internal port scanner reachable
+ * over the public API, and it existed because the guard lived next to the
+ * webhook code rather than next to *outbound connections*.
+ */
+export async function assertSafeHost(host: string, options: SafeUrlOptions = {}): Promise<void> {
+  const allowPrivate = options.allowPrivate ?? env.WEBHOOK_ALLOW_PRIVATE_TARGETS;
+  if (allowPrivate) return;
+
+  const bare = host.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!bare) throw blocked('host is empty.');
+  if (bare === 'localhost' || bare.endsWith('.localhost')) {
+    throw blocked('loopback hostnames are not allowed.');
+  }
+
+  let results: Array<{ address: string }>;
+  try {
+    results = await lookup(bare, { all: true });
+  } catch {
+    throw blocked(`DNS resolution failed for "${bare}".`);
+  }
+  if (results.length === 0) throw blocked(`"${bare}" did not resolve to any address.`);
+  for (const r of results) {
+    if (isPrivateIp(r.address)) {
+      throw blocked(`"${bare}" resolves to a private/loopback address.`);
+    }
+  }
+}
+
 export async function assertSafeUrl(rawUrl: string, options: SafeUrlOptions = {}): Promise<void> {
   let parsed: URL;
   try {
@@ -117,7 +209,12 @@ export async function assertSafeUrl(rawUrl: string, options: SafeUrlOptions = {}
   }
   for (const r of results) {
     if (isPrivateIp(r.address)) {
-      throw blocked(`"${host}" resolves to a private/loopback address (${r.address}).`);
+      // Deliberately NOT naming the resolved address. This message is stored
+      // on the delivery row and served back to the tenant, so including it
+      // turned the webhook log into an internal-DNS mapping oracle: point an
+      // endpoint at an internal hostname, emit an event, read the private IP
+      // out of the delivery error. The address stays in the server log.
+      throw blocked(`"${host}" resolves to a private/loopback address.`);
     }
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@rekey.dev/node",
-  "version": "2.0.0-rc.1",
+  "version": "2.0.0-rc.2",
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
@@ -24,7 +24,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo \"(eslint not yet wired)\"",
-    "test": "vitest run"
+    "test": "tsc -p tsconfig.json && vitest run"
   },
   "keywords": [
     "auth",

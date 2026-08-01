@@ -27,7 +27,7 @@ import {
   type DeviceContext,
   type SignInOutcome,
 } from '../auth/auth.service.js';
-import { webhookService } from '../webhooks/webhook.service.js';
+import { emitDetached } from '../webhooks/webhook.service.js';
 
 export interface OAuthPublicConfigEntry {
   clientId: string;
@@ -257,24 +257,22 @@ export const oauthService = {
       },
     });
     // Outbound webhook for new-via-OAuth users — mirrors password sign-up.
-    void webhookService
-      .emit({
-        applicationId: args.application.id,
-        type: 'user.created',
-        data: {
-          user: {
-            id: created.id,
-            email: created.email,
-            emailVerified: created.emailVerified,
-            role: created.role,
-            createdAt: created.createdAt.toISOString(),
-            metadata: created.metadata ?? null,
-          },
-          via: 'oauth',
-          provider: args.providerName,
+    emitDetached({
+      applicationId: args.application.id,
+      type: 'user.created',
+      data: {
+        user: {
+          id: created.id,
+          email: created.email,
+          emailVerified: created.emailVerified,
+          role: created.role,
+          createdAt: created.createdAt.toISOString(),
+          metadata: created.metadata ?? null,
         },
-      })
-      .catch(() => undefined);
+        via: 'oauth',
+        provider: args.providerName,
+      },
+    });
     return issueSessionOrMfaChallenge(args.application, created, args.device);
   },
 

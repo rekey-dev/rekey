@@ -135,7 +135,10 @@ export async function handleBillingProviderWebhook(
         'billing webhook signature verification failed',
       );
       throw new RekeyError({
-        statusCode: 401,
+        // 401 unless the module says otherwise — an ONLINE verifier that
+        // could not reach its provider answers 503 so the provider retries
+        // instead of reading "your signature is bad".
+        statusCode: result.statusCode ?? 401,
         code: result.code,
         message: result.message,
         ...(result.fix !== undefined && { fix: result.fix }),
@@ -144,8 +147,15 @@ export async function handleBillingProviderWebhook(
   }
 
   // --- Durable idempotency ----------------------------------------------
-  // Same storage + unique key as always: webhook_events UNIQUE(provider,
-  // providerEventId). The DB is the source of truth — never Redis.
+  // Storage: webhook_events UNIQUE(applicationId, provider, providerEventId).
+  // The DB is the source of truth — never Redis.
+  //
+  // The applicationId is IN the key, and has to be: a provider event id is
+  // unique within the provider ACCOUNT, and two Applications can share one
+  // (staging + production, a cloned app). While the key was global, the second
+  // tenant's genuine event collided with the first's, took the duplicate-skip
+  // branch below, and answered 200 — so the provider stopped retrying and that
+  // tenant's invoice.paid was lost for good.
   const providerEventId = module.webhook.extractEventId(req.payload, req);
   const eventType = module.webhook.extractEventType(req.payload);
   let webhookRow;
@@ -169,7 +179,13 @@ export async function handleBillingProviderWebhook(
     //     coupon redemption commits atomically with the payment, provision
     //     is idempotent per period, status updates are absolute).
     const existing = await prisma.webhookEvent.findUnique({
-      where: { provider_providerEventId: { provider: module.name, providerEventId } },
+      where: {
+        applicationId_provider_providerEventId: {
+          applicationId: application.id,
+          provider: module.name,
+          providerEventId,
+        },
+      },
     });
     if (!existing || existing.processedAt) {
       request.log.info(

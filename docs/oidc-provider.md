@@ -5,7 +5,11 @@ to Rekey to sign in, and gets back an ID Token asserting who they are. This is
 the mirror image of [OAuth sign-in](auth.md), where Rekey is the *client* of
 Google/GitHub/an enterprise IdP.
 
-It is off by default. Turn it on per Application:
+It is off by default. Turn it on per Application in **Panel → Application →
+Auth → Security policy**, with the *Act as an OpenID Connect provider* switch
+(next to *Require a verified email*, which it wants — see below).
+
+Or over the API:
 
 ```bash
 curl -X PATCH "$REKEY_URL/api/v1/tenant/applications/$APP_ID/auth-config" \
@@ -273,11 +277,15 @@ Two deliberate departures from the letter of the spec:
 
 Not built (deliberately, listed so nobody assumes otherwise):
 
-- No panel UI for the toggle — `PATCH …/auth-config` is the surface. The
-  operator MCP `update_auth_config` tool does **not** accept `oidcEnabled`
-  either: putting a public authentication surface on the internet is an
+- The operator MCP `update_auth_config` tool does **not** accept `oidcEnabled`:
+  putting a public authentication surface on the internet is an
   operator-console decision, not an AI-tool one. Same for
-  `dynamicClientRegistration`.
+  `dynamicClientRegistration`. (The console half of that argument was missing
+  when this shipped — there was no panel toggle either, so the only way in was
+  a hand-rolled `PATCH`. The `oidcEnabled` toggle is now on the Auth tab; see
+  the top of this document.)
+- No panel toggle for `dynamicClientRegistration` — `PATCH …/auth-config` is
+  still the only surface for that one.
 - No operator-side client registration. `POST /oauth/register` is the only way
   to create an OAuth client, which is why open registration is the default —
   see [Client registration](#client-registration).

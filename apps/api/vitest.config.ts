@@ -25,5 +25,41 @@ export default defineConfig({
     globalSetup: ['./test/global-setup.ts'],
     testTimeout: 15_000,
     hookTimeout: 30_000,
+
+    // Coverage is opt-in (`pnpm test:coverage`), never on by default: the v8
+    // provider adds ~15% to a run that is already the slowest job in CI, and
+    // the number is only interesting when someone is looking at it.
+    //
+    // The thresholds are a RATCHET, not a target. They sit a couple of points
+    // under whatever the suite currently reaches, so they catch a PR that
+    // deletes coverage without failing on the day they land — a threshold that
+    // is red on arrival is a threshold that gets deleted. Raise them when the
+    // real number moves up; never lower them to make a build pass.
+    coverage: {
+      provider: 'v8',
+      // text-summary for the CI log, json-summary for the step summary, lcov
+      // for anything that wants to render annotations later.
+      reporter: ['text-summary', 'json-summary', 'lcov'],
+      reportsDirectory: './coverage',
+      include: ['src/**/*.ts'],
+      exclude: [
+        'src/**/*.d.ts',
+        // Boot/wiring with no branches worth asserting: index.ts starts the
+        // server (never imported by a test), config/env.ts is a schema parsed
+        // once at import, and the generated OpenAPI dump is documentation.
+        'src/index.ts',
+        'src/config/env.ts',
+        'src/lib/swagger.ts',
+      ],
+      // Measured 2026-08-01 at 105 files / 1116 tests:
+      //   statements 83.07%  branches 78.94%  functions 90.05%  lines 83.07%
+      // Each floor sits ~3-5 points under that.
+      thresholds: {
+        lines: 80,
+        statements: 80,
+        functions: 85,
+        branches: 75,
+      },
+    },
   },
 });

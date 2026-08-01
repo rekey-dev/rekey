@@ -20,6 +20,9 @@ export async function GET(req: NextRequest): Promise<Response> {
       method: 'GET',
       path: `/api/v1/tenant/applications/check-slug?slug=${encodeURIComponent(slug)}`,
       redirectOn401: false,
+      // This is a JSON proxy, not a page: the client component wants an
+      // envelope back, not a rendered 404/403 interrupt.
+      interruptOnAccessError: false,
     });
     return NextResponse.json(data);
   } catch (err) {

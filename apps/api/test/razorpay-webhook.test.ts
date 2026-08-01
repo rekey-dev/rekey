@@ -226,7 +226,7 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
     const after = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(after.status).toBe('ACTIVE');
 
-    const payment = await prisma.payment.findUniqueOrThrow({ where: { providerPaymentId: 'pay_chg_1' } });
+    const payment = await prisma.payment.findFirstOrThrow({ where: { providerPaymentId: 'pay_chg_1' } });
     expect(payment.status).toBe('SUCCEEDED');
     expect(payment.amount).toBe(49900);
     expect(payment.currency).toBe('INR');
@@ -284,7 +284,7 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
     expect(await creditsService.getBalance(applicationId, { endUserId: endUser.id })).toBe(500);
 
     // period advances; next charge (paid_count 2) refills a fresh 500.
-    await prisma.subscription.update({
+    await prisma.subscription.updateMany({
       where: { providerSubId: 'sub_credit' },
       data: { currentPeriodEnd: new Date('2026-08-31T00:00:00.000Z') },
     });
@@ -369,7 +369,7 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
 
     const after = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(after.status).toBe('ACTIVE');
-    const payment = await prisma.payment.findUniqueOrThrow({ where: { providerPaymentId: 'pay_link_1' } });
+    const payment = await prisma.payment.findFirstOrThrow({ where: { providerPaymentId: 'pay_link_1' } });
     expect(payment.status).toBe('SUCCEEDED');
     expect(payment.amount).toBe(49900);
   });
@@ -379,8 +379,8 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
     const { payload, headers } = signed(evt, 'evt_unhandled');
     const res = await app.inject({ method: 'POST', url: URL, headers, payload });
     expect(res.statusCode).toBe(200);
-    const row = await prisma.webhookEvent.findUniqueOrThrow({
-      where: { provider_providerEventId: { provider: 'razorpay', providerEventId: 'evt_unhandled' } },
+    const row = await prisma.webhookEvent.findFirstOrThrow({
+      where: { provider: 'razorpay', providerEventId: 'evt_unhandled' },
     });
     expect(row.processedAt).not.toBeNull();
     expect(row.processingError).toBeNull();

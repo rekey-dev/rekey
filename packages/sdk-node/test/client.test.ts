@@ -355,6 +355,29 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     expect(r.resetToken).toBe('rt-opaque');
   });
 
+  it('resendVerificationEmail POSTs to /resend-verification with no user token', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        success: true,
+        data: { emailSent: false, verificationToken: 'vt-opaque' },
+      }),
+    );
+    const client = makeClient(fetchSpy);
+    const r = await client.auth.resendVerificationEmail({
+      email: 'a@b.co',
+      verifyUrl: 'https://app.example.com/verify?t={token}',
+    });
+    const [url, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
+    expect(url).toBe('https://api.example.com/api/v1/auth/resend-verification');
+    expect(JSON.parse(init.body as string)).toEqual({
+      email: 'a@b.co',
+      verifyUrl: 'https://app.example.com/verify?t={token}',
+    });
+    // The whole point of this route: it works without a session.
+    expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBeUndefined();
+    expect(r.verificationToken).toBe('vt-opaque');
+  });
+
   it('resetPassword POSTs to /reset-password', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(
       jsonResponse(200, { success: true, data: { ok: true } }),

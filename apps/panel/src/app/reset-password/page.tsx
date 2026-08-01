@@ -66,7 +66,7 @@ export default async function ResetPasswordPage({
         </p>
         <Link
           href="/forgot-password"
-          className="block w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-center text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] transition-colors"
+          className="block w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-center text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] transition-colors"
         >
           Email me a reset link
         </Link>
@@ -86,7 +86,7 @@ export default async function ResetPasswordPage({
             can't offer a hidden autoComplete="username" field here without an
             API change — password managers fall back to prompting. */}
         <PasswordConfirmFields inputClassName={INPUT_BASE} />
-        <SubmitButton pendingLabel="Saving password…" className="w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-60 disabled:cursor-not-allowed">
+        <SubmitButton pendingLabel="Saving password…" className="w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60 disabled:cursor-not-allowed">
           Set new password
         </SubmitButton>
 

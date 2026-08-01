@@ -226,7 +226,7 @@ Both are `sameSite=lax` and `secure` in production only (so local `http://localh
 ## Links
 
 - Docs: [/docs](https://rekey.dev/docs) · [SDK guide](https://rekey.dev/docs/sdk) · [API reference](https://rekey.dev/docs/api) · [agent prompt](https://rekey.dev/docs/prompt)
-- Example: [`examples/nextjs-saas`](https://github.com/rekey-dev/rekey/blob/main/examples/nextjs-saas) — a complete App Router SaaS using this package end-to-end.
+- Component reference: [docs/react-components.md](https://github.com/rekey-dev/rekey/blob/main/docs/react-components.md) — the `<SignIn>` / `<PricingTable>` family these helpers pair with, including the matching Server Actions. (The `examples/` apps were removed pending a rebuilt set.)
 
 ## License
 

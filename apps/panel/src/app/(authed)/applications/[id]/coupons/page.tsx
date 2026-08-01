@@ -1,4 +1,5 @@
 import * as React from 'react';
+import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { api, PanelApiError, type ApplicationRow, type CouponRow } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
@@ -206,6 +207,18 @@ export default async function CouponsPage({
         <EmptyState
           title="No coupons yet"
           description="Coupons grant a percentage or flat-amount discount at checkout. Codes are case-insensitive and unique per Application."
+          // /applications offers a CTA from its empty state and this page did
+          // not, so the one screen with nothing on it also had nothing to do.
+          // The link carries the modal's own reopen flag rather than mounting a
+          // second Modal with a duplicate modalKey.
+          action={
+            <Link
+              href={`/applications/${id}/coupons?newCoupon=1`}
+              className="inline-block rounded-md bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
+            >
+              + New coupon
+            </Link>
+          }
         />
       ) : (
         <CouponsTable rows={[...active, ...inactive]} applicationId={id} />

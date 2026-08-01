@@ -95,6 +95,7 @@ export default async function McpPage({
   return (
     <div className="space-y-6">
       <PageHeader
+        level={2}
         title="MCP server"
         description="Expose a hosted Model Context Protocol server for this application. End-users authenticate with their account (OAuth 2.1 + PKCE) and connect MCP clients like Claude Code, Claude Desktop, and Cursor to read their own data."
       />
@@ -132,7 +133,7 @@ export default async function McpPage({
           ) : (
             <SubmitButton
               pendingLabel="Enabling…"
-              className="rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-primary)] disabled:opacity-60 disabled:cursor-not-allowed"
+              className="rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-primary)] disabled:opacity-60 disabled:cursor-not-allowed"
             >
               Enable
             </SubmitButton>

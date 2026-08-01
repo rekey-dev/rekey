@@ -293,7 +293,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
     const after = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(after.status).toBe('ACTIVE');
 
-    const payment = await prisma.payment.findUniqueOrThrow({
+    const payment = await prisma.payment.findFirstOrThrow({
       where: { providerPaymentId: 'in_test_paid' },
     });
     expect(payment.status).toBe('SUCCEEDED');
@@ -543,7 +543,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
 
     // Period advances (subscription.updated) → next invoice extends by ~30 days.
     const p2 = new Date('2026-04-30T00:00:00.000Z');
-    await prisma.subscription.update({ where: { providerSubId: 'sub_timed_lic' }, data: { currentPeriodEnd: p2 } });
+    await prisma.subscription.updateMany({ where: { providerSubId: 'sub_timed_lic' }, data: { currentPeriodEnd: p2 } });
     await fireInvoicePaid('evt_lic_p2', 'in_lic_p2');
     const lic2 = await prisma.license.findUniqueOrThrow({ where: { id: lic1.id } });
     const delta = lic2.expiresAt!.getTime() - expiry1;
@@ -598,7 +598,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
     const after = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(after.status).toBe('PAST_DUE');
 
-    const payment = await prisma.payment.findUniqueOrThrow({
+    const payment = await prisma.payment.findFirstOrThrow({
       where: { providerPaymentId: 'in_test_fail' },
     });
     expect(payment.status).toBe('FAILED');
@@ -661,8 +661,8 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
       payload,
     });
     expect(res.statusCode).toBe(200);
-    const row = await prisma.webhookEvent.findUniqueOrThrow({
-      where: { provider_providerEventId: { provider: 'stripe', providerEventId: 'evt_unhandled' } },
+    const row = await prisma.webhookEvent.findFirstOrThrow({
+      where: { provider: 'stripe', providerEventId: 'evt_unhandled' },
     });
     expect(row.processedAt).not.toBeNull();
     expect(row.processingError).toBeNull();

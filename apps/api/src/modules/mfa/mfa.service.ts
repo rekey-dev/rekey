@@ -25,7 +25,7 @@ import {
 } from '../../lib/mfa.js';
 import { assertNotLocked, registerFailure, clearFailures, MFA_POLICY } from '../../lib/brute-force.js';
 import { emailService } from '../email/email.service.js';
-import { webhookService } from '../webhooks/webhook.service.js';
+import { emitDetached } from '../webhooks/webhook.service.js';
 
 interface SetupResult {
   /** otpauth:// URI for QR. The customer's app turns this into a QR code. */
@@ -123,13 +123,11 @@ export const mfaService = {
           },
         })
         .catch(() => undefined);
-      void webhookService
-        .emit({
-          applicationId: args.application.id,
-          type: 'mfa.enabled',
-          data: { userId: args.endUserId, email: endUser.email, enabledAt: enabledAt.toISOString() },
-        })
-        .catch(() => undefined);
+      emitDetached({
+        applicationId: args.application.id,
+        type: 'mfa.enabled',
+        data: { userId: args.endUserId, email: endUser.email, enabledAt: enabledAt.toISOString() },
+      });
     }
 
     return { ok: true };
@@ -217,13 +215,11 @@ export const mfaService = {
     }
     const removed = await prisma.mfaCredential.deleteMany({ where: { endUserId: args.endUserId } });
     if (removed.count > 0 && args.application) {
-      void webhookService
-        .emit({
-          applicationId: args.application.id,
-          type: 'mfa.disabled',
-          data: { userId: args.endUserId },
-        })
-        .catch(() => undefined);
+      emitDetached({
+        applicationId: args.application.id,
+        type: 'mfa.disabled',
+        data: { userId: args.endUserId },
+      });
     }
   },
 

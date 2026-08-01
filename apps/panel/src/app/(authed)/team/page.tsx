@@ -15,6 +15,7 @@ import { formatDate } from '@/lib/date';
 import { publicHttpUrl } from '@/lib/public-url';
 import { PageHeader } from '@/components/PageHeader';
 import { SectionHeader } from '@/components/Card';
+import { EmptyState } from '@/components/EmptyState';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { Field, fieldInputCls } from '@/components/Field';
@@ -256,9 +257,11 @@ export default async function TeamPage({
           </p>
         )}
         {memberRows.length === 0 ? (
-          <p className="text-sm text-[var(--color-muted-fg)]">
-            No members with the MEMBER role — nothing to scope.
-          </p>
+          <EmptyState
+            variant="inline"
+            title="No members with the MEMBER role"
+            description="Per-application access only applies to members. Owners and admins always see everything."
+          />
         ) : (
           <ul className="space-y-3">
             {memberRows.map((m) => {
@@ -337,7 +340,7 @@ export default async function TeamPage({
                       </label>
                       <SubmitButton
                         pendingLabel="Granting…"
-                        className="rounded-md bg-[var(--color-primary)] px-3 py-2 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-60"
+                        className="rounded-md bg-[var(--color-primary)] px-3 py-2 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60"
                       >
                         Grant access
                       </SubmitButton>
@@ -354,7 +357,11 @@ export default async function TeamPage({
       <div className="space-y-3">
         <SectionHeader title="Invitations" count={`(${invitations.length})`} />
         {invitations.length === 0 ? (
-          <p className="text-sm text-[var(--color-muted-fg)]">No invitations.</p>
+          <EmptyState
+            variant="inline"
+            title="No pending invitations"
+            description="Invite a teammate above to give them access to this workspace."
+          />
         ) : (
           <Table minWidth="min-w-[40rem]">
             <THead>
@@ -438,7 +445,7 @@ export default async function TeamPage({
             </div>
             <SubmitButton
               pendingLabel="Generating link…"
-              className="w-full rounded-md bg-[var(--color-primary)] px-3 py-2 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] sm:w-auto disabled:opacity-60"
+              className="w-full rounded-md bg-[var(--color-primary)] px-3 py-2 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] sm:w-auto disabled:opacity-60"
             >
               Generate invite link
             </SubmitButton>

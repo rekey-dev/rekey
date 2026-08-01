@@ -223,10 +223,18 @@ describe('auth security review (2.0.0-rc.1)', () => {
 
     it('the verification mail goes out even with the auto-send switch off', async () => {
       // Otherwise the two settings together mint accounts nobody can reach:
-      // no session to re-send from, and no link ever posted.
+      // no session to re-send from, and no link ever posted. (The first half of
+      // that is no longer true — POST /auth/resend-verification needs no
+      // session — but a link the user never received is still the wrong
+      // default, so this invariant stands.)
+      //
+      // `appUrl` because a send with no resolvable link is skipped outright
+      // rather than mailing a button-less confirmation; that behaviour has its
+      // own coverage in email-verification-config.test.ts.
       const fx = await bootstrap({
         requireEmailVerification: true,
         sendVerificationEmailOnSignUp: false,
+        appUrl: 'https://app.example.com',
       });
       expect((await signUp(fx, 'stranded@example.com')).statusCode).toBe(403);
 

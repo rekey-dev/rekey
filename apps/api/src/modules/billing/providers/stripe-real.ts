@@ -42,6 +42,9 @@ interface RealStripeCreds {
  */
 const CHECKOUT_COUPON_TTL_SECONDS = 25 * 60 * 60;
 
+/** Hard ceiling on any Stripe API call. See the constructor for why. */
+const STRIPE_TIMEOUT_MS = 10_000;
+
 export class RealStripeProvider implements BillingProvider {
   readonly name = 'stripe';
   private readonly stripe: Stripe;
@@ -49,6 +52,15 @@ export class RealStripeProvider implements BillingProvider {
   constructor(private readonly creds: RealStripeCreds) {
     this.stripe = new Stripe(creds.apiKey, {
       apiVersion: '2024-11-20.acacia' as Stripe.LatestApiVersion,
+      // The SDK default is 80 seconds. Every call from this class is made
+      // while an operator or an end-user is waiting on an HTTP response, and
+      // 80s of holding a handler open is indistinguishable from an outage
+      // from the caller's side. 10s matches the budget the PayPal/Razorpay
+      // providers and the OAuth exchanges use.
+      timeout: STRIPE_TIMEOUT_MS,
+      // One retry, which the SDK only applies to requests it knows are safe to
+      // repeat (it sends an idempotency key on writes). Default is 0.
+      maxNetworkRetries: 1,
     });
   }
 

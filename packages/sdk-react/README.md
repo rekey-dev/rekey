@@ -304,7 +304,7 @@ A single-plan CTA.
 
 An Application can enable up to **3 billing providers** (`stripe` / `paypal` / `razorpay`). Checkout's `provider` is optional — when you omit it, a **server-side geo router** auto-picks one. `<ProviderPicker>` lets the end-user override that pick with a "Pay with…" radio group.
 
-Like `<PricingTable plans>`, the provider list is a **prop you fetch server-side** — never from the browser. `GET /api/v1/billing/providers` (`billing.getProviders()`) is **secret-key guarded and rejects public keys**, so the picker takes `providers` and renders them; it issues no API calls.
+Like `<PricingTable plans>`, the provider list is a **prop**: the picker renders what you hand it and issues no API calls of its own. `GET /api/v1/billing/providers` sits at the same trust level as `/plans` — it accepts the **publishable key** as well as a secret key — so you can fetch it either server-side with `billing.getProviders()` or in the browser with `listBillingProviders()`.
 
 ```tsx
 // Server component — fetch the list with the secret key, pass it down.
@@ -415,9 +415,12 @@ Slots: `root`, `card`, `header`, `title`, `subtitle`, `label`, `input`, `button`
 
 ---
 
-## Full example
+## Full reference
 
-See [`examples/nextjs-saas`](https://github.com/rekey-dev/rekey/blob/main/examples/nextjs-saas) for a complete Next.js 15 app wiring every component — including the `/kitchen-sink` page (a live gallery) — against a real Rekey Application with org-scoped billing.
+Every component's props, defaults and a working example per component:
+[docs/react-components.md](https://github.com/rekey-dev/rekey/blob/main/docs/react-components.md).
+(The `examples/` apps that used to live here were removed pending a rebuilt
+set — the reference is checked against the source instead.)
 
 ## Headless escape hatch
 

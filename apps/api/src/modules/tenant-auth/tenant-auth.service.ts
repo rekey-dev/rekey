@@ -51,6 +51,7 @@ import {
 import { panelBaseUrl } from '../../lib/panel-url.js';
 import { emailService } from '../email/email.service.js';
 import { recordAuthEmailDeliveryFailure } from '../../lib/email-transport.js';
+import { checkPasswordBreached } from '../../lib/breached-password.js';
 import { env } from '../../config/env.js';
 
 /**
@@ -74,6 +75,47 @@ import { resolveSignupInvite, consumeSignupInvite } from './operator-signup-poli
 import { recordSecurityEvent } from '../../lib/security-events.js';
 
 const PASSWORD_MIN_LENGTH = 8;
+
+/**
+ * The only rule an operator password had to satisfy, everywhere, was
+ * `length >= 8` — so `password` was accepted. Meanwhile the product ships HIBP
+ * k-anonymity breach checking for its CUSTOMERS' end-users
+ * (`lib/breached-password.ts`, wired into `auth.service.ensurePasswordNotBreached`)
+ * and never wired it to its own operators — the accounts that reach every
+ * workspace, every end-user and every decrypted billing credential in the
+ * deployment. Holding the more privileged account to the weaker standard is
+ * backwards.
+ *
+ * Applies to sign-up, reset and change alike, so there is no path that sets an
+ * operator password without passing through this.
+ *
+ * No availability cost: `checkPasswordBreached` has a 1.5s timeout and fails
+ * OPEN — an unreachable HIBP lets the password through rather than blocking
+ * sign-up. `HIBP_BREACH_CHECK_DISABLED` turns it off deployment-wide, the same
+ * switch the end-user path honours. There is deliberately no per-operator
+ * opt-out: end-users get one because the Application owner is accountable for
+ * their own users' experience, and nobody is in that position for operators.
+ */
+async function assertOperatorPasswordAcceptable(password: string): Promise<void> {
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'PASSWORD_TOO_SHORT',
+      message: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`,
+      fix: `Send a password of length >= ${PASSWORD_MIN_LENGTH}.`,
+    });
+  }
+  if (env.HIBP_BREACH_CHECK_DISABLED) return;
+  const result = await checkPasswordBreached(password);
+  if (result.breached) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'PASSWORD_BREACHED',
+      message: `This password has been seen in ${result.count.toLocaleString()} known breach corpora and cannot be used.`,
+      fix: "Choose a password you haven't used anywhere else. A password manager generating a long random string is the easiest path.",
+    });
+  }
+}
 
 export type PublicTenantUser = Omit<TenantUser, 'passwordHash'>;
 
@@ -202,14 +244,7 @@ export const tenantAuthService = {
     inviteKey?: string | undefined;
     device?: TenantDeviceContext;
   }): Promise<AuthSessionResult> {
-    if (input.password.length < PASSWORD_MIN_LENGTH) {
-      throw new RekeyError({
-        statusCode: 400,
-        code: 'PASSWORD_TOO_SHORT',
-        message: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`,
-        fix: `Send a password of length >= ${PASSWORD_MIN_LENGTH}.`,
-      });
-    }
+    await assertOperatorPasswordAcceptable(input.password);
     // Enforce OPERATOR_SIGNUP_MODE before doing any work. Validation only —
     // the key is consumed atomically inside the creation transaction below, so
     // a later failure (e.g. duplicate email) does not burn it.
@@ -586,16 +621,37 @@ export const tenantAuthService = {
       });
     }
     if (outcome.kind === 'revoked') {
-      // Reuse-detection: mirror the end-user flow — revoke every active
-      // refresh for this operator. Compromise of one refresh in the chain
-      // is treated as compromise of the chain.
-      await revokeAllTenantRefreshTokensForUser(outcome.token.tenantUserId);
+      // A revoked token has two very different histories, and `replacedById`
+      // is what tells them apart:
+      //
+      //   set  → the token was ROTATED. Someone is replaying a link in the
+      //          chain that has already been spent, which is the signature of
+      //          a stolen refresh token. Treat compromise of one link as
+      //          compromise of the chain and revoke everything.
+      //   null → the token was DELIBERATELY revoked — the operator signed this
+      //          device out, or revoked it from the sessions list. Replaying
+      //          it means only that the device has not noticed yet.
+      //
+      // Both used to cascade, which made `DELETE /sessions/:id` do the
+      // opposite of what it says: the revoked device's next scheduled refresh
+      // replayed its token, was read as chain compromise, and signed the
+      // operator out of the session they had deliberately KEPT. A revocation
+      // the operator performed themselves is not evidence of an attacker.
+      if (outcome.token.replacedById !== null) {
+        await revokeAllTenantRefreshTokensForUser(outcome.token.tenantUserId);
+        throw new RekeyError({
+          statusCode: 401,
+          code: 'REFRESH_TOKEN_REUSED',
+          message:
+            'Refresh token has already been used. All sessions for this operator have been revoked as a precaution.',
+          fix: 'A used refresh token cannot be replayed. Sign in again to obtain a fresh session.',
+        });
+      }
       throw new RekeyError({
         statusCode: 401,
-        code: 'REFRESH_TOKEN_REUSED',
-        message:
-          'Refresh token has already been used. All sessions for this operator have been revoked as a precaution.',
-        fix: 'A used refresh token cannot be replayed. Sign in again to obtain a fresh session.',
+        code: 'REFRESH_TOKEN_REVOKED',
+        message: 'This session was revoked.',
+        fix: 'Sign in again. Other sessions for this operator are unaffected.',
       });
     }
     if (outcome.kind === 'expired') {
@@ -763,14 +819,7 @@ export const tenantAuthService = {
   },
 
   async resetPassword(input: { token: string; newPassword: string }): Promise<{ ok: true }> {
-    if (input.newPassword.length < PASSWORD_MIN_LENGTH) {
-      throw new RekeyError({
-        statusCode: 400,
-        code: 'PASSWORD_TOO_SHORT',
-        message: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`,
-        fix: `Send a password of length >= ${PASSWORD_MIN_LENGTH}.`,
-      });
-    }
+    await assertOperatorPasswordAcceptable(input.newPassword);
     const outcome = await lookupTenantResetToken(input.token);
     if (outcome.kind === 'unknown') {
       throw new RekeyError({
@@ -821,14 +870,7 @@ export const tenantAuthService = {
     currentPassword: string;
     newPassword: string;
   }): Promise<{ ok: true }> {
-    if (input.newPassword.length < PASSWORD_MIN_LENGTH) {
-      throw new RekeyError({
-        statusCode: 400,
-        code: 'PASSWORD_TOO_SHORT',
-        message: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`,
-        fix: `Send a password of length >= ${PASSWORD_MIN_LENGTH}.`,
-      });
-    }
+    await assertOperatorPasswordAcceptable(input.newPassword);
     const user = await prisma.tenantUser.findUniqueOrThrow({ where: { id: input.tenantUserId } });
     const ok = await verifyPassword(user.passwordHash, input.currentPassword);
     if (!ok) {

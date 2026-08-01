@@ -47,7 +47,7 @@ import type { FastifyInstance } from 'fastify';
 import { RekeyError } from '../../lib/error.js';
 import { requestContext } from '../../lib/security-events.js';
 import { resolveOperatorMcpBearer } from './bearer-auth.js';
-import { operatorMcpIssuer, scopeHasWrite, scopeHasAdmin } from './oauth.service.js';
+import { scopeHasWrite, scopeHasAdmin } from './oauth.service.js';
 import { handleOperatorMcpMessage, type JsonRpcMessage } from './tenant-mcp-server.js';
 
 export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
@@ -99,10 +99,10 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
           fix: 'Ensure the request carries Authorization: Bearer …',
         });
       }
-      // Add the WWW-Authenticate hint pointing at protected-resource metadata
-      // so clients can run the discovery cascade — but only on success replies
-      // since an unauthed call already 401s before this handler. Skipped here.
-      reply.header('WWW-Authenticate', `Bearer resource_metadata="${operatorMcpIssuer()}/.well-known/oauth-protected-resource"`);
+      // `WWW-Authenticate` is set in the auth hook before it can throw, so it
+      // rides every 401 as well as this success reply. It used to be set only
+      // here, which meant the one response that needed it never carried it.
+      //
       // Write capability is whichever the resolved credential carries:
       //   - OAuth JWT: the granted `scope` string includes `mcp:operator:write`.
       //   - PAT: the token's scopes include `applications:write`.

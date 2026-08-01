@@ -235,7 +235,9 @@ The auth module enforces:
 
   It is also the prerequisite for the OpenID Connect `email` scope — see [oidc-provider.md](oidc-provider.md#why-email-needs-requireemailverification).
 
-  Turning it on takes effect immediately for accounts that already exist, so send the verification email (above) before enforcing it. A blocked user cannot re-send their own link — `POST /auth/send-verification` needs a session — so the routes back in are the original email, a magic link if that method is enabled, or an operator flipping the flag from Panel → Application → End-users.
+  Turning it on takes effect immediately for accounts that already exist, so send the verification email (above) before enforcing it. A blocked user can ask for a fresh link themselves with **`POST /api/v1/auth/resend-verification`** (`{ email }`, no session — that is the point, since this gate is what denies them one). It answers 200 with a constant body whatever happened, so it discloses nothing about which addresses have accounts, and it is rate-limited per (Application, address, IP) exactly like `/auth/forgot-password`. `POST /auth/send-verification` remains the authenticated version, for a user who *has* a session and is changing their address. Other routes back in: the original email, a magic link if that method is enabled, or an operator flipping the flag from Panel → Application → End-users.
+
+  One prerequisite for both: a verification link has to be *buildable*. If the Application has no `appUrl`, no usable `redirectUrls` origin and the deployment has no `DEFAULT_APP_URL`, the automatic sign-up send and `resend-verification` are **skipped entirely** rather than mailing a confirmation with no button in it, and an `auth.email_delivery_failed` event is recorded naming the setting to fix. Set the Application URL (Panel → Application → Auth) before enabling the gate, or pass `verifyUrl` per call.
 
 `google` / `github` (module `oauth`), `magic_link`, `passkey` and `organizationsEnabled` (module `organizations`) are all wired — enabling one in `authConfig.methods` is what opens the corresponding routes.
 

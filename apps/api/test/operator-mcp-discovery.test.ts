@@ -70,4 +70,38 @@ describe('Operator MCP OAuth AS — discovery', () => {
     expect(md.resource).toContain('/api/v1/tenant/mcp');
     expect(md.authorization_servers[0]).toContain('/api/v1/tenant/mcp');
   });
+  // RFC 9728, which the MCP spec makes a MUST: the 401 is what points an
+  // undiscovered client at the authorization server. This shipped without the
+  // header — it was set only on the success reply, i.e. on the one response a
+  // client that already has a token does not need it on. A spec-compliant
+  // client could not discover this surface, and Claude specifically will not
+  // honour the header on a 200.
+  it('401 on the MCP endpoint carries the WWW-Authenticate discovery hint', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/tenant/mcp',
+      payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+    });
+
+    expect(res.statusCode).toBe(401);
+    const header = res.headers['www-authenticate'];
+    expect(header).toBeDefined();
+    expect(String(header)).toContain('Bearer');
+    // Must name the protected-resource document, not just the scheme —
+    // that URL is the whole point of the cascade.
+    expect(String(header)).toContain('resource_metadata=');
+    expect(String(header)).toContain('/.well-known/oauth-protected-resource');
+  });
+
+  it('a bad bearer gets the same hint as a missing one', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/tenant/mcp',
+      headers: { authorization: 'Bearer rp_op_definitely-not-a-real-token' },
+      payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(String(res.headers['www-authenticate'])).toContain('resource_metadata=');
+  });
 });

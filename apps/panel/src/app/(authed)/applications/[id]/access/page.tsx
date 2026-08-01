@@ -2,8 +2,8 @@ import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
-import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
+import { StickyFormFooter } from '@/components/StickyFormFooter';
 import { Banner } from '@/components/Banner';
 import { PageHeader } from '@/components/PageHeader';
 
@@ -55,8 +55,41 @@ const ERR: Record<string, string> = {
   FST_ERR_VALIDATION: 'One or more entries are invalid. IPs must be IP/CIDR; origins like https://app.example.com.',
 };
 
+// `placeholder:` is the point of this class list. The example values in these
+// two boxes render in the SAME mono face as a real entry, and measured at
+// 7.4:1 they were no dimmer than configured text — on a security page, an
+// empty IP allowlist looked exactly like one containing 10.0.0.0/8. Faint +
+// italic makes the distinction visible without a second glance; the explicit
+// state line below each box makes it unambiguous.
 const textareaCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-mono text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-mono text-[var(--color-fg)] placeholder:italic placeholder:text-[var(--color-faint-fg)] placeholder:opacity-70 focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
+
+/**
+ * Affirmative "what is in force right now" line, matching how the API-keys page
+ * already states its origin rule ("No origin allowlist set — any website can
+ * use this key"). An empty security control has to say what it means, not just
+ * be empty.
+ */
+function StateLine({
+  configured,
+  emptyLabel,
+  setLabel,
+}: {
+  configured: string[];
+  emptyLabel: string;
+  setLabel: (n: number) => string;
+}): React.JSX.Element {
+  const n = configured.length;
+  return (
+    <p
+      className={`text-xs font-medium ${
+        n === 0 ? 'text-amber-700 dark:text-amber-400' : 'text-[var(--color-fg)]'
+      }`}
+    >
+      {n === 0 ? emptyLabel : setLabel(n)}
+    </p>
+  );
+}
 
 export default async function AccessPage({
   params,
@@ -81,6 +114,7 @@ export default async function AccessPage({
   return (
     <div className="space-y-5">
       <PageHeader
+        level={2}
         title="Access controls"
         description="Restrict which IPs your server-side secret keys may call from, which browser origins may call the API, and force every end-user to re-authenticate."
       />
@@ -111,12 +145,17 @@ export default async function AccessPage({
             <code>rp_test_</code> calls must originate from an allowed address. Empty = allow all.
             Browser (public-key) calls are never gated.
           </p>
+          <StateLine
+            configured={app.ipAllowlist ?? []}
+            emptyLabel="No IP allowlist set — secret keys may be used from any address."
+            setLabel={(n) => `${n} ${n === 1 ? 'entry' : 'entries'} in force — secret keys are refused from anywhere else.`}
+          />
           <textarea
             id="ipAllowlist"
             name="ipAllowlist"
             defaultValue={ipAllowlist}
             rows={4}
-            placeholder={'10.0.0.0/8\n203.0.113.4'}
+            placeholder={'e.g. 10.0.0.0/8\ne.g. 203.0.113.4'}
             className={textareaCls}
           />
         </div>
@@ -128,17 +167,25 @@ export default async function AccessPage({
             One origin per line — scheme + host + optional port, no path (e.g.{' '}
             <code>https://app.example.com</code>). The API allows these origins for browser calls.
           </p>
+          <StateLine
+            configured={app.corsOrigins ?? []}
+            emptyLabel="No origin allowlist set — any website can make browser calls with this app's publishable key."
+            setLabel={(n) => `${n} ${n === 1 ? 'origin' : 'origins'} allowed — browser calls from anywhere else are refused.`}
+          />
           <textarea
             id="corsOrigins"
             name="corsOrigins"
             defaultValue={corsOrigins}
             rows={4}
-            placeholder={'https://app.example.com\nhttps://staging.example.com'}
+            placeholder={'e.g. https://app.example.com\ne.g. https://staging.example.com'}
             className={textareaCls}
           />
         </div>
-        <div className="flex items-center justify-end bg-[var(--color-surface-muted)] px-5 py-3">
-          <SubmitButton pendingLabel="Saving…">Save changes</SubmitButton>
+        {/* Same footer as Auth methods — this page originated the in-card save
+            pattern; it now also gets the dirty indicator and the route-change
+            guard, so the two security pages behave identically. */}
+        <div className="px-5 py-3">
+          <StickyFormFooter hint="Applies to new requests immediately." />
         </div>
       </form>
 

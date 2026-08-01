@@ -222,7 +222,7 @@ describe('coupon redemption is recorded once per purchase', () => {
         currency: 'usd',
       });
 
-      const payment = await prisma.payment.findUniqueOrThrow({
+      const payment = await prisma.payment.findFirstOrThrow({
         where: { providerPaymentId: 'pi_pack_2' },
       });
       expect(payment).toMatchObject({
@@ -251,7 +251,7 @@ describe('coupon redemption is recorded once per purchase', () => {
         currency: 'usd',
       });
 
-      const payment = await prisma.payment.findUniqueOrThrow({
+      const payment = await prisma.payment.findFirstOrThrow({
         where: { providerPaymentId: 'pi_pack_3' },
       });
       expect(payment.amount).toBe(PACK_AMOUNT - 1500);
@@ -325,7 +325,7 @@ describe('coupon redemption is recorded once per purchase', () => {
       });
       expect(capture.statusCode).toBe(200);
 
-      const payment = await prisma.payment.findUniqueOrThrow({
+      const payment = await prisma.payment.findFirstOrThrow({
         where: { providerPaymentId: 'CAP-pack-1' },
       });
       expect(payment).toMatchObject({ status: 'SUCCEEDED', amount: 4000, endUserId });
@@ -396,7 +396,7 @@ describe('coupon redemption is recorded once per purchase', () => {
 
       expect(renewal.statusCode).toBe(200);
       expect(renewal.json()).toMatchObject({ processed: true });
-      const payment = await prisma.payment.findUniqueOrThrow({
+      const payment = await prisma.payment.findFirstOrThrow({
         where: { providerPaymentId: 'in_pu_renewal' },
       });
       expect(payment.status).toBe('SUCCEEDED');
@@ -446,7 +446,7 @@ describe('coupon redemption is recorded once per purchase', () => {
         status: 'ACTIVE',
       });
       expect(
-        (await prisma.payment.findUniqueOrThrow({ where: { providerPaymentId: 'in_racey' } })).status,
+        (await prisma.payment.findFirstOrThrow({ where: { providerPaymentId: 'in_racey' } })).status,
       ).toBe('SUCCEEDED');
       // Still exactly the one that was there before — refused, not doubled.
       expect(await redemptions()).toBe(1);

@@ -33,6 +33,18 @@ const DEFAULT_SCOPES = ['openid', 'email', 'profile'];
 const DISCOVERY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const discoveryCache = new Map<string, { promise: Promise<DiscoveryDoc>; expiresAt: number }>();
 
+/**
+ * Forget every discovered issuer.
+ *
+ * Test-only. A 24h TTL makes this cache permanent for the life of the module:
+ * the first test to point an Application at `https://issuer.test` pins that
+ * issuer's document for every test that follows, including ones that stub a
+ * different document at the same URL. Called from test/setup.ts's beforeEach.
+ */
+export function __resetForTests(): void {
+  discoveryCache.clear();
+}
+
 async function discover(issuerUrl: string): Promise<DiscoveryDoc> {
   const url = issuerUrl.replace(/\/$/, '') + '/.well-known/openid-configuration';
   const cached = discoveryCache.get(url);

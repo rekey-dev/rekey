@@ -1,3 +1,5 @@
+'use client';
+
 /**
  * Theming for the drop-in components.
  *

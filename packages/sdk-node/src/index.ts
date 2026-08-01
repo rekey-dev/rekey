@@ -61,6 +61,7 @@ import type {
 // The canonical error class lives in shared-types; import it for internal use
 // and re-export below so @rekey.dev/node's public surface is unchanged.
 import { RekeyError } from '@rekey.dev/shared-types';
+import { createRequire } from 'node:module';
 
 export type {
   ApplicationDto,
@@ -685,6 +686,46 @@ class AuthClient {
   }
 
   /**
+   * Re-send a verification link to an address, with **no session** — the
+   * sessionless sibling of `sendVerificationEmail`.
+   *
+   * This is the route for a user locked out by
+   * `authConfig.requireEmailVerification`: that setting refuses the very
+   * session `sendVerificationEmail` needs, so a user whose first mail never
+   * arrived cannot ask for another. Takes the address instead of a token.
+   *
+   * **Branch on the result**, exactly as with `requestPasswordReset` — the
+   * contract is the same one. It never throws for an unknown address and never
+   * discloses whether the address exists, is already verified, or was mailed:
+   * a publishable-key caller gets one constant body whatever happened. A
+   * secret-key caller — this SDK — gets the real outcome, and the raw
+   * `verificationToken` when the Application has no email transport configured,
+   * so you can deliver it with your own provider.
+   *
+   * Pass `verifyUrl` containing `{token}` to template the link target. Unlike
+   * `sendVerificationEmail`, nothing is sent and no token is minted when no
+   * link can be built at all — pass `verifyUrl`, or set the Application URL
+   * (Panel → Application → Auth). Mailing a locked-out user a verification
+   * message with no button in it helps nobody.
+   *
+   * @example
+   * ```ts
+   * const { emailSent, verificationToken } = await rekey.auth.resendVerificationEmail({ email });
+   * // Rekey sent it; nothing to do. Otherwise deliver the token yourself:
+   * if (!emailSent && verificationToken) {
+   *   await mailer.send({ to: email, text: `Verify: ${url(verificationToken)}` });
+   * }
+   * // Always render the same neutral "if that address needs verifying, we sent a link".
+   * ```
+   */
+  resendVerificationEmail(input: {
+    email: string;
+    verifyUrl?: string;
+  }): Promise<{ emailSent: boolean; verificationToken: string | null }> {
+    return this.client.request('POST', '/api/v1/auth/resend-verification', input);
+  }
+
+  /**
    * Consume an email-verification token. Single-use, 24-hour lifetime.
    * Marks `emailVerified: true` on the user record. Cross-Application
    * tokens are refused with `EMAIL_VERIFICATION_TOKEN_WRONG_APPLICATION`.
@@ -1239,6 +1280,29 @@ export interface EntitlementsDto {
 }
 
 /**
+ * Load Node's crypto lazily, from an ESM module.
+ *
+ * This is deliberately `createRequire` and not a bare `require`. The package is
+ * `"type": "module"` with ESM-only `exports`, so in the built `dist` a bare
+ * `require` is simply not defined — `verifyWebhookSignature` and the RS256 path
+ * of `verifyAccessToken` threw `ReferenceError: require is not defined` for
+ * every consumer who installed from npm, in every published version.
+ *
+ * It went unnoticed because `node -e` defines `globalThis.require`, so the
+ * failure does not reproduce in a one-liner — only in a real `.mjs`, `.cjs`, or
+ * `"type": "module"` package, which is to say only in real use. The tests
+ * exercise the TypeScript source rather than the built ESM artifact, so they
+ * never saw it either.
+ *
+ * The laziness is still worth keeping: signature verification is the one place
+ * this SDK needs crypto, and importing it at module scope would break the edge
+ * runtimes that can otherwise use the rest of the client.
+ */
+function nodeCrypto(): typeof import('node:crypto') {
+  return createRequire(import.meta.url)('node:crypto') as typeof import('node:crypto');
+}
+
+/**
  * Verify the HMAC signature on an inbound webhook from Rekey. Returns
  * `true` only when (a) the timestamp is fresh (within `toleranceSeconds`,
  * default 300) AND (b) the signature matches a constant-time compare.
@@ -1282,11 +1346,7 @@ export function verifyWebhookSignature(args: {
   if (!Number.isFinite(t) || !v1) return false;
   if (Math.abs(nowMs - t * 1000) > tolerance) return false;
 
-  // Lazy-load Node crypto so the SDK still runs in edge runtimes that
-  // don't bundle it (signature verification is the only place we need
-  // crypto — everything else uses fetch).
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { createHmac, timingSafeEqual } = require('node:crypto') as typeof import('node:crypto');
+  const { createHmac, timingSafeEqual } = nodeCrypto();
   const body =
     typeof args.payload === 'string' ? Buffer.from(args.payload, 'utf8') : args.payload;
   const signed = `${t}.${body.toString('utf8')}`;
@@ -1484,8 +1544,7 @@ export async function verifyAccessToken(
 
   // Lazy-load node:crypto (same posture as verifyWebhookSignature) — keeps
   // the import graph clean for bundlers that tree-shake this helper away.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { createPublicKey, verify } = require('node:crypto') as typeof import('node:crypto');
+  const { createPublicKey, verify } = nodeCrypto();
   let signatureOk = false;
   try {
     const publicKey = createPublicKey({ key: { kty: jwk.kty, n: jwk.n, e: jwk.e }, format: 'jwk' });

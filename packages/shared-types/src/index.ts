@@ -8,6 +8,22 @@
 import { z } from 'zod';
 
 // ============================================================================
+// Security events
+//
+// The audit-log event types + their labels. Re-exported rather than defined
+// here because the map is long and self-contained; see that file for why it
+// stopped living in the panel.
+// ============================================================================
+
+export {
+  SECURITY_EVENT_LABEL,
+  SECURITY_EVENT_TYPES,
+  humanizeSecurityEventType,
+  securityEventTypeOptions,
+  type SecurityEventType,
+} from './security-events.js';
+
+// ============================================================================
 // Errors
 // ============================================================================
 

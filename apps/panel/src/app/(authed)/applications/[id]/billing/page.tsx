@@ -346,7 +346,7 @@ export default async function BillingPage({
               Disable billing
             </ConfirmButton>
           ) : (
-            <SubmitButton pendingLabel="Enabling…" className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-60">Enable billing</SubmitButton>
+            <SubmitButton pendingLabel="Enabling…" className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60">Enable billing</SubmitButton>
           )}
         </form>
       </Card>
@@ -377,7 +377,7 @@ export default async function BillingPage({
                 Turn off
               </ConfirmButton>
             ) : (
-              <SubmitButton pendingLabel="Enabling…" className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-60">Turn on</SubmitButton>
+              <SubmitButton pendingLabel="Enabling…" className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60">Turn on</SubmitButton>
             )}
           </form>
         </Card>

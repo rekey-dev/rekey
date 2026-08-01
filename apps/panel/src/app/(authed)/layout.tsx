@@ -118,7 +118,7 @@ export default async function AuthedLayout({
       {/* Keyboard users skip straight past the sidebar nav (WP6). */}
       <a
         href="#main"
-        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[60] focus:rounded-md focus:bg-[var(--color-primary)] focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-white"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[60] focus:rounded-md focus:bg-[var(--color-primary)] focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-[var(--color-primary-fg)]"
       >
         Skip to main content
       </a>
@@ -135,7 +135,15 @@ export default async function AuthedLayout({
           />
         }
       />
-      <main id="main" tabIndex={-1} className="flex-1 min-w-0 overflow-x-hidden outline-none">
+      {/* `overflow-x-clip`, not `overflow-x-hidden`. `hidden` makes this a
+          scroll container (the y axis is forced to `auto`), and because <main>
+          is never height-constrained it is a scroll container that can never
+          scroll — which silently breaks `position: sticky` for everything
+          inside it, since sticky resolves against the nearest scrolling
+          ancestor. `clip` gives the same "don't let wide content widen the
+          page" behaviour without creating that box, so the sticky save footer
+          on Auth methods / Access actually sticks. */}
+      <main id="main" tabIndex={-1} className="flex-1 min-w-0 overflow-x-clip outline-none">
         {/* Renders nothing unless a backing service is actually unreachable. */}
         <DependencyBanner />
         {children}

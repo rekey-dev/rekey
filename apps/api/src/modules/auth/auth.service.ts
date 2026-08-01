@@ -84,7 +84,8 @@ import { mfaService } from '../mfa/mfa.service.js';
 import { emailService } from '../email/email.service.js';
 import { resolveAppUrl, buildTokenUrl } from '../../lib/app-url.js';
 import { recordAuthEmailDeliveryFailure } from '../../lib/email-transport.js';
-import { webhookService } from '../webhooks/webhook.service.js';
+import { recordSecurityEvent } from '../../lib/security-events.js';
+import { emitDetached } from '../webhooks/webhook.service.js';
 
 export interface SignUpInput {
   application: Application;
@@ -126,6 +127,21 @@ const PUBLISHABLE_SEND_RESPONSE = {
   delivered: true,
   emailSent: true,
   resetToken: null,
+} as const;
+
+/**
+ * The same idea for `/auth/resend-verification`, whose payload has two fields
+ * rather than three.
+ *
+ * Unknown address, already-verified address, delivered, transport broken, no
+ * transport, no resolvable link — every one of them returns this to a
+ * publishable caller. "Already verified" matters as much as "unknown" here:
+ * distinguishing them answers *does this address have a confirmed account*,
+ * which is the enumeration oracle the constant exists to close.
+ */
+const PUBLISHABLE_VERIFICATION_SEND_RESPONSE = {
+  emailSent: true,
+  verificationToken: null,
 } as const;
 
 /** Same, for the magic-link shape (the token field is named differently). */
@@ -398,16 +414,17 @@ function ensureEmailVerified(application: Application, endUser: EndUser): void {
     statusCode: 403,
     code: 'EMAIL_NOT_VERIFIED',
     message: 'Confirm your email address before using this account — check your inbox for the verification link.',
-    fix: 'The user has to click the link in their verification email; sign-up always sends one while this setting is on. There is no session to re-send from, so if the mail never arrived an operator marks the address verified from Panel → Application → End-users.',
+    fix: 'The user has to click the link in their verification email; sign-up always sends one while this setting is on. If it never arrived, POST /api/v1/auth/resend-verification with their address — it needs no session, precisely because this refusal denies them one. Failing that, an operator can mark the address verified from Panel → Application → End-users.',
   });
 }
 
 /**
  * Mint a verification token and post the `email_verification` mail.
  *
- * Shared by the explicit `/auth/send-verification` endpoint and the automatic
- * sign-up send, so both produce the same token lifetime, the same link and the
- * same delivery-failure bookkeeping. Never throws for a delivery problem: a
+ * Shared by the explicit `/auth/send-verification` endpoint, the public
+ * `/auth/resend-verification` endpoint and the automatic sign-up send, so all
+ * three produce the same token lifetime, the same link and the same
+ * delivery-failure bookkeeping. Never throws for a delivery problem: a
  * transport that is missing (`no_transport`) or broken (`error`) comes back as
  * `emailSent: false`, which is what lets sign-up treat this as best-effort.
  */
@@ -418,7 +435,45 @@ async function deliverVerificationEmail(args: {
   verifyUrl?: string;
   /** Caller-supplied base URL — first rung of the `resolveAppUrl` chain. */
   appUrl?: string;
+  /**
+   * Refuse the send outright when no link resolves, instead of mailing a
+   * verification email with no button in it.
+   *
+   * `buildTokenUrl(null, …)` returns '' and `{{#if verifyUrl}}` then drops the
+   * button (lib/app-url.ts) — right for the welcome mail, whose body still
+   * reads without its CTA, and useless here: the `email_verification` template
+   * says "click the button below to confirm this is your email address" and
+   * there is no button. Composed with `requireEmailVerification`, that mail is
+   * the only route into the account, so shipping it strands the user.
+   *
+   * Set by the UNATTENDED senders — sign-up and the public re-send — where
+   * nobody asked for a token and the mail is the entire product of the call.
+   * The authenticated `/auth/send-verification` deliberately does NOT set it:
+   * that is an explicit integrator call whose documented no-transport contract
+   * hands back `verificationToken` so the customer's own server can build the
+   * link and send it, and refusing to mint would break integrations that never
+   * relied on our template at all. Any caller can also pass `verifyUrl`, which
+   * satisfies this on its own.
+   */
+  requireResolvableUrl?: boolean;
 }): Promise<{ emailSent: boolean; verificationToken: string | null }> {
+  // Resolved BEFORE the token is minted: a send we are about to refuse should
+  // not leave a live token in the table either.
+  const base = args.verifyUrl === undefined ? resolveAppUrl(args.application, args.appUrl) : null;
+  if (args.requireResolvableUrl === true && args.verifyUrl === undefined && base === null) {
+    // The only trace this leaves — nothing reaches the transport, so there is
+    // no `email_logs` row. Without it the fix would be a silent drop, which is
+    // the same class of bug as the button-less mail it replaces.
+    void recordAuthEmailDeliveryFailure({
+      applicationId: args.application.id,
+      tenantId: args.application.tenantId,
+      eventKey: 'email_verification',
+      endUserId: args.endUser.id,
+      reason:
+        'No verification link could be built: set authConfig.appUrl (Panel → Application → Auth), add a redirect URL, or set DEFAULT_APP_URL.',
+    });
+    return { emailSent: false, verificationToken: null };
+  }
   const issued = await issueVerificationToken({
     applicationId: args.application.id,
     endUserId: args.endUser.id,
@@ -430,9 +485,13 @@ async function deliverVerificationEmail(args: {
     to: args.endUser.email,
     variables: {
       userEmail: args.endUser.email,
-      verifyUrl: args.verifyUrl
-        ? args.verifyUrl.replace('{token}', encodeURIComponent(issued.raw))
-        : buildTokenUrl(resolveAppUrl(args.application, args.appUrl), '/verify', issued.raw),
+      // `!== undefined`, matching how `base` was decided above — a truthiness
+      // test here would send an empty caller template down the `base` branch,
+      // where `base` is deliberately null.
+      verifyUrl:
+        args.verifyUrl !== undefined
+          ? args.verifyUrl.replace('{token}', encodeURIComponent(issued.raw))
+          : buildTokenUrl(base, '/verify', issued.raw),
       expiresAtIso: issued.record.expiresAt.toISOString(),
     },
   });
@@ -542,37 +601,43 @@ export const authService = {
     // with no email transport configured logs a `no_transport` send and moves
     // on; the token stays valid, so a later re-send still works.
     //
+    // `requireResolvableUrl` because this send is unattended: nobody asked for
+    // it, and an Application with no resolvable app URL would otherwise mail
+    // every new user a confirmation with no button in it. Skipped, the
+    // operator sees an `auth.email_delivery_failed` event naming the setting
+    // to fix instead of nothing at all.
+    //
     // Forced when `requireEmailVerification` is on, whatever the send switch
     // says. The gate below refuses this sign-up a session, so the link is the
-    // only route into the account and there is no session left to re-send it
-    // from — the two settings together would otherwise create accounts nobody,
-    // including their owner, could ever reach.
+    // only route into the account — the two settings together would otherwise
+    // create accounts nobody, including their owner, could reach. (A user who
+    // never got the mail can ask for another from /auth/resend-verification,
+    // which needs no session.)
     if (config.sendVerificationEmailOnSignUp || config.requireEmailVerification) {
       void deliverVerificationEmail({
         application: input.application,
         endUser,
+        requireResolvableUrl: true,
         ...(input.appUrl !== undefined && { appUrl: input.appUrl }),
       }).catch(() => undefined);
     }
 
     // Outbound webhook — `user.created`. Same fire-and-forget contract;
     // the dispatcher's delivery worker handles retries on its own.
-    void webhookService
-      .emit({
-        applicationId: input.application.id,
-        type: 'user.created',
-        data: {
-          user: {
-            id: endUser.id,
-            email: endUser.email,
-            emailVerified: endUser.emailVerified,
-            role: endUser.role,
-            createdAt: endUser.createdAt.toISOString(),
-            metadata: endUser.metadata ?? null,
-          },
+    emitDetached({
+      applicationId: input.application.id,
+      type: 'user.created',
+      data: {
+        user: {
+          id: endUser.id,
+          email: endUser.email,
+          emailVerified: endUser.emailVerified,
+          role: endUser.role,
+          createdAt: endUser.createdAt.toISOString(),
+          metadata: endUser.metadata ?? null,
         },
-      })
-      .catch(() => undefined);
+      },
+    });
 
     // Throws 403 EMAIL_NOT_VERIFIED when the Application requires a confirmed
     // address. The account IS created and the verification mail IS on its way —
@@ -615,7 +680,51 @@ export const authService = {
       endUser !== null && (await verifyPassword(endUser.passwordHash, input.password));
     if (!valid || endUser === null) {
       if (endUser) {
-        await registerFailure(lockScope, LOGIN_POLICY);
+        const failure = await registerFailure(lockScope, LOGIN_POLICY);
+        // Durable audit trail for the operator panel. Without these rows,
+        // "why can't this user sign in?" is not answerable from the panel at
+        // all: the only record of a failure was a Redis counter with a TTL,
+        // which is gone by the time anyone asks.
+        //
+        // Fire-and-forget, like every other `recordSecurityEvent` call — the
+        // response below must not wait on a log write, and must not change
+        // shape or timing because of one.
+        //
+        // Emitted only for an end-user that EXISTS, matching the failure
+        // counter's own posture two lines up. Recording attempts against
+        // never-registered addresses would let anyone write attacker-chosen
+        // strings into an operator's audit log, and the account-enumeration
+        // signal it would create is the thing this whole path avoids. The
+        // trade-off: credential-stuffing against unknown addresses is visible
+        // in the request log, not here.
+        void recordSecurityEvent({
+          type: 'user.sign_in_failed',
+          actorType: 'end_user',
+          actorId: endUser.id,
+          tenantId: input.application.tenantId,
+          applicationId: input.application.id,
+          ip: input.device?.ip ?? null,
+          userAgent: input.device?.userAgent ?? null,
+          metadata: { via: 'password', failuresInWindow: failure.failures },
+        });
+        if (failure.locked) {
+          // Once per lockout — on the attempt that tripped it, not on every
+          // attempt refused during the window.
+          void recordSecurityEvent({
+            type: 'user.locked_out',
+            actorType: 'end_user',
+            actorId: endUser.id,
+            tenantId: input.application.tenantId,
+            applicationId: input.application.id,
+            ip: input.device?.ip ?? null,
+            userAgent: input.device?.userAgent ?? null,
+            metadata: {
+              via: 'password',
+              failuresInWindow: failure.failures,
+              lockedForSec: failure.lockedForSec,
+            },
+          });
+        }
       }
       throw new RekeyError({
         statusCode: 401,
@@ -1065,13 +1174,11 @@ export const authService = {
         },
       })
       .catch(() => undefined);
-    void webhookService
-      .emit({
-        applicationId: input.application.id,
-        type: 'password.changed',
-        data: { userId: updated.id, email: updated.email, via: 'reset' },
-      })
-      .catch(() => undefined);
+    emitDetached({
+      applicationId: input.application.id,
+      type: 'password.changed',
+      data: { userId: updated.id, email: updated.email, via: 'reset' },
+    });
 
     return { ok: true };
   },
@@ -1137,13 +1244,11 @@ export const authService = {
         },
       })
       .catch(() => undefined);
-    void webhookService
-      .emit({
-        applicationId: input.application.id,
-        type: 'password.changed',
-        data: { userId: endUser.id, email: endUser.email, via: 'change' },
-      })
-      .catch(() => undefined);
+    emitDetached({
+      applicationId: input.application.id,
+      type: 'password.changed',
+      data: { userId: endUser.id, email: endUser.email, via: 'change' },
+    });
 
     return { ok: true };
   },
@@ -1425,23 +1530,21 @@ export const authService = {
           },
         })
         .catch(() => undefined);
-      void webhookService
-        .emit({
-          applicationId: input.application.id,
-          type: 'user.created',
-          data: {
-            user: {
-              id: endUser.id,
-              email: endUser.email,
-              emailVerified: endUser.emailVerified,
-              role: endUser.role,
-              createdAt: endUser.createdAt.toISOString(),
-              metadata: endUser.metadata ?? null,
-            },
-            via: 'magic_link',
+      emitDetached({
+        applicationId: input.application.id,
+        type: 'user.created',
+        data: {
+          user: {
+            id: endUser.id,
+            email: endUser.email,
+            emailVerified: endUser.emailVerified,
+            role: endUser.role,
+            createdAt: endUser.createdAt.toISOString(),
+            metadata: endUser.metadata ?? null,
           },
-        })
-        .catch(() => undefined);
+          via: 'magic_link',
+        },
+      });
     }
 
     return issueSessionOrMfaChallenge(input.application, endUser, input.device);
@@ -1488,6 +1591,72 @@ export const authService = {
       endUser,
       ...(input.verifyUrl !== undefined && { verifyUrl: input.verifyUrl }),
     });
+  },
+
+  /**
+   * Re-send a verification link to an address, with **no session**.
+   *
+   * The route above needs one, and `requireEmailVerification` is precisely the
+   * setting that refuses one — so a user whose verification mail never arrived
+   * had no self-service way back into their own account, and the only fix was
+   * an operator marking the address verified by hand.
+   *
+   * Opening that up is an enumeration and mail-bombing surface, so this
+   * borrows wholesale from `requestPasswordReset`, the unauthenticated
+   * credential-send that already exists:
+   *
+   *   - **Constant response.** A publishable caller always gets
+   *     `PUBLISHABLE_VERIFICATION_SEND_RESPONSE` — unknown address, verified
+   *     address, delivered, broken transport, all identical. A SECRET caller
+   *     gets the real outcome (and the raw token when no transport is
+   *     configured), because that key is the customer's own server, which can
+   *     already list its own end-users.
+   *   - **Constant-ish timing.** The two short-circuit branches sleep the same
+   *     50ms the reset path does, so "no account" and "account, mail sent" are
+   *     not trivially separable by a stopwatch.
+   *   - **One status code.** Never throws for a business outcome. There is no
+   *     `EMAIL_ALREADY_VERIFIED` here — the authenticated route can afford
+   *     that 400 because the caller already proved who they are.
+   *   - **Rate limited** per (Application, address, IP) plus the
+   *     per-Application ceiling, by `authRateLimit` on the route — the same
+   *     cap `/forgot-password` carries, which is the identical surface: an
+   *     unauthenticated, address-keyed request that puts one email in flight.
+   *
+   * `requireResolvableUrl` is set: the requester is a locked-out end user, so
+   * a mail with no button in it helps nobody. A caller that wants the link on
+   * its own domain passes `verifyUrl`.
+   */
+  async resendVerificationEmail(input: {
+    application: Application;
+    email: string;
+    /** Optional URL with `{token}` substituted. */
+    verifyUrl?: string;
+    /** Which credential the caller presented; a publishable key gets the constant. */
+    authKind?: AuthKind;
+  }): Promise<{ emailSent: boolean; verificationToken: string | null }> {
+    const endUser = await prisma.endUser.findUnique({
+      where: {
+        applicationId_email: {
+          applicationId: input.application.id,
+          email: input.email.toLowerCase(),
+        },
+      },
+    });
+    // No account, or nothing to verify. Same flattening sleep and the same
+    // answer for both — see the docblock.
+    if (!endUser || endUser.emailVerified || endUser.erasedAt !== null) {
+      await new Promise((r) => setTimeout(r, 50));
+      if (input.authKind === 'publishable') return PUBLISHABLE_VERIFICATION_SEND_RESPONSE;
+      return { emailSent: false, verificationToken: null };
+    }
+    const result = await deliverVerificationEmail({
+      application: input.application,
+      endUser,
+      requireResolvableUrl: true,
+      ...(input.verifyUrl !== undefined && { verifyUrl: input.verifyUrl }),
+    });
+    if (input.authKind === 'publishable') return PUBLISHABLE_VERIFICATION_SEND_RESPONSE;
+    return result;
   },
 
   /**
@@ -1564,13 +1733,11 @@ export const authService = {
       where: { id: endUser.id },
       data: { emailVerified: true },
     });
-    void webhookService
-      .emit({
-        applicationId: input.application.id,
-        type: 'email.verified',
-        data: { userId: updated.id, email: updated.email },
-      })
-      .catch(() => undefined);
+    emitDetached({
+      applicationId: input.application.id,
+      type: 'email.verified',
+      data: { userId: updated.id, email: updated.email },
+    });
     return { ok: true, endUser: redact(updated) };
   },
 
@@ -1593,13 +1760,11 @@ export const authService = {
   }): Promise<{ revoked: boolean }> {
     const revoked = await revokeSessionForEndUser(args.endUserId, args.sessionId);
     if (revoked) {
-      void webhookService
-        .emit({
-          applicationId: args.application.id,
-          type: 'session.revoked',
-          data: { userId: args.endUserId, sessionId: args.sessionId, via: 'self' },
-        })
-        .catch(() => undefined);
+      emitDetached({
+        applicationId: args.application.id,
+        type: 'session.revoked',
+        data: { userId: args.endUserId, sessionId: args.sessionId, via: 'self' },
+      });
     }
     return { revoked };
   },
@@ -1696,13 +1861,11 @@ export const authService = {
           deviceName: input.deviceName ?? null,
         },
       });
-      void webhookService
-        .emit({
-          applicationId: input.application.id,
-          type: 'mfa.enabled', // Passkeys are a strong factor; reuse the existing event channel.
-          data: { userId: input.endUserId, via: 'passkey', credentialId: created.credentialId },
-        })
-        .catch(() => undefined);
+      emitDetached({
+        applicationId: input.application.id,
+        type: 'mfa.enabled', // Passkeys are a strong factor; reuse the existing event channel.
+        data: { userId: input.endUserId, via: 'passkey', credentialId: created.credentialId },
+      });
       return { credentialId: created.credentialId, deviceName: created.deviceName };
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {

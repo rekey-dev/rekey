@@ -476,6 +476,12 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
         tags: ['Tenant · Auth'],
         security: [{ tenantSession: [] }],
         summary: 'Revoke one operator session by id. Idempotent.',
+        description:
+          'Revokes exactly the named session and nothing else. The revoked device keeps its ' +
+          'short-lived access token until it expires (15 minutes); its next refresh answers ' +
+          '401 `REFRESH_TOKEN_REVOKED` and it does not affect any other session. Replaying a ' +
+          'token that was ROTATED rather than revoked is still treated as chain compromise and ' +
+          'revokes every session — see POST /refresh.',
         params: {
           type: 'object',
           required: ['id'],

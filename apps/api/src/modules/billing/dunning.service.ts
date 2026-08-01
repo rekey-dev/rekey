@@ -37,7 +37,8 @@ import type { DunningCase, Subscription } from '@prisma/client';
 import { BillingConfigSchema } from '@rekey.dev/shared-types';
 import { prisma } from '../../lib/prisma.js';
 import { emailService } from '../email/email.service.js';
-import { emitDunningEvent, emitSubscriptionEvent } from './webhooks/billing-events.js';
+import { enqueueDunningEvent, enqueueSubscriptionEvent } from './webhooks/billing-events.js';
+import { kickDeliveries } from '../webhooks/webhook.service.js';
 
 /** Reminder schedule, in days after `openedAt`. Reminder #1 is sent at open. */
 export const DUNNING_REMINDER_OFFSETS_DAYS = [0, 3, 7] as const;
@@ -171,23 +172,27 @@ async function openForPastDue(args: {
     return null;
   }
 
-  const created = await prisma.dunningCase.create({
-    data: {
-      applicationId: sub.applicationId,
-      subscriptionId: sub.id,
-      endUserId: sub.endUserId,
-      organizationId: sub.beneficiaryOrgId,
-      status: 'OPEN',
-      failedAttempts: args.countFailure ? 1 : 0,
-      lastFailureAt: args.countFailure ? now : null,
-      openedAt: now,
-      // Reminder #1 goes out right now; the scheduler owns day 3 onward.
-      remindersSent: 1,
-      nextActionAt: nextActionAfter(now, 1),
-    },
+  // Case row + its outbox row in one transaction — see webhooks/apply.ts.
+  const { created, deliveryIds } = await prisma.$transaction(async (tx) => {
+    const row = await tx.dunningCase.create({
+      data: {
+        applicationId: sub.applicationId,
+        subscriptionId: sub.id,
+        endUserId: sub.endUserId,
+        organizationId: sub.beneficiaryOrgId,
+        status: 'OPEN',
+        failedAttempts: args.countFailure ? 1 : 0,
+        lastFailureAt: args.countFailure ? now : null,
+        openedAt: now,
+        // Reminder #1 goes out right now; the scheduler owns day 3 onward.
+        remindersSent: 1,
+        nextActionAt: nextActionAfter(now, 1),
+      },
+    });
+    return { created: row, deliveryIds: await enqueueDunningEvent(tx, 'dunning.case_opened', row.id) };
   });
 
-  emitDunningEvent('dunning.case_opened', created.id);
+  kickDeliveries(deliveryIds);
   // Day-0 reminder — off the inbound-webhook critical path.
   void sendReminder(created.id, 1).catch((err) =>
     args.log?.warn({ err, dunningCaseId: created.id }, 'dunning day-0 reminder failed'),
@@ -213,14 +218,19 @@ async function closeCase(
     select: { id: true },
   });
   if (!open) return;
-  // Guarded update — a concurrent closer/scheduler loses the race cleanly.
-  const updated = await prisma.dunningCase.updateMany({
-    where: { id: open.id, status: 'OPEN' },
-    data: { status: outcome, closedAt: new Date(), nextActionAt: null },
+  // Guarded update — a concurrent closer/scheduler loses the race cleanly —
+  // with the outbox row in the same transaction, so the loser of that race
+  // announces nothing and the winner cannot announce nothing.
+  const deliveryIds = await prisma.$transaction(async (tx) => {
+    const updated = await tx.dunningCase.updateMany({
+      where: { id: open.id, status: 'OPEN' },
+      data: { status: outcome, closedAt: new Date(), nextActionAt: null },
+    });
+    return updated.count === 1 && outcome === 'RECOVERED'
+      ? enqueueDunningEvent(tx, 'dunning.case_recovered', open.id)
+      : [];
   });
-  if (updated.count === 1 && outcome === 'RECOVERED') {
-    emitDunningEvent('dunning.case_recovered', open.id);
-  }
+  kickDeliveries(deliveryIds);
 }
 
 /**
@@ -255,21 +265,31 @@ async function exhaustCase(dunningCaseId: string, log?: FastifyBaseLogger): Prom
     }
   }
 
+  // Local cancel + case closure + both outbox rows in ONE transaction. These
+  // two transitions are one decision ("this customer is out of runway") and a
+  // crash between them used to be able to cancel a subscription while telling
+  // nobody, or close the case while leaving the subscription billing.
   const now = new Date();
-  if (sub.status !== 'CANCELED') {
-    await prisma.subscription.update({
-      where: { id: sub.id },
-      data: { status: 'CANCELED', canceledAt: now, cancelAt: now },
+  const { closed, deliveryIds } = await prisma.$transaction(async (tx) => {
+    const ids: string[] = [];
+    if (sub.status !== 'CANCELED') {
+      await tx.subscription.update({
+        where: { id: sub.id },
+        data: { status: 'CANCELED', canceledAt: now, cancelAt: now },
+      });
+      ids.push(...(await enqueueSubscriptionEvent(tx, 'subscription.canceled', sub.id)));
+    }
+    const updated = await tx.dunningCase.updateMany({
+      where: { id: dunningCaseId, status: 'OPEN' },
+      data: { status: 'EXHAUSTED', closedAt: now, nextActionAt: null },
     });
-    emitSubscriptionEvent('subscription.canceled', sub.id);
-  }
-
-  const updated = await prisma.dunningCase.updateMany({
-    where: { id: dunningCaseId, status: 'OPEN' },
-    data: { status: 'EXHAUSTED', closedAt: now, nextActionAt: null },
+    if (updated.count === 1) {
+      ids.push(...(await enqueueDunningEvent(tx, 'dunning.case_exhausted', dunningCaseId)));
+    }
+    return { closed: updated.count === 1, deliveryIds: ids };
   });
-  if (updated.count === 1) {
-    emitDunningEvent('dunning.case_exhausted', dunningCaseId);
+  kickDeliveries(deliveryIds);
+  if (closed) {
     log?.info(
       { dunningCaseId, subscriptionId: sub.id },
       'dunning case exhausted — subscription canceled',

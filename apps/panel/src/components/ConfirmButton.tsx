@@ -49,7 +49,7 @@ export function ConfirmButton({
   const confirmCls =
     variant === 'danger'
       ? 'rounded-md bg-red-600 hover:bg-red-700 px-3 py-1.5 text-sm font-medium text-white'
-      : 'rounded-md bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] px-3 py-1.5 text-sm font-medium text-white';
+      : 'rounded-md bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)]';
 
   const open = (): void => {
     try {

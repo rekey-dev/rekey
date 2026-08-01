@@ -42,6 +42,27 @@ function money(amount: number, currency: string): string {
   }
 }
 
+/**
+ * Price plus its billing cadence — and only where a cadence is real.
+ *
+ * `Plan.interval` defaults to MONTH server-side whatever the plan `kind` is, so
+ * appending it unconditionally advertised a one-off licence as "$499.00/month",
+ * in the plan list AND in the checkout confirmation. A customer was told they
+ * were starting a subscription that does not exist.
+ *
+ * Same rule as `formatPrice` in `@rekey.dev/react` (`pricing-shared.tsx`),
+ * which already got this right — kept as a local helper rather than an import
+ * because that module is client-only and this page is a server component.
+ */
+function planPrice(plan: { amount: number; currency: string; kind?: string; interval?: string | null }): string {
+  const amount = money(plan.amount, plan.currency);
+  if (plan.kind === 'SUBSCRIPTION' && plan.interval) {
+    return `${amount}/${plan.interval.toLowerCase()}`;
+  }
+  if (plan.kind === 'USAGE') return `${amount} per unit`;
+  return `${amount} one-time`;
+}
+
 export default async function DashboardPage({
   params,
   searchParams,
@@ -184,7 +205,7 @@ export default async function DashboardPage({
                   <div className="text-sm">
                     <span className="font-medium text-[var(--color-fg)]">{plan.name}</span>{' '}
                     <span className="text-[var(--color-muted-fg)]">
-                      {money(plan.amount, plan.currency)}/{plan.interval.toLowerCase()}
+                      {planPrice(plan)}
                     </span>
                   </div>
                   {current ? (
@@ -196,7 +217,7 @@ export default async function DashboardPage({
                         size="sm"
                         label={subscription ? 'Switch' : 'Subscribe'}
                         title={subscription ? `Switch to ${plan.name}?` : `Subscribe to ${plan.name}?`}
-                        message={`This takes you to checkout for ${plan.name} at ${money(plan.amount, plan.currency)}/${plan.interval.toLowerCase()}.`}
+                        message={`This takes you to checkout for ${plan.name} at ${planPrice(plan)}.`}
                         confirmLabel="Continue to checkout"
                       >
                         {showProviderPicker && <ProviderRadios providers={providers} />}

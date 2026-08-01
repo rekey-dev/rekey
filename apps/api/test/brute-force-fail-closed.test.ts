@@ -104,9 +104,14 @@ describe('brute-force fails closed on a store outage', () => {
 
   it('the threshold still trips normally when the store is healthy', async () => {
     state.incrValue = LOGIN_POLICY.threshold;
+
+    // `registerFailure` used to return void. It now reports the count and
+    // whether this attempt tripped the lock, because the caller has to emit
+    // `auth.sign_in_failed` / `auth.locked_out` and cannot re-derive either
+    // without a second round-trip to the store.
     await expect(
       registerFailure('eu:login:app:someone@example.com', LOGIN_POLICY),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ failures: LOGIN_POLICY.threshold, locked: true });
   });
 
   it('refuses to run on process-local counters when there is no client in production', async () => {

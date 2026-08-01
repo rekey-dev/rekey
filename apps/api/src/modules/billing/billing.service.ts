@@ -26,7 +26,8 @@ import { buildCheckoutSessionMetadata } from './checkout-sessions.js';
 import { getProviderForApplication, pickProvider } from './providers/index.js';
 import type { BillingProviderName } from './credentials.service.js';
 import { BillingConfigSchema } from '@rekey.dev/shared-types';
-import { emitSubscriptionEvent } from './webhooks/billing-events.js';
+import { enqueueSubscriptionEvent } from './webhooks/billing-events.js';
+import { kickDeliveries } from '../webhooks/webhook.service.js';
 
 /**
  * End-user-facing payment row (GET /api/v1/billing/payments). A deliberate
@@ -400,12 +401,21 @@ export const billingService = {
       });
     }
 
+    // Cancel + its outbox row in one transaction: the customer's own cancel is
+    // a state change a consumer has to hear about, so it must not be able to
+    // commit without the announcement (see webhooks/apply.ts).
     const now = new Date();
-    const updated = await prisma.subscription.update({
-      where: { id: sub.id },
-      data: { status: 'CANCELED', canceledAt: now, cancelAt: now },
+    const { updated, deliveryIds } = await prisma.$transaction(async (tx) => {
+      const row = await tx.subscription.update({
+        where: { id: sub.id },
+        data: { status: 'CANCELED', canceledAt: now, cancelAt: now },
+      });
+      return {
+        updated: row,
+        deliveryIds: await enqueueSubscriptionEvent(tx, 'subscription.canceled', row.id),
+      };
     });
-    emitSubscriptionEvent('subscription.canceled', updated.id);
+    kickDeliveries(deliveryIds);
     // Self-service cancel while PAST_DUE — close the dunning case (silently).
     const { dunningService } = await import('./dunning.service.js');
     await dunningService.closeForCanceledSubscription(updated.id);
@@ -463,12 +473,19 @@ export const billingService = {
       });
     }
 
+    // Same transactional cancel + announce as cancelCurrentSubscription.
     const now = new Date();
-    const updated = await prisma.subscription.update({
-      where: { id: sub.id },
-      data: { status: 'CANCELED', canceledAt: now, cancelAt: now },
+    const { updated, deliveryIds } = await prisma.$transaction(async (tx) => {
+      const row = await tx.subscription.update({
+        where: { id: sub.id },
+        data: { status: 'CANCELED', canceledAt: now, cancelAt: now },
+      });
+      return {
+        updated: row,
+        deliveryIds: await enqueueSubscriptionEvent(tx, 'subscription.canceled', row.id),
+      };
     });
-    emitSubscriptionEvent('subscription.canceled', updated.id);
+    kickDeliveries(deliveryIds);
     const { dunningService } = await import('./dunning.service.js');
     await dunningService.closeForCanceledSubscription(updated.id);
     return updated;

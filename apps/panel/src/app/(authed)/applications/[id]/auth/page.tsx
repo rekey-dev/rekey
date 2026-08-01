@@ -4,8 +4,8 @@ import { redirect } from 'next/navigation';
 import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, SectionHeader } from '@/components/Card';
-import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
+import { StickyFormFooter } from '@/components/StickyFormFooter';
 
 const PRIMARY_METHODS: Array<{ key: string; label: string; hint: string }> = [
   {
@@ -39,6 +39,7 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
   const passwordBreachCheckEnabled = formData.get('passwordBreachCheckEnabled') === 'on';
   const sendVerificationEmailOnSignUp = formData.get('sendVerificationEmailOnSignUp') === 'on';
   const requireEmailVerification = formData.get('requireEmailVerification') === 'on';
+  const oidcEnabled = formData.get('oidcEnabled') === 'on';
   const redirectUrls = String(formData.get('redirectUrls') ?? '')
     .split('\n')
     .map((s) => s.trim())
@@ -61,6 +62,7 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
         passwordBreachCheckEnabled,
         sendVerificationEmailOnSignUp,
         requireEmailVerification,
+        oidcEnabled,
         redirectUrls,
         appUrl,
       },
@@ -118,6 +120,9 @@ export default async function AuthMethodsPage({
     false;
   const requireEmailVerification =
     (app.authConfig as { requireEmailVerification?: boolean }).requireEmailVerification === true;
+  // Off by default, same as `requireEmailVerification` — an app saved before
+  // the field existed must read back as OFF, never as "we're already an IdP".
+  const oidcEnabled = app.authConfig.oidcEnabled === true;
   const redirectUrls = app.authConfig.redirectUrls ?? [];
   const appUrl = (app.authConfig as { appUrl?: string }).appUrl ?? '';
   // What emails would actually link to today if the operator saves nothing:
@@ -137,6 +142,7 @@ export default async function AuthMethodsPage({
   return (
     <div className="space-y-6">
       <PageHeader
+        level={2}
         title="Auth methods"
         description="How end-users sign up and sign in to this application, and the security policy enforced on their accounts."
       />
@@ -279,9 +285,11 @@ export default async function AuthMethodsPage({
                   ) : (
                     <>
                       {' '}
-                      With this blank and no redirect URLs set,{' '}
-                      <strong>emails go out without their button</strong> — we won&apos;t send a
-                      link that leads nowhere.
+                      With this blank and no redirect URLs set we can&apos;t build a link, so the
+                      welcome email <strong>goes out without its button</strong> and the{' '}
+                      <strong>verification email isn&apos;t sent at all</strong> — its whole body is
+                      a button, and a confirmation nobody can click is worse than none. Set this
+                      before turning on <strong>Require a verified email</strong>.
                     </>
                   )}
                 </>
@@ -302,7 +310,7 @@ export default async function AuthMethodsPage({
         <section className="space-y-3">
           <SectionHeader
             title="Security policy"
-            description="Account-protection rules enforced server-side on every end-user."
+            description="Account-protection rules enforced server-side on every end-user, and what this application asserts about them to anyone else."
           />
           <Card className="space-y-5">
             <ToggleRow
@@ -333,13 +341,45 @@ export default async function AuthMethodsPage({
                   sends the link.{' '}
                   <strong>Applies to existing accounts the moment you save</strong> — anyone who
                   never confirmed their address is signed out within 15 minutes and stays out until
-                  they do, so make sure the verification email above is going out first. Magic-link
+                  they do, so make sure the verification email above is going out first. Give your
+                  sign-in screen a &ldquo;send it again&rdquo; button on{' '}
+                  <code className="text-xs">EMAIL_NOT_VERIFIED</code>, wired to{' '}
+                  <code className="text-xs">POST /api/v1/auth/resend-verification</code> — it takes
+                  no session, which is the point. Magic-link
                   and OAuth sign-in pass the gate rather than skip it: each proves the address and
                   now records it.{' '}
                   <strong>Required for the OpenID Connect `email` scope</strong> — while this is
                   off, an Application acting as an identity provider will not assert an address it
                   has no proof of, and omits <code className="text-xs">email</code> from its
                   discovery document.
+                </>
+              }
+            />
+
+            <ToggleRow
+              padded={false}
+              name="oidcEnabled"
+              label="Act as an OpenID Connect provider"
+              defaultChecked={oidcEnabled}
+              hint={
+                <>
+                  Turns this application into a public <strong>identity provider</strong>: other
+                  products can offer &ldquo;Sign in with {app.name}&rdquo; and your end-users&apos;
+                  accounts here become their accounts there. Switching it on publishes an
+                  unauthenticated
+                  discovery document at{' '}
+                  <code className="text-xs">/.well-known/openid-configuration</code>, starts issuing{' '}
+                  <code className="text-xs">id_token</code>s for the{' '}
+                  <code className="text-xs">openid</code> scope, and exposes{' '}
+                  <code className="text-xs">/oauth/userinfo</code>. Relying parties self-register
+                  themselves by default, so anyone who finds the issuer can put a password prompt
+                  on it — leave this off unless you actually want to be an identity provider, and
+                  see{' '}
+                  <code className="text-xs">docs/oidc-provider.md</code> for how to close
+                  registration once yours are set up. Independent of the MCP server switch on the
+                  MCP tab; either one mounts the shared OAuth endpoints. The{' '}
+                  <code className="text-xs">email</code> claim additionally needs{' '}
+                  <strong>Require a verified email</strong> above.
                 </>
               }
             />
@@ -399,9 +439,10 @@ export default async function AuthMethodsPage({
           </Card>
         </section>
 
-        <div className="flex items-center justify-end">
-          <SubmitButton pendingLabel="Saving…">Save changes</SubmitButton>
-        </div>
+        {/* This page is 14 controls over ~1970px. A Save that only exists at
+            the very bottom is a Save most of the page cannot see, and until now
+            navigating away threw the edits out without a word. */}
+        <StickyFormFooter hint="Changes apply to new sign-ins immediately." />
       </form>
     </div>
   );

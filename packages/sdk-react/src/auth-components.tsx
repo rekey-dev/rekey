@@ -1,3 +1,5 @@
+'use client';
+
 /**
  * Auth widgets — the drop-in `<SignIn>` / `<SignUp>` / `<UserButton>` family.
  *

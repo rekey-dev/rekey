@@ -90,6 +90,23 @@ export function recordApiRequest(input: ApiRequestLogInput): void {
  * flush drops that batch — stdout remains the source of truth). Re-entrancy
  * guarded so two timers / a timer + a shutdown flush can't double-write.
  */
+/**
+ * Discard whatever is buffered without writing it.
+ *
+ * Test-only. This buffer is module-level and flushed by a TIMER, which makes
+ * it the documented cause of the TRUNCATE deadlock retry in test/setup.ts:
+ * rows enqueued by one test are still in flight — or land mid-TRUNCATE — while
+ * the next takes an AccessExclusiveLock on `api_request_logs`. Dropping the
+ * buffer between tests removes the write that the retry loop exists to
+ * survive. Called from test/setup.ts's beforeEach.
+ *
+ * `flushing` is deliberately NOT reset: an in-flight `createMany` still owns
+ * the flag and will clear it in its own `finally`.
+ */
+export function __resetForTests(): void {
+  buffer = [];
+}
+
 export async function flushApiRequestLogs(): Promise<number> {
   if (flushing || buffer.length === 0) return 0;
   flushing = true;

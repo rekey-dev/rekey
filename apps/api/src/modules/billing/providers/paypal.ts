@@ -28,6 +28,60 @@ import type { PaypalCredentials, BillingMode } from '../credentials.service.js';
 const SANDBOX_BASE = 'https://api-m.sandbox.paypal.com';
 const LIVE_BASE = 'https://api-m.paypal.com';
 
+/**
+ * Hard ceiling on any outbound PayPal call.
+ *
+ * Node's undici has NO default request timeout, so a bare `fetch()` to a
+ * wedged host hangs until the OS gives up on the socket — minutes, or never.
+ * Every call in this file used to be a bare `fetch()`.
+ *
+ * 10s matches the outbound budget the OAuth providers and the webhook
+ * dispatcher already use. These are operator-initiated management calls
+ * (register a plan, create a checkout, cancel a subscription) where the caller
+ * is a human waiting on an HTTP response.
+ */
+const PAYPAL_TIMEOUT_MS = 10_000;
+
+/**
+ * Tighter ceiling for the calls on the INBOUND WEBHOOK request path
+ * (`verifyPaypalWebhook`: a token mint plus the verify POST, so the worst case
+ * is 2× this).
+ *
+ * That path is the sharp one. It runs synchronously inside the Fastify handler
+ * for every webhook PayPal sends; with no timeout at all, a wedged
+ * api-m.paypal.com held a handler open indefinitely, PayPal retried and opened
+ * another, and the process ran out of connections while `/health/live` — which
+ * touches neither PayPal nor the handler pool — stayed green. Failing a
+ * webhook fast costs one provider retry; holding it costs the API.
+ */
+const PAYPAL_WEBHOOK_TIMEOUT_MS = 4_000;
+
+/**
+ * `fetch` with a deadline. The signal stays armed after the response
+ * resolves, so it covers the body read too — a server that returns headers
+ * promptly and then trickles the body still hits the deadline.
+ */
+function paypalFetch(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs: number = PAYPAL_TIMEOUT_MS,
+): Promise<Response> {
+  return fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+}
+
+/**
+ * Why the online verification is still on the request path.
+ *
+ * PayPal's signature check IS the authentication for the webhook route (there
+ * is no bearer token; see pipeline.ts). Deferring it means either acting on an
+ * unverified payload, or persisting one to a quarantine and building a second
+ * pipeline to drain it — a new trust boundary and a new failure mode to buy
+ * latency we do not otherwise have a problem with. The timeout above bounds
+ * the damage, and an unreachable PayPal now answers 503 rather than 401 (see
+ * `PaypalVerifyOutcome`) so the provider retries instead of being told its
+ * signature was bad.
+ */
+
 interface AccessToken {
   access_token: string;
   expires_at: number; // ms epoch
@@ -50,7 +104,7 @@ export class RealPaypalProvider implements BillingProvider {
       return this.accessTokenCache.access_token;
     }
     const auth = Buffer.from(`${this.creds.clientId}:${this.creds.clientSecret}`).toString('base64');
-    const res = await fetch(`${this.base}/v1/oauth2/token`, {
+    const res = await paypalFetch(`${this.base}/v1/oauth2/token`, {
       method: 'POST',
       headers: {
         Authorization: `Basic ${auth}`,
@@ -75,7 +129,7 @@ export class RealPaypalProvider implements BillingProvider {
     const token = await this.accessToken();
     const productId = `REKEY-PROD-${plan.applicationId.slice(0, 18)}`;
     // Try create the product (idempotent via PayPal-Request-Id).
-    await fetch(`${this.base}/v1/catalogs/products`, {
+    await paypalFetch(`${this.base}/v1/catalogs/products`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -94,7 +148,7 @@ export class RealPaypalProvider implements BillingProvider {
     const requestId = `REKEY-PLAN-${plan.id}`;
     const interval = plan.interval === 'YEAR' ? 'YEAR' : 'MONTH';
     const valueMajor = (plan.amount / 100).toFixed(2);
-    const planRes = await fetch(`${this.base}/v1/billing/plans`, {
+    const planRes = await paypalFetch(`${this.base}/v1/billing/plans`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -150,7 +204,7 @@ export class RealPaypalProvider implements BillingProvider {
     }
 
     const requestId = `REKEY-SUB-${randomUUID()}`;
-    const subRes = await fetch(`${this.base}/v1/billing/subscriptions`, {
+    const subRes = await paypalFetch(`${this.base}/v1/billing/subscriptions`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -217,7 +271,7 @@ export class RealPaypalProvider implements BillingProvider {
     const description = (
       input.discount ? `${input.plan.name} (coupon ${input.discount.code})` : input.plan.name
     ).slice(0, 127);
-    const res = await fetch(`${this.base}/v2/checkout/orders`, {
+    const res = await paypalFetch(`${this.base}/v2/checkout/orders`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -275,7 +329,7 @@ export class RealPaypalProvider implements BillingProvider {
    */
   async captureOneTime(orderId: string): Promise<{ captured: boolean }> {
     const token = await this.accessToken();
-    const res = await fetch(`${this.base}/v2/checkout/orders/${orderId}/capture`, {
+    const res = await paypalFetch(`${this.base}/v2/checkout/orders/${orderId}/capture`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     });
@@ -307,7 +361,7 @@ export class RealPaypalProvider implements BillingProvider {
       'PAYMENT.CAPTURE.COMPLETED',
     ].map((name) => ({ name }));
 
-    const res = await fetch(`${this.base}/v1/notifications/webhooks`, {
+    const res = await paypalFetch(`${this.base}/v1/notifications/webhooks`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ url: publicUrl, event_types: eventTypes }),
@@ -319,7 +373,7 @@ export class RealPaypalProvider implements BillingProvider {
     const text = await res.text();
     // Already registered for this URL → look it up and return its id.
     if (text.includes('WEBHOOK_URL_ALREADY_EXISTS')) {
-      const listRes = await fetch(`${this.base}/v1/notifications/webhooks`, {
+      const listRes = await paypalFetch(`${this.base}/v1/notifications/webhooks`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const list = (await listRes.json()) as { webhooks?: Array<{ id: string; url: string }> };
@@ -333,13 +387,30 @@ export class RealPaypalProvider implements BillingProvider {
     const providerSubId = input.subscription.providerSubId;
     if (!providerSubId) return;
     const token = await this.accessToken();
-    await fetch(`${this.base}/v1/billing/subscriptions/${providerSubId}/cancel`, {
+    await paypalFetch(`${this.base}/v1/billing/subscriptions/${providerSubId}/cancel`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ reason: 'Cancelled via Rekey' }),
     });
   }
 }
+
+/**
+ * The three ways an online verification can end.
+ *
+ * `unreachable` is separated from `invalid` deliberately. Both used to be
+ * `false`, so a PayPal outage or a timeout surfaced as HTTP 401
+ * WEBHOOK_SIGNATURE_INVALID — telling PayPal its own signature was bad. PayPal
+ * disables an endpoint that keeps rejecting, so an outage on OUR side of the
+ * call could cost the operator their webhook. `unreachable` maps to 503, which
+ * is retried and reads correctly in the logs.
+ *
+ * Both are still fail-CLOSED: nothing is processed either way.
+ */
+export type PaypalVerifyOutcome =
+  | { ok: true }
+  | { ok: false; reason: 'invalid' }
+  | { ok: false; reason: 'unreachable' };
 
 /**
  * Verify an inbound PayPal webhook signature.
@@ -350,8 +421,12 @@ export class RealPaypalProvider implements BillingProvider {
  * `verification_status`. Requires a fresh access token minted from the
  * Application's PayPal client credentials.
  *
- * Returns true only on `verification_status === 'SUCCESS'`. Any network
- * error / non-2xx / non-SUCCESS → false (fail-closed; the route rejects).
+ * `{ ok: true }` only on `verification_status === 'SUCCESS'`. A missing
+ * transmission header or an explicit non-SUCCESS is `invalid`; a timeout,
+ * network error or 5xx from PayPal is `unreachable`.
+ *
+ * Both calls carry PAYPAL_WEBHOOK_TIMEOUT_MS — see the constant for why this
+ * is the sharpest of the eleven calls in this file.
  */
 export async function verifyPaypalWebhook(args: {
   creds: PaypalCredentials;
@@ -359,7 +434,7 @@ export async function verifyPaypalWebhook(args: {
   headers: Record<string, string | string[] | undefined>;
   /** The parsed webhook event object (PayPal re-canonicalises server-side). */
   event: unknown;
-}): Promise<boolean> {
+}): Promise<PaypalVerifyOutcome> {
   const base = args.mode === 'live' ? LIVE_BASE : SANDBOX_BASE;
 
   const header = (k: string): string | undefined => {
@@ -372,45 +447,69 @@ export async function verifyPaypalWebhook(args: {
   const authAlgo = header('paypal-auth-algo');
   const transmissionSig = header('paypal-transmission-sig');
   if (!transmissionId || !transmissionTime || !certUrl || !authAlgo || !transmissionSig) {
-    return false;
+    // Nothing was sent to verify with — that is the caller's problem, not
+    // PayPal's availability.
+    return { ok: false, reason: 'invalid' };
   }
 
   // Mint an access token (basic-auth client_credentials).
   const auth = Buffer.from(`${args.creds.clientId}:${args.creds.clientSecret}`).toString('base64');
   let token: string;
   try {
-    const tokenRes = await fetch(`${base}/v1/oauth2/token`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Basic ${auth}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
+    const tokenRes = await paypalFetch(
+      `${base}/v1/oauth2/token`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${auth}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: 'grant_type=client_credentials',
       },
-      body: 'grant_type=client_credentials',
-    });
-    if (!tokenRes.ok) return false;
+      PAYPAL_WEBHOOK_TIMEOUT_MS,
+    );
+    // 401/403 here means the operator's stored client credentials are wrong,
+    // which is a configuration fault they must fix; anything else is PayPal
+    // failing to answer.
+    if (!tokenRes.ok) {
+      return tokenRes.status === 401 || tokenRes.status === 403
+        ? { ok: false, reason: 'invalid' }
+        : { ok: false, reason: 'unreachable' };
+    }
     token = ((await tokenRes.json()) as { access_token: string }).access_token;
   } catch {
-    return false;
+    // Timeout / DNS / connection reset.
+    return { ok: false, reason: 'unreachable' };
   }
 
   try {
-    const verifyRes = await fetch(`${base}/v1/notifications/verify-webhook-signature`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        transmission_id: transmissionId,
-        transmission_time: transmissionTime,
-        cert_url: certUrl,
-        auth_algo: authAlgo,
-        transmission_sig: transmissionSig,
-        webhook_id: args.creds.webhookId,
-        webhook_event: args.event,
-      }),
-    });
-    if (!verifyRes.ok) return false;
+    const verifyRes = await paypalFetch(
+      `${base}/v1/notifications/verify-webhook-signature`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          transmission_id: transmissionId,
+          transmission_time: transmissionTime,
+          cert_url: certUrl,
+          auth_algo: authAlgo,
+          transmission_sig: transmissionSig,
+          webhook_id: args.creds.webhookId,
+          webhook_event: args.event,
+        }),
+      },
+      PAYPAL_WEBHOOK_TIMEOUT_MS,
+    );
+    if (!verifyRes.ok) {
+      return verifyRes.status >= 500
+        ? { ok: false, reason: 'unreachable' }
+        : { ok: false, reason: 'invalid' };
+    }
     const json = (await verifyRes.json()) as { verification_status?: string };
-    return json.verification_status === 'SUCCESS';
+    return json.verification_status === 'SUCCESS'
+      ? { ok: true }
+      : { ok: false, reason: 'invalid' };
   } catch {
-    return false;
+    return { ok: false, reason: 'unreachable' };
   }
 }

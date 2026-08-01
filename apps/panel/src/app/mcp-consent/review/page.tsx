@@ -215,7 +215,7 @@ export default async function McpConsentReviewPage({
               name="decision"
               value="allow"
               pendingLabel="Authorizing…"
-              className="flex-1 rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] transition-colors disabled:opacity-60"
+              className="flex-1 rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] transition-colors disabled:opacity-60"
             >
               Allow
             </SubmitButton>

@@ -30,6 +30,24 @@ import type {
 import { discountUnsupported } from './discount.js';
 import type { RazorpayCredentials } from '../credentials.service.js';
 
+/**
+ * Hard ceiling on any outbound Razorpay call. Same 10s budget as the PayPal
+ * provider and the OAuth exchanges.
+ *
+ * The SDK builds its own axios instance and passes no `timeout`, so axios's
+ * default of `0` — wait forever — applied to every call in this class. A
+ * wedged api.razorpay.com held the operator's request open indefinitely.
+ */
+const RAZORPAY_TIMEOUT_MS = 10_000;
+
+/**
+ * Shape of the SDK internals we reach into below. Not exported by the
+ * package; declared here so the reach is typed rather than an `any` cast.
+ */
+interface RazorpayInternals {
+  api?: { rq?: { defaults?: { timeout?: number } } };
+}
+
 export class RealRazorpayProvider implements BillingProvider {
   readonly name = 'razorpay';
   private readonly client: Razorpay;
@@ -39,22 +57,56 @@ export class RealRazorpayProvider implements BillingProvider {
       key_id: creds.keyId,
       key_secret: creds.keySecret,
     });
+    // The constructor accepts only key_id / key_secret / oauthToken / headers
+    // (razorpay@2.9.6 dist/razorpay.js), so there is NO supported way to pass
+    // a request timeout. Set the default on the axios instance the SDK stored,
+    // which is the only thing that actually cancels the socket.
+    //
+    // Guarded rather than asserted: if a future SDK version moves or renames
+    // this, the optional chain leaves the default in place and `withTimeout`
+    // below still releases OUR handler. Bump this file if the SDK grows a
+    // real option.
+    const internals = this.client as unknown as RazorpayInternals;
+    if (internals.api?.rq?.defaults) {
+      internals.api.rq.defaults.timeout = RAZORPAY_TIMEOUT_MS;
+    }
+  }
+
+  /**
+   * Belt to the axios braces above: reject after the deadline whatever the SDK
+   * is doing. This does not free the socket — only the axios timeout does
+   * that — but it guarantees the caller's request handler is never pinned by a
+   * provider call, which is the failure that matters at the API boundary.
+   */
+  private withTimeout<T>(work: Promise<T>, op: string): Promise<T> {
+    let timer: NodeJS.Timeout;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`Razorpay ${op} exceeded ${RAZORPAY_TIMEOUT_MS}ms`)),
+        RAZORPAY_TIMEOUT_MS + 500,
+      );
+      timer.unref();
+    });
+    return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
   }
 
   async ensurePlanRegistered(plan: Plan): Promise<ProviderPlanRef> {
     const period = plan.interval === 'YEAR' ? 'yearly' : 'monthly';
     // Razorpay needs amount in the smallest currency unit (paise for INR,
     // cents for USD) — same as ours, so no conversion.
-    const created = await this.client.plans.create({
-      period,
-      interval: 1,
-      item: {
-        name: plan.name,
-        amount: plan.amount,
-        currency: plan.currency,
-      },
-      notes: { rekey_plan_id: plan.id, rekey_slug: plan.slug },
-    });
+    const created = await this.withTimeout(
+      this.client.plans.create({
+        period,
+        interval: 1,
+        item: {
+          name: plan.name,
+          amount: plan.amount,
+          currency: plan.currency,
+        },
+        notes: { rekey_plan_id: plan.id, rekey_slug: plan.slug },
+      }),
+      'plans.create',
+    );
     return { providerPlanId: (created as { id: string }).id };
   }
 
@@ -78,15 +130,18 @@ export class RealRazorpayProvider implements BillingProvider {
     // Razorpay Subscription create. `total_count: 12` = 12 billing cycles
     // (Razorpay requires a finite count for subscriptions API). For an
     // indefinite sub we pick a large number; the operator can cancel any time.
-    const sub = await this.client.subscriptions.create({
-      plan_id: rzpPlanId,
-      total_count: input.plan.interval === 'YEAR' ? 10 : 120,
-      customer_notify: 1,
-      notes: {
-        rekey_end_user_id: input.endUser.id,
-        rekey_plan_id: input.plan.id,
-      },
-    });
+    const sub = await this.withTimeout(
+      this.client.subscriptions.create({
+        plan_id: rzpPlanId,
+        total_count: input.plan.interval === 'YEAR' ? 10 : 120,
+        customer_notify: 1,
+        notes: {
+          rekey_end_user_id: input.endUser.id,
+          rekey_plan_id: input.plan.id,
+        },
+      }),
+      'subscriptions.create',
+    );
     // Razorpay returns a `short_url` users hit to authorize. Wrap with our
     // success/cancel via `callback_url` style — Razorpay doesn't natively
     // support cancel/return URLs on subscriptions, so we encode them in
@@ -110,29 +165,35 @@ export class RealRazorpayProvider implements BillingProvider {
     // options/customer) and its return type is noisy — cast to a loose
     // signature, same posture as plans/subscriptions create above.
     const create = this.client.paymentLink.create as (body: unknown) => Promise<unknown>;
-    const link = (await create({
-      amount: input.plan.amount - (input.discount?.amount ?? 0),
-      currency: input.plan.currency,
-      accept_partial: false,
-      description: input.plan.name,
-      callback_url: input.successUrl,
-      callback_method: 'get',
-      notes: {
-        rekey_application_id: input.application.id,
-        rekey_end_user_id: input.endUser.id,
-        rekey_plan_id: input.plan.id,
-        ...(input.discount && {
-          rekey_coupon_code: input.discount.code,
-          rekey_discount_amount: String(input.discount.amount),
-        }),
-      },
-    })) as { id: string; short_url: string };
+    const link = (await this.withTimeout(
+      create({
+        amount: input.plan.amount - (input.discount?.amount ?? 0),
+        currency: input.plan.currency,
+        accept_partial: false,
+        description: input.plan.name,
+        callback_url: input.successUrl,
+        callback_method: 'get',
+        notes: {
+          rekey_application_id: input.application.id,
+          rekey_end_user_id: input.endUser.id,
+          rekey_plan_id: input.plan.id,
+          ...(input.discount && {
+            rekey_coupon_code: input.discount.code,
+            rekey_discount_amount: String(input.discount.amount),
+          }),
+        },
+      }),
+      'paymentLink.create',
+    )) as { id: string; short_url: string };
     return { url: link.short_url, sessionId: link.id };
   }
 
   async cancelSubscription(input: CancelSubscriptionInput): Promise<void> {
     const providerSubId = input.subscription.providerSubId;
     if (!providerSubId) return;
-    await this.client.subscriptions.cancel(providerSubId, !input.atPeriodEnd /* cancel_at_cycle_end */);
+    await this.withTimeout(
+      this.client.subscriptions.cancel(providerSubId, !input.atPeriodEnd /* cancel_at_cycle_end */),
+      'subscriptions.cancel',
+    );
   }
 }

@@ -10,6 +10,7 @@ import { requireUserSession } from '../../middleware/user-session.js';
 import { assertStepUp } from '../../lib/step-up.js';
 import { mfaService } from '../mfa/mfa.service.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
+import type { SecurityEventType } from '@rekey.dev/shared-types';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
 
 /**
@@ -33,7 +34,7 @@ function deviceContext(req: FastifyRequest): { userAgent: string | null; ip: str
  */
 function recordEndUserEvent(
   req: FastifyRequest,
-  type: string,
+  type: SecurityEventType,
   endUserId: string | null,
   metadata?: Record<string, unknown>,
 ): void {
@@ -95,6 +96,12 @@ const VerifyEmailBody = z.object({
 });
 
 const SendVerificationBody = z.object({
+  verifyUrl: TokenizedUrl.optional(),
+});
+
+/** Same body as above plus the address, since there is no session to read it from. */
+const ResendVerificationBody = z.object({
+  email: z.string().email().max(254),
   verifyUrl: TokenizedUrl.optional(),
 });
 
@@ -580,6 +587,56 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         token: body.token,
       });
       recordEndUserEvent(req, 'user.email_verified', result.endUser.id);
+      return { success: true, data: result };
+    },
+  );
+
+  // The sessionless sibling of `/send-verification` (which needs one). It
+  // exists because `requireEmailVerification` refuses the very session that
+  // route demands, so without this a user whose mail never arrived had no
+  // self-service way back. Rate-limited exactly like `/forgot-password` — same
+  // surface, same cap — and enumeration-safe by construction; see
+  // `authService.resendVerificationEmail`.
+  app.post(
+    '/resend-verification',
+    {
+      config: { rateLimit: authRateLimit(10) },
+      schema: {
+        tags: ['Public · Auth'],
+        summary: 'Re-send an email-verification link to an address (no session required)',
+        description:
+          'For a user blocked by `authConfig.requireEmailVerification`, who by definition ' +
+          'has no session and so cannot call /auth/send-verification.\n\n' +
+          'Always returns 200 with `{ emailSent: boolean, verificationToken: string|null }` ' +
+          'and never discloses whether the address exists, is already verified, or was ' +
+          'delivered to — a **publishable**-key caller gets one constant body whatever ' +
+          'happened. A secret-key caller gets the real outcome, and the raw token when the ' +
+          'Application has no email transport configured (the same contract /forgot-password ' +
+          'uses).\n\n' +
+          'Nothing is sent when no verification link can be built — pass `verifyUrl`, or set ' +
+          'the Application URL (Panel → Application → Auth). An already-verified address is ' +
+          'a no-op rather than an error.',
+        security: [{ apiKey: [] }, { publishableKey: [] }],
+        body: {
+          type: 'object',
+          required: ['email'],
+          properties: {
+            email: { type: 'string', format: 'email', maxLength: 254 },
+            // No `format: uri` — see /send-verification for why.
+            verifyUrl: { type: 'string', maxLength: 2048 },
+          },
+        },
+      },
+    },
+    async (req) => {
+      const body = ResendVerificationBody.parse(req.body);
+      const result = await authService.resendVerificationEmail({
+        application: req.application!,
+        email: body.email,
+        ...(body.verifyUrl !== undefined && { verifyUrl: body.verifyUrl }),
+        // Gates the raw-token fallback: a publishable key must never receive it.
+        ...(req.authKind !== undefined && { authKind: req.authKind }),
+      });
       return { success: true, data: result };
     },
   );

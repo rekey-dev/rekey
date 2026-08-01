@@ -132,3 +132,15 @@ export function shouldRecordOutageEvent(subsystem: OutageSubsystem, tenantId: st
   lastOutageEventAt.set(key, now);
   return true;
 }
+
+/**
+ * Forget every recorded window.
+ *
+ * Test-only. The 5-minute suppression window outlives a whole test file, so
+ * the FIRST test to provoke an outage event silences every later one for the
+ * same (subsystem, tenant) — including tests whose entire assertion is that
+ * the row was written. Called from test/setup.ts's beforeEach.
+ */
+export function __resetForTests(): void {
+  lastOutageEventAt.clear();
+}

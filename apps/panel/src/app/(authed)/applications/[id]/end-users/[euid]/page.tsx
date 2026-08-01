@@ -16,7 +16,8 @@ import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import { api, PanelApiError } from '@/lib/api';
+import { api, PanelApiError, type SecurityEventRow } from '@/lib/api';
+import { humanizeEventType } from '@/lib/security-events';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { formatDate, formatDateTime } from '@/lib/date';
 import { CopyButton } from '@/components/CopyButton';
@@ -119,6 +120,47 @@ interface BillingDto {
     createdAt: string;
     plan: { slug: string; name: string } | null;
   }>;
+}
+
+/**
+ * Brute-force policy the API applies to end-user password sign-in
+ * (`LOGIN_POLICY` in `apps/api/src/lib/brute-force.ts`): 10 failures in a
+ * 15-minute window → a 15-minute lock. Mirrored here purely so the counter on
+ * this page has a denominator — "Failed sign-in attempts: 7" is unanswerable
+ * without knowing what trips the lock.
+ */
+const LOGIN_LOCK_THRESHOLD = 10;
+const LOGIN_LOCK_MINUTES = 15;
+
+/**
+ * Recent auth events for ONE end-user.
+ *
+ * `GET /tenant/security-events` has no `actorId` filter, so the panel pulls the
+ * application's most recent `AUTH_EVENT_SCAN` end-user events (200 is the API's
+ * `limit` ceiling) and narrows in memory. On a busy application that window may
+ * not reach far back for a quiet user — the panel says so rather than implying
+ * the list is exhaustive.
+ */
+const AUTH_EVENT_SCAN = 200;
+const AUTH_EVENTS_SHOWN = 20;
+
+/**
+ * Readable one-liner from an event's `metadata`. The shape varies by type
+ * (`{via}` on sign-in, `{reason}` where the API records one, credential info on
+ * passkey events), so pick the keys worth surfacing and fall back to a compact
+ * render of whatever is there.
+ */
+function eventDetail(metadata: Record<string, unknown> | null | undefined): string | null {
+  if (!metadata || typeof metadata !== 'object') return null;
+  const parts: string[] = [];
+  for (const key of ['via', 'reason', 'deviceName', 'count', 'provider'] as const) {
+    const v = metadata[key];
+    if (typeof v === 'string' && v !== '') parts.push(`${key}: ${v.replace(/_/g, ' ')}`);
+    else if (typeof v === 'number') parts.push(`${key}: ${v}`);
+  }
+  if (parts.length > 0) return parts.join(' · ');
+  const keys = Object.keys(metadata);
+  return keys.length === 0 ? null : keys.slice(0, 3).join(', ');
 }
 
 function fmtMoney(amount: number, currency: string): string {
@@ -270,7 +312,7 @@ export default async function EndUserDetailPage({
   const eraseError = typeof sp.eraseError === 'string' ? sp.eraseError : undefined;
   const erased = sp.erased === '1';
 
-  const [detail, credits, billing] = await Promise.all([
+  const [detail, credits, billing, authEvents] = await Promise.all([
     api<EndUserDetailDto>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users/${encodeURIComponent(euid)}`,
@@ -283,6 +325,15 @@ export default async function EndUserDetailPage({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users/${encodeURIComponent(euid)}/billing`,
     }).catch(() => ({ subscriptions: [], payments: [], licenses: [] }) as BillingDto),
+    // "Why can't this user sign in?" — see the AUTH_EVENT_SCAN note.
+    api<{ events: SecurityEventRow[] }>({
+      method: 'GET',
+      path: `/api/v1/tenant/security-events?applicationId=${encodeURIComponent(id)}&actorType=end_user&limit=${AUTH_EVENT_SCAN}`,
+    })
+      .then((r) => r.events.filter((e) => e.actorId === euid).slice(0, AUTH_EVENTS_SHOWN))
+      // OWNER/ADMIN-only endpoint: a MEMBER gets 403 here. Degrade to no panel
+      // rather than 403-ing the whole end-user page.
+      .catch(() => null),
   ]);
 
   type Reveal = { accessToken: string; accessTokenExpiresAt: string };
@@ -306,6 +357,7 @@ export default async function EndUserDetailPage({
   return (
     <div className="space-y-5">
       <PageHeader
+        level={2}
         eyebrow={
           <Link
             href={`/applications/${id}/end-users`}
@@ -408,9 +460,18 @@ export default async function EndUserDetailPage({
             >
               Failed sign-in attempts
             </dt>
+            {/* A bare "7" told the operator nothing: 7 of what? The threshold
+                is the whole point of the number, so show the denominator. */}
             <dd className="text-[var(--color-fg)]">
               {lockedNow ? '≥ ' : ''}
               {detail.endUser.failedSignInAttempts}
+              <span className="text-[var(--color-muted-fg)]"> of {LOGIN_LOCK_THRESHOLD}</span>
+              {!lockedNow && detail.endUser.failedSignInAttempts > 0 && (
+                <span className="block text-xs text-[var(--color-muted-fg)]">
+                  {LOGIN_LOCK_THRESHOLD - detail.endUser.failedSignInAttempts} more locks the
+                  account for {LOGIN_LOCK_MINUTES} minutes
+                </span>
+              )}
             </dd>
           </div>
           <div>
@@ -425,6 +486,67 @@ export default async function EndUserDetailPage({
           </div>
         </dl>
       </Card>
+
+      {/* ─── Recent auth events ───────────────────────────────
+          The answer to "why can't this user sign in?" was previously
+          unreachable: the counter above had no context, and this person's
+          events appeared nowhere — Activity is application-wide and had no
+          way to narrow to one user. */}
+      {authEvents !== null && (
+        <section className="space-y-4">
+          <SectionHeader
+            title="Recent auth events"
+            description={`Last ${AUTH_EVENTS_SHOWN} recorded events for this end-user, newest first.`}
+            count={`(${authEvents.length})`}
+          />
+
+          <Banner tone="info">
+            Successful sign-ins and credential changes only. <strong>Failed</strong> sign-ins and
+            lockouts are counted in Redis and never written as events, so they cannot appear here —
+            the counter above is the only signal, and it resets on a successful sign-in.
+          </Banner>
+
+          {authEvents.length === 0 ? (
+            <EmptyState
+              variant="inline"
+              title="No recorded auth events"
+              description={`Nothing for this user in the application's most recent ${AUTH_EVENT_SCAN} end-user events. On a busy application that window may not reach back far.`}
+            />
+          ) : (
+            <Table minWidth="min-w-[40rem]">
+              <THead>
+                <TR>
+                  <TH>Event</TH>
+                  <TH>Detail</TH>
+                  <TH>IP</TH>
+                  <TH>When</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {authEvents.map((e) => (
+                  <TR key={e.id} hover>
+                    <TD>
+                      <div className="font-medium text-[var(--color-fg)]">
+                        {humanizeEventType(e.type)}
+                      </div>
+                      <div className="font-mono text-xs text-[var(--color-muted-fg)]">{e.type}</div>
+                    </TD>
+                    <TD className="text-xs text-[var(--color-muted-fg)]">
+                      {eventDetail(e.metadata) ?? '—'}
+                    </TD>
+                    <TD mono muted className="text-xs">
+                      <span title={e.userAgent ?? undefined}>{e.ip ?? '—'}</span>
+                    </TD>
+                    <TD muted className="whitespace-nowrap text-xs">
+                      {formatDateTime(e.createdAt)}
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          )}
+        </section>
+      )}
 
       <section className="space-y-4">
         <SectionHeader

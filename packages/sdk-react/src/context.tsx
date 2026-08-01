@@ -1,3 +1,5 @@
+'use client';
+
 /**
  * RekeyProvider — wraps the app, exposes user + signed-in state.
  *

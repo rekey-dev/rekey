@@ -6,23 +6,17 @@ import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
 import { PageHeader } from '@/components/PageHeader';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
-import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
-
-const TYPE_LABEL: Record<string, string> = {
-  'operator.sign_in': 'Operator sign-in',
-  'operator.session_revoked': 'Operator session revoked',
-  'operator.sign_out_everywhere': 'Operator signed out everywhere',
-  'app.sessions_rotated': 'App sessions rotated (kill-switch)',
-  'app.api_key.created': 'API key created',
-  'app.api_key.revoked': 'API key revoked',
-  'app.access_updated': 'Access controls updated',
-  'app.ip_blocked': 'Request blocked by IP allowlist',
-  'user.signed_up': 'End-user signed up',
-  'user.signed_in': 'End-user signed in',
-};
+import { ActorCell } from '@/components/ActorCell';
+import {
+  eventTypeOptions,
+  humanizeEventType,
+  resolveActorEmails,
+} from '@/lib/security-events';
 
 const ACTOR_TYPES = ['operator', 'end_user', 'system'] as const;
+
+const TYPE_OPTIONS = eventTypeOptions();
 
 const inputCls =
   'rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
@@ -51,7 +45,19 @@ export default async function AuditLogPage({
   const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
   const PAGE_SIZE = readPageSize(sp);
 
-  const type = typeof sp.type === 'string' && sp.type in TYPE_LABEL ? sp.type : '';
+  // Accept ANY syntactically plausible type, not only the ones we have a label
+  // for. The old `sp.type in TYPE_LABEL` guard silently discarded a hand-typed
+  // `?type=app.plan_created` — the page rendered the unfiltered log with no
+  // indication the filter had been thrown away. The API takes
+  // `z.string().min(1).max(80)`, so mirror that and let it answer.
+  const rawType = typeof sp.type === 'string' ? sp.type.trim() : '';
+  const type = rawType.length > 0 && rawType.length <= 80 ? rawType : '';
+  // A type outside our map is still a valid filter — surface it in the select
+  // rather than resetting the control to "All types" while the filter is live.
+  const typeOptions =
+    type !== '' && !TYPE_OPTIONS.some((o) => o.value === type)
+      ? [...TYPE_OPTIONS, { value: type, label: humanizeEventType(type) }]
+      : TYPE_OPTIONS;
   const actorType =
     typeof sp.actorType === 'string' &&
     (ACTOR_TYPES as readonly string[]).includes(sp.actorType)
@@ -81,6 +87,8 @@ export default async function AuditLogPage({
     method: 'GET',
     path: `/api/v1/tenant/security-events?${qs.toString()}`,
   });
+  // Resolve actor CUIDs to emails for THIS page of rows. See lib/security-events.
+  const actorEmails = await resolveActorEmails(events);
 
   const filterQsStr = filterQs.toString();
   const exportHref = `/audit-log/export${filterQsStr ? `?${filterQsStr}` : ''}`;
@@ -127,9 +135,9 @@ export default async function AuditLogPage({
           <span className="block text-xs font-medium text-[var(--color-fg)]">Event type</span>
           <select name="type" defaultValue={type} className={inputCls}>
             <option value="">All types</option>
-            {Object.entries(TYPE_LABEL).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
+            {typeOptions.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
               </option>
             ))}
           </select>
@@ -189,16 +197,16 @@ export default async function AuditLogPage({
             {events.map((e) => (
               <TR key={e.id} hover>
                 <TD>
-                  <div className="font-medium text-[var(--color-fg)]">{TYPE_LABEL[e.type] ?? e.type}</div>
+                  <div className="font-medium text-[var(--color-fg)]">{humanizeEventType(e.type)}</div>
                   <div className="font-mono text-xs text-[var(--color-muted-fg)]">{e.type}</div>
                 </TD>
                 <TD>
-                  <Badge tone="neutral">{e.actorType}</Badge>
-                  {e.actorId && (
-                    <div title={e.actorId} className="mt-1 max-w-[12rem] truncate font-mono text-xs text-[var(--color-muted-fg)]">
-                      {e.actorId}
-                    </div>
-                  )}
+                  <ActorCell
+                    actorType={e.actorType}
+                    actorId={e.actorId}
+                    applicationId={e.applicationId}
+                    emails={actorEmails}
+                  />
                 </TD>
                 <TD mono muted>
                   {e.ip ?? '—'}

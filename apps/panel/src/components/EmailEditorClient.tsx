@@ -188,7 +188,7 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
         <button
           type="submit"
           disabled={!ready || submitting}
-          className="rounded-md bg-[var(--color-primary)] px-3.5 py-1.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-60 shrink-0"
+          className="rounded-md bg-[var(--color-primary)] px-3.5 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60 shrink-0"
         >
           {!ready ? 'Loading editor…' : submitting ? 'Saving…' : 'Save'}
         </button>

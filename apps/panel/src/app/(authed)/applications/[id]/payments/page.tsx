@@ -7,19 +7,12 @@ import { formatDateTime } from '@/lib/date';
 import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
-import { Badge, type BadgeTone } from '@/components/Badge';
+import { StatusPill } from '@/components/StatusPill';
 import { EmptyState } from '@/components/EmptyState';
 import { BillingModeBanner } from '@/components/BillingModeBanner';
 
 const STATUSES = ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED'] as const;
 type PaymentStatus = (typeof STATUSES)[number];
-
-const STATUS_TONE: Record<PaymentStatus, BadgeTone> = {
-  SUCCEEDED: 'success',
-  PENDING: 'warning',
-  FAILED: 'danger',
-  REFUNDED: 'neutral',
-};
 
 const inputCls =
   'rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
@@ -188,9 +181,7 @@ export default async function PaymentsPage({
                   {formatMoney(p.amount, p.currency)}
                 </TD>
                 <TD>
-                  <Badge tone={STATUS_TONE[p.status]} dot>
-                    {p.status}
-                  </Badge>
+                  <StatusPill status={p.status} />
                 </TD>
                 <TD muted className="max-w-[16rem] truncate text-xs" title={p.description ?? undefined}>
                   {p.description ?? '—'}

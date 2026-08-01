@@ -81,24 +81,78 @@ jobs:
       - name: Build test dependencies
         run: pnpm exec turbo run build --filter="./packages/*"
 
-      - name: Create test database
-        run: PGPASSWORD=rekey psql -h localhost -U rekey -d rekey -c "CREATE DATABASE rekey_test;"
+      - name: Create test databases
+        run: |
+          PGPASSWORD=rekey psql -h localhost -U rekey -d rekey -c "CREATE DATABASE rekey_test;"
+          PGPASSWORD=rekey psql -h localhost -U rekey -d rekey -c "CREATE DATABASE rekey_shadow;"
 
       - name: Verify migrations apply
         run: |
           DATABASE_URL=postgresql://rekey:rekey@localhost:5432/rekey?schema=public \
             pnpm exec prisma migrate deploy --schema prisma/schema.prisma
 
+      # The step above proves the migrations RUN. It does not prove they build
+      # the schema `schema.prisma` describes. Editing the model without
+      # generating the matching migration still applies cleanly to an empty
+      # database and then diverges from every real one — drift that surfaces as
+      # a Prisma runtime error in production, not as a red build.
+      # `migrate diff --exit-code` replays the migration folder into a shadow
+      # database and compares it to the datamodel. Exit 2 = they differ: run
+      # `pnpm --filter @rekey.dev/api db:migrate` and commit the generated SQL.
+      - name: Check schema.prisma matches its migrations
+        run: |
+          pnpm exec prisma migrate diff \
+            --from-migrations prisma/migrations \
+            --to-schema-datamodel prisma/schema.prisma \
+            --shadow-database-url postgresql://rekey:rekey@localhost:5432/rekey_shadow?schema=public \
+            --exit-code
+
       # concurrency=1 is deliberate and must stay: every suite shares ONE
       # database and truncates between files, so two packages testing at once
       # eat each other's fixtures. This is the one place serialisation is
       # correctness, not slowness — do not "optimise" it.
-      - name: Run tests
+      #
+      # apps/api is invoked directly instead of through turbo so it can emit a
+      # coverage report. It is the SAME single run, not an extra one, and it
+      # stays sequential with the package tests below for the reason above.
+      - name: Run API tests (with coverage)
         env:
           TEST_DATABASE_URL: postgresql://rekey:rekey@localhost:5432/rekey_test?schema=public
           SUPER_ADMIN_KEY: test-admin-key-test-admin-key-test-admin-key
           JWT_SECRET: test-jwt-secret-test-jwt-secret-test-jwt-secret
-        run: pnpm exec turbo run test --concurrency=1
+        run: pnpm --filter @rekey.dev/api run test:coverage
+
+      # Runs even when the thresholds fail — "what is the number now" is
+      # exactly what you want in the summary when the gate is red.
+      - name: Publish coverage summary
+        if: always()
+        run: |
+          if [ ! -f apps/api/coverage/coverage-summary.json ]; then
+            echo "No coverage report was produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "### apps/api coverage"
+            echo
+            echo "| metric | covered | total | % |"
+            echo "| --- | ---: | ---: | ---: |"
+            node -e '
+              const fs = require("fs");
+              const path = "apps/api/coverage/coverage-summary.json";
+              const total = JSON.parse(fs.readFileSync(path, "utf8")).total;
+              for (const key of ["lines", "statements", "functions", "branches"]) {
+                const m = total[key];
+                console.log("| " + key + " | " + m.covered + " | " + m.total + " | " + m.pct + "% |");
+              }
+            '
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run package tests
+        env:
+          TEST_DATABASE_URL: postgresql://rekey:rekey@localhost:5432/rekey_test?schema=public
+          SUPER_ADMIN_KEY: test-admin-key-test-admin-key-test-admin-key
+          JWT_SECRET: test-jwt-secret-test-jwt-secret-test-jwt-secret
+        run: pnpm exec turbo run test --concurrency=1 --filter="./packages/*"
 
   build:
     name: Build

@@ -21,6 +21,7 @@ import { registerDoctorCommand } from './commands/doctor.js';
 import { registerAppsCommand } from './commands/apps.js';
 import { registerPlansCommand } from './commands/plans.js';
 import { registerVersionCommand } from './commands/version.js';
+import { VERSION } from './lib/version.js';
 
 const program = new Command();
 
@@ -28,8 +29,13 @@ program
   .name('rekey')
   .description(
     'Rekey command-line interface. Pass --json on any command for machine-readable output. ' +
-      'See packages/cli/AGENTS.md for the full agent-facing contract.',
+      'Agent-facing contract: the AGENTS.md shipped in this package, also at ' +
+      'https://github.com/rekey-dev/rekey/blob/main/packages/cli/AGENTS.md',
   )
+  // `rekey version` was the only way to ask, and `rekey --version` — which is
+  // what everyone tries first — answered "unknown option". Both work now; the
+  // subcommand stays because it is the one that honours --json.
+  .version(VERSION, '-V, --version', 'Print the CLI version')
   .option('--api-url <url>', 'Override REKEY_URL', process.env.REKEY_URL)
   .option('--admin-key <key>', 'Override SUPER_ADMIN_KEY', process.env.SUPER_ADMIN_KEY)
   .option('--json', 'Emit machine-readable JSON on stdout (errors still go to stderr).')

@@ -17,8 +17,52 @@ import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate, formatDateTime } from '@/lib/date';
 import { keyPrefixFor } from '@/components/EnvironmentBadge';
 
+/**
+ * Scopes an API key can carry, mirroring `SCOPE_IMPLICATIONS` in the API's
+ * `middleware/api-key-auth.ts`. The API validates `scopes` as a bare
+ * `z.array(z.string())` — any string is accepted and persisted, and simply
+ * never matches at enforcement time — so this list is the only thing stopping
+ * a typo from becoming a permanently inert permission.
+ *
+ * `webhooks:read` is declared in the API's implication table but has no
+ * `requireScope('webhooks:read')` call site anywhere, so it grants nothing
+ * today. It is offered here because a key minted with it will start working if
+ * that changes, and the label says what it does now.
+ *
+ * Write implies read (one level, not transitive), which is why ticking
+ * `auth:write` alone is sufficient.
+ */
+const KEY_SCOPES = [
+  {
+    value: 'auth:read',
+    label: 'auth:read',
+    help: 'Read end-users, sessions, and profile state.',
+  },
+  {
+    value: 'auth:write',
+    label: 'auth:write',
+    help: 'Create and modify end-users, OAuth links, MFA, organizations. Includes auth:read.',
+  },
+  {
+    value: 'billing:read',
+    label: 'billing:read',
+    help: 'Read plans, subscriptions, credits, usage, and coupons.',
+  },
+  {
+    value: 'billing:write',
+    label: 'billing:write',
+    help: 'Create and modify subscriptions, credits, usage, licences. Includes billing:read.',
+  },
+  {
+    value: 'webhooks:read',
+    label: 'webhooks:read',
+    help: 'Reserved — no endpoint enforces this scope yet.',
+  },
+] as const;
+
 const ERR: Record<string, string> = {
   missing: 'A key name is required.',
+  EXPIRY_INVALID: 'That expiry date could not be read. Use the date picker.',
   API_KEY_LIMIT_REACHED:
     'This application has reached its API key limit. Revoke an unused key first.',
   API_KEY_EXPIRY_IN_PAST: 'The expiry date must be in the future.',
@@ -60,12 +104,41 @@ async function createKey(applicationId: string, formData: FormData): Promise<voi
   'use server';
   const name = String(formData.get('name') ?? '').trim();
   if (!name) redirect(`/applications/${applicationId}/api-keys?error=missing&newKey=1`);
+
+  // Scopes. The API takes `scopes: z.array(z.string()).default([])` and its
+  // service turns an EMPTY array into `['*']` — so posting "nothing selected"
+  // silently mints a full-access key. Only send the list when the operator
+  // narrowed it; otherwise omit the field entirely so the default is explicit
+  // rather than an accident of an empty checkbox group.
+  const picked = formData.getAll('scopes').map(String).filter((s) => KEY_SCOPES.some((k) => k.value === s));
+  const fullAccess = String(formData.get('fullAccess') ?? '') === '1';
+  const scopes = fullAccess || picked.length === 0 ? undefined : picked;
+
+  // Expiry. `<input type="date">` gives a bare yyyy-mm-dd; the API wants a
+  // strict ISO-8601 datetime (Zod `.datetime()` rejects an offset, so it must
+  // be a UTC `Z` string) and rejects anything in the past with
+  // API_KEY_EXPIRY_IN_PAST. End of the chosen day, so "expires 2026-12-31"
+  // means the key works throughout the 31st.
+  const expiresOn = String(formData.get('expiresOn') ?? '').trim();
+  let expiresAt: string | undefined;
+  if (expiresOn !== '') {
+    const parsed = new Date(`${expiresOn}T23:59:59.999Z`);
+    if (Number.isNaN(parsed.getTime())) {
+      redirect(`/applications/${applicationId}/api-keys?error=EXPIRY_INVALID&newKey=1`);
+    }
+    expiresAt = parsed.toISOString();
+  }
+
   try {
     const result = await api<CreateKeyResp>({
       method: 'POST',
       path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/api-keys`,
       // The prefix follows the application's environment; it is not a choice here.
-      body: { name },
+      body: {
+        name,
+        ...(scopes !== undefined ? { scopes } : {}),
+        ...(expiresAt !== undefined ? { expiresAt } : {}),
+      },
     });
     // Hand the raw key to the next render via a short-lived httpOnly cookie,
     // never the URL. Path-scoped so it's only sent to this route; ~2 min TTL.
@@ -113,6 +186,9 @@ export default async function ApiKeysPage({
   // otherwise render invisibly inside the closed modal, so show those at page
   // level instead (never both).
   const mintModalOpen = sp.newKey === '1';
+  // Earliest expiry the API will accept is "later than now"; make the picker
+  // refuse a past date up front rather than round-tripping API_KEY_EXPIRY_IN_PAST.
+  const tomorrowIso = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const [keys, app] = await Promise.all([
     api<ApiKeyRow[]>({
       method: 'GET',
@@ -229,6 +305,58 @@ export default async function ApiKeysPage({
                   className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]" />
                 <span className="block text-xs text-[var(--color-muted-fg)]">Internal label — helps you identify the key in this list later.</span>
               </label>
+
+              {/* Scopes and expiry: the API has always accepted both on this
+                  POST, but the panel sent neither, so every panel-minted key
+                  was full-access and never expired. */}
+              <fieldset className="space-y-2">
+                <legend className="text-xs font-medium">Permissions</legend>
+                <label className="flex items-start gap-2 text-sm">
+                  <input type="checkbox" name="fullAccess" value="1" defaultChecked className="mt-0.5" />
+                  <span>
+                    Full access
+                    <span className="block text-xs text-[var(--color-muted-fg)]">
+                      Everything this application exposes. Fine for a first key; narrow it for a
+                      key that only does one job.
+                    </span>
+                  </span>
+                </label>
+                <details className="rounded-md border border-[var(--color-border)] px-3 py-2">
+                  <summary className="cursor-pointer text-xs text-[var(--color-muted-fg)]">
+                    Or pick specific scopes…
+                  </summary>
+                  <div className="mt-2 space-y-1.5">
+                    {KEY_SCOPES.map((s) => (
+                      <label key={s.value} className="flex items-start gap-2 text-xs">
+                        <input type="checkbox" name="scopes" value={s.value} className="mt-0.5" />
+                        <span>
+                          <span className="font-mono">{s.label}</span>
+                          <span className="block text-[var(--color-muted-fg)]">{s.help}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-xs text-[var(--color-muted-fg)]">
+                    Untick “Full access” above to use this list — otherwise it is ignored. Leaving
+                    every box clear also mints a full-access key.
+                  </p>
+                </details>
+              </fieldset>
+
+              <label className="block space-y-1">
+                <span className="text-xs font-medium">Expires on <span className="font-normal text-[var(--color-muted-fg)]">(optional)</span></span>
+                <input
+                  type="date"
+                  name="expiresOn"
+                  min={tomorrowIso}
+                  className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
+                />
+                <span className="block text-xs text-[var(--color-muted-fg)]">
+                  The key stops working at the end of this day (UTC). Leave empty for a key that
+                  never expires.
+                </span>
+              </label>
+
               <SubmitButton pendingLabel="Minting key…">Mint key</SubmitButton>
               <p className="text-xs text-[var(--color-muted-fg)]">
                 You'll see the raw key once after creation — copy it then. Only the SHA-256 hash is stored.

@@ -81,7 +81,7 @@ export default async function MagicLinkPage({
         </label>
         <SubmitButton
           pendingLabel="Sending link…"
-          className="w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-60 disabled:cursor-not-allowed"
+          className="w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60 disabled:cursor-not-allowed"
         >
           Email me a sign-in link
         </SubmitButton>

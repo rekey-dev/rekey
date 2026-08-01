@@ -7,8 +7,10 @@
       "env": ["NEXT_PUBLIC_*"]
     },
     "dev": {
+      "dependsOn": ["^build"],
       "cache": false,
-      "persistent": true
+      "persistent": true,
+      "passThroughEnv": ["*"]
     },
     "lint": {},
     "typecheck": {

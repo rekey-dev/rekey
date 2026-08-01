@@ -703,6 +703,8 @@ model Organization {
 
   @@unique([applicationId, slug])
   @@index([applicationId])
+  // App-scoped newest-first organization list (organizations.service.list).
+  @@index([applicationId, createdAt])
   @@map("organizations")
 }
 
@@ -981,6 +983,13 @@ model EndUser {
   @@unique([applicationId, email])
   @@index([applicationId])
   @@index([applicationId, role])
+  // The operator end-user list is app-scoped and sorted by createdAt (default
+  // desc). Without the timestamp in the index Postgres reads every row for the
+  // application and sorts it. Measured at 40k users in one app (Postgres 16,
+  // warm): seq scan + top-N heapsort, 9.809 ms / 590 buffers → index scan
+  // backward, 0.043 ms / 4 buffers. `(applicationId, email)` above already
+  // covers the `sort=email` variant.
+  @@index([applicationId, createdAt])
   @@map("end_users")
 }
 
@@ -1119,6 +1128,8 @@ model License {
   @@index([endUserId])
   @@index([organizationId])
   @@index([keyHash])
+  // App-scoped newest-first license list (licenses.service.list).
+  @@index([applicationId, createdAt])
   @@map("licenses")
 }
 
@@ -1479,8 +1490,9 @@ model Subscription {
   currentPeriodEnd DateTime?       @map("current_period_end")
   cancelAt         DateTime?       @map("cancel_at")
   canceledAt       DateTime?       @map("canceled_at")
-  // Provider's id for this subscription (sub_..., I-...., etc.).
-  providerSubId String?            @unique @map("provider_sub_id")
+  // Provider's id for this subscription (sub_..., I-...., etc.). Scoped by
+  // applicationId, NOT globally unique — see @@unique below.
+  providerSubId String?            @map("provider_sub_id")
   /** Beneficiary org (owner+beneficiary model, ORG_BILLING.md). When set, the
    *  subscription's entitlements are materialized onto this org (shared pool /
    *  feature access for its members); `endUserId` stays the owner (pays +
@@ -1504,10 +1516,22 @@ model Subscription {
   // One active subscription per (application, end-user). Status PENDING
   // shouldn't conflict with ACTIVE in the same row — handled in service.
   @@unique([applicationId, endUserId, planId])
+  // The provider subscription id, scoped to its Application — the third
+  // instance of the same collision as webhook_events / payments (see those
+  // models). Globally unique, it meant two Applications sharing one provider
+  // account could not both hold `sub_...`: the second tenant's activation
+  // `updateMany` threw P2002, the pipeline answered 5xx, and the provider
+  // retried an activation that could never succeed. Every read of this column
+  // already filters by applicationId (`localSubscriptionWhere` in
+  // webhooks/apply.ts), so the global constraint bought nothing.
+  @@unique([applicationId, providerSubId])
   @@index([applicationId])
   @@index([endUserId])
   @@index([beneficiaryOrgId])
   @@index([status])
+  // Same shape as end_users: app-scoped, newest-first operator lists
+  // (`recent_subscriptions`, the org beneficiary tab).
+  @@index([applicationId, createdAt])
   @@map("subscriptions")
 }
 
@@ -1519,7 +1543,9 @@ model Payment {
   amount          Int
   currency        String        @default("USD")
   status          PaymentStatus @default(PENDING)
-  providerPaymentId String?     @unique @map("provider_payment_id")
+  // The provider's charge/sale id. Scoped by applicationId, NOT globally
+  // unique — see @@unique below.
+  providerPaymentId String?     @map("provider_payment_id")
   description     String?
   metadata        Json          @default("{}")
   createdAt       DateTime      @default(now()) @map("created_at")
@@ -1528,10 +1554,26 @@ model Payment {
   application  Application   @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
 
+  // Payment idempotency, scoped to the Application that owns the row.
+  //
+  // This was a GLOBAL `@unique` on provider_payment_id alone, which assumed
+  // one provider account per deployment. Two Applications sharing one Stripe /
+  // PayPal / Razorpay account — staging + production, or a cloned app, which
+  // is the mundane trigger — then collided on the *same* charge id: the second
+  // tenant's Payment insert hit P2002 and the applier treated a genuine first
+  // sale as a replay, and `findUnique({ providerPaymentId })` handed the FIRST
+  // tenant's payment id back into the second tenant's event stream. Scoping by
+  // applicationId is the fix; NULLs stay distinct in Postgres, so rows with no
+  // provider id (manual/one-off records) are unaffected either way.
+  @@unique([applicationId, providerPaymentId])
   @@index([applicationId])
   @@index([endUserId])
   @@index([status])
   @@index([createdAt])
+  // The operator payment lists are all app-scoped and newest-first
+  // (`recent_payments`, the per-end-user payment tab). `(application_id)` alone
+  // makes Postgres sort the whole app's payment history to answer them.
+  @@index([applicationId, createdAt])
   @@map("payments")
 }
 
@@ -1762,8 +1804,18 @@ model CouponRedemption {
 // ============================================================================
 // Webhook events — durable idempotency for inbound provider webhooks.
 //
-// (provider, providerEventId) is the source of truth. Redis is only a
-// fast-path cache. Insert-first, process-second; unique violation = duplicate.
+// (applicationId, provider, providerEventId) is the source of truth. Redis is
+// only a fast-path cache. Insert-first, process-second; unique violation =
+// duplicate.
+//
+// The key is application-scoped deliberately. It used to be (provider,
+// providerEventId), which silently assumed one provider account per
+// deployment: two Applications wired to the same Stripe account see the SAME
+// `evt_...` id, so the second tenant's genuine event hit the constraint, the
+// pipeline read a processed row and replied 200 {processed:false,
+// reason:"duplicate"}, and the provider stopped retrying. That tenant's
+// invoice.paid was then lost permanently and silently. An event id is only
+// ever unique WITHIN the account it came from, which is the Application.
 // ============================================================================
 
 model WebhookEvent {
@@ -1780,7 +1832,7 @@ model WebhookEvent {
 
   application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
 
-  @@unique([provider, providerEventId])
+  @@unique([applicationId, provider, providerEventId])
   @@index([applicationId])
   @@index([provider, eventType])
   @@index([receivedAt])

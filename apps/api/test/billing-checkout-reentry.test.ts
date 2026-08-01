@@ -169,7 +169,7 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
       expect(sub.status).toBe('ACTIVE');
       expect(await creditsService.getBalance(applicationId, { endUserId })).toBe(100);
       expect(
-        (await prisma.payment.findUniqueOrThrow({ where: { providerPaymentId: 'pi_old_session' } })).amount,
+        (await prisma.payment.findFirstOrThrow({ where: { providerPaymentId: 'pi_old_session' } })).amount,
       ).toBe(PACK_AMOUNT);
     });
 
