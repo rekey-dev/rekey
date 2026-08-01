@@ -53,8 +53,18 @@ const { endUser, accessToken } = await rekey.auth.signUp({
   email: 'alice@example.com',
   password: 'correct-horse-battery-staple',
 });
+```
 
+Steps 1 and 2 work on a brand-new Application. Step 3 needs one thing first:
+
+```ts
 // 3. Gate features on the user's resolved entitlements (server-side).
+//
+// REQUIRES billing to be enabled on the Application. `billingConfig.enabled`
+// is false on a new one, and every billing call — this included — answers
+// 403 BILLING_DISABLED until an operator turns it on in
+// Panel → Application → Billing. Read the live value from
+// `rekey.applications.me()` if you need to branch on it.
 const { features, creditBalance } = await rekey.billing.getEntitlements(accessToken);
 if (features.advanced_reporting) renderReportingTab();
 ```
@@ -91,6 +101,7 @@ Everything hangs off namespaces on the client. `amount` fields are always intege
 | `changePassword(accessToken, { currentPassword, newPassword })` | Authenticated change; kills other sessions. |
 | `requestMagicLink({ email, signInUrl? })` / `verifyMagicLink(...)` | Passwordless sign-in. Same `emailSent` contract as password reset. |
 | `sendVerificationEmail(...)` / `verifyEmail(...)` | Email verification. Same `emailSent` contract (no `delivered` field — the caller is already authenticated). |
+| `resendVerificationEmail({ email, verifyUrl? })` | Re-send a verification link with **no session** — the route for a user locked out by `requireEmailVerification`, which refuses the session `sendVerificationEmail` requires. Enumeration-safe; **branch on `emailSent`**. |
 | `listSessions(accessToken)` / `revokeSession(...)` | Active-session management. |
 | `mfaStatus` / `mfaSetup` / `confirmMfaSetup` / `mfaChallenge` / `disableMfa` | TOTP enrollment + step-up. |
 | `startPasskeyAuthentication` / `verifyPasskeyAuthentication` / `startPasskeyRegistration` / `verifyPasskeyRegistration` / `listPasskeys` / `deletePasskey` | WebAuthn / passkeys. |
@@ -118,6 +129,8 @@ if (!r.emailSent && r.resetToken) {
 ```
 
 `sendVerificationEmail` follows the same contract with `{ emailSent, verificationToken }` (no `delivered` — the caller is already authenticated, so there's nothing to hide).
+
+`resendVerificationEmail` is the unauthenticated one, and so is enumeration-safe like the two above: it returns `{ emailSent, verificationToken }` and never reveals whether the address exists or was already verified. One difference from `sendVerificationEmail` — it refuses to send when no link can be built (no `verifyUrl`, and no Application URL configured), returning `{ emailSent: false, verificationToken: null }` rather than mailing a verification message with no button in it. Pass `verifyUrl`, or set the Application URL in **Panel → Application → Auth**.
 
 ### `rekey.billing`
 | Method | Description |
@@ -188,7 +201,7 @@ Retry semantics: a repeat with the same key (timeout retry, queue redelivery, do
 | --- | --- |
 | `verifyWebhookSignature({ header, payload, secret, toleranceSeconds? })` | Verify the HMAC on a webhook **Rekey sends to your app** (user-lifecycle + billing events) against the **raw body bytes** + the `X-Rekey-Signature` header. Not for Stripe/PayPal webhooks — those go to Rekey, never to you (see [docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md)). |
 | `verifyAccessToken(token, { jwksUrl \| jwks })` | Verify an end-user access token **offline** (no API round-trip) against your deployment's `GET /.well-known/jwks.json`. RS256 only — the Application must opt in via `authConfig.tokenAlg: "RS256"`; default HS256 tokens still need `auth.getCurrentUser`. Fetches + caches the JWKS for 5 minutes, checks `kid`/signature/`exp`/`typ`, and returns the claims (`sub`, `applicationId`, `oid?`, …). Check `claims.applicationId` against your own app id. See [docs/jwks.md](https://github.com/rekey-dev/rekey/blob/main/docs/jwks.md). |
-| `WEBHOOK_EVENTS` / `KNOWN_WEBHOOK_EVENTS` / `isKnownWebhookEvent` | The full outbound-event registry — `{ name, description }` pairs (and just the names) for the 13 events Rekey can send: `user.created/updated/deleted`, `session.revoked`, `mfa.enabled/disabled`, `password.changed`, `email.verified`, `subscription.activated/canceled/past_due`, `payment.succeeded/failed`. Mirrors the API exactly; use it for event pickers / autocompleting an endpoint's `events` array. |
+| `WEBHOOK_EVENTS` / `KNOWN_WEBHOOK_EVENTS` / `isKnownWebhookEvent` | The full outbound-event registry — `{ name, description }` pairs (and just the names) for the 17 events Rekey can send: `user.created/updated/deleted/erased`, `session.revoked`, `mfa.enabled/disabled`, `password.changed`, `email.verified`, `subscription.activated/canceled/past_due`, `payment.succeeded/failed`, `dunning.case_opened/case_recovered/case_exhausted`. Mirrors the API exactly; use it for event pickers / autocompleting an endpoint's `events` array rather than hardcoding this list. See [docs/webhooks.md](https://github.com/rekey-dev/rekey/blob/main/docs/webhooks.md). |
 | `WebhookEventType` / `WebhookEventEnvelope<TData>` | Types for the event-name union and the delivery envelope (`{ eventId, occurredAt, type, applicationId, data }`). Dedupe on `eventId` — retries reuse it. |
 | `RekeyError` | The canonical error class — `instanceof`-consistent across SDK packages. |
 
@@ -232,7 +245,7 @@ try {
 ## Links
 
 - Docs: [/docs](https://rekey.dev/docs) · [SDK guide](https://rekey.dev/docs/sdk) · [API reference](https://rekey.dev/docs/api) · [agent prompt](https://rekey.dev/docs/prompt)
-- Examples: [`examples/qr-saas`](https://github.com/rekey-dev/rekey/blob/main/examples/qr-saas) (end-to-end server integration) · [`examples/nextjs-saas`](https://github.com/rekey-dev/rekey/blob/main/examples/nextjs-saas)
+- Worked walkthroughs: [quickstart](https://github.com/rekey-dev/rekey/blob/main/docs/quickstart.md) · [webhooks](https://github.com/rekey-dev/rekey/blob/main/docs/webhooks.md) · [billing](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md). The `examples/` apps were removed pending a rebuilt set.
 
 ## License
 

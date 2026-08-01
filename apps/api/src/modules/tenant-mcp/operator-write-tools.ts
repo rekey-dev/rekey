@@ -27,6 +27,7 @@ import type { Application, TenantRole } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { env } from '../../config/env.js';
 import { RekeyError } from '../../lib/error.js';
+import type { SecurityEventType } from '@rekey.dev/shared-types';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 import { applicationsService } from '../applications/applications.service.js';
 import { plansService } from '../plans/plans.service.js';
@@ -83,7 +84,7 @@ async function loadAppInTenant(tenantId: string, applicationId: string): Promise
 
 function audit(
   ctx: OperatorToolContext,
-  type: string,
+  type: SecurityEventType,
   applicationId: string | null,
   metadata: Record<string, unknown>,
 ): void {

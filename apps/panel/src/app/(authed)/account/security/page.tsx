@@ -15,6 +15,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { api, PanelApiError, type MeDto, type OperatorSessionRow } from '@/lib/api';
+import { describeUserAgent } from '@/lib/format';
 import { QrCode } from '@/components/QrCode';
 import { CopyButton } from '@/components/CopyButton';
 import { DownloadButton } from '@/components/DownloadButton';
@@ -387,20 +388,28 @@ export default async function SecurityPage({
               No active sessions.
             </div>
           ) : (
-            sessions.map((s) => (
+            sessions.map((s) => {
+              const device = describeUserAgent(s.userAgent);
+              return (
               <div key={s.id} className="flex items-center justify-between gap-3 px-5 py-3">
                 <div className="min-w-0">
-                  <div className="truncate text-sm text-[var(--color-fg)]">{s.userAgent ?? 'Unknown device'}</div>
+                  <div className="truncate text-sm text-[var(--color-fg)]" title={s.userAgent ?? undefined}>
+                    {device.label}
+                  </div>
                   <div className="text-xs text-[var(--color-muted-fg)]">
                     {s.ip ?? 'unknown IP'} · started {formatDateTime(s.createdAt)}
                   </div>
+                  {device.note && (
+                    <div className="mt-0.5 text-xs text-[var(--color-faint-fg)]">{device.note}</div>
+                  )}
                 </div>
                 <form action={revokeSession} className="shrink-0">
                   <input type="hidden" name="sessionId" value={s.id} />
                   <ConfirmButton confirm="Revoke this session? That device is signed out immediately and has to log in again.">Revoke</ConfirmButton>
                 </form>
               </div>
-            ))
+              );
+            })
           )}
         </Card>
       </section>
@@ -448,7 +457,7 @@ export default async function SecurityPage({
             />
             <span className="text-xs text-[var(--color-muted-fg)]">At least 8 characters.</span>
           </label>
-          <SubmitButton pendingLabel="Changing password…" className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-60">Change password</SubmitButton>
+          <SubmitButton pendingLabel="Changing password…" className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60">Change password</SubmitButton>
           {/* Visually hidden (not display:none, which many password managers
               skip) so managers associate the new credential with the operator
               email. Placed last so Tailwind's space-y rhythm is unaffected. */}
@@ -507,7 +516,7 @@ function StatusPill({
 function StepHeader({ n, title }: { n: number; title: string }): React.JSX.Element {
   return (
     <div className="flex items-center gap-2.5">
-      <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[var(--color-primary)] text-xs font-semibold text-white">
+      <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[var(--color-primary)] text-xs font-semibold text-[var(--color-primary-fg)]">
         {n}
       </span>
       <h3 className="text-sm font-medium text-[var(--color-fg)]">{title}</h3>

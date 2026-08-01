@@ -33,7 +33,12 @@ export default async function ApplicationDetailLayout({
               slug rather than on a settings tab that implies it is editable. */}
           <EnvironmentBadge environment={app.environment} />
           <span className="font-mono text-xs text-[var(--color-muted-fg)]">{app.slug}</span>
-          <span title={app.publicKey} className="max-w-7xl truncate font-mono text-xs text-[var(--color-faint-fg)]">
+          {/* --color-muted-fg, not --color-faint-fg: this is a value the
+              operator is meant to read off the screen and copy, and faint put
+              it at 3.72:1 (rgb(107,107,107) on #0a0a0a) at 12px — below AA for
+              a string where one wrong character is a silent auth failure.
+              Muted measures 7.85:1 on the same background. */}
+          <span title={app.publicKey} className="max-w-7xl truncate font-mono text-xs text-[var(--color-muted-fg)]">
             {app.publicKey}
           </span>
           <CopyButton value={app.publicKey} label="Copy" />

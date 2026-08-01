@@ -17,5 +17,13 @@ const nextConfig = {
   // workspace runtime helpers Just Works.
   transpilePackages: ['@rekey.dev/shared-types'],
   reactStrictMode: true,
+  experimental: {
+    // Required for `forbidden()` in lib/api.ts. Without it a 403 from the API
+    // falls through to the generic error boundary, which tells the operator
+    // the panel is broken and offers a "Try again" that can never succeed —
+    // the UI could not distinguish "not yours" from "we're down".
+    // `notFound()` is stable and needs no flag; `forbidden()` does.
+    authInterrupts: true,
+  },
 };
 export default nextConfig;

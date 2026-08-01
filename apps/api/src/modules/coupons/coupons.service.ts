@@ -142,8 +142,20 @@ export const couponsService = {
   /**
    * Same as `list`, but with redemption stats for the operator panel:
    * `redemptionCount` and `totalDiscountIssued` (see CouponWithStats for the
-   * derivation caveats). Two extra bounded queries — redemption rows for the
-   * page's coupons, then the linked subscriptions' metadata.
+   * derivation caveats).
+   *
+   * ONE aggregate query, grouped in Postgres. It used to `findMany` the
+   * redemption ROWS for the page's coupons and count/sum them into two JS
+   * Maps — the comment called that "two extra bounded queries" and it was
+   * neither bounded nor two: there is no `take`, so a coupon with a long
+   * history pulled its entire redemption table across the wire (40k rows
+   * measured) to produce two integers per coupon. A `groupBy` returns one row
+   * per coupon regardless.
+   *
+   * The `_count` / `_sum` split is what the display caveat needs: rows written
+   * before `discount_amount` existed have it NULL, and `_sum` skips NULLs, so
+   * `count - (rows with a value)` is the number that still needs the
+   * best-effort fallback below.
    */
   async listWithStats(
     applicationId: string,
@@ -153,32 +165,28 @@ export const couponsService = {
     const coupons = await this.list(applicationId, includeInactive, opts);
     if (coupons.length === 0) return [];
 
-    const redemptions = await prisma.couponRedemption.findMany({
+    const grouped = await prisma.couponRedemption.groupBy({
+      by: ['couponId'],
       where: { couponId: { in: coupons.map((c) => c.id) } },
-      select: { couponId: true, discountAmount: true },
+      _count: { _all: true, discountAmount: true },
+      _sum: { discountAmount: true },
     });
-    const couponById = new Map(coupons.map((c) => [c.id, c]));
+    const statsBy = new Map(grouped.map((g) => [g.couponId, g]));
 
-    const countBy = new Map<string, number>();
-    const discountBy = new Map<string, number>();
-    for (const r of redemptions) {
-      countBy.set(r.couponId, (countBy.get(r.couponId) ?? 0) + 1);
-      const coupon = couponById.get(r.couponId);
-      if (!coupon) continue;
-      const discount =
-        r.discountAmount !== null && Number.isFinite(r.discountAmount)
-          ? r.discountAmount
-          : coupon.discountType === 'AMOUNT'
-            ? coupon.amountOff
-            : 0;
-      discountBy.set(r.couponId, (discountBy.get(r.couponId) ?? 0) + discount);
-    }
-
-    return coupons.map((c) => ({
-      ...c,
-      redemptionCount: countBy.get(c.id) ?? 0,
-      totalDiscountIssued: discountBy.get(c.id) ?? 0,
-    }));
+    return coupons.map((c) => {
+      const g = statsBy.get(c.id);
+      if (!g) return { ...c, redemptionCount: 0, totalDiscountIssued: 0 };
+      // Legacy rows (discountAmount NULL) fall back to the coupon's own
+      // amountOff for AMOUNT, and contribute nothing for PERCENT — exactly
+      // what the per-row loop did.
+      const legacyRows = g._count._all - g._count.discountAmount;
+      const legacyValue = c.discountType === 'AMOUNT' ? legacyRows * c.amountOff : 0;
+      return {
+        ...c,
+        redemptionCount: g._count._all,
+        totalDiscountIssued: (g._sum.discountAmount ?? 0) + legacyValue,
+      };
+    });
   },
 
   async create(input: CreateCouponInput): Promise<Coupon> {

@@ -108,6 +108,103 @@ Operators who want to **self-host** their own single-app portal should follow
 `docs/portal.md`. (A worked reference app previously lived at
 `examples/portal`; the examples were removed pending a rebuild.)
 
+## Backup, restore, and getting your data out
+
+Everything that matters is in Postgres. Redis holds queue state, rate-limit
+counters and lockouts — all TTL'd or reconstructible, none of it a system of
+record — so a backup plan is a Postgres backup plan.
+
+The mechanics are below. How often you run them, how long you keep them, and
+how fast you need to be back are yours to decide; this page does not pretend to
+have decided them for you.
+
+### Dump
+
+```bash
+# Custom format (compressed, restores selectively) — recommended.
+docker compose -f docker-compose.prod.yml exec -T postgres \
+  pg_dump -U rekey -d rekey -Fc > rekey-$(date +%F).dump
+
+# Plain SQL, if you would rather read it.
+docker compose -f docker-compose.prod.yml exec -T postgres \
+  pg_dump -U rekey -d rekey > rekey-$(date +%F).sql
+```
+
+Two details that bite: `-T` matters, because without it compose allocates a TTY
+and the dump lands corrupted; and running `pg_dump` **inside** the container
+(rather than from your laptop) keeps client and server on the same Postgres
+version, which is what stops a newer client emitting settings the older server
+rejects on restore.
+
+Store the result somewhere that is not the same host, and treat it as
+credential material — it contains encrypted provider secrets, password hashes
+and session rows.
+
+**A dump alone is not a restorable backup.** The provider credentials, OAuth
+client secrets, TOTP seeds and RS256 signing keys inside it are encrypted with
+`ENCRYPTION_KEY`, which lives in your environment, not in the database. Back
+that key up separately and treat losing it as losing those rows — there is no
+recovery path.
+
+Verify what you captured before you need it:
+
+```bash
+pg_restore --list rekey-2026-08-01.dump | head
+```
+
+### Restore
+
+Into a fresh, empty database:
+
+```bash
+# 1. Stop the API so nothing writes during the restore.
+docker compose -f docker-compose.prod.yml stop api
+
+# 2. Recreate the database.
+docker compose -f docker-compose.prod.yml exec -T postgres \
+  psql -U rekey -d postgres -c 'DROP DATABASE IF EXISTS rekey;'
+docker compose -f docker-compose.prod.yml exec -T postgres \
+  psql -U rekey -d postgres -c 'CREATE DATABASE rekey OWNER rekey;'
+
+# 3. Load the dump.
+docker compose -f docker-compose.prod.yml exec -T postgres \
+  pg_restore -U rekey -d rekey --no-owner < rekey-2026-08-01.dump
+# (plain SQL dump: psql -U rekey -d rekey < rekey-2026-08-01.sql)
+
+# 4. Start the API. `prisma migrate deploy` runs on boot and is a no-op when
+#    the dump already carries the current schema.
+docker compose -f docker-compose.prod.yml up -d api
+```
+
+Put `ENCRYPTION_KEY` back to the value that was in force when the dump was
+taken, or the credentials restored with it will not decrypt.
+
+Practise this against a scratch database. A restore you have never run is a
+hypothesis.
+
+### Exporting your data
+
+**Self-hosted:** there is nothing to ask anyone for. It is your Postgres, the
+schema is in `prisma/schema.prisma`, and `pg_dump` above is the whole answer —
+in the open `-Fc` or plain-SQL formats, readable by any Postgres. Want a subset
+rather than everything? `pg_dump -t end_users -t subscriptions …`, or query it
+directly:
+
+```bash
+docker compose -f docker-compose.prod.yml exec -T postgres \
+  psql -U rekey -d rekey -c "\copy (SELECT * FROM end_users WHERE application_id = 'app_…') TO STDOUT WITH CSV HEADER" \
+  > end-users.csv
+```
+
+That is the concrete form of the sovereignty claim: no export API stands
+between you and your rows, because there is no need for one.
+
+**On Rekey Cloud:** export is support-mediated. Ask us, tell us what you want
+and in what shape, and we produce it. There is no self-serve export button, and
+that is a deliberate choice rather than a missing feature — the Cloud database
+is shared across workspaces, so a bulk extract is something a human scopes and
+checks rather than an endpoint anyone can point at a tenant boundary.
+
 ## SDK publish
 `@rekey.dev/node` (+ `@rekey.dev/shared-types`) publish to npm on a GitHub Release
 via `.github/workflows/release.yml`. Add an `NPM_TOKEN` repo secret (npm org

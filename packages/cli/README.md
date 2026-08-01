@@ -45,7 +45,7 @@ All commands talk to the **admin surface** (`/api/v1/admin/*`) and need `REKEY_U
 
 | Command | What it does |
 |---|---|
-| `rekey version` | Print the CLI version. No env needed. |
+| `rekey version` | Print the CLI version. No env needed. `rekey --version` / `-V` print the same thing; the subcommand is the one that honours `--json`. |
 | `rekey doctor` | Config + connectivity diagnosis (`/health` probe, env checks). Run this first. |
 | `rekey init` | One-shot bootstrap: create tenant → application → first API key. The `rawKey` is printed once at `data.apiKey.rawKey`. |
 | `rekey apps list \| get <id> \| create` | Application CRUD. |

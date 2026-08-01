@@ -33,6 +33,29 @@ interface DeliveryRow {
   error: string | null;
   createdAt: string;
   nextAttemptAt: string | null;
+  /**
+   * Both are STORED (`WebhookDelivery.payload` / `.responseBody`, the latter
+   * already capped at 4 KB on write) and both are loaded by the service — but
+   * the tenant route's serializer drops them before responding, so today these
+   * arrive `undefined` on every row.
+   *
+   * They are declared optional rather than omitted because the UI below is the
+   * consumer that makes fixing it worthwhile: the moment the serializer
+   * includes them, the expanded row starts rendering real content with no
+   * further panel change. Until then the row explains the gap instead of
+   * showing an empty box.
+   */
+  payload?: unknown;
+  responseBody?: string | null;
+}
+
+/** Response bodies can be 4 KB of nginx HTML; show the head of it. */
+const RESPONSE_BODY_LIMIT = 600;
+
+function truncate(s: string, max: number): { text: string; truncated: boolean } {
+  return s.length <= max
+    ? { text: s, truncated: false }
+    : { text: s.slice(0, max), truncated: true };
 }
 
 async function rotateSecret(applicationId: string, endpointId: string): Promise<void> {
@@ -66,11 +89,151 @@ async function retryDelivery(
   redirect(`/applications/${applicationId}/webhooks/${endpointId}?retried=1`);
 }
 
+/**
+ * Requeue every non-succeeded delivery on this endpoint.
+ *
+ * A dead endpoint produces a page of a dozen failures and the only control was
+ * a per-row Retry — twelve clicks, each a full page navigation, to recover from
+ * one outage. There is no bulk endpoint API-side (`retry-all` does not exist on
+ * any surface), so this fans out the per-delivery call. Sequential rather than
+ * Promise.all: these all hit the same customer URL that just failed, and a
+ * dozen simultaneous POSTs is the wrong way to greet a server coming back up.
+ *
+ * Failures are counted, not thrown — one delivery that has since been evicted
+ * shouldn't abandon the other eleven.
+ */
+async function retryAllFailed(applicationId: string, endpointId: string): Promise<void> {
+  'use server';
+  const rows = await api<DeliveryRow[]>({
+    method: 'GET',
+    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/webhooks/${encodeURIComponent(endpointId)}/deliveries`,
+  });
+  const failed = rows.filter((r) => r.status === 'FAILED');
+  let queued = 0;
+  for (const d of failed) {
+    try {
+      await api({
+        method: 'POST',
+        path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/webhooks/${encodeURIComponent(endpointId)}/deliveries/${encodeURIComponent(d.id)}/retry`,
+      });
+      queued += 1;
+    } catch {
+      /* already retried, evicted, or raced — keep going */
+    }
+  }
+  redirect(
+    `/applications/${applicationId}/webhooks/${endpointId}?retriedAll=${queued}&of=${failed.length}`,
+  );
+}
+
 const STATUS_TONE: Record<DeliveryRow['status'], BadgeTone> = {
   SUCCEEDED: 'success',
   PENDING: 'warning',
   FAILED: 'danger',
 };
+
+/** What we sent and what came back, for one delivery. */
+function DeliveryDetail({ delivery: d }: { delivery: DeliveryRow }): React.JSX.Element {
+  const payloadText =
+    d.payload === undefined || d.payload === null
+      ? null
+      : typeof d.payload === 'string'
+        ? d.payload
+        : JSON.stringify(d.payload, null, 2);
+  const body =
+    d.responseBody === undefined || d.responseBody === null
+      ? null
+      : truncate(d.responseBody, RESPONSE_BODY_LIMIT);
+
+  return (
+    <>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Delivery id" value={d.id} mono />
+        <Field label="Event id" value={d.eventId} mono />
+        <Field
+          label="Response status"
+          value={d.responseStatus === null ? 'no response (network error or timeout)' : String(d.responseStatus)}
+        />
+        <Field
+          label="Next attempt"
+          value={d.nextAttemptAt === null ? '—' : formatDateTime(d.nextAttemptAt)}
+        />
+      </div>
+
+      {d.error && (
+        <div>
+          <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--color-muted-fg)]">
+            Error
+          </div>
+          <p className="mt-1 break-all font-mono text-xs text-red-700 dark:text-red-400">{d.error}</p>
+        </div>
+      )}
+
+      <div>
+        <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--color-muted-fg)]">
+          Request payload
+        </div>
+        {payloadText === null ? (
+          <p className="mt-1 text-xs text-[var(--color-muted-fg)]">
+            Stored, but not returned by the API — the tenant delivery endpoint omits{' '}
+            <code className="font-mono">payload</code> from its response. This panel renders it as
+            soon as the field is served.
+          </p>
+        ) : (
+          <pre className="mt-1 max-h-64 overflow-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-2 font-mono text-[11px] text-[var(--color-fg)]">
+            {payloadText}
+          </pre>
+        )}
+      </div>
+
+      <div>
+        <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--color-muted-fg)]">
+          Response body
+        </div>
+        {body === null ? (
+          <p className="mt-1 text-xs text-[var(--color-muted-fg)]">
+            Stored (capped at 4 KB), but not returned by the API — the tenant delivery endpoint
+            omits <code className="font-mono">responseBody</code> from its response.
+          </p>
+        ) : body.text === '' ? (
+          <p className="mt-1 text-xs text-[var(--color-muted-fg)]">Empty body.</p>
+        ) : (
+          <>
+            <pre className="mt-1 max-h-48 overflow-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-2 font-mono text-[11px] text-[var(--color-fg)]">
+              {body.text}
+            </pre>
+            {body.truncated && (
+              <p className="mt-1 text-[10px] text-[var(--color-muted-fg)]">
+                Truncated to the first {RESPONSE_BODY_LIMIT} characters.
+              </p>
+            )}
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+function Field({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}): React.JSX.Element {
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--color-muted-fg)]">
+        {label}
+      </div>
+      <div className={`truncate text-xs text-[var(--color-fg)] ${mono ? 'font-mono' : ''}`} title={value}>
+        {value}
+      </div>
+    </div>
+  );
+}
 
 export default async function WebhookDetailPage({
   params,
@@ -84,6 +247,8 @@ export default async function WebhookDetailPage({
   const rotated = typeof sp.rotated === 'string';
   const rotatedSecret = (await cookies()).get('rekey_reveal_whsec')?.value ?? null;
   const retried = typeof sp.retried === 'string';
+  const retriedAll = typeof sp.retriedAll === 'string' ? sp.retriedAll : null;
+  const retriedAllOf = typeof sp.of === 'string' ? sp.of : null;
 
   const [endpoints, deliveries] = await Promise.all([
     api<EndpointRow[]>({
@@ -105,11 +270,13 @@ export default async function WebhookDetailPage({
     </Link>
   );
 
+  const failedCount = deliveries.filter((d) => d.status === 'FAILED').length;
   const endpoint = endpoints.find((e) => e.id === endpointId);
   if (!endpoint) {
     return (
       <div className="space-y-5">
-        <PageHeader eyebrow={backLink} title="Endpoint not found" />
+        <PageHeader
+        level={2} eyebrow={backLink} title="Endpoint not found" />
         <EmptyState
           variant="inline"
           title="This webhook endpoint no longer exists"
@@ -122,6 +289,7 @@ export default async function WebhookDetailPage({
   return (
     <div className="space-y-5">
       <PageHeader
+        level={2}
         eyebrow={backLink}
         title={<span className="break-all font-mono text-lg">{endpoint.url}</span>}
         description={
@@ -156,6 +324,12 @@ export default async function WebhookDetailPage({
         </div>
       )}
       {retried && <SavedBanner params={['retried']} message="Retry queued." />}
+      {retriedAll !== null && (
+        <SavedBanner
+          params={['retriedAll', 'of']}
+          message={`Requeued ${retriedAll} of ${retriedAllOf ?? retriedAll} failed deliveries.`}
+        />
+      )}
 
       <Card className="flex items-baseline justify-between gap-3">
         <div>
@@ -172,7 +346,22 @@ export default async function WebhookDetailPage({
       </Card>
 
       <section className="space-y-3">
-        <SectionHeader title="Recent deliveries" count={`${deliveries.length} of last 50`} />
+        <SectionHeader
+          title="Recent deliveries"
+          count={`${deliveries.length} of last 50`}
+          action={
+            failedCount > 0 ? (
+              <form action={retryAllFailed.bind(null, id, endpointId)}>
+                <SubmitButton
+                  pendingLabel={`Queuing ${failedCount}…`}
+                  className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm font-medium hover:bg-[var(--color-surface-muted)] disabled:opacity-60"
+                >
+                  Retry all failed ({failedCount})
+                </SubmitButton>
+              </form>
+            ) : undefined
+          }
+        />
         {deliveries.length === 0 ? (
           <EmptyState
             title="No deliveries yet"
@@ -193,41 +382,63 @@ export default async function WebhookDetailPage({
             </THead>
             <TBody>
               {deliveries.map((d) => (
-                <TR key={d.id} hover>
-                  <TD>
-                    <div className="font-mono text-xs">{d.eventType}</div>
-                    <div title={d.eventId} className="max-w-[14rem] truncate font-mono text-[10px] text-[var(--color-muted-fg)]">
-                      {d.eventId}
-                    </div>
-                  </TD>
-                  <TD>
-                    <Badge tone={STATUS_TONE[d.status]} dot>
-                      {d.status}
-                      {d.responseStatus ? ` · ${d.responseStatus}` : ''}
-                    </Badge>
-                    {d.error && (
-                      <div title={d.error} className="mt-1 max-w-[18rem] truncate text-[10px] text-[var(--color-muted-fg)]">
-                        {d.error}
+                <React.Fragment key={d.id}>
+                  <TR hover className="border-b-0">
+                    <TD>
+                      <div className="font-mono text-xs">{d.eventType}</div>
+                      <div title={d.eventId} className="max-w-[14rem] truncate font-mono text-[10px] text-[var(--color-muted-fg)]">
+                        {d.eventId}
                       </div>
-                    )}
-                  </TD>
-                  <TD className="text-xs">{d.attempts}</TD>
-                  <TD muted className="text-xs">
-                    {formatDateTime(d.createdAt)}
-                  </TD>
-                  <TD align="right">
-                    {d.status !== 'SUCCEEDED' && (
-                      <form action={retryDelivery.bind(null, id, endpointId, d.id)} className="inline">
-                        <SubmitButton
-                          pendingLabel="Queuing…"
-                          className="text-xs font-medium text-[var(--color-primary)] hover:underline disabled:opacity-60"
-                        >
-                          Retry
-                        </SubmitButton>
-                      </form>
-                    )}
-                  </TD>
-                </TR>
+                    </TD>
+                    <TD>
+                      <Badge tone={STATUS_TONE[d.status]} dot>
+                        {d.status}
+                        {d.responseStatus ? ` · ${d.responseStatus}` : ''}
+                      </Badge>
+                      {d.error && (
+                        <div title={d.error} className="mt-1 max-w-[18rem] truncate text-[10px] text-[var(--color-muted-fg)]">
+                          {d.error}
+                        </div>
+                      )}
+                    </TD>
+                    <TD className="text-xs">{d.attempts}</TD>
+                    <TD muted className="text-xs">
+                      {formatDateTime(d.createdAt)}
+                    </TD>
+                    <TD align="right">
+                      {d.status !== 'SUCCEEDED' && (
+                        <form action={retryDelivery.bind(null, id, endpointId, d.id)} className="inline">
+                          <SubmitButton
+                            pendingLabel="Queuing…"
+                            className="text-xs font-medium text-[var(--color-primary)] hover:underline disabled:opacity-60"
+                          >
+                            Retry
+                          </SubmitButton>
+                        </form>
+                      )}
+                    </TD>
+                  </TR>
+                  {/* Expandable detail. A native <details> keeps this a server
+                      component — no client JS, keyboard-operable, and each row
+                      opens independently. Debugging a failed delivery meant
+                      leaving the product entirely before this existed: neither
+                      what we sent nor what came back was visible anywhere. */}
+                  <TR className="!bg-transparent">
+                    <TD colSpan={5} className="!py-0">
+                      <details className="group pb-3">
+                        <summary className="cursor-pointer list-none text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]">
+                          <span className="inline-block w-3 transition-transform group-open:rotate-90">
+                            ›
+                          </span>{' '}
+                          Payload &amp; response
+                        </summary>
+                        <div className="mt-2 space-y-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-3">
+                          <DeliveryDetail delivery={d} />
+                        </div>
+                      </details>
+                    </TD>
+                  </TR>
+                </React.Fragment>
               ))}
             </TBody>
           </Table>

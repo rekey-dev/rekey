@@ -21,6 +21,20 @@ export const env = createEnv({
     RATE_LIMIT_USAGE_MAX: z.coerce.number().int().positive().default(1000),
 
     DATABASE_URL: z.string().url(),
+
+    // Prisma connection-pool sizing, applied to DATABASE_URL as
+    // `connection_limit` / `pool_timeout` by lib/prisma.ts. Declared here for
+    // validation and discoverability only — prisma.ts reads `process.env`
+    // directly, because it must build the client before this module's
+    // side-effecting parse has necessarily run.
+    //
+    // Default 20, NOT Prisma's `num_cpus * 2 + 1`: the webhook worker runs at
+    // concurrency 10 against this same client, so a CPU-derived default on a
+    // small container gave the whole API fewer connections than one background
+    // worker could want. See the docblock in lib/prisma.ts before changing it.
+    // A `connection_limit` already present in DATABASE_URL wins over this.
+    DATABASE_POOL_SIZE: z.coerce.number().int().positive().default(20),
+    DATABASE_POOL_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(10),
     // Required infrastructure (not just rate-limiting): the outbound-webhook
     // delivery queue runs on BullMQ/Redis, and the server refuses to start if
     // Redis is unreachable at boot (no in-process fallback — delivery must go
@@ -263,6 +277,42 @@ if (env.NODE_ENV === 'production' && !env.ENCRYPTION_KEY) {
     '[SECURITY] ENCRYPTION_KEY is required in production — refusing to boot. ' +
       'Without it, provider credentials and tokens are stored in plaintext at rest. ' +
       'Generate one with: openssl rand -hex 32',
+  );
+}
+
+/**
+ * Keys that are public knowledge and must never protect real data.
+ *
+ * `docker-compose.yml` shipped the first of these as a DEFAULT until 2.0.0-rc.1.
+ * It is a valid 64-hex string, so it passed both the schema and the
+ * presence check above, and — because `JWT_SECRET` and `SUPER_ADMIN_KEY` had
+ * deliberately-invalid 17-character defaults that crash the boot — an operator
+ * following the errors generated exactly those two and never discovered that a
+ * third key existed at all. Anyone with the public repo could then decrypt a
+ * stolen dump.
+ *
+ * Presence is not the property that matters here; secrecy is. A deployment that
+ * copied the old compose file keeps booting happily after upgrading unless we
+ * say something, so this refuses rather than warns.
+ */
+const PUBLICLY_KNOWN_ENCRYPTION_KEYS = new Set([
+  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+]);
+
+if (
+  env.NODE_ENV === 'production' &&
+  env.ENCRYPTION_KEY &&
+  (PUBLICLY_KNOWN_ENCRYPTION_KEYS.has(env.ENCRYPTION_KEY.toLowerCase()) ||
+    /^(.)\1{63}$/.test(env.ENCRYPTION_KEY))
+) {
+  throw new Error(
+    '[SECURITY] ENCRYPTION_KEY is a publicly known value — refusing to boot. ' +
+      'This key was published as a docker-compose default before 2.0.0-rc.1, so it ' +
+      'protects nothing. Generate a real one with: openssl rand -hex 32 — and note ' +
+      'that anything already encrypted with the old key must be re-encrypted, since ' +
+      'rotating the key alone leaves stored credentials unreadable. ' +
+      'Treat any provider credentials stored under it as compromised and rotate them ' +
+      'at the provider.',
   );
 }
 

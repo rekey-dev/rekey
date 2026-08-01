@@ -10,6 +10,7 @@ import {
   type InvitationRow,
   type PlanRow,
   type ApiKeyRow,
+  type BillingCredentialRow,
 } from '@/lib/api';
 import { Modal } from '@/components/Modal';
 import { SlugAvailabilityField } from '@/components/SlugAvailabilityField';
@@ -97,14 +98,32 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
   ]);
 
   const billingApp = apps.find((a) => a.billingConfig.enabled);
-  // One extra read, only when an app actually has billing enabled — the list
-  // payload doesn't include plans.
-  const plans = billingApp
-    ? await api<PlanRow[]>({
-        method: 'GET',
-        path: `/api/v1/tenant/applications/${encodeURIComponent(billingApp.id)}/plans`,
-      }).catch(() => null)
-    : [];
+  // Two extra reads, only when an app actually has billing enabled — the list
+  // payload carries neither plans nor provider credentials.
+  //
+  // The credentials read is what makes the billing step honest. `billingConfig
+  // .enabled` alone ticked "Enable billing and add a provider" for an
+  // application with ZERO providers configured, which is a checkout that fails
+  // with BILLING_CREDENTIALS_NOT_CONFIGURED — the checklist was reporting
+  // production-ready on a state that cannot take a payment. The step says "and
+  // add a provider", so it needs both halves.
+  const [plans, billingCredentials] = billingApp
+    ? await Promise.all([
+        api<PlanRow[]>({
+          method: 'GET',
+          path: `/api/v1/tenant/applications/${encodeURIComponent(billingApp.id)}/plans`,
+        }).catch(() => null),
+        api<BillingCredentialRow[]>({
+          method: 'GET',
+          path: `/api/v1/tenant/applications/${encodeURIComponent(billingApp.id)}/billing-credentials`,
+        }).catch(() => null),
+      ])
+    : [[] as PlanRow[], [] as BillingCredentialRow[]];
+  // The endpoint returns one row per CONFIGURED provider, so a non-empty list
+  // is the signal. Null means the read failed — fall back to the old
+  // enabled-only answer rather than claiming the step is incomplete.
+  const providerConfigured =
+    billingCredentials === null ? true : billingCredentials.length > 0;
 
   const createHref = '/applications?newApp=1'; // reopens the create modal via modalKey
   // Four of the steps below (key, auth, billing, plan) operate on an
@@ -149,9 +168,17 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
       key: 'billing',
       label: 'Enable billing and add a provider',
       description: 'Turn on the billing surface and connect Stripe, PayPal, or Razorpay.',
-      href: firstApp ? `/applications/${firstApp.id}/billing` : createHref,
-      done: billingApp !== undefined,
-      hint: requiresAppHint,
+      href: billingApp
+        ? `/applications/${billingApp.id}/billing`
+        : firstApp
+          ? `/applications/${firstApp.id}/billing`
+          : createHref,
+      done: billingApp !== undefined && providerConfigured,
+      hint:
+        requiresAppHint ??
+        (billingApp !== undefined && !providerConfigured
+          ? 'Billing is on, but no provider is configured — checkout would fail'
+          : undefined),
     },
     ...(plans !== null
       ? [
@@ -324,8 +351,8 @@ function NewAppModal({
 }): React.JSX.Element {
   const triggerCls =
     triggerSize === 'md'
-      ? 'inline-block rounded-md bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] cursor-pointer'
-      : 'inline-block rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] cursor-pointer whitespace-nowrap';
+      ? 'inline-block rounded-md bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] cursor-pointer'
+      : 'inline-block rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] cursor-pointer whitespace-nowrap';
   return (
     <Modal
       modalKey={modalKey}

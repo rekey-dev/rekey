@@ -30,6 +30,7 @@
 import type { Application } from '@prisma/client';
 import { Resend } from 'resend';
 import nodemailer from 'nodemailer';
+import { assertSafeHost } from './ssrf-guard.js';
 import { env } from '../config/env.js';
 import { decryptJson } from './secrets.js';
 import { prisma } from './prisma.js';
@@ -226,6 +227,26 @@ async function sendVia(
   }
 
   // SMTP (nodemailer). Covers SES/Postmark/SendGrid/Mailgun/custom relays.
+  //
+  // The host and port come straight from an operator-supplied credential
+  // record, so this is an outbound connection to a tenant-chosen address —
+  // exactly what the SSRF guard exists for, and it was not applied here. A
+  // workspace admin could point it at 127.0.0.1:6379 or 169.254.169.254:80,
+  // fire a test send, and read the connection outcome out of the API response:
+  // an internal port scanner over the public API. The guard lived next to the
+  // webhook code rather than next to *outbound connections*, which is why an
+  // equally tenant-controlled destination four modules away never got it.
+  try {
+    await assertSafeHost(creds.host);
+  } catch {
+    return {
+      kind: 'error',
+      // Deliberately fixed text. The whole value of the scanner was that the
+      // message distinguished refused / timed out / wrong protocol / spoke
+      // SMTP — so the message is where the fix has to land, not just the block.
+      message: 'SMTP host is not an allowed destination.',
+    };
+  }
   try {
     const transport = nodemailer.createTransport({
       host: creds.host,
@@ -243,8 +264,33 @@ async function sendVia(
     });
     return { kind: 'sent', messageId: info.messageId ?? null, via: 'byo_smtp' };
   } catch (e) {
-    return { kind: 'error', message: (e as Error).message };
+    // Classified, not verbatim. This string is returned by the test-send route
+    // and persisted to EmailLog.error, both of which the tenant can read, so a
+    // raw nodemailer error ("connect ECONNREFUSED 127.0.0.1:6379") reports the
+    // state of an internal port back to whoever asked. The full error still
+    // goes to the server log.
+    return { kind: 'error', message: classifySmtpError(e) };
   }
+}
+
+/**
+ * A tenant-safe description of why an SMTP send failed.
+ *
+ * Deliberately coarse: an operator needs to know whether to fix their
+ * credentials, their host, or wait — and nothing finer than that can be said
+ * without describing the network to someone who chose the address.
+ */
+function classifySmtpError(e: unknown): string {
+  const code = (e as { code?: string }).code ?? '';
+  const responseCode = (e as { responseCode?: number }).responseCode;
+  if (code === 'EAUTH' || responseCode === 535) {
+    return 'SMTP authentication was rejected — check the username and password.';
+  }
+  if (code === 'EENVELOPE') return 'SMTP server rejected the sender or recipient address.';
+  if (code === 'ETIMEDOUT' || code === 'ESOCKET' || code === 'ECONNECTION') {
+    return 'Could not establish an SMTP connection — check the host, port and TLS setting.';
+  }
+  return 'SMTP send failed.';
 }
 
 /** Send via the Rekey-managed default Resend pool. */

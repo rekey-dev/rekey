@@ -369,6 +369,16 @@ export async function assertNotLocked(
   }
 }
 
+/** What `registerFailure` counted, so the caller can write an audit trail. */
+export interface RegisteredFailure {
+  /** Failures inside the current window, including this one. */
+  failures: number;
+  /** True on the attempt that TRIPPED the lock — once per lockout, not per attempt. */
+  locked: boolean;
+  /** Seconds the scope is locked for, when `locked`. */
+  lockedForSec: number;
+}
+
 /**
  * Record a failed attempt against `scope`; lock it once the threshold is hit.
  *
@@ -377,15 +387,26 @@ export async function assertNotLocked(
  * whole exploit. The caller has already rejected the credential by this point,
  * so the 503 replaces a 401 — deliberately, because it also stops the endpoint
  * being a free oracle while the counter is broken.
+ *
+ * Returns what it counted. The counter itself is in Redis with a TTL and is
+ * cleared on the successful sign-in, so it answers "is this account locked
+ * right now" and nothing else — an operator asking "why couldn't this user sign
+ * in yesterday" needs a durable row, and only the caller knows which
+ * end-user and Application to attribute it to.
  */
-export async function registerFailure(scope: string, policy: BruteForcePolicy): Promise<void> {
+export async function registerFailure(
+  scope: string,
+  policy: BruteForcePolicy,
+): Promise<RegisteredFailure> {
   const { fail, lock } = keysFor(scope);
   try {
     const count = await store().incrWithTtl(fail, policy.windowSec);
     if (count >= policy.threshold) {
       await store().setLock(lock, policy.lockSec);
       await store().clear([fail]);
+      return { failures: count, locked: true, lockedForSec: policy.lockSec };
     }
+    return { failures: count, locked: false, lockedForSec: 0 };
   } catch (err) {
     asDependencyFailure('incrWithTtl', err);
   }
@@ -406,4 +427,24 @@ export async function clearFailures(scope: string): Promise<void> {
   } catch (err) {
     noteStoreFailure('clearFailures', err, 'a counter or lock will linger until its TTL');
   }
+}
+
+/**
+ * Drop the in-memory counter store.
+ *
+ * Test-only, and the one that actually mattered. Under `NODE_ENV=test`
+ * `getRedis()` returns null, so every counter and lock lives in the
+ * module-level `MemoryStore` above and nothing cleared it between tests. Keys
+ * are `bf:lock:<scope>:<appId>:<email>`, which outlives the TRUNCATE that
+ * removed the end-user they refer to — so a lockout tripped by one test was
+ * still counting when a later one created a fresh end-user with a recycled
+ * address and could not sign in.
+ *
+ * test/setup.ts believed it was clearing this via Redis. It was not: its
+ * `clearRedisTestState` called `getRedis()`, got null, and returned
+ * immediately on all 950 invocations — deleting zero keys, for a store that
+ * was never Redis in the first place.
+ */
+export function __resetForTests(): void {
+  memory = null;
 }

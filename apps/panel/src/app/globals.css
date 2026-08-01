@@ -12,8 +12,23 @@
   /* Brand — teal, matching the marketing site (rekey-* palette).
      Semantic error/danger states stay red (red-* utilities in components). */
   --color-primary: #0d9488;        /* rekey-600 (teal) */
-  --color-primary-hover: #0f766e;  /* rekey-700 */
-  --color-primary-fg: #ffffff;
+  --color-primary-hover: #14b8a6;  /* rekey-500 — hover BRIGHTENS, see note */
+  /* Label on a --color-primary fill. Ink, not white.
+     White on the brand teal has never cleared WCAG AA: measured in-page at
+     14px/500 it is 2.49:1 on dark's #14b8a6 and 3.74:1 on light's #0d9488
+     (AA text needs 4.5:1; even the large-text exemption needs 3:1). That is
+     every primary CTA in the panel — Create application, New API key, New
+     end-user, Save changes, Enable billing, Mint key — while the destructive
+     button sat at 4.83:1 and passed, so the most-used control had the worst
+     contrast in the product.
+     Ink on the same unchanged teal measures 5.29:1 (light) and 7.95:1 (dark).
+     The brand hue is deliberately untouched: only the label flips.
+     Because the label is now dark, the hover step has to get LIGHTER or it
+     loses the contrast it just gained (#0a0a0a on rekey-700 is 3.62:1).
+     Light's hover therefore moves 600→500 and dark's stays 500→400, which
+     also makes the two themes behave the same way for the first time.
+     Hover ratios: 7.95:1 (light) and 10.64:1 (dark). */
+  --color-primary-fg: #0a0a0a;
   --color-primary-soft: #ccfbf1;   /* rekey-100 */
   --color-primary-soft-fg: #115e59;/* rekey-800 */
 

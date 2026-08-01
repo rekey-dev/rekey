@@ -117,13 +117,61 @@ function shape(e: PlanEntitlement): ResolvedEntitlement {
   };
 }
 
+/**
+ * Any Prisma client: the global singleton, or a `$transaction` client. The
+ * read paths below take one so a caller already inside a transaction (the
+ * billing outbox, see webhooks/billing-events.ts) resolves entitlements
+ * through ITS connection instead of taking a second one from the pool while
+ * holding the first.
+ */
+type EntitlementDbClient = Prisma.TransactionClient;
+
 export const entitlementsService = {
   /** List a plan's explicit entitlement rows. */
-  async listForPlan(planId: string): Promise<PlanEntitlement[]> {
-    return prisma.planEntitlement.findMany({
+  async listForPlan(
+    planId: string,
+    client: EntitlementDbClient = prisma,
+  ): Promise<PlanEntitlement[]> {
+    return client.planEntitlement.findMany({
       where: { planId },
       orderBy: [{ kind: 'asc' }, { key: 'asc' }],
     });
+  },
+
+  /**
+   * Resolve several plans' entitlements in ONE query, keyed by plan id.
+   *
+   * The bulk form of `resolveForPlan`, for the read paths that hold a set of
+   * subscriptions: `GET /api/v1/billing/entitlements` is called by customer
+   * apps on every page load, and resolving each subscription's plan in turn
+   * was one `planEntitlement.findMany` per subscription, awaited in sequence.
+   * A plan with no explicit rows still falls back to `synthesizeLegacy`, same
+   * as the single-plan path.
+   */
+  async resolveForPlans(
+    plans: readonly Plan[],
+    client: EntitlementDbClient = prisma,
+  ): Promise<Map<string, ResolvedEntitlement[]>> {
+    const out = new Map<string, ResolvedEntitlement[]>();
+    if (plans.length === 0) return out;
+    // Distinct ids: two subscriptions on the same plan must not widen the IN.
+    const planIds = [...new Set(plans.map((p) => p.id))];
+    const rows = await client.planEntitlement.findMany({
+      where: { planId: { in: planIds } },
+      orderBy: [{ kind: 'asc' }, { key: 'asc' }],
+    });
+    const byPlan = new Map<string, PlanEntitlement[]>();
+    for (const row of rows) {
+      const list = byPlan.get(row.planId);
+      if (list) list.push(row);
+      else byPlan.set(row.planId, [row]);
+    }
+    for (const plan of plans) {
+      if (out.has(plan.id)) continue;
+      const explicit = byPlan.get(plan.id);
+      out.set(plan.id, explicit ? explicit.map(shape) : synthesizeLegacy(plan));
+    }
+    return out;
   },
 
   /** Create or update one entitlement on a plan (keyed by (plan, kind, key)). */
@@ -220,8 +268,11 @@ export const entitlementsService = {
    * The effective entitlements for a plan: its explicit rows, or — when it has
    * none — a single synthesized entitlement from the legacy `kind` fields.
    */
-  async resolveForPlan(plan: Plan): Promise<ResolvedEntitlement[]> {
-    const rows = await this.listForPlan(plan.id);
+  async resolveForPlan(
+    plan: Plan,
+    client: EntitlementDbClient = prisma,
+  ): Promise<ResolvedEntitlement[]> {
+    const rows = await this.listForPlan(plan.id, client);
     if (rows.length > 0) return rows.map(shape);
     return synthesizeLegacy(plan);
   },
@@ -236,9 +287,12 @@ export const entitlementsService = {
    * that asks "what did THIS buyer purchase" wants this one; `provision` and
    * `resolveForEndUser` already compose the same two steps inline.
    */
-  async resolveForSubscription(sub: Subscription): Promise<ResolvedEntitlement[]> {
-    const plan = await prisma.plan.findUniqueOrThrow({ where: { id: sub.planId } });
-    return applyOverrides(await this.resolveForPlan(plan), sub.entitlementOverrides);
+  async resolveForSubscription(
+    sub: Subscription,
+    client: EntitlementDbClient = prisma,
+  ): Promise<ResolvedEntitlement[]> {
+    const plan = await client.plan.findUniqueOrThrow({ where: { id: sub.planId } });
+    return applyOverrides(await this.resolveForPlan(plan, client), sub.entitlementOverrides);
   },
 
   /**
@@ -418,10 +472,15 @@ export const entitlementsService = {
       subject = { endUserId };
     }
 
+    // One query for every subscription's plan entitlements, then the
+    // per-subscription overrides applied in memory. This is the endpoint
+    // customer apps call on every page load, and it used to resolve each
+    // subscription's plan in a sequential `await` inside the loop — N round
+    // trips, uncached, for a subject who is usually holding two or three subs.
+    const byPlan = await this.resolveForPlans(subs.map((s) => s.plan));
     const all: ResolvedEntitlement[] = [];
     for (const s of subs) {
-      const resolved = applyOverrides(await this.resolveForPlan(s.plan), s.entitlementOverrides);
-      all.push(...resolved);
+      all.push(...applyOverrides(byPlan.get(s.planId) ?? [], s.entitlementOverrides));
     }
     // Free-tier fallback (#36): an end-user with no active subscription gets the
     // Application's default plan's FEATURE entitlements (feature gating without a
@@ -495,10 +554,13 @@ export const entitlementsService = {
           status: { in: ENTITLING_STATUSES },
         };
     const subs = await prisma.subscription.findMany({ where, include: { plan: true } });
+    // One query for every plan, same reason as resolveForEndUser: this runs on
+    // the usage.record hot path, once per recorded event.
+    const byPlan = await this.resolveForPlans(subs.map((s) => s.plan));
     let total = 0;
     let capped = false;
     for (const s of subs) {
-      const ents = applyOverrides(await this.resolveForPlan(s.plan), s.entitlementOverrides);
+      const ents = applyOverrides(byPlan.get(s.planId) ?? [], s.entitlementOverrides);
       for (const e of ents) {
         if (e.kind === 'USAGE' && e.key === meterSlug && e.quantity != null && e.quantity > 0) {
           total += e.quantity;

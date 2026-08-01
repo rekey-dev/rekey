@@ -4,7 +4,595 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
-## 2.0.0-rc.1
+## 2.0.0-rc.2
+
+### Fixed: the Developer section was unreachable on a phone
+
+At a 375px viewport the application's primary nav measured 457px of pills
+against a 375px box with `overflow-x: visible`, inside a `<main>` that clips
+horizontal overflow. That is not "slightly cut off" — **API keys, Webhooks,
+Requests, Access and Email could not be opened on a phone at all**, and
+"Billing" was truncated mid-label. The secondary row had scrolled correctly for
+a while; the primary row now gets the same `overflow-x-auto`, the same
+scroll-the-active-item-into-view effect, and the same edge fade.
+
+`<main>` moved from `overflow-x-hidden` to `overflow-x-clip` as part of this.
+`hidden` silently makes the element a scroll container, and because `<main>` is
+never height-constrained it was a scroll container that could never scroll —
+which broke `position: sticky` for everything inside it.
+
+
+### Fixed: billing sub-pages broke the nav when billing was off
+
+On `/applications/{id}/plans` — and payments, coupons, revenue, dunning,
+licenses, usage, portal — with billing disabled, the tab labelled **"Overview"
+carried `aria-current="page"` and linked to the page you were already on**. No
+sub-tab row rendered and there was no way back. It was one click from the
+default landing page: the application Overview's Configuration list and the
+get-started checklist both link into billing while billing is off.
+
+The cause was the Billing group collapsing to a single child while disabled, so
+`plans` matched no group at all and the `?? groups[0]` fallback marked Overview
+active. The group now keeps its full child list in both states; only the link
+target of the group pill changes.
+
+
+### Fixed: a 404 rendered as a crash page
+
+`/applications/<bad-id>/end-users` answered with "Something went wrong loading
+this page… contact support (ref …)" and a single "Try again" button that could
+never succeed. The UI could not distinguish "does not exist / not yours" from
+"we are broken".
+
+The panel API client now maps 404 to `notFound()` and 403 to `forbidden()` on
+read requests, so both get a real page that keeps the chrome and offers a way
+out. Mutations still surface a `PanelApiError` so server actions can re-render
+a form with the operator's input intact. The generic error card also gained a
+"Back to applications" link.
+
+
+### Fixed: every primary button failed WCAG AA
+
+Measured in-page: `#ffffff` on `#14b8a6` is **2.49:1** at 14px, where AA needs
+4.5:1 and even the large-text exemption needs 3:1. Light theme's `#ffffff` on
+`#0d9488` is 3.74:1, also failing. That was every primary CTA in the product —
+Create application, New API key, New end-user, Save changes, Enable billing,
+Mint key — while the destructive button passed at 4.83:1. The most-used control
+had the worst contrast in the app.
+
+The brand teal is unchanged. The label flips to ink (`--color-primary-fg`,
+`#0a0a0a`), giving **5.29:1** in light and **7.95:1** in dark. Because the label
+is now dark, light theme's hover step moves 600→500 rather than 600→700, so
+hover brightens in both themes instead of only one; hover measures 7.95:1 and
+10.64:1.
+
+The publishable key in the application header also moved from
+`--color-faint-fg` to `--color-muted-fg`: **3.72:1 → 7.85:1**, on a value the
+operator is meant to read and copy character by character.
+
+
+### Fixed: workspace deletion told self-hosted operators to email a vendor
+
+The deletion flow ended in "Email support@rekey.dev from the OWNER address" —
+hard-coded and unconditional. On a **self-hosted** deployment that instructs the
+customer to email Rekey about rows in a database Rekey has no access to and
+cannot touch. It is not merely unhelpful; it cannot be followed.
+
+The address now comes from `PANEL_SUPPORT_EMAIL`. Unset — the default, and
+therefore what every self-host sees — switches the copy to the truthful answer:
+deletion is an operation you run against your own database, with the exact
+`DELETE FROM tenants WHERE id = …` (everything under it cascades), a `pg_dump`
+warning, and a copy button. Rekey Cloud sets the variable and keeps the manual
+support path, where the friction is deliberate.
+
+
+### Fixed: the audit log printed raw event keys for 44 of 54 event types
+
+The label map had 10 entries against 54 emitted types, so ordinary setup
+produced rows reading `app.plan_created / app.plan_created` — the key printed
+twice, once as its own label. The same 10 entries populated the Event-type
+filter, and a hand-typed `?type=` outside them was silently discarded.
+
+All 54 are now labelled, the filter is built from the same map, unknown keys are
+humanised rather than printed raw, and any syntactically valid `?type=` is
+passed through to the API instead of being dropped.
+
+
+### Fixed: the audit log and Activity identified people by CUID
+
+Payments and Dunning show an email because their endpoints return one. The
+audit log and Activity showed a 25-character CUID because
+`GET /tenant/security-events` has no relations to join and no email in its
+serializer. "Who is `cmsa91v4c000nv5h5txnjvvry`?" had no answer inside the
+product. The panel now resolves actors a page at a time — operators from the
+members list, end-users by id, deduped and capped — and links end-users to their
+page, falling back to the CUID when a lookup fails.
+
+
+### Added: per-user auth events, and an honest account of what isn't recorded
+
+The end-user page showed "Failed sign-in attempts: 7" with no threshold, and
+that user's events appeared nowhere: Activity is application-wide and had no
+filters. The counter now reads "7 of 10" with the lockout duration, a
+**Recent auth events** panel lists that user's last 20 events with reason codes
+and IPs, and Activity gained an email filter.
+
+Both surfaces state plainly that **failed sign-ins and lockouts are never
+recorded as events** — the API increments a Redis counter and discards the
+detail — so nobody concludes from an empty list that a locked-out user did
+nothing.
+
+
+### Added: webhook endpoint health, delivery detail, and bulk retry
+
+An endpoint with 12 of 12 deliveries failing rendered "● Enabled" in green,
+identical to a working one; finding it meant opening Details on every endpoint
+in turn. The list gained a **Last 24h** column ("12/12 failed", amber/red) and a
+banner when any endpoint is failing.
+
+Delivery rows are now expandable, showing the delivery and event ids, response
+status, error and next attempt — and the stored `payload` and `responseBody`
+whenever the API serves them. **It does not yet:** the tenant delivery route
+loads both fields and then drops them from its response, so the expanded row
+explains that rather than showing an empty box. **Retry all failed** replaces
+twelve individual Retry clicks.
+
+
+### Fixed: access-control placeholders read as configured values
+
+On `/applications/{id}/access`, empty IP-allowlist and CORS fields showed
+example values (`10.0.0.0/8`, `https://app.example.com`) in the same mono face
+as a real entry at 7.4:1 — indistinguishable from configuration, on a security
+page. Placeholders are now dimmed and italic, prefixed "e.g.", and each field
+states its live effect affirmatively the way the API-keys page already did:
+"No IP allowlist set — secret keys may be used from any address."
+
+
+### Added: a sticky save bar with a dirty guard on Auth methods and Access
+
+Auth methods is 14 controls over ~1970px with one Save at the very bottom and no
+dirty state; navigating away discarded everything silently. Both pages now share
+a sticky footer that shows "Unsaved changes", promotes the Save button when
+there is something to save, and confirms before an in-app link or a reload
+throws the edits away.
+
+
+### Fixed: the get-started checklist ticked billing with zero providers
+
+"Enable billing and add a provider" was satisfied by `billingConfig.enabled`
+alone, so the checklist reported production-ready on a state where checkout
+fails with `BILLING_CREDENTIALS_NOT_CONFIGURED`. It now requires a configured
+provider too, and says so when billing is on but unconfigured.
+
+
+### Added: scopes and expiry on panel-minted API keys
+
+The API has always accepted `scopes` and `expiresAt` on this endpoint; the panel
+sent neither, so every panel-minted key was full-access and never expired. The
+mint modal now offers both. Note that the API turns an empty `scopes` array into
+`['*']`, so the panel omits the field entirely rather than posting `[]` — the UI
+never says "no scopes" while minting a full-access key.
+
+
+### Fixed: hydration mismatch on every page with a Modal
+
+The dialog id came from a module-level counter, which does not agree between a
+server process that has rendered other modals and a freshly loaded client:
+server emitted `rekey-modal-2-title`, client `-3-`. React logged "This won't be
+patched up" on every page containing a Modal. It now derives from `useId()`.
+
+
+### Fixed: the slug field was a dead end
+
+Typing "Northwind Store" left Slug empty and disabled the submit with nothing
+naming the blocking field; a click during "Checking availability…" hit a
+disabled button and did nothing at all. The slug is now prefilled from the name
+(and stays linked until you edit it), the submit is never disabled — a blocked
+submit focuses the field and says why — and a click during the check is held and
+released when the answer arrives.
+
+
+### Fixed: inconsistencies between comparable surfaces
+
+One `<StatusPill>` replaces the divergent status rendering that showed uppercase
+`FAILED` on /payments and title-case `Failed` on /revenue from two separate tone
+maps. Empty states on /team use the shared `<EmptyState>`, and /coupons gained
+the CTA that /applications already had. Confirm dialogs and the create modal now
+render the same `<dialog>` chrome. Application sub-pages emitted two `<h1>`
+elements (the layout's application name plus their own); `PageHeader` takes a
+`level` so the nested ones are `<h2>`.
+
+Also: "Active sessions" listed a device called `node` — the User-Agent of the
+panel's own server-side fetch — on a page that says "Revoke any you don't
+recognize". It is now labelled as the panel with a note saying revoking it signs
+you out.
+
+### Fixed: four consecutive commands failed on a fresh clone
+
+Someone cloned the repo and followed `docs/quickstart.md` verbatim. Nothing
+worked, in four different ways, none of them documented:
+
+1. **`pnpm db:migrate:deploy`** → `Environment variable not found: DATABASE_URL`.
+   The root script delegated to `apps/api`, so Prisma ran with CWD `apps/api`
+   and `--schema ../../prisma/schema.prisma` — meaning it looked for `.env` in
+   `apps/api/` and `prisma/`, never the root `.env` the docs had just told you
+   to create. The four `db:*` scripts now run Prisma **from the repo root**,
+   where its own dotenv loader finds that file. (This is what CI already did.)
+2. **`pnpm dev`** → `ERR_MODULE_NOT_FOUND: @rekey.dev/shared-types/dist/index.js`.
+   The `dev` task in `turbo.json` had no `dependsOn: ["^build"]`, so the apps
+   started against workspace packages that had never been built. It has one now.
+3. **`pnpm build`** → ~20 × `Module '"@prisma/client"' has no exported member
+   'Prisma'`. The Prisma client had never been generated, `pnpm db:generate`
+   existed, and no document mentioned it — `migrate deploy`, unlike
+   `migrate dev`, does not generate. `build`, `dev`, `typecheck` and `test` now
+   run it first.
+4. **`pnpm dev`, again** → `Invalid environment variables: DATABASE_URL,
+   JWT_SECRET, SUPER_ADMIN_KEY`. Nothing in the chain loaded the root `.env`:
+   not pnpm, not turbo, not tsx, not the API. `dev` now runs under `dotenv-cli`,
+   and the `dev` task passes the environment through to its children.
+
+Fixed in the tooling rather than documented as a workaround, because four lines
+of configuration beat four paragraphs telling people to work around it. The
+docs were then rewritten to match, and the whole path re-run from a scratch
+copy of the repo: install → configure → migrate → dev → bootstrap → first
+end-user.
+
+`@rekey.dev/api`'s own `db:*` scripts are unchanged; they still expect an
+`apps/api/.env` if you invoke them directly from that directory.
+
+### Fixed: `rekey --version` was an unknown option
+
+`rekey version` worked; `rekey --version` — which is what everybody tries
+first — printed `error: unknown option '--version'`. Both work now. The
+subcommand stays, because it is the one that honours `--json`.
+
+`rekey --help` also pointed at `packages/cli/AGENTS.md`, a monorepo path that
+means nothing to someone who installed the package from npm. It now names the
+`AGENTS.md` shipped inside the tarball, with a URL.
+
+### Docs: the React component library, outbound webhooks, and a restore runbook
+
+Three documents that should have existed:
+
+- **`docs/react-components.md`** — `@rekey.dev/react` ships `SignIn`, `SignUp`,
+  `UserButton`, `Protect`, `OrganizationSwitcher`, `CreateOrganization`,
+  `OrganizationProfile`, `PricingTable`, `CheckoutButton` and `ProviderPicker`
+  plus theming, and `docs/` mentioned none of them while the site promised
+  "drop-in components". Props, defaults and a working example per component.
+- **`docs/webhooks.md`** — the site served `/docs/webhooks` and the CHANGELOG
+  referred to `docs/webhooks.md`, which did not exist. Envelope, signature
+  verification, the delivery and retry schedule as the code actually
+  implements it, and the full event catalog.
+- **`DEPLOY.md` → Backup, restore, and getting your data out** — `pg_dump` /
+  `pg_restore` mechanics, the `ENCRYPTION_KEY` caveat that makes a dump
+  restorable or not, and how export works on a self-hosted deployment versus on
+  Rekey Cloud.
+
+Corrections in passing, each checked against the code rather than against the
+previous sentence:
+
+- `@rekey.dev/node`'s README said Rekey sends **13** webhook events and listed
+  13. It sends **17** — `user.erased` and the three `dunning.*` events were
+  missing.
+- That README's three-step quickstart ended on `billing.getEntitlements()`,
+  which throws `403 BILLING_DISABLED` on a new Application because
+  `billingConfig.enabled` defaults to `false`. The precondition is now stated
+  where the call is.
+- `@rekey.dev/react`'s README claimed `GET /api/v1/billing/providers` is
+  "secret-key guarded and rejects public keys". It accepts the publishable key,
+  by design and with a comment saying so.
+- `.env.example` said a missing `ENCRYPTION_KEY` makes the API "log a critical
+  warning at boot". It refuses to boot. It also refuses to boot on the value
+  `docker-compose.yml` shipped as a default before this release.
+- `.env.example` claimed defaults for `PANEL_URL` and `PUBLIC_PORTAL_URL` that
+  `config/env.ts` deliberately does not have — and set `PANEL_URL` to a
+  placeholder domain, which is worse than leaving it unset.
+- The README's Examples table had headers and no rows, and linked
+  `github.com/EtherLabZ/Rekey/issues/184`, which 404s. The `examples/` apps were
+  removed in #261; the README, both SDK READMEs and `docs/portal.md` now say so
+  instead of linking into the hole.
+- `CONTRIBUTING.md` asked for Node 20 (`engines` says 22) and said
+  `docker compose up` boots the full stack (it needs `--profile full`).
+- `/docs/sdk` was missing `billing.cancelSubscription`: the generated
+  `sdk-reference.json` is committed and was only ever regenerated by hand. A
+  `prebuild` hook now regenerates it before every marketing build.
+
+### Fixed (money): two Applications sharing one payment provider lost each other's webhooks
+
+Three provider ids were unique across the whole deployment rather than per
+Application: `webhook_events (provider, provider_event_id)`,
+`payments.provider_payment_id`, and `subscriptions.provider_sub_id`. That
+assumed one Stripe / PayPal / Razorpay account per deployment. Two Applications
+wired to the same account — a staging app beside production, or a cloned app,
+which is the mundane way this happens rather than an attack — see the *same*
+`evt_…`, charge and subscription ids, and collided:
+
+* The second tenant's genuine `invoice.paid` hit the unique constraint, the
+  pipeline read the first tenant's already-processed row, and answered
+  `200 {received: true, processed: false, reason: "duplicate"}`. **The provider
+  stops retrying on a 200, so that tenant's event was lost permanently and
+  silently.**
+* The payment applier's duplicate-recovery path then looked the charge up by
+  `provider_payment_id` alone and returned **another tenant's payment id** into
+  the victim's event stream.
+* A subscription activation for the second tenant threw on the unique
+  `provider_sub_id`, the webhook answered 5xx, and the provider retried an
+  activation that could never succeed.
+
+All three keys are now scoped by `application_id`. The migration creates each
+new index before dropping the old one, so there is no window without an
+idempotency guard; the new keys are strictly weaker than the ones they replace,
+so it cannot fail on existing data.
+
+Nothing changes for a deployment with one provider account per Application: a
+replay of the same event id *within* one Application is still a duplicate.
+
+### Fixed (money): billing events could be lost between the payment and the outbox
+
+`applyPaymentSucceeded` committed money in a transaction and then, in a detached
+`void (async () => …)()`, re-read the database to insert the outbound-webhook
+delivery rows. A pod rotation or a connection-pool timeout in that gap lost
+`payment.succeeded` **permanently** — the delivery poller only re-attempts rows
+that already exist, and no row had been written. The comments called this a
+transactional outbox; an outbox that starts after an un-retried async hop is not
+one.
+
+Delivery rows are now written inside the same `$transaction` as the state change
+that causes them, across the inbound-webhook appliers, the dunning state machine
+and the self-service/operator cancels. Only the first delivery *attempt* is
+post-commit, and losing that costs latency rather than the event: the row is
+`PENDING` with `nextAttemptAt` in the past, so the poller picks it up.
+
+The remaining fire-and-forget emitters (the auth and user-lifecycle events,
+which have no single transaction to join) now **log** when an enqueue fails.
+They were `void emit(…).catch(() => undefined)`, which discarded the only signal
+that an event had been dropped.
+
+### Fixed: PayPal and Razorpay calls had no timeout, including on the webhook request path
+
+Node's `fetch` has no default request timeout, and `providers/paypal.ts` made
+eleven bare calls. The sharpest ran synchronously inside the inbound-webhook
+handler: a wedged `api-m.paypal.com` held a Fastify handler open indefinitely,
+PayPal retried and opened another, and the process ran out of connections while
+`/health/live` — which touches neither PayPal nor the handler pool — stayed
+green. Razorpay's SDK was constructed with no options at all, so its axios
+client ran on `timeout: 0`; Stripe inherited its SDK's 80-second default.
+
+Every provider call now carries a deadline: 10s for management calls, 4s for the
+two on the webhook request path. Online verification stays on the request path —
+PayPal's signature check *is* the authentication for that route — but an
+unreachable PayPal now answers **503**, not `401 WEBHOOK_SIGNATURE_INVALID`.
+Telling a provider its own signature was bad, when the fault is that we could
+not reach the provider to ask, is how an endpoint gets disabled for someone
+else's outage.
+
+### Performance: operator lists, entitlement resolution, coupon stats, CORS refresh, pool sizing
+
+* `end_users` had no `(application_id, created_at)` index, so the operator
+  end-user list read every row for the application and sorted it. Measured on
+  40k users in one app: **9.81 ms → 0.04 ms**, 590 buffers → 4.
+  `payments`, `subscriptions`, `licenses` and `organizations` are the same query
+  shape and get the same index.
+* `GET /api/v1/billing/entitlements` — the call customer apps make on every page
+  load — resolved each subscription's plan in a sequential `await` inside a
+  loop. Now one `IN` query, grouped in memory: for a three-subscription subject,
+  **3 queries / 2.21 ms → 1 query / 0.80 ms**. The same fix applies to the
+  usage-quota lookup on `usage.record`.
+* The coupon list pulled every redemption row to compute a count and a sum in
+  JavaScript — no `take`, so a coupon's entire history crossed the wire. Now one
+  `groupBy`: at 40k redemptions, **65.9 ms → 4.4 ms** and 40,000 rows → 1.
+* The CORS origin cache ran `application.findMany()` with no `where` and no
+  `take` every 30 seconds, forever, loading every Application in the deployment
+  into memory. It now filters to applications that can contribute an origin and
+  reads them in cursor-paged batches.
+* Prisma's pool was never sized, so every deployment ran on `num_cpus * 2 + 1` —
+  five connections on a 2-vCPU container, shared with a webhook worker that runs
+  ten jobs concurrently. `DATABASE_POOL_SIZE` (default **20**) and
+  `DATABASE_POOL_TIMEOUT_SECONDS` (default 10) now set `connection_limit` and
+  `pool_timeout`; a value already in `DATABASE_URL` still wins.
+
+### Fixed: the operator MCP 401 carried no `WWW-Authenticate` header
+
+RFC 9728, which the MCP specification makes a MUST, uses the 401 itself to point
+an undiscovered client at the authorization server. The operator MCP endpoint
+set the header only on its **success** reply — that is, only on the one response
+belonging to a client that already had a token. A spec-compliant client could
+not discover the surface at all, and Claude specifically will not honour the
+header on a 200.
+
+The header is now set in the auth hook before it can throw, so it rides every
+401 as well as the success reply. The per-Application MCP endpoint was already
+correct; this was the operator surface only.
+
+
+### Fixed: `verifyWebhookSignature` and RS256 `verifyAccessToken` threw on every npm install
+
+**Both functions were unusable from a published package, in every released
+version, including the stable `1.1.2`.** They lazily loaded Node's crypto with a
+bare `require('node:crypto')` — but `@rekey.dev/node` is `"type": "module"` with
+ESM-only `exports`, so in the built output `require` is not defined:
+
+```
+ReferenceError: require is not defined
+```
+
+`verifyWebhookSignature` is the function the docs tell you to gate billing on,
+so anyone who followed that advice found it throwing the first time a webhook
+arrived. Both now use `createRequire(import.meta.url)`, which is what
+`@rekey.dev/mcp` already did correctly. The lazy load is kept — crypto is the
+only Node builtin this SDK needs, and importing it eagerly would break the edge
+runtimes that can otherwise use the rest of the client.
+
+The signature scheme itself was never wrong: `HMAC-SHA256` over
+`` `${t}.${rawBody}` ``, exactly as `docs/webhooks.md` describes. Only the helper
+was broken.
+
+Why it survived six releases: the tests imported the TypeScript source, which
+vitest transpiles into an environment where CommonJS interop is available, so
+they never touched the artifact that ships. It also does not reproduce under
+`node -e`, because inline eval defines `globalThis.require` — it appears only in
+a real `.mjs` file or a `"type": "module"` package. `packages/sdk-node/test/built-artifact.test.ts`
+now runs against `dist/` in a spawned Node process, and `pnpm test` builds first
+so it cannot drift.
+
+
+### Security: `docker-compose.yml` shipped a working `ENCRYPTION_KEY` default
+
+**Anyone who deployed the reference compose file without setting
+`ENCRYPTION_KEY` has been encrypting with a key published in the repository.**
+That key is AES-256-GCM over every stored provider credential (Stripe, PayPal,
+Razorpay), OAuth client secret, TOTP seed, SMTP password and RS256 private
+signing key — so a stolen database dump was decryptable by anyone with the
+public source.
+
+The default was easy to miss precisely because the file looked careful. Its
+neighbours `JWT_SECRET` and `SUPER_ADMIN_KEY` defaulted to `change-me-in-prod`,
+which is 17 characters, fails the 32-character minimum, and crashes the boot —
+so an operator following the errors generated exactly those two secrets and
+never learned a third existed. `ENCRYPTION_KEY`'s default was a valid 64-hex
+string that satisfied both the schema and the production presence check, so it
+never raised anything.
+
+- The compose default is removed. `ENCRYPTION_KEY` is now required, and compose
+  refuses to start without it.
+- The API additionally **refuses to boot in production** if `ENCRYPTION_KEY` is
+  the published value or a single repeated character, rather than warning. A
+  deployment that copied the old file would otherwise keep working silently
+  after upgrading, which is the whole problem.
+
+**If you may be affected:** rotate the affected credentials **at the provider**
+(Stripe, PayPal, Razorpay, your SMTP host, any OAuth app) and treat stored TOTP
+seeds as known. Note that changing `ENCRYPTION_KEY` alone does not re-encrypt
+existing rows — they were written under the old key and must be re-entered.
+
+### Behaviour change: existing Applications begin sending a second email at sign-up
+
+`authConfig.sendVerificationEmailOnSignUp` is new in this release and defaults
+to **`true`**, so an Application that upgrades and changes nothing starts
+posting the `email_verification` mail alongside `welcome` on every password
+sign-up. Nothing breaks — delivery is fire-and-forget and cannot fail an
+account creation — but your users will receive mail they did not receive
+before, from your configured transport, against your sending quota.
+
+Set `sendVerificationEmailOnSignUp: false` to keep the old behaviour. Full
+entry, including what the switch does and does not cover: [email verification
+is configurable per Application](#added-email-verification-is-configurable-per-application).
+
+Filed here rather than under *Added* because "an existing deployment does
+something new without being asked" is the thing a self-hoster reads a changelog
+to find, and the original entry sat below three `### Breaking:` sections where
+nobody skimming for it would.
+
+### Behaviour change: the MCP JSON-RPC endpoint now requires the `mcp:account` scope
+
+`POST /api/v1/mcp/<slug>` previously accepted any valid access token from the
+Application's authorization server, whatever scope it carried. It now returns
+403 `insufficient_scope` without `mcp:account`.
+
+This tightens a **live** surface, so it is called out here rather than left
+inside the OIDC feature entry. Clients that requested `mcp:account`, or no
+scope at all (which still defaults to it), are unaffected; a token minted with
+an unrecognised scope string is not. Refresh tokens issued before this release
+carry no recorded scope and are read as `mcp:account` — exactly what they used
+to be re-issued with, so existing sessions keep working. Full entry: [an
+Application can be an OpenID Connect
+provider](#added-an-application-can-be-an-openid-connect-provider).
+
+### Fixed: a verification email with no button, and no way to ask for another
+
+Two halves of the same lockout, both reproduced against a running server.
+
+- **The mail went out with nothing to click.** When no verification link
+  resolves — no `authConfig.appUrl`, no usable `redirectUrls` origin, no
+  `DEFAULT_APP_URL` — `buildTokenUrl` returns `''` and the template drops the
+  button, which is right for the welcome mail and useless for this one: the
+  body says "click the button below to confirm this is your email address" and
+  there is no button. With `sendVerificationEmailOnSignUp` defaulting on, every
+  new user of such an Application got it. **Sign-up now skips the send
+  entirely** in that case and records an `auth.email_delivery_failed` security
+  event naming the setting to fix, rather than mailing a dead end. No token is
+  minted either. The explicit `POST /auth/send-verification` is unchanged: it is
+  an integrator call whose documented no-transport contract hands back
+  `verificationToken` for the customer's own server to deliver, and refusing to
+  mint would break integrations that never used our template.
+- **New: `POST /api/v1/auth/resend-verification`.** Composed with
+  `requireEmailVerification`, the above stranded users permanently: the gate
+  denies the session that `/auth/send-verification` requires, so there was no
+  self-service route back and the only fix was an operator marking the address
+  verified by hand. The new route takes `{ email, verifyUrl? }` and no session.
+  It is enumeration-safe by construction — a publishable-key caller gets one
+  constant 200 body whether the address is unknown, already verified, erased or
+  genuinely mailed, with the same flattening delay `/auth/forgot-password`
+  uses, and it never raises `EMAIL_ALREADY_VERIFIED`. A secret-key caller gets
+  the real outcome and the raw token when no transport is configured, matching
+  `/auth/forgot-password` exactly. Rate-limited per (Application, address, IP)
+  plus the per-Application auth ceiling, on the same cap as
+  `/auth/forgot-password` — it is the same surface: an unauthenticated,
+  address-keyed request that puts one email in flight.
+- **`auth.resendVerificationEmail({ email, verifyUrl? })`** on `@rekey.dev/node`,
+  binding the new route. Additive. `sendVerificationEmail` beside it still takes
+  an access token, so it was no help to precisely the user who needs this.
+  Branch on `emailSent` and deliver `verificationToken` yourself, the same shape
+  `requestPasswordReset` returns. The browser SDKs are unchanged: `@rekey.dev/react`
+  binds no unauthenticated credential-send today, not `/auth/forgot-password`
+  either, so there is no sibling there to match.
+
+`EMAIL_NOT_VERIFIED`'s `fix` string and `docs/errors.md` both said there was no
+way to re-send. That is no longer true, and both now name the new route.
+
+`apps/marketing/public/openapi.json`, which feeds the published API reference,
+is regenerated here too — it is a checked-in `openapi:dump` artifact that nothing
+in CI rebuilds or verifies, so the new route was absent from the reference. The
+regenerated diff is exactly that one path, which is the good case; nothing keeps
+it that way, and a drift check on the dump is still missing.
+
+### Added: `oidcEnabled` has a panel toggle
+
+Enabling the OpenID Provider was a hand-rolled `PATCH …/auth-config` — it was
+excluded from the operator MCP write tools on the grounds that standing up a
+public authentication surface is an operator-console decision, while the
+console had no control for it. **Panel → Application → Auth → Security policy**
+now has *Act as an OpenID Connect provider*, next to *Require a verified
+email*, which the `email` claim depends on. The copy states what switching it
+on publishes: an unauthenticated discovery document, `id_token`s, `/userinfo`,
+and self-registering relying parties by default.
+`docs/oidc-provider.md` no longer lists the missing UI under *Not built*.
+`dynamicClientRegistration` still has no panel control.
+
+### Added: end-users can edit their own `metadata`
+
+`EndUser.metadata` was readable and unwritable. The schema advertises it as the
+place for display name, avatar and custom fields, `GET /api/v1/users/me`
+returns it, and every write path was operator-side — so an integrator could
+show a profile and never let the user edit it.
+
+- **`PATCH /api/v1/users/me`** (new public endpoint). Takes the publishable key
+  plus the user's own JWT, like the `GET` beside it; the token is the
+  authorizer, and there is no id anywhere in the route, so "someone else's
+  record" is not a request it can express.
+- **`auth.updateCurrentUser(accessToken, { metadata })`** on `@rekey.dev/node`.
+  Additive.
+- **Shallow-merged at the top level, not replaced.** A key you omit survives; a
+  key you send replaces that top-level key wholesale (no deep merge); a key
+  sent as `null` is deleted; `metadata: null` clears the object. Replace is the
+  semantics that quietly destroys data — read, edit one key, write back, and
+  everything another device wrote in between is gone with nothing in the
+  request to say so.
+- **The writable field list is a closed allowlist**, not a deny-list: a
+  deny-list silently grants whatever column the next migration adds, `role`
+  being the concrete danger. Unknown fields are **refused**, not stripped, so an
+  integrator who tries `{ role: "admin" }` finds out immediately.
+- Capped at 16KB serialized, measured **after** the merge.
+- New error codes: **`END_USER_UPDATE_INVALID`** (400) for a body naming
+  anything but `metadata`, and **`METADATA_TOO_LARGE`** (400) for the ceiling.
+  Both are in [docs/errors.md](docs/errors.md). `METADATA_TOO_LARGE` is worth
+  one note: it is *not* `PAYLOAD_TOO_LARGE` (413), which is the HTTP layer
+  refusing a >1 MiB request body. Different status, different remedy — switch
+  on the code, not the phrase.
+
+The reserved `metadata.oidc` namespace and the post-merge cap on every other
+writer arrived with the security review above; read that entry too if you are
+integrating this.
 
 ### Fixed (security): eight findings across the new auth surfaces
 
@@ -537,6 +1125,16 @@ tightening:
 New error code `OIDC_NOT_FOUND` (404) for the OIDC-only paths on an Application
 that has not enabled OIDC.
 
+**Type note (TypeScript consumers).** `oidcEnabled` and
+`dynamicClientRegistration` are `.default()` fields on `AuthConfigSchema`, and
+`AuthConfig` is the `z.infer` *output* type — so both are **required**
+properties on it, as are the two email-verification switches. Four new required
+properties in all for anyone constructing an `AuthConfig` object literal;
+reading one, and the `PATCH …/auth-config` body, are unaffected.
+
+`oidcEnabled` shipped with no operator-console control at all. It has one now —
+see [`oidcEnabled` has a panel toggle](#added-oidcenabled-has-a-panel-toggle).
+
 ### Added: optional IP allowlist on the admin surface
 
 - **`ADMIN_IP_ALLOWLIST`** (comma-separated IPs and/or CIDRs, v4 and v6) gates
@@ -595,11 +1193,26 @@ close both halves, each settable from Panel → Application → Auth, the
 - Note before enabling the gate: it applies to accounts that already exist, and
   a blocked user cannot re-send their own link (`/auth/send-verification`
   requires a session). Operators can mark an address verified from
-  Panel → Application → End-users.
+  Panel → Application → End-users. **No longer true as of the fix below**:
+  `POST /auth/resend-verification` needs no session. Left standing because it
+  is what shipped.
 - The two bullets above are the corrected form. As first written this entry said
   the gate covered password **sign-in** only and that already-issued refresh
   tokens kept working — both were true of the code and both were the bug. See
   the security entry at the top of this release.
+- One more prerequisite, added after the release was cut: a verification link
+  has to be *buildable*. With no `appUrl`, no usable redirect origin and no
+  `DEFAULT_APP_URL` the send is now skipped rather than mailing a button-less
+  confirmation, and a user who never got theirs can ask for another without a
+  session — see [a verification email with no
+  button](#fixed-a-verification-email-with-no-button-and-no-way-to-ask-for-another).
+- **Type note (TypeScript consumers).** `AuthConfig` is
+  `z.infer<typeof AuthConfigSchema>`, the schema's *output* type, so a
+  `.default()` field is **required** on it — not optional. Both switches are
+  `.default()`, so both become required properties, and code that constructs an
+  `AuthConfig` as an object literal stops compiling until it supplies them.
+  *Consuming* an `AuthConfig` is unaffected, as is the `PATCH …/auth-config`
+  request body, which stays all-optional.
 
 ### Added: `subscription.*` webhooks carry the resolved entitlements
 

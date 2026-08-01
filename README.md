@@ -15,8 +15,10 @@ If you're an AI coding agent reading this repo, start at [AGENTS.md](AGENTS.md).
 The whole stack boots with one command — the API auto-migrates on start:
 
 ```bash
-cp .env.example .env             # fill POSTGRES_PASSWORD, REDIS_PASSWORD, JWT_SECRET, SUPER_ADMIN_KEY
-                                 # (see .env.example — the datastore passwords also go in DATABASE_URL/REDIS_URL)
+cp .env.example .env             # fill POSTGRES_PASSWORD, REDIS_PASSWORD,
+                                 #      JWT_SECRET, SUPER_ADMIN_KEY, ENCRYPTION_KEY
+                                 # then paste the datastore passwords into
+                                 # DATABASE_URL/REDIS_URL — compose does not do it for you
 docker compose --profile full up # Postgres + Redis + API (:3030) + panel (:3031)
 ```
 
@@ -24,18 +26,32 @@ Prefer to run from source (watch mode)? Start just the datastores in Docker:
 
 ```bash
 pnpm install
-cp .env.example .env
+cp .env.example .env             # same five values as above
 docker compose up -d postgres redis
 pnpm db:migrate:deploy
 pnpm dev
 ```
 
+Both paths read that one root `.env`. `pnpm dev` generates the Prisma client
+and builds the workspace packages the apps import before starting anything, so
+a fresh clone needs no separate build step.
+
 API at `http://localhost:3030`, interactive docs at `/docs`, operator panel at
 `http://localhost:3031`.
 
+Then bootstrap the first Tenant, Application and API key in one command:
+
+```bash
+export REKEY_URL=http://localhost:3030
+export SUPER_ADMIN_KEY=$(grep ^SUPER_ADMIN_KEY .env | cut -d= -f2)
+
+npx @rekey.dev/cli init --tenant-name "Acme Co" --owner-email ops@acme.example \
+                        --app-name "Acme Prod" --app-slug acme-prod
+```
+
 See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough (boot →
-create a Tenant → create an Application → mint an API key → call from your app),
-and [DEPLOY.md](DEPLOY.md) to run it in production (Traefik + TLS).
+bootstrap → call from your app → sign up an end-user), and
+[DEPLOY.md](DEPLOY.md) to run it in production (Traefik + TLS).
 
 ## Structure
 
@@ -48,10 +64,12 @@ Apps (each runs on a fixed dev port):
 | `apps/admin` | `@rekey.dev/admin` | — | Read-only super-admin dashboard (admin.rekey.dev) |
 | `apps/portal` | `@rekey.dev/portal` | 3050 | Hosted customer portal V2 (portal.rekey.dev) |
 
-Examples (integration references — not deployed; each ships a `.env.example`):
-
-| Path | Package | Port | What |
-|---|---|---|---|
+`examples/` is currently empty: the previous demo apps were removed in #261
+because they had drifted from the API they demonstrated, and a rebuilt set has
+not landed yet. Until it does, the worked integrations are
+[docs/quickstart.md](docs/quickstart.md) and
+[docs/react-components.md](docs/react-components.md), both of which are checked
+against a running stack.
 
 Packages:
 
@@ -61,7 +79,22 @@ Packages:
 - `packages/cli` — the `rekey` CLI
 - `packages/mcp` — MCP server
 - `prisma/schema.prisma` — owned by `apps/api`
-- `docs/` — concept primers, API key model, **end-user auth**, **billing**, **coupons**, error model, quickstart
+
+Docs (`docs/`):
+
+| Doc | What |
+|---|---|
+| [quickstart.md](docs/quickstart.md) | Fresh clone → running API → first Application → first end-user |
+| [concepts.md](docs/concepts.md) | Tenant / Application / EndUser data model |
+| [api-keys.md](docs/api-keys.md) | The three credential types, and environments |
+| [api-key-rotation.md](docs/api-key-rotation.md) | Leaked-key drill + rotation cadence |
+| [auth.md](docs/auth.md) | End-user auth: tokens, MFA, passkeys, OAuth |
+| [react-components.md](docs/react-components.md) | The drop-in React component library |
+| [billing.md](docs/billing.md) · [billing-providers.md](docs/billing-providers.md) · [coupons.md](docs/coupons.md) | Plans, checkout, providers, discounts |
+| [webhooks.md](docs/webhooks.md) | Outbound events, signature verification, retries |
+| [portal.md](docs/portal.md) | Hosted customer self-service billing portal |
+| [errors.md](docs/errors.md) | Error envelope + the complete code reference |
+| [jwks.md](docs/jwks.md) · [oidc-provider.md](docs/oidc-provider.md) · [tenant-auth.md](docs/tenant-auth.md) · [mcp.md](docs/mcp.md) · [data-erasure.md](docs/data-erasure.md) | Everything else |
 
 ## Billing providers
 
@@ -70,8 +103,11 @@ interface with geographic routing (Razorpay for India, Stripe elsewhere, by
 default — configurable per Application). Need a different processor? Providers
 are self-describing modules — one directory describes checkout, webhook
 verification, and event mapping, and the registry wires up the rest. See
-[docs/billing-providers.md](docs/billing-providers.md) for the how-to and
-[#184](https://github.com/EtherLabZ/Rekey/issues/184) for rollout status.
+[docs/billing-providers.md](docs/billing-providers.md) for the how-to.
+
+Billing is **off** on a new Application (`billingConfig.enabled` defaults to
+`false`) — every billing endpoint answers `403 BILLING_DISABLED` until an
+operator turns it on in Panel → Application → Billing.
 
 
 ## Known dev-only behaviours

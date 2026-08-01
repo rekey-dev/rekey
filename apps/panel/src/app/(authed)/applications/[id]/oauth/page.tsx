@@ -144,6 +144,7 @@ export default async function OAuthPage({
   return (
     <div className="space-y-6">
       <PageHeader
+        level={2}
         title="OAuth providers"
         description="Optional — let end-users sign in with their existing accounts. Each provider needs a client ID + secret from the provider's developer console plus a matching redirect URI. Secrets are AES-256-GCM encrypted at rest; never returned in any API response."
       />

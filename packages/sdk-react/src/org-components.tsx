@@ -1,3 +1,5 @@
+'use client';
+
 /**
  * Organization widgets — `<OrganizationSwitcher>` / `<CreateOrganization>` /
  * `<OrganizationProfile>`, Clerk-shaped.

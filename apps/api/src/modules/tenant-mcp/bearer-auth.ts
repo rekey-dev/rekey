@@ -60,8 +60,23 @@ function unauthorized(): RekeyError {
  */
 export async function resolveOperatorMcpBearer(
   request: FastifyRequest,
-  _reply: FastifyReply,
+  reply: FastifyReply,
 ): Promise<void> {
+  // Set the discovery hint BEFORE any throw. Every 401 out of this hook is a
+  // client that has not yet found the authorization server, and RFC 9728 (which
+  // the MCP spec makes a MUST) says the 401 itself is what points them at it.
+  //
+  // This used to be set only on the success reply in tenant-mcp.routes.ts, on
+  // the reasoning that "an unauthed call already 401s before this handler" —
+  // which is exactly true and exactly backwards: the one response that needed
+  // the header was the only one that never got it. A spec-compliant client
+  // could not discover the operator MCP at all, and Claude specifically will
+  // not honour the header on a 200.
+  reply.header(
+    'WWW-Authenticate',
+    `Bearer resource_metadata="${operatorMcpIssuer()}/.well-known/oauth-protected-resource"`,
+  );
+
   const header = request.headers.authorization ?? '';
   const presented = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
   if (!presented) throw unauthorized();

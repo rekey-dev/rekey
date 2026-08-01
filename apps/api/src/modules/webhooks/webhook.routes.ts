@@ -38,6 +38,17 @@ import { KNOWN_WEBHOOK_EVENTS } from './events.js';
 import { isWebhookUrlSafe } from '../../lib/webhook-signing.js';
 import { env } from '../../config/env.js';
 
+/**
+ * Ceiling on the stored `responseBody` this route returns per delivery.
+ *
+ * The delivery worker already stops reading at 4 KiB (MAX_RESPONSE_BODY_BYTES
+ * in webhook.service.ts), so this only matters for rows written before that cap
+ * existed. Re-applied here rather than trusted, because a page of 50 rows is
+ * what an operator loads to debug a failure and the size of it should not
+ * depend on a historical value.
+ */
+const MAX_RESPONSE_BODY_CHARS = 4096;
+
 const AppParam = z.object({ id: z.string().min(1) });
 const EndpointParam = z.object({
   id: z.string().min(1),
@@ -276,14 +287,44 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
         summary: 'List recent delivery attempts for an endpoint',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
+          'Each row carries the `payload` that was POSTed and the consumer\'s `responseBody` ' +
+          '(truncated) — the two things you actually need when an endpoint is failing. ' +
+          'Filter with `?status=FAILED` and page with `limit` / `offset`.',
+        querystring: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED'] },
+            eventType: { type: 'string', maxLength: 100 },
+            limit: { type: 'integer', minimum: 1, maximum: 100 },
+            offset: { type: 'integer', minimum: 0 },
+          },
+        },
       },
     },
     async (req) => {
       const { id, endpointId } = EndpointParam.parse(req.params);
       await ensureAppAccess(req, id, 'read');
       await ensureEndpointInApp(id, endpointId);
-      const rows = await webhookService.listDeliveries(id, endpointId);
+      // Not `.strict()`, unlike the billing-config PATCH body. An unknown key
+      // in a PATCH body is a typo'd instruction that would otherwise be
+      // silently dropped; an unknown key on a GET query string is a
+      // cache-buster or an analytics param, and 400-ing those breaks callers
+      // for no benefit. A bad VALUE for a known param is still refused.
+      const q = z
+        .object({
+          status: z.enum(['PENDING', 'SUCCEEDED', 'FAILED']).optional(),
+          eventType: z.string().min(1).max(100).optional(),
+          limit: z.coerce.number().int().min(1).max(100).optional(),
+          offset: z.coerce.number().int().min(0).optional(),
+        })
+        .parse(req.query ?? {});
+      const rows = await webhookService.listDeliveries(id, endpointId, {
+        ...(q.status !== undefined && { status: q.status }),
+        ...(q.eventType !== undefined && { eventType: q.eventType }),
+        ...(q.limit !== undefined && { limit: q.limit }),
+        ...(q.offset !== undefined && { offset: q.offset }),
+      });
       return {
         success: true,
         data: rows.map((r) => ({
@@ -296,6 +337,19 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
           error: r.error,
           createdAt: r.createdAt.toISOString(),
           nextAttemptAt: r.nextAttemptAt?.toISOString() ?? null,
+          // The two fields this route read out of the database and then threw
+          // away, while its own docblock said it returned them. An operator
+          // looking at "12/12 failing" needs to see what was sent and what came
+          // back; without these the page can only say that it failed.
+          //
+          // Neither is a new disclosure: `payload` is the event this operator's
+          // own Application emitted, and `responseBody` is their own consumer's
+          // reply. Both are already capped at write time (4 KiB for the
+          // response body, see webhook.service.ts) and re-capped here so a row
+          // written before that cap existed cannot bloat this page.
+          payload: r.payload,
+          responseBody:
+            r.responseBody === null ? null : r.responseBody.slice(0, MAX_RESPONSE_BODY_CHARS),
         })),
       };
     },

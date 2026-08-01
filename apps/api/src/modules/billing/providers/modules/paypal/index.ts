@@ -130,22 +130,33 @@ async function verify(
   // ONLINE verification: transmission headers + parsed event + our webhook
   // id posted to PayPal's verify-webhook-signature API (sandbox vs live
   // base URL from the credential row's mode). Fail-closed on any network
-  // error / non-SUCCESS.
-  const ok = await verifyPaypalWebhook({
+  // error / non-SUCCESS — but the two are reported differently.
+  const outcome = await verifyPaypalWebhook({
     creds: creds as unknown as PaypalCredentials,
     mode: ctx.mode,
     headers: req.headers,
     event: req.payload,
   });
-  if (!ok) {
+  if (outcome.ok) return { ok: true };
+  if (outcome.reason === 'unreachable') {
+    // PayPal did not answer within the request-path budget. Nothing is
+    // processed (still fail-closed), but 503 is the honest status: telling
+    // PayPal its signature was invalid, when the fault is that we could not
+    // reach PayPal to ask, is how an endpoint gets disabled for an outage.
     return {
       ok: false,
-      code: 'WEBHOOK_SIGNATURE_INVALID',
-      message: 'PayPal webhook signature verification failed.',
-      fix: 'Check the webhook id matches what PayPal shows for this endpoint, and that the transmission headers are intact.',
+      statusCode: 503,
+      code: 'WEBHOOK_VERIFICATION_UNAVAILABLE',
+      message: 'PayPal did not answer the signature-verification call in time.',
+      fix: 'Transient — PayPal will retry the webhook. If it persists, check PayPal status and this deployment\'s egress to api-m.paypal.com.',
     };
   }
-  return { ok: true };
+  return {
+    ok: false,
+    code: 'WEBHOOK_SIGNATURE_INVALID',
+    message: 'PayPal webhook signature verification failed.',
+    fix: 'Check the webhook id matches what PayPal shows for this endpoint, and that the transmission headers are intact.',
+  };
 }
 
 /**

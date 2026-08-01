@@ -38,6 +38,123 @@ const ALL_EVENTS = [
   'payment.failed',
 ];
 
+/**
+ * Per-endpoint delivery health over the last 24 hours.
+ *
+ * An endpoint with 12 of 12 deliveries failing rendered "● Enabled" in green,
+ * pixel-identical to a working one — "enabled" is a config flag, and the list
+ * was showing configuration where the operator needed behaviour. Finding the
+ * dead one meant opening Details on every endpoint in turn.
+ *
+ * There is no tenant-side aggregate to read. `/admin/metrics/webhook-endpoint-
+ * health` computes exactly this, but it is `requireSuperAdmin` and
+ * deployment-wide, so an operator cannot call it. The only tenant source is
+ * `GET .../webhooks/:endpointId/deliveries`, which takes no query parameters at
+ * all: no status filter, no time window, no limit (the route pins the service's
+ * page size to 50). So the panel fans out one request per endpoint — bounded by
+ * the endpoint count, not by volume — and counts the rows inside the window.
+ *
+ * The 50-row cap is a real limit and the UI does not hide it: when the page is
+ * saturated AND its oldest row is still inside 24h, the counts are a floor and
+ * the cell says so.
+ */
+interface DeliveryRow {
+  id: string;
+  eventId: string;
+  eventType: string;
+  status: 'PENDING' | 'SUCCEEDED' | 'FAILED';
+  attempts: number;
+  responseStatus: number | null;
+  error: string | null;
+  createdAt: string;
+  nextAttemptAt: string | null;
+}
+
+interface EndpointHealth {
+  succeeded: number;
+  failed: number;
+  pending: number;
+  total: number;
+  /** True when the 50-row page couldn't cover the whole 24h window. */
+  truncated: boolean;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** The route hardwires the service's page size; mirrored so `truncated` is right. */
+const DELIVERY_PAGE_SIZE = 50;
+
+async function endpointHealth(
+  applicationId: string,
+  endpointId: string,
+): Promise<EndpointHealth | null> {
+  const rows = await api<DeliveryRow[]>({
+    method: 'GET',
+    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/webhooks/${encodeURIComponent(endpointId)}/deliveries`,
+  }).catch(() => null);
+  if (rows === null) return null;
+
+  const cutoff = Date.now() - DAY_MS;
+  const recent = rows.filter((r) => new Date(r.createdAt).getTime() >= cutoff);
+  const oldest = rows[rows.length - 1];
+  const truncated =
+    rows.length >= DELIVERY_PAGE_SIZE &&
+    oldest !== undefined &&
+    new Date(oldest.createdAt).getTime() >= cutoff;
+
+  return {
+    succeeded: recent.filter((r) => r.status === 'SUCCEEDED').length,
+    failed: recent.filter((r) => r.status === 'FAILED').length,
+    pending: recent.filter((r) => r.status === 'PENDING').length,
+    total: recent.length,
+    truncated,
+  };
+}
+
+/**
+ * Colour by how bad it is, not by whether anything failed at all: a single
+ * failure among fifty is noise, everything failing is an outage. Thresholds
+ * match how the super-admin dashboard reads its own success rate.
+ */
+function HealthCell({ health }: { health: EndpointHealth | null }): React.JSX.Element {
+  if (health === null) {
+    return <span className="text-xs text-[var(--color-muted-fg)]">—</span>;
+  }
+  if (health.total === 0) {
+    return <span className="text-xs text-[var(--color-muted-fg)]">No deliveries</span>;
+  }
+  const failRate = health.failed / health.total;
+  const tone = failRate === 0 ? 'success' : failRate >= 0.5 ? 'danger' : 'warning';
+  const suffix = health.truncated ? '+' : '';
+  return (
+    <span
+      className="inline-flex flex-col items-start gap-0.5"
+      title={
+        `Last 24h: ${health.succeeded} succeeded, ${health.failed} failed, ${health.pending} pending.` +
+        (health.truncated
+          ? ' Counted from the most recent 50 attempts, which do not reach back a full 24 hours — the real totals are higher.'
+          : '')
+      }
+    >
+      {health.failed === 0 ? (
+        <Badge tone="success">
+          {health.total}
+          {suffix} delivered
+        </Badge>
+      ) : (
+        <Badge tone={tone} dot>
+          {health.failed}/{health.total}
+          {suffix} failed
+        </Badge>
+      )}
+      {health.pending > 0 && (
+        <span className="text-[10px] text-[var(--color-muted-fg)]">
+          {health.pending} in flight
+        </span>
+      )}
+    </span>
+  );
+}
+
 const ERR: Record<string, string> = {
   missing: 'A URL and at least one event are required.',
   WEBHOOK_URL_UNSAFE:
@@ -124,6 +241,11 @@ export default async function WebhooksPage({
     method: 'GET',
     path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/webhooks`,
   });
+  // One request per endpoint, in parallel. The endpoint list is capped at 100
+  // API-side and is realistically a handful.
+  const healths = await Promise.all(endpoints.map((e) => endpointHealth(id, e.id)));
+  const healthById = new Map(endpoints.map((e, i) => [e.id, healths[i] ?? null]));
+  const failingCount = healths.filter((h) => h !== null && h.failed > 0).length;
 
   const createBound = createEndpoint.bind(null, id);
 
@@ -229,6 +351,15 @@ export default async function WebhooksPage({
         </Banner>
       )}
 
+      {failingCount > 0 && (
+        <Banner tone="warning">
+          {failingCount === 1
+            ? 'One endpoint has failed deliveries in the last 24 hours.'
+            : `${failingCount} endpoints have failed deliveries in the last 24 hours.`}{' '}
+          Open Details to see the payload and the response your server returned.
+        </Banner>
+      )}
+
       {endpoints.length === 0 ? (
         <EmptyState
           title="No webhook endpoints yet"
@@ -241,6 +372,7 @@ export default async function WebhooksPage({
               <TH>URL</TH>
               <TH>Events</TH>
               <TH>Status</TH>
+              <TH>Last 24h</TH>
               <TH align="right">
                 <span className="sr-only">Actions</span>
               </TH>
@@ -261,6 +393,9 @@ export default async function WebhooksPage({
                   <Badge tone={e.enabled ? 'success' : 'neutral'} dot>
                     {e.enabled ? 'Enabled' : 'Disabled'}
                   </Badge>
+                </TD>
+                <TD>
+                  <HealthCell health={healthById.get(e.id) ?? null} />
                 </TD>
                 <TD align="right">
                   <div className="flex items-center justify-end gap-3">

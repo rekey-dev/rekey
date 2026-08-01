@@ -64,7 +64,13 @@ export interface RawWebhookReq {
  */
 export type VerifyResult =
   | { ok: true }
-  | { ok: false; code: string; message: string; fix?: string };
+  /**
+   * `statusCode` defaults to 401 (the signature did not check out). A module
+   * whose verification is ONLINE sets 503 when the failure was its inability
+   * to REACH the provider — a different fact, and one the provider must be
+   * told correctly or it will disable the endpoint for our outage.
+   */
+  | { ok: false; statusCode?: number; code: string; message: string; fix?: string };
 
 /**
  * Application scoping reference. Normalizes the divergence: Stripe resolves

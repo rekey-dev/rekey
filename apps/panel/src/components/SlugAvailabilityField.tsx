@@ -1,17 +1,29 @@
 'use client';
 
 /**
- * Slug input with live availability feedback.
+ * Slug input with live availability feedback, derived from the name field.
  *
- * Debounces typing (350ms), hits the panel's /api/check-slug proxy, and
- * renders a status hint underneath: ✓ available / × taken / ! invalid /
- * checking…
+ * ## What was wrong
  *
- * The submit button is disabled when the slug is empty or known-taken/
- * invalid. We find the submit through the input's `form.elements` (an
- * HTMLFormControlsCollection, the spec-blessed form-scoped lookup) rather
- * than `querySelector`. ARIA: input exposes `aria-invalid` + a stable
- * `aria-describedby` pointing at the status message.
+ * Typing "Northwind Store" left Slug empty. The submit button was then
+ * *disabled* — by this component reaching into `form.elements`, flipping
+ * `btn.disabled`, and adding `opacity-50` — with nothing on screen saying which
+ * field was blocking it. A dead button and no error message is the worst of
+ * both: no feedback, and no way to ask for feedback. Worse, `status === 'checking'`
+ * was in the same blocked set, so a click during the 350ms debounce plus the
+ * round trip hit a disabled button and did nothing at all, with no indication
+ * the click had even been received.
+ *
+ * ## What it does now
+ *
+ * - **Prefills** a slugified name, and keeps tracking the name until the
+ *   operator edits the slug themselves. Clearing the slug restores the link, so
+ *   an accidental edit isn't a one-way door.
+ * - **Never disables the submit.** Submission is intercepted instead: if the
+ *   slug is empty or known-bad the submit is cancelled, the field is focused,
+ *   and a message names it. That is something an operator can act on.
+ * - **A click during "Checking availability…" is held**, not dropped. It fires
+ *   by itself the moment the check comes back clean, and the wait is stated.
  */
 
 import * as React from 'react';
@@ -22,32 +34,63 @@ const SLUG_PATTERN = '^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$';
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const DEBOUNCE_MS = 350;
 const STATUS_ID = 'slug-availability-status';
+const BLOCK_ID = 'slug-blocking-message';
+
+const TAKEN_MSG = (v: string): string =>
+  `“${v}” is already taken — slugs are globally unique. Pick another.`;
+const INVALID_MSG =
+  'The slug must be lowercase letters, digits and hyphens, 2–40 characters, starting and ending alphanumeric.';
+
+/**
+ * Name → slug. Lowercase, strip diacritics, runs of non-alphanumerics become a
+ * single hyphen, trim to the API's 40-character ceiling, and never leave a
+ * leading or trailing hyphen (the pattern requires alphanumeric edges).
+ */
+export function slugify(name: string): string {
+  return name
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+/, '')
+    .slice(0, 40)
+    .replace(/-+$/, '');
+}
 
 export function SlugAvailabilityField({
   name = 'slug',
   placeholder,
   inputClassName,
   submitName,
+  deriveFrom = 'name',
 }: {
   name?: string;
   placeholder?: string;
   inputClassName?: string;
   /**
-   * `name` attribute of the submit button to disable, if there's more
-   * than one form-control with `type="submit"`. Defaults to the first
-   * one in `form.elements` matching `type="submit"`.
+   * `name` attribute of the submit button, if there's more than one
+   * form-control with `type="submit"`. Defaults to the first one in
+   * `form.elements` matching `type="submit"`.
    */
   submitName?: string;
+  /** `name` attribute of the text input to derive the slug from. */
+  deriveFrom?: string;
 }): React.JSX.Element {
   const [value, setValue] = React.useState('');
   const [status, setStatus] = React.useState<Status>('idle');
+  /** True once the operator edits the slug directly — stops mirroring the name. */
+  const [touched, setTouched] = React.useState(false);
+  /** Non-null when a submit was attempted and blocked; names the reason. */
+  const [blockedReason, setBlockedReason] = React.useState<string | null>(null);
+  /** A submit is waiting for the in-flight availability check to land. */
+  const [submitPending, setSubmitPending] = React.useState(false);
+
   const inputRef = React.useRef<HTMLInputElement>(null);
   const seqRef = React.useRef(0);
+  const submitPendingRef = React.useRef(false);
+  submitPendingRef.current = submitPending;
 
-  // Form-scoped submit lookup via the spec-blessed HTMLFormControlsCollection.
-  // Falls back to a single querySelector if `name` isn't provided. Works
-  // across re-renders because we re-resolve every effect run.
-  function findSubmit(): HTMLButtonElement | null {
+  const findSubmit = React.useCallback((): HTMLButtonElement | null => {
     const form = inputRef.current?.form;
     if (!form) return null;
     if (submitName) {
@@ -58,19 +101,28 @@ export function SlugAvailabilityField({
       if (el instanceof HTMLButtonElement && el.type === 'submit') return el;
     }
     return null;
-  }
+  }, [submitName]);
 
+  // ── Mirror the name field until the slug is touched ──
   React.useEffect(() => {
-    const btn = findSubmit();
-    if (!btn) return;
-    const blocked =
-      value.length === 0 || status === 'taken' || status === 'invalid' || status === 'checking';
-    btn.disabled = blocked;
-    btn.classList.toggle('opacity-50', blocked);
-    btn.classList.toggle('cursor-not-allowed', blocked);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, value]);
+    const form = inputRef.current?.form;
+    if (!form) return;
+    const source = form.elements.namedItem(deriveFrom);
+    if (!(source instanceof HTMLInputElement)) return;
 
+    const sync = (): void => {
+      if (touched) return;
+      setValue(slugify(source.value));
+      setBlockedReason(null);
+    };
+    source.addEventListener('input', sync);
+    // Catch a value restored by the browser (back/forward, autofill) that
+    // never fires `input`.
+    sync();
+    return () => source.removeEventListener('input', sync);
+  }, [deriveFrom, touched]);
+
+  // ── Availability check ──
   React.useEffect(() => {
     if (value.length === 0) {
       setStatus('idle');
@@ -98,6 +150,56 @@ export function SlugAvailabilityField({
     return () => window.clearTimeout(t);
   }, [value]);
 
+  // ── Release a submit that was held for the check ──
+  React.useEffect(() => {
+    if (!submitPending || status === 'checking') return;
+    setSubmitPending(false);
+    if (status === 'taken' || status === 'invalid') {
+      setBlockedReason(status === 'taken' ? TAKEN_MSG(value) : INVALID_MSG);
+      inputRef.current?.focus();
+      return;
+    }
+    // 'available', 'idle' or 'error' (server unreachable — the server-side
+    // action revalidates anyway, so don't strand the operator here).
+    findSubmit()?.click();
+  }, [submitPending, status, value, findSubmit]);
+
+  // ── Intercept submit instead of disabling the button ──
+  React.useEffect(() => {
+    const form = inputRef.current?.form;
+    if (!form) return;
+
+    const onSubmit = (e: SubmitEvent): void => {
+      // Our own programmatic re-submit — let it through.
+      if (submitPendingRef.current) return;
+      const current = inputRef.current?.value ?? '';
+
+      if (current.trim() === '') {
+        e.preventDefault();
+        setBlockedReason('A slug is required. It becomes part of your API keys and webhook URLs.');
+        inputRef.current?.focus();
+        return;
+      }
+      if (status === 'taken' || status === 'invalid') {
+        e.preventDefault();
+        setBlockedReason(status === 'taken' ? TAKEN_MSG(current) : INVALID_MSG);
+        inputRef.current?.focus();
+        return;
+      }
+      if (status === 'checking') {
+        // Don't drop the click — hold it and fire when the answer arrives.
+        e.preventDefault();
+        setBlockedReason(null);
+        setSubmitPending(true);
+        return;
+      }
+      setBlockedReason(null);
+    };
+
+    form.addEventListener('submit', onSubmit);
+    return () => form.removeEventListener('submit', onSubmit);
+  }, [status]);
+
   const invalid = status === 'taken' || status === 'invalid';
 
   return (
@@ -106,23 +208,46 @@ export function SlugAvailabilityField({
         ref={inputRef}
         type="text"
         name={name}
-        required
         autoComplete="off"
         spellCheck={false}
         pattern={SLUG_PATTERN}
         placeholder={placeholder}
         value={value}
-        onChange={(e) => setValue(e.currentTarget.value.trim().toLowerCase())}
+        onChange={(e) => {
+          const next = e.currentTarget.value.trim().toLowerCase();
+          setValue(next);
+          setBlockedReason(null);
+          // Clearing the field re-links it to the name.
+          setTouched(next !== '');
+        }}
         className={inputClassName}
         aria-invalid={invalid || undefined}
-        aria-describedby={STATUS_ID}
+        aria-describedby={blockedReason ? `${STATUS_ID} ${BLOCK_ID}` : STATUS_ID}
       />
-      <SlugStatus status={status} value={value} />
+      <SlugStatus status={status} value={value} derived={!touched && value !== ''} />
+      {blockedReason && (
+        <span id={BLOCK_ID} role="alert" className="block text-xs text-red-600 dark:text-red-400">
+          {blockedReason}
+        </span>
+      )}
+      {submitPending && (
+        <span role="status" aria-live="polite" className="block text-xs text-[var(--color-muted-fg)]">
+          Checking the slug, then creating…
+        </span>
+      )}
     </>
   );
 }
 
-function SlugStatus({ status, value }: { status: Status; value: string }): React.JSX.Element {
+function SlugStatus({
+  status,
+  value,
+  derived,
+}: {
+  status: Status;
+  value: string;
+  derived: boolean;
+}): React.JSX.Element {
   const common = 'block text-xs';
   if (value.length === 0) {
     return (
@@ -142,6 +267,9 @@ function SlugStatus({ status, value }: { status: Status; value: string }): React
       return (
         <span id={STATUS_ID} role="status" aria-live="polite" className={`${common} text-green-600 dark:text-green-400`}>
           ✓ <code className="font-mono">{value}</code> is available
+          {derived && (
+            <span className="text-[var(--color-muted-fg)]"> — from the name; edit to change</span>
+          )}
         </span>
       );
     case 'taken':

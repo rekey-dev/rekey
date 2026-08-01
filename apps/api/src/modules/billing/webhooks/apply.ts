@@ -17,11 +17,23 @@
  *     provider had already collected. A redemption is bookkeeping; a payment
  *     is money. Redemption runs post-commit, is idempotent per (coupon,
  *     checkout session), and reports failure instead of raising it.
- *   - P2002 on the unique provider_payment_id = webhook replay → the whole
- *     transaction rolls back and the applier skips silently.
- *   - Outbound emission (emitPaymentEvent/emitSubscriptionEvent) and dunning
- *     calls run strictly POST-commit, gated on a NEWLY recorded payment /
- *     an actual status transition — replays announce nothing.
+ *   - P2002 on the unique (application_id, provider_payment_id) = webhook
+ *     replay → the whole transaction rolls back and the applier skips
+ *     silently.
+ *   - Outbound OUTBOX ROWS are written inside the same $transaction as the
+ *     state change they announce (`enqueuePaymentEvent` /
+ *     `enqueueSubscriptionEvent` take the tx client), gated on a NEWLY
+ *     recorded payment / an actual status transition — replays announce
+ *     nothing. Only the first delivery ATTEMPT is post-commit
+ *     (`kickDeliveries`), and skipping even that only costs latency: the row
+ *     is PENDING with nextAttemptAt=now, so the poller re-attempts it.
+ *
+ *     This used to be a detached `void (async () => …)()` that re-read the DB
+ *     after the commit. A pod rotation or a pool timeout in that gap lost
+ *     `payment.succeeded` permanently, because there was no row for the poller
+ *     to find. The word "outbox" was already in these comments; it is now true.
+ *   - Dunning calls still run strictly POST-commit — they are their own state
+ *     machine with their own transactions, not part of this one.
  *   - Entitlements provisioning semantics unchanged (idempotent per period;
  *     first period pinned to the 'initial' anchor).
  */
@@ -38,7 +50,8 @@ import {
   newestCheckoutSessionId,
 } from '../checkout-sessions.js';
 import { advanceBillingPeriod } from './period.js';
-import { emitPaymentEvent, emitSubscriptionEvent } from './billing-events.js';
+import { enqueuePaymentEvent, enqueueSubscriptionEvent } from './billing-events.js';
+import { kickDeliveries } from '../../webhooks/webhook.service.js';
 import type {
   CheckoutApprovedEvent,
   CheckoutCompletedEvent,
@@ -182,15 +195,29 @@ export async function applyCheckoutCompleted(
     select: { id: true, status: true },
   });
 
-  const updated = await prisma.subscription.updateMany({
-    where,
-    data: {
-      status: 'ACTIVE',
-      ...(ev.providerSubscriptionId !== null && { providerSubId: ev.providerSubscriptionId }),
-      // Activation payloads that carry the period anchor (Razorpay
-      // `current_end`) mirror it in the same write; undefined = untouched.
-      ...(ev.currentPeriodEnd !== undefined && { currentPeriodEnd: ev.currentPeriodEnd }),
-    },
+  // Status flip + its outbox rows in ONE transaction, so a
+  // `subscription.activated` announcement can never be lost by a crash between
+  // the two. The delivery ATTEMPT is kicked post-commit, at the point the emit
+  // used to sit.
+  const activatedFrom = before && before.status !== 'ACTIVE' ? before : null;
+  const { updated, deliveryIds } = await prisma.$transaction(async (tx) => {
+    const result = await tx.subscription.updateMany({
+      where,
+      data: {
+        status: 'ACTIVE',
+        ...(ev.providerSubscriptionId !== null && { providerSubId: ev.providerSubscriptionId }),
+        // Activation payloads that carry the period anchor (Razorpay
+        // `current_end`) mirror it in the same write; undefined = untouched.
+        ...(ev.currentPeriodEnd !== undefined && { currentPeriodEnd: ev.currentPeriodEnd }),
+      },
+    });
+    // Only on the PENDING→ACTIVE transition (not on replays that found the row
+    // already ACTIVE).
+    const ids =
+      result.count > 0 && activatedFrom
+        ? await enqueueSubscriptionEvent(tx, 'subscription.activated', activatedFrom.id)
+        : [];
+    return { updated: result, deliveryIds: ids };
   });
 
   // Materialize the plan's entitlements (licenses, credits, …) onto the buyer.
@@ -228,14 +255,16 @@ export async function applyCheckoutCompleted(
         ctx,
       );
     }
-    // Outbound event — only on the PENDING→ACTIVE transition (not on replays
-    // that found the row already ACTIVE). Fire-and-forget like the auth emits.
-    if (before && before.status !== 'ACTIVE') {
-      emitSubscriptionEvent('subscription.activated', before.id);
+    // Delivery kickoff for the rows committed above. Deliberately here rather
+    // than right after the commit, so a consumer still sees the same ordering
+    // it always did: entitlements are provisioned before the activation is
+    // announced.
+    kickDeliveries(deliveryIds);
+    if (activatedFrom) {
       // Reactivation of a suspended (PAST_DUE) sub recovers its dunning case
       // (PayPal BILLING.SUBSCRIPTION.ACTIVATED port). No-op when no case is
       // open — a fresh PENDING→ACTIVE checkout (Stripe) has none.
-      await dunningService.recoverForSubscription(before.id);
+      await dunningService.recoverForSubscription(activatedFrom.id);
     }
   }
 
@@ -267,20 +296,24 @@ async function recordCompletionPayment(
   if (amount === null) return undefined; // Refused (see safeAmount).
 
   try {
-    const payment = await prisma.payment.create({
-      data: {
-        applicationId: ev.applicationId,
-        endUserId: sub.endUserId,
-        subscriptionId: sub.id,
-        amount,
-        currency: (charge.currency ?? 'usd').toUpperCase(),
-        status: 'SUCCEEDED',
-        providerPaymentId: charge.providerPaymentId,
-        description: charge.description,
-      },
-      select: { id: true },
+    const { payment, deliveryIds } = await prisma.$transaction(async (tx) => {
+      const row = await tx.payment.create({
+        data: {
+          applicationId: ev.applicationId,
+          endUserId: sub.endUserId,
+          subscriptionId: sub.id,
+          amount,
+          currency: (charge.currency ?? 'usd').toUpperCase(),
+          status: 'SUCCEEDED',
+          providerPaymentId: charge.providerPaymentId,
+          description: charge.description,
+        },
+        select: { id: true },
+      });
+      // Outbox row commits with the payment — see the module docblock.
+      return { payment: row, deliveryIds: await enqueuePaymentEvent(tx, 'payment.succeeded', row.id) };
     });
-    emitPaymentEvent('payment.succeeded', payment.id);
+    kickDeliveries(deliveryIds);
     return payment.id;
   } catch (e) {
     if ((e as { code?: string }).code !== 'P2002') throw e;
@@ -288,8 +321,17 @@ async function recordCompletionPayment(
       { providerPaymentId: charge.providerPaymentId },
       'checkout completed: payment already recorded',
     );
+    // Scoped by application: the unique key is (application_id,
+    // provider_payment_id), and looking the charge id up globally would return
+    // ANOTHER tenant's payment row when two Applications share a provider
+    // account — which is exactly the collision that key now prevents.
     const existing = await prisma.payment.findUnique({
-      where: { providerPaymentId: charge.providerPaymentId },
+      where: {
+        applicationId_providerPaymentId: {
+          applicationId: ev.applicationId,
+          providerPaymentId: charge.providerPaymentId,
+        },
+      },
       select: { id: true },
     });
     return existing?.id;
@@ -334,9 +376,16 @@ export async function applyCheckoutApproved(
     }
   }
 
-  await prisma.subscription.updateMany({
-    where: { id: sub.id },
-    data: { status: 'ACTIVE', providerSubId: ev.checkoutSessionId },
+  // Status flip + its outbox row in one transaction. `sub` is the pre-update
+  // row, so the transition test reads the status the row had before this event.
+  const deliveryIds = await prisma.$transaction(async (tx) => {
+    await tx.subscription.updateMany({
+      where: { id: sub.id },
+      data: { status: 'ACTIVE', providerSubId: ev.checkoutSessionId },
+    });
+    return sub.status !== 'ACTIVE'
+      ? enqueueSubscriptionEvent(tx, 'subscription.activated', sub.id)
+      : [];
   });
   await entitlementsService.provision({ subscription: sub, log: ctx.log });
   // Fulfilment happened, so the coupon has been spent. This applier is the
@@ -345,10 +394,9 @@ export async function applyCheckoutApproved(
   // simply never recorded — a single-use code discounted every subsequent
   // purchase by the same buyer, forever.
   await redeemSessionCoupon({ subscription: sub, checkoutSessionId: ev.checkoutSessionId }, ctx);
-  // `sub` is the pre-update row — emit only on the actual flip to ACTIVE.
-  if (sub.status !== 'ACTIVE') {
-    emitSubscriptionEvent('subscription.activated', sub.id);
-  }
+  // Delivery kickoff, at the point the emit used to sit — after provisioning,
+  // so a consumer sees the same ordering it always did.
+  kickDeliveries(deliveryIds);
   ctx.log.info(
     { orderId: ev.checkoutSessionId, kind: sub.plan.kind },
     'one-time order captured + fulfilled',
@@ -413,7 +461,8 @@ export async function applyPaymentSucceeded(
     return;
   }
 
-  // Idempotent: provider_payment_id is unique; skip on conflict.
+  // Idempotent: (application_id, provider_payment_id) is unique; skip on
+  // conflict.
   //
   // The coupon redemption is deliberately NOT in this transaction any more.
   // It used to be, on the reasoning that a payment must never commit without
@@ -425,8 +474,9 @@ export async function applyPaymentSucceeded(
   // recovery, and the provider retried the poisoned event until it gave up.
   // Redemption now runs post-commit and reports rather than throws.
   let createdPayment: { id: string } | null = null;
+  let deliveryIds: string[] = [];
   try {
-    createdPayment = await prisma.$transaction(async (tx) => {
+    const committed = await prisma.$transaction(async (tx) => {
       const payment = await tx.payment.create({
         data: {
           applicationId: ev.applicationId,
@@ -453,13 +503,23 @@ export async function applyPaymentSucceeded(
           await tx.subscription.update({ where: { id: localSub.id }, data: subData });
         }
       }
-      return payment;
+      // Outbox rows, same transaction as the money — only when a NEW payment
+      // row was committed, which by construction is every path that reaches
+      // here (a replay throws P2002 above and rolls the whole thing back).
+      const ids = await enqueuePaymentEvent(tx, 'payment.succeeded', payment.id);
+      if (localSub && localSub.status !== 'ACTIVE') {
+        // Recovery/activation via payment — a real status transition.
+        ids.push(...(await enqueueSubscriptionEvent(tx, 'subscription.activated', localSub.id)));
+      }
+      return { payment, deliveryIds: ids };
     });
+    createdPayment = committed.payment;
+    deliveryIds = committed.deliveryIds;
   } catch (e) {
-    // P2002 = this provider payment id already has a Payment row (webhook
-    // replay) — the original transaction committed payment + status
-    // together, so skipping here is safe. Anything else rolls all back and
-    // rethrows.
+    // P2002 = this provider payment id already has a Payment row for this
+    // application (webhook replay) — the original transaction committed
+    // payment + status + outbox rows together, so skipping here is safe.
+    // Anything else rolls all back and rethrows.
     if ((e as { code?: string }).code === 'P2002') {
       ctx.log.info(
         { providerPaymentId: ev.providerPaymentId },
@@ -470,15 +530,9 @@ export async function applyPaymentSucceeded(
     }
   }
 
-  // Outbound events — only when a NEW payment row was committed. A replayed
-  // payment (P2002 above → createdPayment stays null) emits nothing.
-  if (createdPayment) {
-    emitPaymentEvent('payment.succeeded', createdPayment.id);
-    if (localSub && localSub.status !== 'ACTIVE') {
-      // Recovery/activation via payment — a real status transition.
-      emitSubscriptionEvent('subscription.activated', localSub.id);
-    }
-  }
+  // First delivery attempt for the rows committed above. A replayed payment
+  // (P2002 → deliveryIds stays empty) announces nothing.
+  kickDeliveries(deliveryIds);
 
   // Coupon redemption — post-commit, and keyed on the session that bought the
   // discount, so a RENEWAL of a discounted subscription redeems nothing: the
@@ -553,13 +607,16 @@ export async function applyPaymentFailed(ev: PaymentFailedEvent, ctx: ApplyConte
   });
   if (failedAmount === null) return;
 
-  // Record the FAILED payment and flip the subscription to PAST_DUE atomically:
-  // a committed payment must never be left behind without its matching status
-  // change (or vice versa). Idempotent — provider_payment_id is unique, so a
-  // webhook replay hits P2002 and the whole transaction rolls back cleanly.
+  // Record the FAILED payment, flip the subscription to PAST_DUE, and write
+  // the outbox rows atomically: a committed payment must never be left behind
+  // without its matching status change, and neither must be left without the
+  // event that announces it. Idempotent — (application_id,
+  // provider_payment_id) is unique, so a webhook replay hits P2002 and the
+  // whole transaction rolls back cleanly.
   let createdPayment: { id: string } | null = null;
+  let deliveryIds: string[] = [];
   try {
-    createdPayment = await prisma.$transaction(async (tx) => {
+    const committed = await prisma.$transaction(async (tx) => {
       const payment = await tx.payment.create({
         data: {
           applicationId: ev.applicationId,
@@ -579,8 +636,14 @@ export async function applyPaymentFailed(ev: PaymentFailedEvent, ctx: ApplyConte
           data: { status: 'PAST_DUE' },
         });
       }
-      return payment;
+      const ids = await enqueuePaymentEvent(tx, 'payment.failed', payment.id);
+      if (localSub && localSub.status !== 'PAST_DUE') {
+        ids.push(...(await enqueueSubscriptionEvent(tx, 'subscription.past_due', localSub.id)));
+      }
+      return { payment, deliveryIds: ids };
     });
+    createdPayment = committed.payment;
+    deliveryIds = committed.deliveryIds;
   } catch (e) {
     // P2002 = this provider payment id already recorded a FAILED payment
     // (replay) — the original transaction committed payment + status
@@ -594,17 +657,13 @@ export async function applyPaymentFailed(ev: PaymentFailedEvent, ctx: ApplyConte
   }
 
   // Side effects fire only after the transaction commits, and only when a NEW
-  // failed payment was recorded (replays emit nothing / don't re-bump dunning).
-  if (createdPayment) {
-    emitPaymentEvent('payment.failed', createdPayment.id);
-    if (localSub) {
-      if (localSub.status !== 'PAST_DUE') {
-        emitSubscriptionEvent('subscription.past_due', localSub.id);
-      }
-      // Open (or bump) the dunning case. The provider keeps retrying the card
-      // itself — the case tracks state + notifies; it never re-charges.
-      await dunningService.recordPaymentFailure({ subscriptionId: localSub.id, log: ctx.log });
-    }
+  // failed payment was recorded (replays deliver nothing / don't re-bump
+  // dunning).
+  kickDeliveries(deliveryIds);
+  if (createdPayment && localSub) {
+    // Open (or bump) the dunning case. The provider keeps retrying the card
+    // itself — the case tracks state + notifies; it never re-charges.
+    await dunningService.recordPaymentFailure({ subscriptionId: localSub.id, log: ctx.log });
   }
 }
 
@@ -672,20 +731,30 @@ async function applySubscriptionStatusMirror(
     where,
     select: { id: true, status: true },
   });
-  await prisma.subscription.updateMany({
-    where,
-    data: {
-      status: ev.status,
-      ...(ev.currentPeriodEnd !== undefined && { currentPeriodEnd: ev.currentPeriodEnd }),
-      ...(ev.cancelAt !== undefined && { cancelAt: ev.cancelAt }),
-      ...(ev.canceledAt !== undefined && { canceledAt: ev.canceledAt }),
-    },
+  const transitioned = Boolean(existing && existing.status !== ev.status);
+  // Mirror + outbox row in ONE transaction: the announcement is written with
+  // the transition it announces, so a crash between the two cannot leave a
+  // CANCELED subscription that nobody was ever told about.
+  const deliveryIds = await prisma.$transaction(async (tx) => {
+    await tx.subscription.updateMany({
+      where,
+      data: {
+        status: ev.status,
+        ...(ev.currentPeriodEnd !== undefined && { currentPeriodEnd: ev.currentPeriodEnd }),
+        ...(ev.cancelAt !== undefined && { cancelAt: ev.cancelAt }),
+        ...(ev.canceledAt !== undefined && { canceledAt: ev.canceledAt }),
+      },
+    });
+    if (!transitioned || !existing) return [];
+    // No outbound event for EXPIRED — a natural end, not a cancellation
+    // (consumers read the terminal state off the record).
+    if (ev.status === 'ACTIVE') return enqueueSubscriptionEvent(tx, 'subscription.activated', existing.id);
+    if (ev.status === 'CANCELED') return enqueueSubscriptionEvent(tx, 'subscription.canceled', existing.id);
+    if (ev.status === 'PAST_DUE') return enqueueSubscriptionEvent(tx, 'subscription.past_due', existing.id);
+    return [];
   });
-  if (existing && existing.status !== ev.status) {
-    if (ev.status === 'ACTIVE') emitSubscriptionEvent('subscription.activated', existing.id);
-    else if (ev.status === 'CANCELED') emitSubscriptionEvent('subscription.canceled', existing.id);
-    else if (ev.status === 'PAST_DUE') emitSubscriptionEvent('subscription.past_due', existing.id);
-
+  kickDeliveries(deliveryIds);
+  if (existing && transitioned) {
     // Dunning case lifecycle mirrors the status transition. A status echo of
     // a failure payment.failed already counted opens no second case
     // (ensureCaseOpen is idempotent per OPEN case) and bumps no counter.
@@ -696,8 +765,7 @@ async function applySubscriptionStatusMirror(
     } else if (ev.status === 'CANCELED' || ev.status === 'EXPIRED') {
       // EXPIRED is terminal too (Razorpay `subscription.completed` — the sub
       // ran its full finite cycle count): close any open case so it doesn't
-      // linger. No outbound event for EXPIRED — a natural end, not a
-      // cancellation (consumers read the terminal state off the record).
+      // linger.
       await dunningService.closeForCanceledSubscription(existing.id);
     }
   }
@@ -740,8 +808,16 @@ export async function applySubscriptionPeriodAdvanced(
     //   - no prior SUCCEEDED payment → this is the FIRST sale, which pays
     //     for the period the activation already provisioned — advancing
     //     would double-grant.
+    // Scoped by application — see recordCompletionPayment. A global lookup
+    // would see ANOTHER tenant's payment for the same charge id and skip the
+    // period advance for a renewal this tenant genuinely just had.
     const alreadyRecorded = await prisma.payment.findUnique({
-      where: { providerPaymentId: ev.providerPaymentId },
+      where: {
+        applicationId_providerPaymentId: {
+          applicationId: ev.applicationId,
+          providerPaymentId: ev.providerPaymentId,
+        },
+      },
       select: { id: true },
     });
     if (alreadyRecorded) return;

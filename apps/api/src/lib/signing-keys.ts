@@ -103,11 +103,22 @@ let cache: KeyCache | null = null;
 let envKey: ActiveSigningKey | null | undefined; // undefined = not resolved yet
 const TTL_MS = 60_000;
 
-/** Test hook — drop the in-memory snapshot so the next call re-reads the DB. */
-export function _clearSigningKeyCacheForTests(): void {
+/**
+ * Drop the in-memory snapshot so the next call re-reads the DB.
+ *
+ * Test-only. The 60s TTL outlives a whole test file, so a key cached against a
+ * `signing_keys` row that a later TRUNCATE removed keeps being served — the
+ * JWKS a test then asserts on describes a key that no longer exists. Called
+ * from test/setup.ts's beforeEach; individual tests may still call it directly
+ * around a rotation.
+ */
+export function __resetForTests(): void {
   cache = null;
   envKey = undefined;
 }
+
+/** @deprecated Use `__resetForTests` — kept so existing call sites compile. */
+export const _clearSigningKeyCacheForTests = __resetForTests;
 
 function resolveEnvKey(): ActiveSigningKey | null {
   if (envKey !== undefined) return envKey;

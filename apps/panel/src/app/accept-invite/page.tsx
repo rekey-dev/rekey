@@ -105,7 +105,7 @@ export default async function AcceptInvitePage({
         </p>
         <Link
           href="/login"
-          className="block w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-center text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] transition-colors"
+          className="block w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-center text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] transition-colors"
         >
           Go to sign in
         </Link>
@@ -138,7 +138,7 @@ export default async function AcceptInvitePage({
                 offer sign-in, since the person may already have an account. */}
             <Link
               href="/login"
-              className="block w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-center text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] transition-colors"
+              className="block w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-center text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] transition-colors"
             >
               Go to sign in
             </Link>
@@ -165,7 +165,7 @@ export default async function AcceptInvitePage({
                 <input type="hidden" name="token" value={token} />
                 <SubmitButton
                   pendingLabel="Accepting…"
-                  className="w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-60 disabled:cursor-not-allowed"
+                  className="w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   Accept invitation
                 </SubmitButton>

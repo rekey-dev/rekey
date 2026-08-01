@@ -71,3 +71,51 @@ describe('assertSafeUrl', () => {
     await expect(assertSafeUrl('http://127.0.0.1:9000', { allowPrivate: true })).resolves.toBeUndefined();
   });
 });
+
+/**
+ * Transition and translation prefixes that EMBED an IPv4 address.
+ *
+ * Each of these was a full bypass of `isPrivateIp`, because the guard compared
+ * strings: `64:ff9b::7f00:1` does not *look* like loopback. `64:ff9b::/96` is
+ * the RFC 6052 well-known NAT64 prefix and is standard on IPv6-only clusters,
+ * so on such a deployment `64:ff9b::a9fe:a9fe` reached the cloud metadata
+ * service through a guard that believed it was public.
+ *
+ * The public NAT64 case is here deliberately: over-blocking the whole prefix
+ * would break legitimate IPv6-only deployments, so the check has to decode the
+ * embedded address rather than reject on the prefix.
+ */
+describe('IPv6 addresses that embed an IPv4 address', () => {
+  const blocked = [
+    ['64:ff9b::7f00:1', 'NAT64 loopback'],
+    ['64:ff9b::a9fe:a9fe', 'NAT64 cloud metadata'],
+    ['::7f00:1', 'IPv4-compatible loopback'],
+    ['2002:7f00:1::', '6to4 loopback — the v4 is in the FIRST groups, not the tail'],
+    ['fec0::1', 'deprecated site-local'],
+  ] as const;
+
+  for (const [ip, why] of blocked) {
+    it(`blocks ${ip} (${why})`, () => {
+      expect(isPrivateIp(ip)).toBe(true);
+    });
+  }
+
+  it('still allows a public IPv4 reached through NAT64', () => {
+    // 93.184.216.34 → 5db8:d822. Blocking the prefix wholesale would break
+    // every IPv6-only deployment, so this is the case that keeps the fix honest.
+    expect(isPrivateIp('64:ff9b::5db8:d822')).toBe(false);
+  });
+
+  it('still allows ordinary public addresses', () => {
+    expect(isPrivateIp('93.184.216.34')).toBe(false);
+    expect(isPrivateIp('2606:2800:220:1:248:1893:25c8:1946')).toBe(false);
+  });
+});
+
+describe('reserved IPv4 ranges that are not RFC 1918', () => {
+  // Never a legitimate webhook or SMTP destination, and routable enough to be
+  // useful for probing. 192.0.0.0/24 holds the NAT64 discovery addresses.
+  for (const ip of ['192.0.0.1', '198.18.0.1', '192.0.2.1', '198.51.100.1', '203.0.113.1']) {
+    it(`blocks ${ip}`, () => expect(isPrivateIp(ip)).toBe(true));
+  }
+});

@@ -12,9 +12,11 @@ Runs on port **3050** (`pnpm --filter @rekey.dev/portal dev`); needs only `REKEY
 
 **Roadmap:** custom domain per app (DNS-verified, on-demand TLS), branding, invoice PDFs, payment-method update, MFA.
 
-## Self-hosting (single-app reference)
+## Self-hosting
 
-Operators who want to run their **own** portal (own infra/domain today, heavy UI forking) can use the single-app reference at [`examples/portal`](../examples/portal) — it authenticates with one Application **secret key** per deployment, the original V1 model.
+`apps/portal` is the thing you deploy. It is multi-app by construction and holds no per-app secret, so self-hosting it is the same app described here pointed at your own API — see [Environment](#environment) and [Run with Docker Compose](#run-with-docker-compose) below.
+
+There used to be a single-app V1 reference at `examples/portal` that took one Application **secret key** per deployment. The `examples/` apps were removed in #261 pending a rebuilt set, and that model is not the one to copy anyway: a per-deployment secret key is exactly what V2 exists to avoid.
 
 ## Environment
 
@@ -32,7 +34,7 @@ REKEY_URL=http://localhost:3030 pnpm dev
 # → http://localhost:3050/<slug>
 ```
 
-The single-app reference at `examples/portal` is the one that still takes `REKEY_SECRET_KEY` (or `REKEY_SECRET`) and an optional `PORTAL_APP_NAME` — see its own README.
+There is no `REKEY_SECRET_KEY` / `PORTAL_APP_NAME` here. Those belonged to the removed single-app V1 reference; V2 resolves both per request from `GET /api/v1/portal/config/:slug`.
 
 ## Run with Docker Compose
 

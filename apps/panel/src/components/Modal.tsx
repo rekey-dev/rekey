@@ -37,10 +37,21 @@
 import * as React from 'react';
 import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 
-let modalCounter = 0;
+/**
+ * Stable dialog id, identical on the server and the client.
+ *
+ * This used to be a module-level `++modalCounter`. The module is evaluated
+ * once per server process and once per browser page, and the two never
+ * agreed: the server had rendered other modals before this request, so it
+ * emitted `aria-labelledby="rekey-modal-2-title"` where the freshly-loaded
+ * client produced `-3-`. React logged "This won't be patched up" on every
+ * page containing a Modal, and one load escalated to a full document reload.
+ *
+ * `useId()` is React's answer to exactly this — it derives the id from the
+ * component's position in the tree, so both renders compute the same string.
+ */
 function useModalId(): string {
-  const [id] = React.useState(() => `rekey-modal-${++modalCounter}`);
-  return id;
+  return `rekey-modal-${React.useId()}`;
 }
 
 export type ModalSize = 'sm' | 'md' | 'lg' | 'xl';
@@ -51,6 +62,67 @@ const SIZE_CLS: Record<ModalSize, string> = {
   lg: 'max-w-2xl',
   xl: 'max-w-3xl',
 };
+
+/**
+ * The `<dialog>` chrome, shared by every modal in the panel.
+ *
+ * There used to be two dialog looks. This one — left-aligned, header rule, an X
+ * — and a second, hand-rolled inside TypedConfirmButton: centred, narrower, no
+ * rule, no X. Same product, same interaction, two visual languages, and a
+ * confirm dialog that didn't look like it belonged to the app that opened it.
+ * Both now render from these two exports.
+ *
+ * Kept as a class string plus a component rather than one wrapper component
+ * because the two call sites differ in a way that matters: `Modal` owns its own
+ * trigger and open/close state, while `TypedConfirmButton` has to submit the
+ * PARENT form (its confirm button is a real `type="submit"` inside the caller's
+ * `<form action={serverAction}>`). Sharing the chrome is the part that was
+ * actually broken; sharing the mechanics would have meant rewriting the
+ * server-action plumbing for no user-visible gain.
+ */
+export function dialogChromeCls(size: ModalSize = 'md'): string {
+  return `m-auto h-fit rounded-xl p-0 text-left backdrop:bg-black/50 backdrop:backdrop-blur-sm bg-[var(--color-surface)] text-[var(--color-fg)] ${SIZE_CLS[size]} w-[90vw] shadow-2xl border border-[var(--color-border)]`;
+}
+
+/** Title + optional description + close affordance, above a rule. */
+export function ModalHeader({
+  titleId,
+  descId,
+  title,
+  description,
+  onClose,
+}: {
+  titleId: string;
+  descId?: string;
+  title: React.ReactNode;
+  description?: React.ReactNode;
+  onClose: () => void;
+}): React.JSX.Element {
+  return (
+    <div className="px-6 pt-5 pb-3 border-b border-[var(--color-border)] flex items-start justify-between gap-4">
+      <div className="min-w-0 flex-1">
+        <h2 id={titleId} className="text-base font-semibold">
+          {title}
+        </h2>
+        {description && (
+          <p id={descId} className="text-xs text-neutral-600 dark:text-neutral-400 mt-1">
+            {description}
+          </p>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={onClose}
+        aria-label="Close"
+        className="shrink-0 rounded-md p-1 text-neutral-600 dark:text-neutral-400 hover:text-[var(--color-fg)] hover:bg-neutral-100 dark:hover:bg-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--color-primary)]"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <path d="M18 6L6 18M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+  );
+}
 
 export function Modal({
   trigger,
@@ -161,7 +233,7 @@ export function Modal({
   }
 
   const defaultTriggerClass =
-    'inline-flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-primary)]';
+    'inline-flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-primary)]';
 
   // Only style the wrapping <button> when `trigger` is a string (default =
   // primary pill, override via triggerClassName). If `trigger` is an element it
@@ -179,7 +251,7 @@ export function Modal({
         ref={ref}
         aria-labelledby={titleId}
         aria-describedby={description ? descId : undefined}
-        className={`rounded-xl p-0 text-left backdrop:bg-black/50 backdrop:backdrop-blur-sm bg-[var(--color-surface)] text-[var(--color-fg)] ${SIZE_CLS[size]} w-[90vw] shadow-2xl border border-[var(--color-border)]`}
+        className={dialogChromeCls(size)}
         onClose={handleClose}
         onClick={(e) => {
           // Click on backdrop → close. Safari is unreliable comparing
@@ -188,28 +260,13 @@ export function Modal({
           if (e.target === e.currentTarget) close();
         }}
       >
-        <div className="px-6 pt-5 pb-3 border-b border-[var(--color-border)] flex items-start justify-between gap-4">
-          <div className="min-w-0 flex-1">
-            <h2 id={titleId} className="text-base font-semibold">
-              {title}
-            </h2>
-            {description && (
-              <p id={descId} className="text-xs text-neutral-600 dark:text-neutral-400 mt-1">
-                {description}
-              </p>
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={close}
-            aria-label="Close"
-            className="shrink-0 rounded-md p-1 text-neutral-600 dark:text-neutral-400 hover:text-[var(--color-fg)] hover:bg-neutral-100 dark:hover:bg-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--color-primary)]"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-              <path d="M18 6L6 18M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
+        <ModalHeader
+          titleId={titleId}
+          descId={description ? descId : undefined}
+          title={title}
+          description={description}
+          onClose={close}
+        />
         <div className="p-6 max-h-[70vh] overflow-y-auto">{children}</div>
       </dialog>
     </>

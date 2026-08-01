@@ -6,6 +6,21 @@
  * sequences and follow FK chains — slightly heavier than per-table DELETE
  * but a lot less code than carefully ordering deletes.
  *
+ * Postgres is not the only store holding per-test state, and the second one is
+ * NOT Redis. Under `NODE_ENV=test` `getRedis()` returns null by design, so
+ * brute-force counters, OIDC discovery documents, signing keys, the
+ * request-log buffer and the outage-event window all live in plain
+ * module-level variables that no TRUNCATE reaches. Nothing reset them, so each
+ * one leaked into every later test that shared its module instance. Each now
+ * exports a `__resetForTests`, and `resetProcessGlobalState` below calls all of
+ * them from `beforeEach`.
+ *
+ * This replaced a `clearRedisTestState()` that SCANned Redis for `bf:*` keys.
+ * It could never have worked: it opened with `const redis = getRedis(); if
+ * (!redis) return;`, and in test that is always null. It deleted zero keys on
+ * all 950 invocations while its docblock described fixing exactly the leak
+ * that was in fact still happening, in memory, one module over.
+ *
  * It also installs the FAKE billing providers. The shipped factory only ever
  * returns real, network-talking providers and throws when an Application has
  * no credentials — deliberately, see `providers/index.ts`. Tests must not
@@ -17,7 +32,6 @@
 
 import { afterAll, beforeEach, vi } from 'vitest';
 import { prisma } from '../src/lib/prisma.js';
-import { getRedis } from '../src/lib/redis.js';
 import { fakeProviderFor } from './fakes/billing-providers.js';
 
 vi.mock('../src/modules/billing/providers/index.js', async (importOriginal) => {
@@ -78,30 +92,54 @@ const DOMAIN_TABLES = [
 ];
 
 /**
- * Postgres is not the only store holding per-test state.
+ * Modules that keep state the TRUNCATE below cannot reach, each exporting a
+ * `__resetForTests`. What each one holds, and why it has to be dropped:
  *
- * Brute-force lock keys are keyed on application + email, so they outlive the
- * TRUNCATE that removed the end-user they refer to — a lock set by one test can
- * still be counting when the next one signs in as a freshly created user with a
- * recycled address. Rate-limit counters have the same shape (see
- * `globalRateLimitMax` in lib/rate-limit.ts, which is what stops the global
- * limiter from throttling the suite against itself), so clear those too rather
- * than depend on which store the plugin happens to be using.
+ *   brute-force        failure counters + lockouts, keyed
+ *                      `bf:lock:<scope>:<appId>:<email>` — so a lock outlives
+ *                      the end-user it refers to and hits the next test that
+ *                      recycles the address. In test this is an in-MEMORY
+ *                      store, never Redis (`getRedis()` returns null), which
+ *                      is why the old Redis SCAN never cleared it.
+ *   cors-origins       the union of every Application's registered origins,
+ *                      on a 30s TTL.
+ *   signing-keys       active JWT signing key + JWKS snapshot, on a 60s TTL,
+ *                      against `signing_keys` rows the TRUNCATE removes.
+ *   request-log        buffered api_request_logs rows, flushed by a TIMER —
+ *                      the in-flight INSERT the TRUNCATE deadlock retry below
+ *                      exists to survive.
+ *   dependency-outage  the 5-minute per-(subsystem, tenant) suppression window
+ *                      on outage security events.
+ *   oauth/oidc         cached OIDC discovery documents, on a 24h TTL.
  *
- * SCAN rather than FLUSHDB: the BullMQ webhook queue shares this Redis and its
- * jobs are not per-test state.
+ * Imported DYNAMICALLY, and that is load-bearing: a static import here loads
+ * these modules — and their dependencies — into the file's module graph before
+ * a test file's hoisted `vi.mock` can register. `brute-force-fail-closed.test.ts`
+ * mocks `lib/redis.js`, and a static import of brute-force from this file binds
+ * it to the REAL one, silently turning six fail-closed assertions green-by-
+ * accident. Resolving at hook time gets the mocked module like any other
+ * consumer.
  */
-async function clearRedisTestState(): Promise<void> {
-  const redis = getRedis();
-  if (!redis) return;
-  for (const pattern of ['fastify-rate-limit-*', 'bf:*']) {
-    let cursor = '0';
-    do {
-      const [next, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 500);
-      cursor = next;
-      if (keys.length > 0) await redis.del(...keys);
-    } while (cursor !== '0');
-  }
+const RESET_MODULES = [
+  '../src/lib/brute-force.js',
+  '../src/lib/cors-origins.js',
+  '../src/lib/signing-keys.js',
+  '../src/lib/request-log.js',
+  '../src/lib/dependency-outage.js',
+  '../src/modules/oauth/providers/oidc.js',
+] as const;
+
+let resetFns: Array<() => void> | null = null;
+
+/** Reset every module-level singleton that outlives a single test. */
+async function resetProcessGlobalState(): Promise<void> {
+  resetFns ??= await Promise.all(
+    RESET_MODULES.map(async (spec) => {
+      const mod = (await import(spec)) as { __resetForTests: () => void };
+      return mod.__resetForTests;
+    }),
+  );
+  for (const reset of resetFns) reset();
 }
 
 async function truncateDomainTables(): Promise<void> {
@@ -130,8 +168,10 @@ async function truncateDomainTables(): Promise<void> {
 }
 
 beforeEach(async () => {
+  // Globals first: dropping the request-log buffer removes the in-flight
+  // INSERT that the TRUNCATE's deadlock retry exists to survive.
+  await resetProcessGlobalState();
   await truncateDomainTables();
-  await clearRedisTestState();
 });
 
 afterAll(async () => {

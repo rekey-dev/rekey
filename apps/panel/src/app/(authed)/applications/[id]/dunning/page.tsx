@@ -6,7 +6,8 @@ import { formatDateTime } from '@/lib/date';
 import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
-import { Badge, type BadgeTone } from '@/components/Badge';
+import { Badge } from '@/components/Badge';
+import { StatusPill } from '@/components/StatusPill';
 import { EmptyState } from '@/components/EmptyState';
 import { BillingModeBanner } from '@/components/BillingModeBanner';
 
@@ -19,13 +20,6 @@ import { BillingModeBanner } from '@/components/BillingModeBanner';
 
 const STATUSES = ['OPEN', 'RECOVERED', 'EXHAUSTED', 'CANCELED'] as const;
 type DunningStatus = (typeof STATUSES)[number];
-
-const STATUS_TONE: Record<DunningStatus, BadgeTone> = {
-  OPEN: 'warning',
-  RECOVERED: 'success',
-  EXHAUSTED: 'danger',
-  CANCELED: 'neutral',
-};
 
 /** Friendly labels for display — the raw enum still goes to the API. */
 const STATUS_LABEL: Record<DunningStatus, string> = {
@@ -228,11 +222,7 @@ export default async function DunningPage({
                   {c.planSlug}
                 </TD>
                 <TD>
-                  <span className="inline-flex items-center gap-1.5">
-                    <Badge tone={STATUS_TONE[c.status]} dot>
-                      {STATUS_LABEL[c.status]}
-                    </Badge>
-                  </span>
+                  <StatusPill status={c.status} />
                 </TD>
                 <TD align="right" mono>
                   {c.failedAttempts}

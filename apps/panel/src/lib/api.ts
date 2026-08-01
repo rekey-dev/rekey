@@ -14,7 +14,7 @@
  */
 
 import { cookies, headers } from 'next/headers';
-import { redirect } from 'next/navigation';
+import { forbidden, notFound, redirect } from 'next/navigation';
 
 export const ACCESS_COOKIE = 'rekey_access';
 export const REFRESH_COOKIE = 'rekey_refresh';
@@ -136,15 +136,52 @@ async function setSessionCookiesSafe(args: {
 }
 
 /**
+ * In-flight refresh exchanges, keyed by the refresh token being spent.
+ *
+ * Refresh tokens rotate and are single-use: the first exchange invalidates the
+ * presented token, so a second concurrent exchange of the SAME token gets a
+ * 401. That is correct server behaviour — reuse detection is a security
+ * feature — but every RSC on a page calls `api()` independently, so a
+ * navigation after the 15-minute access token expires fires several 401s at
+ * once and each one tried to refresh. One won; the rest were told their token
+ * was already spent and bounced the operator to `/login?reason=expired`,
+ * discarding whatever they had typed.
+ *
+ * Observed live: 5 of 8 refreshes in a 40-minute session returned 401, with
+ * pairs landing in the same millisecond, throwing the operator out roughly
+ * every quarter of an hour.
+ *
+ * Keying on the token rather than using a bare module-level promise matters:
+ * two different tokens (different operators, or a stale tab) must not share an
+ * exchange. The entry is deleted in a `finally` so a later expiry refreshes
+ * again rather than replaying a resolved promise.
+ */
+const inFlightRefreshes = new Map<string, Promise<string | null>>();
+
+/**
  * Attempt token refresh. Returns the new access token on success, or `null`
  * if refresh failed OR if we couldn't persist the new cookies (caller is in
  * a server-component context and Next 15 won't let us write cookies). The
  * caller treats `null` as "give up, bounce through /sign-out".
+ *
+ * Concurrent callers presenting the same refresh token share one exchange.
  */
 async function tryRefresh(): Promise<string | null> {
   const jar = await cookies();
   const refresh = jar.get(REFRESH_COOKIE)?.value;
   if (!refresh) return null;
+
+  const existing = inFlightRefreshes.get(refresh);
+  if (existing) return existing;
+
+  const exchange = exchangeRefreshToken(refresh).finally(() => {
+    inFlightRefreshes.delete(refresh);
+  });
+  inFlightRefreshes.set(refresh, exchange);
+  return exchange;
+}
+
+async function exchangeRefreshToken(refresh: string): Promise<string | null> {
   try {
     const res = await fetch(`${apiUrl()}/api/v1/tenant/auth/refresh`, {
       method: 'POST',
@@ -172,6 +209,20 @@ export interface RequestArgs {
   path: string;
   body?: unknown;
   redirectOn401?: boolean;
+  /**
+   * Turn a 404/403 from the API into Next's `notFound()` / `forbidden()`
+   * interrupts instead of a thrown `PanelApiError`.
+   *
+   * Defaults to TRUE for GET and false for everything else. A GET is a page
+   * render: `/applications/<bad-id>/end-users` used to fall through to the
+   * generic error boundary, which told the operator "Something went wrong…
+   * contact support (ref …)" and offered a "Try again" button that could never
+   * succeed — the UI could not tell "does not exist / not yours" apart from
+   * "we are broken". A mutation is different: server actions catch
+   * `PanelApiError` and re-render with a field-level message, and replacing
+   * that with a whole-page 404 would lose the operator's typed input.
+   */
+  interruptOnAccessError?: boolean;
 }
 
 async function callOnce(
@@ -224,6 +275,15 @@ export async function api<T>(args: RequestArgs): Promise<T> {
         }
       }
     }
+    // 404 → "this doesn't exist (or isn't yours)"; 403 → "you can't see this".
+    // Both are answers, not failures, and both have a real page. Handled by the
+    // HTTPAccessFallbackBoundary already in the tree — not-found.tsx and
+    // forbidden.tsx — which keeps the chrome and offers a way back instead of
+    // a dead "Try again".
+    if (args.interruptOnAccessError ?? args.method === 'GET') {
+      if (res.status === 404) notFound();
+      if (res.status === 403) forbidden();
+    }
     const err =
       'error' in json
         ? json.error
@@ -267,6 +327,8 @@ export interface ApplicationRow {
     signupMode?: 'public' | 'secret_only' | 'invite_only';
     mfa?: 'off' | 'optional' | 'required';
     mcpEnabled?: boolean;
+    /** Application acts as an OpenID Connect provider. Independent of `mcpEnabled`. */
+    oidcEnabled?: boolean;
     organizationsEnabled?: boolean;
     passwordBreachCheckEnabled?: boolean;
     sendVerificationEmailOnSignUp?: boolean;

@@ -9,7 +9,7 @@ should also read [AGENTS.md](AGENTS.md).
 
 ## Prerequisites
 
-- **Node.js 20+**
+- **Node.js 22+** (matches `engines` in the root `package.json`)
 - **pnpm 9+** (`corepack enable` will provide it)
 - **Docker** (for Postgres + Redis; or bring your own)
 
@@ -22,9 +22,11 @@ pnpm install
 
 # Configure — the API refuses to boot without the required secrets.
 cp .env.example .env
-#   Generate each with: openssl rand -hex 32
-#   Required: JWT_SECRET (≥32 chars), SUPER_ADMIN_KEY (≥32 chars)
-#   Required in production: ENCRYPTION_KEY (64 hex chars)
+#   Generate each with: openssl rand -hex 32 (24 for the datastore passwords)
+#   Required by the API:     DATABASE_URL, JWT_SECRET (≥32), SUPER_ADMIN_KEY (≥32)
+#   Required by compose:     POSTGRES_PASSWORD, REDIS_PASSWORD — then paste both
+#                            into DATABASE_URL / REDIS_URL by hand
+#   Required in production:  ENCRYPTION_KEY (64 hex chars)
 
 # Start the datastores (Postgres + Redis) and apply migrations.
 docker compose up -d postgres redis
@@ -33,6 +35,12 @@ pnpm db:migrate:deploy
 # Run everything in watch mode.
 pnpm dev
 ```
+
+`pnpm db:migrate:deploy` and `pnpm dev` both read that root `.env`, and
+`pnpm dev` generates the Prisma client and builds the workspace packages the
+apps import from `dist/` before starting anything — a fresh clone needs no
+separate build step. Running an app's own `dev` script directly (`pnpm --filter
+@rekey.dev/api dev`) does none of that, and does not read `.env` either.
 
 - API: `http://localhost:3030` — interactive docs at `/docs`
 - Operator panel: `http://localhost:3031`
@@ -46,9 +54,13 @@ Instead of `pnpm dev`, you can boot the full stack (Postgres + Redis + API +
 panel) with one command — the API auto-migrates on start:
 
 ```bash
-cp .env.example .env   # fill the required secrets
-docker compose up      # add --build after changing app code
+cp .env.example .env                  # fill the required secrets
+docker compose --profile full up      # add --build after changing app code
 ```
+
+The `full` profile is what pulls in the API and the panel; a bare
+`docker compose up` starts only Postgres and Redis, which is the right thing
+when you are running the apps from your shell.
 
 ### Create your first tenant
 

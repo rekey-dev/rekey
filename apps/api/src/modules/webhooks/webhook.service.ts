@@ -15,6 +15,29 @@
  * service kicks the HTTP call off with `void` and lets the delivery
  * worker (this same module) retry on failure.
  *
+ * ## Enqueue vs. kick — the outbox seam
+ *
+ * `emit()` does two separable things: WRITE the delivery rows (step 3), and
+ * KICK the first attempt (step 4). Only the write has to be durable, and
+ * callers that are already changing state in a `$transaction` need it to
+ * commit with that change or not at all. So the two halves are exported
+ * separately:
+ *
+ *   - `enqueueEvent(client, args)` — writes the rows through whatever client
+ *     it is handed (the global one, or a `$transaction` tx) and returns their
+ *     ids. Never touches the network.
+ *   - `kickDeliveries(ids)` — hands those ids to the active scheduler. Call it
+ *     AFTER the transaction commits; a kick from inside one races a delivery
+ *     against rows no other connection can see yet, and fires at all for a
+ *     transaction that goes on to roll back.
+ *
+ * Callers with nothing to join (the auth/user lifecycle events) use `emit()`,
+ * which is exactly `enqueueEvent(prisma, …)` + `kickDeliveries(…)`.
+ *
+ * A row that is written but never kicked is not lost: it is PENDING with
+ * `nextAttemptAt = now`, and the poller re-attempts it. That is the whole
+ * point of writing it in the transaction.
+ *
  * Scheduling goes through a pluggable seam (`scheduleAttempt`). In every real
  * runtime the BullMQ worker (webhook.queue.ts) installs a Redis-backed enqueue
  * at boot — required, no process-local fallback — so delayed retries live in
@@ -30,7 +53,12 @@
  * replicas can never double-send the same delivery.
  */
 
-import type { WebhookEndpoint, WebhookDelivery } from '@prisma/client';
+import type {
+  Prisma,
+  WebhookDelivery,
+  WebhookDeliveryStatus,
+  WebhookEndpoint,
+} from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
@@ -80,15 +108,113 @@ function cuid(): string {
 // endpoints win under the cap is stable rather than DB-order-dependent.
 const MAX_ENDPOINTS_PER_EVENT = 100;
 
+/**
+ * Any Prisma client: the global singleton or an interactive-transaction
+ * client. `PrismaClient` is a structural superset of `TransactionClient`, so
+ * both satisfy this.
+ */
+export type WebhookDbClient = Prisma.TransactionClient;
+
 function listForEvent(
+  client: WebhookDbClient,
   applicationId: string,
   type: WebhookEventType,
 ): Promise<WebhookEndpoint[]> {
-  return prisma.webhookEndpoint.findMany({
+  return client.webhookEndpoint.findMany({
     where: { applicationId, enabled: true },
     orderBy: { createdAt: 'asc' },
     take: MAX_ENDPOINTS_PER_EVENT,
   }).then((rows) => rows.filter((r) => endpointMatches(r.events, type)));
+}
+
+/**
+ * Write the delivery rows for one event through `client` and return their ids.
+ * The write half of `emit` — see the module docblock. Does no network I/O and
+ * schedules nothing, so it is safe to call inside a `$transaction`: the rows
+ * commit with the state change that caused them, or not at all.
+ *
+ * Returns `[]` when the application has no endpoint subscribed to this type,
+ * which is the common case and costs one indexed SELECT.
+ */
+export async function enqueueEvent(
+  client: WebhookDbClient,
+  args: {
+    applicationId: string;
+    type: WebhookEventType;
+    data: Record<string, unknown>;
+  },
+): Promise<string[]> {
+  if (!isKnownWebhookEvent(args.type)) return [];
+  const endpoints = await listForEvent(client, args.applicationId, args.type);
+  if (endpoints.length === 0) return [];
+
+  const eventId = cuid();
+  const envelope: WebhookEventEnvelope = {
+    eventId,
+    occurredAt: new Date().toISOString(),
+    type: args.type,
+    applicationId: args.applicationId,
+    data: args.data,
+  };
+
+  // One statement rather than N creates: inside a transaction every extra
+  // round trip is time the row locks are held.
+  const rows = await client.webhookDelivery.createManyAndReturn({
+    data: endpoints.map((ep) => ({
+      endpointId: ep.id,
+      applicationId: args.applicationId,
+      eventId,
+      eventType: args.type,
+      payload: envelope as never,
+      status: 'PENDING' as const,
+      attempts: 0,
+      nextAttemptAt: new Date(),
+    })),
+    select: { id: true },
+  });
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Hand delivery ids to the active scheduler for an immediate first attempt.
+ * The read half of `emit`'s second step — see the module docblock. Call this
+ * only AFTER the rows are committed. Skipping it entirely is safe but slow:
+ * the rows are PENDING with `nextAttemptAt = now`, so the poller picks them up.
+ */
+export function kickDeliveries(deliveryIds: readonly string[]): void {
+  for (const id of deliveryIds) {
+    scheduleAttempt(id, 0, 0);
+  }
+}
+
+/**
+ * Fire-and-forget `emit` for the call sites with no transaction to join (the
+ * auth / user-lifecycle events, which change state through several statements
+ * that were never one unit of work).
+ *
+ * Exists because every one of those sites was written `void emit(…).catch(() =>
+ * undefined)`. That discards the ONLY signal that an event was dropped: a
+ * connection-pool timeout or a DB blip between the state change and the
+ * enqueue silently loses the event, and nothing anywhere records it. This
+ * cannot make the emit durable — that needs `enqueueEvent` in the caller's
+ * transaction — but it makes the loss visible.
+ *
+ * `console` rather than the Fastify logger, matching lib/brute-force.ts: these
+ * callers are services with no request context, and the message deliberately
+ * carries only the event type + application, never the payload.
+ */
+export function emitDetached(args: {
+  applicationId: string;
+  type: WebhookEventType;
+  data: Record<string, unknown>;
+}): void {
+  void webhookService.emit(args).catch((err: unknown) => {
+    console.error(
+      `[webhooks] failed to enqueue "${args.type}" for application ${args.applicationId}; ` +
+        'the event is LOST (no row was written, so the poller cannot recover it)',
+      err instanceof Error ? err.message : String(err),
+    );
+  });
 }
 
 /**
@@ -328,51 +454,26 @@ export async function processDueWebhookDeliveries(limit = 50): Promise<number> {
 export const webhookService = {
   /**
    * Emit an event to every matching endpoint. Returns the delivery row
-   * ids that were enqueued. Fire-and-forget — auth flows MUST NOT await
-   * this; do `void webhookService.emit(...).catch(...)`.
+   * ids that were enqueued. Fire-and-forget — callers MUST NOT await this;
+   * use `emitDetached` so the failure is at least logged.
+   *
+   * For a caller that is ALREADY inside a `$transaction` changing the state
+   * this event announces, use `enqueueEvent(tx, …)` + `kickDeliveries(…)`
+   * instead. This helper cannot join a transaction, so the rows it writes can
+   * be lost by a crash between the state change and this call.
    */
   async emit(args: {
     applicationId: string;
     type: WebhookEventType;
     data: Record<string, unknown>;
   }): Promise<string[]> {
-    if (!isKnownWebhookEvent(args.type)) return [];
-    const endpoints = await listForEvent(args.applicationId, args.type);
-    if (endpoints.length === 0) return [];
-
-    const eventId = cuid();
-    const envelope: WebhookEventEnvelope = {
-      eventId,
-      occurredAt: new Date().toISOString(),
-      type: args.type,
-      applicationId: args.applicationId,
-      data: args.data,
-    };
-
-    const deliveries = await Promise.all(
-      endpoints.map((ep) =>
-        prisma.webhookDelivery.create({
-          data: {
-            endpointId: ep.id,
-            applicationId: args.applicationId,
-            eventId,
-            eventType: args.type,
-            payload: envelope as never,
-            status: 'PENDING',
-            attempts: 0,
-            nextAttemptAt: new Date(),
-          },
-        }),
-      ),
-    );
+    const ids = await enqueueEvent(prisma, args);
     // Kick off the first attempt immediately, in the background, via the active
     // scheduler (in-process timer or BullMQ enqueue). The rows are already
     // PENDING with nextAttemptAt=now, so the poller re-attempts off
     // `nextAttemptAt` if the kickoff is lost (e.g. crash before the job lands).
-    for (const d of deliveries) {
-      scheduleAttempt(d.id, 0, 0);
-    }
-    return deliveries.map((d) => d.id);
+    kickDeliveries(ids);
+    return ids;
   },
 
   // ---------- Endpoint CRUD ----------
@@ -454,16 +555,35 @@ export const webhookService = {
     return secret;
   },
 
-  /** Recent deliveries for one endpoint, newest-first. Capped at 100. */
+  /**
+   * Recent deliveries for one endpoint, newest-first. Capped at 100 per page.
+   *
+   * `status` is the filter that matters: an endpoint with a long history and a
+   * handful of failures is exactly the case an operator opens this for, and
+   * without it they page through successes looking for the red ones.
+   */
   async listDeliveries(
     applicationId: string,
     endpointId: string,
-    limit = 50,
+    opts: {
+      status?: WebhookDeliveryStatus;
+      eventType?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
   ): Promise<WebhookDelivery[]> {
     return prisma.webhookDelivery.findMany({
-      where: { applicationId, endpointId },
-      orderBy: { createdAt: 'desc' },
-      take: Math.min(limit, 100),
+      where: {
+        applicationId,
+        endpointId,
+        ...(opts.status !== undefined && { status: opts.status }),
+        ...(opts.eventType !== undefined && { eventType: opts.eventType }),
+      },
+      // Secondary key on id so paging is stable when several deliveries of one
+      // event share a createdAt.
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: Math.min(opts.limit ?? 50, 100),
+      ...(opts.offset !== undefined && { skip: opts.offset }),
     });
   },
 

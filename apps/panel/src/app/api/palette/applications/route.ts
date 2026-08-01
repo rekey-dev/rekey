@@ -27,6 +27,9 @@ export async function GET(): Promise<Response> {
       method: 'GET',
       path: '/api/v1/tenant/applications/?limit=100&offset=0',
       redirectOn401: false,
+      // JSON proxy — degrade to an empty list rather than rendering a 404 page
+      // into the command palette's fetch.
+      interruptOnAccessError: false,
     });
     const slim: PaletteApplication[] = apps.map((a) => ({
       id: a.id,

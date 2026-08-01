@@ -30,7 +30,7 @@
 
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { webhookService } from '../webhooks/webhook.service.js';
+import { emitDetached } from '../webhooks/webhook.service.js';
 import { clearFailures, euLoginLockScope } from '../../lib/brute-force.js';
 
 /** Non-routable tombstone address. `.invalid` is reserved (RFC 2606) so it can never deliver. */
@@ -214,18 +214,16 @@ export async function eraseEndUser(args: {
   // Outbound webhook — only on a real transition (not the idempotent no-op).
   // Fire-and-forget, same contract as the auth emit-sites.
   if (result.erased) {
-    void webhookService
-      .emit({
-        applicationId,
-        type: 'user.erased',
-        data: {
-          user: {
-            id: endUserId,
-            erasedAt: result.erasedAt,
-          },
+    emitDetached({
+      applicationId,
+      type: 'user.erased',
+      data: {
+        user: {
+          id: endUserId,
+          erasedAt: result.erasedAt,
         },
-      })
-      .catch(() => undefined);
+      },
+    });
   }
 
   return result;
