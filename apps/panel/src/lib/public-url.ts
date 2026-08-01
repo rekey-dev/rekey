@@ -1,6 +1,6 @@
 /**
  * Validate that a server-side env value is safe to serialize into client HTML
- * as a copy-pasteable URL. Server-only vars like RELIPAY_URL / PANEL_URL may
+ * as a copy-pasteable URL. Server-only vars like REKEY_URL / PANEL_URL may
  * point at in-cluster hosts (e.g. `http://api:3030`) that would both leak
  * internal topology and be unreachable for whoever pastes them.
  *

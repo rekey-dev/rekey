@@ -1,13 +1,12 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { api, PanelApiError, type ApiKeyRow, type ApplicationRow } from '@/lib/api';
 
 // One-time reveal of a freshly minted secret key. Carried in a short-lived,
 // httpOnly, path-scoped cookie instead of the URL query — a raw key in the URL
 // leaks into browser history, the referer header, and server access logs.
-const REVEAL_COOKIE = 'relipay_reveal_key';
+const REVEAL_COOKIE = 'rekey_reveal_key';
 import { CopyButton } from '@/components/CopyButton';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { Modal } from '@/components/Modal';
@@ -16,6 +15,7 @@ import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { EmptyState } from '@/components/EmptyState';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate, formatDateTime } from '@/lib/date';
+import { keyPrefixFor } from '@/components/EnvironmentBadge';
 
 const ERR: Record<string, string> = {
   missing: 'A key name is required.',
@@ -34,6 +34,9 @@ interface CreateKeyResp {
   warning: string;
 }
 
+// These actions deliberately redirect without revalidatePath — pairing the two
+// is what blanked this page after a key was minted. Reasoning in `(authed)/layout.tsx`.
+
 async function rotatePublicKey(applicationId: string, force: boolean): Promise<void> {
   'use server';
   try {
@@ -50,7 +53,6 @@ async function rotatePublicKey(applicationId: string, force: boolean): Promise<v
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/api-keys`);
   redirect(`/applications/${applicationId}/api-keys?e=pubkey_rotated`);
 }
 
@@ -62,8 +64,8 @@ async function createKey(applicationId: string, formData: FormData): Promise<voi
     const result = await api<CreateKeyResp>({
       method: 'POST',
       path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/api-keys`,
-      // Test-mode API keys are paused (billing keeps its own test mode); mint live only.
-      body: { name, mode: 'live' },
+      // The prefix follows the application's environment; it is not a choice here.
+      body: { name },
     });
     // Hand the raw key to the next render via a short-lived httpOnly cookie,
     // never the URL. Path-scoped so it's only sent to this route; ~2 min TTL.
@@ -75,7 +77,6 @@ async function createKey(applicationId: string, formData: FormData): Promise<voi
       path: `/applications/${applicationId}/api-keys`,
       maxAge: 120,
     });
-    revalidatePath(`/applications/${applicationId}/api-keys`);
     redirect(`/applications/${applicationId}/api-keys?e=apikey_created`);
   } catch (err) {
     if (err instanceof PanelApiError) {
@@ -91,7 +92,6 @@ async function revokeKey(applicationId: string, keyId: string): Promise<void> {
     method: 'DELETE',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/api-keys/${encodeURIComponent(keyId)}`,
   });
-  revalidatePath(`/applications/${applicationId}/api-keys`);
   redirect(`/applications/${applicationId}/api-keys?e=apikey_revoked`);
 }
 
@@ -214,7 +214,7 @@ export default async function ApiKeysPage({
           <Modal
             modalKey="newKey"
             title="Mint a new API key"
-            description="Server-side key for your backend + SDKs (rp_live_…). Shown once at creation."
+            description={`Server-side key for your backend + SDKs (${keyPrefixFor(app.environment)}…, from this application's environment). Shown once at creation.`}
             trigger="+ New API key"
           >
             <form action={createKey.bind(null, id)} className="space-y-3">

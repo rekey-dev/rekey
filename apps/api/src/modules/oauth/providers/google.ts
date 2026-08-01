@@ -5,7 +5,8 @@
  * id_token (Google's stable account id) plus the email.
  *
  * This implementation makes real outbound calls to Google. In tests we
- * inject a mock provider via the registry — see `oauth.routes.test.ts`.
+ * inject a mock provider via the registry — see `test/phase4.test.ts`,
+ * `test/security.test.ts` and `test/tenant-oauth.test.ts`.
  */
 
 import { fetchJsonWithTimeout } from './_oauth2-base.js';

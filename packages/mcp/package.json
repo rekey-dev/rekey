@@ -1,7 +1,10 @@
 {
   "name": "@rekey.dev/mcp",
-  "version": "1.1.2",
+  "version": "2.0.0-rc.1",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "description": "Model Context Protocol server for Rekey — lets Claude Desktop / Cursor / Claude Code introspect a deployment.",
   "type": "module",
   "bin": {
@@ -34,7 +37,6 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
-    "@rekey.dev/shared-types": "workspace:*",
     "zod": "^3.23.8"
   },
   "devDependencies": {

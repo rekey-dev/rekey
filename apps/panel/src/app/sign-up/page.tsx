@@ -96,6 +96,10 @@ export default async function SignUpPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }): Promise<React.JSX.Element> {
   const [params, mode] = await Promise.all([searchParams, fetchSignupMode()]);
+  // Where THIS deployment tells people to get an invite key. Optional: unset
+  // means the panel says nothing, which is correct for a self-host that hands
+  // keys out by its own means. Rekey Cloud points it at rekey.dev/pricing.
+  const signupHelpUrl = process.env.PANEL_SIGNUP_HELP_URL?.trim() || null;
   const error = typeof params.error === 'string' ? params.error : undefined;
   const keepEmail = typeof params.email === 'string' ? params.email : undefined;
   const keepName = typeof params.name === 'string' ? params.name : undefined;
@@ -137,7 +141,7 @@ export default async function SignUpPage({
       title="Create your workspace"
       subtitle={
         mode === 'invite'
-          ? 'Sign-up is invite-only here. Paste the key you were given.'
+          ? 'This deployment issues workspace keys. Paste the key you were given.'
           : "You'll be the owner. Invite teammates after sign-up."
       }
     >
@@ -147,6 +151,26 @@ export default async function SignUpPage({
         {bannerError && (
           <p role="alert" className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
             {bannerError}
+          </p>
+        )}
+
+        {mode === 'invite' && signupHelpUrl && (
+          // A deployment-supplied pointer to wherever IT hands out keys.
+          // Unset renders nothing, which is the right default for a self-host:
+          // the panel has no idea how a given operator distributes keys, and
+          // hardcoding rekey.dev here would put our commercial funnel in the
+          // open-source product.
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            Don&apos;t have a key?{' '}
+            <a
+              href={signupHelpUrl}
+              className="underline"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Find out how to get one
+            </a>
+            .
           </p>
         )}
 
@@ -214,12 +238,12 @@ export default async function SignUpPage({
           Create workspace
         </SubmitButton>
 
-        {/* No env var for the marketing host — the panel links relipay.dev
+        {/* No env var for the marketing host — the panel links rekey.dev
             absolutely elsewhere (docs, MCP guide), so match that. */}
         <p className="text-xs text-[var(--color-muted-fg)] text-center">
           By creating a workspace you agree to the{' '}
           <a
-            href="https://relipay.dev/terms"
+            href="https://rekey.dev/terms"
             target="_blank"
             rel="noopener noreferrer"
             className="underline hover:text-[var(--color-fg)]"
@@ -228,7 +252,7 @@ export default async function SignUpPage({
           </a>{' '}
           and{' '}
           <a
-            href="https://relipay.dev/privacy"
+            href="https://rekey.dev/privacy"
             target="_blank"
             rel="noopener noreferrer"
             className="underline hover:text-[var(--color-fg)]"

@@ -1,6 +1,8 @@
 # `@rekey.dev/node`
 
-The server SDK for [Rekey](https://relipay.dev) — auth, billing, usage, credits, licenses, and teams for your application, from any server-side TypeScript runtime (Node, Bun, Deno, Express, Fastify, Nest, Hono).
+> **ReliPay is now Rekey.** This package was previously published as the equivalent `@relipay/*` package, which is deprecated. Env vars renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read — set `REKEY_*`). relipay.dev (the old domain) will redirect to rekey.dev after the domain migration.
+
+The server SDK for [Rekey](https://rekey.dev) — auth, billing, usage, credits, licenses, and teams for your application, from any server-side TypeScript runtime (Node, Bun, Deno, Express, Fastify, Nest, Hono).
 
 > **For AI coding agents:** start at [AGENTS.md](./AGENTS.md) — it has the do-this-first rules.
 
@@ -16,19 +18,19 @@ One client instance per Application, constructed with that Application's **secre
 | Key | Format | Where to get it |
 | --- | --- | --- |
 | Secret key | `rp_live_…` (production) or `rp_test_…` (sandbox) | Panel → Application → API Keys |
-| API URL | `https://api.relipay.dev` or `http://localhost:3030` | Your Rekey deployment |
+| API URL | `https://api.rekey.dev` or `http://localhost:3030` | Your Rekey deployment |
 
 Convention: read both from the environment — never hardcode.
 
 ```bash
-RELIPAY_URL=https://api.relipay.dev
-RELIPAY_SECRET=rp_live_…   # the Application secret key
+REKEY_URL=https://api.rekey.dev
+REKEY_SECRET=rp_live_…   # the Application secret key
 ```
 
 > **Never ship the secret key to the browser.** It authenticates as the whole
 > Application — anyone holding it can act on every end-user. Browser code must
-> use the Application's **public** key (`rp_pub_…`) via [`@rekey.dev/react`](../sdk-react)
-> or [`@rekey.dev/nextjs`](../sdk-nextjs) instead. The flow is always:
+> use the Application's **public** key (`rp_pub_…`) via [`@rekey.dev/react`](https://www.npmjs.com/package/@rekey.dev/react)
+> or [`@rekey.dev/nextjs`](https://www.npmjs.com/package/@rekey.dev/nextjs) instead. The flow is always:
 > browser → your backend → Rekey.
 
 ## Quickstart
@@ -38,8 +40,8 @@ import { Rekey } from '@rekey.dev/node';
 
 // Module-level singleton — don't construct one per request.
 const rekey = new Rekey({
-  apiUrl: process.env.RELIPAY_URL!,
-  secretKey: process.env.RELIPAY_SECRET!,
+  apiUrl: process.env.REKEY_URL!,
+  secretKey: process.env.REKEY_SECRET!,
 });
 
 // 1. Smoke test: verifies your credentials and returns the Application.
@@ -82,6 +84,7 @@ Everything hangs off namespaces on the client. `amount` fields are always intege
 | `signIn({ email, password })` | Authenticate. Returns a `SignInOutcome` — **branch on `mfaRequired`** before reading `accessToken`. |
 | `mfaVerify({ mfaChallengeToken, code })` | Exchange an MFA challenge for a real session. |
 | `getCurrentUser(accessToken)` | Resolve the end-user behind a token (+ `activeOrganizationId`). |
+| `updateCurrentUser(accessToken, { metadata })` | Let a signed-in user edit their own `metadata`. **Shallow-merged**, not replaced: omitted keys survive, a sent key replaces that top-level key wholesale, a key sent as `null` is deleted, and `metadata: null` clears it. Only `metadata` is writable — email/role/password are refused. |
 | `refresh(refreshToken)` | Rotate the token pair. Single-use — store the new refresh immediately. |
 | `signOut(refreshToken)` / `signOutEverywhere(accessToken)` | Revoke one / all refresh tokens. |
 | `requestPasswordReset({ email, resetUrl? })` / `resetPassword({ token, newPassword })` | Reset flow. **Branch on `emailSent`** — see [Email-sending methods](#email-sending-methods-branch-on-emailsent). |
@@ -122,9 +125,10 @@ if (!r.emailSent && r.resetToken) {
 | `getPlans()` | List the Application's active plans (public — render pricing pages). |
 | `getSubscription(accessToken)` | The user's active subscription, or `null`. |
 | `createCheckout(accessToken, { planSlug, successUrl, cancelUrl, couponCode?, organizationId? })` | Start hosted checkout; returns the redirect URL + a PENDING subscription. Activation happens via the provider webhook. |
+| `cancelSubscription(accessToken, { atPeriodEnd?, organizationId? })` | Cancel the user's subscription. Defaults to **at period end** — the row stays ACTIVE with `cancelAt` set until the provider webhook terminates it, so read `cancelAt`, not `status`. Pass `atPeriodEnd: false` to end it immediately. |
 | `validateCoupon(accessToken, { code, planSlug })` | Price-check a coupon without applying it. |
 | `getProviders(country?)` | The geo-routed list of enabled billing providers. |
-| `getEntitlements(accessToken, { organizationId? })` | Resolve feature flags + limits + live credit balance. **Gate your app on this.** Cache it with a ~5-min TTL / stale-while-revalidate and bust on checkout success — see ["Caching entitlements" in docs/billing.md](../../docs/billing.md#caching-entitlements). |
+| `getEntitlements(accessToken, { organizationId? })` | Resolve feature flags + limits + live credit balance. **Gate your app on this.** Cache it with a ~5-min TTL / stale-while-revalidate and bust on checkout success — see ["Caching entitlements" in docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md#caching-entitlements). |
 
 ### `rekey.organizations` (teams)
 | Method | Description |
@@ -182,11 +186,11 @@ Retry semantics: a repeat with the same key (timeout retry, queue redelivery, do
 ### Top-level exports
 | Export | Description |
 | --- | --- |
-| `verifyWebhookSignature({ header, payload, secret, toleranceSeconds? })` | Verify the HMAC on a webhook **Rekey sends to your app** (user-lifecycle + billing events) against the **raw body bytes** + the `X-Rekey-Signature` header. Not for Stripe/PayPal webhooks — those go to Rekey, never to you (see [docs/billing.md](../../docs/billing.md)). |
-| `verifyAccessToken(token, { jwksUrl \| jwks })` | Verify an end-user access token **offline** (no API round-trip) against your deployment's `GET /.well-known/jwks.json`. RS256 only — the Application must opt in via `authConfig.tokenAlg: "RS256"`; default HS256 tokens still need `auth.getCurrentUser`. Fetches + caches the JWKS for 5 minutes, checks `kid`/signature/`exp`/`typ`, and returns the claims (`sub`, `applicationId`, `oid?`, …). Check `claims.applicationId` against your own app id. See [docs/jwks.md](../../docs/jwks.md). |
+| `verifyWebhookSignature({ header, payload, secret, toleranceSeconds? })` | Verify the HMAC on a webhook **Rekey sends to your app** (user-lifecycle + billing events) against the **raw body bytes** + the `X-Rekey-Signature` header. Not for Stripe/PayPal webhooks — those go to Rekey, never to you (see [docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md)). |
+| `verifyAccessToken(token, { jwksUrl \| jwks })` | Verify an end-user access token **offline** (no API round-trip) against your deployment's `GET /.well-known/jwks.json`. RS256 only — the Application must opt in via `authConfig.tokenAlg: "RS256"`; default HS256 tokens still need `auth.getCurrentUser`. Fetches + caches the JWKS for 5 minutes, checks `kid`/signature/`exp`/`typ`, and returns the claims (`sub`, `applicationId`, `oid?`, …). Check `claims.applicationId` against your own app id. See [docs/jwks.md](https://github.com/rekey-dev/rekey/blob/main/docs/jwks.md). |
 | `WEBHOOK_EVENTS` / `KNOWN_WEBHOOK_EVENTS` / `isKnownWebhookEvent` | The full outbound-event registry — `{ name, description }` pairs (and just the names) for the 13 events Rekey can send: `user.created/updated/deleted`, `session.revoked`, `mfa.enabled/disabled`, `password.changed`, `email.verified`, `subscription.activated/canceled/past_due`, `payment.succeeded/failed`. Mirrors the API exactly; use it for event pickers / autocompleting an endpoint's `events` array. |
 | `WebhookEventType` / `WebhookEventEnvelope<TData>` | Types for the event-name union and the delivery envelope (`{ eventId, occurredAt, type, applicationId, data }`). Dedupe on `eventId` — retries reuse it. |
-| `RelipayError` | The canonical error class — `instanceof`-consistent across SDK packages. |
+| `RekeyError` | The canonical error class — `instanceof`-consistent across SDK packages. |
 
 ### Pagination
 
@@ -202,15 +206,15 @@ All list pagination is `{ limit, offset }`. Per-endpoint windows (server-enforce
 
 ## Errors
 
-Every failure is a `RelipayError` with `code`, `message`, and usually a concrete `fix` (plus optional `docs`, `statusCode`, `requestId`). **Read `error.fix` first.**
+Every failure is a `RekeyError` with `code`, `message`, and usually a concrete `fix` (plus optional `docs`, `statusCode`, `requestId`). **Read `error.fix` first.**
 
 ```ts
-import { RelipayError } from '@rekey.dev/node';
+import { RekeyError } from '@rekey.dev/node';
 
 try {
   await rekey.billing.createCheckout(accessToken, { /* … */ });
 } catch (err) {
-  if (err instanceof RelipayError) console.error(err.code, err.fix);
+  if (err instanceof RekeyError) console.error(err.code, err.fix);
   throw err;
 }
 ```
@@ -219,16 +223,16 @@ try {
 
 - **Entitlements are resolved server-side.** Never gate features from client state — always read `rekey.billing.getEntitlements(...)` on the server.
 - **`billingSubject: 'org'` needs an `organizationId`.** When the Application bills per-team (Panel → Application → Billing → Subject), an individual can't hold a subscription — pass `organizationId` (a team the user owns/admins) to `createCheckout`. Omitting it throws `BILLING_ORGANIZATION_REQUIRED`. Read the live config via `rekey.applications.me()` (`billingConfig.billingSubject`) and drive your UI from it.
-- **Checkout is async.** `createCheckout` returns a *PENDING* subscription + a redirect URL; the subscription flips to ACTIVE only when the **provider's webhook to Rekey** lands (Stripe/PayPal → Rekey — configured by the operator in the panel; your code never receives or verifies it). To react to activation, re-fetch `getSubscription` / `getEntitlements` when the user returns to your `successUrl`. `verifyWebhookSignature` is for the *other* direction — webhooks Rekey sends to your app (user-lifecycle events); see [docs/billing.md](../../docs/billing.md).
+- **Checkout is async.** `createCheckout` returns a *PENDING* subscription + a redirect URL; the subscription flips to ACTIVE only when the **provider's webhook to Rekey** lands (Stripe/PayPal → Rekey — configured by the operator in the panel; your code never receives or verifies it). To react to activation, re-fetch `getSubscription` / `getEntitlements` when the user returns to your `successUrl`. `verifyWebhookSignature` is for the *other* direction — webhooks Rekey sends to your app (user-lifecycle events); see [docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md).
 - **Switching active org returns new tokens.** `organizations.switch` / `clearActive` return a fresh `{ accessToken, refreshToken }` pair — persist both, or later reads use the stale org view.
 - **Pagination is `{ limit, offset }`.** Defaults to 50 everywhere; max is 100 for org lists and 200 for the credit ledger — see the [Pagination](#pagination) table.
-- **Retrying a timed-out mutation? Send an `Idempotency-Key` header.** High-value mutating routes (checkout, subscription cancel, credits consume, and the operator create/mint/issue/grant endpoints) accept the header (max 200 chars, scoped to your Application): a retry with the same key replays the first response (`Idempotency-Replayed: true`) instead of executing twice; the same key with a *different* body is a `409 IDEMPOTENCY_KEY_REUSED`. Keys live 24 h; 5xx responses are never cached, so retries after server errors really re-execute. The body-level `idempotencyKey` on `credits.consume` still works — it dedupes the ledger entry itself. See [docs/concepts.md → Idempotent requests](../../docs/concepts.md#idempotent-requests).
+- **Retrying a timed-out mutation? Send an `Idempotency-Key` header.** High-value mutating routes (checkout, subscription cancel, credits consume, and the operator create/mint/issue/grant endpoints) accept the header (max 200 chars, scoped to your Application): a retry with the same key replays the first response (`Idempotency-Replayed: true`) instead of executing twice; the same key with a *different* body is a `409 IDEMPOTENCY_KEY_REUSED`. Keys live 24 h; 5xx responses are never cached, so retries after server errors really re-execute. The body-level `idempotencyKey` on `credits.consume` still works — it dedupes the ledger entry itself. See [docs/concepts.md → Idempotent requests](https://github.com/rekey-dev/rekey/blob/main/docs/concepts.md#idempotent-requests).
 - **One client per Application.** Construct a module-level singleton; don't `new Rekey()` per request. Never log the secret key.
 
 ## Links
 
-- Docs: [/docs](https://relipay.dev/docs) · [SDK guide](https://relipay.dev/docs/sdk) · [API reference](https://relipay.dev/docs/api) · [agent prompt](https://relipay.dev/docs/prompt)
-- Examples: [`examples/qr-saas`](../../examples/qr-saas) (end-to-end server integration) · [`examples/nextjs-saas`](../../examples/nextjs-saas)
+- Docs: [/docs](https://rekey.dev/docs) · [SDK guide](https://rekey.dev/docs/sdk) · [API reference](https://rekey.dev/docs/api) · [agent prompt](https://rekey.dev/docs/prompt)
+- Examples: [`examples/qr-saas`](https://github.com/rekey-dev/rekey/blob/main/examples/qr-saas) (end-to-end server integration) · [`examples/nextjs-saas`](https://github.com/rekey-dev/rekey/blob/main/examples/nextjs-saas)
 
 ## License
 

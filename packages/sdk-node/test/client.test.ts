@@ -290,6 +290,44 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     expect(r.discountAmount).toBe(499);
   });
 
+  it('billing.cancelSubscription POSTs to /subscription/cancel with the user JWT', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        success: true,
+        data: { id: 'sub_1', status: 'ACTIVE', cancelAt: '2026-09-01T00:00:00.000Z' },
+      }),
+    );
+    const client = makeClient(fetchSpy);
+    const sub = await client.billing.cancelSubscription('user.access.token');
+    const [url, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
+    expect(url).toBe('https://api.example.com/api/v1/billing/subscription/cancel');
+    expect(init.method).toBe('POST');
+    // Empty body, not `{atPeriodEnd: undefined}` — the API's own default is
+    // cancel-at-period-end and the SDK must not talk it out of that.
+    expect(JSON.parse(init.body as string)).toEqual({});
+    expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBe(
+      'user.access.token',
+    );
+    // Provider-backed rows stay ACTIVE with cancelAt set until the webhook.
+    expect(sub.cancelAt).toBe('2026-09-01T00:00:00.000Z');
+  });
+
+  it('billing.cancelSubscription forwards atPeriodEnd:false and organizationId', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse(200, { success: true, data: { id: 'sub_1', status: 'CANCELED' } }),
+    );
+    const client = makeClient(fetchSpy);
+    await client.billing.cancelSubscription('user.access.token', {
+      atPeriodEnd: false,
+      organizationId: 'org_9',
+    });
+    const init = fetchSpy.mock.calls[0]![1] as RequestInit;
+    expect(JSON.parse(init.body as string)).toEqual({
+      atPeriodEnd: false,
+      organizationId: 'org_9',
+    });
+  });
+
   it('signOut POSTs the refresh token and returns a {signedOut:true} envelope', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(
       jsonResponse(200, { success: true, data: { signedOut: true } }),

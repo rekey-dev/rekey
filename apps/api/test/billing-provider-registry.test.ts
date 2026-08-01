@@ -65,7 +65,7 @@ describe('billing provider-module registry', () => {
     const webhookField = stripeModule.credentialSchema.find((f) => f.webhookRole);
     expect(webhookField?.key).toBe('webhookSecret');
     expect(webhookField?.webhookRole).toBe('secret');
-    // Prefix rules mirror upsertStripe's validation.
+    // Stripe key prefixes. `sk_` also drives live/test mode resolution.
     expect(stripeModule.credentialSchema.find((f) => f.key === 'apiKey')?.pattern?.prefix).toBe(
       'sk_',
     );
@@ -84,7 +84,7 @@ describe('billing provider-module registry', () => {
     const webhookField = razorpayModule.credentialSchema.find((f) => f.webhookRole);
     expect(webhookField?.key).toBe('webhookSecret');
     expect(webhookField?.webhookRole).toBe('secret');
-    // Prefix rule mirrors upsertRazorpay's validation.
+    // Razorpay key prefix. `rzp_` also drives live/test mode resolution.
     expect(razorpayModule.credentialSchema.find((f) => f.key === 'keyId')?.pattern?.prefix).toBe(
       'rzp_',
     );
@@ -119,6 +119,25 @@ describe('billing provider-module registry', () => {
 
   it('razorpay declares manual webhook registration (panel sends operators to the dashboard)', () => {
     expect(razorpayModule.capabilities.autoWebhookRegister).toBe(false);
+  });
+
+  it('every in-tree module states its discount support explicitly', () => {
+    // `capabilities.discounts` is optional in the type so a module written
+    // before it keeps compiling, and absent resolves to "cannot" — but an
+    // in-tree module has no excuse for staying silent. Forgetting it here
+    // would silently stop every coupon on that provider.
+    for (const name of registryNames) {
+      expect(getModule(name)!.capabilities.discounts).toBeDefined();
+    }
+  });
+
+  it('only stripe can discount a recurring subscription', () => {
+    // Not a preference — PayPal Subscriptions v1 and Razorpay Subscriptions
+    // have no per-checkout discount surface at all, so checkout refuses the
+    // coupon there rather than billing full price. See the module descriptors.
+    expect(stripeModule.capabilities.discounts).toEqual({ oneTime: true, recurring: true });
+    expect(paypalModule.capabilities.discounts).toEqual({ oneTime: true, recurring: false });
+    expect(razorpayModule.capabilities.discounts).toEqual({ oneTime: true, recurring: false });
   });
 });
 
@@ -215,15 +234,23 @@ describe('credentialSchema-driven validation (P3)', () => {
     }
   });
 
-  it('inferMode hooks reproduce the legacy per-provider inference', () => {
-    // Stripe: sk_live_ → live, anything else → test.
-    expect(stripeModule.inferMode?.({ apiKey: 'sk_live_x', webhookSecret: '' })).toBe('live');
-    expect(stripeModule.inferMode?.({ apiKey: 'sk_test_x', webhookSecret: '' })).toBe('test');
-    // Razorpay: rzp_live_ → live, anything else → test.
-    expect(razorpayModule.inferMode?.({ keyId: 'rzp_live_x' })).toBe('live');
-    expect(razorpayModule.inferMode?.({ keyId: 'rzp_test_x' })).toBe('test');
-    // PayPal has no shape distinction — no hook; the service defaults to 'test'.
-    expect(paypalModule.inferMode).toBeUndefined();
+  it('detectMode reads the mode out of the key, and answers null when it cannot', () => {
+    expect(stripeModule.detectMode?.({ apiKey: 'sk_live_x', webhookSecret: '' })).toBe('live');
+    expect(stripeModule.detectMode?.({ apiKey: 'sk_test_x', webhookSecret: '' })).toBe('test');
+    expect(razorpayModule.detectMode?.({ keyId: 'rzp_live_x' })).toBe('live');
+    expect(razorpayModule.detectMode?.({ keyId: 'rzp_test_x' })).toBe('test');
+
+    // The load-bearing half: an unrecognised shape is null, NOT 'test'.
+    // Returning 'test' here would record an unknown-but-live credential as
+    // sandbox, which is what the panel badge, the revenue stats and dunning
+    // all read — a wrong answer about real money, dressed as a safe default.
+    expect(stripeModule.detectMode?.({ apiKey: 'rk_live_restricted', webhookSecret: '' })).toBeNull();
+    expect(stripeModule.detectMode?.({ apiKey: '', webhookSecret: '' })).toBeNull();
+    expect(razorpayModule.detectMode?.({ keyId: 'something_else' })).toBeNull();
+
+    // PayPal credentials carry no marker at all, so the module declines to
+    // guess: no hook. See docs/billing.md for the residual gap this leaves.
+    expect(paypalModule.detectMode).toBeUndefined();
   });
 });
 
@@ -246,6 +273,7 @@ describe('discovery projection (P4)', () => {
       expect(Object.keys(d.capabilities).sort()).toEqual([
         'autoWebhookRegister',
         'captureStep',
+        'discounts',
         'oneTime',
         'onlineVerify',
         'periodRotationEvents',

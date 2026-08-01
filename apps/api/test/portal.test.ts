@@ -19,7 +19,13 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
-const PORTAL_ORIGIN = 'https://portal.relipay.dev';
+// Derived from the deployment's configured portal, NOT hardcoded: this used to
+// read 'https://portal.rekey.dev' because that was PUBLIC_PORTAL_URL's default.
+// When the default was removed (a Rekey-owned default pointed a self-hoster's
+// END USERS at our infrastructure) this test silently began asserting against
+// an origin the API no longer knew about, and failed 403 instead of 201.
+const PORTAL_ORIGIN = new URL(process.env.PUBLIC_PORTAL_URL ?? 'https://portal.test.invalid')
+  .origin;
 
 describe('Portal V2 API', () => {
   let app: FastifyInstance;
@@ -243,10 +249,12 @@ describe('Portal V2 API', () => {
     const { billingCredentialsService } = await import(
       '../src/modules/billing/credentials.service.js'
     );
-    await billingCredentialsService.upsertStripe(
+    await billingCredentialsService.upsertCredentials(
       applicationId,
-      { apiKey: 'sk_live_for_ci_only', webhookSecret: 'whsec_x' },
-      { enabled: true, mode: 'live' },
+      'stripe',
+      // DEVELOPMENT app (the default) — only test-mode credentials are allowed.
+      { apiKey: 'sk_test_for_ci_only', webhookSecret: 'whsec_x' },
+      { enabled: true, mode: 'test' },
     );
     const res = await app.inject({
       method: 'GET',

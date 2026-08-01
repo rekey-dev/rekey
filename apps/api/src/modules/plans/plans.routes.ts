@@ -55,7 +55,8 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
         security: [{ superAdminKey: [] }],
         summary: 'Create a plan',
         description:
-          'Creates a Plan locally, then registers it with the Application\'s billing provider. ' +
+          'Creates a Plan locally, then registers it with Stripe if the Application has Stripe ' +
+          'credentials stored. PayPal and Razorpay register the plan lazily at first checkout. ' +
           'Amount is in the smallest currency unit (cents/paise/sen — never a decimal float).',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         body: {

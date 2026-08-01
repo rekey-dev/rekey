@@ -1,18 +1,16 @@
 /**
- * PayPal billing provider — real implementation backed by `@paypal/paypal-server-sdk`.
+ * PayPal billing provider — real implementation, driven by plain `fetch`.
  *
- * Uses Subscriptions v1 (the SDK ships REST helpers; we drive plans via
- * direct fetch to the `/v1/billing/plans` and `/v1/billing/subscriptions`
- * endpoints because the SDK's billing surface in v2 is a thin REST wrapper
- * with awkward types).
+ * Uses Subscriptions v1 against `/v1/billing/plans` and
+ * `/v1/billing/subscriptions` directly. `@paypal/paypal-server-sdk` is still a
+ * declared dependency but is deliberately NOT imported here: its billing surface
+ * is a thin REST wrapper with awkward types, so it bought nothing over fetch.
  *
  * Mode (`test` → sandbox, `live` → production) selects the API base URL.
  *
  * Webhook verification is delegated to the operator's hosted webhook ID (we
  * call `/v1/notifications/verify-webhook-signature`) — see
  * modules/paypal/index.ts (the ProviderModule).
- *
- * Stub remains importable for tests (NODE_ENV=test, RELIPAY_BILLING_FORCE_STUB).
  */
 
 import { randomUUID, createHash } from 'node:crypto';
@@ -24,6 +22,7 @@ import type {
   CheckoutSessionResult,
   ProviderPlanRef,
 } from './types.js';
+import { discountUnsupported } from './discount.js';
 import type { PaypalCredentials, BillingMode } from '../credentials.service.js';
 
 const SANDBOX_BASE = 'https://api-m.sandbox.paypal.com';
@@ -127,6 +126,20 @@ export class RealPaypalProvider implements BillingProvider {
   }
 
   async createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
+    if (input.discount) {
+      // Subscriptions v1 has no per-subscription coupon. The only price
+      // control at create time is the inline `plan` override, which can just
+      // restate the pricing_scheme of a cycle the plan already declares — and
+      // ours declare a single REGULAR cycle with `total_cycles: 0`, so
+      // discounting "the first period" would discount every period forever
+      // against one recorded redemption. Refuse instead of billing a
+      // permanently wrong price; see the module descriptor for the full note.
+      //
+      // `checkout-discount.ts` normally refuses this before a provider is even
+      // built (`capabilities.discounts.recurring` is false). This is the
+      // backstop for any caller that reaches the class directly.
+      throw discountUnsupported(this.name, 'recurring');
+    }
     const token = await this.accessToken();
     // Lookup or create the PayPal plan id.
     const meta = (input.plan.metadata as Record<string, unknown> | null) ?? {};
@@ -183,11 +196,27 @@ export class RealPaypalProvider implements BillingProvider {
    * link; the buyer approves, then the order is captured (see `captureOneTime`,
    * driven by the `CHECKOUT.ORDER.APPROVED` webhook). `custom_id` carries
    * `${appId}:${euId}`; the local row is matched by order id.
+   *
+   * A coupon becomes a real discount line rather than a quietly smaller
+   * number: Orders v2 takes `amount.breakdown.discount`, and PayPal renders it
+   * on the approval page and the buyer's receipt. The breakdown must add up —
+   * `item_total - discount === amount.value` — or PayPal rejects the order.
    */
   async createOneTimeCheckout(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
     const token = await this.accessToken();
     const requestId = `REKEY-ORDER-${randomUUID()}`;
-    const valueMajor = (input.plan.amount / 100).toFixed(2);
+    const currency = input.plan.currency;
+    const discountMinor = input.discount?.amount ?? 0;
+    // Same two-decimal assumption the rest of this class makes (plans and
+    // subscriptions both do `amount / 100`).
+    const grossMajor = (input.plan.amount / 100).toFixed(2);
+    const discountMajor = (discountMinor / 100).toFixed(2);
+    const valueMajor = ((input.plan.amount - discountMinor) / 100).toFixed(2);
+    // PayPal has no free-form metadata on a purchase unit, so the code goes
+    // where the buyer and the operator will both see it.
+    const description = (
+      input.discount ? `${input.plan.name} (coupon ${input.discount.code})` : input.plan.name
+    ).slice(0, 127);
     const res = await fetch(`${this.base}/v2/checkout/orders`, {
       method: 'POST',
       headers: {
@@ -200,8 +229,26 @@ export class RealPaypalProvider implements BillingProvider {
         purchase_units: [
           {
             custom_id: `${input.application.id}:${input.endUser.id}`,
-            description: input.plan.name.slice(0, 127),
-            amount: { currency_code: input.plan.currency, value: valueMajor },
+            description,
+            amount: {
+              currency_code: currency,
+              value: valueMajor,
+              ...(input.discount && {
+                breakdown: {
+                  item_total: { currency_code: currency, value: grossMajor },
+                  discount: { currency_code: currency, value: discountMajor },
+                },
+              }),
+            },
+            ...(input.discount && {
+              items: [
+                {
+                  name: input.plan.name.slice(0, 127),
+                  quantity: '1',
+                  unit_amount: { currency_code: currency, value: grossMajor },
+                },
+              ],
+            }),
           },
         ],
         application_context: {
@@ -365,32 +412,5 @@ export async function verifyPaypalWebhook(args: {
     return json.verification_status === 'SUCCESS';
   } catch {
     return false;
-  }
-}
-
-/** Fallback used in tests / when creds are missing. Deterministic stub URLs. */
-export class PaypalStubProvider implements BillingProvider {
-  readonly name = 'paypal';
-  async ensurePlanRegistered(plan: Plan): Promise<ProviderPlanRef> {
-    return { providerPlanId: `P-stub-${plan.slug}` };
-  }
-  async createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
-    const sessionId = `BAID-stub-${randomUUID()}`;
-    const url = `${input.successUrl}${input.successUrl.includes('?') ? '&' : '?'}stub_provider=paypal&stub_session=${sessionId}`;
-    return { url, sessionId };
-  }
-  async createOneTimeCheckout(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
-    const sessionId = `ORDER-stub-${randomUUID()}`;
-    const url = `${input.successUrl}${input.successUrl.includes('?') ? '&' : '?'}stub_provider=paypal&stub_order=${sessionId}`;
-    return { url, sessionId };
-  }
-  async captureOneTime(_orderId: string): Promise<{ captured: boolean }> {
-    return { captured: true };
-  }
-  async registerWebhook(publicUrl: string): Promise<{ webhookId?: string }> {
-    return { webhookId: `WH-stub-${createHash('sha256').update(publicUrl).digest('hex').slice(0, 20)}` };
-  }
-  async cancelSubscription(_input: CancelSubscriptionInput): Promise<void> {
-    /* no-op */
   }
 }

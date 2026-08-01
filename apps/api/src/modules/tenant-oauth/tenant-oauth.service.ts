@@ -10,7 +10,7 @@
  * It reuses the provider implementations in `modules/oauth/providers/*` (token +
  * userinfo exchange) but wires its OWN credentials, redirect URI, and account
  * model (TenantUser, matched/created by verified email — see
- * `tenantAuthService.findOrCreateOAuthOperator` + `completeOAuth`).
+ * `tenantAuthService.findOrCreateOAuthOperator` + `completeSignIn`).
  *
  * CSRF: the panel owns the `state` (it sets a one-shot httpOnly cookie on start
  * and compares it on the callback). This module just round-trips `state` and

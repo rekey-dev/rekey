@@ -8,9 +8,10 @@ export const env = createEnv({
     HOST: z.string().default('0.0.0.0'),
 
     // Global rate limit (the `@fastify/rate-limit` plugin). Defaults to
-    // 100 requests / 60s per source IP. Raise these for high-volume
-    // server-to-server traffic (e.g. usage-event ingestion) — a customer's
-    // backend ingests from a single IP, so all its API calls share one budget.
+    // 100 requests / 60s, keyed by **API key** where one was presented and by
+    // source IP only on unauthenticated routes (see `keyGenerator` in app.ts).
+    // So a customer's backend gets its own budget rather than sharing an IP
+    // bucket. Raise these for high-volume ingestion (e.g. usage events).
     // Auth endpoints keep their own tighter per-route caps regardless.
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
@@ -29,7 +30,6 @@ export const env = createEnv({
     REDIS_URL: z.string().url().default('redis://localhost:6379'),
 
     JWT_SECRET: z.string().min(32),
-    SESSION_SECRET: z.string().length(64).optional(),
 
     // Optional RS256 private key (PKCS#8 or PKCS#1 PEM) for end-user access
     // tokens on Applications that opt in via `authConfig.tokenAlg = "RS256"`.
@@ -47,7 +47,7 @@ export const env = createEnv({
 
     // Public, internet-reachable base URL of THIS API — used to auto-register
     // provider webhook endpoints (Stripe/PayPal call back here). Must be the
-    // externally resolvable origin (e.g. https://api.relipay.com, or an ngrok
+    // externally resolvable origin (e.g. https://api.rekey.dev, or an ngrok
     // tunnel in dev), NOT the in-cluster API_URL. Falls back to API_URL when
     // unset; auto-registration refuses on a non-public (localhost) base.
     PUBLIC_WEBHOOK_BASE_URL: z.string().url().optional(),
@@ -56,13 +56,19 @@ export const env = createEnv({
     // origin is auto-allowed for publishable-key requests from portal-enabled
     // apps (so operators don't hand-add it to corsOrigins) and folded into the
     // CORS union. Default is the production host.
-    PUBLIC_PORTAL_URL: z.string().url().default('https://portal.relipay.dev'),
+    // No default: this is the origin end-users are sent to, and defaulting it
+    // to Rekey's hosted portal would point a self-hoster's customers at our
+    // infrastructure. Unset means portal links are simply not offered.
+    PUBLIC_PORTAL_URL: z.string().url().optional(),
 
     // Public base URL of the operator panel. The operator MCP OAuth authorize
     // endpoint redirects here (`/mcp-consent`) so the operator signs in through
     // the real panel login (session reuse, passkeys, MFA, magic-link) instead
     // of a bespoke password form on the API. Default is the production host.
-    PANEL_URL: z.string().url().default('https://panel.relipay.dev'),
+    // No default, same reasoning: this builds operator-facing links (the MCP
+    // consent screen, emailed workspace invites), so a Rekey default would send
+    // a self-hoster's operators to our panel.
+    PANEL_URL: z.string().url().optional(),
 
     // Bootstrap admin credential. Required to create the first Tenant and
     // Application via /api/v1/admin/*. Once the panel ships, normal tenant
@@ -71,13 +77,20 @@ export const env = createEnv({
     // Generate with: openssl rand -hex 32
     SUPER_ADMIN_KEY: z.string().min(32),
 
-    // Stripe API key. Optional — when unset, providers/index.ts falls back
-    // to the deterministic stub provider so dev / CI work without an account.
-    // NOTE: there is no deployment-wide STRIPE_WEBHOOK_SECRET. Stripe webhooks
-    // are per-Application only (BYO webhook secret on the Application, verified
-    // at POST /api/v1/billing/webhook/stripe/:appSlug) — a shared secret would
-    // be a cross-tenant trust boundary. See decisions.md (2026-05-27).
-    STRIPE_API_KEY: z.string().optional(),
+    // Optional network gate on /api/v1/admin/* — comma-separated IPs and/or
+    // CIDRs (v4 and v6). Unset (the default) means no network restriction, so
+    // upgrading changes nothing. When set, requests from anywhere else are
+    // refused BEFORE the key is examined, which is the point: SUPER_ADMIN_KEY
+    // is a single shared secret over the whole deployment, and a leak of it is
+    // otherwise game over. This is defence in depth, not a replacement for it.
+    // A malformed entry is a boot failure rather than a silently-open gate.
+    ADMIN_IP_ALLOWLIST: z.string().optional(),
+
+    // NOTE: there is deliberately no deployment-wide Stripe configuration —
+    // neither an API key nor a STRIPE_WEBHOOK_SECRET. Webhook secrets are
+    // per-Application (stored with that app's BYO credentials); a shared one
+    // would be a cross-tenant trust boundary. Signature verification is
+    // offline HMAC and needs no account key at all.
 
     // Default transactional email transport (Resend).
     //
@@ -91,6 +104,17 @@ export const env = createEnv({
     RESEND_DEFAULT_API_KEY: z.string().optional(),
     RESEND_DEFAULT_FROM: z.string().email().optional(),
     RESEND_DEFAULT_FROM_NAME: z.string().optional(),
+
+    // Deployment-wide fallback for the base URL transactional emails link
+    // back to (`{{appUrl}}`, and the base for reset/verify/magic-link URLs
+    // when the SDK caller doesn't pass one). LAST resort in the resolution
+    // chain — see lib/app-url.ts.
+    //
+    // Unset by default and deliberately so: a single-app self-host can set
+    // it once instead of configuring every Application, but leaving it empty
+    // changes nothing. When nothing in the chain resolves, emails render
+    // WITHOUT the call-to-action button rather than with a broken one.
+    DEFAULT_APP_URL: z.string().url().optional(),
 
     // Global kill-switch for the HIBP Pwned Passwords breach check. When
     // `true`, all per-Application `authConfig.passwordBreachCheckEnabled`
@@ -137,6 +161,43 @@ export const env = createEnv({
     // silently degrading to 'open'. The enforcement layer
     // (modules/tenant-auth/operator-signup-policy.ts) reads the live value.
     OPERATOR_SIGNUP_MODE: z.enum(['open', 'invite', 'closed']).default('open'),
+
+    // Ceilings stamped onto every workspace this deployment creates, as a JSON
+    // object matching `TenantLimitsSchema` (@rekey.dev/shared-types) — e.g.
+    // '{"maxProductionApps":1}'.
+    //
+    // Unset or empty (the default) means `Tenant.limits` stays NULL, which
+    // means unlimited — exactly what every workspace gets today, so a self-host
+    // upgrading past this key notices nothing.
+    //
+    // It exists because `Tenant.limits` is otherwise only ever written after
+    // the fact (PUT /api/v1/admin/tenants/:id/limits), so a workspace nobody
+    // ever visits that endpoint for is unbounded. This closes the gap at
+    // creation for the deployments that want a floor.
+    //
+    // This is a mechanism, not a pricing model: the API has no idea what a
+    // plan, price or tier is, and nothing here derives a number from a
+    // subscription. A deployment supplies the policy; the API applies it.
+    // Shape is validated at boot by `assertDefaultTenantLimitsValid`
+    // (lib/tenant-limits.ts) — a silently-ignored default would leave an
+    // operator believing new workspaces are capped when they are not.
+    DEFAULT_TENANT_LIMITS: z.string().optional(),
+
+    // Deploy-time control of WORKSPACE creation by an already-signed-in
+    // operator (POST /api/v1/tenant/workspace).
+    //   - 'open'     (default): anyone with a session can spin up another
+    //                workspace — today's behavior, preserved exactly.
+    //   - 'disabled': that endpoint refuses with WORKSPACE_CREATION_DISABLED.
+    //
+    // The pair to DEFAULT_TENANT_LIMITS: a per-workspace ceiling means nothing
+    // if any operator — including an invited team member — can mint themselves
+    // a fresh workspace with a fresh ceiling. Gates CREATION only; switching
+    // between, listing, renaming and leaving workspaces are untouched, so an
+    // operator already in several keeps working normally.
+    // Validated here so a typo fails the boot rather than silently degrading
+    // to 'open'; the enforcement layer (modules/tenant-workspaces) reads the
+    // live value.
+    WORKSPACE_CREATION: z.enum(['open', 'disabled']).default('open'),
 
     // Panel-side WebAuthn (operator passkeys) relying-party config.
     //
@@ -207,25 +268,15 @@ if (env.NODE_ENV === 'production' && !env.ENCRYPTION_KEY) {
 
 if (
   env.NODE_ENV === 'production' &&
-  process.env.RELIPAY_DEV_ECHO_AUTH_TOKENS === 'true'
+  process.env.REKEY_DEV_ECHO_AUTH_TOKENS === 'true'
 ) {
   // Echoing raw password-reset / magic-link tokens back in API responses is a
   // local-development convenience (it lets the panel show a working link with
   // no mail transport). In production it is an account-takeover handout: the
   // operator endpoints that return them are unauthenticated by necessity.
   throw new Error(
-    '[SECURITY] RELIPAY_DEV_ECHO_AUTH_TOKENS=true is not allowed in production — refusing to boot. ' +
+    '[SECURITY] REKEY_DEV_ECHO_AUTH_TOKENS=true is not allowed in production — refusing to boot. ' +
       'It returns raw password-reset and magic-link tokens in API responses. Unset it and configure email transport.',
-  );
-}
-
-if (env.NODE_ENV === 'production' && process.env.RELIPAY_BILLING_FORCE_STUB === 'true') {
-  // The stub forces fake billing providers AND (historically) bypassed webhook
-  // signature verification. Neither is ever legitimate in production: real
-  // checkouts would route to a no-op stub and webhooks would be forgeable.
-  throw new Error(
-    '[SECURITY] RELIPAY_BILLING_FORCE_STUB=true is not allowed in production — refusing to boot. ' +
-      'It forces stub billing providers and disables webhook signature checks. Unset it.',
   );
 }
 

@@ -301,7 +301,7 @@ apps/
         email-transport.ts   — Resend BYO + default pool
         webhook-signing.ts   — HMAC sign / verify + SSRF URL safety
         prisma.ts            — Prisma client singleton
-        error.ts             — RelipayError + Fastify error handler
+        error.ts             — RekeyError + Fastify error handler
       middleware/
         api-key-auth.ts      — Application secret key + requireScope
         user-session.ts      — eu_access JWT verification + applicationId guard
@@ -358,7 +358,6 @@ reachable Redis. Everything else is optional or has a default.
 | `REDIS_URL` | outbound-webhook delivery queue + rate-limit/lockout state | **required infra** — the API refuses to boot if Redis is unreachable; the URL itself defaults to `localhost` |
 | `ENCRYPTION_KEY` | AES-256-GCM for secrets at rest (64 hex chars) | **required in production** (boot fails without it) |
 | `CORS_ALLOWED_ORIGINS` | allowlist for browser callers | **required in production** (dev permits localhost) |
-| `STRIPE_API_KEY` | use real Stripe; a deterministic **stub provider** is used when unset | optional |
 | `RESEND_DEFAULT_API_KEY` + `RESEND_DEFAULT_FROM` | shared Resend pool; without it the API returns raw tokens to the caller | optional |
 | `WEBHOOK_ALLOW_PRIVATE_TARGETS` | opt out of the outbound-webhook SSRF guard for intra-VPC URLs | optional (self-host) |
 

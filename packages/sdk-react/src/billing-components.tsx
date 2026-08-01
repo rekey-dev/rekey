@@ -25,8 +25,10 @@
  * and `<PricingTable>` renders a `<ProviderPicker>` above the grid and threads the
  * chosen provider into each plan's checkout form. That path needs client state, so
  * it dispatches to an interactive client variant; WITHOUT `providers` the table
- * stays a Server Component exactly as before. The providers endpoint rejects
- * public keys — never fetch it from the browser; see `provider-picker.tsx`.
+ * stays a Server Component exactly as before. The providers endpoint sits at the
+ * same trust level as `/plans` (publishable key, no user token), so either side
+ * can fetch it — `billing.getProviders()` on the server, `listBillingProviders()`
+ * in the browser; see `provider-picker.tsx`.
  */
 
 import * as React from 'react';
@@ -115,8 +117,9 @@ export interface PricingTableProps {
   /** Label for the upgrade CTA. */
   ctaLabel?: string;
   /**
-   * The Application's enabled billing providers (server-fetched via
-   * `billing.getProviders()` — never from the browser). When present, a
+   * The Application's enabled billing providers — fetch with
+   * `billing.getProviders()` on the server, or `listBillingProviders()` in the
+   * browser (the endpoint accepts the publishable key). When present, a
    * `<ProviderPicker>` renders above the grid and the chosen provider is threaded
    * into every plan's checkout form (posted as `provider`). This makes the table
    * an interactive client component; omit it to keep the table a Server Component.

@@ -69,12 +69,6 @@ function nextActionAfter(openedAt: Date, remindersSent: number): Date {
  * logged as `no_transport` (the schedule still advances — the case is the
  * source of truth, not the inbox). The outcome is appended to
  * `metadata.reminders` for operator forensics.
- *
- * Test/live isolation (roadmap §7): a case inherits its subscription's mode.
- * TEST-mode cases run the exact same state machine (open → reminders →
- * exhaust) but never email the end-user — the reminder is recorded in
- * `metadata.reminders` with outcome `skipped_test_mode` instead, so sandbox
- * dunning rehearsals can't spam (or alarm) anyone.
  */
 async function sendReminder(dunningCaseId: string, attempt: number): Promise<void> {
   const dunningCase = await prisma.dunningCase.findUnique({
@@ -94,10 +88,7 @@ async function sendReminder(dunningCaseId: string, attempt: number): Promise<voi
     : null;
 
   let outcomeKind = 'skipped_no_recipient';
-  if (dunningCase.subscription.mode === 'TEST') {
-    // Log-only for sandbox data — the schedule still advances normally.
-    outcomeKind = 'skipped_test_mode';
-  } else if (endUser?.email) {
+  if (endUser?.email) {
     const outcome = await emailService.dispatch({
       application: dunningCase.application,
       eventKey: 'billing_payment_failed_reminder',

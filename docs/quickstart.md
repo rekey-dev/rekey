@@ -4,7 +4,7 @@ From a fresh clone to a working API + first Application + first key. Copy-pastea
 
 ## 0 — Prerequisites
 
-- Node 20+ LTS
+- Node 22+ LTS
 - pnpm 9+ (`corepack enable && corepack prepare pnpm@latest --activate`)
 - Docker (for Postgres + Redis)
 
@@ -72,7 +72,7 @@ The response includes a public key (`rp_pub_acme-prod_…`). That's safe to embe
 curl -sX POST http://localhost:3030/api/v1/admin/applications/$APP/api-keys \
   -H "Authorization: Bearer $ADMIN" \
   -H "Content-Type: application/json" \
-  -d '{"name": "Production server", "mode": "live"}' \
+  -d '{"name": "Production server"}' \
   | jq
 ```
 
@@ -86,7 +86,7 @@ import { Rekey } from '@rekey.dev/node';
 
 const rekey = new Rekey({
   apiUrl: 'http://localhost:3030',
-  secretKey: process.env.RELIPAY_SECRET!, // the rawKey from step 4
+  secretKey: process.env.REKEY_SECRET!, // the rawKey from step 4
 });
 
 // Smoke test — verifies your credentials and prints which Application you're connected to.
@@ -98,7 +98,7 @@ Or via curl:
 
 ```bash
 curl http://localhost:3030/api/v1/me/ \
-  -H "Authorization: Bearer $RELIPAY_SECRET"
+  -H "Authorization: Bearer $REKEY_SECRET"
 # → {"success":true,"data":{"id":"...","slug":"acme-prod","publicKey":"rp_pub_...","authConfig":{...},"billingConfig":{...}}}
 ```
 
@@ -125,17 +125,17 @@ Or via curl:
 
 ```bash
 RESPONSE=$(curl -sX POST http://localhost:3030/api/v1/auth/sign-up \
-  -H "Authorization: Bearer $RELIPAY_SECRET" \
+  -H "Authorization: Bearer $REKEY_SECRET" \
   -H "Content-Type: application/json" \
   -d '{"email":"alice@example.com","password":"correct-horse-battery-staple"}')
 ACCESS=$(echo "$RESPONSE" | jq -r .data.accessToken)
 
 curl http://localhost:3030/api/v1/users/me/ \
-  -H "Authorization: Bearer $RELIPAY_SECRET" \
+  -H "Authorization: Bearer $REKEY_SECRET" \
   -H "X-Rekey-User-Token: $ACCESS"
 ```
 
-See [docs/auth.md](auth.md) for the full auth model — access vs refresh tokens, the cross-application guard, replay protection, and how `Application.authConfig` shapes what's allowed. Billing methods land in the next slice.
+See [docs/auth.md](auth.md) for the full auth model — access vs refresh tokens, the cross-application guard, replay protection, and how `Application.authConfig` shapes what is allowed. For billing see [docs/billing.md](billing.md) — `rekey.billing.getPlans()`, `createCheckout()`, `getSubscription()` and `getEntitlements()` are all live.
 
 ## 7 — Password reset & magic links: branch on `emailSent`
 

@@ -1,8 +1,10 @@
 # `@rekey.dev/cli`
 
-`rekey` — command-line interface for **[Rekey](https://relipay.dev)** deployments. Designed for both human developers and AI agents.
+> **ReliPay is now Rekey.** This package was previously published as the equivalent `@relipay/*` package, which is deprecated. Env vars renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read — set `REKEY_*`). relipay.dev (the old domain) will redirect to rekey.dev after the domain migration.
 
-> **What is Rekey?** An auth + billing backend for your SaaS: sign-in (password, magic-link, passkeys, OAuth, MFA), subscriptions, usage, credits, licenses, and teams — behind one API, multi-tenant, provider-agnostic. Docs: **[relipay.dev/docs](https://relipay.dev/docs)**. This CLI manages a deployment — tenants, applications, API keys — from your terminal or an agent.
+`rekey` — command-line interface for **[Rekey](https://rekey.dev)** deployments. Designed for both human developers and AI agents.
+
+> **What is Rekey?** An auth + billing backend for your SaaS: sign-in (password, magic-link, passkeys, OAuth, MFA), subscriptions, usage, credits, licenses, and teams — behind one API, multi-tenant, provider-agnostic. Docs: **[rekey.dev/docs](https://rekey.dev/docs)**. This CLI manages a deployment — tenants, applications, API keys — from your terminal or an agent.
 
 > **For AI agents**: start at [AGENTS.md](./AGENTS.md).
 
@@ -17,7 +19,7 @@ pnpm add -D @rekey.dev/cli
 ## Use
 
 ```bash
-export RELIPAY_URL=http://localhost:3030
+export REKEY_URL=http://localhost:3030
 export SUPER_ADMIN_KEY=$(openssl rand -hex 32)  # whatever you set on the deployment
 
 rekey doctor
@@ -39,7 +41,7 @@ Phase 2.0 scaffold. Everything below in "Implemented" is real and wired to the A
 
 ### Implemented
 
-All commands talk to the **admin surface** (`/api/v1/admin/*`) and need `RELIPAY_URL` + `SUPER_ADMIN_KEY` (except `version`).
+All commands talk to the **admin surface** (`/api/v1/admin/*`) and need `REKEY_URL` + `SUPER_ADMIN_KEY` (except `version`).
 
 | Command | What it does |
 |---|---|
@@ -54,7 +56,7 @@ All commands talk to the **admin surface** (`/api/v1/admin/*`) and need `RELIPAY
 These are on the roadmap but **not shipped** — don't script against them yet:
 
 - `rekey coupons …` — coupon management (today: panel or admin API).
-- `rekey api-keys list/create/revoke` — key lifecycle (today: panel, admin API, or the [MCP server's](../mcp) `mint_api_key`).
+- `rekey api-keys list/create/revoke` — key lifecycle (today: panel, admin API, or the [MCP server's](https://www.npmjs.com/package/@rekey.dev/mcp) `mint_api_key`).
 - `rekey tunnel-webhooks` — the `stripe listen` equivalent for local webhook development.
 
 See [AGENTS.md](./AGENTS.md) for the full agent-facing contract.
@@ -65,5 +67,5 @@ See [AGENTS.md](./AGENTS.md) for the full agent-facing contract.
 
 Rekey is a self-hostable **auth + billing backend for SaaS** — one API for sign-in, subscriptions, usage, credits, licenses, and teams.
 
-- Website + docs: **[relipay.dev](https://relipay.dev)** · [relipay.dev/docs](https://relipay.dev/docs)
+- Website + docs: **[rekey.dev](https://rekey.dev)** · [rekey.dev/docs](https://rekey.dev/docs)
 - SDKs: [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node) (server) · [`@rekey.dev/react`](https://www.npmjs.com/package/@rekey.dev/react) (browser) · [`@rekey.dev/nextjs`](https://www.npmjs.com/package/@rekey.dev/nextjs) · [`@rekey.dev/mcp`](https://www.npmjs.com/package/@rekey.dev/mcp) (MCP server)

@@ -50,7 +50,7 @@ export class AdminClient {
       throw new AdminApiError({
         code: 'READ_REQUIRES_ADMIN_KEY',
         message: 'This read/introspection tool requires the global SUPER_ADMIN_KEY.',
-        fix: 'Set SUPER_ADMIN_KEY in the MCP server env to enable read tools. (The keys:mint write tool only needs RELIPAY_OPERATOR_TOKEN.)',
+        fix: 'Set SUPER_ADMIN_KEY in the MCP server env to enable read tools. (The keys:mint write tool only needs REKEY_OPERATOR_TOKEN.)',
         statusCode: 400,
       });
     }
@@ -69,7 +69,7 @@ export class AdminClient {
       throw new AdminApiError({
         code: 'OPERATOR_TOKEN_MISSING',
         message: 'This write tool requires an operator personal-access-token.',
-        fix: 'Set RELIPAY_OPERATOR_TOKEN (an rp_op_… token minted in the Panel, scoped to keys:mint) in the MCP server env.',
+        fix: 'Set REKEY_OPERATOR_TOKEN (an rp_op_… token minted in the Panel, scoped to keys:mint) in the MCP server env.',
         statusCode: 400,
       });
     }

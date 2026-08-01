@@ -25,7 +25,7 @@ Scope: **end-user access tokens only.** Refresh tokens (opaque, hash-at-rest), M
 `authConfig.tokenAlg` (`"HS256"` default, `"RS256"` opt-in):
 
 ```bash
-curl -X PATCH "$RELIPAY_URL/api/v1/tenant/applications/$APP_ID/auth-config" \
+curl -X PATCH "$REKEY_URL/api/v1/tenant/applications/$APP_ID/auth-config" \
   -H "Authorization: Bearer $OPERATOR_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "tokenAlg": "RS256" }'
@@ -42,7 +42,7 @@ const claims = await verifyAccessToken(token, {
   jwksUrl: 'https://rekey.example.com/.well-known/jwks.json',
 });
 // claims: { typ: 'eu_access', sub, applicationId, oid?, iat, exp }
-if (claims.applicationId !== MY_RELIPAY_APP_ID) throw new Error('wrong application');
+if (claims.applicationId !== MY_REKEY_APP_ID) throw new Error('wrong application');
 ```
 
 - The JWKS is fetched lazily and cached **5 minutes**; an unknown `kid` triggers one immediate refetch (covers fresh rotations). Pass `jwks: {...}` instead of `jwksUrl` to skip the network entirely.

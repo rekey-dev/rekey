@@ -11,8 +11,8 @@
  * import { Rekey } from "@rekey.dev/node";
  *
  * const rekey = new Rekey({
- *   apiUrl: process.env.RELIPAY_URL!,
- *   secretKey: process.env.RELIPAY_SECRET!,
+ *   apiUrl: process.env.REKEY_URL!,
+ *   secretKey: process.env.REKEY_SECRET!,
  * });
  *
  * const me = await rekey.applications.me();
@@ -116,7 +116,7 @@ export type {
 } from '@rekey.dev/shared-types';
 
 /** Configuration for a Rekey client instance. */
-export interface ReliPayConfig {
+export interface RekeyConfig {
   /** Base URL of the Rekey API. e.g. `https://rekey.example.com` */
   apiUrl: string;
   /** Secret key for one Application — `rp_live_…` or `rp_test_…`. Never ship to the browser. */
@@ -175,12 +175,12 @@ export class Rekey {
   /** MCP — validate Rekey-issued MCP tokens from your own MCP server. */
   public readonly mcp: McpClient;
 
-  constructor(config: ReliPayConfig) {
+  constructor(config: RekeyConfig) {
     if (!config.apiUrl) {
       throw new RekeyError({
         code: 'CONFIG_MISSING_API_URL',
         message: 'Rekey client requires `apiUrl`.',
-        fix: 'Pass `apiUrl: process.env.RELIPAY_URL` when constructing the client.',
+        fix: 'Pass `apiUrl: process.env.REKEY_URL` when constructing the client.',
       });
     }
     if (!config.secretKey || !config.secretKey.startsWith('rp_')) {
@@ -359,16 +359,20 @@ class AuthClient {
 
   /**
    * Create a new end-user in the calling Application via email + password.
-   * Returns the user and a JWT to use for subsequent per-user calls
-   * (e.g. `getCurrentUser(token)`).
+   * Returns the user plus an `accessToken` for subsequent per-user calls
+   * (e.g. `getCurrentUser(accessToken)`) and a `refreshToken` to renew it.
+   *
+   * Unless the Application turns `authConfig.sendVerificationEmailOnSignUp`
+   * off, Rekey also emails the verification link — best-effort, so it never
+   * fails the sign-up, and `sendVerificationEmail` re-sends on demand.
    *
    * @example
    * ```ts
-   * const { endUser, token } = await rekey.auth.signUp({
+   * const { endUser, accessToken, refreshToken } = await rekey.auth.signUp({
    *   email: 'alice@example.com',
    *   password: 'correct-horse-battery-staple',
    * });
-   * // store token in your session, return it to the browser, etc.
+   * // store both in your session — the access token expires in 15 minutes
    * ```
    *
    * @throws {RekeyError} `EMAIL_ALREADY_EXISTS` (409) if the email is taken in this Application.
@@ -393,6 +397,10 @@ class AuthClient {
    *
    * @throws {RekeyError} `INVALID_CREDENTIALS` (401) — single code on purpose.
    *   Don't try to distinguish wrong-email from wrong-password from the SDK side either.
+   * @throws {RekeyError} `EMAIL_NOT_VERIFIED` (403) when the Application sets
+   *   `authConfig.requireEmailVerification` and the user hasn't confirmed their
+   *   address. The password was correct — prompt for the emailed link (or call
+   *   `sendVerificationEmail`), not for the password again.
    */
   signIn(input: SignInRequest): Promise<SignInOutcomeDto> {
     return this.client.request('POST', '/api/v1/auth/sign-in', input);
@@ -538,6 +546,42 @@ class AuthClient {
   }
 
   /**
+   * Update the end-user behind a presented access token — their OWN record,
+   * and only ever their own: the token identifies the subject, so there is no
+   * user id to pass and no way to aim this at anyone else.
+   *
+   * `metadata` is **shallow-merged** over what is stored, not replaced. A key
+   * you leave out survives; a key you send replaces that top-level key
+   * wholesale (nested objects are not deep-merged); a key sent as `null` is
+   * deleted; `metadata: null` clears the whole object. So the read-edit-write
+   * cycle below cannot clobber a key some other device wrote in between.
+   *
+   * Only `metadata` is writable here. Email, role and password are not
+   * self-service and are refused rather than ignored.
+   *
+   * @example
+   * ```ts
+   * const user = await rekey.auth.updateCurrentUser(accessToken, {
+   *   metadata: { displayName: 'Alice', theme: 'dark', oldFlag: null },
+   * });
+   * // oldFlag is gone; every other stored key is untouched
+   * ```
+   *
+   * @throws {RekeyError} `END_USER_UPDATE_INVALID` (400) if the body names a field
+   *   other than `metadata`.
+   * @throws {RekeyError} `METADATA_TOO_LARGE` (400) if the merged metadata exceeds 16KB.
+   * @throws {RekeyError} `USER_TOKEN_INVALID` (401) if expired/forged/wrong-secret.
+   */
+  updateCurrentUser(
+    accessToken: string,
+    input: { metadata?: Record<string, unknown> | null },
+  ): Promise<EndUserDto & { activeOrganizationId: string | null }> {
+    return this.client.request('PATCH', '/api/v1/users/me/', input, {
+      'X-Rekey-User-Token': accessToken,
+    });
+  }
+
+  /**
    * Exchange a refresh token for a fresh {access, refresh} pair. The presented
    * refresh is revoked atomically — call this **once** and store the new
    * `refreshToken` from the response immediately.
@@ -564,14 +608,22 @@ class AuthClient {
   }
 
   /**
-   * Request a password-reset token for an email. Always succeeds — never
-   * tells you whether the email exists. **You must email the returned
-   * `resetToken` to the user**: Rekey does not send email.
+   * Request a password reset for an email. Always succeeds — never tells you
+   * whether the email exists.
+   *
+   * **Branch on the result.** When the Application has an email transport
+   * (BYO Resend/SMTP, or a deployment-wide `RESEND_DEFAULT_API_KEY`) Rekey sends
+   * the mail itself and `resetToken` is null. With no transport it falls back to
+   * the original contract and hands the raw token to you — a secret-key caller
+   * only — so you can deliver it with your own provider.
    *
    * @example
    * ```ts
-   * const { resetToken } = await rekey.auth.requestPasswordReset({ email });
-   * if (resetToken) await sendgrid.send({ to: email, subject: 'Reset', text: `link: ${url(resetToken)}` });
+   * const { emailSent, resetToken } = await rekey.auth.requestPasswordReset({ email });
+   * // Rekey sent it; nothing to do. Otherwise deliver the token yourself:
+   * if (!emailSent && resetToken) {
+   *   await sendgrid.send({ to: email, subject: 'Reset', text: `link: ${url(resetToken)}` });
+   * }
    * ```
    */
   requestPasswordReset(input: ForgotPasswordRequest): Promise<ForgotPasswordResultDto> {
@@ -1112,13 +1164,6 @@ class UsageClient {
 }
 
 /**
- * Prepaid credits — the "lead pack" / pay-as-you-go drawdown model. The
- * customer's backend grants credits (by selling a CREDIT-kind plan, which
- * grants automatically on payment) and draws them down per unit consumed.
- *
- * All calls are server-to-server (secret key) and scoped to an end-user id.
- */
-/**
  * A credit subject — pass `endUserId` for a personal balance, or
  * `organizationId` for a shared org pool (owner+beneficiary billing).
  */
@@ -1131,6 +1176,14 @@ function creditSubjectQuery(subject: CreditSubject): URLSearchParams {
   return p;
 }
 
+/**
+ * Prepaid credits — the "lead pack" / pay-as-you-go drawdown model. The
+ * customer's backend grants credits (by selling a CREDIT-kind plan, which
+ * grants automatically on payment) and draws them down per unit consumed.
+ *
+ * All calls are server-to-server (secret key) and scoped to a `CreditSubject` —
+ * an end-user's personal balance, or an organization's shared pool.
+ */
 class CreditsClient {
   constructor(private readonly client: Rekey) {}
 
@@ -1201,7 +1254,7 @@ export interface EntitlementsDto {
  *   const ok = verifyWebhookSignature({
  *     header: req.headers['x-rekey-signature'] as string,
  *     payload: req.rawBody!,
- *     secret: process.env.RELIPAY_WEBHOOK_SECRET!,
+ *     secret: process.env.REKEY_WEBHOOK_SECRET!,
  *   });
  *   if (!ok) return reply.status(401).send({ error: 'bad signature' });
  *   // safe to act on req.body
@@ -1581,5 +1634,46 @@ class BillingClient {
     return this.client.request('GET', `/api/v1/billing/entitlements${qs}`, undefined, {
       'X-Rekey-User-Token': accessToken,
     });
+  }
+
+  /**
+   * Cancel the calling end-user's current subscription.
+   *
+   * Defaults to cancelling **at period end** — the user keeps what they paid
+   * for until the period they already bought runs out. A provider-backed
+   * subscription therefore stays ACTIVE with `cancelAt` set, and the provider
+   * webhook is what eventually terminates it; read `cancelAt` on the returned
+   * row rather than expecting `status` to have flipped. Pass
+   * `{ atPeriodEnd: false }` to end it immediately, forfeiting the remainder.
+   *
+   * PENDING checkouts (and anything with no provider-side record) are
+   * cancelled locally straight away regardless of the flag — there is nothing
+   * at the provider to schedule against.
+   *
+   * Pass `organizationId` when the subscription belongs to a team; the caller
+   * must be its OWNER or ADMIN.
+   *
+   * @example
+   * ```ts
+   * const sub = await rekey.billing.cancelSubscription(userAccessToken);
+   * // Tell them what they actually get: access until the date they paid through.
+   * console.log(`Access until ${sub.cancelAt ?? sub.currentPeriodEnd}`);
+   * ```
+   */
+  cancelSubscription(
+    accessToken: string,
+    input?: { atPeriodEnd?: boolean; organizationId?: string },
+  ): Promise<SubscriptionDto> {
+    return this.client.request(
+      'POST',
+      '/api/v1/billing/subscription/cancel',
+      {
+        // Omitted rather than sent as undefined so the API applies its own
+        // default (at period end) instead of parsing a null-ish field.
+        ...(input?.atPeriodEnd !== undefined && { atPeriodEnd: input.atPeriodEnd }),
+        ...(input?.organizationId && { organizationId: input.organizationId }),
+      },
+      { 'X-Rekey-User-Token': accessToken },
+    );
   }
 }

@@ -1,7 +1,11 @@
 /**
  * API key service.
  *
- * Mints and lists Application-scoped secret keys (`rp_live_…` / `rp_test_…`).
+ * Mints and lists Application-scoped secret keys. The prefix follows the
+ * Application's `environment`: PRODUCTION apps mint `rp_live_…`, STAGING and
+ * DEVELOPMENT apps mint `rp_test_…`. That prefix is a label for humans, not a
+ * switch — every key has exactly the reach its Application has.
+ *
  * The raw key is returned **once at creation** and never again — only the
  * SHA-256 hash is stored.
  *
@@ -31,7 +35,6 @@ function redact(key: ApiKey): PublicApiKey {
 export interface CreateApiKeyInput {
   applicationId: string;
   name: string;
-  mode: 'live' | 'test';
   scopes: string[];
   expiresAt?: Date;
 }
@@ -79,7 +82,25 @@ export const apiKeysService = {
       });
     }
 
-    const { raw, hash, prefix } = generateSecretKey(input.mode);
+    // The prefix is derived from the Application, never from the caller: a
+    // PRODUCTION app mints rp_live_*, everything else rp_test_*. Letting the
+    // caller pick would put the two out of sync, and the prefix is the one
+    // thing a human reads before pasting a key somewhere.
+    const application = await prisma.application.findUnique({
+      where: { id: input.applicationId },
+      select: { environment: true },
+    });
+    if (!application) {
+      throw new RekeyError({
+        statusCode: 404,
+        code: 'APPLICATION_NOT_FOUND',
+        message: `Application "${input.applicationId}" not found.`,
+        fix: 'List applications with GET /api/v1/admin/applications.',
+      });
+    }
+    const { raw, hash, prefix } = generateSecretKey(
+      application.environment === 'PRODUCTION' ? 'live' : 'test',
+    );
 
     const apiKey = await prisma.apiKey.create({
       data: {

@@ -1,15 +1,21 @@
 import Script from 'next/script';
 
-// Google Analytics (gtag.js) for the operator panel. Mounts only in production
-// so dev navigation doesn't pollute the GA4 property. Defaults to the SAME
-// measurement ID as the marketing site so the marketing→panel funnel lands in
-// one property (enable cross-domain in the GA4 UI: Admin → Data Streams →
-// Configure your domains → add relipay.dev + panel.relipay.dev). Override
-// per-deploy via NEXT_PUBLIC_GA_MEASUREMENT_ID.
+// Google Analytics (gtag.js) for the operator panel. Mounts only in production,
+// and only when NEXT_PUBLIC_GA_MEASUREMENT_ID is set — there is deliberately no
+// default. It used to default to Rekey's own measurement id (shared with the
+// marketing site, for a marketing→panel funnel), which meant every self-hosted
+// panel reported its operators to us with nobody opting in.
+//
+// Rekey Cloud sets the id as a build arg in docker-compose.panel.yml; if you
+// want the cross-domain funnel, set the same id for both apps and enable it in
+// the GA4 UI (Admin → Data Streams → Configure your domains).
 //
 // Custom events fire via track() / <TrackFlag/> / <TrackView/>. SPA pageviews
 // come free from GA4 Enhanced Measurement (history-based) — no manual wiring.
-const GA_ID = process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID || 'G-BGRR27P2GD';
+// No default measurement id, deliberately. A hardcoded fallback meant every
+// self-hosted panel shipped its operators' behaviour to Rekey's own GA
+// property with nobody opting in. Unset => no analytics at all.
+const GA_ID = process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID;
 
 export function Analytics() {
   if (process.env.NODE_ENV !== 'production' || !GA_ID) return null;

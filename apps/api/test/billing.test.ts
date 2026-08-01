@@ -2,15 +2,18 @@
  * Billing scaffold — admin plan CRUD + public plan list + checkout flow +
  * subscription resolution.
  *
- * The Stripe provider is the deterministic stub in
- * `modules/billing/providers/stripe.ts` — same input always produces the
- * same provider id and URL. That's enough to exercise the full wiring
- * without an actual Stripe account.
+ * No Stripe account is dialled. `test/setup.ts` mocks
+ * `getProviderForApplication` with the deterministic fakes in
+ * `test/fakes/billing-providers.ts` (same input always produces the same
+ * provider id and URL), which is enough to exercise the full wiring. The
+ * shipped `src/modules/billing/providers/` factory has no stub to fall back
+ * on — it refuses with `BILLING_CREDENTIALS_NOT_CONFIGURED`.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { configureSandboxStripe } from './fakes/billing-credentials.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -56,6 +59,7 @@ describe('billing scaffold', () => {
         payload: { name: 'k', mode: 'live' },
       })
       .then((r) => r.json().data as { rawKey: string });
+    await configureSandboxStripe(application.id);
     return { applicationId: application.id, liveKey: key.rawKey };
   }
 

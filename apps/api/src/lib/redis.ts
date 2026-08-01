@@ -6,9 +6,14 @@
  *
  * Returns `null` under NODE_ENV=test — callers fall back to in-memory so the
  * suite needs no external Redis. In dev/prod it connects to `REDIS_URL`,
- * configured to fail FAST and never queue: every caller treats a Redis error
- * as "skip" (fail-open), so a Redis outage degrades brute-force protection to
- * off rather than taking auth down.
+ * configured to fail FAST and never queue. Each consumer then picks its own
+ * posture rather than inheriting one from here:
+ *   - the global rate limiter fails OPEN (`app.ts`, `skipOnError: true`) — an
+ *     outage must not take the whole API down;
+ *   - the auth tier fails CLOSED (`lib/rate-limit.ts`, `skipOnError: false`) —
+ *     an outage must not silently waive the caps on credential endpoints;
+ *   - the outbound-webhook queue refuses to boot without Redis
+ *     (`assertRedisReachable` in `modules/webhooks/webhook.queue.ts`).
  */
 
 import { Redis } from 'ioredis';

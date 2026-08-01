@@ -8,8 +8,8 @@
  *
  * Both accept the **publishable OR secret** key plus the end-user JWT, so a
  * browser-only portal can manage teams and accept invitations with no secret
- * key. The JWT is the authorizer: it is bound to the Application and carries
- * the test/live mode check.
+ * key. The JWT is the authorizer: it names the single end-user the route may act
+ * on, and its `applicationId` claim must match the presented key's Application.
  *
  *   POST   /api/v1/users/me/organizations                            create
  *   GET    /api/v1/users/me/organizations                            list-mine

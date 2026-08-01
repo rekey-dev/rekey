@@ -8,7 +8,9 @@
  *   - sign-up creates a Tenant + an OWNER membership atomically. The first
  *     person to sign up owns their workspace; team-mates join via invite.
  *   - sign-in returns the user's full memberships list. The caller picks an
- *     active workspace (defaults to most-recently-created) and we mint
+ *     active workspace (defaults to the OLDEST — `loadMemberships` orders
+ *     `createdAt: 'asc'` and callers take `[0]`, so it is the workspace you
+ *     joined first, which for most operators is the one they created) and we mint
  *     tokens scoped to that tenant.
  *   - refresh / sign-out / password-reset / change-password mirror the
  *     end-user surface 1:1; the only change is which JWT shape we issue.
@@ -18,6 +20,7 @@ import type { Tenant, TenantRole, TenantUser } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { hashPassword, verifyPassword } from '../../lib/passwords.js';
+import { resolveNewTenantLimits } from '../../lib/tenant-limits.js';
 import { assertNotLocked, registerFailure, clearFailures, LOGIN_POLICY } from '../../lib/brute-force.js';
 import {
   issueTenantAccessToken,
@@ -65,7 +68,7 @@ function echoAuthTokensInDev(): boolean {
   // end-to-end (request -> consume the token -> assert the session), so they
   // need the raw value. NODE_ENV='test' is set by vitest, never by a server.
   if (env.NODE_ENV === 'test') return true;
-  return env.NODE_ENV === 'development' && process.env.RELIPAY_DEV_ECHO_AUTH_TOKENS === 'true';
+  return env.NODE_ENV === 'development' && process.env.REKEY_DEV_ECHO_AUTH_TOKENS === 'true';
 }
 import { resolveSignupInvite, consumeSignupInvite } from './operator-signup-policy.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
@@ -226,7 +229,14 @@ export const tenantAuthService = {
     const passwordHash = await hashPassword(input.password);
     const result = await prisma.$transaction(async (tx) => {
       const tenant = await tx.tenant.create({
-        data: { name: input.workspaceName, ownerEmail: input.email.toLowerCase() },
+        // `resolveNewTenantLimits()` stamps the deployment's
+        // DEFAULT_TENANT_LIMITS on the workspace. Unset = no `limits` key at
+        // all = unlimited, i.e. what self-serve sign-up has always produced.
+        data: {
+          name: input.workspaceName,
+          ownerEmail: input.email.toLowerCase(),
+          ...resolveNewTenantLimits(),
+        },
       });
       const user = await tx.tenantUser.create({
         data: {
@@ -291,7 +301,13 @@ export const tenantAuthService = {
     const invite = await resolveSignupInvite(input.inviteKey);
     const created = await prisma.$transaction(async (tx) => {
       const tenant = await tx.tenant.create({
-        data: { name: deriveWorkspaceName(input.name, email), ownerEmail: email },
+        // Same deployment default as the password path — an operator must not
+        // land in a wider workspace by choosing the OAuth button.
+        data: {
+          name: deriveWorkspaceName(input.name, email),
+          ownerEmail: email,
+          ...resolveNewTenantLimits(),
+        },
       });
       const user = await tx.tenantUser.create({
         data: {
@@ -355,9 +371,12 @@ export const tenantAuthService = {
 
   /**
    * Request a magic-link token. **Enumeration-safe**: always returns the same
-   * shape, never revealing whether the email maps to an operator. Rekey
-   * doesn't send operator email — the raw `token` is returned for the caller
-   * (panel) to forward, exactly like `requestPasswordReset`.
+   * shape, never revealing whether the email maps to an operator.
+   *
+   * We email the link ourselves via the deployment-wide transport and return
+   * `token: null`. The raw token is echoed back only under the dev flag
+   * (`REKEY_DEV_ECHO_AUTH_TOKENS`, refused at boot in production) or when no
+   * transport is configured — same shape as `requestPasswordReset`.
    */
   async requestMagicLink(input: { email: string }): Promise<{ delivered: boolean; token: string | null }> {
     const user = await prisma.tenantUser.findUnique({ where: { email: input.email.toLowerCase() } });

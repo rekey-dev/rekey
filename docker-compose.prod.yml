@@ -1,7 +1,7 @@
-# ReliPay — production stack for Dokploy (Traefik-routed).
+# Rekey — production stack for Dokploy (Traefik-routed).
 #
-# Deploys: postgres + redis (PRIVATE network) + api (api.relipay.dev) + panel
-# (panel.relipay.dev) + portal (portal.relipay.dev) + admin (admin.relipay.dev)
+# Deploys: postgres + redis (PRIVATE network) + api (api.rekey.dev) + panel
+# (panel.rekey.dev) + portal (portal.rekey.dev)
 #
 # Dokploy notes:
 #   - Set this as the Compose file of a Dokploy "Compose" service.
@@ -9,7 +9,7 @@
 #   - Service names (api/panel/portal) MUST match the Dokploy domain
 #     attachments — don't rename them.
 #   - NETWORK ISOLATION (important): Postgres + Redis live on a PRIVATE
-#     `relipay-internal` network and are NOT on the shared `dokploy-network`.
+#     `rekey-internal` network and are NOT on the shared `dokploy-network`.
 #     On the shared network a service name is a DNS alias, so a `postgres`/
 #     `redis` there collides with other Dokploy apps' DBs (it once shadowed a
 #     sibling app's `postgres`, failing its auth). Keeping the DB/cache private
@@ -27,17 +27,17 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
     environment:
-      POSTGRES_USER: relipay
+      POSTGRES_USER: rekey
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: relipay
+      POSTGRES_DB: rekey
     volumes:
-      - relipay_postgres:/var/lib/postgresql/data
+      - rekey_postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U relipay -d relipay"]
+      test: ["CMD-SHELL", "pg_isready -U rekey -d rekey"]
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [relipay-internal]
+    networks: [rekey-internal]
 
   redis:
     image: redis:7-alpine
@@ -71,19 +71,19 @@ services:
       # `openssl rand -hex 24` is; a password containing @ : / or # would not be.
       REDISCLI_AUTH: ${REDIS_PASSWORD}
     volumes:
-      - relipay_redis:/data
+      - rekey_redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [relipay-internal]
+    networks: [rekey-internal]
 
   api:
     build:
       context: .
       target: api-runtime
-    image: relipay-api:prod
+    image: rekey-api:prod
     restart: unless-stopped
     logging:
       driver: json-file
@@ -102,38 +102,58 @@ services:
       start_period: 40s
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgresql://relipay:${POSTGRES_PASSWORD}@postgres:5432/relipay?schema=public
+      DATABASE_URL: postgresql://rekey:${POSTGRES_PASSWORD}@postgres:5432/rekey?schema=public
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       JWT_SECRET: ${JWT_SECRET}
-      SESSION_SECRET: ${SESSION_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       SUPER_ADMIN_KEY: ${SUPER_ADMIN_KEY}
-      API_URL: https://api.relipay.dev
+      # Network gate on the super-admin surface, checked BEFORE the key
+      # comparison (middleware/admin-auth.ts). Comma-separated IPs/CIDRs; unset
+      # means no network restriction, which is how it shipped — the variable
+      # existed and was documented but was in no compose file, so setting it in
+      # Dokploy did nothing and the gate was inert on every deployment. Compose
+      # `environment:` blocks are allowlists; a variable absent here never
+      # reaches the container.
+      ADMIN_IP_ALLOWLIST: ${ADMIN_IP_ALLOWLIST:-}
+      API_URL: https://api.rekey.dev
       # Public base used to auto-register provider webhooks (Stripe/PayPal).
-      PUBLIC_WEBHOOK_BASE_URL: https://api.relipay.dev
+      PUBLIC_WEBHOOK_BASE_URL: https://api.rekey.dev
       # Hosted customer portal origin — auto-allowed for publishable-key calls
       # from portal-enabled apps (CORS + per-app origin check).
-      PUBLIC_PORTAL_URL: https://portal.relipay.dev
-      CORS_ALLOWED_ORIGINS: https://panel.relipay.dev,https://relipay.dev,https://admin.relipay.dev,https://portal.relipay.dev
+      PUBLIC_PORTAL_URL: https://portal.rekey.dev
+      CORS_ALLOWED_ORIGINS: https://panel.rekey.dev,https://rekey.dev,https://portal.rekey.dev
       # Default transactional email via Resend. Only the API key is a secret
       # (set in the Dokploy environment); sender is fixed.
       RESEND_DEFAULT_API_KEY: ${RESEND_DEFAULT_API_KEY}
-      RESEND_DEFAULT_FROM: support@relipay.dev
-      RESEND_DEFAULT_FROM_NAME: ReliPay
+      RESEND_DEFAULT_FROM: support@rekey.dev
+      RESEND_DEFAULT_FROM_NAME: Rekey
+      # Last-resort base URL for links in transactional emails, after the SDK
+      # call, the per-Application setting, and the app's first redirect URL.
+      # Empty = unset, and unset means emails omit the button rather than link
+      # somewhere broken. Named here because a compose `environment:` block is
+      # an allowlist — a variable missing from it never reaches the container.
+      DEFAULT_APP_URL: ${DEFAULT_APP_URL:-}
     labels:
       - traefik.enable=true
-      - traefik.http.routers.relipay-api.rule=Host(`api.relipay.dev`)
-      - traefik.http.routers.relipay-api.entrypoints=websecure
-      - traefik.http.routers.relipay-api.tls.certresolver=letsencrypt
-      - traefik.http.services.relipay-api.loadbalancer.server.port=3030
-    # dokploy-network: reachable by Traefik. relipay-internal: reach postgres/redis.
-    networks: [relipay-internal, dokploy-network]
+      - traefik.http.routers.rekey-api.rule=Host(`api.rekey.dev`)
+      - traefik.http.routers.rekey-api.entrypoints=websecure
+      - traefik.http.routers.rekey-api.tls.certresolver=letsencrypt
+      - traefik.http.services.rekey-api.loadbalancer.server.port=3030
+    # dokploy-network: reachable by Traefik. rekey-internal: reach postgres/redis.
+    networks: [rekey-internal, dokploy-network]
 
   panel:
     build:
       context: .
       target: panel-runtime
-    image: relipay-panel:prod
+      args:
+        # Compiled into the client bundle — the runtime `environment:` below
+        # cannot change these after the build.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.rekey.dev}
+        NEXT_PUBLIC_APP_URL: ${PANEL_URL:-https://panel.rekey.dev}
+        NEXT_PUBLIC_PORTAL_URL: ${NEXT_PUBLIC_PORTAL_URL:-}
+        NEXT_PUBLIC_GA_MEASUREMENT_ID: ${NEXT_PUBLIC_GA_MEASUREMENT_ID:-}
+    image: rekey-panel:prod
     restart: unless-stopped
     logging:
       driver: json-file
@@ -143,17 +163,17 @@ services:
     environment:
       NODE_ENV: production
       # Server-side panel → API calls stay on the private network.
-      RELIPAY_URL: http://api:3030
-      PANEL_URL: https://panel.relipay.dev
+      REKEY_URL: http://api:3030
+      PANEL_URL: https://panel.rekey.dev
     labels:
       - traefik.enable=true
-      - traefik.http.routers.relipay-panel.rule=Host(`panel.relipay.dev`)
-      - traefik.http.routers.relipay-panel.entrypoints=websecure
-      - traefik.http.routers.relipay-panel.tls.certresolver=letsencrypt
-      - traefik.http.services.relipay-panel.loadbalancer.server.port=3031
-    networks: [relipay-internal, dokploy-network]
+      - traefik.http.routers.rekey-panel.rule=Host(`panel.rekey.dev`)
+      - traefik.http.routers.rekey-panel.entrypoints=websecure
+      - traefik.http.routers.rekey-panel.tls.certresolver=letsencrypt
+      - traefik.http.services.rekey-panel.loadbalancer.server.port=3031
+    networks: [rekey-internal, dokploy-network]
 
-  # Hosted multi-app customer portal (Portal V2) at portal.relipay.dev/<slug>.
+  # Hosted multi-app customer portal (Portal V2) at portal.rekey.dev/<slug>.
   # ONE deployment serves every opted-in Application — no per-app deploy, no
   # secret key. Operators enable it per Application in Panel → Application →
   # Billing → Portal. The portal identifies each app by its publishable key
@@ -163,7 +183,7 @@ services:
     build:
       context: .
       target: portal-runtime
-    image: relipay-portal:prod
+    image: rekey-portal:prod
     restart: unless-stopped
     logging:
       driver: json-file
@@ -173,53 +193,30 @@ services:
     environment:
       NODE_ENV: production
       # Server-side portal → API calls stay on the private network.
-      RELIPAY_URL: http://api:3030
+      REKEY_URL: http://api:3030
       # Public URL of this portal — checkout success/cancel return links.
-      PORTAL_BASE_URL: https://portal.relipay.dev
+      PORTAL_BASE_URL: https://portal.rekey.dev
     labels:
       - traefik.enable=true
-      - traefik.http.routers.relipay-portal.rule=Host(`portal.relipay.dev`)
-      - traefik.http.routers.relipay-portal.entrypoints=websecure
-      - traefik.http.routers.relipay-portal.tls.certresolver=letsencrypt
-      - traefik.http.services.relipay-portal.loadbalancer.server.port=3050
-    networks: [relipay-internal, dokploy-network]
+      - traefik.http.routers.rekey-portal.rule=Host(`portal.rekey.dev`)
+      - traefik.http.routers.rekey-portal.entrypoints=websecure
+      - traefik.http.routers.rekey-portal.tls.certresolver=letsencrypt
+      - traefik.http.services.rekey-portal.loadbalancer.server.port=3050
+    networks: [rekey-internal, dokploy-network]
 
-  admin:
-    build:
-      context: .
-      target: admin-runtime
-    image: relipay-admin:prod
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "3" }
-    depends_on:
-      - api
-    environment:
-      NODE_ENV: production
-      # Server-side admin → API calls stay on the private network.
-      RELIPAY_URL: http://api:3030
-      # The admin app verifies the operator-pasted key against this on login
-      # AND uses it as the Bearer token on every API call. Same value as the
-      # api service — set once in the Dokploy environment.
-      SUPER_ADMIN_KEY: ${SUPER_ADMIN_KEY}
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.relipay-admin.rule=Host(`admin.relipay.dev`)
-      - traefik.http.routers.relipay-admin.entrypoints=websecure
-      - traefik.http.routers.relipay-admin.tls.certresolver=letsencrypt
-      - traefik.http.services.relipay-admin.loadbalancer.server.port=3034
-    networks: [relipay-internal, dokploy-network]
+  # NOTE: the super-admin UI (apps/admin) is deliberately NOT deployed.
+  # It runs as a local app against the production API when needed
+  # (see apps/admin/README.md). Decision logged in decisions.md 2026-07-28.
 
 
 volumes:
-  relipay_postgres:
-  relipay_redis:
+  rekey_postgres:
+  rekey_redis:
 
 networks:
   dokploy-network:
     external: true
   # Private to this stack — keeps Postgres/Redis (and api↔panel traffic) off the
   # shared network so generic names can't collide with other Dokploy apps.
-  relipay-internal:
+  rekey-internal:
     driver: bridge

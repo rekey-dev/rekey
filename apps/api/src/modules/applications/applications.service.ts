@@ -15,6 +15,7 @@
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { generatePublicKey } from '../../lib/keys.js';
+import { assertProductionAppQuota } from '../../lib/tenant-limits.js';
 import {
   AuthConfigSchema,
   BillingConfigSchema,
@@ -22,7 +23,7 @@ import {
   type BillingConfig,
   type BillingProvider,
 } from '@rekey.dev/shared-types';
-import { Prisma, type Application } from '@prisma/client';
+import { Prisma, type AppEnvironment, type Application } from '@prisma/client';
 
 export interface CreateApplicationInput {
   tenantId: string;
@@ -42,6 +43,17 @@ export interface CreateApplicationInput {
     organizationsEnabled?: boolean | undefined;
   };
   billingProvider?: BillingProvider | undefined;
+  /**
+   * Which environment this Application is. Defaults to DEVELOPMENT — going
+   * live is a deliberate act. It does not restrict which billing credentials
+   * the Application may hold; it drives the API-key prefix and is the unit
+   * deployments are billed and quota'd by.
+   *
+   * **Set here or never.** There is no update path for this field, by design:
+   * see the note on `AppEnvironment` in schema.prisma. To "go live", create a
+   * PRODUCTION Application.
+   */
+  environment?: AppEnvironment | undefined;
   /**
    * Opt billing ON at create time. Defaults OFF — new apps start with the
    * billing surface gated (see `requireBillingEnabled`). Operators flip it on
@@ -63,8 +75,20 @@ const DEFAULT_AUTH_CONFIG: AuthConfig = {
   mfa: 'optional',
   // HIBP breach check is on by default — operators can opt out per app.
   passwordBreachCheckEnabled: true,
+  // New accounts get their confirmation link automatically; enforcing that
+  // they click it is a separate, opt-in decision.
+  sendVerificationEmailOnSignUp: true,
+  requireEmailVerification: false,
   // MCP server + OAuth AS off by default — operators opt in per app.
   mcpEnabled: false,
+  // OpenID Provider off by default. Turning an Application into an IdP puts a
+  // public authentication surface on the internet; that is an explicit choice.
+  oidcEnabled: false,
+  // RFC 7591 open registration ON, because MCP clients self-register as their
+  // first act and nothing else can create an OAuth client yet. It is the
+  // control an operator hardens with once their relying parties exist, not a
+  // default that would brick both surfaces the day they enable them.
+  dynamicClientRegistration: true,
   // HS256 (per-app derived key) by default; RS256/JWKS is per-app opt-in.
   tokenAlg: 'HS256',
 };
@@ -155,12 +179,21 @@ export const applicationsService = {
       // Wrap in a transaction so the default `user` role gets seeded
       // alongside the Application — the public sign-up flow needs it.
       return await prisma.$transaction(async (tx) => {
+        // Only production applications consume quota. Checked inside the
+        // transaction so the count and the create read the same snapshot, and
+        // only when the caller asked for PRODUCTION — the column defaults to
+        // DEVELOPMENT, so an omitted `environment` is never billable and must
+        // not be blocked.
+        if (input.environment === 'PRODUCTION') {
+          await assertProductionAppQuota(input.tenantId, tx);
+        }
         const app = await tx.application.create({
           data: {
             tenantId: input.tenantId,
             name: input.name,
             slug: input.slug,
             publicKey: generatePublicKey(input.slug),
+            ...(input.environment !== undefined && { environment: input.environment }),
             // Cast — Prisma's InputJsonValue is structurally narrower than our
             // domain types (it disallows `unknown`-typed values in records),
             // but at runtime any JSON-serialisable object is accepted.
@@ -205,12 +238,31 @@ export const applicationsService = {
       methods?: string[] | undefined;
       passwordMinLength?: number | undefined;
       redirectUrls?: string[] | undefined;
+      /**
+       * Base URL emails link back to. `null` (or `''`) CLEARS it — that is a
+       * meaningful operation, not a no-op: with no app URL the templates drop
+       * their call-to-action button rather than render a dead one.
+       */
+      appUrl?: string | null | undefined;
       organizationsEnabled?: boolean | undefined;
       signupEnabled?: boolean | undefined;
       signupMode?: 'public' | 'secret_only' | 'invite_only' | undefined;
       mfa?: 'off' | 'optional' | 'required' | undefined;
       mcpEnabled?: boolean | undefined;
+      /**
+       * Turn the Application into an OpenID Provider — discovery document,
+       * `id_token`, `/oauth/userinfo`. Independent of `mcpEnabled`; see
+       * docs/oidc-provider.md.
+       */
+      oidcEnabled?: boolean | undefined;
       passwordBreachCheckEnabled?: boolean | undefined;
+      sendVerificationEmailOnSignUp?: boolean | undefined;
+      /**
+       * Refuse password sign-in for users with `emailVerified: false`. Turning
+       * it on takes effect immediately for existing accounts — anyone who
+       * never confirmed their address is locked out until they do.
+       */
+      requireEmailVerification?: boolean | undefined;
       /**
        * Access-token signature alg. `RS256` makes NEW access tokens
        * offline-verifiable against /.well-known/jwks.json; outstanding HS256
@@ -233,7 +285,15 @@ export const applicationsService = {
       cleaned.signupMode = cleaned.signupEnabled === false ? 'invite_only' : 'public';
     }
     delete cleaned.signupEnabled;
-    const next = AuthConfigSchema.parse({ ...current, ...cleaned });
+    // `appUrl` is the one optional field with no default, so clearing it has
+    // to be expressible. `null`/`''` means "unset" — drop the key from the
+    // merged object rather than feeding a non-URL to the schema, which would
+    // reject it and leave the operator unable to remove a stale URL.
+    const clearAppUrl = cleaned.appUrl === null || cleaned.appUrl === '';
+    if (clearAppUrl) delete cleaned.appUrl;
+    const merged: Record<string, unknown> = { ...current, ...cleaned };
+    if (clearAppUrl) delete merged.appUrl;
+    const next = AuthConfigSchema.parse(merged);
     return prisma.application.update({
       where: { id: args.applicationId },
       data: { authConfig: next as object },

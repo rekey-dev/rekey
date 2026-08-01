@@ -1,10 +1,13 @@
 /**
  * Billing service — public surface used by `@rekey.dev/node`.
  *
- * Three operations today:
- *   - listPlans(application)              → public plan catalogue
+ * Core operations:
+ *   - listActivePlans(application)        → public plan catalogue
  *   - getCurrentSubscription(app, eu)     → that user's active sub, if any
  *   - createCheckoutSession(app, eu, slug, urls) → returns provider URL
+ *
+ * Plus the self-service reads and the cancel path the hosted portal drives —
+ * see the exported object at the bottom of the file for the full list.
  *
  * Subscription activation, payment recording, and status transitions all
  * happen via webhook events from the provider — *not* synchronously here.
@@ -13,11 +16,13 @@
  * `translate` + the shared appliers in `webhooks/apply.ts`).
  */
 
-import type { Application, DataMode, EndUser, Plan, Subscription } from '@prisma/client';
+import type { Application, EndUser, Plan, Subscription } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { plansService } from '../plans/plans.service.js';
 import { couponsService } from '../coupons/coupons.service.js';
+import { resolveCheckoutDiscount } from './checkout-discount.js';
+import { buildCheckoutSessionMetadata } from './checkout-sessions.js';
 import { getProviderForApplication, pickProvider } from './providers/index.js';
 import type { BillingProviderName } from './credentials.service.js';
 import { BillingConfigSchema } from '@rekey.dev/shared-types';
@@ -41,6 +46,17 @@ export interface EndUserPaymentDto {
   planSlug: string | null;
   /** Provider-hosted receipt URL, when present in the payment metadata. */
   receiptUrl: string | null;
+}
+
+/**
+ * Statuses that mean the buyer is currently paying for this subscription.
+ *
+ * PAST_DUE is included: the dunning window exists precisely so a failed charge
+ * does not immediately revoke what has been bought, and the portal treats it
+ * as entitled too. Only these are protected from being reset by a new checkout.
+ */
+function isEntitled(status: Subscription['status'] | undefined): boolean {
+  return status === 'ACTIVE' || status === 'PAST_DUE';
 }
 
 /** Pull a usable https receipt link out of a payment's metadata, if any. */
@@ -108,12 +124,6 @@ export const billingService = {
     /** Beneficiary org (owner+beneficiary). The route asserts the caller is an
      *  OWNER/ADMIN of it before passing it here. Null/absent = bill the owner. */
     beneficiaryOrgId?: string;
-    /**
-     * Test/live isolation: the calling secret key's mode. TEST checkouts only
-     * select test-mode (sandbox) billing credentials and stamp the resulting
-     * Subscription with mode TEST. Defaults to LIVE.
-     */
-    dataMode?: DataMode;
   }): Promise<{
     url: string;
     subscription: Subscription;
@@ -146,7 +156,15 @@ export const billingService = {
       });
     }
 
-    let couponContext: { couponId: string; discountAmount: number } | null = null;
+    // CREDIT packs + perpetual (non-TIMED) licenses are one-off purchases —
+    // route them through the provider's one-time payment flow so they DON'T
+    // create a recurring subscription. TIMED licenses + SUBSCRIPTION plans
+    // recur. Fulfillment (credit grant / license issue) still lands on the
+    // payment-completed webhook either way.
+    const isOneTime =
+      plan.kind === 'CREDIT' || (plan.kind === 'LICENSE' && plan.licenseKind !== 'TIMED');
+
+    let couponContext: { couponId: string; code: string; discountAmount: number } | null = null;
     if (input.couponCode) {
       const validated = await couponsService.validate({
         applicationId: input.application.id,
@@ -156,16 +174,26 @@ export const billingService = {
         amount: plan.amount,
         currency: plan.currency,
       });
-      couponContext = { couponId: validated.coupon.id, discountAmount: validated.discountAmount };
+      couponContext = {
+        couponId: validated.coupon.id,
+        code: validated.coupon.code,
+        discountAmount: validated.discountAmount,
+      };
     }
 
-    const dataMode: DataMode = input.dataMode ?? 'LIVE';
     const providerName = await pickProvider({
       application: input.application,
       ...(input.country !== undefined && { country: input.country }),
       ...(input.provider !== undefined && { preferred: input.provider }),
-      dataMode,
     });
+
+    // Resolved as soon as the provider is known and BEFORE any row is written:
+    // whether the discount can actually be charged depends on the provider and
+    // the flow, and a checkout that cannot honour the coupon must fail while
+    // it still costs nothing. See checkout-discount.ts for what it refuses.
+    const discount = couponContext
+      ? resolveCheckoutDiscount({ plan, provider: providerName, isOneTime, coupon: couponContext })
+      : null;
 
     // Guard: if the user already has an ACTIVE/PAST_DUE sub on this plan
     // bound to a different provider, refuse the switch — they need to
@@ -194,19 +222,17 @@ export const billingService = {
     }
 
     const provider = await getProviderForApplication(input.application, providerName);
-    // CREDIT packs + perpetual (non-TIMED) licenses are one-off purchases —
-    // route them through the provider's one-time payment flow so they DON'T
-    // create a recurring subscription. TIMED licenses + SUBSCRIPTION plans
-    // recur. Fulfillment (credit grant / license issue) still lands on the
-    // payment-completed webhook either way.
-    const isOneTime =
-      plan.kind === 'CREDIT' || (plan.kind === 'LICENSE' && plan.licenseKind !== 'TIMED');
     const checkoutInput = {
       application: { id: input.application.id, slug: input.application.slug },
       endUser: input.endUser,
       plan,
       successUrl: input.successUrl,
       cancelUrl: input.cancelUrl,
+      // The discount goes to the PROCESSOR, not just onto our own rows. It
+      // used to stop at `couponContext` below, so every coupon ever applied
+      // charged the buyer full price while we recorded a discount and
+      // redeemed the code.
+      ...(discount !== null && { discount }),
     };
     const session = isOneTime
       ? await provider.createOneTimeCheckout(checkoutInput)
@@ -215,14 +241,21 @@ export const billingService = {
     // Upsert by (applicationId, endUserId, planId): if the user already started
     // checkout for this same plan and bailed, reuse that PENDING row instead
     // of creating a parallel one.
-    const subscriptionMetadata: Record<string, unknown> = {
-      checkoutSessionId: session.sessionId,
-      ...(isOneTime && { oneTime: true }),
-    };
-    if (couponContext) {
-      subscriptionMetadata.couponId = couponContext.couponId;
-      subscriptionMetadata.discountAmount = couponContext.discountAmount;
-    }
+    //
+    // The metadata REMEMBERS the earlier sessions rather than overwriting them.
+    // Overwriting stranded any still-live provider session — a Stripe Checkout
+    // Session stays completable for ~24h — so a buyer who reopened checkout and
+    // then went back and paid on the first tab matched no local row: 200 OK,
+    // row still PENDING, no payment, no redemption, no trace of a real sale.
+    // See checkout-sessions.ts.
+    const subscriptionMetadata = buildCheckoutSessionMetadata({
+      previous: existing?.metadata ?? null,
+      sessionId: session.sessionId,
+      isOneTime,
+      coupon: couponContext
+        ? { couponId: couponContext.couponId, discountAmount: couponContext.discountAmount }
+        : null,
+    });
     const subscription = await prisma.subscription.upsert({
       where: {
         applicationId_endUserId_planId: {
@@ -237,22 +270,29 @@ export const billingService = {
         planId: plan.id,
         provider: providerName,
         status: 'PENDING',
-        mode: dataMode,
         ...(input.beneficiaryOrgId !== undefined && { beneficiaryOrgId: input.beneficiaryOrgId }),
         metadata: subscriptionMetadata as never,
       },
       update: {
         provider: providerName,
-        status: 'PENDING',
-        mode: dataMode,
+        // An ALREADY-PAYING row is not reset to PENDING. Opening a checkout is
+        // not an event that removes entitlement, and this unconditionally made
+        // it one: an ACTIVE subscriber who merely pressed Upgrade — or typed a
+        // coupon into the form the account page now shows *existing*
+        // subscribers — was downgraded on the spot. PENDING is not an
+        // entitling status, so their portal showed them as unsubscribed and
+        // every entitlement gate started refusing, without a single provider
+        // event having happened. The provider's webhook is what moves a paying
+        // subscription between states; this row is only a checkout record.
+        ...(isEntitled(existing?.status) ? {} : { status: 'PENDING' as const }),
         ...(input.beneficiaryOrgId !== undefined && { beneficiaryOrgId: input.beneficiaryOrgId }),
         metadata: subscriptionMetadata as never,
       },
     });
 
-    // Redemption is NOT recorded here. The coupon id rides on
-    // `subscription.metadata.couponId` and is consumed at payment-success
-    // time in `webhooks/apply.ts > applyPaymentSucceeded`. Recording at
+    // Redemption is NOT recorded here. The coupon rides on
+    // `subscription.metadata.couponBySession` and is consumed when the
+    // provider says the purchase completed (`webhooks/apply.ts`). Recording at
     // checkout-creation was abusable — an attacker could apply a coupon,
     // abandon checkout, and exhaust the per-user / global redemption
     // limit for legitimate users. See decisions.md 2026-05-19.

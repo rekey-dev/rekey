@@ -153,7 +153,7 @@ describe('Operator MCP admin tools + get_end_user', () => {
     const token = await mcpToken(op.accessToken, op.tenantId, 'mcp:operator:read mcp:operator:write');
     const appId = await createApp(token, 'lookup-app');
     await prisma.endUser.create({
-      data: { application: { connect: { id: appId } }, email: 'jane@example.com', role: 'user', mode: 'LIVE' },
+      data: { application: { connect: { id: appId } }, email: 'jane@example.com', role: 'user' },
     });
 
     const hit = toolResult(
@@ -191,7 +191,7 @@ describe('Operator MCP admin tools + get_end_user', () => {
       ).data as { id: string }
     ).id;
     const endUser = await prisma.endUser.create({
-      data: { application: { connect: { id: appId } }, email: 'sub@example.com', role: 'user', mode: 'LIVE' },
+      data: { application: { connect: { id: appId } }, email: 'sub@example.com', role: 'user' },
     });
     const sub = await prisma.subscription.create({
       data: {
@@ -199,7 +199,6 @@ describe('Operator MCP admin tools + get_end_user', () => {
         endUser: { connect: { id: endUser.id } },
         plan: { connect: { id: planId } },
         status: 'ACTIVE',
-        mode: 'LIVE',
       },
     });
 

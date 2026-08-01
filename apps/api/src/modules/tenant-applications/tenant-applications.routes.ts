@@ -21,6 +21,7 @@ import {
   billingCredentialsService,
   type BillingProviderName,
 } from '../billing/credentials.service.js';
+import { registerProviderWebhook } from '../billing/webhook-registration.js';
 import {
   providerNameSchema,
   registryNames,
@@ -37,9 +38,11 @@ import { prisma } from '../../lib/prisma.js';
 import { PaginationQuery, parsePagination, paginationJsonSchema } from '../../lib/pagination.js';
 import { listApiRequests } from '../../lib/request-log.js';
 import { CouponDiscountType, type LicenseKind } from '@prisma/client';
-import { BillingProviderSchema, GrantCreditsRequestSchema } from '@rekey.dev/shared-types';
+import { AppEnvironmentSchema, BillingProviderSchema, GrantCreditsRequestSchema } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../lib/error.js';
 import { hashPassword } from '../../lib/passwords.js';
+import { assertMetadataWithinLimit } from '../auth/auth.service.js';
+import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { endUserRolesService } from '../end-user-roles/end-user-roles.service.js';
 import { organizationsService } from '../organizations/organizations.service.js';
 import { entitlementsService } from '../billing/entitlements.service.js';
@@ -58,6 +61,7 @@ import { mcpIssuer } from '../mcp/oauth.service.js';
 import { eraseEndUser } from './end-user-erasure.service.js';
 import { billingService } from '../billing/billing.service.js';
 import { webhookService } from '../webhooks/webhook.service.js';
+import { euLoginLockScope, getScopeLockState, LOGIN_POLICY } from '../../lib/brute-force.js';
 
 // Per-route access control: `ensureAppAccess(req, appId, need)` replaces the
 // old `ensureAppInTenant` helper. It both confirms the Application belongs to
@@ -71,6 +75,47 @@ import { webhookService } from '../webhooks/webhook.service.js';
 // ally keep requireTenantRole(['OWNER','ADMIN']) — no grant unlocks those.
 // See lib/app-access.ts for the full matrix.
 
+/**
+ * Live failed-sign-in / lockout state for one end-user, in the shape the
+ * operator surfaces have always published.
+ *
+ * These two fields used to be read straight off `EndUser.{failedSignInAttempts,
+ * lockedUntil}`. Lockout moved to the Redis brute-force limiter and nothing has
+ * written those columns since, so the end-user detail page reported "Lockout:
+ * none" for an account that was demonstrably locked — an operator investigating
+ * a "I can't sign in" complaint was shown the opposite of the truth. The
+ * columns are gone now; both fields are sourced from the lock itself.
+ *
+ * `failedSignInAttempts` is honest but blunt, and it is worth knowing why:
+ * `registerFailure` DELETES the failure counter at the instant it sets the
+ * lock, so there is no surviving count for a locked account. Below the
+ * threshold we report the real counter. Once locked, the only true statement
+ * left is "at least `threshold` failures", so we report the threshold — the
+ * same convention `adminMetricsService.lockedAccounts` already uses, and a
+ * documented floor rather than an invented number.
+ *
+ * `lockedUntil` is reconstructed from the key's remaining TTL, so it drifts by
+ * at most a second against the value the limiter will actually enforce.
+ */
+async function endUserLockState(
+  applicationId: string,
+  email: string,
+): Promise<{ failedSignInAttempts: number; lockedUntil: string | null }> {
+  const state = await getScopeLockState(euLoginLockScope(applicationId, email));
+  // `null` = the store could not be read. Report no lock rather than 503-ing a
+  // whole detail page; sign-in itself is failing closed during the same outage,
+  // so nobody is getting in on the strength of this badge. See
+  // `getScopeLockState` for the full rationale.
+  if (state === null) return { failedSignInAttempts: 0, lockedUntil: null };
+  if (state.lockedForSec === null) {
+    return { failedSignInAttempts: state.failuresInWindow, lockedUntil: null };
+  }
+  return {
+    failedSignInAttempts: LOGIN_POLICY.threshold,
+    lockedUntil: new Date(Date.now() + state.lockedForSec * 1000).toISOString(),
+  };
+}
+
 // ---- request shapes (mirror the admin routes) ----
 
 const AppParam = z.object({ id: z.string().min(1) });
@@ -81,13 +126,13 @@ const CouponCodeParam = z.object({ id: z.string().min(1), code: z.string().min(1
 const CreateAppBody = z.object({
   name: z.string().min(1).max(120),
   slug: z.string().min(1).max(40),
+  environment: AppEnvironmentSchema.optional(),
   billingProvider: BillingProviderSchema.optional(),
   enableBilling: z.boolean().optional(),
 });
 
 const CreateKeyBody = z.object({
   name: z.string().min(1).max(120),
-  mode: z.enum(['live', 'test']).default('live'),
   scopes: z.array(z.string()).default([]),
   expiresAt: z.string().datetime().optional(),
 });
@@ -218,7 +263,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const application = await applicationsService.get(id);
       // Surface the PUBLIC MCP URL (derived from PUBLIC_WEBHOOK_BASE_URL/API_URL
       // on the API side) so the panel shows the externally-reachable host, not
-      // its own in-cluster RELIPAY_URL (e.g. http://api:3030).
+      // its own in-cluster REKEY_URL (e.g. http://api:3030).
       const data = { ...application, mcpUrl: mcpIssuer(application.slug) };
       // Billing managers see money, not sign-in: hide the auth/OAuth config.
       return {
@@ -288,13 +333,28 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         security: [{ tenantSession: [] }],
         summary: 'Create an Application in the active workspace',
         description:
-          'Requires the **OWNER or ADMIN** workspace role.',
+          'Requires the **OWNER or ADMIN** workspace role.\n\n' +
+          'The Application is the isolation boundary in Rekey — every row carries its ' +
+          '`applicationId`. Create a separate Application per environment rather than ' +
+          'mixing real and rehearsal data in one: `environment` is fixed here and cannot ' +
+          'be changed afterwards.',
         body: {
           type: 'object',
           required: ['name', 'slug'],
           properties: {
             name: { type: 'string', minLength: 1, maxLength: 120 },
             slug: { type: 'string', minLength: 1, maxLength: 40 },
+            environment: {
+              type: 'string',
+              enum: ['PRODUCTION', 'STAGING', 'DEVELOPMENT'],
+              default: 'DEVELOPMENT',
+              description:
+                'What this Application is, fixed at creation and **immutable** — there is no ' +
+                'endpoint that changes it. Defaults to DEVELOPMENT. A PRODUCTION app mints ' +
+                'rp_live_ keys, others mint rp_test_ — the prefix is descriptive. Environment ' +
+                'does NOT restrict which billing credentials the app may hold. To go live, ' +
+                'create a PRODUCTION Application.',
+            },
             billingProvider: { type: 'string', enum: registryNames },
             enableBilling: {
               type: 'boolean',
@@ -310,6 +370,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         tenantId: req.tenantId!,
         name: body.name,
         slug: body.slug,
+        ...(body.environment !== undefined && { environment: body.environment }),
         ...(body.billingProvider !== undefined && { billingProvider: body.billingProvider }),
         ...(body.enableBilling !== undefined && { enableBilling: body.enableBilling }),
       });
@@ -340,8 +401,27 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             methods: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 40 } },
             passwordMinLength: { type: 'integer', minimum: 8, maximum: 128 },
             redirectUrls: { type: 'array', items: { type: 'string', format: 'uri' } },
+            appUrl: {
+              type: ['string', 'null'],
+              description:
+                "Base URL of your own application — what transactional emails link back to " +
+                '(the welcome mail CTA, and the base for reset/verify/magic-link URLs when the ' +
+                'SDK call does not supply one). Send null or "" to clear it. When unset, and ' +
+                'nothing else resolves (first redirectUrl origin, then DEFAULT_APP_URL), emails ' +
+                'render WITHOUT the call-to-action button rather than with a broken link.',
+            },
             organizationsEnabled: { type: 'boolean' },
             passwordBreachCheckEnabled: { type: 'boolean', description: 'HIBP Pwned-Passwords breach check at sign-up/reset/change. Default true.' },
+            sendVerificationEmailOnSignUp: {
+              type: 'boolean',
+              description:
+                'Send the email-verification link automatically on password sign-up, alongside the welcome mail. Default true. Delivery is best-effort — a failed send never fails the sign-up.',
+            },
+            requireEmailVerification: {
+              type: 'boolean',
+              description:
+                'Refuse password sign-in with 403 EMAIL_NOT_VERIFIED until the end-user confirms their address. Default false; turning it on applies to existing unverified accounts immediately.',
+            },
             signupEnabled: { type: 'boolean', description: 'Legacy alias for signupMode (false ⇔ invite_only). Prefer signupMode.' },
             signupMode: {
               type: 'string',
@@ -351,6 +431,23 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             },
             mfa: { type: 'string', enum: ['off', 'optional', 'required'], description: 'End-user 2FA policy.' },
             mcpEnabled: { type: 'boolean', description: 'Expose a hosted MCP server + OAuth AS for this app.' },
+            oidcEnabled: {
+              type: 'boolean',
+              description:
+                'Act as an OpenID Connect provider: serve /.well-known/openid-configuration, ' +
+                'issue an id_token when the openid scope is granted, and expose /oauth/userinfo. ' +
+                'Independent of mcpEnabled. The `email` scope additionally needs ' +
+                'requireEmailVerification — Rekey will not assert an address nobody proved.',
+            },
+            dynamicClientRegistration: {
+              type: 'boolean',
+              description:
+                'Allow anyone to register an OAuth client with POST /oauth/register (RFC 7591 ' +
+                'open registration). Default true — MCP clients self-register and there is no ' +
+                'operator-side client-creation surface yet. Turn it off once your relying ' +
+                'parties are registered: open registration on a public IdP lets anyone put a ' +
+                "password prompt on this deployment's issuer origin.",
+            },
             tokenAlg: {
               type: 'string',
               enum: ['HS256', 'RS256'],
@@ -371,12 +468,20 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           methods: z.array(z.string().min(1).max(40)).optional(),
           passwordMinLength: z.number().int().min(8).max(128).optional(),
           redirectUrls: z.array(z.string().url()).optional(),
+          // A URL, or null/'' to clear. Validated here rather than left to the
+          // AuthConfigSchema merge so a bad value is a 400 with a field path
+          // instead of a confusing schema error on an unrelated key.
+          appUrl: z.union([z.string().url(), z.literal(''), z.null()]).optional(),
           organizationsEnabled: z.boolean().optional(),
           passwordBreachCheckEnabled: z.boolean().optional(),
+          sendVerificationEmailOnSignUp: z.boolean().optional(),
+          requireEmailVerification: z.boolean().optional(),
           signupEnabled: z.boolean().optional(),
           signupMode: z.enum(['public', 'secret_only', 'invite_only']).optional(),
           mfa: z.enum(['off', 'optional', 'required']).optional(),
           mcpEnabled: z.boolean().optional(),
+          oidcEnabled: z.boolean().optional(),
+          dynamicClientRegistration: z.boolean().optional(),
           tokenAlg: z.enum(['HS256', 'RS256']).optional(),
         })
         .parse(req.body);
@@ -508,14 +613,15 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'Mint an API key (raw shown once)',
         description:
           'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
-          '`APP_ADMIN` grant on it.',
+          '`APP_ADMIN` grant on it.\n\n' +
+          "The key's prefix follows the Application's `environment`: PRODUCTION mints " +
+          '`rp_live_…`, STAGING/DEVELOPMENT mint `rp_test_…`. It is not selectable.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         body: {
           type: 'object',
           required: ['name'],
           properties: {
             name: { type: 'string', minLength: 1, maxLength: 120 },
-            mode: { type: 'string', enum: ['live', 'test'], default: 'live' },
             scopes: { type: 'array', items: { type: 'string' } },
             expiresAt: { type: 'string', format: 'date-time' },
           },
@@ -526,21 +632,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'write');
       const body = CreateKeyBody.parse(req.body);
-      // Test-mode API keys are paused pending a review of the test/live model.
-      // Billing keeps its own test mode; only API-key minting is gated here.
-      // Remove this guard (and re-expose the option in the panel) to restore it.
-      if (body.mode === 'test') {
-        throw new RekeyError({
-          statusCode: 400,
-          code: 'TEST_API_KEYS_DISABLED',
-          message: 'Test-mode API keys are temporarily disabled.',
-          fix: 'Mint a live key (rp_live_…). Billing still supports test mode separately.',
-        });
-      }
       const result = await apiKeysService.create({
         applicationId: id,
         name: body.name,
-        mode: body.mode,
         scopes: body.scopes,
         ...(body.expiresAt !== undefined && { expiresAt: new Date(body.expiresAt) }),
       });
@@ -551,7 +645,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         tenantId: req.tenantId!,
         applicationId: id,
         ...requestContext(req),
-        metadata: { apiKeyId: result.apiKey.id, name: body.name, mode: body.mode, scopes: body.scopes },
+        metadata: { apiKeyId: result.apiKey.id, name: body.name, scopes: body.scopes },
       });
       return reply.status(201).send({
         success: true,
@@ -1305,7 +1399,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         .parse(req.params);
       await ensureAppAccess(req, params.id, 'write');
       const application = await applicationsService.get(params.id);
-      const result = await billingCredentialsService.registerWebhook(
+      const result = await registerProviderWebhook(
         params.id,
         params.provider as BillingProviderName,
         application.slug,
@@ -1387,8 +1481,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           'Subscription counters (active, past-due, canceled/new in the last 30 days), MRR ' +
           '(ACTIVE recurring SUBSCRIPTION plans, yearly normalized to monthly), 30-day payment ' +
           'volume + success/failure counts, and a 12-month UTC monthly revenue series. ' +
-          'All amounts are in the smallest currency unit. Live-mode data only — TEST ' +
-          'subscriptions/payments (sandbox checkouts via rp_test_* keys) are excluded.',
+          'All amounts are in the smallest currency unit.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       },
     },
@@ -1412,8 +1505,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
           'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
           'Operator view of every Payment row — subscription invoices and one-time charges. ' +
-          'Filter by `status`, a `from`/`to` createdAt window, and `mode` (TEST/LIVE — operator ' +
-          'surfaces see both modes by default; rows carry `mode`). Joined with the paying ' +
+          'Filter by `status` and a `from`/`to` createdAt window. Joined with the paying ' +
           "end-user's email where the payment is attributable to one. " +
           'Sort with `?sort=createdAt|amount|status&order=asc|desc` (default createdAt desc).',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
@@ -1421,7 +1513,6 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           type: 'object',
           properties: {
             status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED'] },
-            mode: { type: 'string', enum: ['TEST', 'LIVE'] },
             from: { type: 'string', format: 'date-time' },
             to: { type: 'string', format: 'date-time' },
             sort: { type: 'string', enum: ['createdAt', 'amount', 'status'] },
@@ -1437,7 +1528,6 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const q = z
         .object({
           status: z.enum(['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED']).optional(),
-          mode: z.enum(['TEST', 'LIVE']).optional(),
           from: z.coerce.date().optional(),
           to: z.coerce.date().optional(),
           sort: z.enum(['createdAt', 'amount', 'status']).optional(),
@@ -1457,7 +1547,6 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         where: {
           applicationId: id,
           ...(q.status && { status: q.status }),
-          ...(q.mode && { mode: q.mode }),
           ...((q.from || q.to) && {
             createdAt: {
               ...(q.from && { gte: q.from }),
@@ -1472,7 +1561,6 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           amount: true,
           currency: true,
           status: true,
-          mode: true,
           providerPaymentId: true,
           description: true,
           createdAt: true,
@@ -1554,7 +1642,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             : { openedAt: order };
       const cases = await prisma.dunningCase.findMany({
         where: { applicationId: id, ...(q.status && { status: q.status }) },
-        include: { subscription: { select: { mode: true, plan: { select: { slug: true, name: true } } } } },
+        include: { subscription: { select: { plan: { select: { slug: true, name: true } } } } },
         // Stable secondary order by id so pages never overlap/skip.
         orderBy: [primaryOrder, { id: 'desc' }],
         take,
@@ -1581,7 +1669,6 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           endUserEmail: c.endUserId ? (emailById.get(c.endUserId) ?? null) : null,
           organizationId: c.organizationId,
           status: c.status,
-          mode: c.subscription.mode,
           planSlug: c.subscription.plan.slug,
           planName: c.subscription.plan.name,
           failedAttempts: c.failedAttempts,
@@ -1702,16 +1789,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
           'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
-          'Sort with `?sort=createdAt|email&order=asc|desc` (default createdAt desc). ' +
-          'Rows carry `mode` (TEST = signed up via an rp_test_* key); operator surfaces see ' +
-          'both modes by default — filter with `?mode=TEST|LIVE`.',
+          'Sort with `?sort=createdAt|email&order=asc|desc` (default createdAt desc).',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         querystring: {
           type: 'object',
           properties: {
             search: { type: 'string', maxLength: 254 },
             emailVerified: { type: 'boolean' },
-            mode: { type: 'string', enum: ['TEST', 'LIVE'] },
             subscriptionStatus: {
               type: 'string',
               enum: ['PENDING', 'ACTIVE', 'PAST_DUE', 'CANCELED', 'EXPIRED'],
@@ -1732,7 +1816,6 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           // Fastify's Ajv coerces "true"/"false" query strings to booleans
           // via the querystring schema above before zod sees them.
           emailVerified: z.boolean().optional(),
-          mode: z.enum(['TEST', 'LIVE']).optional(),
           subscriptionStatus: z
             .enum(['PENDING', 'ACTIVE', 'PAST_DUE', 'CANCELED', 'EXPIRED'])
             .optional(),
@@ -1748,7 +1831,6 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           applicationId: id,
           ...(q.search && { email: { contains: q.search.toLowerCase() } }),
           ...(q.emailVerified !== undefined && { emailVerified: q.emailVerified }),
-          ...(q.mode && { mode: q.mode }),
           ...(q.subscriptionStatus && {
             subscriptions: { some: { status: q.subscriptionStatus } },
           }),
@@ -1758,7 +1840,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         take,
         skip,
         select: {
-          id: true, email: true, emailVerified: true, role: true, mode: true, metadata: true, createdAt: true,
+          id: true, email: true, emailVerified: true, role: true, metadata: true, createdAt: true,
         },
       });
       return { success: true, data: users };
@@ -1813,6 +1895,15 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           emailVerified: z.boolean().optional(),
         })
         .parse(req.body);
+      // Same 16KB ceiling every other metadata writer applies. An operator is
+      // trusted with the CONTENT of this blob (it is where the OIDC claims
+      // live), not with the size of the jsonb column every auth-path query
+      // reads back.
+      if (body.metadata !== undefined) assertMetadataWithinLimit(body.metadata);
+      // Workspace ceiling. Operator-driven seeding is still creation, so it is
+      // gated identically to SDK sign-up — otherwise the quota is one panel
+      // click away from being irrelevant.
+      await assertEndUserQuota(req.tenantId!);
       const passwordHash = body.password ? await hashPassword(body.password) : null;
       // Resolve role: explicit pick must exist in the catalog; otherwise
       // assign the application's default.
@@ -1873,7 +1964,6 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           email: true,
           emailVerified: true,
           role: true,
-          mode: true,
           metadata: true,
           erasedAt: true,
           erasedBy: true,
@@ -1889,7 +1979,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           fix: 'List end-users to confirm the id.',
         });
       }
-      const [passkeys, recentImpersonations] = await Promise.all([
+      const [passkeys, recentImpersonations, lockState] = await Promise.all([
         prisma.webAuthnCredential.findMany({
           where: { endUserId: eu.id },
           select: { id: true, credentialId: true, deviceName: true, lastUsedAt: true, createdAt: true },
@@ -1900,11 +1990,16 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           orderBy: { startedAt: 'desc' },
           take: 20,
         }),
+        endUserLockState(eu.applicationId, eu.email),
       ]);
       return {
         success: true,
         data: {
-          endUser: eu,
+          // The panel has always declared `failedSignInAttempts` + `lockedUntil`
+          // on this payload, but this select never returned them: the lock badge
+          // read `undefined` and rendered "none" for every account, locked or
+          // not. They are real now, sourced from the limiter.
+          endUser: { ...eu, ...lockState },
           passkeys: passkeys.map((p) => ({
             ...p,
             lastUsedAt: p.lastUsedAt?.toISOString() ?? null,
@@ -2058,6 +2153,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           emailVerified: z.boolean().optional(),
         })
         .parse(req.body);
+      // Same 16KB ceiling as every other writer — see the create route above.
+      // This one replaces wholesale rather than merging, so the check is on
+      // exactly what will be stored.
+      if (body.metadata) assertMetadataWithinLimit(body.metadata);
       // Confirm the user belongs to this Application (cross-app guard).
       const existing = await prisma.endUser.findUnique({ where: { id: params.euid } });
       if (!existing || existing.applicationId !== params.id) {
@@ -2429,8 +2528,6 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           emailVerified: true,
           role: true,
           metadata: true,
-          failedSignInAttempts: true,
-          lockedUntil: true,
           createdAt: true,
           updatedAt: true,
         },
@@ -2465,6 +2562,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         usageRecords,
         securityEvents,
         impersonations,
+        lockState,
       ] = await Promise.all([
         prisma.oAuthIdentity.findMany({
           where: { endUserId: endUser.id },
@@ -2595,6 +2693,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           select: { id: true, operatorUserId: true, reason: true, startedAt: true, endedAt: true, ip: true },
           orderBy: { startedAt: 'desc' },
         }),
+        endUserLockState(endUser.applicationId, endUser.email),
       ]);
 
       const notes = [
@@ -2614,7 +2713,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         notes,
         endUser: {
           ...endUser,
-          lockedUntil: endUser.lockedUntil?.toISOString() ?? null,
+          // Both from the Redis limiter, not the (now dropped) EndUser columns.
+          // Kept on the document because `EndUserExportProfile` in the published
+          // shared-types package declares them: a DSAR export losing fields is a
+          // breaking change for anyone archiving these documents.
+          ...lockState,
           createdAt: endUser.createdAt.toISOString(),
           updatedAt: endUser.updatedAt.toISOString(),
         },
@@ -2904,7 +3007,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   // ---------- Hosted customer portal (Portal V2) ----------
 
   // Opt this Application into (or out of) the Rekey-hosted customer portal at
-  // portal.relipay.dev/<slug>, and set its branding. Enabling auto-allows the
+  // portal.rekey.dev/<slug>, and set its branding. Enabling auto-allows the
   // portal origin for this app's publishable key. OWNER/ADMIN.
   const PortalConfigBody = z.object({
     enabled: z.boolean().optional(),
@@ -3886,8 +3989,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   // org's seats provisionable but unusable: nobody could obtain a key to call
   // POST /api/v1/licenses/verify. This route mints a FRESH key for the existing
   // pooled license row and returns it ONCE (same hash-only posture as issuance
-  // + API keys). Operator-gated (tenant session, OWNER/ADMIN) — it does not add
-  // any end-user-facing reveal surface. Rotating invalidates any prior
+  // + API keys). Operator-gated: tenant session + `ensureAppAccess(…, 'write')`,
+  // so OWNER/ADMIN or a MEMBER holding an APP_ADMIN grant on this Application —
+  // there is no extra `requireTenantRole` here. It does not add any
+  // end-user-facing reveal surface. Rotating invalidates any prior
   // activations; `activationsReset` lets the operator warn the team if a key
   // was already in circulation (normally 0 — the original was never delivered).
   app.post(

@@ -126,14 +126,16 @@ describe('Dunning', () => {
       .then((r) => r.json().data as { id: string });
 
     if (provider === 'stripe') {
-      await billingCredentialsService.upsertStripe(
+      await billingCredentialsService.upsertCredentials(
         application.id,
+        'stripe',
         { apiKey: 'sk_test_for_ci_only', webhookSecret: WEBHOOK_SECRET },
         { enabled: true, mode: 'test' },
       );
     } else {
-      await billingCredentialsService.upsertPaypal(
+      await billingCredentialsService.upsertCredentials(
         application.id,
+        'paypal',
         { clientId: 'cid', clientSecret: 'csecret', webhookId: 'WH-TEST' },
         { enabled: true, mode: 'test' },
       );

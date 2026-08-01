@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { api, type ApplicationRow } from '@/lib/api';
 import { AppNav } from '@/components/AppNav';
 import { CopyButton } from '@/components/CopyButton';
+import { EnvironmentBadge } from '@/components/EnvironmentBadge';
 
 export default async function ApplicationDetailLayout({
   children,
@@ -28,6 +29,9 @@ export default async function ApplicationDetailLayout({
         </Link>
         <div className="mt-0.5 flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h1 className="text-xl font-semibold tracking-tight text-[var(--color-fg)]">{app.name}</h1>
+          {/* Fixed at creation, so it belongs in the identity row next to the
+              slug rather than on a settings tab that implies it is editable. */}
+          <EnvironmentBadge environment={app.environment} />
           <span className="font-mono text-xs text-[var(--color-muted-fg)]">{app.slug}</span>
           <span title={app.publicKey} className="max-w-7xl truncate font-mono text-xs text-[var(--color-faint-fg)]">
             {app.publicKey}

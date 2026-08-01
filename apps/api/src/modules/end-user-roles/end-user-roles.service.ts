@@ -76,7 +76,11 @@ export const endUserRolesService = {
 
   /**
    * Seed the bootstrap `user` role for a freshly-created Application. Idempotent.
-   * Called from `applicationsService.create` inside the transaction.
+   *
+   * Currently UNCALLED: `applicationsService.create` inlines the equivalent
+   * `tx.endUserRole.create` inside its own transaction. Kept because it is the
+   * idempotent form — reach for it if a backfill or repair path ever needs to
+   * guarantee the default role exists without knowing whether it already does.
    */
   async seedDefault(tx: typeof prisma, applicationId: string): Promise<void> {
     await tx.endUserRole.upsert({

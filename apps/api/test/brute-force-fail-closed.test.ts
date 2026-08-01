@@ -22,6 +22,7 @@ const state = {
   failing: false,
   ttlValue: 0,
   incrValue: 1,
+  getValue: null as string | null,
   client: null as unknown,
 };
 
@@ -32,6 +33,7 @@ function makeClient() {
     expire: () => (state.failing ? boom() : Promise.resolve(1)),
     set: () => (state.failing ? boom() : Promise.resolve('OK')),
     ttl: () => (state.failing ? boom() : Promise.resolve(state.ttlValue)),
+    get: () => (state.failing ? boom() : Promise.resolve(state.getValue)),
     del: () => (state.failing ? boom() : Promise.resolve(1)),
   };
 }
@@ -41,15 +43,21 @@ vi.mock('../src/lib/redis.js', () => ({
   closeRedis: async () => {},
 }));
 
-const { assertNotLocked, registerFailure, clearFailures, LOGIN_POLICY } = await import(
-  '../src/lib/brute-force.js'
-);
+const {
+  assertNotLocked,
+  registerFailure,
+  clearFailures,
+  getScopeLockState,
+  euLoginLockScope,
+  LOGIN_POLICY,
+} = await import('../src/lib/brute-force.js');
 
 describe('brute-force fails closed on a store outage', () => {
   beforeEach(() => {
     state.failing = false;
     state.ttlValue = 0;
     state.incrValue = 1;
+    state.getValue = null;
     state.client = makeClient();
   });
 
@@ -121,6 +129,78 @@ describe('brute-force fails closed on a store outage', () => {
   it('still uses the in-memory store outside production, so tests stay deterministic', async () => {
     state.client = null;
     await expect(assertNotLocked('eu:login:app:nobody@example.com')).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * `getScopeLockState` is the ONE read in this module that fails open, and that
+ * is a deliberate exception rather than a relapse: it drives the operator
+ * panel's lock badge, it gates nothing, and `assertNotLocked` is still refusing
+ * every sign-in attempt during the same outage. 503-ing an entire end-user
+ * detail page because Redis blipped would buy no security.
+ */
+describe('the display-only lock read fails open, and says so', () => {
+  beforeEach(() => {
+    state.failing = false;
+    state.ttlValue = 0;
+    state.incrValue = 1;
+    state.getValue = null;
+    state.client = makeClient();
+  });
+
+  it('answers null (unknown) rather than throwing when the store is down', async () => {
+    state.failing = true;
+    await expect(getScopeLockState('eu:login:app:someone@example.com')).resolves.toBeNull();
+  });
+
+  it('reports the remaining TTL for a locked scope', async () => {
+    state.ttlValue = 600;
+    await expect(getScopeLockState('eu:login:app:someone@example.com')).resolves.toEqual({
+      lockedForSec: 600,
+      failuresInWindow: 0,
+    });
+  });
+
+  it('reports the live failure counter while a scope is still below the threshold', async () => {
+    state.getValue = '4';
+    await expect(getScopeLockState('eu:login:app:someone@example.com')).resolves.toEqual({
+      lockedForSec: null,
+      failuresInWindow: 4,
+    });
+  });
+
+  it('derives its key exactly the way the writer does', async () => {
+    // The failure mode this guards: a reader that builds the scope even
+    // slightly differently gets a permanent miss and reports "not locked"
+    // forever, which is exactly how the panel came to lie. One
+    // exported builder, used by auth.service on write and the operator routes
+    // on read, is the only reason that cannot drift.
+    expect(euLoginLockScope('app_123', 'Someone@Example.COM')).toBe(
+      'eu:login:app_123:someone@example.com',
+    );
+    // Case-folding matters because sign-in looks the row up case-insensitively:
+    // a per-capitalisation counter would be a free reset for an attacker.
+    expect(euLoginLockScope('app_123', 'someone@example.com')).toBe(
+      euLoginLockScope('app_123', 'SOMEONE@EXAMPLE.COM'),
+    );
+  });
+
+  it('a lock set by the real write path is visible to the read path', async () => {
+    // End-to-end through the in-memory store: registerFailure crossing the
+    // threshold must produce a lock that getScopeLockState can see, using only
+    // the public API. The counter is consumed setting the lock, which is why
+    // the operator surface reports the policy threshold rather than a count.
+    state.client = null;
+    const scope = euLoginLockScope('app_rt', 'roundtrip@example.com');
+    for (let i = 0; i < LOGIN_POLICY.threshold; i++) {
+      await registerFailure(scope, LOGIN_POLICY);
+    }
+    const locked = await getScopeLockState(scope);
+    expect(locked?.lockedForSec).toBeGreaterThan(0);
+    expect(locked?.failuresInWindow).toBe(0);
+
+    await clearFailures(scope);
+    expect(await getScopeLockState(scope)).toEqual({ lockedForSec: null, failuresInWindow: 0 });
   });
 });
 

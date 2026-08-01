@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import {
   api,
   PanelApiError,
@@ -40,7 +39,6 @@ async function invite(formData: FormData): Promise<void> {
       path: '/api/v1/tenant/workspace/invitations',
       body: { email, role },
     });
-    revalidatePath('/team');
     redirect(
       `/team?inviteToken=${encodeURIComponent(result.token)}&emailSent=${result.emailSent ? '1' : '0'}&e=member_invited`,
     );
@@ -58,7 +56,6 @@ async function revokeInvite(invitationId: string): Promise<void> {
     method: 'DELETE',
     path: `/api/v1/tenant/workspace/invitations/${encodeURIComponent(invitationId)}`,
   });
-  revalidatePath('/team');
   redirect('/team');
 }
 
@@ -68,7 +65,6 @@ async function removeMember(membershipId: string): Promise<void> {
     method: 'DELETE',
     path: `/api/v1/tenant/workspace/members/${encodeURIComponent(membershipId)}`,
   });
-  revalidatePath('/team');
   redirect('/team');
 }
 
@@ -80,7 +76,6 @@ async function changeRole(membershipId: string, formData: FormData): Promise<voi
     path: `/api/v1/tenant/workspace/members/${encodeURIComponent(membershipId)}`,
     body: { role },
   });
-  revalidatePath('/team');
   redirect('/team');
 }
 
@@ -99,7 +94,6 @@ async function setGrant(membershipId: string, formData: FormData): Promise<void>
     if (err instanceof PanelApiError) redirect(`/team?error=${encodeURIComponent(err.code)}`);
     throw err;
   }
-  revalidatePath('/team');
   redirect('/team');
 }
 
@@ -109,7 +103,6 @@ async function removeGrant(membershipId: string, applicationId: string): Promise
     method: 'DELETE',
     path: `/api/v1/tenant/workspace/members/${encodeURIComponent(membershipId)}/grants/${encodeURIComponent(applicationId)}`,
   });
-  revalidatePath('/team');
   redirect('/team');
 }
 
@@ -156,10 +149,11 @@ export default async function TeamPage({
   const memberRows = members.filter((m) => m.role === 'MEMBER');
   // PANEL_URL is server-only and on some deploys is an in-cluster host (e.g.
   // http://panel:3031) — publicHttpUrl() keeps that out of the client HTML.
-  // When it doesn't look public, fall back to a relative path: the operator is
-  // viewing this page at the panel's real origin, so the link resolves there
-  // and can be prefixed with their domain before sharing.
-  const panelBase = publicHttpUrl(process.env.PANEL_URL ?? 'http://localhost:3031') ?? '';
+  // When it doesn't look public we emit a visible sentinel rather than a
+  // relative path: this link is copied into an email, where a relative path is
+  // silently useless to the recipient, whereas the sentinel names the variable
+  // the operator has to set.
+  const panelBase = publicHttpUrl(process.env.PANEL_URL ?? '') ?? '<set PANEL_URL>';
   const inviteUrl = inviteToken ? `${panelBase}/accept-invite?token=${inviteToken}` : null;
 
   return (

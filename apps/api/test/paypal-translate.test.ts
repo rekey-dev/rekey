@@ -191,8 +191,64 @@ describe('paypal module translate', () => {
 
   it('unhandled event types → null (ack + ignore upstream)', () => {
     expect(
-      translate({ id: 'WH-13', event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: 'CAP-1' } }, ctx()),
+      translate({ id: 'WH-13', event_type: 'BILLING.SUBSCRIPTION.RE-ACTIVATED', resource: { id: 'I-X' } }, ctx()),
     ).toBeNull();
+  });
+
+  describe('PAYMENT.CAPTURE.COMPLETED — the money leg of a one-time order', () => {
+    // Registered with PayPal from the start and never handled, so it fell to
+    // `default: null` and a captured one-off purchase produced no Payment row.
+    it('records the capture against the ORDER, not the capture id', () => {
+      const events = translate(
+        {
+          id: 'WH-CAP',
+          event_type: 'PAYMENT.CAPTURE.COMPLETED',
+          resource: {
+            id: 'CAP-1',
+            custom_id: `${APP_ID}:eu_1`,
+            amount: { value: '49.99', currency_code: 'EUR' },
+            supplementary_data: { related_ids: { order_id: 'ORDER-1' } },
+          },
+        },
+        ctx(),
+      );
+      expect(events).toMatchObject([
+        {
+          type: 'payment.succeeded',
+          providerPaymentId: 'CAP-1',
+          // The local row is keyed by the order id, which is what checkout
+          // stored; the capture id has never been seen before.
+          checkoutSessionId: 'ORDER-1',
+          // A capture is never a recurring charge — that is PAYMENT.SALE.*.
+          providerSubscriptionId: null,
+          amount: 4999,
+          currency: 'EUR',
+          firstPeriod: true,
+        },
+      ]);
+    });
+
+    it('drops a capture whose custom_id names another application', () => {
+      expect(
+        translate(
+          {
+            id: 'WH-CAP-X',
+            event_type: 'PAYMENT.CAPTURE.COMPLETED',
+            resource: { id: 'CAP-2', custom_id: 'app_other:eu_1', amount: { value: '1.00' } },
+          },
+          ctx(),
+        ),
+      ).toEqual([]);
+    });
+
+    it('drops a capture with no usable amount rather than writing a zero payment', () => {
+      expect(
+        translate(
+          { id: 'WH-CAP-Y', event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: 'CAP-3' } },
+          ctx(),
+        ),
+      ).toEqual([]);
+    });
   });
 
   it('extractEventId / extractEventType read the PayPal envelope', () => {

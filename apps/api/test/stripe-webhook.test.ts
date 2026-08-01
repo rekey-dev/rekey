@@ -82,8 +82,9 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
 
     // BYO Stripe creds (incl. webhook signing secret) so the per-app webhook
     // endpoint resolves + verifies against this app's own secret.
-    await billingCredentialsService.upsertStripe(
+    await billingCredentialsService.upsertCredentials(
       applicationId,
+      'stripe',
       { apiKey: 'sk_test_for_ci_only', webhookSecret: WEBHOOK_SECRET },
       { enabled: true, mode: 'test' },
     );

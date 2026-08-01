@@ -36,3 +36,14 @@ export function statusTone(status: string): Tone {
   if (s === 'FAILED' || s === 'CANCELED' || s === 'CANCELLED' || s === 'EXPIRED' || s === 'REFUNDED' || s === 'DOWN' || s === 'REVOKED') return 'danger';
   return 'default';
 }
+
+/**
+ * Application environment → tone. Deliberately not `danger` for PRODUCTION:
+ * this is a label for what an application IS, not a fault, and the admin app
+ * reserves red for things that need attention.
+ */
+export function environmentTone(environment: string): Tone {
+  if (environment === 'PRODUCTION') return 'info';
+  if (environment === 'STAGING') return 'warning';
+  return 'default';
+}

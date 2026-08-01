@@ -5,6 +5,7 @@ import { SearchForm, buildQs } from '@/components/SearchForm';
 import { Pagination } from '@/components/Pagination';
 import { DateTime } from '@/components/DateTime';
 import { CopyButton } from '@/components/CopyButton';
+import { Badge, environmentTone } from '@/components/Badge';
 import { adminGetSafe, emptyPage, type Paginated, type ApplicationSummaryRow } from '@/lib/api';
 import { fmtCount } from '@/lib/format';
 
@@ -51,7 +52,14 @@ export default async function ApplicationsPage({
       header: <a href={sortHref('name')} className="hover:text-[var(--color-fg)]">Application{sortIcon('name')}</a>,
       render: (a) => (
         <div className="min-w-0">
-          <p className="font-medium truncate">{a.name}</p>
+          <p className="flex items-center gap-2">
+            {/* min-w-0 keeps the name truncating now that it's a flex item, and
+                shrink-0 keeps the badge whole instead of squeezing it. */}
+            <span className="min-w-0 truncate font-medium">{a.name}</span>
+            <Badge tone={environmentTone(a.environment)} className="shrink-0">
+              {a.environment}
+            </Badge>
+          </p>
           <p className="flex items-center gap-1 font-mono text-[11px] text-[var(--color-faint-fg)]">
             {a.slug}
             <CopyButton value={a.id} label={`Copy ${a.id}`} />

@@ -1,4 +1,4 @@
-// ReliPay — multi-tenant Auth + Billing.
+// Rekey — multi-tenant Auth + Billing.
 //
 // Two tenant levels:
 //   Tenant      = the company/dev who self-hosts or signs up.
@@ -25,9 +25,28 @@ datasource db {
 model Tenant {
   id           String        @id @default(cuid())
   name         String
-  // Kept for backward-compat with the bootstrap admin path. The canonical
-  // owner relationship now lives in TenantMembership.
+  // Denormalised owner address, NOT vestigial: required by the bootstrap
+  // admin path (POST /api/v1/admin/tenants), written by operator self-signup
+  // and workspace-create, and read by the super-admin tenant list (display +
+  // the `q` search predicate) and the CLI's `init`. The canonical owner
+  // *relationship* is TenantMembership.role = OWNER; this column is the
+  // address captured at creation and is not updated by ownership transfer, so
+  // treat it as "who created this workspace", not "who owns it now".
   ownerEmail   String        @map("owner_email")
+  // Optional per-workspace resource ceilings, set by a super-admin only
+  // (PUT /api/v1/admin/tenants/:id/limits). Shape lives in shared-types as
+  // `TenantLimitsSchema`; today it carries `maxActiveEndUsers`.
+  //
+  // NULL (the default, and the state of every pre-existing row) means
+  // UNLIMITED — a self-host deployment that never touches this field behaves
+  // exactly as it did before. An absent key inside the object means the same
+  // thing for that one limit. Deliberately an object rather than a scalar
+  // column so future limits are additive without another migration.
+  //
+  // Rekey never interprets this as pricing. A deployment's own billing
+  // automation (if any) is what writes plan-derived numbers in here; this
+  // codebase only knows "a number, or no number".
+  limits       Json?         @map("limits")
   createdAt    DateTime      @default(now()) @map("created_at")
   updatedAt    DateTime      @updatedAt @map("updated_at")
 
@@ -41,9 +60,9 @@ model Tenant {
 }
 
 // ============================================================================
-// Operator accounts (humans who log into the ReliPay panel).
+// Operator accounts (humans who log into the Rekey panel).
 //
-// Distinct from EndUser — operators are "users of ReliPay itself" while
+// Distinct from EndUser — operators are "users of Rekey itself" while
 // EndUser is "users of one of the operator's customer-facing applications."
 // They share the auth primitives (argon2, JWT, refresh, reset) via the same
 // libs but live in their own tables and carry an extra `tid` claim in their
@@ -271,7 +290,7 @@ model TenantPasswordResetToken {
 // Operator passwordless sign-in tokens (magic link). Single-use, short-lived
 // (15 min), hash-only — same shape as tenant_password_reset_tokens but minted
 // by /tenant/auth/magic-link/request and consumed by /verify, which then mints
-// a session. ReliPay doesn't send operator email; the raw token is returned to
+// a session. Rekey doesn't send operator email; the raw token is returned to
 // the caller (panel) to forward, mirroring the reset flow.
 model TenantMagicLinkToken {
   id           String    @id @default(cuid())
@@ -329,12 +348,52 @@ model TenantApiToken {
   @@map("tenant_api_tokens")
 }
 
+// Which environment an Application *is*. This is the isolation boundary for
+// the whole product: every domain row already hangs off `applicationId`, so
+// "keep my experiments away from my customers" is "use a second Application",
+// not a flag on three of forty models.
+//
+// Defaults to DEVELOPMENT — least privilege for a brand-new app.
+//
+// What actually branches on it: secret-key minting. A PRODUCTION Application
+// mints `rp_live_…` keys, STAGING and DEVELOPMENT mint `rp_test_…` (see
+// api-keys.service.ts). That prefix is a label for the human pasting the key,
+// not a capability — every key has exactly the reach its Application has.
+// Every other reader (admin metrics, the operator MCP tools) only *reports*
+// this column.
+//
+// It deliberately does NOT gate billing credentials. An earlier revision
+// refused live provider keys on non-production Applications; that rule was
+// removed because it could never be enforced for PayPal, whose sandbox and
+// live client ids are byte-identical — a safety property that silently holds
+// for two of three providers is worse than none. See `resolveMode` in
+// billing/credentials.service.ts for what is enforced instead: the stored
+// mode may not contradict the key material.
+//
+// **Fixed at creation. There is no code path that updates it** — it is written
+// in applicationsService.create and nowhere else. Creating a second
+// Application costs nothing and is the operation people actually want: the
+// live app and the rehearsal app are different things, not one thing in two
+// states. A mutable field would have needed one guard on promotion, another on
+// demotion, and a third wherever a future write path appeared.
+//
+// STAGING and DEVELOPMENT are mechanically identical (same key prefix, no
+// other branch); they differ only so operators can name what a deployment is
+// for.
+enum AppEnvironment {
+  PRODUCTION
+  STAGING
+  DEVELOPMENT
+}
+
 model Application {
   id              String   @id @default(cuid())
   tenantId        String   @map("tenant_id")
   name            String
   // Used as the public identifier in API keys, e.g. "myapp-prod".
   slug            String   @unique
+  // See AppEnvironment. Write-once: set at create, never updated.
+  environment     AppEnvironment @default(DEVELOPMENT)
   // Public, browser-safe key. Format: "rp_pub_<slug>_<random>". A real
   // credential for the public-bootstrap routes (sign-in/up, magic-link,
   // passkey-authenticate, license verify, plan listing) — see
@@ -361,14 +420,21 @@ model Application {
   // live in `oauthCredentialsCiphertext`, encrypted.
   oauthConfig                  Json    @default("{}") @map("oauth_config")
   oauthCredentialsCiphertext   String? @map("oauth_credentials_ciphertext")
-  // Per-application email-delivery config — `from` address/name, reply-to,
-  // etc. Schema in shared-types as `EmailConfigSchema`. Empty object
-  // means "use ReliPay defaults" (hosted Resend pool with our from address).
+  // Per-application email-delivery config — `fromAddress`, `fromName`,
+  // `replyTo`. Shape is the `EmailConfig` interface in lib/email-transport.ts
+  // (API-side only; no shared-types schema, no shared-types schema covers it, which is why the panel's email settings page hand-declares its own copy of the shape (a real drift hazard — keep them in step)).
+  // Empty object means "use Rekey defaults" (the RESEND_DEFAULT_API_KEY pool
+  // with RESEND_DEFAULT_FROM); a BYO transport with no `fromAddress` is an
+  // error, not a fallback.
   emailConfig                  Json    @default("{}") @map("email_config")
   // Encrypted per-Application transport credentials. AES-256-GCM via
-  // lib/secrets.ts. Shape: `{ resend: { apiKey } }`. Null = no BYO; we
-  // fall back to RESEND_DEFAULT_API_KEY if set, otherwise we return the
-  // raw token to the caller (legacy "ReliPay does not send email" mode).
+  // lib/secrets.ts. Shape is the `EmailCredentials` union in
+  // lib/email-transport.ts: `{ provider: 'resend', apiKey }` or
+  // `{ provider: 'smtp', host, port, secure, user, pass }` (SMTP covers SES /
+  // Postmark / SendGrid / Mailgun / custom relays). Pre-union ciphertexts of
+  // `{ resend: { apiKey } }` are still read and normalised on decrypt.
+  // Null = no BYO; we fall back to RESEND_DEFAULT_API_KEY if set, otherwise we
+  // return the raw token to the caller (legacy "Rekey does not send email" mode).
   emailCredentialsCiphertext   String? @map("email_credentials_ciphertext")
   // End-user session generation. End-user JWTs are signed with a key derived
   // from JWT_SECRET + this counter (see lib/jwt.ts). Bumping it instantly
@@ -386,9 +452,9 @@ model Application {
   // the API's CORS allowlist (union across all apps; see lib/cors-origins.ts) so
   // each tenant manages their own origins instead of a single global env list.
   corsOrigins     String[] @default([]) @map("cors_origins")
-  // Hosted customer portal (Portal V2). When enabled, ReliPay serves a
+  // Hosted customer portal (Portal V2). When enabled, Rekey serves a
   // self-service billing portal for this app's end-users at
-  // portal.relipay.dev/<slug> (and the optional custom domain below), driven by
+  // portal.rekey.dev/<slug> (and the optional custom domain below), driven by
   // the publishable key + the end-user's own token. See docs/specs/hosted-portal.md.
   hostedPortalEnabled    Boolean  @default(false) @map("hosted_portal_enabled")
   // Optional custom domain for the hosted portal (e.g. billing.theirsaas.com).
@@ -591,7 +657,7 @@ model EmailVerificationToken {
 // End-user organizations / teams.
 //
 // Multi-user workspaces *inside* an Application — distinct from the
-// operator-side `Tenant` (which models ReliPay's own customers). An
+// operator-side `Tenant` (which models Rekey's own customers). An
 // EndUser may belong to many Organizations; an Organization belongs to
 // exactly one Application. Mirrors Clerk's contract closely so existing
 // customer-side code that targets Clerk's `Organization` model lifts
@@ -805,10 +871,17 @@ model BillingCredentials {
   id            String   @id @default(cuid())
   applicationId String   @map("application_id")
   provider      String   // 'stripe' | 'paypal' | 'razorpay'
-  // 'test' = sandbox/dev keys (no real money). 'live' = production. Inferred
-  // from key prefix when possible (sk_test_/sk_live_ for Stripe, rzp_test_/rzp_live_
-  // for Razorpay) but always stored explicitly so the operator's intent is
-  // unambiguous and we can route PayPal (which uses different base URLs per mode).
+  // 'test' = sandbox/dev keys (no real money). 'live' = production. Derived
+  // from the key material wherever the provider states it (sk_test_/sk_live_
+  // for Stripe, rzp_test_/rzp_live_ for Razorpay); a submitted `mode` that
+  // contradicts the key is a hard refusal (BILLING_CREDENTIALS_MODE_CONTRADICTED,
+  // see `resolveMode`). The operator's declaration only decides for PayPal,
+  // whose sandbox and live client ids are byte-identical. Stored rather than
+  // re-derived on read because PayPal needs it to pick a base URL and the
+  // panel/revenue stats need it to say whether an amount is real money.
+  //
+  // Descriptive, not a permission: it is NOT constrained by the Application's
+  // `environment` — see the note on AppEnvironment.
   mode          String   @default("test")
   enabled       Boolean  @default(true)
   ciphertext    String
@@ -850,16 +923,6 @@ model ApiKey {
 // End-users (the signups inside each Application)
 // ============================================================================
 
-// Test/live data isolation (roadmap §7 v1). Stamped at row creation from the
-// calling API key's mode (`rp_test_*` → TEST, `rp_live_*` → LIVE); operator-
-// created rows and everything that predates the feature default to LIVE.
-// TEST rows are invisible to live keys and vice versa on the end-user-scoped
-// public API; operator/tenant surfaces see both and carry the `mode` field.
-enum DataMode {
-  TEST
-  LIVE
-}
-
 model EndUser {
   id            String    @id @default(cuid())
   applicationId String    @map("application_id")
@@ -874,23 +937,18 @@ model EndUser {
   // listings (e.g. "all admins").
   role          String    @default("user")
   // Free-form per-app metadata (display name, avatar, custom fields).
-  // The customer's app reads/writes this via the SDK; ReliPay never
+  // The customer's app reads/writes this via the SDK; Rekey never
   // interprets it, just stores it.
   metadata      Json?
-  // Per-user failed-sign-in counter + lockout. Incremented on each
-  // INVALID_CREDENTIALS during password sign-in; reset on success; rolls
-  // into `lockedUntil = now + LOCK_DURATION` after `LOCK_THRESHOLD`
-  // failures. Honoured by `authService.signIn` to throw
-  // `TOO_MANY_FAILED_ATTEMPTS` instead of running argon2.verify during
-  // the lockout window. `lockedUntil` is checked against `now` on every
-  // sign-in attempt; expired locks are cleared lazily.
-  failedSignInAttempts Int       @default(0) @map("failed_sign_in_attempts")
-  lockedUntil          DateTime? @map("locked_until")
-  // Test/live isolation: which "universe" this user lives in. Stamped from
-  // the calling key's mode at sign-up; immutable in practice. Note email is
-  // still unique per (application, email) ACROSS modes — the same address
-  // cannot exist as both a test and a live user.
-  mode          DataMode  @default(LIVE)
+  // NO failed-sign-in / lockout columns here, deliberately. Per-user lockout
+  // lives entirely in the Redis brute-force limiter (keys `bf:fail:` +
+  // `bf:lock:eu:login:<appId>:<email>`, see apps/api/src/lib/brute-force.ts) so
+  // the hot auth path doesn't write Postgres on every wrong password. The old
+  // `failed_sign_in_attempts` / `locked_until` columns outlived their writer by
+  // several releases and were read by operator surfaces that consequently
+  // reported every account as unlocked; dropped rather than left as a trap.
+  // Operator surfaces read the limiter — see `getScopeLockState`.
+  //
   // GDPR erasure (roadmap §10). When set, this EndUser is a TOMBSTONE: its
   // PII/auth material has been hard-deleted (email tombstoned to
   // erased+<id>@deleted.invalid, name/metadata nulled, passwordHash cleared,
@@ -923,7 +981,6 @@ model EndUser {
   @@unique([applicationId, email])
   @@index([applicationId])
   @@index([applicationId, role])
-  @@index([applicationId, mode])
   @@map("end_users")
 }
 
@@ -1171,6 +1228,14 @@ model RefreshToken {
   // (and vice-versa). MCP tokens also bind to the OAuth `clientId`.
   kind          String    @default("session")
   clientId      String?   @map("client_id")
+  // Scopes granted to this token chain (space-separated, RFC 6749), for
+  // `kind: "mcp"` only — session tokens carry no scope and leave this null.
+  // The refresh grant re-issues EXACTLY this string instead of a constant, so a
+  // chain granted only `openid email` can never come back holding
+  // `mcp:account`. Carried across rotations. Null on rows minted before the
+  // column existed; the refresh grant reads those as `mcp:account`, which is
+  // what it used to hard-code for every MCP token.
+  scope         String?
   // Active organization for this session (the `oid` access-token claim). Set by
   // POST /users/me/organizations/:id/switch; carried forward across rotations so
   // the active org survives refresh. SetNull if the org is deleted. Per-session
@@ -1207,15 +1272,20 @@ model RefreshToken {
 // Password reset tokens — short-lived, hashed-in-DB, single-use.
 //
 // Issued by `requestPasswordReset(email)` — we generate a 32-byte CSPRNG
-// token, store its SHA-256 hash, and return the raw value to the caller.
-// **ReliPay does not send email.** The customer's app receives the token
-// and emails (or SMSes, or pushes) it via their own provider. This keeps
-// us out of the email-deliverability business and lets each customer keep
-// their own from-address branding.
+// token (lib/password-reset.ts) and store only its SHA-256 hash.
 //
-// Lifetime: 1 hour. Single-use — `consumedAt` set on first successful
-// reset. Re-using a consumed token is a no-op + logs (treated as a
-// possible compromise signal).
+// Delivery: Rekey now sends the mail itself when a transport is configured
+// (per-Application BYO Resend/SMTP, else RESEND_DEFAULT_API_KEY) and the raw
+// token never leaves the server. The original "Rekey does not send email"
+// contract survives as the no-transport fallback: the raw token is returned to
+// the calling *server* (secret key only — never to a publishable-key caller,
+// which ships in browser code) so the customer's app can deliver it with its
+// own provider and from-address branding.
+//
+// Lifetime: 1 hour. Single-use — `consumedAt` is set on first successful reset,
+// atomically via updateMany so two concurrent resets can't both win. Presenting
+// a consumed token is refused with 401 PASSWORD_RESET_TOKEN_USED (not silently
+// ignored), so a replay is visible to the caller.
 // ============================================================================
 
 model PasswordResetToken {
@@ -1266,7 +1336,7 @@ enum PaymentStatus {
 }
 
 enum CouponDiscountType {
-  PERCENT  // amountOff is in basis-points-ish: 1500 = 15.00%
+  PERCENT  // amountOff is in basis points: 1500 = 15.00%, capped at 10000
   AMOUNT   // amountOff is in smallest currency unit (cents/paise/sen)
 }
 
@@ -1347,7 +1417,7 @@ model Plan {
 // single-`Plan.kind` shorthand (which still works as a fallback — a plan with
 // no entitlement rows is provisioned from its legacy kind fields).
 //
-// Hybrid model (see BILLING_MODEL.md): three STATEFUL kinds map to ReliPay's
+// Hybrid model (see BILLING_MODEL.md): three STATEFUL kinds map to Rekey's
 // in-house subsystems via the provisioner (CREDIT → CreditLedger/Balance,
 // LICENSE → License, USAGE → metered allowance), and a generic FEATURE kind
 // carries a Lago-style typed value (BOOL/INT/STRING) for arbitrary access
@@ -1420,9 +1490,6 @@ model Subscription {
    *  entitlements at provision/read time. Shape: {"KIND:key": value|quantity}
    *  e.g. {"LICENSE:": 50} for a negotiated 50-seat deal. */
   entitlementOverrides Json?       @map("entitlement_overrides")
-  // Test/live isolation: stamped from the calling key's mode at checkout
-  // (always equals the owning end-user's mode). LIVE for legacy rows.
-  mode          DataMode           @default(LIVE)
   metadata      Json               @default("{}")
   createdAt     DateTime           @default(now()) @map("created_at")
   updatedAt     DateTime           @updatedAt @map("updated_at")
@@ -1438,7 +1505,6 @@ model Subscription {
   // shouldn't conflict with ACTIVE in the same row — handled in service.
   @@unique([applicationId, endUserId, planId])
   @@index([applicationId])
-  @@index([applicationId, mode])
   @@index([endUserId])
   @@index([beneficiaryOrgId])
   @@index([status])
@@ -1455,9 +1521,6 @@ model Payment {
   status          PaymentStatus @default(PENDING)
   providerPaymentId String?     @unique @map("provider_payment_id")
   description     String?
-  // Test/live isolation: inherited from the subscription (or LIVE when the
-  // payment isn't attributable to a mode-stamped subscription).
-  mode            DataMode      @default(LIVE)
   metadata        Json          @default("{}")
   createdAt       DateTime      @default(now()) @map("created_at")
   updatedAt       DateTime      @updatedAt @map("updated_at")
@@ -1466,7 +1529,6 @@ model Payment {
   subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
 
   @@index([applicationId])
-  @@index([applicationId, mode])
   @@index([endUserId])
   @@index([status])
   @@index([createdAt])
@@ -1479,7 +1541,7 @@ model Payment {
 // One case tracks one subscription's trip through PAST_DUE: opened on the
 // transition, reminder emails at day 0/3/7, EXHAUSTED (subscription canceled)
 // at day 14 without recovery. The actual card retries are the PROVIDER's job
-// (Stripe Smart Retries / PayPal suspension retries) — ReliPay tracks state,
+// (Stripe Smart Retries / PayPal suspension retries) — Rekey tracks state,
 // notifies the end-user, and emits `dunning.*` outbound webhook events.
 //
 // Invariant: at most ONE OPEN case per subscription. Enforced at the service
@@ -1656,6 +1718,17 @@ model CouponRedemption {
   // coupons can be applied at checkout (subscription) OR one-off (payment).
   subscriptionId String?  @map("subscription_id")
   paymentId      String?  @map("payment_id")
+  /// The provider checkout session the coupon was applied to. THE identity of
+  /// "one purchase" for redemption purposes — see the unique index below.
+  /// Nullable for redemptions recorded before this column existed and for any
+  /// future caller that has no session in hand.
+  checkoutSessionId String? @map("checkout_session_id")
+  /// What the discount was worth, in the smallest currency unit, at the moment
+  /// it was redeemed. Denormalised on purpose: it used to be read back off
+  /// `Subscription.metadata.discountAmount`, which a later checkout on the same
+  /// (app, end-user, plan) row overwrites — so the operator's redemption
+  /// totals silently restated history.
+  discountAmount Int?     @map("discount_amount")
   redeemedAt     DateTime @default(now()) @map("redeemed_at")
 
   coupon Coupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
@@ -1667,6 +1740,22 @@ model CouponRedemption {
   // this — without it, a webhook replay double-counts the redemption
   // toward the per-user / global limits.
   @@unique([couponId, paymentId])
+  // One redemption per (coupon, checkout session) — the grain a coupon is
+  // actually sold at, and the reason it is not (coupon, subscription):
+  //
+  //   - A recurring coupon is `duration: 'once'` at the provider, so it buys
+  //     invoice #1 and nothing else. Keying on the subscription alone was not
+  //     enough to stop the renewal invoice recording a SECOND redemption for
+  //     the same one discount (and, once a per-user limit was hit, failing the
+  //     renewal outright).
+  //   - Keying on the subscription would be too strong the other way: a
+  //     one-time purchase reuses the same Subscription row (the upsert is by
+  //     (application, end-user, plan)), so buying the same credit pack twice
+  //     with the same coupon is TWO discounts and must be two redemptions.
+  //
+  // Postgres treats NULLs as distinct, so session-less redemptions are
+  // unaffected by this index.
+  @@unique([couponId, checkoutSessionId])
   @@map("coupon_redemptions")
 }
 
@@ -1699,14 +1788,14 @@ model WebhookEvent {
 }
 
 // ============================================================================
-// Outbound webhook endpoints — customer-registered URLs that ReliPay POSTs
+// Outbound webhook endpoints — customer-registered URLs that Rekey POSTs
 // user-lifecycle events to. Distinct from `WebhookEvent` above (that one is
 // INBOUND from billing providers).
 //
 // Per-Application, multiple endpoints supported (e.g. separate URLs for
 // staging vs production environments running off the same Application).
 // `secret` is the HMAC-SHA256 signing key included in each delivery's
-// `X-Relipay-Signature` header so customers can verify authenticity.
+// `X-Rekey-Signature` header so customers can verify authenticity.
 // Stored in plaintext because it's *the* shared secret — encrypting it
 // at rest with our own key would just shift the trust anchor, not raise
 // the bar against a DB-leak attacker.
@@ -1723,7 +1812,7 @@ model WebhookEndpoint {
   // Subscribed event types. ["*"] = all. See modules/webhooks/events.ts.
   events        String[]
   // Random secret (32 bytes hex). Used to HMAC-SHA256 the payload bytes;
-  // customers verify via `X-Relipay-Signature: sha256=<hex>`.
+  // customers verify via `X-Rekey-Signature: sha256=<hex>`.
   secret        String
   enabled       Boolean  @default(true)
   createdAt     DateTime @default(now()) @map("created_at")
@@ -1754,7 +1843,7 @@ model WebhookDelivery {
   id             String                @id @default(cuid())
   endpointId     String                @map("endpoint_id")
   applicationId  String                @map("application_id")
-  // Stable event id (cuid) — included in the payload + the `X-Relipay-Event-Id`
+  // Stable event id (cuid) — included in the payload + the `X-Rekey-Event-Id`
   // header. Customers should treat as the idempotency key.
   eventId        String                @map("event_id")
   eventType      String                @map("event_type")
@@ -1960,7 +2049,7 @@ model IdempotencyKey {
 
 // ============================================================================
 // MCP / OAuth 2.1 authorization server (per-Application, gated by
-// authConfig.mcpEnabled). ReliPay acts as the OAuth AS that MCP clients
+// authConfig.mcpEnabled). Rekey acts as the OAuth AS that MCP clients
 // (Claude Code, Claude Desktop) authenticate end-users against, then connect
 // to the hosted MCP server at /api/v1/mcp/<slug>.
 // ============================================================================
@@ -1996,6 +2085,18 @@ model OAuthAuthCode {
   // PKCE S256 challenge the client proves with its verifier at /token.
   codeChallenge String    @map("code_challenge")
   scope         String
+  // OIDC `nonce` from the authentication request, replayed verbatim into the
+  // ID Token (OIDC Core §3.1.3.7 rule 11 — the RP binds it to its own session
+  // to detect replay). Null when the client didn't send one; the claim is then
+  // omitted entirely rather than emitted empty.
+  nonce         String?
+  // When the end-user actually authenticated for THIS code — the `auth_time`
+  // ID Token claim. The authorize form re-authenticates on every request (there
+  // is no AS-side SSO session), so it is always "just now" at code creation,
+  // but it is persisted rather than recomputed at token time: the delay between
+  // consent and redemption is the RP's, not the user's, and auth_time must
+  // report the authentication event.
+  authTime      DateTime? @map("auth_time")
   expiresAt     DateTime  @map("expires_at")
   consumedAt    DateTime? @map("consumed_at")
   createdAt     DateTime  @default(now()) @map("created_at")

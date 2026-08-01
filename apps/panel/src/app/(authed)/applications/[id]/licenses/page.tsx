@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
@@ -83,14 +82,13 @@ async function issueLicense(applicationId: string, formData: FormData): Promise<
     // One-time key via a short-lived httpOnly cookie, not the URL (keys in the
     // URL leak into history, the referer header, and access logs).
     const jar = await cookies();
-    jar.set('relipay_reveal_license', result.rawKey, {
+    jar.set('rekey_reveal_license', result.rawKey, {
       httpOnly: true,
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
       path: `/applications/${applicationId}/licenses`,
       maxAge: 120,
     });
-    revalidatePath(`/applications/${applicationId}/licenses`);
     redirect(`/applications/${applicationId}/licenses?e=license_issued`);
   } catch (err) {
     if (err instanceof PanelApiError) {
@@ -106,7 +104,6 @@ async function revokeLicense(applicationId: string, licenseId: string): Promise<
     method: 'DELETE',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/licenses/${encodeURIComponent(licenseId)}`,
   });
-  revalidatePath(`/applications/${applicationId}/licenses`);
   redirect(`/applications/${applicationId}/licenses`);
 }
 
@@ -128,7 +125,7 @@ export default async function LicensesPage({
   const { id } = await params;
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
-  const reveal = (await cookies()).get('relipay_reveal_license')?.value;
+  const reveal = (await cookies()).get('rekey_reveal_license')?.value;
   const PAGE_SIZE = readPageSize(sp);
   const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
 

@@ -37,7 +37,7 @@ For an erasure of end-user `E` in application `A`:
 
 | Model | Action | Detail |
 |---|---|---|
-| `EndUser` | **anonymize (tombstone)** | `email` → `erased+<id>@deleted.invalid`, `emailVerified` → false, `passwordHash` → null, `metadata` → null, `role` → `"user"`, `failedSignInAttempts` → 0, `lockedUntil` → null, `erasedAt`/`erasedBy` set. Row **kept**. |
+| `EndUser` | **anonymize (tombstone)** | `email` → `erased+<id>@deleted.invalid`, `emailVerified` → false, `passwordHash` → null, `metadata` → null, `role` → `"user"`, `erasedAt`/`erasedBy` set. Row **kept**. |
 | `OAuthIdentity` | **delete** | All of E's provider links removed. |
 | `RefreshToken` | **delete** | All sessions (session + mcp kinds) removed → existing sessions die. |
 | `MfaCredential` | **delete** | TOTP secret + backup codes gone. |
@@ -45,6 +45,7 @@ For an erasure of end-user `E` in application `A`:
 | `MagicLinkToken` | **delete** | Any outstanding magic links removed. |
 | `PasswordResetToken` | **delete** | Any outstanding reset tokens removed. |
 | `EmailVerificationToken` | **delete** | Any outstanding verification tokens removed. |
+| `OAuthAuthCode` | **delete** | Any unredeemed per-Application OAuth/OIDC authorization codes removed. 60-second TTL, so usually none — but a code minted moments earlier is a live credential. |
 | `Subscription` | **retain + scrub** | Rows kept (FK to tombstone). `metadata` JSON cleared (`{}`). Status/plan/amounts untouched. |
 | `Payment` | **retain + scrub** | Rows kept. `metadata` cleared, `description` → null. Amount/currency/status/provider ref untouched. |
 | `License` | **retain + scrub** | Rows kept. `metadata` cleared. Key hash/prefix/status untouched. |
@@ -55,6 +56,7 @@ For an erasure of end-user `E` in application `A`:
 | `SecurityEvent` | **retain** | Security audit trail (including the erasure event itself) is retained for forensics. |
 | `ImpersonationAudit` | **retain** | Operator-accountability trail — retained. |
 | `DunningCase` | **retain** | Denormalized `endUserId` (no FK); part of the billing record. |
+| Redis brute-force lock | **delete** | `bf:fail:` / `bf:lock:eu:login:<appId>:<email>` for the erased address. The key embeds the email in plaintext and the super-admin locked-accounts dashboard enumerates those keys, so a surviving lock would keep the address readable for the rest of its 15-minute TTL. Best-effort, outside the transaction (Redis can't join it). |
 
 > Erasure is **idempotent**: erasing an already-tombstoned user is a no-op (the
 > response carries `alreadyErased: true`). All mutations run in one transaction.
@@ -75,12 +77,27 @@ with HTTP `410 END_USER_ERASED`:
   current user through `authService.getById`, which rejects erased users, so a
   pre-erasure access token stops working the moment it's next used.
 
+The per-Application **OAuth 2.1 / OpenID Connect surface** enforces the identical
+rule, in the dialect its clients parse rather than the Rekey envelope — an OAuth
+client cannot read a `{ success: false, error: { code } }` body, so `410
+END_USER_ERASED` would be indistinguishable from a bug:
+
+- **`grant_type=authorization_code`** — `invalid_grant`, even for a code minted
+  before the erasure (they are also deleted above, so this is the backstop).
+- **`grant_type=refresh_token`** — `invalid_grant`. The window here is the
+  30-day refresh chain, not the 60 seconds of a code.
+- **`/oauth/userinfo`** — `401 invalid_token`.
+- **`POST /api/v1/mcp/<slug>`** — `401 invalid_token`, before any tool runs.
+  `get_profile` returns the user's metadata, so a 15-minute access-token
+  lifetime was not an acceptable grace period.
+
 ## Observability
 
 - **Security event:** `end_user.erased` (actor = operator) with per-model counts.
 - **Outbound webhook:** `user.erased` — payload `data.user` = `{ id, erasedAt }`.
   Use it to propagate the erasure to your own copies of the user's PII. (See the
-  webhook events registry in `@rekey.dev/node` / docs/webhooks.)
+  webhook events registry — `WEBHOOK_EVENTS` from `@rekey.dev/node` — and
+  [billing.md → Webhooks](billing.md).)
 
 ## Panel
 

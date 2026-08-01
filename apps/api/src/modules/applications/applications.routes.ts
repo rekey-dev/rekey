@@ -2,13 +2,19 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { applicationsService } from './applications.service.js';
 import { requireSuperAdmin } from '../../middleware/admin-auth.js';
-import { BillingProviderSchema } from '@rekey.dev/shared-types';
+import { AppEnvironmentSchema, BillingProviderSchema } from '@rekey.dev/shared-types';
 import { PaginationQuery, parsePagination, paginationJsonSchema } from '../../lib/pagination.js';
 
 const CreateApplicationBody = z.object({
   tenantId: z.string().min(1),
   name: z.string().min(1).max(120),
   slug: z.string().min(1).max(40),
+  // Write-once, and the field that decides whether the Application counts
+  // against `maxProductionApps`. The tenant-facing create route has always
+  // accepted it; this surface silently dropped it, so a super-admin (or a
+  // deployment's own provisioning automation) could not create anything but a
+  // DEVELOPMENT app.
+  environment: AppEnvironmentSchema.optional(),
   billingProvider: BillingProviderSchema.optional(),
   enableBilling: z.boolean().optional(),
   authConfig: z
@@ -86,6 +92,14 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
               maxLength: 40,
               description: 'URL-safe lowercase identifier. Letters, digits, hyphens only.',
             },
+            environment: {
+              type: 'string',
+              enum: ['PRODUCTION', 'STAGING', 'DEVELOPMENT'],
+              description:
+                'Defaults to DEVELOPMENT. Write-once — it cannot be changed after creation, ' +
+                'so create a separate Application per environment. Only PRODUCTION counts ' +
+                'against the workspace `maxProductionApps` limit.',
+            },
             billingProvider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] },
             enableBilling: {
               type: 'boolean',
@@ -113,6 +127,7 @@ export async function applicationsRoutes(app: FastifyInstance): Promise<void> {
         tenantId: input.tenantId,
         name: input.name,
         slug: input.slug,
+        ...(input.environment !== undefined && { environment: input.environment }),
         ...(input.billingProvider !== undefined && { billingProvider: input.billingProvider }),
         ...(input.enableBilling !== undefined && { enableBilling: input.enableBilling }),
         ...(input.authConfig !== undefined && { authConfig: input.authConfig }),

@@ -8,11 +8,11 @@
  * on `Plan` / `Subscription` / `Payment`. Resist surfacing provider-only
  * concepts as top-level columns.
  *
- * Real implementations exist for all three providers — `RealStripeProvider`,
- * `RealPaypalProvider`, `RealRazorpayProvider` — selected when the Application
- * has BYO credentials. The deterministic `*StubProvider` variants are used
- * only under `NODE_ENV=test` or `RELIPAY_BILLING_FORCE_STUB=true`, or when no
- * credentials are configured yet (Stripe). See `providers/index.ts`.
+ * The only implementations are the real ones — `RealStripeProvider`,
+ * `RealPaypalProvider`, `RealRazorpayProvider` — built from the Application's
+ * BYO credentials. There is no stub: without credentials `providers/index.ts`
+ * throws `BILLING_CREDENTIALS_NOT_CONFIGURED`. Tests supply their own fakes
+ * from `test/fakes/billing-providers.ts`.
  */
 
 import type { Plan, EndUser, Subscription } from '@prisma/client';
@@ -23,6 +23,35 @@ export interface ProviderPlanRef {
   providerPlanId: string;
 }
 
+/**
+ * A validated coupon discount to apply to ONE checkout, resolved by
+ * `billing/checkout-discount.ts` before the provider is built.
+ *
+ * It is optional on `CheckoutSessionInput` so provider implementations written
+ * before coupons reached the provider keep compiling. That is a courtesy to
+ * the compiler and nothing more: a provider that cannot apply the discount
+ * must THROW (`discountUnsupported`), never quietly drop it. Dropping it is
+ * exactly the bug this field exists to fix — the buyer paid full price while
+ * Rekey stamped `discountAmount` on the Subscription and burned a redemption.
+ * `resolveCheckoutDiscount` refuses the checkout up front for any provider
+ * whose module does not declare `capabilities.discounts`, so a module that
+ * predates this never receives one.
+ */
+export interface CheckoutDiscount {
+  /**
+   * Amount off in the smallest currency unit, already resolved against the
+   * plan — a PERCENT coupon is computed by `couponsService` and reaches the
+   * provider as money, never as a percentage. Always `0 < amount <= plan.amount`.
+   */
+  amount: number;
+  /** Currency of `amount` — always the plan's, ISO 4217 as stored. */
+  currency: string;
+  /** Rekey `Coupon.id`, for the provider's own records where it takes them. */
+  couponId: string;
+  /** The coupon code as stored (lowercase), for the provider-side label. */
+  code: string;
+}
+
 export interface CheckoutSessionInput {
   application: { id: string; slug: string };
   endUser: EndUser;
@@ -30,6 +59,8 @@ export interface CheckoutSessionInput {
   /** Where the customer's site wants the user sent on success / cancellation. */
   successUrl: string;
   cancelUrl: string;
+  /** Coupon discount to apply to this checkout. Absent = charge full price. */
+  discount?: CheckoutDiscount;
 }
 
 export interface CheckoutSessionResult {
@@ -66,6 +97,10 @@ export interface BillingProvider {
   /**
    * Mint a hosted-checkout session for a RECURRING subscription. Returns a
    * URL to redirect the user to. Activation lands via the webhook handler.
+   *
+   * `input.discount`, when present, MUST be applied to the first billing
+   * period or the call must throw. Ignoring it charges full price against a
+   * discount Rekey has already recorded.
    */
   createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSessionResult>;
 
@@ -75,6 +110,8 @@ export interface BillingProvider {
    * return shape; the difference is the provider charges once. Fulfillment
    * (credit grant / license issue) still lands via the webhook handler when
    * payment completes.
+   *
+   * Same rule for `input.discount`: apply it to the single charge, or throw.
    */
   createOneTimeCheckout(input: CheckoutSessionInput): Promise<CheckoutSessionResult>;
 

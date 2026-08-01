@@ -9,6 +9,31 @@ import { StatusBadge } from '@/components/status-badge';
 import { ConfirmSubmit } from '@/components/confirm-submit';
 import { ProviderRadios } from '@/components/provider-radios';
 
+/**
+ * Checkout / cancel failures, translated for the merchant's customer.
+ *
+ * Audience rule from not-found.tsx applies: no error codes, and none of the
+ * API's operator `fix` text — "configure a provider in Panel → Billing" is an
+ * instruction the person reading this cannot act on. Each string says what it
+ * means for them instead.
+ *
+ * BILLING_CREDENTIALS_NOT_CONFIGURED matters most: with the stub providers
+ * gone, an app whose operator hasn't connected a provider now fails EVERY
+ * subscribe click. Left generic, that reads as "try again" and the customer
+ * loops forever on an error no retry can clear.
+ */
+const CHECKOUT_ERR: Record<string, string> = {
+  BILLING_CREDENTIALS_NOT_CONFIGURED:
+    'Payments aren’t set up here yet, so checkout isn’t available.',
+  PLAN_NOT_FOUND: 'That plan isn’t available any more.',
+  PLAN_INACTIVE: 'That plan isn’t available any more.',
+  BILLING_ORGANIZATION_REQUIRED:
+    'This plan is billed to your team, so a team owner or admin has to start it.',
+  BILLING_PROVIDER_SWITCH_BLOCKED:
+    'Your current subscription is billed through a different payment provider. It needs to be canceled before you start this one.',
+  SUBSCRIPTION_NOT_FOUND: 'We couldn’t find that subscription — it may already be canceled.',
+};
+
 function money(amount: number, currency: string): string {
   try {
     return new Intl.NumberFormat('en', { style: 'currency', currency }).format(amount / 100);
@@ -80,17 +105,17 @@ export default async function DashboardPage({
       {notice === 'canceled' && <Banner tone="info">Your subscription will end at the close of the current period.</Banner>}
       {error && (
         <Banner tone="error">
-          Something went wrong. Please try again
+          {CHECKOUT_ERR[error] ?? 'Something went wrong. Please try again.'}
           {supportHref ? (
             <>
-              , or{' '}
+              {' '}
               <a href={supportHref} className="underline" target="_blank" rel="noopener noreferrer">
-                contact support
+                Contact support
               </a>{' '}
-              if it keeps happening.
+              if you need help.
             </>
           ) : (
-            ', or contact support if it keeps happening.'
+            ' Contact support if you need help.'
           )}
         </Banner>
       )}

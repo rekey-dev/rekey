@@ -2,8 +2,8 @@
  * Dump the generated OpenAPI spec to stdout (or a file path arg).
  *
  * Builds the Fastify app to `.ready()` and reads `app.swagger()` — route
- * registration only attaches schemas, so no DB/Redis connection happens.
- * Feeds the marketing-site API reference (apps/marketing/public/openapi.json).
+ * registration only attaches schemas, so it DOES need a reachable Postgres: buildApp() calls primeCorsOrigins(), which queries `application`. Point DATABASE_URL at any migrated database (a throwaway container is fine).
+ * Writes the OpenAPI document to the path given as the first argument.
  *
  *   pnpm --filter @rekey.dev/api openapi:dump        # -> marketing/public
  *   tsx scripts/dump-openapi.mts [outfile]
@@ -14,7 +14,7 @@
  */
 import { writeFileSync } from 'node:fs';
 
-process.env.DATABASE_URL ??= 'postgresql://relipay:relipay@localhost:5432/relipay';
+process.env.DATABASE_URL ??= 'postgresql://rekey:rekey@localhost:5432/rekey';
 process.env.JWT_SECRET ??= '0'.repeat(48);
 process.env.SUPER_ADMIN_KEY ??= '0'.repeat(48);
 process.env.NODE_ENV ??= 'development';

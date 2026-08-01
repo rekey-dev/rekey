@@ -181,7 +181,6 @@ Day-to-day uses operator login. The `/api/v1/admin/*` routes (super-admin) and `
 
 ## What's deliberately not here yet
 
-- **OAuth providers for operator login** (Google / GitHub) — same module pattern as end-user OAuth, ships in Phase 4.3.
-- **MFA** — TOTP + backup codes for operators, ships in Phase 4.4.
 - **Workspace deletion** — destructive op needs a confirmation flow + soft-delete period.
-- **Audit log** of operator actions — visible in the panel.
+
+Operator OAuth (Google / GitHub), TOTP MFA, passkeys and the audit log have all shipped — `modules/tenant-oauth`, `modules/tenant-mfa`, `modules/tenant-passkeys`, and the panel's `(authed)/audit-log`. Listed here only so the gap isn't re-filed.

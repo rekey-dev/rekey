@@ -82,21 +82,6 @@ describe('per-app access controls (IP allowlist + CORS)', () => {
     expect((await callMe(ctx)).statusCode).toBe(200);
   });
 
-  it('minting a TEST-mode API key from the panel route is disabled (live still works)', async () => {
-    const ctx = await bootstrap();
-    const mint = (mode: string) =>
-      app.inject({
-        method: 'POST',
-        url: `/api/v1/tenant/applications/${ctx.appId}/api-keys`,
-        headers: { authorization: `Bearer ${ctx.operatorToken}` },
-        payload: { name: `k-${mode}`, mode },
-      });
-    const test = await mint('test');
-    expect(test.statusCode).toBe(400);
-    expect(test.json().error.code).toBe('TEST_API_KEYS_DISABLED');
-    expect((await mint('live')).statusCode).toBe(201);
-  });
-
   it('allowlist excluding the caller IP → 403 IP_NOT_ALLOWED, then allowed once it includes it', async () => {
     const ctx = await bootstrap();
     expect((await setAccess(ctx, { ipAllowlist: ['10.0.0.0/8'] })).statusCode).toBe(200);

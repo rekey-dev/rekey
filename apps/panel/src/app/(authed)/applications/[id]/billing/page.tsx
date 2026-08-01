@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import {
   api,
   PanelApiError,
@@ -79,7 +78,6 @@ async function saveProviderCredentials(
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/billing`);
   redirect(`/applications/${applicationId}/billing?saved=${encodeURIComponent(provider)}`);
 }
 
@@ -94,7 +92,6 @@ async function toggleEnabled(
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${encodeURIComponent(provider)}`,
     body: { enabled },
   });
-  revalidatePath(`/applications/${applicationId}/billing`);
   redirect(`/applications/${applicationId}/billing`);
 }
 
@@ -117,7 +114,6 @@ async function setBillingEnabled(applicationId: string, enabled: boolean): Promi
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/billing`);
   redirect(`/applications/${applicationId}/billing?saved=billing`);
 }
 
@@ -141,7 +137,6 @@ async function setDunningEnabled(applicationId: string, dunningEnabled: boolean)
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/billing`);
   redirect(`/applications/${applicationId}/billing?saved=dunning`);
 }
 
@@ -159,7 +154,6 @@ async function setBillingSubject(applicationId: string, billingSubject: 'user' |
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/billing`);
   redirect(`/applications/${applicationId}/billing?saved=subject`);
 }
 
@@ -172,7 +166,6 @@ async function removeProvider(
     method: 'DELETE',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${encodeURIComponent(provider)}`,
   });
-  revalidatePath(`/applications/${applicationId}/billing`);
   redirect(`/applications/${applicationId}/billing`);
 }
 
@@ -192,7 +185,6 @@ async function registerWebhook(
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/billing`);
   redirect(`/applications/${applicationId}/billing?webhook=${provider}`);
 }
 
@@ -287,17 +279,17 @@ export default async function BillingPage({
   const dunningEnabled = app.billingConfig.dunningEnabled ?? false;
 
   // This URL is PASTED INTO the provider dashboard, so it must be the PUBLIC
-  // API origin the provider can reach — not the in-cluster RELIPAY_URL
+  // API origin the provider can reach — not the in-cluster REKEY_URL
   // (e.g. `http://api:3030`), which would show an unreachable `api:3030`-style
   // host. Prefer NEXT_PUBLIC_API_URL (the public origin); fall back to
-  // RELIPAY_URL only for local dev where they're the same — and only after
+  // REKEY_URL only for local dev where they're the same — and only after
   // publicHttpUrl() confirms it looks public (dotted host or localhost), so an
   // in-cluster value never leaks into the HTML. When neither passes, apiBase is
   // null and the row renders a "configure NEXT_PUBLIC_API_URL" warning so the
   // operator catches it before pasting (Stripe silently rejects relative/bad
   // hosts and the webhook then fails forever — UX-AUDIT MEDIUM #24).
   const apiBase =
-    publicHttpUrl(process.env.NEXT_PUBLIC_API_URL) ?? publicHttpUrl(process.env.RELIPAY_URL);
+    publicHttpUrl(process.env.NEXT_PUBLIC_API_URL) ?? publicHttpUrl(process.env.REKEY_URL);
   // Module-name-driven (P4): the shared webhook pipeline route is
   // /billing/webhook/:provider/:slug for every registered module.
   const webhookUrlFor = (name: string): string | null =>

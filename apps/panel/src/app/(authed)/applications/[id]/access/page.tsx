@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
@@ -32,7 +31,6 @@ async function saveAccess(applicationId: string, formData: FormData): Promise<vo
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/access`);
   redirect(`/applications/${applicationId}/access?saved=1`);
 }
 
@@ -43,7 +41,6 @@ async function rotateSessions(applicationId: string): Promise<void> {
       method: 'POST',
       path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/rotate-sessions`,
     });
-    revalidatePath(`/applications/${applicationId}/access`);
     redirect(`/applications/${applicationId}/access?rotated=${r.sessionsRevoked}`);
   } catch (err) {
     if (err instanceof PanelApiError) {

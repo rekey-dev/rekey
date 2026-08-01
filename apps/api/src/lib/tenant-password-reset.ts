@@ -1,10 +1,12 @@
 /**
  * Tenant-operator password reset tokens.
  *
- * Mirrors `lib/password-reset.ts` for the operator side. Rekey still
- * doesn't send email — the bootstrap flow returns the raw token so the
- * deploying organisation can hand it off to whatever mailer they like
- * (or, in dev, click through directly).
+ * Mirrors `lib/password-reset.ts` for the operator side: this module mints,
+ * looks up and consumes, nothing more. `tenantAuthService.requestPasswordReset`
+ * emails the link via the deployment-wide transport and returns
+ * `resetToken: null`. The raw token comes back to the caller only under the
+ * `REKEY_DEV_ECHO_AUTH_TOKENS` dev flag (refused at boot in production) or when
+ * no transport is configured.
  *
  * 1-hour lifetime, single-use, hash-only DB.
  */

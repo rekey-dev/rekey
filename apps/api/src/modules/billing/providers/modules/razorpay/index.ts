@@ -21,8 +21,6 @@
 
 import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
 import { RekeyError } from '../../../../../lib/error.js';
-import { RazorpayStubProvider, RealRazorpayProvider } from '../../razorpay.js';
-import type { RazorpayCredentials } from '../../../credentials.service.js';
 import type {
   AppRef,
   DomainBillingEvent,
@@ -303,8 +301,8 @@ export const razorpayModule: ProviderModule = {
   display: {
     label: 'Razorpay',
     docsUrl: 'https://razorpay.com/docs/webhooks/',
-    // Historical geo-routing default: India routes to Razorpay when
-    // configured (see pickProvider).
+    // Suggested only — the panel pre-fills "IN" here. `pickProvider` reads the
+    // stored row, so India routes to Razorpay only once an operator saves it.
     defaultCountries: ['IN'],
     priority: 100,
   },
@@ -320,6 +318,13 @@ export const razorpayModule: ProviderModule = {
     // off the provider's own event, no local advance needed.
     periodRotationEvents: true,
     onlineVerify: false,
+    // A Payment Link's amount is ours to set, so a one-off discount is simply
+    // a smaller amount. Subscriptions bill straight off the plan: the only
+    // discount surface is an Offer (`offer_id`), which is created in the
+    // Razorpay dashboard rather than through the API and is not per-checkout,
+    // and `addons` only ever ADD to a cycle. Nothing here can take an ad-hoc
+    // discount off one period, so the coupon is refused instead.
+    discounts: { oneTime: true, recurring: false },
   },
   credentialSchema: [
     {
@@ -344,19 +349,13 @@ export const razorpayModule: ProviderModule = {
       webhookRole: 'secret',
     },
   ],
-  inferMode(creds) {
-    // Legacy inference (credentials.service.ts pre-P3): rzp_live_ → live,
-    // anything else → test.
-    return (creds.keyId ?? '').startsWith('rzp_live_') ? 'live' : 'test';
-  },
-  createProvider(creds) {
-    // Same selection the factory (providers/index.ts) applies for the
-    // creds-present case: tests and RELIPAY_BILLING_FORCE_STUB short-circuit
-    // the real SDK; production uses it unconditionally.
-    if (process.env.NODE_ENV === 'test' || process.env.RELIPAY_BILLING_FORCE_STUB === 'true') {
-      return new RazorpayStubProvider();
-    }
-    return new RealRazorpayProvider(creds as unknown as RazorpayCredentials);
+  detectMode(creds) {
+    // Razorpay key ids are self-describing; see the Stripe module for why an
+    // unrecognised shape is `null` rather than 'test'.
+    const keyId = creds.keyId ?? '';
+    if (keyId.startsWith('rzp_live_')) return 'live';
+    if (keyId.startsWith('rzp_test_')) return 'test';
+    return null;
   },
   webhook: {
     resolveApplication,

@@ -26,7 +26,7 @@ export async function GET(req: NextRequest): Promise<Response> {
     ? `/login?reason=${encodeURIComponent(reason)}`
     : '/login';
   // Emit a RELATIVE Location so the browser resolves it against the public URL
-  // it's on (panel.relipay.dev) — NOT `req.url`, which behind a proxy is the
+  // it's on (panel.rekey.dev) — NOT `req.url`, which behind a proxy is the
   // internal bind address (e.g. 0.0.0.0:3031). Same pattern as the magic-link /
   // oauth-callback handlers. NextResponse.redirect requires an absolute URL, so
   // set the Location header directly.

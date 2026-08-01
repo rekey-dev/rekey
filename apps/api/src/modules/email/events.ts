@@ -8,8 +8,8 @@
  * arbitrary expressions, no helper functions, just `{{var}}` lookups.
  *
  * Adding a new event means: (1) add the entry below, (2) drop a default
- * HTML/subject pair in `defaults/`, (3) call `emailService.send(...)` from
- * the relevant flow.
+ * HTML/subject pair in `defaults/`, (3) call `emailService.dispatch(...)` (or
+ * `dispatchSystem(...)` for mail with no Application) from the relevant flow.
  *
  * Variable values are always HTML-escaped at render time (see `render.ts`)
  * — never interpolate raw HTML from user-supplied strings.

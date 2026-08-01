@@ -13,11 +13,12 @@
  * (existing OAuthIdentity) or creates a new EndUser + OAuthIdentity.
  */
 
-import type { Application, DataMode } from '@prisma/client';
+import type { Application } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { assertSignupAllowed, type AuthKind } from '../../lib/signup-policy.js';
+import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
 import { getOAuthProvider, buildAuthUrl as buildAuthUrlVia } from './providers/index.js';
 import type { OAuthProviderConfig } from './providers/index.js';
@@ -120,8 +121,6 @@ export const oauthService = {
     providerName: string;
     code: string;
     device?: DeviceContext;
-    /** Calling key's mode — stamped onto a user created by this callback. */
-    mode?: DataMode;
     /** Calling key kind — a `secret_only` app refuses creation via pub key. */
     authKind?: AuthKind;
   }): Promise<OAuthSignInResult> {
@@ -196,8 +195,8 @@ export const oauthService = {
     // 3. Email exists locally but the OAuth side didn't verify it. Refuse
     //    to silently create a new user (would hit the unique constraint)
     //    AND refuse to auto-link. Customer's app should prompt the user
-    //    to sign in with their existing credential and link explicitly
-    //    from /me/oauth/:provider/link (Phase 2 endpoint).
+    //    to sign in with their existing credential and link explicitly via
+    //    POST /api/v1/auth/oauth/:provider/link/{start,complete}.
     if (identity.email && !identity.emailVerified) {
       const existingByEmail = await prisma.endUser.findUnique({
         where: {
@@ -234,6 +233,10 @@ export const oauthService = {
         fix: 'Either link this provider to an existing account first, or grant the email scope to this OAuth client.',
       });
     }
+    // Workspace ceiling. An OAuth-first login is a sign-up, so it is gated
+    // exactly like password / magic-link creation. Linking a provider to an
+    // ALREADY-EXISTING user returned above and is never gated.
+    await assertEndUserQuota(args.application.tenantId);
     const created = await prisma.endUser.create({
       data: {
         applicationId: args.application.id,
@@ -242,7 +245,6 @@ export const oauthService = {
         // EndUser.emailVerified column was previously hardcoded `true`
         // which silently laundered unverified emails into trusted state.
         emailVerified: identity.emailVerified,
-        mode: args.mode ?? 'LIVE',
       },
     });
     await prisma.oAuthIdentity.create({
@@ -265,7 +267,6 @@ export const oauthService = {
             email: created.email,
             emailVerified: created.emailVerified,
             role: created.role,
-            mode: created.mode,
             createdAt: created.createdAt.toISOString(),
             metadata: created.metadata ?? null,
           },

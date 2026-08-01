@@ -8,10 +8,15 @@
  * payload shapes and status maps stay in the modules' `translate`; this
  * file owns the domain writes.
  *
- * The atomicity contract from the July audit is load-bearing and preserved
- * verbatim:
- *   - Payment row + subscription status change commit in ONE $transaction
- *     (+ coupon redemption for successes).
+ * The atomicity contract from the July audit is load-bearing and preserved,
+ * with one deliberate narrowing:
+ *   - Payment row + subscription status change commit in ONE $transaction.
+ *   - Coupon redemption is NO LONGER in that transaction. It was, and it could
+ *     therefore undo a payment: a coupon whose limit had since been reached
+ *     threw from inside the transaction and rolled back a renewal that the
+ *     provider had already collected. A redemption is bookkeeping; a payment
+ *     is money. Redemption runs post-commit, is idempotent per (coupon,
+ *     checkout session), and reports failure instead of raising it.
  *   - P2002 on the unique provider_payment_id = webhook replay → the whole
  *     transaction rolls back and the applier skips silently.
  *   - Outbound emission (emitPaymentEvent/emitSubscriptionEvent) and dunning
@@ -22,9 +27,16 @@
  */
 
 import type { FastifyBaseLogger } from 'fastify';
+import type { Subscription } from '@prisma/client';
 import { prisma } from '../../../lib/prisma.js';
 import { entitlementsService } from '../entitlements.service.js';
 import { dunningService } from '../dunning.service.js';
+import {
+  checkoutSessionMatchers,
+  checkoutSessionWhere,
+  couponForSession,
+  newestCheckoutSessionId,
+} from '../checkout-sessions.js';
 import { advanceBillingPeriod } from './period.js';
 import { emitPaymentEvent, emitSubscriptionEvent } from './billing-events.js';
 import type {
@@ -74,6 +86,54 @@ function safeAmount(
   return raw;
 }
 
+/**
+ * Redeem the coupon a completed checkout session carried, if it carried one.
+ *
+ * Called from BOTH the checkout appliers and the payment applier, because
+ * neither one alone sees every sale: a one-time purchase completes without
+ * ever producing an invoice event, and a recurring one is only settled by the
+ * invoice. `redeemForCheckout` is idempotent per (coupon, session), so the
+ * overlap costs a query and nothing else.
+ *
+ * Never throws, and never runs inside a caller's transaction: an exhausted
+ * coupon must not be able to undo a payment write. What it could not record
+ * is logged at warn — the operator's coupon books being one row short is a
+ * thing to look at, not a thing to fail a webhook over.
+ */
+async function redeemSessionCoupon(
+  args: {
+    subscription: Pick<Subscription, 'id' | 'applicationId' | 'endUserId' | 'metadata'>;
+    checkoutSessionId: string;
+    paymentId?: string | undefined;
+  },
+  ctx: ApplyContext,
+): Promise<void> {
+  const coupon = couponForSession(args.subscription.metadata, args.checkoutSessionId);
+  if (!coupon) return;
+  // Dynamic import: coupons → billing → webhooks is otherwise a cycle.
+  const { couponsService } = await import('../../coupons/coupons.service.js');
+  const outcome = await couponsService.redeemForCheckout({
+    couponId: coupon.couponId,
+    applicationId: args.subscription.applicationId,
+    endUserId: args.subscription.endUserId,
+    checkoutSessionId: args.checkoutSessionId,
+    subscriptionId: args.subscription.id,
+    discountAmount: coupon.discountAmount,
+    ...(args.paymentId !== undefined && { paymentId: args.paymentId }),
+  });
+  if (outcome.recorded === false && outcome.reason === 'limit-reached') {
+    ctx.log.warn(
+      {
+        couponId: coupon.couponId,
+        subscriptionId: args.subscription.id,
+        checkoutSessionId: args.checkoutSessionId,
+        code: outcome.code,
+      },
+      'coupon discount was applied but its redemption could not be recorded — limit reached',
+    );
+  }
+}
+
 /** Dispatch one normalized event to its applier. Used by the pipeline. */
 export async function applyBillingEvent(ev: DomainBillingEvent, ctx: ApplyContext): Promise<void> {
   switch (ev.type) {
@@ -99,32 +159,31 @@ export async function applyBillingEvent(ev: DomainBillingEvent, ctx: ApplyContex
 }
 
 /**
- * Hosted checkout completed: the local PENDING subscription (matched by the
- * checkout-session id stored in its metadata at creation) flips ACTIVE, the
- * provider's subscription id is persisted for future event matching, and
- * the plan's entitlements are provisioned for the FIRST period.
+ * Hosted checkout completed: the local PENDING subscription (matched by any
+ * checkout-session id the row has issued — see checkout-sessions.ts) flips
+ * ACTIVE, the provider's subscription id is persisted for future event
+ * matching, and the plan's entitlements are provisioned for the FIRST period.
+ *
+ * This is also where a ONE-TIME purchase is fully accounted for: it is the
+ * only event either Stripe or PayPal produces for a `mode: 'payment'` sale, so
+ * both the `Payment` row (when the payload carries the charge) and the coupon
+ * redemption have to land here or they never land at all.
  */
 export async function applyCheckoutCompleted(
   ev: CheckoutCompletedEvent,
   ctx: ApplyContext,
 ): Promise<void> {
+  const where = checkoutSessionWhere(ev.applicationId, ev.checkoutSessionId);
   // Pre-transition snapshot so the outbound `subscription.activated` event
   // fires only on a REAL state change — a replayed event whose row is
   // already ACTIVE must not re-announce.
   const before = await prisma.subscription.findFirst({
-    where: {
-      applicationId: ev.applicationId,
-      metadata: { path: ['checkoutSessionId'], equals: ev.checkoutSessionId },
-    },
+    where,
     select: { id: true, status: true },
   });
 
   const updated = await prisma.subscription.updateMany({
-    where: {
-      applicationId: ev.applicationId,
-      // jsonpath / json filter — Prisma supports `path` here.
-      metadata: { path: ['checkoutSessionId'], equals: ev.checkoutSessionId },
-    },
+    where,
     data: {
       status: 'ACTIVE',
       ...(ev.providerSubscriptionId !== null && { providerSubId: ev.providerSubscriptionId }),
@@ -138,12 +197,7 @@ export async function applyCheckoutCompleted(
   // Idempotent, and covers both legacy single-kind plans (via synthesizeLegacy)
   // and bundled PlanEntitlement rows.
   if (updated.count > 0) {
-    const sub = await prisma.subscription.findFirst({
-      where: {
-        applicationId: ev.applicationId,
-        metadata: { path: ['checkoutSessionId'], equals: ev.checkoutSessionId },
-      },
-    });
+    const sub = await prisma.subscription.findFirst({ where });
     if (sub) {
       // Checkout provisions the subscription's FIRST period by default —
       // pinned to the 'initial' anchor so the first invoice.paid
@@ -157,6 +211,22 @@ export async function applyCheckoutCompleted(
         log: ctx.log,
         firstPeriod: ev.firstPeriod ?? true,
       });
+
+      // The charge, when the completion payload carried one (one-time flows).
+      // Recorded AFTER provisioning so a payment row never exists for a
+      // fulfilment that failed, and independently of it so a duplicate
+      // delivery re-provisions idempotently without a second payment.
+      const paymentId = ev.payment
+        ? await recordCompletionPayment(ev, sub, ctx)
+        : undefined;
+
+      // Redemption for the one-time flows, which produce no payment event of
+      // their own. Idempotent, so the recurring flows redeeming again from
+      // `applyPaymentSucceeded` costs a lookup.
+      await redeemSessionCoupon(
+        { subscription: sub, checkoutSessionId: ev.checkoutSessionId, paymentId },
+        ctx,
+      );
     }
     // Outbound event — only on the PENDING→ACTIVE transition (not on replays
     // that found the row already ACTIVE). Fire-and-forget like the auth emits.
@@ -176,6 +246,57 @@ export async function applyCheckoutCompleted(
 }
 
 /**
+ * Write the SUCCEEDED `Payment` row for a checkout completion that carried its
+ * own charge, and return its id. Returns undefined when nothing was written.
+ *
+ * Idempotent through the unique `provider_payment_id`, exactly like the
+ * payment appliers: a replayed completion hits P2002 and reports the existing
+ * row's id so the redemption can still link to it.
+ */
+async function recordCompletionPayment(
+  ev: CheckoutCompletedEvent,
+  sub: Subscription,
+  ctx: ApplyContext,
+): Promise<string | undefined> {
+  const charge = ev.payment;
+  if (!charge) return undefined;
+  const amount = safeAmount(charge.amount, ctx.log, {
+    providerPaymentId: charge.providerPaymentId,
+    field: 'amount_total',
+  });
+  if (amount === null) return undefined; // Refused (see safeAmount).
+
+  try {
+    const payment = await prisma.payment.create({
+      data: {
+        applicationId: ev.applicationId,
+        endUserId: sub.endUserId,
+        subscriptionId: sub.id,
+        amount,
+        currency: (charge.currency ?? 'usd').toUpperCase(),
+        status: 'SUCCEEDED',
+        providerPaymentId: charge.providerPaymentId,
+        description: charge.description,
+      },
+      select: { id: true },
+    });
+    emitPaymentEvent('payment.succeeded', payment.id);
+    return payment.id;
+  } catch (e) {
+    if ((e as { code?: string }).code !== 'P2002') throw e;
+    ctx.log.info(
+      { providerPaymentId: charge.providerPaymentId },
+      'checkout completed: payment already recorded',
+    );
+    const existing = await prisma.payment.findUnique({
+      where: { providerPaymentId: charge.providerPaymentId },
+      select: { id: true },
+    });
+    return existing?.id;
+  }
+}
+
+/**
  * Approved-but-uncaptured one-time order (PayPal Orders v2 —
  * CHECKOUT.ORDER.APPROVED). Port of the bespoke paypal.handler
  * `onOrderApproved`: capture via the provider, then flip the local row
@@ -189,10 +310,7 @@ export async function applyCheckoutApproved(
   ctx: ApplyContext,
 ): Promise<void> {
   const sub = await prisma.subscription.findFirst({
-    where: {
-      applicationId: ev.applicationId,
-      metadata: { path: ['checkoutSessionId'], equals: ev.checkoutSessionId },
-    },
+    where: checkoutSessionWhere(ev.applicationId, ev.checkoutSessionId),
     include: { plan: true },
   });
   if (!sub) {
@@ -221,6 +339,12 @@ export async function applyCheckoutApproved(
     data: { status: 'ACTIVE', providerSubId: ev.checkoutSessionId },
   });
   await entitlementsService.provision({ subscription: sub, log: ctx.log });
+  // Fulfilment happened, so the coupon has been spent. This applier is the
+  // ONLY place that knows it for a PayPal one-off: the capture arrives later
+  // as its own payment event, and before this existed the redemption was
+  // simply never recorded — a single-use code discounted every subsequent
+  // purchase by the same buyer, forever.
+  await redeemSessionCoupon({ subscription: sub, checkoutSessionId: ev.checkoutSessionId }, ctx);
   // `sub` is the pre-update row — emit only on the actual flip to ACTIVE.
   if (sub.status !== 'ACTIVE') {
     emitSubscriptionEvent('subscription.activated', sub.id);
@@ -232,10 +356,10 @@ export async function applyCheckoutApproved(
 }
 
 /**
- * Successful recurring payment: record the SUCCEEDED Payment row, redeem a
- * pending coupon (same transaction), ensure the subscription is ACTIVE,
- * recover any open dunning case, and (re-)provision entitlements for the
- * paid period.
+ * Successful recurring payment: record the SUCCEEDED Payment row and the
+ * subscription's status/period in one transaction, then — strictly after the
+ * commit — redeem the checkout's coupon if it has not been already, recover
+ * any open dunning case, and (re-)provision entitlements for the paid period.
  */
 /**
  * Local-subscription matcher shared by the payment/status appliers.
@@ -259,7 +383,9 @@ function localSubscriptionWhere(
   const or: object[] = [];
   if (providerSubscriptionId) or.push({ providerSubId: providerSubscriptionId });
   if (checkoutSessionId) {
-    or.push({ metadata: { path: ['checkoutSessionId'], equals: checkoutSessionId } });
+    // Any session the row has issued, not just its newest — see
+    // checkout-sessions.ts for why a row can have several live at once.
+    or.push(...checkoutSessionMatchers(checkoutSessionId));
   }
   return or.length > 0 ? { applicationId, OR: or } : null;
 }
@@ -287,21 +413,17 @@ export async function applyPaymentSucceeded(
     return;
   }
 
-  // ----- Coupon redemption: record ONCE here, at payment-success time -----
-  // Previously the redemption row was inserted at checkout-session creation,
-  // which let abandoned-checkout abuse exhaust per-user / global limits
-  // without anyone actually paying. Now we only record when the provider
-  // tells us money moved. The redemption is created in the SAME transaction
-  // as the Payment row — a redemption failure must not leave a committed
-  // payment behind with no redemption to ever record it (the replay path
-  // skips the whole block once the payment exists).
-  const subMeta = (localSub?.metadata ?? null) as Record<string, unknown> | null;
-  const couponId = typeof subMeta?.couponId === 'string' ? subMeta.couponId : null;
-  const { couponsService } = couponId
-    ? await import('../../coupons/coupons.service.js')
-    : { couponsService: null };
-
   // Idempotent: provider_payment_id is unique; skip on conflict.
+  //
+  // The coupon redemption is deliberately NOT in this transaction any more.
+  // It used to be, on the reasoning that a payment must never commit without
+  // its redemption — but the redemption throws on an exhausted limit, and a
+  // recurring coupon was being redeemed again on EVERY renewal, so the first
+  // renewal after a `maxRedemptionsPerUser: 1` coupon was consumed rolled the
+  // renewal payment back: money moved at the provider, no Payment row, no
+  // status or period mirror, no re-provisioned entitlements, no dunning
+  // recovery, and the provider retried the poisoned event until it gave up.
+  // Redemption now runs post-commit and reports rather than throws.
   let createdPayment: { id: string } | null = null;
   try {
     createdPayment = await prisma.$transaction(async (tx) => {
@@ -315,23 +437,9 @@ export async function applyPaymentSucceeded(
           status: 'SUCCEEDED',
           providerPaymentId: ev.providerPaymentId,
           description: ev.description ?? null,
-          // Test/live isolation: a payment inherits its subscription's mode.
-          mode: localSub?.mode ?? ev.mode ?? 'LIVE',
         },
         select: { id: true },
       });
-      if (couponsService && couponId && localSub) {
-        await couponsService.recordRedemption(
-          {
-            couponId,
-            applicationId: ev.applicationId,
-            endUserId: localSub.endUserId,
-            subscriptionId: localSub.id,
-            paymentId: payment.id,
-          },
-          tx,
-        );
-      }
       // Flip the subscription ACTIVE (and mirror a payload-carried period
       // anchor, e.g. Razorpay current_end) in the SAME transaction as the
       // payment — a committed payment must never be left with a stale
@@ -349,9 +457,9 @@ export async function applyPaymentSucceeded(
     });
   } catch (e) {
     // P2002 = this provider payment id already has a Payment row (webhook
-    // replay) — the original transaction committed payment + redemption +
-    // status together, so skipping here is safe. Anything else rolls all
-    // back and rethrows.
+    // replay) — the original transaction committed payment + status
+    // together, so skipping here is safe. Anything else rolls all back and
+    // rethrows.
     if ((e as { code?: string }).code === 'P2002') {
       ctx.log.info(
         { providerPaymentId: ev.providerPaymentId },
@@ -369,6 +477,26 @@ export async function applyPaymentSucceeded(
     if (localSub && localSub.status !== 'ACTIVE') {
       // Recovery/activation via payment — a real status transition.
       emitSubscriptionEvent('subscription.activated', localSub.id);
+    }
+  }
+
+  // Coupon redemption — post-commit, and keyed on the session that bought the
+  // discount, so a RENEWAL of a discounted subscription redeems nothing: the
+  // provider coupon is `duration: 'once'` and only ever cut the first invoice,
+  // yet every renewal used to record another redemption. The operator's stats
+  // then multiplied one discount by the number of periods, and once a per-user
+  // limit was reached the extra redemption failed the renewal outright.
+  if (localSub) {
+    const sessionId = newestCheckoutSessionId(localSub.metadata);
+    if (sessionId) {
+      await redeemSessionCoupon(
+        {
+          subscription: localSub,
+          checkoutSessionId: sessionId,
+          paymentId: createdPayment?.id,
+        },
+        ctx,
+      );
     }
   }
 
@@ -442,8 +570,6 @@ export async function applyPaymentFailed(ev: PaymentFailedEvent, ctx: ApplyConte
           status: 'FAILED',
           providerPaymentId: ev.providerPaymentId,
           description: ev.description ?? null,
-          // Test/live isolation: a payment inherits its subscription's mode.
-          mode: localSub?.mode ?? ev.mode ?? 'LIVE',
         },
         select: { id: true },
       });

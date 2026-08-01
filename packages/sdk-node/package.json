@@ -1,7 +1,10 @@
 {
   "name": "@rekey.dev/node",
-  "version": "1.1.2",
+  "version": "2.0.0-rc.1",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "description": "Rekey server SDK for Node — auth + billing for your application.",
   "type": "module",
   "main": "./dist/index.js",
@@ -34,8 +37,7 @@
     "subscription"
   ],
   "dependencies": {
-    "@rekey.dev/shared-types": "workspace:*",
-    "zod": "^3.23.8"
+    "@rekey.dev/shared-types": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",

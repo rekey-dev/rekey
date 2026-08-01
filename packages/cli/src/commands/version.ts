@@ -1,7 +1,6 @@
 import type { Command } from 'commander';
 import { ok, readGlobalOpts } from '../lib/output.js';
-
-const VERSION = '0.0.0';
+import { VERSION } from '../lib/version.js';
 
 export function registerVersionCommand(program: Command): void {
   program

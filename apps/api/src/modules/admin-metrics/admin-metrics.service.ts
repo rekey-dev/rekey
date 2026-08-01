@@ -2,7 +2,7 @@
  * Super-admin metrics service.
  *
  * Pure READ aggregations across the whole deployment for the operator
- * dashboard at admin.relipay.dev. Every method is a `findMany`/`count`/
+ * dashboard at admin.rekey.dev. Every method is a `findMany`/`count`/
  * `groupBy` over Prisma — no writes, no caching. The dashboard runs at low
  * cadence (operator-driven page loads), so we avoid materialised views and
  * compute on demand.
@@ -11,6 +11,7 @@
  * max 200). The overview rolls up counts in parallel with `Promise.all`.
  */
 
+import type { AppEnvironment } from '@rekey.dev/shared-types';
 import { prisma } from '../../lib/prisma.js';
 import { getRedis } from '../../lib/redis.js';
 import { scanActiveLoginLocks, LOGIN_POLICY } from '../../lib/brute-force.js';
@@ -119,7 +120,8 @@ export interface OverviewMetrics {
   /**
    * Number of end-user accounts currently inside the failed-sign-in lockout
    * window. Sourced from the Redis brute-force limiter (`bf:lock:eu:login:*`),
-   * NOT the dead `EndUser.lockedUntil` column — see `scanActiveLoginLocks`.
+   * which is the only source — the `EndUser.lockedUntil` column this used to
+   * read was dropped on 2026-07-30. See `scanActiveLoginLocks`.
    */
   lockedAccountsCount: number;
   /** SUM(CreditBalance.balance) across all applications. Unit-less. */
@@ -560,6 +562,7 @@ export const adminMetricsService = {
       tenantName: string;
       name: string;
       slug: string;
+      environment: AppEnvironment;
       endUserCount: number;
       activeSubscriptions: number;
       apiRequestsLast24h: number;
@@ -618,6 +621,9 @@ export const adminMetricsService = {
           tenantName: a.tenant.name,
           name: a.name,
           slug: a.slug,
+          // The deployment owner sees every tenant's applications side by side;
+          // with data modes gone this is the only marker of which ones are real.
+          environment: a.environment,
           endUserCount,
           activeSubscriptions: activeSubs,
           apiRequestsLast24h: requests24h,
@@ -1211,8 +1217,8 @@ export const adminMetricsService = {
    * End-user accounts currently inside the failed-sign-in lockout window.
    *
    * Sourced from the Redis brute-force limiter (`lib/brute-force.ts`), NOT the
-   * dead `EndUser.{lockedUntil,failedSignInAttempts}` columns — lockout moved
-   * to Redis and nothing writes those columns anymore. We `SCAN` the
+   * `EndUser.{lockedUntil,failedSignInAttempts}` columns, which are gone (they
+   * outlived their writer and were dropped on 2026-07-30). We `SCAN` the
    * `bf:lock:eu:login:*` keys (each encodes applicationId + email), resolve the
    * remaining TTL as `lockedUntil`, and join back to `EndUser` for the id +
    * application slug. `failedAttempts` reports the policy threshold: a lock is

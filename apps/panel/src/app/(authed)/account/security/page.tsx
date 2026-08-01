@@ -13,7 +13,6 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { api, PanelApiError, type MeDto, type OperatorSessionRow } from '@/lib/api';
 import { QrCode } from '@/components/QrCode';
@@ -38,10 +37,10 @@ const inputCls =
  * with `?otpauth=…&backups=…` in the URL — that data ended up in browser
  * history, referer headers, and panel access logs. AUDIT-3 (2026-05-19):
  * we now stash them in a short-lived, HttpOnly, SameSite=strict cookie
- * (`relipay_mfa_setup`) scoped to /account/security, read once by the
+ * (`rekey_mfa_setup`) scoped to /account/security, read once by the
  * page, then cleared after a successful confirm/disable.
  */
-const MFA_SETUP_COOKIE = 'relipay_mfa_setup';
+const MFA_SETUP_COOKIE = 'rekey_mfa_setup';
 const MFA_SETUP_COOKIE_MAX_AGE = 60 * 5; // 5 minutes — long enough to scan, short enough to limit blast radius.
 
 interface MfaStatus {
@@ -71,7 +70,6 @@ async function setupMfa(): Promise<void> {
     path: '/account/security',
     maxAge: MFA_SETUP_COOKIE_MAX_AGE,
   });
-  revalidatePath('/account/security');
   redirect('/account/security');
 }
 
@@ -94,7 +92,6 @@ async function confirmMfa(formData: FormData): Promise<void> {
   // need the backup codes again must mint fresh ones via Disable + Setup.
   const jar = await cookies();
   jar.delete(MFA_SETUP_COOKIE);
-  revalidatePath('/account/security');
   redirect('/account/security?confirmed=1');
 }
 
@@ -103,7 +100,6 @@ async function disableMfa(): Promise<void> {
   await api({ method: 'POST', path: '/api/v1/tenant/auth/mfa/disable' });
   const jar = await cookies();
   jar.delete(MFA_SETUP_COOKIE);
-  revalidatePath('/account/security');
   redirect('/account/security?disabled=1');
 }
 
@@ -123,7 +119,6 @@ async function changePassword(formData: FormData): Promise<void> {
     }
     throw err;
   }
-  revalidatePath('/account/security');
   redirect('/account/security?pwchanged=1');
 }
 
@@ -134,14 +129,12 @@ async function revokeSession(formData: FormData): Promise<void> {
     method: 'DELETE',
     path: `/api/v1/tenant/auth/sessions/${encodeURIComponent(sessionId)}`,
   });
-  revalidatePath('/account/security');
   redirect('/account/security?session_revoked=1');
 }
 
 async function signOutEverywhere(): Promise<void> {
   'use server';
   await api({ method: 'POST', path: '/api/v1/tenant/auth/sign-out-everywhere' });
-  revalidatePath('/account/security');
   redirect('/account/security?signed_out_all=1');
 }
 

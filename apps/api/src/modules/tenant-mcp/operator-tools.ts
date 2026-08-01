@@ -12,9 +12,14 @@
  * transport- and SDK-agnostic so the handlers are unit-testable directly.
  *
  * Authorization is the caller's responsibility: each tool runs with a fixed
- * (tenantUserId, tenantId) context the auth guard supplied. The PAT is bound
- * to one workspace per token, so cross-tenant reads are structurally
- * impossible.
+ * (tenantUserId, tenantId) context the auth guard supplied.
+ *
+ * Two credentials reach here (see `bearer-auth.ts`): a PAT, whose workspace is
+ * pinned by `TenantApiToken.tenantId`, or an OAuth access token, whose workspace
+ * comes from the `tid` the operator consented to. Both re-check membership on
+ * every request. But tenant isolation itself is each handler filtering on
+ * `ctx.tenantId` — a convention every new tool must follow, not a property the
+ * type system or the guard can enforce for you.
  */
 
 import type { TenantRole } from '@prisma/client';
@@ -227,20 +232,18 @@ export const operatorTools: OperatorTool[] = [
     description:
       "Recent Payment rows across the workspace's Applications — by default " +
       'the last 25, max 200. Filter optionally by `status` (SUCCEEDED / FAILED / ' +
-      'PENDING / REFUNDED) and by `mode` (TEST / LIVE). Each row reports its mode.',
+      "PENDING / REFUNDED). Each row reports its Application's environment.",
     inputSchema: {
       type: 'object',
       properties: {
         limit: { type: 'integer', minimum: 1, maximum: 200, default: 25 },
         status: { type: 'string', enum: ['SUCCEEDED', 'FAILED', 'PENDING', 'REFUNDED'] },
-        mode: { type: 'string', enum: ['TEST', 'LIVE'] },
       },
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
       const limit = clampLimit(args.limit);
       const status = typeof args.status === 'string' ? args.status : undefined;
-      const mode = args.mode === 'TEST' || args.mode === 'LIVE' ? args.mode : undefined;
       const apps = await prisma.application.findMany({
         where: { tenantId: ctx.tenantId },
         select: { id: true },
@@ -251,11 +254,10 @@ export const operatorTools: OperatorTool[] = [
         where: {
           applicationId: { in: appIds },
           ...(status ? { status: status as 'SUCCEEDED' | 'FAILED' | 'PENDING' | 'REFUNDED' } : {}),
-          ...(mode ? { mode: mode as 'TEST' | 'LIVE' } : {}),
         },
         orderBy: { createdAt: 'desc' },
         take: limit,
-        include: { application: { select: { slug: true } } },
+        include: { application: { select: { slug: true, environment: true } } },
       });
       return {
         payments: rows.map((r) => ({
@@ -265,7 +267,7 @@ export const operatorTools: OperatorTool[] = [
           amountMinor: r.amount,
           currency: r.currency,
           status: r.status,
-          mode: r.mode,
+          environment: r.application.environment,
           createdAt: r.createdAt.toISOString(),
         })),
       };
@@ -275,8 +277,8 @@ export const operatorTools: OperatorTool[] = [
     name: 'recent_subscriptions',
     description:
       'Recent Subscription rows across the workspace — by default the last 25, max ' +
-      '200. Filter optionally by `status` (PENDING / ACTIVE / PAST_DUE / CANCELED / EXPIRED) ' +
-      'and by `mode` (TEST / LIVE). Each row reports its mode and id (use the id with ' +
+      '200. Filter optionally by `status` (PENDING / ACTIVE / PAST_DUE / CANCELED / EXPIRED). ' +
+      "Each row reports its Application's environment and its id (use the id with " +
       'cancel_subscription).',
     inputSchema: {
       type: 'object',
@@ -286,14 +288,12 @@ export const operatorTools: OperatorTool[] = [
           type: 'string',
           enum: ['PENDING', 'ACTIVE', 'PAST_DUE', 'CANCELED', 'EXPIRED'],
         },
-        mode: { type: 'string', enum: ['TEST', 'LIVE'] },
       },
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
       const limit = clampLimit(args.limit);
       const status = typeof args.status === 'string' ? args.status : undefined;
-      const mode = args.mode === 'TEST' || args.mode === 'LIVE' ? args.mode : undefined;
       const apps = await prisma.application.findMany({
         where: { tenantId: ctx.tenantId },
         select: { id: true },
@@ -306,12 +306,11 @@ export const operatorTools: OperatorTool[] = [
           ...(status
             ? { status: status as 'PENDING' | 'ACTIVE' | 'PAST_DUE' | 'CANCELED' | 'EXPIRED' }
             : {}),
-          ...(mode ? { mode: mode as 'TEST' | 'LIVE' } : {}),
         },
         orderBy: { createdAt: 'desc' },
         take: limit,
         include: {
-          application: { select: { slug: true } },
+          application: { select: { slug: true, environment: true } },
           plan: { select: { slug: true, name: true, amount: true, currency: true, interval: true } },
         },
       });
@@ -323,7 +322,7 @@ export const operatorTools: OperatorTool[] = [
           planSlug: r.plan.slug,
           planName: r.plan.name,
           status: r.status,
-          mode: r.mode,
+          environment: r.application.environment,
           amountMinor: r.plan.amount,
           currency: r.plan.currency,
           interval: r.plan.interval,
@@ -517,8 +516,9 @@ export const operatorTools: OperatorTool[] = [
     name: 'get_end_user',
     description:
       'Look up one end-user in an application by email OR id. Returns profile, role, ' +
-      'verification + mode, and their current subscription (if any). Provide `applicationId` ' +
-      'plus exactly one of `email` or `endUserId`. Read-only; no password or token data.',
+      "verification state, the Application's environment, and their current subscription " +
+      '(if any). Provide `applicationId` plus exactly one of `email` or `endUserId`. ' +
+      'Read-only; no password or token data.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -534,7 +534,7 @@ export const operatorTools: OperatorTool[] = [
       // otherwise an arbitrary applicationId could read another tenant's users.
       const app = await prisma.application.findFirst({
         where: { id: String(args.applicationId), tenantId: ctx.tenantId },
-        select: { id: true },
+        select: { id: true, environment: true },
       });
       if (!app) {
         return { found: false, reason: 'application_not_found_in_workspace' };
@@ -566,7 +566,7 @@ export const operatorTools: OperatorTool[] = [
           email: user.email,
           role: user.role,
           emailVerified: user.emailVerified,
-          mode: user.mode,
+          environment: app.environment,
           createdAt: user.createdAt.toISOString(),
         },
         currentSubscription: subscription
@@ -575,7 +575,6 @@ export const operatorTools: OperatorTool[] = [
               status: subscription.status,
               planSlug: subscription.plan?.slug ?? null,
               planName: subscription.plan?.name ?? null,
-              mode: subscription.mode,
             }
           : null,
       };

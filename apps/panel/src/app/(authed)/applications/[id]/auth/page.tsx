@@ -1,7 +1,6 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, SectionHeader } from '@/components/Card';
@@ -38,10 +37,16 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
     | 'required';
   const organizationsEnabled = formData.get('organizationsEnabled') === 'on';
   const passwordBreachCheckEnabled = formData.get('passwordBreachCheckEnabled') === 'on';
+  const sendVerificationEmailOnSignUp = formData.get('sendVerificationEmailOnSignUp') === 'on';
+  const requireEmailVerification = formData.get('requireEmailVerification') === 'on';
   const redirectUrls = String(formData.get('redirectUrls') ?? '')
     .split('\n')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+  // Empty string is meaningful — it CLEARS the stored URL. Sending it through
+  // unchanged is what lets an operator remove a stale value; the API treats
+  // '' and null identically.
+  const appUrl = String(formData.get('appUrl') ?? '').trim();
 
   try {
     await api({
@@ -54,7 +59,10 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
         mfa,
         organizationsEnabled,
         passwordBreachCheckEnabled,
+        sendVerificationEmailOnSignUp,
+        requireEmailVerification,
         redirectUrls,
+        appUrl,
       },
     });
   } catch (err) {
@@ -63,7 +71,6 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/auth`);
   redirect(`/applications/${applicationId}/auth?saved=1`);
 }
 
@@ -103,7 +110,29 @@ export default async function AuthMethodsPage({
     (app.authConfig as { organizationsEnabled?: boolean }).organizationsEnabled === true;
   const breachCheckEnabled =
     (app.authConfig as { passwordBreachCheckEnabled?: boolean }).passwordBreachCheckEnabled !== false;
+  // Both default-sensitive: `!== false` for the on-by-default send, `=== true`
+  // for the off-by-default gate, so an app saved before these fields existed
+  // reads back the same answer the API applies.
+  const sendVerificationEmailOnSignUp =
+    (app.authConfig as { sendVerificationEmailOnSignUp?: boolean }).sendVerificationEmailOnSignUp !==
+    false;
+  const requireEmailVerification =
+    (app.authConfig as { requireEmailVerification?: boolean }).requireEmailVerification === true;
   const redirectUrls = app.authConfig.redirectUrls ?? [];
+  const appUrl = (app.authConfig as { appUrl?: string }).appUrl ?? '';
+  // What emails would actually link to today if the operator saves nothing:
+  // the origin of the first redirect URL. Shown as the placeholder so the
+  // inferred fallback is visible rather than a surprise.
+  const inferredAppUrl = ((): string | null => {
+    for (const url of redirectUrls) {
+      try {
+        return new URL(url).origin;
+      } catch {
+        /* skip unparseable entries */
+      }
+    }
+    return null;
+  })();
 
   return (
     <div className="space-y-6">
@@ -192,6 +221,23 @@ export default async function AuthMethodsPage({
               </Field>
             </div>
             <ToggleRow
+              name="sendVerificationEmailOnSignUp"
+              label="Send a verification email on sign-up"
+              defaultChecked={sendVerificationEmailOnSignUp}
+              hint={
+                <>
+                  Emails new password sign-ups a confirmation link, in addition to the welcome
+                  email — you don&apos;t have to call{' '}
+                  <code className="text-xs">auth.sendVerificationEmail()</code> yourself. Sent
+                  through this app&apos;s email transport (Email tab); with none configured nothing
+                  goes out and sign-up still succeeds. Magic-link and OAuth sign-ups skip it — those
+                  addresses are already proven. Ignored while{' '}
+                  <strong>Require a verified email</strong> is on: the link is then the only way
+                  into a new account, so it always goes out.
+                </>
+              }
+            />
+            <ToggleRow
               name="organizationsEnabled"
               label="Organizations (teams)"
               defaultChecked={organizationsEnabled}
@@ -207,7 +253,52 @@ export default async function AuthMethodsPage({
           </Card>
         </section>
 
-        {/* 3 — Security policy: MFA, breach check, password rules, redirect allow-list. */}
+        {/* 3 — Application URL: the origin transactional emails link back to. */}
+        <section className="space-y-3">
+          <SectionHeader
+            title="Your application"
+            description="Where this application lives on the web. Transactional emails link back here."
+          />
+          <Card>
+            <Field
+              label="Application URL"
+              hint={
+                <>
+                  The base address of your own app, e.g.{' '}
+                  <code className="text-xs">https://app.yourcompany.com</code>. It&apos;s the
+                  destination of the <strong>Get started</strong> button in the welcome email, and
+                  the base for password-reset, email-verification and magic-link URLs when your
+                  code doesn&apos;t pass one explicitly.
+                  {inferredAppUrl ? (
+                    <>
+                      {' '}
+                      Leave blank and we&apos;ll use{' '}
+                      <code className="text-xs">{inferredAppUrl}</code>, taken from your first
+                      redirect URL below.
+                    </>
+                  ) : (
+                    <>
+                      {' '}
+                      With this blank and no redirect URLs set,{' '}
+                      <strong>emails go out without their button</strong> — we won&apos;t send a
+                      link that leads nowhere.
+                    </>
+                  )}
+                </>
+              }
+            >
+              <input
+                type="url"
+                name="appUrl"
+                defaultValue={appUrl}
+                placeholder={inferredAppUrl ?? 'https://app.yourcompany.com'}
+                className={`${inputCls} w-full font-mono`}
+              />
+            </Field>
+          </Card>
+        </section>
+
+        {/* 4 — Security policy: MFA, breach check, password rules, redirect allow-list. */}
         <section className="space-y-3">
           <SectionHeader
             title="Security policy"
@@ -225,6 +316,30 @@ export default async function AuthMethodsPage({
                   user sets or changes one. Recommended on: passwords themselves never leave your
                   server — only an anonymous partial hash is compared against the public breach
                   database. Turn off only if this deployment can&apos;t reach the internet.
+                </>
+              }
+            />
+
+            <ToggleRow
+              padded={false}
+              name="requireEmailVerification"
+              label="Require a verified email"
+              defaultChecked={requireEmailVerification}
+              hint={
+                <>
+                  No session until the user clicks their verification link — sign-up, sign-in and
+                  refresh all answer <code className="text-xs">EMAIL_NOT_VERIFIED</code> (403)
+                  instead, so your app can say why. Sign-up still creates the account and always
+                  sends the link.{' '}
+                  <strong>Applies to existing accounts the moment you save</strong> — anyone who
+                  never confirmed their address is signed out within 15 minutes and stays out until
+                  they do, so make sure the verification email above is going out first. Magic-link
+                  and OAuth sign-in pass the gate rather than skip it: each proves the address and
+                  now records it.{' '}
+                  <strong>Required for the OpenID Connect `email` scope</strong> — while this is
+                  off, an Application acting as an identity provider will not assert an address it
+                  has no proof of, and omits <code className="text-xs">email</code> from its
+                  discovery document.
                 </>
               }
             />

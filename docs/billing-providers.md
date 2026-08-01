@@ -39,7 +39,6 @@ const mollie: ProviderModule = {
     { key: 'webhookSecret', label: 'Webhook secret', secret: true,
       webhookRole: 'secret' },
   ],
-  createProvider,   // the outbound side: checkout, cancel, plan registration
   webhook: {
     resolveApplication,  // which Application does this event belong to?
     verify,              // is this really from the processor?
@@ -51,8 +50,9 @@ const mollie: ProviderModule = {
 
 Two halves:
 
-**Outbound** (`createProvider`) returns the existing `BillingProvider`
-interface — `ensurePlanRegistered`, `createCheckoutSession`,
+**Outbound** is NOT part of the module. Providers are constructed by
+`getProviderForApplication` in `providers/index.ts`, which returns the existing
+`BillingProvider` interface — `ensurePlanRegistered`, `createCheckoutSession`,
 `createOneTimeCheckout`, `cancelSubscription`, and friends. This interface
 predates the module system and is unchanged; `docs/billing.md` covers its
 rules (intersection of capabilities at the top level, provider-specific data

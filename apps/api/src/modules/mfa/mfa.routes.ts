@@ -3,12 +3,14 @@
  *
  * setup → confirm → (sign-in challenges fire from now on)
  *
- * The sign-in flow's MFA challenge isn't here — sign-in itself is in
- * `modules/auth`. For Phase 4.4 we kept it simple: existing /sign-in
- * issues a session AS USUAL even when MFA is enrolled. The customer's
- * server is expected to treat MFA as "step-up" — gate sensitive actions
- * by also calling /mfa/challenge with a fresh code. A follow-up can
- * add the "session is unusable until MFA challenge passes" semantics.
+ * The sign-in MFA challenge is NOT here — sign-in lives in `modules/auth`. An
+ * enrolled user gets an `mfaChallengeToken` instead of a session, exchanged at
+ * `POST /api/v1/auth/mfa-verify`. So no session exists until the second factor
+ * passes.
+ *
+ * `POST /mfa/challenge` in this module is a different thing: it sits behind
+ * `requireUserSession`, so it is step-up for an already-signed-in user, and
+ * cannot complete a sign-in.
  */
 
 import type { FastifyInstance } from 'fastify';

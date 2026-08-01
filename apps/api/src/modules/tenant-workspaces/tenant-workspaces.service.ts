@@ -10,7 +10,11 @@
  * Role rules:
  *   - OWNER: invite anyone in any role, remove anyone, change anyone's
  *     role. There must always be at least one OWNER per Tenant.
- *   - ADMIN: invite ADMIN/MEMBER, remove MEMBERs, change MEMBER roles.
+ *   - ADMIN: invite, remove and re-role **MEMBERs only**. Anything touching an
+ *     ADMIN or an OWNER requires OWNER (`ensureCanManage`) — an ADMIN cannot
+ *     invite a second ADMIN, and gets 403 TENANT_ROLE_INSUFFICIENT if they try.
+ *     Note this is stricter than the end-user-side `Organization` rules, where an
+ *     org ADMIN may manage other ADMINs.
  *   - MEMBER: read-only.
  */
 
@@ -31,7 +35,51 @@ import {
   issueTenantAccessToken,
 } from '../../lib/tenant-jwt.js';
 import { issueTenantRefreshToken } from '../../lib/tenant-refresh-tokens.js';
+import { resolveNewTenantLimits } from '../../lib/tenant-limits.js';
+import { env } from '../../config/env.js';
 import { emailService } from '../email/email.service.js';
+import { buildTokenUrl } from '../../lib/app-url.js';
+import { panelBaseUrl } from '../../lib/panel-url.js';
+
+/**
+ * Deployment policy for CREATING another workspace (`WORKSPACE_CREATION`).
+ *
+ * Read live from `process.env` with the boot-validated value as the fallback,
+ * matching `operatorSignupMode` — capturing it at module load would make the
+ * gate untestable in-process, and an out-of-range live value must never quietly
+ * widen the gate, so the boot value (which a typo would have crashed on) wins.
+ */
+export function workspaceCreationMode(): 'open' | 'disabled' {
+  const raw = process.env.WORKSPACE_CREATION;
+  return raw === 'open' || raw === 'disabled' ? raw : env.WORKSPACE_CREATION;
+}
+
+/**
+ * Throw when this deployment does not allow an operator to create another
+ * workspace.
+ *
+ * Why creation and nothing else: a workspace is the unit a deployment sizes
+ * itself against (see `DEFAULT_TENANT_LIMITS`), and a ceiling per workspace is
+ * worth nothing if any signed-in operator — including someone invited into a
+ * team — can mint a fresh workspace with a fresh ceiling. Switching, listing,
+ * renaming, leaving and everything else stay open, so an operator who already
+ * belongs to several is completely unaffected.
+ *
+ * Default is 'open', i.e. exactly today's behaviour; a self-host that never
+ * sets the variable never sees this.
+ */
+export function assertWorkspaceCreationAllowed(): void {
+  if (workspaceCreationMode() !== 'disabled') return;
+  throw new RekeyError({
+    statusCode: 403,
+    code: 'WORKSPACE_CREATION_DISABLED',
+    message: 'Creating additional workspaces is disabled on this deployment.',
+    fix:
+      'Contact the deployment administrator to have a workspace created for you. ' +
+      'Your existing workspaces are unaffected — you can still switch between them, ' +
+      'invite members, and manage applications as usual.',
+  });
+}
 
 export interface MemberGrantRow {
   applicationId: string;
@@ -316,9 +364,15 @@ export const tenantWorkspacesService = {
         inviteeEmail: email,
         inviterName: inviter?.name ?? inviter?.email ?? 'A teammate',
         workspaceName: tenant?.name ?? 'a workspace',
+        // An invitation is an OPERATOR-facing link, so its base is the panel,
+        // not a customer app — `panelBaseUrl()` (PANEL_OAUTH_REDIRECT_BASE, or
+        // inferred from CORS_ALLOWED_ORIGINS). It used to fall back to the
+        // placeholder `your-panel.example.com`, which mailed a live invitation
+        // token to a domain nobody owns. Empty now when nothing resolves, and
+        // the template drops the button rather than rendering href="".
         inviteUrl: input.inviteUrl
           ? input.inviteUrl.replace('{token}', encodeURIComponent(rawToken))
-          : `https://your-panel.example.com/accept-invite?token=${encodeURIComponent(rawToken)}`,
+          : buildTokenUrl(panelBaseUrl(), '/accept-invite', rawToken),
         expiresAtIso: invitation.expiresAt.toISOString(),
       },
     });
@@ -660,12 +714,17 @@ export const tenantWorkspacesService = {
    * (e.g. side project) without signing up a second account. Returns the
    * new tenantId — caller should then switch the active workspace via
    * /tenant/auth/switch-workspace.
+   *
+   * Gated by `WORKSPACE_CREATION`. The gate lives here rather than in the route
+   * so it holds for any future caller (the MCP write surface, a CLI) rather
+   * than only for the one HTTP verb it was written against.
    */
   async createWorkspaceForUser(args: {
     tenantUserId: string;
     name: string;
     actorEmail: string;
   }): Promise<{ id: string; name: string }> {
+    assertWorkspaceCreationAllowed();
     const name = args.name.trim();
     if (name.length < 2 || name.length > 80) {
       throw new RekeyError({
@@ -677,7 +736,13 @@ export const tenantWorkspacesService = {
     }
     const result = await prisma.$transaction(async (tx) => {
       const tenant = await tx.tenant.create({
-        data: { name, ownerEmail: args.actorEmail.toLowerCase() },
+        // The deployment default applies here too — a second workspace must
+        // not be a way to obtain a wider one than sign-up hands out.
+        data: {
+          name,
+          ownerEmail: args.actorEmail.toLowerCase(),
+          ...resolveNewTenantLimits(),
+        },
       });
       await tx.tenantMembership.create({
         data: { tenantUserId: args.tenantUserId, tenantId: tenant.id, role: 'OWNER' },

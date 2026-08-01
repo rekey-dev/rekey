@@ -12,11 +12,16 @@
  * Role rules (intentionally close to Clerk's contract):
  *   - OWNER: invite anyone, change anyone's role, remove anyone, transfer
  *     ownership. There must always be at least one OWNER per Org.
- *   - ADMIN: invite ADMIN/MEMBER, change MEMBER roles, remove MEMBERs.
+ *   - ADMIN: manage anyone below OWNER — so ADMINs can add, re-role and remove
+ *     other ADMINs as well as MEMBERs (see `canManage`).
  *   - MEMBER: read-only.
  *
- * `authConfig.organizationsEnabled` gates every mutating route at the
- * service layer — operators must opt in per Application.
+ * `authConfig.organizationsEnabled` gates org **creation** only
+ * (`ensureOrgsEnabled` has one call site, in `create`). Turning the toggle off
+ * does not freeze existing orgs: invitations can still be minted and accepted,
+ * roles changed, members removed. That is deliberate — an operator disabling the
+ * feature still needs to wind existing teams down — but it means this is not a
+ * kill-switch, so don't rely on it to stop membership churn.
  *
  * The active organization for a session is carried on the `eu_access`
  * JWT as the `oid` claim (mirrors the operator-side `tid`). Users
@@ -214,7 +219,7 @@ export const organizationsService = {
     return { ...shape(m.organization), role: m.role };
   },
 
-  /** OWNER-only metadata + name updates. */
+  /** Metadata + name updates. OWNER or ADMIN (see `requireRole` below). */
   async update(args: {
     application: { id: string };
     actorEndUserId: string;

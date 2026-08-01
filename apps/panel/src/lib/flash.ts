@@ -12,7 +12,7 @@
 
 import { cookies } from 'next/headers';
 
-const COOKIE = 'relipay_flash';
+const COOKIE = 'rekey_flash';
 const MAX_AGE = 30; // 30s — long enough to survive the redirect, short enough to expire across tabs.
 
 export type FlashTone = 'success' | 'info' | 'warning' | 'error';

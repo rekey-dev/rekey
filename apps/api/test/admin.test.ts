@@ -127,7 +127,7 @@ describe('admin surface — end to end', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${application.id}/api-keys`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { name: 'CI server', mode: 'live' },
+      payload: { name: 'CI server' },
     });
     expect(keyRes.statusCode).toBe(201);
     const created = asSuccess<{
@@ -135,8 +135,10 @@ describe('admin surface — end to end', () => {
       rawKey: string;
       warning: string;
     }>(keyRes.json()).data;
-    expect(created.rawKey).toMatch(/^rp_live_/);
-    expect(created.apiKey.keyPrefix).toMatch(/^rp_live_/);
+    // The prefix follows the Application's environment, which defaults to
+    // DEVELOPMENT — it is not a per-key choice any more.
+    expect(created.rawKey).toMatch(/^rp_test_/);
+    expect(created.apiKey.keyPrefix).toMatch(/^rp_test_/);
     expect(created.apiKey.scopes).toEqual(['*']);
     expect(created.warning).toContain('shown exactly once');
     // The hash MUST NOT be returned (regression guard).

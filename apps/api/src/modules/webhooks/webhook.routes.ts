@@ -12,7 +12,9 @@
  *     Edit url/events/enabled.
  *
  *   DELETE /api/v1/tenant/applications/:id/webhooks/:endpointId
- *     Soft removal — cascades delete WebhookDelivery history.
+ *     HARD delete — the row is removed and cascades away its WebhookDelivery
+ *     history. To pause an endpoint without losing the delivery log, PATCH it
+ *     with `{ enabled: false }` instead.
  *
  *   POST   /api/v1/tenant/applications/:id/webhooks/:endpointId/rotate-secret
  *     Replace the signing secret. Returns the new raw value once.

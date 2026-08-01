@@ -196,8 +196,8 @@ export function shapeSignInOutcome(
  * The authenticated half of the end-user auth surface — sessions, token
  * revocation, password change, MFA enrollment — lives in
  * `authenticatedAuthRoutes` below. It takes the same two key kinds and adds
- * `requireUserSession`, which is the actual authorizer there. The exception is
- * passkey ENROLLMENT, which stays secret-key-only via its own route-level hook.
+ * `requireUserSession`, which is the actual authorizer there. Passkey ENROLLMENT
+ * additionally demands a step-up proof from publishable callers (`lib/step-up.ts`).
  */
 export async function authRoutes(app: FastifyInstance): Promise<void> {
   // Public-bootstrap auth surface (sign-up, sign-in, magic-link, passkey
@@ -208,7 +208,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   // emailed token) per route.
   app.addHook('onRequest', requirePublishableOrSecretKey);
   // All routes in this plugin mutate auth state (create users, mint sessions,
-  // change passwords). Require `auth:write` (which the legacy `*` default
+  // change passwords). Require `auth:write` (which the `*` mint default
   // also satisfies via SCOPE_IMPLICATIONS; publishable requests are
   // pre-authorized by route membership).
   app.addHook('onRequest', requireScope('auth:write'));
@@ -221,7 +221,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         summary: 'Create an end-user via email + password',
         description:
           'Creates a new EndUser in the calling Application and issues a JWT. ' +
-          'Email is unique per Application, not globally.',
+          'Email is unique per Application, not globally. Unless the Application turns ' +
+          '`authConfig.sendVerificationEmailOnSignUp` off, the verification link goes out ' +
+          'alongside the welcome mail — both are best-effort and neither can fail the sign-up. ' +
+          'With `authConfig.requireEmailVerification` on this returns 403 `EMAIL_NOT_VERIFIED` ' +
+          'instead of a session: the account IS created and the link IS sent (that switch ' +
+          'overrides the send setting), but no token is issued until the address is confirmed.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
         body: {
           type: 'object',
@@ -246,8 +251,6 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         password: body.password,
         ...(body.metadata !== undefined && { metadata: body.metadata }),
         device: deviceContext(req),
-        // Test/live isolation: stamp the new user with the calling key's mode.
-        ...(req.dataMode !== undefined && { mode: req.dataMode }),
         // Signup policy: a `secret_only` app refuses creation via a pub key.
         ...(req.authKind !== undefined && { authKind: req.authKind }),
       });
@@ -266,7 +269,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Verifies the password and issues a JWT. Returns 401 INVALID_CREDENTIALS for ' +
           'any auth failure (wrong email, wrong password, or sign-up via different method) — ' +
-          'we never disclose which.',
+          'we never disclose which. When the Application sets ' +
+          '`authConfig.requireEmailVerification`, a correct password on an unconfirmed ' +
+          'address returns 403 EMAIL_NOT_VERIFIED instead, so your app can prompt the user ' +
+          'to check their inbox rather than re-enter a password that is already right.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
         body: {
           type: 'object',
@@ -285,8 +291,6 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         email: body.email,
         password: body.password,
         device: deviceContext(req),
-        // Test/live isolation: users of the other mode are invisible here.
-        ...(req.dataMode !== undefined && { mode: req.dataMode }),
       });
       if (!outcome.mfaRequired) {
         recordEndUserEvent(req, 'user.signed_in', outcome.endUser.id, { via: 'password' });
@@ -476,8 +480,6 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         application: req.application!,
         token: body.token,
         device: deviceContext(req),
-        // A consume that creates the user stamps the calling key's mode.
-        ...(req.dataMode !== undefined && { mode: req.dataMode }),
         // Signup policy: refuse creation via a pub key in `secret_only` apps.
         ...(req.authKind !== undefined && { authKind: req.authKind }),
       });
@@ -626,11 +628,16 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
  * JWT. The JWT is the authorizer — every route here acts solely on
  * `req.endUser` — so a browser-only client can reach these with `rp_pub_…`.
  *
- * One exception, by its own route-level hook: passkey ENROLLMENT
- * (`passkey/register/{start,complete}`) still requires a secret key. A passkey
- * bypasses the MFA challenge, so a stolen access token that could enroll one
- * would buy persistent takeover that neither a password change nor
- * sign-out-everywhere revokes.
+ * Passkey ENROLLMENT (`passkey/register/{start,complete}`) is reachable on the
+ * same terms, but a **publishable** caller must additionally step up — see
+ * `lib/step-up.ts`. A passkey bypasses the MFA challenge at sign-in, and neither
+ * a password change nor sign-out-everywhere removes one, so a stolen access
+ * token alone must not be able to enroll it. The step-up is enforced at
+ * `/start`; `/complete` inherits it via the single-use challenge.
+ *
+ * This used to be secret-key-only. That was traded for step-up deliberately:
+ * refusing the whole route made enrollment unreachable from a browser-only app
+ * while doing nothing about the stolen-token case on a server-side one.
  */
 export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<void> {
   // Accepts the publishable key, like the pre-user siblings (`passkey/
@@ -721,8 +728,9 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
       // Reachable from a browser, but only behind a STEP-UP.
       //
       // Enrolling a passkey is a persistent-takeover primitive: a passkey is a
-      // strong factor that BYPASSES the MFA challenge (see auth.service.ts
-      // `verifyPasskeyAuthentication`), so an attacker who enrolled one could
+      // strong factor that BYPASSES the MFA challenge (see
+      // `authService.passkeyAuthenticateComplete`), so an attacker who enrolled
+      // one could
       // sign in later with no password and no second factor. Neither
       // change-password nor sign-out-everywhere removes it — the victim would
       // have to notice a stranger's row in GET /passkeys.
@@ -788,7 +796,8 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
   app.post(
     '/passkey/register/complete',
     {
-      // SECRET KEY ONLY — deliberately narrower than the rest of this plugin.
+      // Same credentials as the rest of this plugin (publishable or secret key
+      // + the user's token) — no extra route-level hook.
       //
       // No step-up here, and that is not an oversight: the step-up happens at
       // /passkey/register/start, and `consumeChallenge` binds this ceremony to it.

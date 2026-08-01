@@ -5,9 +5,11 @@
  * ("api_calls", "storage_gb_hours"). The customer's app reports
  * increments via POST /api/v1/usage/record. We aggregate via SUM on read.
  *
- * Subscription billing wiring is deliberately not here yet — usage is
- * captured first; billing rules read aggregated values when invoices are
- * computed (later phase).
+ * `record` DOES enforce the subject's plan-included quota synchronously, via
+ * `entitlementsService` — over the allowance it rejects with 402
+ * `USAGE_QUOTA_EXCEEDED` rather than recording. What is still absent is
+ * *overage invoicing*: nothing bills for consumption beyond the included quota,
+ * so metered pricing means "cap and refuse", not "charge for what you used".
  */
 
 import type { UsageMeter, UsageRecord } from '@prisma/client';

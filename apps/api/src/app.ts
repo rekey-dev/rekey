@@ -90,6 +90,8 @@ import {
   operatorMcpOAuthRoutes,
   operatorMcpWellKnownRoutes,
 } from './modules/tenant-mcp/index.js';
+import { assertAdminIpAllowlistValid } from './middleware/admin-auth.js';
+import { assertDefaultTenantLimitsValid } from './lib/tenant-limits.js';
 
 export interface BuildAppOptions {
   /** Override the default logger config (e.g. silence in tests). */
@@ -156,6 +158,14 @@ export function trustProxyConfig(
 }
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
+  // Fail the boot on a malformed ADMIN_IP_ALLOWLIST rather than starting with a
+  // gate that silently matches nothing (see the middleware for the reasoning).
+  assertAdminIpAllowlistValid();
+  // Same posture for DEFAULT_TENANT_LIMITS: a default that cannot be parsed
+  // would leave every new workspace unlimited while the operator believes they
+  // are capped. Refuse to start instead (see lib/tenant-limits.ts).
+  assertDefaultTenantLimitsValid();
+
   const app = Fastify({
     logger:
       options.logger ??
@@ -200,7 +210,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   // CORS — strict allowlist. Reflective `origin: true` is forbidden because
-  // browsers will happily send our `relipay_*` credential cookies from any
+  // browsers will happily send our `rekey_*` credential cookies from any
   // page that the dynamic ACAO header endorses. The allowlist is sourced
   // from CORS_ALLOWED_ORIGINS; dev permits localhost so the panel + sample
   // apps work without manual config.
@@ -515,7 +525,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // Generic provider-module pipeline (docs/specs/billing-provider-modules.md).
   // The legacy per-provider URLs above stay registered forever — operators
   // have them configured at the provider — and (Stripe since P1) forward
-  // into this same pipeline.
+  // into this same pipeline. Re-confirmed in the 2.0.0 shim sweep: these are
+  // URLs already pasted into live Stripe/PayPal/Razorpay dashboards, so
+  // unregistering them 404s a real endpoint. The provider retries, disables it,
+  // and the operator's subscriptions stop activating with nothing visible on
+  // our side — the exact silent failure a major is not licence to cause.
   await app.register(billingProviderWebhookRoutes, { prefix: '/api/v1/webhooks/billing' });
 
   // Tenant operator surface — email/password auth, workspace memberships,
@@ -529,10 +543,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // Operator-PAT-gated surface — authenticated by `rp_op_…` personal-access-tokens
   // (Authorization: Bearer) instead of a session JWT. Default-deny on writes.
   await app.register(operatorTokenRoutes, { prefix: '/api/v1/tenant/operator' });
-  // Operator-side MCP server — JSON-RPC at /api/v1/tenant/mcp. Gated by the
-  // same operator PAT as `/api/v1/tenant/operator/*`. OAuth 2.1 AS layered on
-  // top in a future iteration (Phase 2).
-  // Operator MCP OAuth AS (Phase 2) — discovery + register + authorize +
+  // Operator-side MCP server — JSON-RPC at /api/v1/tenant/mcp. Accepts EITHER
+  // the operator PAT that gates `/api/v1/tenant/operator/*` or an OAuth access
+  // token, via the hybrid guard in tenant-mcp/bearer-auth.ts.
+  // Operator MCP OAuth AS — discovery + register + authorize +
   // token + introspect. Registered BEFORE tenantMcpRoutes so the OAuth
   // endpoints under the same prefix don't fall into the JSON-RPC catch-all.
   // Gated by OPERATOR_MCP_ENABLED (default on): when disabled, neither plugin
@@ -568,7 +582,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // registration when OPERATOR_SIGNUP_MODE='invite'. Gated by SUPER_ADMIN_KEY.
   await app.register(operatorInvitesRoutes, { prefix: '/api/v1/admin/operator-invites' });
   // Read-only deployment-wide rollups for the super-admin dashboard
-  // (apps/admin → admin.relipay.dev). GET-only; gated by SUPER_ADMIN_KEY.
+  // (apps/admin → admin.rekey.dev). GET-only; gated by SUPER_ADMIN_KEY.
   await app.register(adminMetricsRoutes, { prefix: '/api/v1/admin/metrics' });
 
   app.setNotFoundHandler((req, reply) => {

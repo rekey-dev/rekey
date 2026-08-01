@@ -32,12 +32,15 @@
  *     for OAuth, `applications:write` for a PAT) AND the operator's role must
  *     clear the tool's minimum (default ADMIN). The gate filters `tools/list`
  *     and re-checks at `tools/call`, and every write handler re-scopes by
- *     tenant. Destructive / financial ops are intentionally NOT exposed yet.
- *   - PAT scope is honored: this surface requires `read` to authenticate; a
- *     PAT additionally needs `applications:write` to reach the write tools.
- *   - Workspace scoping is structural: the PAT is bound to one workspace
- *     (`TenantApiToken.tenantId`), so the tools' (tenantUserId, tenantId)
- *     context is the only thing they can ever see.
+ *     tenant. Two tools (`configure_billing_provider`, `cancel_subscription`) are
+ *     flagged `admin`, so they need `mcp:operator:admin` on top of write.
+ *   - Scope is honored: this surface requires `read` (or `mcp:operator:read`) to
+ *     authenticate; a PAT additionally needs `applications:write`, and an OAuth
+ *     token `mcp:operator:write`, to reach the write tools.
+ *   - Workspace scoping: a PAT is pinned to one workspace
+ *     (`TenantApiToken.tenantId`); an OAuth token carries the consented `tid`.
+ *     Either way the isolation is each handler filtering on `ctx.tenantId` —
+ *     a convention to uphold, not a structural guarantee.
  */
 
 import type { FastifyInstance } from 'fastify';

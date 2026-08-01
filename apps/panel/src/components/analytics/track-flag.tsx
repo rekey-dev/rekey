@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { usePathname, useSearchParams } from 'next/navigation';
 import { track, FLAG_EVENTS } from '@/lib/analytics';
 
 /**
@@ -13,10 +13,10 @@ import { track, FLAG_EVENTS } from '@/lib/analytics';
  */
 export function TrackFlag(): null {
   const params = useSearchParams();
-  const router = useRouter();
   const pathname = usePathname();
 
   React.useEffect(() => {
+    if (typeof window === 'undefined') return;
     const flag = params.get('e');
     if (!flag) return;
 
@@ -27,8 +27,14 @@ export function TrackFlag(): null {
     const next = new URLSearchParams(params.toString());
     next.delete('e');
     const qs = next.toString();
-    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
-  }, [params, pathname, router]);
+    // history.replaceState, not router.replace: this only ever wanted to tidy
+    // the address bar. Next 15 feeds a native history edit back into
+    // useSearchParams, so the URL and the hooks stay in sync without kicking
+    // off a navigation — and a navigation here would race the one the server
+    // action's own redirect is already running, into a router cache that
+    // action just emptied. That race is what left the page blank.
+    window.history.replaceState(null, '', qs ? `${pathname}?${qs}` : pathname);
+  }, [params, pathname]);
 
   return null;
 }

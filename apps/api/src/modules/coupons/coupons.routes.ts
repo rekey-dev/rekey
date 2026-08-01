@@ -62,7 +62,7 @@ export async function couponsAdminRoutes(app: FastifyInstance): Promise<void> {
         security: [{ superAdminKey: [] }],
         summary: 'Create a coupon',
         description:
-          'Discount kinds: PERCENT (amountOff in basis-points × 10, so 1500 = 15%) ' +
+          'Discount kinds: PERCENT (amountOff in basis points, so 1500 = 15%) ' +
           'or AMOUNT (amountOff in smallest currency unit). Codes are stored lowercase.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         body: {

@@ -2,8 +2,8 @@
  * Panel API client — calls the operator surface (`/api/v1/tenant/*`).
  *
  * Two cookies, both httpOnly + SameSite=Strict + Secure-in-prod:
- *   - relipay_access  — short-lived (15 min) operator JWT
- *   - relipay_refresh — long-lived (30 days) opaque token
+ *   - rekey_access  — short-lived (15 min) operator JWT
+ *   - rekey_refresh — long-lived (30 days) opaque token
  *
  * Auto-refresh on 401: when the access token expires, we exchange the
  * refresh token, rotate cookies, and retry the original request once.
@@ -16,8 +16,8 @@
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 
-export const ACCESS_COOKIE = 'relipay_access';
-export const REFRESH_COOKIE = 'relipay_refresh';
+export const ACCESS_COOKIE = 'rekey_access';
+export const REFRESH_COOKIE = 'rekey_refresh';
 
 interface ErrorEnvelope {
   success: false;
@@ -46,12 +46,12 @@ export class PanelApiError extends Error {
 }
 
 function apiUrl(): string {
-  const url = process.env.RELIPAY_URL;
+  const url = process.env.REKEY_URL;
   if (!url) {
     throw new PanelApiError({
       code: 'PANEL_API_URL_MISSING',
-      message: 'RELIPAY_URL is not set on the panel deployment.',
-      fix: 'Set RELIPAY_URL=https://your-rekey.example.com in the panel environment.',
+      message: 'REKEY_URL is not set on the panel deployment.',
+      fix: 'Set REKEY_URL=https://your-rekey.example.com in the panel environment.',
       statusCode: 500,
     });
   }
@@ -247,6 +247,13 @@ export interface ApplicationRow {
   tenantId: string;
   name: string;
   slug: string;
+  /**
+   * What this application IS. The isolation boundary in Rekey — real customers
+   * and rehearsals live in different Applications, not different "modes".
+   * The prefix its API keys carry follows from it; it does not restrict
+   * which billing credentials the app may hold.
+   */
+  environment: 'PRODUCTION' | 'STAGING' | 'DEVELOPMENT';
   publicKey: string;
   /** Previous publishable key during a rotation grace window (null otherwise). */
   previousPublicKey?: string | null;
@@ -262,6 +269,8 @@ export interface ApplicationRow {
     mcpEnabled?: boolean;
     organizationsEnabled?: boolean;
     passwordBreachCheckEnabled?: boolean;
+    sendVerificationEmailOnSignUp?: boolean;
+    requireEmailVerification?: boolean;
   };
   billingConfig: {
     /** Master switch. When false the whole billing surface is gated server-side. */
@@ -431,10 +440,7 @@ export interface CouponRow {
   totalDiscountIssued: number;
 }
 
-/**
- * GET /tenant/applications/:id/billing/stats — revenue dashboard numbers.
- * Live-mode data only: TEST subscriptions/payments are excluded server-side.
- */
+/** GET /tenant/applications/:id/billing/stats — revenue dashboard numbers. */
 export interface BillingStatsRow {
   activeSubscriptions: number;
   pastDueSubscriptions: number;
@@ -461,8 +467,6 @@ export interface PaymentRow {
   amount: number;
   currency: string;
   status: 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'REFUNDED';
-  /** Test/live isolation: TEST = sandbox checkout via an rp_test_* key. */
-  mode: 'TEST' | 'LIVE';
   providerPaymentId: string | null;
   description: string | null;
   createdAt: string;
@@ -476,8 +480,6 @@ export interface DunningCaseRow {
   endUserEmail: string | null;
   organizationId: string | null;
   status: 'OPEN' | 'RECOVERED' | 'EXHAUSTED' | 'CANCELED';
-  /** Test/live isolation: TEST = sandbox dunning case (mirrors PaymentRow). */
-  mode: 'TEST' | 'LIVE';
   planSlug: string;
   planName: string;
   failedAttempts: number;
@@ -493,8 +495,6 @@ export interface EndUserRow {
   email: string;
   emailVerified: boolean;
   role: string;
-  /** Test/live isolation: TEST = signed up via an rp_test_* key. */
-  mode: 'TEST' | 'LIVE';
   metadata: Record<string, unknown> | null;
   createdAt: string;
 }

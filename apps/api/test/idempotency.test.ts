@@ -125,11 +125,11 @@ describe('idempotency-key middleware', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${applicationId}/api-keys`,
       headers: { authorization: `Bearer ${tenantAccess}`, 'idempotency-key': 'mint-1' },
-      payload: { name: 'cached-mint', mode: 'live' },
+      payload: { name: 'cached-mint' },
     });
     expect(res.statusCode).toBe(201);
     const rawKey = (res.json().data as { rawKey: string }).rawKey;
-    expect(rawKey).toMatch(/^rp_live_/);
+    expect(rawKey).toMatch(/^rp_test_/);
 
     const row = await prisma.idempotencyKey.findFirstOrThrow({ where: { key: 'mint-1' } });
     // The cached body must be ciphertext: the plaintext key appears nowhere
@@ -141,7 +141,7 @@ describe('idempotency-key middleware', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${applicationId}/api-keys`,
       headers: { authorization: `Bearer ${tenantAccess}`, 'idempotency-key': 'mint-1' },
-      payload: { name: 'cached-mint', mode: 'live' },
+      payload: { name: 'cached-mint' },
     });
     expect(replay.headers['idempotency-replayed']).toBe('true');
     expect((replay.json().data as { rawKey: string }).rawKey).toBe(rawKey);

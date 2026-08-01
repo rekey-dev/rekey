@@ -1,7 +1,6 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { api, PanelApiError, type OrganizationDetail, type EndUserRow, type OrgBillingDto } from '@/lib/api';
 import { Modal } from '@/components/Modal';
@@ -79,7 +78,6 @@ async function addMember(applicationId: string, orgId: string, formData: FormDat
     }
     throw err;
   }
-  revalidatePath(pageUrl(applicationId, orgId));
   redirect(`${pageUrl(applicationId, orgId)}?memberAdded=1`);
 }
 
@@ -99,14 +97,12 @@ async function setMemberRole(
     }
     throw err;
   }
-  revalidatePath(pageUrl(applicationId, orgId));
   redirect(`${pageUrl(applicationId, orgId)}?roleChanged=1`);
 }
 
 async function removeMember(applicationId: string, orgId: string, euid: string): Promise<void> {
   'use server';
   await api({ method: 'DELETE', path: `${orgBase(applicationId, orgId)}/members/${encodeURIComponent(euid)}` });
-  revalidatePath(pageUrl(applicationId, orgId));
   redirect(`${pageUrl(applicationId, orgId)}?memberRemoved=1`);
 }
 
@@ -138,7 +134,6 @@ async function updateOrg(applicationId: string, orgId: string, formData: FormDat
     }
     throw err;
   }
-  revalidatePath(pageUrl(applicationId, orgId));
   redirect(`${pageUrl(applicationId, orgId)}?orgUpdated=1`);
 }
 
@@ -163,14 +158,13 @@ async function revealOrgLicenseKey(
     // One-time key via a short-lived httpOnly cookie, not the URL (keys in the
     // URL leak into history, the referer header, and access logs).
     const jar = await cookies();
-    jar.set('relipay_reveal_org_license', result.rawKey, {
+    jar.set('rekey_reveal_org_license', result.rawKey, {
       httpOnly: true,
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
       path: pageUrl(applicationId, orgId),
       maxAge: 120,
     });
-    revalidatePath(pageUrl(applicationId, orgId));
     redirect(`${pageUrl(applicationId, orgId)}?revealed=1&reset=${result.activationsReset}`);
   } catch (err) {
     if (err instanceof PanelApiError) {
@@ -194,7 +188,7 @@ export default async function OrganizationDetailPage({
   const error = typeof sp.error === 'string' ? sp.error : undefined;
   const addMemberError = sp.addMember === '1' ? error : undefined;
   const editOrgError = sp.editOrg === '1' ? error : undefined;
-  const reveal = (await cookies()).get('relipay_reveal_org_license')?.value;
+  const reveal = (await cookies()).get('rekey_reveal_org_license')?.value;
   const revealReset = typeof sp.reset === 'string' ? Number(sp.reset) : 0;
 
   let detail: OrganizationDetail;

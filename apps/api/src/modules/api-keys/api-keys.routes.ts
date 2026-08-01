@@ -9,7 +9,6 @@ const KeyParams = z.object({ id: z.string().min(1), keyId: z.string().min(1) });
 
 const CreateKeyBody = z.object({
   name: z.string().min(1).max(120),
-  mode: z.enum(['live', 'test']).default('live'),
   scopes: z.array(z.string()).default([]),
   /** ISO-8601 string. Omit for non-expiring keys. */
   expiresAt: z.string().datetime().optional(),
@@ -58,12 +57,6 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
               maxLength: 120,
               description: 'Human-readable label, e.g. "CI server", "Staging worker".',
             },
-            mode: {
-              type: 'string',
-              enum: ['live', 'test'],
-              default: 'live',
-              description: '`test` keys are intended for sandboxes; format is otherwise identical.',
-            },
             scopes: {
               type: 'array',
               items: { type: 'string' },
@@ -86,7 +79,6 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
       const result = await apiKeysService.create({
         applicationId: id,
         name: body.name,
-        mode: body.mode,
         scopes: body.scopes,
         ...(body.expiresAt !== undefined && { expiresAt: new Date(body.expiresAt) }),
       });

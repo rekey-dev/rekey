@@ -3,6 +3,8 @@
 Self-hostable, multi-tenant auth and billing for the apps you run. User auth and provider-agnostic billing share one tenant model, behind one API, in one `docker compose --profile full up`.
 
 > **Status:** Public beta. [MIT licensed](LICENSE).
+>
+> **ReliPay is now Rekey.** Packages moved to `@rekey.dev/*` (the old `@relipay/*` packages are deprecated), environment variables renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read — set `REKEY_*`), and relipay.dev (the old domain) will redirect to rekey.dev once the domain migration completes.
 
 ## For AI agents
 
@@ -42,18 +44,14 @@ Apps (each runs on a fixed dev port):
 | App | Package | Port | What |
 |---|---|---|---|
 | `apps/api` | `@rekey.dev/api` | 3030 | Fastify monolith — auth + billing + admin API |
-| `apps/panel` | `@rekey.dev/panel` | 3031 | Next.js admin panel (panel.relipay.dev) |
-| `apps/admin` | `@rekey.dev/admin` | — | Read-only super-admin dashboard (admin.relipay.dev) |
-| `apps/portal` | `@rekey.dev/portal` | 3050 | Hosted customer portal V2 (portal.relipay.dev) |
+| `apps/panel` | `@rekey.dev/panel` | 3031 | Next.js admin panel (panel.rekey.dev) |
+| `apps/admin` | `@rekey.dev/admin` | — | Read-only super-admin dashboard (admin.rekey.dev) |
+| `apps/portal` | `@rekey.dev/portal` | 3050 | Hosted customer portal V2 (portal.rekey.dev) |
 
 Examples (integration references — not deployed; each ships a `.env.example`):
 
 | Path | Package | Port | What |
 |---|---|---|---|
-| `examples/demo` | `rekey-demo` | 3032 | Minimal Next.js auth demo via `@rekey.dev/node` |
-| `examples/nextjs-saas` | `rekey-nextjs-saas` | 3040 | Full SaaS boilerplate — auth + billing + teams |
-| `examples/portal` | `rekey-portal-selfhost-example` | 3050 | Single-app self-host portal |
-| `examples/qr-saas` | `qr-saas` | 3000 | Metered QR product end-to-end |
 
 Packages:
 
@@ -81,7 +79,7 @@ verification, and event mapping, and the registry wires up the rest. See
 Things that are deliberately unsafe outside local development, documented here
 rather than left for you to discover. None are enabled by default.
 
-**`RELIPAY_DEV_ECHO_AUTH_TOKENS=true`** makes the operator password-reset and
+**`REKEY_DEV_ECHO_AUTH_TOKENS=true`** makes the operator password-reset and
 magic-link endpoints return the raw token in the API response, and the panel
 then puts that token in a URL query string (`?demoToken=…`) to render a working
 link. Query strings land in browser history, `Referer` headers, and access logs,
@@ -97,9 +95,6 @@ Guards: the API **refuses to boot** if the flag is set with
 query-string hand-off in place rather than re-engineer a dev convenience, and to
 document it instead — if this turns out to bite someone, the fix is a one-shot
 httpOnly cookie and we'll take it.
-
-**`RELIPAY_BILLING_FORCE_STUB=true`** forces stub billing providers. Also
-refuses to boot in production.
 
 ## Contributing
 

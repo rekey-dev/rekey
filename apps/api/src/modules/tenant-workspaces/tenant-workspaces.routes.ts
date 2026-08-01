@@ -63,7 +63,9 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
         summary: 'Create a new workspace for the current operator (becomes OWNER)',
         description:
           'Lets a signed-in user spin up an additional Tenant without registering a new account. ' +
-          'After creation, switch into it via POST /api/v1/tenant/auth/switch-workspace.',
+          'After creation, switch into it via POST /api/v1/tenant/auth/switch-workspace.\n\n' +
+          'A deployment can turn this off with `WORKSPACE_CREATION=disabled`, in which case ' +
+          'this route (and only this route) refuses with 403 `WORKSPACE_CREATION_DISABLED`.',
         body: {
           type: 'object',
           required: ['name'],

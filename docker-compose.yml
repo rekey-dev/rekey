@@ -1,4 +1,4 @@
-# Full ReliPay stack — postgres + redis + api + panel + portal.
+# Full Rekey stack — postgres + redis + api + panel + portal.
 #
 # The api/panel/portal services are behind the `full` profile, so:
 #   - `docker compose up -d`                  → just postgres + redis (local dev:
@@ -20,12 +20,12 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
     environment:
-      POSTGRES_USER: relipay
+      POSTGRES_USER: rekey
       # No default. An unset POSTGRES_PASSWORD fails the container start with a
       # clear Postgres error, which is the right outcome: the previous default
-      # of `relipay` shipped a known credential on every deployment.
+      # of `rekey` shipped a known credential on every deployment.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (openssl rand -hex 24)}
-      POSTGRES_DB: relipay
+      POSTGRES_DB: rekey
     ports:
       # Bound to loopback, NOT 0.0.0.0. Only the api container needs Postgres and
       # it reaches it over the compose network by service name; publishing on all
@@ -34,9 +34,9 @@ services:
       # dockerised datastores working.
       - "127.0.0.1:5432:5432"
     volumes:
-      - relipay_postgres:/var/lib/postgresql/data
+      - rekey_postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U relipay -d relipay"]
+      test: ["CMD-SHELL", "pg_isready -U rekey -d rekey"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -63,7 +63,7 @@ services:
       # Redis on a public interface is a trivially readable session/lockout store.
       - "127.0.0.1:6379:6379"
     volumes:
-      - relipay_redis:/data
+      - rekey_redis:/data
     environment:
       # redis-cli reads this, so the healthcheck below doesn't put the password
       # in a command line that shows up in `docker inspect`/`ps` output.
@@ -82,16 +82,15 @@ services:
     build:
       context: .
       target: api-runtime
-    image: relipay-api:local
+    image: rekey-api:local
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgresql://relipay:${POSTGRES_PASSWORD}@postgres:5432/relipay?schema=public
+      DATABASE_URL: postgresql://rekey:${POSTGRES_PASSWORD}@postgres:5432/rekey?schema=public
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       JWT_SECRET:        ${JWT_SECRET:-change-me-in-prod}
-      SESSION_SECRET:    ${SESSION_SECRET:-change-me-in-prod}
       ENCRYPTION_KEY:    ${ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
       SUPER_ADMIN_KEY:   ${SUPER_ADMIN_KEY:-change-me-in-prod}
       API_URL:           http://api:3030
@@ -109,6 +108,14 @@ services:
       # Who can create operator (admin) accounts: open | invite | closed.
       # Default open for first-boot; switch to invite/closed on a private deploy.
       OPERATOR_SIGNUP_MODE: ${OPERATOR_SIGNUP_MODE:-open}
+      # Starting ceilings for every workspace this deployment creates (JSON,
+      # TenantLimitsSchema — e.g. {"maxProductionApps":1}). Empty = unlimited,
+      # which is the default and what every workspace gets today.
+      DEFAULT_TENANT_LIMITS: ${DEFAULT_TENANT_LIMITS:-}
+      # Whether a signed-in operator may create additional workspaces:
+      # open (default) | disabled. Creation only — switching and listing are
+      # never gated.
+      WORKSPACE_CREATION: ${WORKSPACE_CREATION:-open}
       # Operator MCP server (agent read + operate). On by default; false to disable.
       OPERATOR_MCP_ENABLED: ${OPERATOR_MCP_ENABLED:-true}
     ports:
@@ -131,15 +138,15 @@ services:
     build:
       context: .
       target: panel-runtime
-    image: relipay-panel:local
+    image: rekey-panel:local
     depends_on:
       - api
     environment:
       NODE_ENV: production
       # In-cluster API address the panel calls server-side.
-      RELIPAY_URL: http://api:3030
+      REKEY_URL: http://api:3030
       # Public API origin shown in the UI (e.g. the webhook URL operators paste
-      # into Stripe). MUST be the public origin, not the in-cluster RELIPAY_URL.
+      # into Stripe). MUST be the public origin, not the in-cluster REKEY_URL.
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3030}
       PANEL_URL:   ${PANEL_URL:-http://localhost:3031}
     ports:
@@ -157,16 +164,16 @@ services:
     build:
       context: .
       target: portal-runtime
-    image: relipay-portal:local
+    image: rekey-portal:local
     depends_on:
       - api
     environment:
       NODE_ENV: production
-      RELIPAY_URL: http://api:3030
+      REKEY_URL: http://api:3030
       PORTAL_BASE_URL: http://localhost:3050
     ports:
       - "3050:3050"
 
 volumes:
-  relipay_postgres:
-  relipay_redis:
+  rekey_postgres:
+  rekey_redis:

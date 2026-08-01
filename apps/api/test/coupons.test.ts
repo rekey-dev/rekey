@@ -6,6 +6,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { configureSandboxStripe } from './fakes/billing-credentials.js';
 import { prisma } from '../src/lib/prisma.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
@@ -53,6 +54,7 @@ describe('coupons', () => {
       .then((r) => r.json().data as { rawKey: string });
     applicationId = application.id;
     liveKey = key.rawKey;
+    await configureSandboxStripe(applicationId);
 
     await app.inject({
       method: 'POST',
@@ -247,11 +249,11 @@ describe('coupons', () => {
     expect(subs).toHaveLength(0);
   });
 
-  it('enforces maxRedemptionsPerUser at the recordRedemption (payment-success) boundary', async () => {
-    // Audit fix 2026-05-19: limits are enforced atomically at
-    // recordRedemption time (called from the Stripe webhook), not at
-    // checkout. This test drives the limit via the service directly to
-    // model what the webhook does on invoice.paid.
+  it('enforces maxRedemptionsPerUser at the redemption (purchase-completed) boundary', async () => {
+    // Audit fix 2026-05-19: limits are enforced atomically at redemption
+    // time (called from the billing webhook appliers), not at checkout. This
+    // test drives the limit via the service directly to model what the
+    // webhook does when the provider says the purchase completed.
     const coupon = await createCoupon({
       code: 'once',
       discountType: 'PERCENT',
@@ -268,15 +270,16 @@ describe('coupons', () => {
     });
     expect(first.statusCode).toBe(200);
 
-    // Simulate a successful payment recording the redemption (this is what
-    // the Stripe webhook does on invoice.paid).
     const { couponsService } = await import('../src/modules/coupons/coupons.service.js');
-    await couponsService.recordRedemption({
-      couponId: coupon.id,
-      applicationId,
-      endUserId: userId,
-      paymentId: 'pay_test_001',
-    });
+    await expect(
+      couponsService.redeemForCheckout({
+        couponId: coupon.id,
+        applicationId,
+        endUserId: userId,
+        checkoutSessionId: 'cs_test_001',
+        paymentId: 'pay_test_001',
+      }),
+    ).resolves.toEqual({ recorded: true });
 
     // Validate again → atomic re-check inside transaction will reject.
     const second = await app.inject({
@@ -288,16 +291,54 @@ describe('coupons', () => {
     expect(second.statusCode).toBe(400);
     expect(second.json().error.code).toBe('COUPON_USER_LIMIT_REACHED');
 
-    // A second recordRedemption (e.g. webhook replay for a different payment)
-    // by the same user MUST be rejected, even though webhook replays for
-    // the SAME paymentId are caught idempotently via the unique index.
+    // A redemption for a DIFFERENT checkout by the same user must not be
+    // recorded. It is REPORTED rather than thrown: the caller is a webhook
+    // applier that has just written a Payment row, and an exhausted coupon
+    // must never be able to roll that back.
     await expect(
-      couponsService.recordRedemption({
+      couponsService.redeemForCheckout({
         couponId: coupon.id,
         applicationId,
         endUserId: userId,
+        checkoutSessionId: 'cs_test_002',
         paymentId: 'pay_test_002',
       }),
-    ).rejects.toMatchObject({ code: 'COUPON_USER_LIMIT_REACHED' });
+    ).resolves.toMatchObject({ recorded: false, code: 'COUPON_USER_LIMIT_REACHED' });
+    expect(await prisma.couponRedemption.count({ where: { couponId: coupon.id } })).toBe(1);
+  });
+
+  it('redeeming the SAME checkout session twice records one row, limits or not', async () => {
+    // Both the checkout applier and the payment applier redeem the same sale,
+    // and providers replay webhooks freely. Idempotency is by (coupon,
+    // checkout session), and an already-recorded session reports
+    // "already-redeemed" rather than a limit failure even once the coupon is
+    // exhausted — otherwise a replay would look like a real problem.
+    const coupon = await createCoupon({
+      code: 'twice',
+      discountType: 'AMOUNT',
+      amountOff: 500,
+      maxRedemptions: 1,
+    });
+    const { couponsService } = await import('../src/modules/coupons/coupons.service.js');
+
+    const args = {
+      couponId: coupon.id,
+      applicationId,
+      endUserId: userId,
+      checkoutSessionId: 'cs_same',
+      discountAmount: 500,
+    };
+    await expect(couponsService.redeemForCheckout(args)).resolves.toEqual({ recorded: true });
+    await expect(couponsService.redeemForCheckout(args)).resolves.toEqual({
+      recorded: false,
+      reason: 'already-redeemed',
+    });
+    expect(await prisma.couponRedemption.count({ where: { couponId: coupon.id } })).toBe(1);
+
+    // The discount is stamped on the row, so the operator's total cannot be
+    // restated later by a subscription's metadata being overwritten.
+    const row = await prisma.couponRedemption.findFirstOrThrow({ where: { couponId: coupon.id } });
+    expect(row.discountAmount).toBe(500);
+    expect(row.checkoutSessionId).toBe('cs_same');
   });
 });

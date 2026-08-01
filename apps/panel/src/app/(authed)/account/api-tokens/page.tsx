@@ -13,7 +13,6 @@
 
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { api, PanelApiError } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
@@ -45,7 +44,7 @@ function scopeTone(scope: string): 'neutral' | 'brand' | 'warning' {
   return SCOPES.find((s) => s.value === scope)?.tone ?? 'neutral';
 }
 
-const REVEAL_COOKIE = 'relipay_pat_reveal';
+const REVEAL_COOKIE = 'rekey_pat_reveal';
 // Short floor: the reveal is dismissed (cookie deleted) the moment the operator
 // clicks "Done" or navigates away, so this max-age is only the fallback window
 // if they abandon the tab. Kept tight to limit how long the raw token lingers.
@@ -97,7 +96,6 @@ async function mintToken(formData: FormData): Promise<void> {
     path: '/account/api-tokens',
     maxAge: REVEAL_COOKIE_MAX_AGE,
   });
-  revalidatePath('/account/api-tokens');
   redirect('/account/api-tokens?minted=1');
 }
 
@@ -112,7 +110,6 @@ async function revokeToken(formData: FormData): Promise<void> {
     }
     throw err;
   }
-  revalidatePath('/account/api-tokens');
   redirect('/account/api-tokens?revoked=1');
 }
 
@@ -127,7 +124,6 @@ async function dismissReveal(): Promise<void> {
   'use server';
   const jar = await cookies();
   jar.delete(REVEAL_COOKIE);
-  revalidatePath('/account/api-tokens');
   redirect('/account/api-tokens');
 }
 

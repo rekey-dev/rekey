@@ -41,8 +41,19 @@ ${bodyHtml}
 </body></html>`;
 }
 
-function button(href: string, label: string): string {
-  return `<p style="margin:24px 0;"><a href="${href}" style="display:inline-block;background:#0071e3;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:6px;font-weight:500;">${label}</a></p>`;
+/**
+ * Call-to-action button, wrapped in a `{{#if}}` guard on the variable that
+ * supplies its href.
+ *
+ * The guard is not decoration. `renderTemplate` substitutes an unresolvable
+ * `{{var}}` with the empty string, so an unguarded button renders as
+ * `<a href="">Get started</a>` — a link to nowhere, sitting in a real
+ * customer's inbox looking clickable. A missing button is honest; a dead
+ * one is not. Pass the bare variable name, e.g. `cta('appUrl', 'Get started')`.
+ */
+function cta(varName: string, label: string): string {
+  const href = `{{${varName}}}`;
+  return `{{#if ${varName}}}<p style="margin:24px 0;"><a href="${href}" style="display:inline-block;background:#0071e3;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:6px;font-weight:500;">${label}</a></p>{{/if}}`;
 }
 
 export const DEFAULT_TEMPLATES: Record<EmailEventKey, DefaultTemplate> = {
@@ -52,7 +63,7 @@ export const DEFAULT_TEMPLATES: Record<EmailEventKey, DefaultTemplate> = {
 <h1 style="font-size:20px;margin:0 0 16px;font-weight:600;">Reset your password</h1>
 <p style="margin:0 0 12px;">Hi {{userEmail}},</p>
 <p style="margin:0 0 12px;">We received a request to reset your password. Click the button below to choose a new one. This link is valid until <strong>{{expiresAtIso}}</strong>.</p>
-${button('{{resetUrl}}', 'Reset password')}
+${cta('resetUrl', 'Reset password')}
 <p style="margin:0 0 12px;color:#86868b;font-size:13px;">If you didn't request a password reset, you can safely ignore this email — your password won't change.</p>
 `),
   },
@@ -62,7 +73,7 @@ ${button('{{resetUrl}}', 'Reset password')}
 <h1 style="font-size:20px;margin:0 0 16px;font-weight:600;">Verify your email</h1>
 <p style="margin:0 0 12px;">Hi {{userEmail}},</p>
 <p style="margin:0 0 12px;">Click the button below to confirm this is your email address. This link is valid until <strong>{{expiresAtIso}}</strong>.</p>
-${button('{{verifyUrl}}', 'Verify email')}
+${cta('verifyUrl', 'Verify email')}
 <p style="margin:0 0 12px;color:#86868b;font-size:13px;">If you didn't sign up, you can ignore this email.</p>
 `),
   },
@@ -72,7 +83,7 @@ ${button('{{verifyUrl}}', 'Verify email')}
 <h1 style="font-size:20px;margin:0 0 16px;font-weight:600;">Sign in</h1>
 <p style="margin:0 0 12px;">Hi {{userEmail}},</p>
 <p style="margin:0 0 12px;">Click the button below to sign in. This link is valid for 15 minutes (until <strong>{{expiresAtIso}}</strong>) and can be used once.</p>
-${button('{{signInUrl}}', 'Sign in')}
+${cta('signInUrl', 'Sign in')}
 <p style="margin:0 0 12px;color:#86868b;font-size:13px;">If you didn't request this, you can safely ignore this email — no one can sign in without clicking the link.</p>
 `),
   },
@@ -82,7 +93,7 @@ ${button('{{signInUrl}}', 'Sign in')}
 <h1 style="font-size:20px;margin:0 0 16px;font-weight:600;">You're invited</h1>
 <p style="margin:0 0 12px;">Hi {{inviteeEmail}},</p>
 <p style="margin:0 0 12px;"><strong>{{inviterName}}</strong> has invited you to join the <strong>{{workspaceName}}</strong> workspace.</p>
-${button('{{inviteUrl}}', 'Accept invitation')}
+${cta('inviteUrl', 'Accept invitation')}
 <p style="margin:0 0 12px;color:#86868b;font-size:13px;">This invitation expires on {{expiresAtIso}}.</p>
 `),
   },
@@ -92,7 +103,7 @@ ${button('{{inviteUrl}}', 'Accept invitation')}
 <h1 style="font-size:20px;margin:0 0 16px;font-weight:600;">Welcome</h1>
 <p style="margin:0 0 12px;">Hi {{userEmail}},</p>
 <p style="margin:0 0 12px;">Thanks for signing up. We're glad to have you.</p>
-${button('{{appUrl}}', 'Get started')}
+${cta('appUrl', 'Get started')}
 `),
   },
   mfa_enabled: {

@@ -7,14 +7,14 @@
  * else from it: the provider-name enum, the generic webhook pipeline route,
  * and (P3/P4) the generic credentials service + discovery endpoints.
  *
- * The OUTBOUND side (`BillingProvider`, ./types.ts) predates this contract
- * and is reused unchanged via `createProvider`. This file only adds the
- * INBOUND half — webhook verification and event translation — which the
- * three bespoke route/handler pairs previously each solved differently.
+ * The OUTBOUND side (`BillingProvider`, ./types.ts) predates this contract and
+ * is untouched by it: providers are still constructed by the switch in
+ * providers/index.ts. This file is the INBOUND half only — webhook
+ * verification and event translation — which the three bespoke route/handler
+ * pairs previously each solved differently.
  */
 
 import type { FastifyBaseLogger } from 'fastify';
-import type { BillingProvider } from './types.js';
 
 /**
  * One credential input field. The generic credentials service (P3) builds
@@ -81,9 +81,6 @@ export type AppRef = { applicationId: string } | { slug: string };
  */
 export type LocalSubscriptionStatus = 'ACTIVE' | 'PAST_DUE' | 'CANCELED' | 'EXPIRED' | 'PENDING';
 
-/** Test/live isolation mode carried on Payment/Subscription rows. */
-export type LocalDataMode = 'TEST' | 'LIVE';
-
 interface DomainEventBase {
   /** Provider's event id — the idempotency key stored in `webhook_events`. */
   providerEventId: string;
@@ -94,12 +91,6 @@ interface DomainEventBase {
    * application.
    */
   applicationId: string;
-  /**
-   * Test/live mode when the provider payload states it. Optional: Stripe
-   * events don't carry it, and the appliers then inherit the local
-   * subscription's mode (`localSub.mode ?? 'LIVE'`) exactly as before.
-   */
-  mode?: LocalDataMode;
   /** The full provider payload, for metadata/debugging. Never re-verified. */
   raw: unknown;
 }
@@ -125,6 +116,29 @@ export interface CheckoutCompletedEvent extends DomainEventBase {
    * 'initial').
    */
   firstPeriod?: boolean;
+  /**
+   * The charge this completion settled, when the completion payload carries
+   * it. Present for ONE-TIME checkouts (Stripe `mode: 'payment'`, where the
+   * session reports `payment_intent`, `amount_total` and `payment_status`);
+   * absent for recurring ones, whose money arrives on a separate invoice
+   * event.
+   *
+   * It exists because one-time revenue had no `Payment` row anywhere. Stripe
+   * emits no invoice for `mode: 'payment'`, and the deployment's webhook
+   * registration subscribes to invoice events only — so a completed credit
+   * pack granted the credits and recorded no payment at all. Rather than
+   * subscribe `payment_intent.succeeded` (which also fires for every invoice
+   * payment, carries no link back to the local row, and would have to be
+   * de-duplicated against `invoice.paid`), the completion event that already
+   * routes to the right subscription carries the charge.
+   */
+  payment?: {
+    providerPaymentId: string;
+    /** Smallest currency unit, passed through UNVALIDATED — see `safeAmount`. */
+    amount: number | null | undefined;
+    currency: string | null;
+    description: string | null;
+  };
 }
 
 /**
@@ -286,11 +300,6 @@ export interface VerifyCtx {
   mode: 'test' | 'live';
 }
 
-/** Context for `createProvider` — the credential row's test/live mode. */
-export interface CreateProviderCtx {
-  mode: 'test' | 'live';
-}
-
 /**
  * The self-describing provider module. See the spec for field-by-field
  * rationale; the registry CI test asserts `name` equals the directory name.
@@ -302,7 +311,11 @@ export interface ProviderModule {
     label: string;
     /** Provider setup guide for operators. */
     docsUrl: string;
-    /** Feeds pickProvider geo-routing defaults (P4). */
+    /**
+     * SUGGESTED geo-routing values, surfaced through the discovery projection so
+     * the panel can pre-fill the credential form. `pickProvider` never reads
+     * these — it routes purely on what is stored on the credential row.
+     */
     defaultCountries: string[];
     priority: number;
   };
@@ -318,24 +331,61 @@ export interface ProviderModule {
     /**
      * Signature check calls the provider's API (PayPal). Drives the
      * pipeline's CENTRALIZED test-skip: only online verification is skipped
-     * under NODE_ENV=test / RELIPAY_BILLING_FORCE_STUB — offline HMAC
-     * providers verify even in tests (tests sign their fixtures).
+     * under NODE_ENV=test — offline HMAC providers verify even in tests
+     * (tests sign their fixtures).
      */
     onlineVerify: boolean;
+    /**
+     * Whether the provider can apply an ad-hoc, per-checkout coupon discount.
+     * Split by flow because these are genuinely different API surfaces: a
+     * provider whose one-off charge amount is ours to set discounts that
+     * trivially, and may still have no way to take a single-period discount
+     * on a recurring subscription (PayPal, Razorpay — see their descriptors).
+     *
+     * OPTIONAL, and absent means **cannot**. The field postdates the three
+     * built-in modules and the contract is on its way to third parties
+     * (`@rekey.dev/provider-kit`, see the spec's v2 section), so a module that
+     * says nothing must not be handed a discount it will silently drop and
+     * bill full price for. Fail-closed here costs a refused checkout;
+     * fail-open costs the buyer money.
+     */
+    discounts?: {
+      /** One-off charges — CREDIT packs and perpetual LICENSE purchases. */
+      oneTime: boolean;
+      /** A FIRST-PERIOD-ONLY discount on a recurring subscription. */
+      recurring: boolean;
+    };
   };
   credentialSchema: CredentialField[];
   /** Escape hatch for cross-field rules the declarative schema can't express. */
   validateCredentials?(creds: Record<string, string>): void;
   /**
-   * Best-effort test/live inference from key shapes (Stripe `sk_live_`,
-   * Razorpay `rzp_live_`). Absent → 'test' (PayPal keys carry no mode
-   * marker). Only a default: operators can always override with an explicit
-   * `mode` at upsert time, and the generic credentials service (P3) applies
-   * exactly that precedence.
+   * Read the sandbox/live mode OUT OF THE KEY MATERIAL itself (Stripe
+   * `sk_live_`/`sk_test_`, Razorpay `rzp_live_`/`rzp_test_`).
+   *
+   * Tri-state on purpose:
+   *   - `'test'` / `'live'` — the credential says which it is. **Authoritative.**
+   *     `credentials.service` stores this and rejects any contradicting
+   *     operator-supplied label; an operator cannot relabel a live key as
+   *     test, because the label is not what the provider SDK reads — the key
+   *     is. A label allowed to disagree with the key would make everything
+   *     downstream of `mode` a lie: the panel's test/live badge, the revenue
+   *     stats, dunning, and PayPal's sandbox-vs-live base-URL choice.
+   *   - `null` — the shape carries no marker and we genuinely cannot tell.
+   *     Only then does an explicit `mode` decide, defaulting to `'test'`.
+   *
+   * Omit the hook entirely when the provider's credentials never carry a
+   * marker (PayPal: a sandbox client id is indistinguishable from a live one).
+   * Returning `'test'` for "unrecognised" would be a lie with teeth — it is
+   * exactly the conflation that let a live key be stored as test.
    */
-  inferMode?(creds: Record<string, string>): 'test' | 'live';
-  /** Build the EXISTING outbound interface (types.ts) — unchanged contract. */
-  createProvider(creds: Record<string, string>, ctx: CreateProviderCtx): BillingProvider;
+  detectMode?(creds: Record<string, string>): 'test' | 'live' | null;
+  // NO `createProvider` here. The spec sketched one so a module could own its
+  // outbound construction too, but the switch in providers/index.ts
+  // (`getProviderForApplication`) was never migrated onto it, so all three
+  // implementations sat unreachable for the life of the contract — a second,
+  // silently-diverging way to build a provider. If the factory is ever moved
+  // into the modules, add it back then, with a call site.
   webhook: {
     resolveApplication(req: RawWebhookReq): AppRef;
     /** Async → covers PayPal's online verify. Skipping is the PIPELINE's call. */

@@ -1,7 +1,6 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
 import { api, PanelApiError } from '@/lib/api';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SavedBanner } from '@/components/SavedBanner';
@@ -78,7 +77,6 @@ async function saveCreds(applicationId: string, formData: FormData): Promise<voi
     }
     throw err;
   }
-  revalidatePath(`/applications/${applicationId}/email`);
   redirect(`/applications/${applicationId}/email?saved=1`);
 }
 
@@ -88,7 +86,6 @@ async function removeCreds(applicationId: string): Promise<void> {
     method: 'DELETE',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/email-credentials`,
   });
-  revalidatePath(`/applications/${applicationId}/email`);
   redirect(`/applications/${applicationId}/email?removed=1`);
 }
 
@@ -226,7 +223,16 @@ export default async function EmailPage({
           <div>
             <h2 className="text-base font-semibold">Templates</h2>
             <p className="text-xs text-[var(--color-muted-fg)]">
-              Customize per-event subject + body, or leave the Rekey defaults.
+              Customize per-event subject + body, or leave the Rekey defaults. Where the buttons in
+              these emails point is the{' '}
+              <Link
+                href={`/applications/${id}/auth`}
+                className="font-medium text-[var(--color-primary)] hover:underline"
+              >
+                application URL
+              </Link>{' '}
+              on the Auth tab — with no URL resolvable, the button is left out rather than sent
+              broken.
             </p>
           </div>
         </header>

@@ -8,8 +8,9 @@
  *
  *   1. HARD-DELETES pure PII / auth-credential rows (the data a data-subject
  *      erasure request is actually about): OAuth identities, refresh-token
- *      sessions, MFA, passkeys, magic-link / password-reset / email-verify
- *      tokens.
+ *      sessions of every kind (session AND the per-app OAuth/OIDC `mcp` ones),
+ *      MFA, passkeys, magic-link / password-reset / email-verify tokens, and
+ *      unredeemed OAuth authorization codes.
  *   2. ANONYMIZES the EndUser row in place (TOMBSTONE): email → a non-routable
  *      tombstone, name/metadata nulled, passwordHash cleared, `erasedAt` set.
  *   3. RETAINS but PII-SCRUBS financial / accounting rows — Subscription,
@@ -30,6 +31,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { webhookService } from '../webhooks/webhook.service.js';
+import { clearFailures, euLoginLockScope } from '../../lib/brute-force.js';
 
 /** Non-routable tombstone address. `.invalid` is reserved (RFC 2606) so it can never deliver. */
 export function tombstoneEmail(endUserId: string): string {
@@ -49,6 +51,7 @@ export interface EraseResult {
     magicLinkTokens: number;
     passwordResetTokens: number;
     emailVerificationTokens: number;
+    oauthAuthCodes: number;
     subscriptionsScrubbed: number;
     paymentsScrubbed: number;
     licensesScrubbed: number;
@@ -69,12 +72,17 @@ export async function eraseEndUser(args: {
 }): Promise<EraseResult> {
   const { applicationId, endUserId, operatorUserId } = args;
 
+  // Captured inside the tx, used after it commits: the brute-force limiter is
+  // in Redis, so clearing the lock cannot join the transaction.
+  let erasedEmail: string | null = null;
+
   const result = await prisma.$transaction(async (tx) => {
     // Re-read inside the tx — guards against a concurrent erase / delete.
     const user = await tx.endUser.findUnique({ where: { id: endUserId } });
     if (!user || user.applicationId !== applicationId) {
       return null; // Vanished between the route check and here — treat as not-found upstream.
     }
+    erasedEmail = user.email;
     if (user.erasedAt !== null) {
       // Already a tombstone — idempotent no-op.
       return {
@@ -83,6 +91,7 @@ export async function eraseEndUser(args: {
         counts: {
           oauthIdentities: 0, sessions: 0, mfa: 0, passkeys: 0,
           magicLinkTokens: 0, passwordResetTokens: 0, emailVerificationTokens: 0,
+          oauthAuthCodes: 0,
           subscriptionsScrubbed: 0, paymentsScrubbed: 0, licensesScrubbed: 0,
           creditLedgerScrubbed: 0, usageRecordsScrubbed: 0,
         },
@@ -98,14 +107,23 @@ export async function eraseEndUser(args: {
       magicLinks,
       pwdResets,
       emailVerifs,
+      authCodes,
     ] = await Promise.all([
       tx.oAuthIdentity.deleteMany({ where: { endUserId } }),
+      // Every kind, `mcp` included: an OAuth/OIDC refresh token is a 30-day
+      // credential for this person's account like any other.
       tx.refreshToken.deleteMany({ where: { endUserId } }),
       tx.mfaCredential.deleteMany({ where: { endUserId } }),
       tx.webAuthnCredential.deleteMany({ where: { endUserId } }),
       tx.magicLinkToken.deleteMany({ where: { endUserId } }),
       tx.passwordResetToken.deleteMany({ where: { endUserId } }),
       tx.emailVerificationToken.deleteMany({ where: { endUserId } }),
+      // Unredeemed authorization codes. 60-second TTL, so this rarely deletes
+      // anything — but a code minted moments before the erasure is a live
+      // credential, and the redemption path's own erasure gate should not be
+      // the only thing standing between it and an `id_token` about someone we
+      // have just promised to forget.
+      tx.oAuthAuthCode.deleteMany({ where: { endUserId } }),
     ]);
 
     // ── 2. ANONYMIZE / scrub PII duplicated onto RETAINED financial rows ────
@@ -149,8 +167,6 @@ export async function eraseEndUser(args: {
         // Null the free-form profile PII (display name, avatar, custom fields).
         metadata: Prisma.DbNull,
         role: 'user',
-        failedSignInAttempts: 0,
-        lockedUntil: null,
         erasedAt,
         erasedBy: operatorUserId,
       },
@@ -167,6 +183,7 @@ export async function eraseEndUser(args: {
         magicLinkTokens: magicLinks.count,
         passwordResetTokens: pwdResets.count,
         emailVerificationTokens: emailVerifs.count,
+        oauthAuthCodes: authCodes.count,
         subscriptionsScrubbed: subs.count,
         paymentsScrubbed: payments.count,
         licensesScrubbed: licenses.count,
@@ -177,6 +194,22 @@ export async function eraseEndUser(args: {
   });
 
   if (result === null) return null as unknown as EraseResult;
+
+  // Drop any live failed-sign-in counter / lockout for the erased address.
+  //
+  // This replaces the old `failedSignInAttempts: 0, lockedUntil: null` on the
+  // tombstone update, which stopped meaning anything when lockout moved to
+  // Redis (and whose columns are now gone). It is not cosmetic: the limiter's
+  // key is `bf:lock:eu:login:<appId>:<email>`, so it holds the erased address in
+  // PLAINTEXT for up to the 15-minute lock TTL, and the super-admin
+  // locked-accounts list enumerates exactly those keys. An erasure that leaves
+  // the email sitting in a Redis key an operator dashboard reads back is not an
+  // erasure. Best-effort by design (`clearFailures` swallows store errors) —
+  // failing here must not roll back a committed erasure, and the TTL is the
+  // backstop.
+  if (result.erased && erasedEmail !== null) {
+    await clearFailures(euLoginLockScope(applicationId, erasedEmail));
+  }
 
   // Outbound webhook — only on a real transition (not the idempotent no-op).
   // Fire-and-forget, same contract as the auth emit-sites.

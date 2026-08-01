@@ -12,6 +12,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { configureSandboxStripe } from './fakes/billing-credentials.js';
 import { prisma } from '../src/lib/prisma.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
@@ -56,6 +57,7 @@ describe('end-user billing portal surface', () => {
         payload: { name: 'k', mode: 'live' },
       })
       .then((r) => r.json().data as { rawKey: string }).then((d) => d.rawKey);
+    await configureSandboxStripe(applicationId);
   });
 
   async function signUpUser(email: string): Promise<{ accessToken: string; id: string }> {

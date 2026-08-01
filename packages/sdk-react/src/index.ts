@@ -6,7 +6,7 @@
  * // Server (Next.js App Router root layout)
  * const user = await getCurrentUserFromCookie();
  * return (
- *   <RekeyProvider apiUrl={env.RELIPAY_URL} initialUser={user} accessToken={user?.accessToken ?? null}>
+ *   <RekeyProvider apiUrl={env.REKEY_URL} initialUser={user} accessToken={user?.accessToken ?? null}>
  *     {children}
  *   </RekeyProvider>
  * );
@@ -28,11 +28,11 @@
 
 export { RekeyProvider } from './context.js';
 export type { RekeyContextValue, RekeyProviderProps } from './context.js';
-export { useUser, useRelipay } from './hooks.js';
+export { useUser, useRekey } from './hooks.js';
 export { SignedIn, SignedOut, Loading } from './components.js';
 export { RekeyBrowserClient, RekeyError } from './client.js';
 export type {
-  ReliPayBrowserConfig,
+  RekeyBrowserConfig,
   EndUserDto,
   EntitlementsDto,
   PortalPaymentDto,

@@ -1,10 +1,12 @@
 # `@rekey.dev/react`
 
-The browser SDK for **[Rekey](https://relipay.dev)** — React hooks **and drop-in UI components** for end-user auth, organizations, and billing.
+> **ReliPay is now Rekey.** This package was previously published as the equivalent `@relipay/*` package, which is deprecated. Env vars renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read — set `REKEY_*`). relipay.dev (the old domain) will redirect to rekey.dev after the domain migration.
 
-> **What is Rekey?** An auth + billing backend for your SaaS: sign-in (password, magic-link, passkeys, OAuth, MFA), subscriptions, usage, credits, licenses, and teams — behind one API, multi-tenant, provider-agnostic. Docs: **[relipay.dev/docs](https://relipay.dev/docs)**. This package is its React/browser SDK; the server SDK is [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node).
+The browser SDK for **[Rekey](https://rekey.dev)** — React hooks **and drop-in UI components** for end-user auth, organizations, and billing.
 
-It gives you Clerk-style components (`<SignIn>`, `<UserButton>`, `<PricingTable>`, …) plus the headless primitives (`useUser`, `<SignedIn>`, `<Protect>`) so you can ship auth/billing UI fast, or build your own.
+> **What is Rekey?** An auth + billing backend for your SaaS: sign-in (password, magic-link, passkeys, OAuth, MFA), subscriptions, usage, credits, licenses, and teams — behind one API, multi-tenant, provider-agnostic. Docs: **[rekey.dev/docs](https://rekey.dev/docs)**. This package is its React/browser SDK; the server SDK is [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node).
+
+It gives you drop-in components (`<SignIn>`, `<UserButton>`, `<PricingTable>`, …) plus the headless primitives (`useUser`, `<SignedIn>`, `<Protect>`) so you can ship auth/billing UI fast, or build your own.
 
 ```bash
 npm install @rekey.dev/react
@@ -21,8 +23,8 @@ The browser **never holds your Application secret key** (`rp_live_…` / `rp_tes
 
 Because of that, the components here are **render + delegate**:
 
-- They **read** auth state from `<RelipayProvider>` (which calls the user-token-only `GET /api/v1/auth/me`).
-- For **writes** — sign-in, sign-up, sign-out, create-org, invite, checkout — they call **your** server (a Next.js Server Action or a route handler) that runs [`@rekey.dev/node`](https://www.npmjs.com/package/`@rekey.dev/node`) with the secret key. This is exactly how Clerk's components talk to Clerk's backend; Rekey just keeps that backend on _your_ server.
+- They **read** auth state from `<RekeyProvider>` (which calls the user-token-only `GET /api/v1/auth/me`).
+- For **writes** — sign-in, sign-up, sign-out, create-org, invite, checkout — they call **your** server (a Next.js Server Action or a route handler) that runs [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node) with the secret key. The secret key never reaches the browser — the components talk to your server, and your server is the only thing that talks to Rekey with it.
 
 ```
 Browser (UI components, public)
@@ -31,34 +33,34 @@ Browser (UI components, public)
 Your server  ──@rekey.dev/node + secret──►  Rekey API
    │  sets the session cookie
    ▼
-SSR seeds <RelipayProvider> on the next render
+SSR seeds <RekeyProvider> on the next render
 ```
 
 So every component below that mutates something takes an `action` (or `actionUrl`) prop — that's your server code.
 
 ---
 
-## Setup: `<RelipayProvider>`
+## Setup: `<RekeyProvider>`
 
-Wrap your app once, seeded from your server session. With Next.js + [`@rekey.dev/nextjs`](https://www.npmjs.com/package/`@rekey.dev/nextjs`):
+Wrap your app once, seeded from your server session. With Next.js + [`@rekey.dev/nextjs`](https://www.npmjs.com/package/@rekey.dev/nextjs):
 
 ```tsx
 // app/layout.tsx (Server Component)
 import { auth } from '@rekey.dev/nextjs/server';
-import { RelipayProvider } from '@rekey.dev/react';
+import { RekeyProvider } from '@rekey.dev/react';
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   const session = await auth(); // { user, accessToken } | null
   return (
     <html>
       <body>
-        <RelipayProvider
-          apiUrl={process.env.NEXT_PUBLIC_RELIPAY_URL!}
+        <RekeyProvider
+          apiUrl={process.env.NEXT_PUBLIC_REKEY_URL!}
           initialUser={session?.user ?? null}
           accessToken={session?.accessToken ?? null}
         >
           {children}
-        </RelipayProvider>
+        </RekeyProvider>
       </body>
     </html>
   );
@@ -69,42 +71,42 @@ export default async function RootLayout({ children }: { children: React.ReactNo
 
 > **Publishable key vs secret key.** Your Application's publishable key (`rp_pub_…`) is a **real browser credential** — safe to ship in client code. The secret key (`rp_live_…` / `rp_test_…`) is server-only. There are two ways to drive auth from this SDK:
 >
-> 1. **Server-delegated (this README's prebuilt components).** Writes go to your Server Actions running [`@rekey.dev/node`](https://www.npmjs.com/package/`@rekey.dev/node`) with the secret key; the browser only reads auth state via the user JWT. Best when you already have a server.
-> 2. **Backendless.** Pass `publishableKey` to `<RelipayProvider>` and call the client's bootstrap methods (`client.signIn`, `signUp`, `requestMagicLink`, `verifyLicense`, `getPlans`) straight from the browser — no server required. The publishable key only identifies the app; the user still proves identity (password/passkey/token). See [Backendless mode](#backendless-mode).
+> 1. **Server-delegated (this README's prebuilt components).** Writes go to your Server Actions running [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node) with the secret key; the browser only reads auth state via the user JWT. Best when you already have a server.
+> 2. **Backendless.** Pass `publishableKey` to `<RekeyProvider>` and call the client's bootstrap methods (`client.signIn`, `signUp`, `requestMagicLink`, `verifyLicense`, `getPlans`) straight from the browser — no server required. The publishable key only identifies the app; the user still proves identity (password/passkey/token). See [Backendless mode](#backendless-mode).
 
 ## Backendless mode
 
 For a pure SPA / mobile / desktop app with no backend, give the provider a `publishableKey` and call the bootstrap methods directly:
 
 ```tsx
-<RelipayProvider
-  apiUrl={process.env.NEXT_PUBLIC_RELIPAY_URL!}
+<RekeyProvider
+  apiUrl={process.env.NEXT_PUBLIC_REKEY_URL!}
   publishableKey="rp_pub_myapp-prod_…"   // safe in client code
 >
   <App />
-</RelipayProvider>
+</RekeyProvider>
 ```
 
 ```ts
-import { RelipayBrowserClient } from '@rekey.dev/react';
+import { RekeyBrowserClient } from '@rekey.dev/react';
 
-const client = new RelipayBrowserClient({ apiUrl, publishableKey: 'rp_pub_…' });
+const client = new RekeyBrowserClient({ apiUrl, publishableKey: 'rp_pub_…' });
 const out = await client.signIn({ email, password });   // → SignInOutcome (branch on mfaRequired)
 const plans = await client.getPlans();                   // public catalogue
 const lic = await client.verifyLicense({ key, machineFingerprint });
 ```
 
-Restrict where the key works via the Application's **CORS origin allowlist** (Panel → Application → Access); off-allowlist origins get `403 ORIGIN_NOT_ALLOWED`. Money + account-management routes still require the secret key on a server. See [api-keys.md → Publishable key](../../docs/api-keys.md#publishable-key).
+Restrict where the key works via the Application's **CORS origin allowlist** (Panel → Application → Access); off-allowlist origins get `403 ORIGIN_NOT_ALLOWED`. Money + account-management routes still require the secret key on a server. See [api-keys.md → Publishable key](https://github.com/rekey-dev/rekey/blob/main/docs/api-keys.md#publishable-key).
 
 ### Hooks
 
 ```tsx
 'use client';
-import { useUser, useRelipay } from '@rekey.dev/react';
+import { useUser, useRekey } from '@rekey.dev/react';
 
 function Profile() {
   const { user, signedIn, loading } = useUser();
-  const { refresh } = useRelipay(); // re-fetch the user after a sign-in round-trip
+  const { refresh } = useRekey(); // re-fetch the user after a sign-in round-trip
   if (loading) return <Spinner />;
   if (!signedIn) return <a href="/login">Sign in</a>;
   return <p>Hi {user.email}</p>;
@@ -121,18 +123,18 @@ Gate regions of your UI. No styling, no opinions.
 | --- | --- |
 | `<SignedIn>` | a user is signed in |
 | `<SignedOut>` | no user is signed in |
-| `<RelipayLoading>` | the provider is still resolving the session |
-| `<RelipayLoaded>` | the provider has resolved |
+| `<RekeyLoading>` | the provider is still resolving the session |
+| `<RekeyLoaded>` | the provider has resolved |
 | `<Protect>` | the supplied entitlement / feature / role check passes |
 
 ```tsx
-import { SignedIn, SignedOut, RelipayLoading, RelipayLoaded, Protect } from '@rekey.dev/react';
+import { SignedIn, SignedOut, RekeyLoading, RekeyLoaded, Protect } from '@rekey.dev/react';
 
-<RelipayLoading><Spinner /></RelipayLoading>
-<RelipayLoaded>
+<RekeyLoading><Spinner /></RekeyLoading>
+<RekeyLoaded>
   <SignedIn><Dashboard /></SignedIn>
   <SignedOut><Landing /></SignedOut>
-</RelipayLoaded>
+</RekeyLoaded>
 ```
 
 ### `<Protect>` — gate by entitlement / feature / role
@@ -196,7 +198,7 @@ export async function signInAction(formData: FormData) {
 }
 ```
 
-Not on the App Router? Use `actionUrl="/api/sign-in"` (the form does a plain `POST`) and call `useRelipay().refresh()` after.
+Not on the App Router? Use `actionUrl="/api/sign-in"` (the form does a plain `POST`) and call `useRekey().refresh()` after.
 
 ### `<UserButton>`
 
@@ -415,11 +417,11 @@ Slots: `root`, `card`, `header`, `title`, `subtitle`, `label`, `input`, `button`
 
 ## Full example
 
-See [`examples/nextjs-saas`](../../examples/nextjs-saas) for a complete Next.js 15 app wiring every component — including the `/kitchen-sink` page (a live gallery) — against a real Rekey Application with org-scoped billing.
+See [`examples/nextjs-saas`](https://github.com/rekey-dev/rekey/blob/main/examples/nextjs-saas) for a complete Next.js 15 app wiring every component — including the `/kitchen-sink` page (a live gallery) — against a real Rekey Application with org-scoped billing.
 
 ## Headless escape hatch
 
-Need full control? Skip the components and use `useUser()` + the control primitives, or talk to the API directly with `RelipayBrowserClient` (user-token-scoped reads only). The components are built on exactly these.
+Need full control? Skip the components and use `useUser()` + the control primitives, or talk to the API directly with `RekeyBrowserClient` (user-token-scoped reads only). The components are built on exactly these.
 
 ---
 
@@ -427,7 +429,7 @@ Need full control? Skip the components and use `useUser()` + the control primiti
 
 Rekey is a self-hostable **auth + billing backend for SaaS** — one API for sign-in, subscriptions, usage, credits, licenses, and teams.
 
-- Website + docs: **[relipay.dev](https://relipay.dev)** · [relipay.dev/docs](https://relipay.dev/docs)
+- Website + docs: **[rekey.dev](https://rekey.dev)** · [rekey.dev/docs](https://rekey.dev/docs)
 - Other SDKs: [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node) (server) · [`@rekey.dev/nextjs`](https://www.npmjs.com/package/@rekey.dev/nextjs) (Next.js) · [`@rekey.dev/cli`](https://www.npmjs.com/package/@rekey.dev/cli) · [`@rekey.dev/mcp`](https://www.npmjs.com/package/@rekey.dev/mcp) (MCP server)
 
 ## License

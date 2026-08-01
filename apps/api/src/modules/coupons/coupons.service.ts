@@ -2,7 +2,7 @@
  * Coupons — discount codes applied at checkout.
  *
  * Two discount kinds:
- *   - PERCENT — `amountOff` is basis points × 10. `1500` means 15.00%.
+ *   - PERCENT — `amountOff` is basis points. `1500` means 15.00%.
  *   - AMOUNT  — `amountOff` is in the smallest currency unit. `500` is $5.00.
  *
  * Validity rules (all must hold):
@@ -15,14 +15,37 @@
  *
  * `code` is case-insensitive — we lowercase on storage and on validation.
  *
- * Redemption is recorded in `CouponRedemption` when the coupon is *applied*
- * to a checkout session. We optimistically count it as consumed at apply
- * time; if the user abandons checkout, the redemption row exists but isn't
- * linked to a successful Payment. Cleanup of "stale apply but no pay" rows
- * is a future concern — for now slightly-overcounting is acceptable.
+ * Redemption is recorded in `CouponRedemption` when the provider tells us the
+ * purchase went through — `webhooks/apply.ts` calls `redeemForCheckout` from
+ * checkout completion (one-time flows, where fulfilment happens) and from
+ * payment success (recurring flows). Until then the coupon just rides along on
+ * `Subscription.metadata.couponBySession`.
+ *
+ * It used to be recorded at apply time, on the theory that slight overcounting
+ * was harmless. It wasn't: abandoning checkouts in a loop let an attacker burn
+ * through `maxRedemptions` / `maxRedemptionsPerUser` without ever paying, which
+ * is a denial-of-discount against every other customer. Don't move it back
+ * earlier — a redemption should cost money.
+ *
+ * It was then recorded ONLY at payment-success, which was wrong in both
+ * directions and is why `redeemForCheckout` exists:
+ *
+ *   - **Never, for a one-time purchase.** Neither Stripe's `mode: 'payment'`
+ *     session nor a PayPal Orders v2 capture produces the invoice event the
+ *     payment applier hangs off, so a `maxRedemptions: 1` coupon discounted an
+ *     unlimited number of one-off checkouts and recorded nothing.
+ *   - **Every period, for a recurring one.** The provider coupon is
+ *     `duration: 'once'` and discounts invoice #1 only, but every renewal
+ *     invoice recorded another redemption — and once a per-user limit was
+ *     reached the redemption threw *inside the payment transaction* and rolled
+ *     the renewal payment back entirely.
+ *
+ * The grain is therefore (coupon, checkout session), enforced by a unique
+ * index, and a redemption that cannot be recorded is reported, never thrown at
+ * a caller that is in the middle of writing money.
  */
 
-import type { Coupon, Prisma } from '@prisma/client';
+import type { Coupon } from '@prisma/client';
 import { CouponDiscountType } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
@@ -69,18 +92,33 @@ export interface CouponWithStats extends Coupon {
   redemptionCount: number;
   /**
    * Total discount granted across redemptions, in the smallest currency unit.
-   * Best-effort: per-redemption discount isn't stored on the redemption row —
-   * checkout records it on the subscription's metadata (`discountAmount`).
-   * We sum that where available and fall back to `amountOff` for AMOUNT
-   * coupons (exact unless clamped); PERCENT redemptions without a linked
-   * subscription contribute 0.
+   *
+   * Summed from `CouponRedemption.discountAmount`, which is stamped at
+   * redemption time. It used to be read back off the linked subscription's
+   * `metadata.discountAmount` — a value the NEXT checkout on the same
+   * (application, end-user, plan) row overwrites, so the operator's historical
+   * totals were restated by activity that had nothing to do with them.
+   * Redemptions written before that column existed still take the old
+   * best-effort path: `amountOff` for AMOUNT coupons (exact unless it was
+   * clamped to the plan price), 0 for PERCENT.
    */
   totalDiscountIssued: number;
 }
 
+/** Why `redeemForCheckout` did or did not write a row. See the method. */
+export type RedemptionOutcome =
+  /** A new `CouponRedemption` row was written. */
+  | { recorded: true }
+  /** This (coupon, checkout session) was already redeemed — replay, or the
+   *  other applier got there first. Nothing to do, and not an error. */
+  | { recorded: false; reason: 'already-redeemed' }
+  /** A global / per-user limit is now exhausted. The purchase still stands;
+   *  the operator's coupon books simply cannot record this one. */
+  | { recorded: false; reason: 'limit-reached'; code: string; message: string };
+
 function computeDiscount(coupon: Coupon, amount: number): number {
   if (coupon.discountType === 'PERCENT') {
-    // amountOff = basis-points × 10, so 1500 → 15.00%. Floor to int cents.
+    // amountOff = basis points, so 1500 → 15.00%. Floor to int cents.
     const raw = Math.floor((amount * coupon.amountOff) / 10000);
     return Math.min(raw, amount);
   }
@@ -117,18 +155,8 @@ export const couponsService = {
 
     const redemptions = await prisma.couponRedemption.findMany({
       where: { couponId: { in: coupons.map((c) => c.id) } },
-      select: { couponId: true, subscriptionId: true },
+      select: { couponId: true, discountAmount: true },
     });
-    const subIds = [
-      ...new Set(redemptions.map((r) => r.subscriptionId).filter((v): v is string => v !== null)),
-    ];
-    const subs = subIds.length
-      ? await prisma.subscription.findMany({
-          where: { id: { in: subIds } },
-          select: { id: true, metadata: true },
-        })
-      : [];
-    const metaById = new Map(subs.map((s) => [s.id, s.metadata]));
     const couponById = new Map(coupons.map((c) => [c.id, c]));
 
     const countBy = new Map<string, number>();
@@ -137,13 +165,9 @@ export const couponsService = {
       countBy.set(r.couponId, (countBy.get(r.couponId) ?? 0) + 1);
       const coupon = couponById.get(r.couponId);
       if (!coupon) continue;
-      const meta = r.subscriptionId
-        ? (metaById.get(r.subscriptionId) as Record<string, unknown> | null | undefined)
-        : null;
-      const recorded = meta && typeof meta === 'object' ? meta['discountAmount'] : undefined;
       const discount =
-        typeof recorded === 'number' && Number.isFinite(recorded)
-          ? recorded
+        r.discountAmount !== null && Number.isFinite(r.discountAmount)
+          ? r.discountAmount
           : coupon.discountType === 'AMOUNT'
             ? coupon.amountOff
             : 0;
@@ -171,7 +195,7 @@ export const couponsService = {
         statusCode: 400,
         code: 'COUPON_AMOUNT_INVALID',
         message: 'Coupon amountOff must be >= 0.',
-        fix: 'PERCENT discounts use basis-points × 10 (1500 = 15%); AMOUNT discounts use cents.',
+        fix: 'PERCENT discounts use basis points (1500 = 15%); AMOUNT discounts use cents.',
       });
     }
     if (input.discountType === 'PERCENT' && input.amountOff > 10000) {
@@ -179,7 +203,7 @@ export const couponsService = {
         statusCode: 400,
         code: 'COUPON_AMOUNT_INVALID',
         message: `PERCENT coupon amountOff "${input.amountOff}" exceeds 100% (10000).`,
-        fix: 'PERCENT discount is capped at 10000 basis-points-times-10 (= 100%). For full-comp, use AMOUNT >= price.',
+        fix: 'PERCENT discount is capped at 10000 basis points (= 100%). For full-comp, use AMOUNT >= price.',
       });
     }
 
@@ -327,82 +351,116 @@ export const couponsService = {
   },
 
   /**
-   * Record a redemption atomically with the limit re-check. The earlier
-   * `validate` call is an *advisory* gate (TOCTOU-vulnerable); this is
-   * the authoritative one. Wrapped in a serialisable transaction with a
-   * row-level lock on the coupon row so two concurrent webhook handlers
-   * cannot both pass the count check.
+   * Record the redemption of a coupon against ONE completed checkout session,
+   * with the limit re-check. The earlier `validate` call is an *advisory* gate
+   * (TOCTOU-vulnerable); this is the authoritative one. It runs in a
+   * transaction with a row-level lock on the coupon row so two concurrent
+   * webhook handlers cannot both pass the count check.
    *
-   * Throws `RekeyError`(COUPON_REDEMPTION_LIMIT_REACHED / COUPON_USER_LIMIT_REACHED)
-   * when the limit is now exceeded. Callers that just want the idempotent
-   * "already recorded" behaviour should catch P2002 via the
-   * `(couponId, paymentId)` unique index — re-recording the same payment
-   * is a no-op (used by webhook replay).
+   * ## Idempotent, by (coupon, checkout session)
    *
-   * Pass `outerTx` to run inside an existing transaction (the billing
-   * webhook handlers create the Payment row and the redemption atomically
-   * — neither must commit without the other). The coupon row lock is taken
-   * either way.
+   * Both the checkout applier and the payment applier call this for the same
+   * purchase, and the provider replays webhooks freely, so this is called
+   * several times per sale by design. Exactly one row results. The grain is
+   * the checkout session rather than the subscription because a subscription
+   * row is reused: the same (application, end-user, plan) row backs a repeat
+   * one-time purchase, which is a second discount and must be a second
+   * redemption, while a recurring subscription's renewals reuse the session
+   * that bought the single discounted invoice and must not be.
+   *
+   * ## Never throws for a business reason
+   *
+   * This is called from webhook appliers that have just written, or are about
+   * to write, a `Payment` row. A redemption that cannot be recorded — the
+   * coupon has since been exhausted, or a per-user limit was configured that
+   * the renewal now exceeds — is a bookkeeping fact, not a reason to fail the
+   * delivery. It used to throw from inside the payment transaction, which
+   * rolled the payment back: the money moved at the provider, the local
+   * `Payment` row never existed, the subscription's status and period were
+   * never mirrored, entitlements were never re-provisioned, and the provider
+   * retried the poisoned event until it gave up. The outcome is returned so
+   * the caller can log it; genuine infrastructure failures still throw.
+   *
+   * Deliberately NOT given an `outerTx` parameter. Running inside the caller's
+   * transaction is exactly what made a redemption failure able to undo a
+   * payment, and a Postgres transaction that has hit a constraint violation
+   * cannot be continued anyway — so the isolation is load-bearing, not a
+   * style choice.
    */
-  async recordRedemption(
-    args: {
-      couponId: string;
-      applicationId: string;
-      endUserId: string;
-      subscriptionId?: string;
-      paymentId?: string;
-    },
-    outerTx?: Prisma.TransactionClient,
-  ): Promise<void> {
-    const run = async (tx: Prisma.TransactionClient): Promise<void> => {
-      // Pessimistic lock on the coupon row — serialises every concurrent
-      // redemption attempt against the same coupon, so the count we read
-      // below is authoritative for the duration of this transaction.
-      await tx.$queryRaw`SELECT id FROM coupons WHERE id = ${args.couponId} FOR UPDATE`;
+  async redeemForCheckout(args: {
+    couponId: string;
+    applicationId: string;
+    endUserId: string;
+    checkoutSessionId: string;
+    subscriptionId?: string;
+    paymentId?: string;
+    /** Discount in the smallest currency unit, stamped onto the row. */
+    discountAmount?: number;
+  }): Promise<RedemptionOutcome> {
+    try {
+      return await prisma.$transaction(async (tx): Promise<RedemptionOutcome> => {
+        // Pessimistic lock on the coupon row — serialises every concurrent
+        // redemption attempt against the same coupon, so the counts read
+        // below are authoritative for the duration of this transaction.
+        await tx.$queryRaw`SELECT id FROM coupons WHERE id = ${args.couponId} FOR UPDATE`;
 
-      const coupon = await tx.coupon.findUniqueOrThrow({
-        where: { id: args.couponId },
-      });
+        const coupon = await tx.coupon.findUniqueOrThrow({ where: { id: args.couponId } });
 
-      if (coupon.maxRedemptions !== null) {
-        const total = await tx.couponRedemption.count({ where: { couponId: coupon.id } });
-        if (total >= coupon.maxRedemptions) {
-          throw new RekeyError({
-            statusCode: 400,
-            code: 'COUPON_REDEMPTION_LIMIT_REACHED',
-            message: `Coupon "${coupon.code}" has reached its redemption limit.`,
-            fix: 'No further redemptions can be recorded against this coupon.',
-          });
-        }
-      }
-      if (coupon.maxRedemptionsPerUser !== null) {
-        const userCount = await tx.couponRedemption.count({
-          where: { couponId: coupon.id, endUserId: args.endUserId },
+        // Checked BEFORE the limits, and inside the lock: an already-recorded
+        // session is a no-op even when the coupon is now exhausted, so a
+        // replayed webhook cannot be reported as a limit failure.
+        const existing = await tx.couponRedemption.findFirst({
+          where: { couponId: coupon.id, checkoutSessionId: args.checkoutSessionId },
+          select: { id: true },
         });
-        if (userCount >= coupon.maxRedemptionsPerUser) {
-          throw new RekeyError({
-            statusCode: 400,
-            code: 'COUPON_USER_LIMIT_REACHED',
-            message: `User has reached the per-user redemption limit for "${coupon.code}".`,
-            fix: 'No further redemptions can be recorded for this user.',
-          });
-        }
-      }
+        if (existing) return { recorded: false, reason: 'already-redeemed' };
 
-      await tx.couponRedemption.create({
-        data: {
-          couponId: args.couponId,
-          applicationId: args.applicationId,
-          endUserId: args.endUserId,
-          subscriptionId: args.subscriptionId ?? null,
-          paymentId: args.paymentId ?? null,
-        },
+        if (coupon.maxRedemptions !== null) {
+          const total = await tx.couponRedemption.count({ where: { couponId: coupon.id } });
+          if (total >= coupon.maxRedemptions) {
+            return {
+              recorded: false,
+              reason: 'limit-reached',
+              code: 'COUPON_REDEMPTION_LIMIT_REACHED',
+              message: `Coupon "${coupon.code}" has reached its redemption limit.`,
+            };
+          }
+        }
+        if (coupon.maxRedemptionsPerUser !== null) {
+          const userCount = await tx.couponRedemption.count({
+            where: { couponId: coupon.id, endUserId: args.endUserId },
+          });
+          if (userCount >= coupon.maxRedemptionsPerUser) {
+            return {
+              recorded: false,
+              reason: 'limit-reached',
+              code: 'COUPON_USER_LIMIT_REACHED',
+              message: `User has reached the per-user redemption limit for "${coupon.code}".`,
+            };
+          }
+        }
+
+        await tx.couponRedemption.create({
+          data: {
+            couponId: args.couponId,
+            applicationId: args.applicationId,
+            endUserId: args.endUserId,
+            checkoutSessionId: args.checkoutSessionId,
+            subscriptionId: args.subscriptionId ?? null,
+            paymentId: args.paymentId ?? null,
+            discountAmount: args.discountAmount ?? null,
+          },
+        });
+        return { recorded: true };
       });
-    };
-    if (outerTx) {
-      await run(outerTx);
-      return;
+    } catch (e) {
+      // P2002 = the unique index caught a race the row lock could not (two
+      // appliers for the same session on different connections). Same answer
+      // as the read above, just discovered a moment later.
+      if ((e as { code?: string }).code === 'P2002') {
+        return { recorded: false, reason: 'already-redeemed' };
+      }
+      throw e;
     }
-    await prisma.$transaction(run);
   },
 };

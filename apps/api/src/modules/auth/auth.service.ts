@@ -5,6 +5,11 @@
  * Application's `authConfig`:
  *   - `methods` array — sign-up/sign-in are refused if `"password"` isn't enabled.
  *   - `passwordMinLength` — enforced on sign-up.
+ *   - `sendVerificationEmailOnSignUp` — sign-up posts the verification link
+ *     alongside the welcome mail (default on; forced on when the gate below is).
+ *   - `requireEmailVerification` — an unconfirmed address gets NO session, from
+ *     any door: sign-up, sign-in, MFA verification, org switch, refresh
+ *     (default off).
  *
  * Email is unique **per Application**, not globally — `(applicationId, email)`
  * is the unique constraint in the schema. The same email may exist as
@@ -12,10 +17,14 @@
  *
  * Sign-in failures use a *single* `INVALID_CREDENTIALS` code. We never tell
  * the caller whether the email or the password was wrong; that distinction
- * is the gift that keeps on giving for credential-stuffing attacks.
+ * is the gift that keeps on giving for credential-stuffing attacks. The
+ * distinct codes that exist alongside it (lockout, erasure, unverified email)
+ * are all raised *after* the password verified, so none of them answers a
+ * question an attacker could ask without knowing it.
  */
 
-import type { Application, DataMode, EndUser } from '@prisma/client';
+import { Prisma } from '@prisma/client';
+import type { Application, EndUser } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { hashPassword, verifyPassword } from '../../lib/passwords.js';
@@ -62,14 +71,18 @@ import {
   assertNotLocked,
   registerFailure,
   clearFailures,
+  euLoginLockScope,
   LOGIN_POLICY,
 } from '../../lib/brute-force.js';
 import type { WebAuthnCredential } from '@prisma/client';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
+import { assertNoReservedMetadataKey } from '../../lib/oidc-profile.js';
 import { assertSignupAllowed, signupAllowed, type AuthKind } from '../../lib/signup-policy.js';
+import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { endUserRolesService } from '../end-user-roles/end-user-roles.service.js';
 import { mfaService } from '../mfa/mfa.service.js';
 import { emailService } from '../email/email.service.js';
+import { resolveAppUrl, buildTokenUrl } from '../../lib/app-url.js';
 import { recordAuthEmailDeliveryFailure } from '../../lib/email-transport.js';
 import { webhookService } from '../webhooks/webhook.service.js';
 
@@ -81,11 +94,6 @@ export interface SignUpInput {
   /** Optional `appUrl` used in the welcome email's CTA button. */
   appUrl?: string;
   device?: DeviceContext;
-  /**
-   * Test/live isolation (roadmap §7): the calling secret key's mode, stamped
-   * onto the new EndUser. Defaults to LIVE when the caller doesn't say.
-   */
-  mode?: DataMode;
   /**
    * How the request authenticated (`secret` | `publishable`). Threaded from
    * `request.authKind` so `secret_only` apps can refuse user creation from a
@@ -99,12 +107,6 @@ export interface SignInInput {
   email: string;
   password: string;
   device?: DeviceContext;
-  /**
-   * Test/live isolation: when set, a user of the OTHER mode is treated as
-   * nonexistent (INVALID_CREDENTIALS) — a live key cannot authenticate a
-   * test user and vice versa.
-   */
-  mode?: DataMode;
 }
 
 /**
@@ -143,13 +145,53 @@ function redact(user: EndUser): PublicEndUser {
 }
 
 /**
+ * Ceiling on stored `metadata`, measured on the POST-merge object.
+ *
+ * `metadata` is free-form and end-user-writable, which makes it the one place
+ * in the schema where a signed-in user chooses how many bytes we store per row
+ * forever. 16 KB is far above any legitimate "display name, avatar URL, a few
+ * custom fields" payload and far below the size at which a jsonb column starts
+ * hurting the queries that select whole EndUser rows on the hot auth path.
+ * Measured after the merge, not on the request body, because a stream of small
+ * patches is the way you would grow it past the limit otherwise.
+ *
+ * Applies to EVERY writer, not just `updateSelf`. It first shipped on the
+ * self-service PATCH alone, which meant a 200KB blob posted at sign-up was
+ * stored (204,811 bytes) and then permanently bricked that user's own PATCH
+ * route: the cap is measured post-merge, so every later self-service write
+ * failed on bytes the user could no longer remove. A ceiling one writer
+ * enforces is a bug in the other writers, not a ceiling.
+ */
+export const METADATA_MAX_BYTES = 16 * 1024;
+
+export function assertMetadataWithinLimit(metadata: Record<string, unknown>): void {
+  const bytes = Buffer.byteLength(JSON.stringify(metadata), 'utf8');
+  if (bytes > METADATA_MAX_BYTES) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'METADATA_TOO_LARGE',
+      message: `Metadata would be ${bytes} bytes after merging; the limit is ${METADATA_MAX_BYTES}.`,
+      fix: 'Store large values (files, documents, long text) in your own storage and keep only a reference here.',
+    });
+  }
+}
+
+/**
  * GDPR erasure gate (roadmap §10). A tombstoned EndUser (`erasedAt` set) has
  * had its credentials hard-deleted and must NEVER be able to authenticate
  * again — the row only survives to anchor retained financial records. Every
- * session-minting / token-resolving path runs through here so an erased user
- * is uniformly rejected with a single, clear code regardless of which auth
- * method is attempted (password, magic-link, OAuth, refresh, or a still-valid
- * access token presented at the session chokepoint).
+ * SESSION-API path that mints a session or resolves an access token runs
+ * through here, so an erased user is uniformly rejected with a single, clear
+ * code regardless of which auth method is attempted (password, magic-link,
+ * OAuth, refresh, or a still-valid access token presented at the session
+ * chokepoint).
+ *
+ * It is not the only implementation of the rule, and this docblock used to
+ * claim it was. The per-Application OAuth/OIDC surface has to answer in the
+ * `{ error, error_description }` dialect its clients parse, not the Rekey
+ * envelope, so it enforces the identical rule through `liveGrantSubject` in
+ * modules/mcp/oauth.service.ts — code redemption, the refresh grant,
+ * `/userinfo` and the MCP endpoint. Change one, change both.
  *
  * 410 Gone (not 401): the account existed and was deliberately erased — a
  * distinct, non-retryable terminal state. The customer's app should treat it
@@ -211,6 +253,14 @@ async function issuePair(
   device?: DeviceContext,
   activeOrganizationId?: string,
 ): Promise<AuthResult> {
+  // Email-verification chokepoint. THE place a session comes into existence in
+  // this service — sign-up, sign-in, MFA verification and org switching all end
+  // up here — which is why the gate lives here rather than beside each caller.
+  // It used to guard `signIn` alone, so `POST /auth/sign-up` handed out a
+  // working access token and a 30-day refresh chain with the flag on, to
+  // exactly the population the flag exists for: an attacker who registers an
+  // address they cannot read never had to open the mailbox.
+  ensureEmailVerified(application, endUser);
   // Honours the app's `authConfig.tokenAlg` (HS256 default, RS256 = JWKS).
   const access = await issueUserAccessTokenForApp(
     application,
@@ -248,6 +298,12 @@ export async function issueSessionOrMfaChallenge(
   // magic-link, OAuth sign-in, OAuth link) funnels through here before a
   // session/challenge is minted, so an erased user is rejected uniformly.
   assertEndUserNotErased(endUser);
+  // Same gate `issuePair` runs, repeated here for the branch that returns
+  // BEFORE it: an MFA-enrolled user with an unconfirmed address would otherwise
+  // be asked for a TOTP code and only then told to go and read their email.
+  // The challenge token holds no session, so this is UX rather than a hole —
+  // but a login form that asks for a factor it will not accept is its own bug.
+  ensureEmailVerified(application, endUser);
   if (await mfaService.isEnrolled(endUser.id)) {
     const challenge = issueMfaChallengeToken(endUser.id, application.id, application.tokenGeneration);
     return {
@@ -280,16 +336,6 @@ function ensurePasswordMethodEnabled(application: Application): void {
   }
 }
 
-/**
- * Per-(application, email) login lockout scope key for the Redis-backed
- * brute-force limiter (lib/brute-force.ts). 10 failures / 15 min → 15-min lock.
- * Replaces the old per-attempt DB writes on `EndUser.{failedSignInAttempts,
- * lockedUntil}` (those columns are now unused) so the hot path doesn't hammer
- * Postgres under credential stuffing.
- */
-function loginLockScope(applicationId: string, email: string): string {
-  return `eu:login:${applicationId}:${email.toLowerCase()}`;
-}
 
 /**
  * Refuse `password` if it appears in the HIBP Pwned Passwords corpus.
@@ -329,6 +375,86 @@ function ensureMagicLinkMethodEnabled(application: Application): void {
   }
 }
 
+/**
+ * Refuse a session to a user who hasn't confirmed their address, when the
+ * Application has `authConfig.requireEmailVerification` on.
+ *
+ * Its own code rather than `INVALID_CREDENTIALS`: the credential was right, and
+ * the only way through is a link sitting in the user's inbox — an app that
+ * cannot tell them that sends them round the reset-password loop forever. Same
+ * shape as the other "credential fine, account not permitted" refusals
+ * (lockout, erasure): distinct code, and a `fix` the customer's UI can act on.
+ *
+ * Only ever reached after a credential verified (it hangs off `issuePair` and
+ * the MFA bridge, both of which run downstream of authentication). Checking
+ * earlier would answer "does this address have an account here" for anyone who
+ * asks, which is the enumeration oracle the single sign-in error code exists to
+ * close.
+ */
+function ensureEmailVerified(application: Application, endUser: EndUser): void {
+  const config = AuthConfigSchema.parse(application.authConfig);
+  if (!config.requireEmailVerification || endUser.emailVerified) return;
+  throw new RekeyError({
+    statusCode: 403,
+    code: 'EMAIL_NOT_VERIFIED',
+    message: 'Confirm your email address before using this account — check your inbox for the verification link.',
+    fix: 'The user has to click the link in their verification email; sign-up always sends one while this setting is on. There is no session to re-send from, so if the mail never arrived an operator marks the address verified from Panel → Application → End-users.',
+  });
+}
+
+/**
+ * Mint a verification token and post the `email_verification` mail.
+ *
+ * Shared by the explicit `/auth/send-verification` endpoint and the automatic
+ * sign-up send, so both produce the same token lifetime, the same link and the
+ * same delivery-failure bookkeeping. Never throws for a delivery problem: a
+ * transport that is missing (`no_transport`) or broken (`error`) comes back as
+ * `emailSent: false`, which is what lets sign-up treat this as best-effort.
+ */
+async function deliverVerificationEmail(args: {
+  application: Application;
+  endUser: Pick<EndUser, 'id' | 'email'>;
+  /** Caller-supplied link template; `{token}` is substituted. */
+  verifyUrl?: string;
+  /** Caller-supplied base URL — first rung of the `resolveAppUrl` chain. */
+  appUrl?: string;
+}): Promise<{ emailSent: boolean; verificationToken: string | null }> {
+  const issued = await issueVerificationToken({
+    applicationId: args.application.id,
+    endUserId: args.endUser.id,
+    email: args.endUser.email,
+  });
+  const outcome = await emailService.dispatch({
+    application: args.application,
+    eventKey: 'email_verification',
+    to: args.endUser.email,
+    variables: {
+      userEmail: args.endUser.email,
+      verifyUrl: args.verifyUrl
+        ? args.verifyUrl.replace('{token}', encodeURIComponent(issued.raw))
+        : buildTokenUrl(resolveAppUrl(args.application, args.appUrl), '/verify', issued.raw),
+      expiresAtIso: issued.record.expiresAt.toISOString(),
+    },
+  });
+  if (outcome.kind === 'sent') {
+    return { emailSent: true, verificationToken: null };
+  }
+  if (outcome.kind === 'error') {
+    // Lower stakes than reset/magic-link (this token only flips
+    // emailVerified) but the same reasoning: a failed send is not a
+    // no-transport deployment, and the token should not land in logs.
+    void recordAuthEmailDeliveryFailure({
+      applicationId: args.application.id,
+      tenantId: args.application.tenantId,
+      eventKey: 'email_verification',
+      endUserId: args.endUser.id,
+      reason: outcome.message,
+    });
+    return { emailSent: false, verificationToken: null };
+  }
+  return { emailSent: false, verificationToken: issued.raw };
+}
+
 export const authService = {
   async signUp(input: SignUpInput): Promise<AuthResult> {
     ensurePasswordMethodEnabled(input.application);
@@ -344,6 +470,20 @@ export const authService = {
       });
     }
     await ensurePasswordNotBreached(input.application, input.password);
+    if (input.metadata !== undefined) {
+      // Same ceiling `updateSelf` applies, applied here too — see
+      // `METADATA_MAX_BYTES`. Sign-up is reachable with a publishable key, so
+      // "the caller is our own backend" was never true of this path.
+      assertMetadataWithinLimit(input.metadata);
+      // Identity claims are the operator's to assert, never the subject's. A
+      // browser-shipped key must not be able to seed `metadata.oidc` at
+      // creation time and pick its own `preferred_username` — that is the same
+      // hole as the self-service PATCH, through a different door. A SECRET key
+      // is the customer's own server, which IS the operator here.
+      if (input.authKind === 'publishable') assertNoReservedMetadataKey(input.metadata);
+    }
+    // Workspace ceiling. Creation-only — see lib/tenant-limits.ts.
+    await assertEndUserQuota(input.application.tenantId);
 
     const passwordHash = await hashPassword(input.password);
     // Look up the Application's default end-user role. New sign-ups always
@@ -359,7 +499,6 @@ export const authService = {
           email: input.email.toLowerCase(),
           passwordHash,
           role: defaultRole.name,
-          mode: input.mode ?? 'LIVE',
           ...(input.metadata !== undefined && {
             metadata: input.metadata as never,
           }),
@@ -387,10 +526,34 @@ export const authService = {
         to: endUser.email,
         variables: {
           userEmail: endUser.email,
-          appUrl: input.appUrl ?? 'https://your-app.example.com',
+          // Resolution chain (caller → per-app setting → redirect-URL origin
+          // → DEFAULT_APP_URL). Empty when nothing resolves, which makes the
+          // template drop the "Get started" button entirely rather than ship
+          // a dead one. See lib/app-url.ts.
+          appUrl: resolveAppUrl(input.application, input.appUrl) ?? '',
         },
       })
       .catch(() => undefined);
+
+    // Verification email — same fire-and-forget contract as the welcome mail
+    // it rides alongside (it does not replace it). On by default: a new
+    // account should be able to confirm its address without the customer's
+    // server having to call /auth/send-verification itself. An Application
+    // with no email transport configured logs a `no_transport` send and moves
+    // on; the token stays valid, so a later re-send still works.
+    //
+    // Forced when `requireEmailVerification` is on, whatever the send switch
+    // says. The gate below refuses this sign-up a session, so the link is the
+    // only route into the account and there is no session left to re-send it
+    // from — the two settings together would otherwise create accounts nobody,
+    // including their owner, could ever reach.
+    if (config.sendVerificationEmailOnSignUp || config.requireEmailVerification) {
+      void deliverVerificationEmail({
+        application: input.application,
+        endUser,
+        ...(input.appUrl !== undefined && { appUrl: input.appUrl }),
+      }).catch(() => undefined);
+    }
 
     // Outbound webhook — `user.created`. Same fire-and-forget contract;
     // the dispatcher's delivery worker handles retries on its own.
@@ -404,7 +567,6 @@ export const authService = {
             email: endUser.email,
             emailVerified: endUser.emailVerified,
             role: endUser.role,
-            mode: endUser.mode,
             createdAt: endUser.createdAt.toISOString(),
             metadata: endUser.metadata ?? null,
           },
@@ -412,6 +574,13 @@ export const authService = {
       })
       .catch(() => undefined);
 
+    // Throws 403 EMAIL_NOT_VERIFIED when the Application requires a confirmed
+    // address. The account IS created and the verification mail IS on its way —
+    // what the caller does not get is a session, which is the whole point of
+    // the setting. Deliberately not a 201-with-null-tokens: `AuthResult` is a
+    // published type across four SDKs, and making the tokens nullable to
+    // describe a state only one Application in a hundred is in would push the
+    // branch into every integrator's code.
     return issuePair(input.application, endUser, input.device);
   },
 
@@ -435,19 +604,17 @@ export const authService = {
     // Clerk's posture. Keyed by email so it works whether or not the user
     // exists; we only record failures for existing users (no enumeration via
     // lockout of never-registered emails).
-    const lockScope = loginLockScope(input.application.id, input.email);
+    // Scope built by the shared helper in lib/brute-force.ts, not locally: the
+    // operator panel reads this same lock back and has to derive the key
+    // identically or it reports "not locked" for a locked account.
+    const lockScope = euLoginLockScope(input.application.id, input.email);
     await assertNotLocked(lockScope);
-
-    // Test/live isolation: a user of the other mode is invisible to this key
-    // — same INVALID_CREDENTIALS as a nonexistent email (no enumeration).
-    const visible =
-      endUser !== null && (input.mode === undefined || endUser.mode === input.mode);
 
     // Single error code — never disclose whether email or password was wrong.
     const valid =
-      visible && endUser !== null && (await verifyPassword(endUser.passwordHash, input.password));
+      endUser !== null && (await verifyPassword(endUser.passwordHash, input.password));
     if (!valid || endUser === null) {
-      if (endUser && visible) {
+      if (endUser) {
         await registerFailure(lockScope, LOGIN_POLICY);
       }
       throw new RekeyError({
@@ -462,6 +629,11 @@ export const authService = {
     await clearFailures(lockScope);
 
     // MFA-aware: returns a challenge token instead of a session when enrolled.
+    // Also where the email-verification gate fires, AFTER the clear above and
+    // on purpose: the password WAS correct, so an unverified-address refusal is
+    // not a failed attempt and must not push the account toward a lockout. A
+    // user waiting on their confirmation link would otherwise lock themselves
+    // out by retrying.
     return issueSessionOrMfaChallenge(input.application, endUser, input.device);
   },
 
@@ -606,6 +778,13 @@ export const authService = {
     // access token. (Erasure also revokes all refresh tokens, but a token
     // rotated in a concurrent request could still reach here — belt and braces.)
     assertEndUserNotErased(endUser);
+    // Email-verification gate, re-checked rather than trusted from issue time.
+    // A refresh chain lasts 30 days: without this, an operator who switches
+    // `requireEmailVerification` on is switching it on for future sign-ins
+    // only, and every unconfirmed account that already holds a refresh token
+    // keeps renewing for a month. Re-checking bounds that to one access-token
+    // lifetime.
+    ensureEmailVerified(application, endUser);
     // Preserve the session's active org across refresh, but self-heal: if the
     // user left the org since the last token, drop the `oid` (and clear it on
     // the rotated refresh row) so a stale active org can't linger.
@@ -743,9 +922,13 @@ export const authService = {
       to: endUser.email,
       variables: {
         userEmail: endUser.email,
+        // Caller-supplied template wins; otherwise build one on the resolved
+        // app URL. Empty string when nothing resolves — the template then
+        // renders no button at all instead of linking a live reset token to
+        // a domain the operator does not own.
         resetUrl: input.resetUrl
           ? input.resetUrl.replace('{token}', encodeURIComponent(issued.raw))
-          : `https://your-app.example.com/reset?token=${encodeURIComponent(issued.raw)}`,
+          : buildTokenUrl(resolveAppUrl(input.application), '/reset', issued.raw),
         expiresAtIso: issued.record.expiresAt.toISOString(),
       },
     });
@@ -1041,9 +1224,11 @@ export const authService = {
       to: email,
       variables: {
         userEmail: email,
+        // Same rule as the reset link, and the stakes are higher: this token
+        // IS a session. No resolvable base ⇒ no button, never a dead href.
         signInUrl: input.signInUrl
           ? input.signInUrl.replace('{token}', encodeURIComponent(issued.raw))
-          : `https://your-app.example.com/sign-in/magic?token=${encodeURIComponent(issued.raw)}`,
+          : buildTokenUrl(resolveAppUrl(input.application), '/sign-in/magic', issued.raw),
         expiresAtIso: issued.record.expiresAt.toISOString(),
       },
     });
@@ -1085,15 +1270,18 @@ export const authService = {
    * ownership), assigned the Application's default role, and the
    * lifecycle side-effects (welcome email, user.created webhook) fire.
    *
+   * An EXISTING user's `emailVerified` is promoted to true on the same
+   * reasoning — the proof is identical whether or not the account predates the
+   * link. It is only ever set, never cleared.
+   *
    * Stale-email guard: if the user's email changed between issue and
-   * consume, the token is refused (`MAGIC_LINK_STALE`).
+   * consume, the token is refused (`MAGIC_LINK_STALE`). It is what makes the
+   * promotion above sound: the proof is of the address on the account NOW.
    */
   async verifyMagicLink(input: {
     application: Application;
     token: string;
     device?: DeviceContext;
-    /** Calling key's mode — stamped onto a user created by this consume. */
-    mode?: DataMode;
     /** Calling key kind — a `secret_only` app refuses creation via pub key. */
     authKind?: AuthKind;
   }): Promise<SignInOutcome> {
@@ -1165,7 +1353,20 @@ export const authService = {
             fix: 'Request a fresh magic link.',
           });
         }
-        return existing;
+        // The user just retrieved a single-use secret we posted to that
+        // mailbox and nowhere else. That is the same proof the verification
+        // link collects, and the stale-email check above is what makes it
+        // proof of the address *currently* on the account. Recording it here
+        // is what makes the documented claim — "magic-link and OAuth sign-in
+        // each carry their own proof of the address" — actually true: the
+        // create branch below always set the flag, so only the account that
+        // already existed threw the evidence away, and it kept shipping
+        // `email_verified: false` to relying parties forever afterwards.
+        if (existing.emailVerified) return existing;
+        return tx.endUser.update({
+          where: { id: existing.id },
+          data: { emailVerified: true },
+        });
       }
 
       // New user: create with verified email + default role. Re-check the
@@ -1175,6 +1376,10 @@ export const authService = {
         AuthConfigSchema.parse(input.application.authConfig),
         input.authKind,
       );
+      // Workspace ceiling, checked inside the same transaction as the create.
+      // Throwing here rolls the token consume back too, so a link rejected for
+      // quota stays usable and works once the workspace has room again.
+      await assertEndUserQuota(input.application.tenantId, tx);
       const defaultRole = await endUserRolesService.getDefault(input.application.id);
       try {
         return await tx.endUser.create({
@@ -1183,7 +1388,6 @@ export const authService = {
             email: outcome.token.email,
             emailVerified: true,
             role: defaultRole.name,
-            mode: input.mode ?? 'LIVE',
           },
         });
       } catch (e) {
@@ -1215,7 +1419,9 @@ export const authService = {
           to: endUser.email,
           variables: {
             userEmail: endUser.email,
-            appUrl: 'https://your-app.example.com',
+            // Magic-link sign-up has no caller-supplied appUrl to pass, so
+            // this leans entirely on the per-app / inferred / env chain.
+            appUrl: resolveAppUrl(input.application) ?? '',
           },
         })
         .catch(() => undefined);
@@ -1229,7 +1435,6 @@ export const authService = {
               email: endUser.email,
               emailVerified: endUser.emailVerified,
               role: endUser.role,
-              mode: endUser.mode,
               createdAt: endUser.createdAt.toISOString(),
               metadata: endUser.metadata ?? null,
             },
@@ -1278,40 +1483,11 @@ export const authService = {
         fix: 'No further action is required.',
       });
     }
-    const issued = await issueVerificationToken({
-      applicationId: input.application.id,
-      endUserId: endUser.id,
-      email: endUser.email,
-    });
-    const outcome = await emailService.dispatch({
+    return deliverVerificationEmail({
       application: input.application,
-      eventKey: 'email_verification',
-      to: endUser.email,
-      variables: {
-        userEmail: endUser.email,
-        verifyUrl: input.verifyUrl
-          ? input.verifyUrl.replace('{token}', encodeURIComponent(issued.raw))
-          : `https://your-app.example.com/verify?token=${encodeURIComponent(issued.raw)}`,
-        expiresAtIso: issued.record.expiresAt.toISOString(),
-      },
+      endUser,
+      ...(input.verifyUrl !== undefined && { verifyUrl: input.verifyUrl }),
     });
-    if (outcome.kind === 'sent') {
-      return { emailSent: true, verificationToken: null };
-    }
-    if (outcome.kind === 'error') {
-      // Lower stakes than reset/magic-link (this token only flips
-      // emailVerified) but the same reasoning: a failed send is not a
-      // no-transport deployment, and the token should not land in logs.
-      void recordAuthEmailDeliveryFailure({
-        applicationId: input.application.id,
-        tenantId: input.application.tenantId,
-        eventKey: 'email_verification',
-        endUserId: endUser.id,
-        reason: outcome.message,
-      });
-      return { emailSent: false, verificationToken: null };
-    }
-    return { emailSent: false, verificationToken: issued.raw };
   },
 
   /**
@@ -1550,12 +1726,17 @@ export const authService = {
    *   - **Usernameless** (`email` omitted): returns options with no
    *     `allowCredentials`. The browser asks the platform / roaming
    *     authenticator to surface any matching resident-key passkey. The
-   *     complete path then resolves the user from the credential's
-   *     stored `userHandle`.
+   *     complete path then resolves the user from the credential id the
+   *     browser returns (`webauthn_credentials.credential_id` is globally
+   *     unique) — there is no `userHandle` column.
    *   - **Email-first** (`email` provided): we scope `allowCredentials`
-   *     to that user's registered passkeys. If the user has none, we
-   *     refuse with an enumeration-safe shape (returns the same options
-   *     a usernameless flow would, so an attacker can't probe).
+   *     to that user's registered passkeys.
+   *
+   * KNOWN GAP: a known email with zero passkeys is currently distinguishable
+   * from an unknown email. The intent is for both to return the usernameless
+   * shape, but `allowCredentials: []` is emitted for the former (the omission in
+   * `lib/webauthn.ts` is keyed on `null`, not on emptiness) while the latter
+   * emits no field at all. Fix is to pass `null` when the list is empty.
    */
   async passkeyAuthenticateStart(input: {
     application: Application;
@@ -1723,5 +1904,93 @@ export const authService = {
     // token minted before erasure is rejected the moment it's used.
     assertEndUserNotErased(endUser);
     return redact(endUser);
+  },
+
+  /**
+   * Self-service update of the caller's OWN EndUser record.
+   *
+   * The field list is a **closed allowlist**, and it is closed rather than
+   * open (i.e. "everything except a deny-list") on purpose: an open list
+   * silently grants whatever column the next schema migration adds. `role` is
+   * the concrete danger — it is the per-app RBAC field, so an open shape would
+   * let any signed-in user promote themselves the moment the request body
+   * happened to name it. `email` is an identity change that must go through
+   * verification, `passwordHash` has its own step-up-guarded route, and
+   * `erasedAt`/`erasedBy` are the GDPR tombstone, which only an operator sets.
+   * None of those are things a user may hand themselves; adding a field here
+   * has to be a deliberate act.
+   *
+   * **Merge semantics for `metadata`: top-level shallow merge.**
+   *   - key omitted from the patch → left exactly as it was
+   *   - key present with a value  → replaces that top-level key **wholesale**
+   *     (nested objects are NOT deep-merged — `{a:{b:1}}` over `{a:{c:2}}`
+   *     leaves `{a:{b:1}}`)
+   *   - key present with `null`   → deleted from the stored object
+   *   - `metadata: null`          → clears the whole column to SQL NULL
+   *
+   * Merge, not replace, because the verb is PATCH and because replace is the
+   * semantics that quietly destroys data: a client that reads, edits one key
+   * and writes back would drop every key written concurrently by another
+   * device. Deleting on `null` exists so shallow merge still has a way to
+   * remove a key without a read-modify-replace race.
+   *
+   * ONE key inside `metadata` is reserved: `oidc`, which holds the identity
+   * claims this Application asserts about the user to relying parties. The rest
+   * of the object stays as free-form as it ever was. See lib/oidc-profile.ts
+   * for why the namespace exists rather than a list of reserved claim names.
+   */
+  async updateSelf(args: {
+    applicationId: string;
+    endUserId: string;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<PublicEndUser> {
+    // Re-read (and re-run the erasure gate) rather than trusting the caller's
+    // copy: the merge below is computed from stored state, so it has to be
+    // stored state we just looked at.
+    const current = await authService.getById(args.applicationId, args.endUserId);
+
+    const data: Prisma.EndUserUpdateInput = {};
+    if (args.metadata === null) {
+      // Clearing the whole object drops the reserved namespace with it, which
+      // is a self-inflicted loss of the user's own claims, not an escalation —
+      // they cannot write different ones.
+      data.metadata = Prisma.DbNull;
+    } else if (args.metadata !== undefined) {
+      assertNoReservedMetadataKey(args.metadata);
+      const base =
+        current.metadata && typeof current.metadata === 'object' && !Array.isArray(current.metadata)
+          ? (current.metadata as Record<string, unknown>)
+          : {};
+      const merged: Record<string, unknown> = { ...base };
+      for (const [key, value] of Object.entries(args.metadata)) {
+        if (value === null) delete merged[key];
+        else merged[key] = value;
+      }
+      assertMetadataWithinLimit(merged);
+      data.metadata = merged as Prisma.InputJsonValue;
+    }
+
+    // Nothing to write — return the current record rather than bumping
+    // `updatedAt` for a no-op request.
+    if (Object.keys(data).length === 0) return current;
+
+    // The WHERE is scoped to (id, applicationId) so that even if a token from
+    // another Application somehow reached here, it matches zero rows instead of
+    // writing across the tenant boundary. `updateMany` (not `update`) because
+    // only it accepts a compound WHERE on non-unique columns.
+    const result = await prisma.endUser.updateMany({
+      where: { id: args.endUserId, applicationId: args.applicationId },
+      data,
+    });
+    if (result.count !== 1) {
+      throw new RekeyError({
+        statusCode: 404,
+        code: 'END_USER_NOT_FOUND',
+        message: `EndUser "${args.endUserId}" not found in this application.`,
+        fix: 'Verify the user id and that the presented user token belongs to this Application.',
+      });
+    }
+
+    return authService.getById(args.applicationId, args.endUserId);
   },
 };

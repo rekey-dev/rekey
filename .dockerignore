@@ -19,11 +19,6 @@
 .claude
 .husky
 
-# Example apps (examples/*) are workspace members but never deployed. The deps
-# stage doesn't COPY their package.json, so pnpm install resolves the subset of
-# the graph that is present; their source only enters the build stage via
-# `COPY . .` and is never referenced by a runtime target.
-
 # Misc
 **/*.log
 **/.DS_Store

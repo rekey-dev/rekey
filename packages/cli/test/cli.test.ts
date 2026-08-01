@@ -12,10 +12,18 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cliEntry = path.resolve(here, '..', 'dist', 'index.js');
+
+// Read the expected version the same way the CLI does, rather than repeating
+// it as a literal. A literal here is a second place to bump on every release,
+// and it is exactly what let the CLI ship `0.0.0` for the whole 1.x line: the
+// test asserted the stale constant, so it agreed with the bug.
+const PKG_VERSION = (createRequire(import.meta.url)('../package.json') as { version: string })
+  .version;
 
 interface RunResult {
   code: number;
@@ -26,7 +34,7 @@ interface RunResult {
 function runCli(args: string[], env: Record<string, string> = {}): Promise<RunResult> {
   return new Promise((resolve) => {
     const proc = spawn('node', [cliEntry, ...args], {
-      env: { ...process.env, ...env, RELIPAY_URL: '', SUPER_ADMIN_KEY: '', ...env },
+      env: { ...process.env, ...env, REKEY_URL: '', SUPER_ADMIN_KEY: '', ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -86,21 +94,24 @@ describe('rekey CLI', () => {
 
   // ---------- version ----------
 
-  it('rekey version → stdout: "0.0.0", exit 0', async () => {
+  it("rekey version → stdout: the package's own version, exit 0", async () => {
     const r = await runCli(['version']);
     expect(r.code).toBe(0);
-    expect(r.stdout.trim()).toBe('0.0.0');
+    expect(r.stdout.trim()).toBe(PKG_VERSION);
+    // Guard the failure this test previously encoded: a placeholder version is
+    // never a correct answer, however it got there.
+    expect(r.stdout.trim()).not.toBe('0.0.0');
   });
 
   it('rekey version --json → emits JSON', async () => {
     const r = await runCli(['version', '--json']);
     expect(r.code).toBe(0);
-    expect(JSON.parse(r.stdout)).toEqual({ version: '0.0.0' });
+    expect(JSON.parse(r.stdout)).toEqual({ version: PKG_VERSION });
   });
 
   // ---------- doctor ----------
 
-  it('doctor without RELIPAY_URL fails with the right code', async () => {
+  it('doctor without REKEY_URL fails with the right code', async () => {
     const r = await runCli(['doctor', '--json']);
     expect(r.code).toBe(1);
     const parsed = JSON.parse(r.stdout) as {
@@ -114,7 +125,7 @@ describe('rekey CLI', () => {
     stub.reset();
     stub.setResponse('GET /health', 200, { status: 'ok', service: 'rekey-api' });
     const r = await runCli(['doctor', '--json'], {
-      RELIPAY_URL: stub.url,
+      REKEY_URL: stub.url,
       SUPER_ADMIN_KEY: 'x'.repeat(40),
     });
     expect(r.code).toBe(0);
@@ -143,7 +154,7 @@ describe('rekey CLI', () => {
       ],
     });
     const r = await runCli(['apps', 'list', '--json'], {
-      RELIPAY_URL: stub.url,
+      REKEY_URL: stub.url,
       SUPER_ADMIN_KEY: 'x'.repeat(40),
     });
     expect(r.code).toBe(0);
@@ -164,7 +175,7 @@ describe('rekey CLI', () => {
       },
     });
     const r = await runCli(['apps', 'list', '--json'], {
-      RELIPAY_URL: stub.url,
+      REKEY_URL: stub.url,
       SUPER_ADMIN_KEY: 'wrongwrongwrongwrongwrongwrongwrongwrong',
     });
     expect(r.code).toBe(1);
@@ -194,7 +205,7 @@ describe('rekey CLI', () => {
         '9.99',
         '--json',
       ],
-      { RELIPAY_URL: stub.url, SUPER_ADMIN_KEY: 'x'.repeat(40) },
+      { REKEY_URL: stub.url, SUPER_ADMIN_KEY: 'x'.repeat(40) },
     );
     expect(r.code).toBe(1);
     const parsed = JSON.parse(r.stderr) as { error: { code: string; fix: string } };

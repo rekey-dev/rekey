@@ -18,10 +18,11 @@
  * (largest MRR); `mixedCurrencies` flags when other currencies were present
  * so the panel can say the figure is partial.
  *
- * Test/live isolation (roadmap §7): every counter and series here is computed
- * over LIVE-mode rows only — TEST subscriptions/payments (sandbox checkouts
- * made with `rp_test_*` keys) never inflate revenue or subscription numbers.
- * The panel labels the dashboard "live mode data" accordingly.
+ * Scope: one Application. Isolation is the Application boundary — an app's
+ * environment (PRODUCTION / STAGING / DEVELOPMENT) tells you how to read
+ * these numbers, but it does not guarantee them: a development app may hold
+ * live credentials, so check the credential mode rather than the environment
+ * before treating a figure as sandbox.
  */
 
 import { Prisma } from '@prisma/client';
@@ -75,29 +76,28 @@ export const billingStatsService = {
       paymentsByStatus,
       monthlyRows,
     ] = await Promise.all([
-      // LIVE only throughout — TEST rows are sandbox data (see module doc).
-      prisma.subscription.count({ where: { applicationId, mode: 'LIVE', status: 'ACTIVE' } }),
-      prisma.subscription.count({ where: { applicationId, mode: 'LIVE', status: 'PAST_DUE' } }),
+      prisma.subscription.count({ where: { applicationId, status: 'ACTIVE' } }),
+      prisma.subscription.count({ where: { applicationId, status: 'PAST_DUE' } }),
       prisma.subscription.count({
-        where: { applicationId, mode: 'LIVE', status: 'CANCELED', canceledAt: { gte: since30d } },
+        where: { applicationId, status: 'CANCELED', canceledAt: { gte: since30d } },
       }),
       prisma.subscription.count({
-        where: { applicationId, mode: 'LIVE', createdAt: { gte: since30d } },
+        where: { applicationId, createdAt: { gte: since30d } },
       }),
       // MRR: one group per plan (bounded by the app's plan catalog), priced
       // below — never a per-subscription read.
       prisma.subscription.groupBy({
         by: ['planId'],
-        where: { applicationId, mode: 'LIVE', status: 'ACTIVE' },
+        where: { applicationId, status: 'ACTIVE' },
         _count: { _all: true },
       }),
       prisma.payment.aggregate({
         _sum: { amount: true },
-        where: { applicationId, mode: 'LIVE', status: 'SUCCEEDED', createdAt: { gte: since30d } },
+        where: { applicationId, status: 'SUCCEEDED', createdAt: { gte: since30d } },
       }),
       prisma.payment.groupBy({
         by: ['status'],
-        where: { applicationId, mode: 'LIVE', createdAt: { gte: since30d } },
+        where: { applicationId, createdAt: { gte: since30d } },
         _count: { _all: true },
       }),
       // Monthly SUCCEEDED revenue, bucketed by UTC calendar month in SQL —
@@ -110,7 +110,6 @@ export const billingStatsService = {
         FROM "payments"
         WHERE "application_id" = ${applicationId}
           AND status = 'SUCCEEDED'
-          AND mode = 'LIVE'
           AND "created_at" >= ${seriesStart}
         GROUP BY month
         ORDER BY month ASC

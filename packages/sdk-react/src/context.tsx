@@ -3,7 +3,8 @@
  *
  * Two ways to feed it:
  *   1. Initial user + access token from your SSR (Next.js App Router server
- *      component): `<RekeyProvider initialUser={...} initialAccessToken={...}>`
+ *      component): `<RekeyProvider initialUser={...} accessToken={...}>` — the
+ *      first render needs no fetch.
  *   2. Fetch on mount: pass only `accessToken` — the provider calls
  *      getCurrentUser on mount + on token change.
  *
@@ -43,7 +44,11 @@ export interface RekeyProviderProps {
   initialUser?: EndUserDto | null;
   /** Token to use for client-side calls. Provider re-fetches user when this changes. */
   accessToken?: string | null;
-  /** Override the /me-by-token endpoint your customer server proxies to Rekey. */
+  /**
+   * Override the current-user endpoint. Defaults to `/api/v1/auth/me`, which
+   * takes the user token alone (no Application key), so no proxy route is
+   * needed. Set this only when you front Rekey with your own passthrough.
+   */
   meEndpoint?: string;
 }
 
@@ -97,7 +102,7 @@ export function RekeyProvider({
 }
 
 /** Internal — use the public hooks instead. */
-export function useRelipayContext(): RekeyContextValue {
+export function useRekeyContext(): RekeyContextValue {
   const ctx = React.useContext(Ctx);
   if (!ctx) {
     throw new Error(

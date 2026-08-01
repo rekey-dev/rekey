@@ -414,8 +414,11 @@ describe('operator panel features', () => {
     const amount = await createCoupon({ code: 'flat5', discountType: 'AMOUNT', amountOff: 500 });
     await createCoupon({ code: 'unused', discountType: 'AMOUNT', amountOff: 100 });
 
-    // PERCENT redemption: the actual discount is recorded on the
-    // subscription's metadata at checkout time — the stats read it back.
+    // PERCENT redemption: the discount is stamped on the REDEMPTION row when
+    // it is recorded. It used to be read back off the linked subscription's
+    // metadata at display time, which the buyer's next checkout on the same
+    // plan overwrites — so an operator's historical totals were restated by
+    // later, unrelated activity.
     const plan = await prisma.plan.create({
       data: { applicationId: b.applicationId, slug: 'opf-coup', name: 'Coup', amount: 999 },
     });
@@ -434,9 +437,12 @@ describe('operator panel features', () => {
         applicationId: b.applicationId,
         endUserId,
         subscriptionId: sub.id,
+        checkoutSessionId: 'cs_opf_pct',
+        discountAmount: 149,
       },
     });
-    // AMOUNT redemptions without a linked subscription fall back to amountOff.
+    // Redemptions with no recorded discount (rows written before the column
+    // existed) fall back to amountOff for an AMOUNT coupon.
     for (const paymentId of ['opf-redeem-1', 'opf-redeem-2']) {
       await prisma.couponRedemption.create({
         data: { couponId: amount.id, applicationId: b.applicationId, endUserId, paymentId },
