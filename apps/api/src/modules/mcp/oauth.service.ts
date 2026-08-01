@@ -350,6 +350,18 @@ async function liveGrantSubject(
   // authenticate anywhere else either — so every token naming it reads as
   // invalid.
   if (!user || user.erasedAt !== null) return null;
+
+  // `requireEmailVerification` has to hold here too. It was enforced at every
+  // door on the first-party auth surface and at none on this one, so an
+  // unconfirmed account refused a session by `/auth/refresh` could still renew
+  // an MCP/OIDC grant indefinitely — a longer-lived credential than the one
+  // being denied. Both grants funnel through this function, which is why the
+  // check belongs here rather than in each of them.
+  const application = await prisma.application.findUnique({ where: { id: applicationId } });
+  if (!application) return null;
+  const authConfig = AuthConfigSchema.parse(application.authConfig);
+  if (authConfig.requireEmailVerification && !user.emailVerified) return null;
+
   return user;
 }
 

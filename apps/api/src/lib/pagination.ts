@@ -22,7 +22,12 @@ export const MAX_LIMIT = 100;
 /** Zod shape to merge into a route's querystring validation. */
 export const PaginationQuery = z.object({
   limit: z.coerce.number().int().min(1).max(MAX_LIMIT).optional(),
-  offset: z.coerce.number().int().min(0).optional(),
+  // Upper-bounded deliberately: `.int().min(0)` alone accepts 1e20 — it IS an
+  // integer — which then exceeds a 64-bit signed int inside Prisma's `skip`
+  // and surfaces as a 500 with "share this request id with support". User
+  // input must not produce a server error, and a caller paging past a million
+  // rows has a different problem than pagination.
+  offset: z.coerce.number().int().min(0).max(1_000_000).optional(),
 });
 export type PaginationInput = z.infer<typeof PaginationQuery>;
 

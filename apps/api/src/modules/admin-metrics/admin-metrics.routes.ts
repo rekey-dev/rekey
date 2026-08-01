@@ -23,7 +23,7 @@ import { requireSuperAdmin } from '../../middleware/admin-auth.js';
 
 const Order = z.enum(['asc', 'desc']).optional();
 const Limit = z.coerce.number().int().positive().max(200).optional();
-const Offset = z.coerce.number().int().min(0).optional();
+const Offset = z.coerce.number().int().min(0).max(1_000_000).optional();
 const Q = z.string().trim().min(1).max(200).optional();
 
 const TenantsQuery = z.object({

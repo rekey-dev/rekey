@@ -217,6 +217,33 @@ export async function handleBillingProviderWebhook(
       );
     }
     for (const ev of events ?? []) {
+      // The event's Application MUST be the one whose secret verified this
+      // request. Stripe's translator reads the id from `payload.metadata`,
+      // which is attacker-controlled: a tenant signing with THEIR OWN webhook
+      // secret could name another tenant's application and write payments
+      // into it, cancel its subscriptions, or pre-poison a provider payment id
+      // so the victim's genuine `invoice.paid` was later swallowed as a
+      // duplicate. No shared provider account required.
+      //
+      // Refuse rather than skip: a mismatch is either an attack or a
+      // translator bug, and both deserve to be loud.
+      if (ev.applicationId !== application.id) {
+        request.log.error(
+          {
+            provider: module.name,
+            eventId: providerEventId,
+            routeApplicationId: application.id,
+            payloadApplicationId: ev.applicationId,
+          },
+          'billing webhook event named a different Application than the one that signed it',
+        );
+        throw new RekeyError({
+          statusCode: 400,
+          code: 'WEBHOOK_APPLICATION_MISMATCH',
+          message: 'Event names a different Application than the credential that signed it.',
+          fix: 'Send the event to the route for the Application whose webhook secret signed it.',
+        });
+      }
       await applyBillingEvent(ev, { log: request.log });
     }
     await prisma.webhookEvent.update({

@@ -817,19 +817,42 @@ export const authService = {
       });
     }
     if (outcome.kind === 'revoked') {
-      // Reuse-detection: a token that was already revoked was just presented.
-      // Strong compromise signal — either an attacker is replaying a stolen
-      // token, or a legit client raced with itself. We can't tell. Revoke
-      // every active refresh for this end-user so no live session retains
-      // value from the compromised chain. Other devices for the same user
-      // are forced to sign in again.
-      await revokeAllForEndUser(outcome.token.endUserId);
+      // Two very different things arrive here, and collapsing them made
+      // "revoke this one device" revoke every device.
+      //
+      // `replacedById !== null` — the token was ROTATED and its replacement
+      // issued, and someone is now replaying the spent one. That is the
+      // compromise signal: either a stolen token or a client racing itself,
+      // and we cannot tell which, so the whole chain loses value.
+      //
+      // `replacedById === null` — the token was DELIBERATELY revoked, by an
+      // operator or by the user hitting "sign out this device". The revoked
+      // device does not know it was revoked, so its next scheduled refresh
+      // replays a dead token — and treating that as compromise signed the
+      // user out everywhere, which is the opposite of what they asked for.
+      //
+      // The operator surface has discriminated on this since it was written
+      // (see tenant-auth.service.ts); the end-user path had not.
+      if (outcome.token.replacedById !== null) {
+        await revokeAllForEndUser(outcome.token.endUserId);
+        throw new RekeyError({
+          statusCode: 401,
+          code: 'REFRESH_TOKEN_REUSED',
+          message:
+            'Refresh token has already been used. All sessions for this user have been revoked as a precaution.',
+          fix: 'A used refresh token cannot be replayed. Sign the user in again to obtain a fresh session.',
+        });
+      }
+      // Deliberately says nothing about OTHER sessions. A token reaches here
+      // either because this one device was signed out — in which case the
+      // others are fine — or because it was caught in a family revocation
+      // triggered elsewhere, in which case they are not. `replacedById` cannot
+      // tell those apart, so the message does not guess.
       throw new RekeyError({
         statusCode: 401,
-        code: 'REFRESH_TOKEN_REUSED',
-        message:
-          'Refresh token has already been used. All sessions for this user have been revoked as a precaution.',
-        fix: 'A used refresh token cannot be replayed. Sign the user in again to obtain a fresh session.',
+        code: 'REFRESH_TOKEN_REVOKED',
+        message: 'This session was revoked.',
+        fix: 'Sign the user in again to obtain a fresh session.',
       });
     }
     if (outcome.kind === 'expired') {

@@ -313,6 +313,26 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // 415 for form-encoded bodies on JSON-only routes. onRequest so it lands
   // before body parsing — see middleware/media-type.ts for why the global
   // formbody parser made this necessary.
+  // A NUL byte in the query string can never be valid input: Postgres `text`
+  // cannot hold one, so every such value reaches the driver and comes back as
+  // `22021 invalid byte sequence for encoding "UTF8"` — a 500 telling the
+  // caller to contact support about their own malformed request. Rejecting at
+  // the edge covers every string filter at once, rather than adding a
+  // refinement to each of the dozen schemas that happen to parse one today.
+  app.addHook('onRequest', async (req, reply) => {
+    if (req.raw.url?.includes('%00') || req.raw.url?.includes('\u0000')) {
+      return reply.code(400).send({
+        success: false,
+        error: {
+          code: 'INVALID_QUERY',
+          message: 'Query string contains a NUL byte.',
+          fix: 'Remove the %00 sequence from the request URL.',
+          requestId: req.id,
+        },
+      });
+    }
+  });
+
   app.addHook('onRequest', rejectUnsupportedMediaType);
 
   // Coarse ceiling for auth endpoints, deliberately at `onRequest`.

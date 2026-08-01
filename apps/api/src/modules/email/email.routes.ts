@@ -82,7 +82,7 @@ const SetCredsBody = z.discriminatedUnion('provider', [
 
 const LogQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
-  offset: z.coerce.number().int().min(0).optional(),
+  offset: z.coerce.number().int().min(0).max(1_000_000).optional(),
   status: z.enum(['sent', 'error', 'no_transport']).optional(),
 });
 

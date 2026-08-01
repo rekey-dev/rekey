@@ -316,7 +316,7 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
           status: z.enum(['PENDING', 'SUCCEEDED', 'FAILED']).optional(),
           eventType: z.string().min(1).max(100).optional(),
           limit: z.coerce.number().int().min(1).max(100).optional(),
-          offset: z.coerce.number().int().min(0).optional(),
+          offset: z.coerce.number().int().min(0).max(1_000_000).optional(),
         })
         .parse(req.query ?? {});
       const rows = await webhookService.listDeliveries(id, endpointId, {

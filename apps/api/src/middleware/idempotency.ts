@@ -106,15 +106,38 @@ export async function idempotencyPreHandler(
   }
 
   // Principal scope — auth middlewares (onRequest) have already run.
+  //
+  // The scope MUST be the effective actor, not merely the Application or
+  // workspace. A replay short-circuits the handler entirely, and this hook is
+  // an instance-level `preHandler`, so it runs BEFORE route-level
+  // `preHandler`s and before the handler body — which means `requireTenantRole`
+  // and the in-handler `ensureAppAccess` calls are both skipped on a replay.
+  //
+  // Scoped only to the Application, that made the cache a privilege-escalation
+  // primitive: a workspace MEMBER whose own mint returns 403 could replay an
+  // OWNER's key on `POST /:id/api-keys` and receive the plaintext key with
+  // `scopes:['*']`. On the end-user side, the subject is a JWT *header* and the
+  // fingerprint is method+path+body — so one end-user could replay another's
+  // key and receive their checkout URL and subscription. `/subscription/cancel`
+  // was worst: its body is `{}`, identical for every user, so the fingerprint
+  // offered no protection at all.
+  //
+  // Routes that carry the subject in the BODY (credits/consume, usage/record)
+  // were always safe, because the body hash IS the fingerprint. Adding the
+  // actor to the scope makes that property universal instead of accidental.
   let scopeKey: string;
   let applicationId: string | null = null;
   let tenantId: string | null = null;
   if (req.application) {
-    scopeKey = `app:${req.application.id}`;
+    scopeKey = req.endUser
+      ? `app:${req.application.id}:user:${req.endUser.id}`
+      : `app:${req.application.id}`;
     applicationId = req.application.id;
     tenantId = req.application.tenantId;
   } else if (req.tenantId) {
-    scopeKey = `tenant:${req.tenantId}`;
+    scopeKey = req.tenantMembershipId
+      ? `tenant:${req.tenantId}:member:${req.tenantMembershipId}`
+      : `tenant:${req.tenantId}`;
     tenantId = req.tenantId;
   } else {
     // No authenticated principal to scope to — behave as if no header was sent.
@@ -213,7 +236,13 @@ export async function idempotencyOnSend(
 
   const status = reply.statusCode;
   let parsedBody: unknown;
-  let storable = status >= 200 && status < 500; // never cache 5xx
+  // Never cache 5xx, and never cache an authorization refusal. A cached 401/
+  // 403/404 let a low-privileged caller pre-seed a key so the legitimate
+  // higher-privileged request replayed the refusal instead of executing — a
+  // denial primitive, and a confused deputy. Those statuses are also a
+  // function of WHO asked, which is exactly what a cache must not freeze.
+  const AUTHZ_REFUSALS = new Set([401, 403, 404]);
+  let storable = status >= 200 && status < 500 && !AUTHZ_REFUSALS.has(status);
   if (storable) {
     try {
       const text =
