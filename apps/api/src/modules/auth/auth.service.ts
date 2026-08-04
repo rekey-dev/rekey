@@ -436,7 +436,7 @@ function ensureEmailVerified(application: Application, endUser: EndUser): void {
  * transport that is missing (`no_transport`) or broken (`error`) comes back as
  * `emailSent: false`, which is what lets sign-up treat this as best-effort.
  */
-async function deliverVerificationEmail(args: {
+export async function deliverVerificationEmail(args: {
   application: Application;
   endUser: Pick<EndUser, 'id' | 'email'>;
   /** Caller-supplied link template; `{token}` is substituted. */

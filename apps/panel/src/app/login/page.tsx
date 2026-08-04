@@ -184,6 +184,22 @@ const PROVIDER_LABELS: Record<string, string> = {
  */
 const PASSWORD_SECONDARY = process.env.PANEL_PASSWORD_LOGIN_SECONDARY === 'true';
 
+/**
+ * Which credential this deployment leads with.
+ *
+ * `magic_link` suits a deployment whose operators never set a password —
+ * arriving by invite, by OIDC, or by emailed link — where a password form in
+ * the primary position is the path almost nobody should take, sitting where the
+ * page says "start here".
+ *
+ * Default is `password`, so no existing deployment changes behaviour and the
+ * open-source default is the conventional one. Password sign-in is never
+ * removed, only moved: it stays one click away, because an operator who set one
+ * must not be locked out by a preference, and because email delivery failing is
+ * exactly when you need another way in.
+ */
+const PRIMARY_SIGNIN = process.env.PANEL_PRIMARY_SIGNIN === 'magic_link' ? 'magic_link' : 'password';
+
 export const metadata: Metadata = { title: 'Sign in · Rekey' };
 
 const ERROR_MESSAGES: Record<string, string> = {
@@ -203,6 +219,15 @@ const ERROR_MESSAGES: Record<string, string> = {
   OAUTH_EMAIL_NOT_VERIFIED: 'Your provider account email is not verified — verify it at the provider, then retry.',
   OAUTH_NO_EMAIL: 'Your provider account did not share an email. Grant email access, then retry.',
   oauth_state: 'Sign-in session expired or could not be verified. Please try again.',
+  oauth_no_code: 'The provider sent you back without an authorization code. Start the sign-in again.',
+  oauth_no_state: 'That sign-in link is missing its state value. Start the sign-in again.',
+  // Named precisely because it is the one with a cause worth chasing: the
+  // browser did not return the cookie we set when the flow began.
+  oauth_cookie_missing:
+    'Your browser did not send back the sign-in cookie. If you are blocking cookies for this site, allow them and try again — otherwise this is a bug worth reporting.',
+  oauth_state_mismatch:
+    'This sign-in link belongs to a different attempt. Start again from this page rather than reusing an old link.',
+  oauth_provider_mismatch: 'That sign-in link is for a different provider. Start again.',
   oauth_denied: 'Sign-in was cancelled at the provider.',
   cloud_handoff: 'That sign-in link is missing its token. Start again from rekey.dev.',
   OIDC_ASSERTION_INVALID: 'That sign-in link is not valid — they are single-use and short-lived. Start again from rekey.dev.',
@@ -240,8 +265,14 @@ export default async function LoginPage({
   // Demote the password form only when the flag is on, the reader has not asked
   // for it, AND there is actually another way in. Hiding it with no provider
   // configured would lock every operator out of their own panel.
+  // Demote the password form when a provider is configured (the original
+  // reason) OR when this deployment leads with magic link. Never demote it with
+  // nothing else on the page: hiding the only way in locks every operator out
+  // of their own panel, which is a worse failure than an unwanted default.
+  const magicLinkPrimary = PRIMARY_SIGNIN === 'magic_link' && !passwordRequested;
   const showPasswordSecondary =
-    PASSWORD_SECONDARY && !passwordRequested && oauthProviders.length > 0;
+    !passwordRequested &&
+    (magicLinkPrimary || (PASSWORD_SECONDARY && oauthProviders.length > 0));
 
   const inputCls =
     'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
@@ -279,6 +310,26 @@ export default async function LoginPage({
                 ))}
             </div>
             {!showPasswordSecondary && <OrDivider />}
+          </>
+        )}
+
+        {/* Magic link in the primary slot. Deliberately a link to the existing
+            page rather than a second copy of its form: that page owns the
+            request action, the sent/error states and the dev-mode token
+            fallback, and duplicating it here would mean two implementations of
+            one flow drifting apart. */}
+        {magicLinkPrimary && (
+          <>
+            {oauthProviders.length > 0 && <OrDivider />}
+            <Link
+              href={`/magic-link${next ? `?next=${encodeURIComponent(next)}` : ''}`}
+              className="block w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-center text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] transition-colors"
+            >
+              Email me a sign-in link
+            </Link>
+            <p className="text-center text-xs text-[var(--color-muted-fg)]">
+              No password needed — we send a one-time link to your inbox.
+            </p>
           </>
         )}
 

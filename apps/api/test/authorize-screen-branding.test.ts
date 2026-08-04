@@ -128,6 +128,30 @@ describe('authorize screen branding', () => {
     expect(res.body).toContain('#0d9488');
   });
 
+  it("sends a CSP whose form-action allows the client's redirect origin", async () => {
+    // The bug this exists for: the deployment-wide policy is
+    // `form-action 'self'`, and browsers enforce form-action ACROSS the
+    // redirect a submission triggers. This page is served by the API and must
+    // redirect to the relying party's origin, so the browser silently refused
+    // the navigation — a correct 302 that went nowhere, with nothing in any
+    // server log. Every headless test passed throughout, because curl and
+    // `app.inject` do not enforce CSP. Hence this test asserts the HEADER
+    // rather than the behaviour.
+    const f = await fixture('brand-csp', {});
+    const res = await authorize(f.slug, f.clientId);
+    const csp = res.headers['content-security-policy'] as string;
+    expect(csp, 'the page must send its own policy').toBeTruthy();
+    expect(csp).toContain("form-action 'self' https://client.test");
+    // The logo is a remote https image; the default policy's `img-src 'self'
+    // data:` would drop it.
+    expect(csp).toContain('img-src');
+    expect(csp).toMatch(/img-src[^;]*https:/);
+    // The inline script that acknowledges a click needs its nonce.
+    const nonce = /script-src[^;]*'nonce-([^']+)'/.exec(csp)?.[1];
+    expect(nonce, 'script-src must carry a nonce').toBeTruthy();
+    expect(res.body).toContain(`nonce="${nonce}"`);
+  });
+
   it('renders the plain screen when there is no branding at all', async () => {
     const f = await fixture('brand-none', {});
     const res = await authorize(f.slug, f.clientId);

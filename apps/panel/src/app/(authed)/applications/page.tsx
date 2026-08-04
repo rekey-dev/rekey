@@ -1,7 +1,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type ApplicationRow, type MemberRow, type InvitationRow, type PlanRow, type ApiKeyRow, type BillingCredentialRow, getMe } from '@/lib/api';
+import { api, errorQuery, PanelApiError, type ApplicationRow, type MemberRow, type InvitationRow, type PlanRow, type ApiKeyRow, type BillingCredentialRow, getMe } from '@/lib/api';
 import { Modal } from '@/components/Modal';
 import { SlugAvailabilityField } from '@/components/SlugAvailabilityField';
 import { SubmitButton } from '@/components/SubmitButton';
@@ -42,7 +42,7 @@ async function createApp(formData: FormData): Promise<void> {
     redirect(`/applications/${app.id}?saved=created&e=app_created`);
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications?error=${encodeURIComponent(err.code)}&newApp=1`);
+      redirect(`/applications?${errorQuery(err, { newApp: '1' })}`);
     }
     throw err;
   }
@@ -226,6 +226,10 @@ export default async function ApplicationsPage({
 }): Promise<React.JSX.Element> {
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix, carried through the redirect by
+  // `errorQuery`. Shown when this page has no better words for the code.
+  const errorDetail = typeof sp.detail === 'string' ? sp.detail : undefined;
+  const errorFix = typeof sp.fix === 'string' ? sp.fix : undefined;
   // Only owners and admins may create an Application — the API answers
   // TENANT_ROLE_INSUFFICIENT for a MEMBER. Since #326 a MEMBER also starts with
   // access to NO Application, which is exactly the state accepting an
@@ -256,7 +260,7 @@ export default async function ApplicationsPage({
            the empty state is the right entry point, and rendering both
            here used to collide on modalKey="newApp" (HIGH #7 fix). */
         action={
-          apps.length > 0 && canManageApps ? <NewAppModal error={error} modalKey="newApp" /> : undefined
+          apps.length > 0 && canManageApps ? <NewAppModal error={error} errorDetail={errorDetail} errorFix={errorFix} modalKey="newApp" /> : undefined
         }
       />
 
@@ -320,6 +324,8 @@ export default async function ApplicationsPage({
           action={
             <NewAppModal
               error={error}
+              errorDetail={errorDetail}
+              errorFix={errorFix}
               triggerLabel="Create your first application"
               triggerSize="md"
               modalKey="newApp"
@@ -374,11 +380,16 @@ export default async function ApplicationsPage({
 
 function NewAppModal({
   error,
+  errorDetail,
+  errorFix,
   triggerLabel = '+ New application',
   triggerSize = 'sm',
   modalKey,
 }: {
   error?: string;
+  /** The API's own message + fix, shown when `ERR` has no entry for `error`. */
+  errorDetail?: string;
+  errorFix?: string;
   triggerLabel?: string;
   triggerSize?: 'sm' | 'md';
   modalKey: string;
@@ -398,7 +409,14 @@ function NewAppModal({
       <form action={createApp} className="space-y-3">
         {error && (
           <Banner tone="error">
-            {ERR[error] ?? 'Something went wrong. Please try again.'}
+            {/* The local map first — a page often has better words than the
+                API. Then the API's own message, which for a quota refusal
+                names the limit and the current count. "Something went wrong"
+                only when there is genuinely nothing to say. */}
+            {ERR[error] ?? errorDetail ?? 'Something went wrong. Please try again.'}
+            {ERR[error] === undefined && errorFix ? (
+              <span className="mt-1 block text-xs opacity-80">{errorFix}</span>
+            ) : null}
           </Banner>
         )}
         <label className="block space-y-1">

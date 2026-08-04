@@ -72,11 +72,25 @@ export async function GET(
     );
 
   if (providerError) return fail('oauth_denied');
+
   // CSRF: the returned state must match the cookie we set on start, for THIS
-  // provider. A missing/mismatched cookie means a forged or stale callback.
-  if (!code || !state || !cookieState || state !== cookieState || cookieProvider !== provider) {
-    return fail('oauth_state');
-  }
+  // provider. A missing or mismatched cookie means a forged or stale callback.
+  //
+  // These were one condition answering one error code, which made a genuine
+  // bug indistinguishable from an attack and from a stale bookmark. They are
+  // five different situations with five different fixes, and the operator
+  // staring at "sign-in session expired" has no way to tell which they are in.
+  // Splitting them discloses nothing an attacker does not already know — they
+  // control the request that produced the failure — while telling an operator
+  // whether their cookie is being dropped or their link is stale.
+  if (!code) return fail('oauth_no_code');
+  if (!state) return fail('oauth_no_state');
+  // The one that matters: the browser did not send back the cookie we set.
+  // Usually the cookie was never stored (wrong `Secure` for the scheme the
+  // browser saw) or was dropped crossing origins.
+  if (!cookieState) return fail('oauth_cookie_missing');
+  if (state !== cookieState) return fail('oauth_state_mismatch');
+  if (cookieProvider !== provider) return fail('oauth_provider_mismatch');
 
   let result: CallbackResult;
   try {

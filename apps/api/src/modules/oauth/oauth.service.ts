@@ -18,6 +18,7 @@ import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { assertSignupAllowed, type AuthKind } from '../../lib/signup-policy.js';
+import { deliverVerificationEmail } from '../auth/auth.service.js';
 import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
 import { getOAuthProvider, buildAuthUrl as buildAuthUrlVia } from './providers/index.js';
@@ -266,6 +267,26 @@ export const oauthService = {
         email: identity.email,
       },
     });
+
+    // The provider would not vouch for this address, so the account exists and
+    // cannot sign in: `requireEmailVerification` refuses it, and nothing has
+    // been sent that would let the person prove the address themselves. They
+    // are stranded on an account they just created, with no action available.
+    //
+    // The password sign-up path already sends this. OAuth did not, because it
+    // assumed a provider always asserts verification. Google, GitHub, Discord
+    // and GitLab do; a Microsoft consumer account and a generic OIDC server
+    // may not, and those are the users who were stuck.
+    //
+    // Fire and forget, like every other send on a sign-in path: the response
+    // must not wait on a mail round trip, and a transport failure is recorded
+    // as a security event rather than changing what the caller sees.
+    if (!identity.emailVerified) {
+      void deliverVerificationEmail({
+        application: args.application,
+        endUser: created,
+      });
+    }
     // Outbound webhook for new-via-OAuth users — mirrors password sign-up.
     emitDetached({
       applicationId: args.application.id,

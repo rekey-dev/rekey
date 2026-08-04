@@ -37,6 +37,7 @@ import { hasScope } from './oidc.service.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
 import { authService } from '../auth/auth.service.js';
 import { apiKeysService } from '../api-keys/api-keys.service.js';
+import { randomBytes } from 'node:crypto';
 import { RekeyError } from '../../lib/error.js';
 import { verifyMcpAccessToken } from '../../lib/jwt.js';
 import { handleMcpMessage, type JsonRpcMessage } from './mcp-server.js';
@@ -276,6 +277,47 @@ const SCOPE_DESCRIPTIONS: Record<string, string> = {
 };
 
 /** Minimal server-rendered login + consent page for the authorization endpoint. */
+/**
+ * The sign-in page needs a Content-Security-Policy of its own.
+ *
+ * The deployment-wide policy is `form-action 'self'`, and browsers enforce
+ * `form-action` ACROSS THE REDIRECT that follows a submission. This page is
+ * served by the API and its whole purpose is to redirect to the relying
+ * party's `redirect_uri` on another origin — so the browser silently refused
+ * the navigation. The server issued a correct 302 and nothing happened: no
+ * error page, no console message except a CSP violation, and every headless
+ * test passed because curl does not enforce CSP.
+ *
+ * `script-src 'self'` blocked the inline script that acknowledges a click, and
+ * `img-src 'self' data:` blocked the Application's own logo, which is a remote
+ * https URL. One header, three symptoms.
+ *
+ * The redirect origin is NOT taken from user input: `redirect_uri` has already
+ * been matched against the client's registered allowlist by the time this runs,
+ * so widening `form-action` to it grants nothing the flow did not already
+ * permit. The nonce is per-response.
+ */
+function authorizePageCsp(redirectUri: string, nonce: string): string {
+  let formAction = "'self'";
+  try {
+    formAction = `'self' ${new URL(redirectUri).origin}`;
+  } catch {
+    // Unparseable never reaches here — the route rejects it earlier — but a
+    // policy that is too narrow is safer than one built from a bad value.
+  }
+  return [
+    "default-src 'self'",
+    "base-uri 'self'",
+    `form-action ${formAction}`,
+    "frame-ancestors 'none'",
+    // The Application's logo is an operator-configured remote image.
+    "img-src 'self' data: https:",
+    `script-src 'self' 'nonce-${nonce}'`,
+    "style-src 'self' 'unsafe-inline'",
+    "object-src 'none'",
+  ].join('; ');
+}
+
 function renderAuthorizePage(opts: {
   actionUrl: string;
   appName: string;
@@ -314,6 +356,8 @@ function renderAuthorizePage(opts: {
    * a malformed value must degrade to the plain screen, never break sign-in.
    */
   branding?: { displayName?: string; logoUrl?: string; primaryColor?: string } | null;
+  /** Per-response CSP nonce for the one inline script this page carries. */
+  nonce: string;
 }): string {
   const hidden = (['response_type', 'client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'scope', 'state', 'nonce'] as const)
     .map((k) => {
@@ -409,6 +453,36 @@ button{flex:1;padding:.5625rem 1rem;border-radius:.375rem;border:0;cursor:pointe
         <button class="deny" type="submit" name="consent" value="deny">Deny</button>
       </div>
     </form>
+    <!-- The form works without this. It is a plain POST and always has been —
+         which is why the page must not depend on script to submit. All this
+         adds is the acknowledgement a click deserves: the pressed button says
+         what it is doing and both are disabled, so a slow round-trip does not
+         look like a dead page and cannot be double-submitted into a second
+         authorization code. -->
+    <script nonce="${esc(opts.nonce)}">
+      (function () {
+        var form = document.currentScript.previousElementSibling;
+        if (!form || form.tagName !== 'FORM') return;
+        form.addEventListener('submit', function (e) {
+          var pressed = e.submitter;
+          var buttons = form.querySelectorAll('button');
+          for (var i = 0; i < buttons.length; i++) {
+            if (buttons[i] === pressed) {
+              buttons[i].textContent =
+                pressed.value === 'allow' ? 'Signing in\u2026' : 'Cancelling\u2026';
+            }
+            // Disabled AFTER the value is read for submission — disabling a
+            // submitter before the browser serialises the form drops its
+            // name/value, and the consent value is what this page decides.
+            setTimeout(function (b) {
+              return function () {
+                b.disabled = true;
+              };
+            }(buttons[i]), 0);
+          }
+        });
+      })();
+    </script>
     ${reset}
   </main>
 </body></html>`;
@@ -638,6 +712,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       const { slug } = SlugParam.parse(req.params);
+      const pageNonce = randomBytes(16).toString('base64');
       const application = await resolveAuthServerApp(slug);
       const q = AuthorizeQuery.safeParse(req.query);
       if (!q.success) {
@@ -646,10 +721,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       const client = await mcpOAuthService.getClient(application.id, q.data.client_id);
       // Never redirect to an unvalidated URI — render an error instead.
       if (!client || !client.redirectUris.includes(q.data.redirect_uri)) {
-        return reply
-          .type('text/html')
-          .code(400)
-          .send('<p>Unknown client_id or unregistered redirect_uri.</p>');
+        return reply.type('text/html').code(400).send('<p>Unknown client_id or unregistered redirect_uri.</p>');
       }
       const redirectError = (error: string): FastifyReply => {
         const u = new URL(q.data.redirect_uri);
@@ -664,8 +736,12 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       // login form that hands back a token covering something else.
       const granted = grantScopes(application, q.data.scope);
       if (granted === '') return redirectError('invalid_scope');
-      return reply.type('text/html').send(
+      return reply
+        .header('content-security-policy', authorizePageCsp(q.data.redirect_uri, pageNonce))
+        .type('text/html')
+        .send(
         renderAuthorizePage({
+          nonce: pageNonce,
           actionUrl: `/api/v1/mcp/${slug}/oauth/authorize`,
           appName: application.name,
           appUrl: (application.authConfig as { appUrl?: string } | null)?.appUrl ?? null,
@@ -732,6 +808,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           .send('<p>Unknown client_id or unregistered redirect_uri.</p>');
       }
       const params = q.data;
+      const pageNonce = randomBytes(16).toString('base64');
       const redirectWith = (extra: Record<string, string>): unknown => {
         const u = new URL(params.redirect_uri);
         for (const [k, v] of Object.entries(extra)) u.searchParams.set(k, v);
@@ -750,8 +827,13 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       const password = typeof body.password === 'string' ? body.password : '';
       const mfaCode = typeof body.mfaCode === 'string' ? body.mfaCode : '';
       const renderErr = (error: string, mfa = false): unknown =>
-        reply.type('text/html').code(200).send(
+        reply
+          .header('content-security-policy', authorizePageCsp(params.redirect_uri, pageNonce))
+          .type('text/html')
+          .code(200)
+          .send(
           renderAuthorizePage({
+            nonce: pageNonce,
             actionUrl: `/api/v1/mcp/${slug}/oauth/authorize`,
             appName: application.name,
             clientName: client.clientName ?? 'An application',

@@ -207,9 +207,16 @@ describe('PayPal cancellation', () => {
       stubFetch({ status: 422, body: '{"name":"UNPROCESSABLE_ENTITY"}' });
       const provider = new RealPaypalProvider(creds, 'test');
 
+      // Throwing is the contract. The message now carries PayPal's own error
+      // name rather than the raw status, because a plain Error reached the
+      // caller as a generic 500 and told the buyer nothing about a payment
+      // that had just failed.
       await expect(
         provider.cancelSubscription({ subscription: row('I-ABC'), atPeriodEnd: false }),
-      ).rejects.toThrow(/422/);
+      ).rejects.toMatchObject({
+        code: 'BILLING_PROVIDER_REFUSED',
+        message: expect.stringContaining('UNPROCESSABLE_ENTITY'),
+      });
     });
 
     it('treats an already-cancelled agreement as success, so a retry settles', async () => {

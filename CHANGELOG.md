@@ -4,6 +4,56 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.0.0-rc.5
+
+Everything here came out of running the product rather than from the test
+suite, which is the reason this is a release candidate and not the stable tag.
+
+### Fixed
+
+- **The sign-in redirect was blocked by our own Content-Security-Policy.** The
+  page is served by the API and its job is to redirect to the relying party on
+  another origin; `form-action 'self'` forbade exactly that. Browsers enforce
+  that directive across the redirect a form submission triggers, so the server
+  issued a correct 302 and the browser silently declined to follow it. The same
+  header blocked the Application's logo and the script that acknowledges a
+  click. The page now sends its own policy. No headless client enforces CSP, so
+  nothing in the suite could have caught this.
+- **A declined payment said "an unexpected error occurred".** Every PayPal
+  failure threw a plain Error and reached the caller as a generic 500. Seven
+  call sites now answer `BILLING_PROVIDER_REFUSED` with PayPal's own error
+  name, so a declined card says so. The provider's free text stays in the
+  server log because it can name the account.
+- **A refused OIDC token exchange said nothing.** Same shape: the issuer states
+  the reason in a fixed vocabulary and it was discarded.
+- **"Something went wrong" replaced accurate quota messages.** Creating a second
+  production Application at the limit hid a message that named the limit and
+  the current count. The panel now shows the API's own words when it has none
+  better.
+- **An OAuth sign-up the provider would not vouch for could not be recovered.**
+  The account was created and every sign-in refused, with nothing sent that
+  would let the person prove the address.
+- **Five different sign-in failures answered one error code**, so a bug, a
+  stale link and a forged callback were indistinguishable.
+
+### Added
+
+- **PKCE on the generic OIDC provider**, decided by the issuer's discovery
+  document. Without it no issuer that mandates PKCE could be used at all, which
+  includes Rekey's own Applications. The verifier is held server-side against
+  the CSRF state and never given to the browser.
+- **OAuth clients tab**: list what has registered against an Application,
+  revoke it, and close open registration. Registration is unauthenticated by
+  design and there was previously no way to audit or stop it.
+- **Operator sign-in against one of the deployment's own Applications**, so
+  buyers who already have an account do not keep a second password.
+- **A sign-in screen that explains itself**: names the Application, carries its
+  branding, echoes a failed email back, and links password reset.
+- `PANEL_PRIMARY_SIGNIN=magic_link` for deployments whose operators never set a
+  password.
+- An Application's pooled mail now sends as `<Application> (via <Deployment>)`
+  rather than the deployment's name alone.
+
 ## 2.0.0-rc.4
 
 ### Record a sale that no payment provider saw

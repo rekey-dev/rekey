@@ -24,6 +24,7 @@ import type {
 } from './types.js';
 import { discountUnsupported } from './discount.js';
 import type { PaypalCredentials, BillingMode } from '../credentials.service.js';
+import { RekeyError } from '../../../lib/error.js';
 
 const SANDBOX_BASE = 'https://api-m.sandbox.paypal.com';
 const LIVE_BASE = 'https://api-m.paypal.com';
@@ -87,6 +88,42 @@ interface AccessToken {
   expires_at: number; // ms epoch
 }
 
+/**
+ * Turn a PayPal refusal into an answer the caller can act on.
+ *
+ * These were plain Errors, so every one became `500 INTERNAL_ERROR` with "an
+ * unexpected error occurred". PayPal had said why, we kept it in the log, and
+ * the buyer whose payment had just failed was told nothing. On the money path
+ * that is the worst place to be vague: the person cannot tell whether to retry,
+ * use another card, or contact anyone.
+ *
+ * The `name` PayPal returns is a fixed, documented vocabulary
+ * (INSTRUMENT_DECLINED, PAYER_ACTION_REQUIRED, ...). It is safe to pass on and
+ * is the part that decides what the buyer should do. The `message` and
+ * `details` are not forwarded: they can name the account, and this reaches a
+ * browser.
+ */
+function paypalError(operation: string, status: number, body: string): RekeyError {
+  let name: string | null = null;
+  try {
+    const parsed = JSON.parse(body) as { name?: unknown };
+    if (typeof parsed.name === 'string') name = parsed.name;
+  } catch {
+    // Not JSON. Nothing to forward, so the status carries the meaning.
+  }
+  return new RekeyError({
+    statusCode: 502,
+    code: 'BILLING_PROVIDER_REFUSED',
+    message: name
+      ? `PayPal refused the ${operation} (${name}).`
+      : `PayPal refused the ${operation} (HTTP ${status}).`,
+    fix:
+      name === 'INSTRUMENT_DECLINED'
+        ? 'The payment method was declined. Ask the customer to use another one.'
+        : 'Check the billing credentials configured for this Application, then retry. The full provider response is in the server log.',
+  });
+}
+
 export class RealPaypalProvider implements BillingProvider {
   readonly name = 'paypal';
   private readonly base: string;
@@ -113,7 +150,11 @@ export class RealPaypalProvider implements BillingProvider {
       body: 'grant_type=client_credentials',
     });
     if (!res.ok) {
-      throw new Error(`PayPal token fetch failed: HTTP ${res.status} ${await res.text()}`);
+      {
+      const body = await res.text();
+      console.error(`paypal token request failed`, res.status, body);
+      throw paypalError('token request', res.status, body);
+    }
     }
     const json = (await res.json()) as { access_token: string; expires_in: number };
     this.accessTokenCache = {
@@ -173,7 +214,11 @@ export class RealPaypalProvider implements BillingProvider {
       }),
     });
     if (!planRes.ok && planRes.status !== 422 /* duplicate */) {
-      throw new Error(`PayPal plan create failed: HTTP ${planRes.status} ${await planRes.text()}`);
+      {
+      const body = await planRes.text();
+      console.error(`paypal plan creation failed`, planRes.status, body);
+      throw paypalError('plan creation', planRes.status, body);
+    }
     }
     const planJson = (await planRes.json()) as { id?: string };
     return { providerPlanId: planJson.id ?? requestId };
@@ -232,7 +277,11 @@ export class RealPaypalProvider implements BillingProvider {
       }),
     });
     if (!subRes.ok) {
-      throw new Error(`PayPal subscription create failed: HTTP ${subRes.status} ${await subRes.text()}`);
+      {
+      const body = await subRes.text();
+      console.error(`paypal subscription failed`, subRes.status, body);
+      throw paypalError('subscription', subRes.status, body);
+    }
     }
     const sub = (await subRes.json()) as {
       id: string;
@@ -314,7 +363,11 @@ export class RealPaypalProvider implements BillingProvider {
       }),
     });
     if (!res.ok) {
-      throw new Error(`PayPal order create failed: HTTP ${res.status} ${await res.text()}`);
+      {
+      const body = await res.text();
+      console.error(`paypal order failed`, res.status, body);
+      throw paypalError('order', res.status, body);
+    }
     }
     const order = (await res.json()) as { id: string; links: Array<{ rel: string; href: string }> };
     const approve = order.links.find((l) => l.rel === 'approve' || l.rel === 'payer-action');
@@ -336,7 +389,8 @@ export class RealPaypalProvider implements BillingProvider {
     if (!res.ok) {
       const text = await res.text();
       if (res.status === 422 && text.includes('ORDER_ALREADY_CAPTURED')) return { captured: true };
-      throw new Error(`PayPal order capture failed: HTTP ${res.status} ${text}`);
+      console.error('paypal capture failed', res.status, text);
+      throw paypalError('capture', res.status, text);
     }
     const data = (await res.json()) as { status?: string };
     return { captured: data.status === 'COMPLETED' };
@@ -380,7 +434,8 @@ export class RealPaypalProvider implements BillingProvider {
       const match = list.webhooks?.find((w) => w.url === publicUrl);
       if (match) return { webhookId: match.id };
     }
-    throw new Error(`PayPal webhook register failed: HTTP ${res.status} ${text}`);
+    console.error('paypal webhook register failed', res.status, text);
+    throw paypalError('webhook registration', res.status, text);
   }
 
   /**
@@ -457,7 +512,8 @@ export class RealPaypalProvider implements BillingProvider {
     const text = await res.text();
     // Already cancelled/expired at PayPal — the outcome we asked for.
     if (res.status === 422 && text.includes('SUBSCRIPTION_STATUS_INVALID')) return;
-    throw new Error(`PayPal subscription cancel failed: HTTP ${res.status} ${text}`);
+    console.error('paypal cancel failed', res.status, text);
+    throw paypalError('cancellation', res.status, text);
   }
 }
 

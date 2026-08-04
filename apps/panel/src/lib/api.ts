@@ -923,3 +923,31 @@ export async function getReadyReport(): Promise<ReadyReport | null> {
     return null;
   }
 }
+
+/**
+ * Carry an API refusal through a redirect so the page can show what it said.
+ *
+ * Every page keeps a local map of error code → sentence, and falls back to
+ * "Something went wrong. Please try again." for anything unmapped. That is
+ * fine for codes a page expects and actively wrong for the rest: the API
+ * already answers with a precise, operator-facing message — "This workspace
+ * has reached its limit of 1 production application (currently 1). Staging and
+ * development applications are not counted" — and the panel replaced it with a
+ * sentence carrying no information at all.
+ *
+ * The map still wins where a page has better words. This only decides what
+ * happens when it does not, and the answer should be the truth rather than a
+ * shrug. It needs no per-code panel work, so a limit added to the API tomorrow
+ * explains itself in the panel today — which is also why it suits a
+ * self-hosted deployment whose limits are its own.
+ *
+ * The message is the API's, not user input, and React escapes it on render.
+ * Capped because it travels in a URL.
+ */
+export function errorQuery(err: PanelApiError, extra?: Record<string, string>): string {
+  const params = new URLSearchParams({ error: err.code });
+  if (err.message) params.set('detail', err.message.slice(0, 300));
+  if (err.fix) params.set('fix', err.fix.slice(0, 300));
+  for (const [k, v] of Object.entries(extra ?? {})) params.set(k, v);
+  return params.toString();
+}
