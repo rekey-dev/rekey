@@ -6,7 +6,7 @@
 
 > **What is Rekey?** An auth + billing backend for your SaaS: sign-in (password, magic-link, passkeys, OAuth, MFA), subscriptions, usage, credits, licenses, and teams — behind one API, multi-tenant, provider-agnostic. Docs: **[rekey.dev/docs](https://rekey.dev/docs)**. This CLI manages a deployment — tenants, applications, API keys — from your terminal or an agent.
 
-> **For AI agents**: start at [AGENTS.md](./AGENTS.md).
+> **For AI agents**: start at [AGENTS.md](../../AGENTS.md).
 
 ## Install
 
@@ -59,7 +59,7 @@ These are on the roadmap but **not shipped** — don't script against them yet:
 - `rekey api-keys list/create/revoke` — key lifecycle (today: panel, admin API, or the [MCP server's](https://www.npmjs.com/package/@rekey.dev/mcp) `mint_api_key`).
 - `rekey tunnel-webhooks` — the `stripe listen` equivalent for local webhook development.
 
-See [AGENTS.md](./AGENTS.md) for the full agent-facing contract.
+See [AGENTS.md](../../AGENTS.md) for the full agent-facing contract.
 
 ---
 

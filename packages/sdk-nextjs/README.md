@@ -4,7 +4,7 @@
 
 [Rekey](https://rekey.dev) helpers for the **Next.js App Router** (14, 15 and 16): route-gating middleware, server-side `auth()` / `signIn()` / `signUp()` / `signOut()`, and an httpOnly cookie session — built on top of [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node).
 
-> **For AI coding agents:** start at [AGENTS.md](./AGENTS.md).
+> **For AI coding agents:** start at [AGENTS.md](../../AGENTS.md).
 
 ```bash
 npm i @rekey.dev/nextjs

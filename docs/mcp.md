@@ -103,8 +103,7 @@ other Application's data.
 
 ## Connecting
 
-See [`apps/marketing/src/app/docs/mcp/page.tsx`](../apps/marketing/src/app/docs/mcp/page.tsx)
-or [rekey.dev/docs/mcp](https://rekey.dev/docs/mcp) for the full
+See [rekey.dev/docs/mcp](https://rekey.dev/docs/mcp) for the full
 end-user-facing setup (Claude Code CLI, Claude Desktop `mcp.json`, Cursor,
 custom HTTP client, hand-rolled curl walkthrough).
 

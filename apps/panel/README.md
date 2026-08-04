@@ -2,7 +2,7 @@
 
 Next.js 15 admin panel for Rekey deployments.
 
-> **For AI agents**: see [AGENTS.md](./AGENTS.md).
+> **For AI agents**: see [AGENTS.md](../../AGENTS.md).
 
 ## Run
 

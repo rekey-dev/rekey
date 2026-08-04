@@ -330,7 +330,6 @@ apps/
     test/                    — vitest suites
   panel/                     — Next.js operator panel (App Router, server actions, Tailwind)
   portal/                    — hosted multi-app customer billing portal
-  admin/                     — super-admin dashboard
 packages/
   shared-types/              — Zod schemas + types shared between API and SDKs
   sdk-node/                  — server SDK (Application secret key)
@@ -363,7 +362,7 @@ reachable Redis. Everything else is optional or has a default.
 | `OPERATOR_SIGNUP_MODE` | `open` \| `invite` \| `closed` — who may create a new operator account | defaults `open`; the API logs a `[SECURITY]` warning while `open` + `NODE_ENV=production` |
 | `OPERATOR_MCP_DYNAMIC_REGISTRATION` | `open` \| `disabled` — RFC 7591 registration on the operator MCP authorization server | defaults `open`; close it once your MCP clients hold a `client_id` |
 | `TRUSTED_PROXIES` | hop count or IP/CIDR allowlist deciding whether `X-Forwarded-For` is believed | required behind a reverse proxy — `request.ip`, rate-limit buckets and IP allowlists key off it |
-| `REKEY_COOKIE_SECURE` | forces the `Secure` cookie attribute on/off in the **web apps** (panel/portal/admin + `@rekey.dev/nextjs`); the API sets no cookies | optional — `Secure` is otherwise decided per request from `X-Forwarded-Proto`, falling back to the host |
+| `REKEY_COOKIE_SECURE` | forces the `Secure` cookie attribute on/off in the **web apps** (panel/portal + `@rekey.dev/nextjs`); the API sets no cookies | optional — `Secure` is otherwise decided per request from `X-Forwarded-Proto`, falling back to the host |
 
 See [.env.example](.env.example) for the complete, commented list.
 

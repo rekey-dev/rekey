@@ -6,7 +6,7 @@ A customer-facing Next.js app where the **end-users of any opted-in Application*
 
 One Rekey-hosted portal serves **every** opted-in Application, resolved by the `<slug>` in the URL: `portal.rekey.dev/<slug>`. The operator turns it on per-Application in **Panel → Application → Billing → Portal** and gets the URL — no deploy, no secret key.
 
-**Credential model.** The portal holds **no per-app secret key**. It looks up each app's public config (`GET /api/v1/portal/config/:slug` → name + **publishable key** + branding) and authorizes each customer with **their own session token**. The self-service billing routes (`subscription`, `entitlements`, `payments`, `cancel`, `checkout`) accept the publishable key + the caller's token and act only on that caller's own resources. Tokens live in httpOnly cookies **scoped to `/<slug>`**, so one app's session can't be replayed on another under the shared host. See [specs/hosted-portal.md](specs/hosted-portal.md).
+**Credential model.** The portal holds **no per-app secret key**. It looks up each app's public config (`GET /api/v1/portal/config/:slug` → name + **publishable key** + branding) and authorizes each customer with **their own session token**. The self-service billing routes (`subscription`, `entitlements`, `payments`, `cancel`, `checkout`) accept the publishable key + the caller's token and act only on that caller's own resources. Tokens live in httpOnly cookies **scoped to `/<slug>`**, so one app's session can't be replayed on another under the shared host.
 
 Runs on port **3050** (`pnpm --filter @rekey.dev/portal dev`); needs only `REKEY_URL` (+ `PORTAL_BASE_URL` for checkout return links).
 

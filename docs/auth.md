@@ -271,7 +271,7 @@ const { endUser, token } = await rekey.auth.signUp({
 const user = await rekey.auth.getCurrentUser(req.cookies.session);
 ```
 
-See [`packages/sdk-node/AGENTS.md`](../packages/sdk-node/AGENTS.md) for the full method surface.
+See the type definitions in `@rekey.dev/node` for the full method surface.
 
 ## What's deliberately not here yet
 
@@ -280,4 +280,4 @@ Everything this section once listed has shipped: refresh tokens (documented abov
 Genuinely open:
 
 - **Lockout parameter tuning** — thresholds and windows are picked, not measured. Revisit with real sign-in telemetry.
-- **SCIM / directory sync** and **SAML** — see [ENTERPRISE-ROADMAP.md](ENTERPRISE-ROADMAP.md).
+- **SCIM / directory sync** and **SAML** — not built.

@@ -100,31 +100,6 @@ source address *before* the key is examined, so a leaked `SUPER_ADMIN_KEY` alone
 is not enough. Behind Traefik that needs `TRUSTED_PROXIES` too, or every request
 looks like it came from the proxy.
 
-## Super-admin dashboard (local-only, not deployed)
-- Read-only — surfaces tenants, applications, end-users, orgs, subscriptions,
-  payments, MRR, webhook health, services, audit log, request log.
-- Auth: paste `SUPER_ADMIN_KEY` on the login form. The container compares
-  via `timingSafeEqual` and mints a 12-hour sliding opaque session id; the
-  cookie carries only the id, never the key.
-- Brute-force throttled at 5 attempts / 5 min / IP (in-memory).
-- The admin app needs the same `SUPER_ADMIN_KEY` env value as the api
-  service (locally, in your shell or a .env.local). If it is missing, the
-  login page says so explicitly rather than rejecting the key you paste — no key
-  can work until the container has one.
-
-### Two operational quirks worth knowing
-- **Sessions live in memory, so a restart signs everyone out.** The admin app
-  keeps its opaque session ids in a process-local map. Redeploying or restarting
-  the container invalidates every session and operators paste the key again.
-  Acceptable for a single-replica read-only dashboard, and the reason it is not
-  Redis-backed is that adding a dependency to the tool you open *when Redis is
-  broken* is the wrong trade. If you ever run more than one admin replica this
-  becomes a real problem: sessions are not shared, so requests would bounce
-  between replicas and appear to sign you out at random. Run one replica.
-- **The session cookie is `Secure` unless the request is loopback.** See
-  "Session cookies and `Secure`" below — this is decided per request, not from
-  `NODE_ENV`. Serve the admin app over HTTPS, or run it on `localhost`.
-
 ## Session cookies and `Secure`
 
 **Applies to every web app in this repo** — panel, portal, admin, marketing, and

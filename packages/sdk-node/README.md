@@ -4,7 +4,7 @@
 
 The server SDK for [Rekey](https://rekey.dev) — auth, billing, usage, credits, licenses, and teams for your application, from any server-side TypeScript runtime (Node, Bun, Deno, Express, Fastify, Nest, Hono).
 
-> **For AI coding agents:** start at [AGENTS.md](./AGENTS.md) — it has the do-this-first rules.
+> **For AI coding agents:** start at [AGENTS.md](../../AGENTS.md) — it has the do-this-first rules.
 
 ```bash
 npm i @rekey.dev/node

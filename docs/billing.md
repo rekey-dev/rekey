@@ -261,7 +261,7 @@ The signature is the auth — no `Authorization` header on this route. The raw b
 | `invoice.payment_failed` | Inserts FAILED Payment + sets Subscription PAST_DUE |
 | anything else | Logged + recorded as processed (no-op) |
 
-See [`apps/api/src/modules/billing/webhooks/AGENTS.md`](../apps/api/src/modules/billing/webhooks/AGENTS.md) for the full module rules.
+See `apps/api/src/modules/billing/webhooks/` for the full module rules.
 
 ## Caching entitlements
 

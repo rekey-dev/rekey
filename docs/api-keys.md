@@ -52,7 +52,7 @@ const lic = await client.verifyLicense({ key, machineFingerprint });
 | † org management (`users/me/organizations/*`) | |
 | ‡ passkey **enrollment** (`passkey/register/*`) | |
 
-† These additionally require the end-user's own JWT (`requireUserSession`), and that JWT — not the key — is the authorizer: every one of them acts solely on `request.endUser`. That is what lets a browser-only portal manage a team and take a payment with no secret key at all (Portal V2, see [specs/hosted-portal.md](specs/hosted-portal.md)).
+† These additionally require the end-user's own JWT (`requireUserSession`), and that JWT — not the key — is the authorizer: every one of them acts solely on `request.endUser`. That is what lets a browser-only portal manage a team and take a payment with no secret key at all (Portal V2).
 
 ‡ Publishable callers must additionally **step up** — send `password`, or a current TOTP / unused backup `code` — at `passkey/register/start`. A passkey bypasses the MFA challenge at sign-in, and neither a password change nor sign-out-everywhere removes one, so a stolen access token alone must not be able to enroll it. `/complete` needs no second proof: the single-use challenge binds it to the `/start` that already stepped up. Secret-key callers skip step-up, because the customer's backend is the gate.
 

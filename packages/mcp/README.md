@@ -4,7 +4,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server for [Rekey](https://rekey.dev). Lets Claude Desktop, Cursor, and Claude Code introspect a deployment — and mint API keys — directly, without screenshots or copy-paste from the panel.
 
-> **For AI agents connected through this server:** see [AGENTS.md](./AGENTS.md) for what's safe to call and the write-tool safety model.
+> **For AI agents connected through this server:** see [AGENTS.md](../../AGENTS.md) for what's safe to call and the write-tool safety model.
 
 ```bash
 # Run on demand (no global install needed):
