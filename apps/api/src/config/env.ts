@@ -266,6 +266,24 @@ export const env = createEnv({
     PANEL_OAUTH_GOOGLE_CLIENT_SECRET: z.string().optional(),
     PANEL_OAUTH_GITHUB_CLIENT_ID: z.string().optional(),
     PANEL_OAUTH_GITHUB_CLIENT_SECRET: z.string().optional(),
+    /**
+     * "Sign in with <this deployment>" — operator sign-in against one of the
+     * deployment's OWN Applications, so buyers who already have an account do
+     * not need a second password for the panel. Driven by the generic `oidc`
+     * provider, so the issuer is any Application with OIDC enabled:
+     * `https://<api>/api/v1/mcp/<slug>`.
+     *
+     * All three are required together; the provider reports itself
+     * unconfigured unless the issuer is set too, because a client id with
+     * nowhere to point is not usable.
+     *
+     * The Application must offer the `email` scope, which means it must have
+     * `requireEmailVerification` on — an assertion carrying an address nobody
+     * proved is refused, by design.
+     */
+    PANEL_OAUTH_REKEY_CLIENT_ID: z.string().optional(),
+    PANEL_OAUTH_REKEY_CLIENT_SECRET: z.string().optional(),
+    PANEL_OAUTH_REKEY_ISSUER: z.string().url().optional(),
     // Base origin the panel runs on, used to build the operator OAuth redirect
     // URI `<base>/login/oauth/<provider>/callback` (must be registered on each
     // provider console). Falls back to the first CORS_ALLOWED_ORIGINS entry

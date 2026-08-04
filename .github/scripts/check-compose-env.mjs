@@ -54,7 +54,7 @@
  * Usage: node .github/scripts/check-compose-env.mjs
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const ENV_TS = 'apps/api/src/config/env.ts';
 
@@ -159,6 +159,50 @@ if (leaked.length > 0) {
     'docker-compose.prod.yml contains Rekey-owned hostnames outside a comment:\n' +
       leaked.map(([n, line]) => `    ${n}: ${line.trim()}`).join('\n'),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Build args have the same allowlist problem, one layer down.
+//
+// A `NEXT_PUBLIC_*` passed under `build.args:` in a compose file reaches Docker,
+// and Docker DISCARDS it unless the Dockerfile declares a matching `ARG` — no
+// error, just a build where Next inlines nothing and the app silently falls back
+// to whatever its unset branch does. That is how the panel's "Continue with …"
+// button shipped reading "your account" with the label set correctly in the
+// deployment environment.
+//
+// Declaring the ARG is necessary but not sufficient: it also has to be passed
+// on the `RUN` line that invokes the build, because that is what puts it in the
+// build command's environment. Both are checked.
+{
+  const dockerfile = readFileSync('Dockerfile', 'utf8');
+  const declaredArgs = new Set(
+    [...dockerfile.matchAll(/^ARG\s+([A-Z0-9_]+)/gm)].map((m) => m[1]),
+  );
+  const missing = [];
+  // Discovered, not listed. A hardcoded list would have to name every hosted
+  // unit's compose file, including ones the public strip removes — and this
+  // script is the one thing under .github/scripts that survives that strip, so
+  // naming them would fail the release tripwire. Discovery also means a compose
+  // file added later is covered without anyone remembering to add it here.
+  const composeFiles = readdirSync('.').filter(
+    (f) => f.startsWith('docker-compose.') && f.endsWith('.yml'),
+  );
+  for (const file of composeFiles) {
+    const text = readFileSync(file, 'utf8');
+    const argsBlock = text.match(/build:[\s\S]*?args:([\s\S]*?)(?=\n {4}\w|\n {2}\w|$)/g) ?? [];
+    for (const block of argsBlock) {
+      for (const m of block.matchAll(/^\s+(NEXT_PUBLIC_[A-Z0-9_]+):/gm)) {
+        const name = m[1];
+        if (!declaredArgs.has(name)) {
+          missing.push(`${file} passes ${name} as a build arg, but the Dockerfile declares no matching ARG`);
+        } else if (!new RegExp(`${name}=\\$${name}`).test(dockerfile)) {
+          missing.push(`${file} passes ${name}, and the Dockerfile declares the ARG, but never forwards it on a RUN line`);
+        }
+      }
+    }
+  }
+  if (missing.length > 0) problems.push(...missing);
 }
 
 if (problems.length > 0) {

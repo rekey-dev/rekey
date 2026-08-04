@@ -280,11 +280,40 @@ function renderAuthorizePage(opts: {
   actionUrl: string;
   appName: string;
   clientName: string;
+  /**
+   * The Application's own site, when the operator has set one. Used for the
+   * password-reset link — without it this screen is a dead end for anyone who
+   * has forgotten the password, which is the single most likely reason someone
+   * is stuck here.
+   */
+  appUrl?: string | null;
   params: AuthorizeParams;
   /** The scopes that WILL be granted — already filtered by `grantScopes`. */
   grantedScopes: string[];
   error?: string;
   mfa?: boolean;
+  /**
+   * What was typed into the email field on a failed attempt, echoed back.
+   *
+   * The refusal is deliberately identical whether the password was wrong or no
+   * such account exists — that is what stops this screen enumerating addresses.
+   * The cost is that someone whose browser autofilled the wrong one of their
+   * two addresses gets an error that cannot tell them so, retries, and sees the
+   * same thing forever. Re-displaying their OWN input discloses nothing they
+   * did not just type, and makes a substituted address visible immediately.
+   */
+  email?: string;
+  /**
+   * The Application's own branding, as configured on the Portal tab and already
+   * served publicly by `GET /portal/config/:slug`. Reused here so an
+   * Application's customers see that Application — its name, its mark, its
+   * colour — rather than a generic form on whatever host the API happens to
+   * run on.
+   *
+   * Read defensively: it is operator-authored JSON with no schema at rest, and
+   * a malformed value must degrade to the plain screen, never break sign-in.
+   */
+  branding?: { displayName?: string; logoUrl?: string; primaryColor?: string } | null;
 }): string {
   const hidden = (['response_type', 'client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'scope', 'state', 'nonce'] as const)
     .map((k) => {
@@ -297,22 +326,91 @@ function renderAuthorizePage(opts: {
   const grants = opts.grantedScopes
     .map((s) => `<li>${esc(SCOPE_DESCRIPTIONS[s] ?? s)}</li>`)
     .join('');
+  // `logoUrl` is operator-authored and ends up in an <img src>. Only http(s)
+  // survives — a `javascript:` or `data:` URL here would be script execution on
+  // the sign-in page, which is the worst place in the product for it.
+  const logo = (() => {
+    const raw = opts.branding?.logoUrl;
+    if (!raw) return '';
+    try {
+      const u = new URL(raw);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+      return `<img class="logo" src="${esc(u.href)}" alt="">`;
+    } catch {
+      return '';
+    }
+  })();
+  // Same reasoning for the colour: it lands inside a stylesheet, so anything
+  // that is not a plain hex value is dropped rather than interpolated.
+  const accent = /^#[0-9a-fA-F]{3,8}$/.test(opts.branding?.primaryColor ?? '')
+    ? opts.branding!.primaryColor!
+    : '#0d9488';
+  const shown = opts.branding?.displayName?.trim() || opts.appName;
+  const reset = opts.appUrl
+    ? `<p class="muted"><a href="${esc(opts.appUrl.replace(/\/+$/, ''))}/forgot-password">Forgot your password?</a></p>`
+    : '';
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in — ${esc(opts.appName)}</title>
-<style>body{font-family:system-ui,sans-serif;max-width:24rem;margin:3rem auto;padding:0 1rem}label{display:block;margin:.75rem 0 .25rem;font-size:.875rem}input[type=email],input[type=password],input[type=text]{width:100%;padding:.5rem;border:1px solid #ccc;border-radius:.375rem;box-sizing:border-box}button{margin-top:1rem;padding:.5rem 1rem;border-radius:.375rem;border:0;cursor:pointer}.allow{background:#0b8;color:#fff}.deny{background:#eee}.err{color:#c00;font-size:.875rem;margin:.5rem 0}.muted{color:#666;font-size:.8125rem}ul.scopes{color:#666;font-size:.8125rem;margin:.5rem 0;padding-left:1.25rem}</style>
+<title>Sign in to ${esc(shown)}</title>
+<style>
+:root{color-scheme:light dark}
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1.5rem;background:#fafaf9;color:#1c1917}
+@media(prefers-color-scheme:dark){body{background:#0c0a09;color:#fafaf9}}
+.card{width:100%;max-width:24rem;background:#fff;border:1px solid #e7e5e4;border-radius:.75rem;padding:1.75rem}
+@media(prefers-color-scheme:dark){.card{background:#1c1917;border-color:#292524}}
+h1{font-size:1.125rem;line-height:1.4;margin:0 0 .25rem}
+.logo{max-height:2rem;max-width:9rem;display:block;margin:0 0 1rem}
+.who{font-size:.8125rem;color:#78716c;margin:0 0 1.25rem}
+.grants{margin:0 0 1.25rem;padding:.75rem .875rem;border-radius:.5rem;background:#f5f5f4;font-size:.8125rem;color:#57534e}
+@media(prefers-color-scheme:dark){.grants{background:#292524;color:#a8a29e}.who{color:#a8a29e}}
+.grants p{margin:0 0 .375rem;font-weight:500}
+.grants ul{margin:0;padding-left:1.125rem}
+.grants li{margin:.125rem 0}
+label{display:block;margin:.875rem 0 .3125rem;font-size:.8125rem;font-weight:500}
+input{width:100%;padding:.5rem .625rem;border:1px solid #d6d3d1;border-radius:.375rem;font-size:.9375rem;background:transparent;color:inherit}
+@media(prefers-color-scheme:dark){input{border-color:#44403c}}
+input:focus{outline:2px solid ${accent};outline-offset:-1px;border-color:transparent}
+.row{display:flex;gap:.5rem;margin-top:1.25rem}
+button{flex:1;padding:.5625rem 1rem;border-radius:.375rem;border:0;cursor:pointer;font-size:.875rem;font-weight:500}
+.allow{background:${accent};color:#fff}
+.allow:hover{filter:brightness(.92)}
+.deny{background:transparent;border:1px solid #d6d3d1;color:inherit}
+@media(prefers-color-scheme:dark){.deny{border-color:#44403c}}
+.err{margin:.75rem 0 0;padding:.5rem .625rem;border-radius:.375rem;background:#fef2f2;color:#b91c1c;font-size:.8125rem}
+@media(prefers-color-scheme:dark){.err{background:#450a0a;color:#fca5a5}}
+.muted{font-size:.75rem;color:#78716c;margin:1rem 0 0;text-align:center}
+@media(prefers-color-scheme:dark){.muted{color:#a8a29e}}
+.muted a{color:inherit}
+</style>
 </head><body>
-  <h2>${esc(opts.clientName)} wants to access your ${esc(opts.appName)} account</h2>
-  <p class="muted">Sign in to grant:</p>
-  <ul class="scopes">${grants}</ul>
-  ${opts.error ? `<p class="err">${esc(opts.error)}</p>` : ''}
-  <form method="post" action="${esc(opts.actionUrl)}">
+  <main class="card">
+    ${logo}
+    <h1>Sign in to ${esc(shown)}</h1>
+    <!-- Naming the client AND the account is the whole job of this line. The
+         previous wording ("X wants to access your Y account") left people
+         entering the wrong credentials, because on a deployment that runs its
+         own panel the reader assumes it means their operator login. It does
+         not: this is the end-user account for this Application. -->
+    <p class="who">${esc(opts.clientName)} is asking for access. Use your ${esc(shown)} account — the one you sign in to ${esc(shown)} with, not an administrator login.</p>
+    <div class="grants">
+      <p>It will be able to:</p>
+      <ul>${grants}</ul>
+    </div>
+    ${opts.error ? `<p class="err">${esc(opts.error)}</p>` : ''}
+    <form method="post" action="${esc(opts.actionUrl)}">
       ${hidden}
-    <label>Email</label><input type="email" name="email" required autocomplete="username">
-    <label>Password</label><input type="password" name="password" required autocomplete="current-password">
-    ${opts.mfa ? '<label>Authenticator code</label><input type="text" name="mfaCode" inputmode="numeric" autocomplete="one-time-code">' : ''}
-    <div><button class="allow" type="submit" name="consent" value="allow">Allow</button>
-    <button class="deny" type="submit" name="consent" value="deny">Deny</button></div>
-  </form>
+      <label for="email">Email</label>
+      <input id="email" type="email" name="email" required autocomplete="username" autofocus value="${esc(opts.email ?? '')}">
+      <label for="password">Password</label>
+      <input id="password" type="password" name="password" required autocomplete="current-password">
+      ${opts.mfa ? '<label for="mfaCode">Authenticator code</label><input id="mfaCode" type="text" name="mfaCode" inputmode="numeric" autocomplete="one-time-code">' : ''}
+      <div class="row">
+        <button class="allow" type="submit" name="consent" value="allow">Allow</button>
+        <button class="deny" type="submit" name="consent" value="deny">Deny</button>
+      </div>
+    </form>
+    ${reset}
+  </main>
 </body></html>`;
 }
 
@@ -570,6 +668,10 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         renderAuthorizePage({
           actionUrl: `/api/v1/mcp/${slug}/oauth/authorize`,
           appName: application.name,
+          appUrl: (application.authConfig as { appUrl?: string } | null)?.appUrl ?? null,
+          branding: (application.portalBranding ?? null) as
+            | { displayName?: string; logoUrl?: string; primaryColor?: string }
+            | null,
           clientName: client.clientName ?? 'An application',
           params: q.data,
           grantedScopes: granted.split(' '),
@@ -644,6 +746,9 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       if (granted === '') return redirectWith({ error: 'invalid_scope' });
       if (body.consent !== 'allow') return redirectWith({ error: 'access_denied' });
 
+      const email = typeof body.email === 'string' ? body.email : '';
+      const password = typeof body.password === 'string' ? body.password : '';
+      const mfaCode = typeof body.mfaCode === 'string' ? body.mfaCode : '';
       const renderErr = (error: string, mfa = false): unknown =>
         reply.type('text/html').code(200).send(
           renderAuthorizePage({
@@ -654,12 +759,10 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
             grantedScopes: granted.split(' '),
             error,
             mfa,
+            email,
           }),
         );
 
-      const email = typeof body.email === 'string' ? body.email : '';
-      const password = typeof body.password === 'string' ? body.password : '';
-      const mfaCode = typeof body.mfaCode === 'string' ? body.mfaCode : '';
       let endUserId: string;
       try {
         const ua = req.headers['user-agent'];

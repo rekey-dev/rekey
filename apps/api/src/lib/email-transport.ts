@@ -293,15 +293,51 @@ function classifySmtpError(e: unknown): string {
   return 'SMTP send failed.';
 }
 
+/**
+ * The display name an Application's mail goes out under when it is riding the
+ * shared pool rather than its own credentials.
+ *
+ * The address belongs to the deployment, so the name has to disclose that: mail
+ * about "Acme" arriving from `noreply@rekey.dev` under the bare name "Rekey"
+ * tells the recipient nothing about who it concerns, and under the bare name
+ * "Acme" it claims a sending identity Acme does not have. `Acme (via Rekey)` is
+ * the convention Google Groups and GitHub use for the same situation, and it is
+ * the honest reading of what actually happened.
+ *
+ * An operator who sets their own `fromName` gets it verbatim — this is only the
+ * default. An Application with BYO credentials never reaches here at all: that
+ * mail leaves their own domain, so there is nothing to disclose.
+ *
+ * The suffix is the deployment's own name, never a hardcoded "Rekey" — a
+ * self-hoster's shared pool is theirs, not ours.
+ */
+export function pooledFromName(
+  application: Application,
+  /** Injectable so the rule is testable without a deployment-wide env var. */
+  deploymentName: string | undefined = env.RESEND_DEFAULT_FROM_NAME,
+): string | undefined {
+  const configured = emailConfig(application).fromName;
+  if (configured) return configured;
+  const appName = application.name?.trim();
+  if (!appName) return deploymentName;
+  const deployment = deploymentName?.trim();
+  // Nothing to disclose if the Application IS the deployment brand.
+  if (!deployment || deployment.toLowerCase() === appName.toLowerCase()) return appName;
+  return `${appName} (via ${deployment})`;
+}
+
 /** Send via the Rekey-managed default Resend pool. */
-async function sendDefaultResend(input: SendInput): Promise<SendOutcome> {
+async function sendDefaultResend(
+  input: SendInput,
+  fromName: string | undefined = env.RESEND_DEFAULT_FROM_NAME,
+): Promise<SendOutcome> {
   if (!env.RESEND_DEFAULT_API_KEY || !env.RESEND_DEFAULT_FROM) {
     return { kind: 'no_transport' };
   }
   try {
     const client = new Resend(env.RESEND_DEFAULT_API_KEY);
     const res = await client.emails.send({
-      from: fromHeader(env.RESEND_DEFAULT_FROM, env.RESEND_DEFAULT_FROM_NAME),
+      from: fromHeader(env.RESEND_DEFAULT_FROM, fromName),
       to: input.to,
       subject: input.subject,
       html: input.html,
@@ -416,7 +452,9 @@ export async function sendEmail(
       });
     }
   } else {
-    outcome = await sendDefaultResend(input);
+    // Shared pool: the recipient is told which Application this is about, and
+    // that it left the deployment's domain rather than that Application's.
+    outcome = await sendDefaultResend(input, pooledFromName(application));
   }
 
   await recordLog({

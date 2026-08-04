@@ -4465,6 +4465,140 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     },
   );
 
+  // ---------- Registered OAuth clients (RFC 7591 inbound) ----------
+  //
+  // The OTHER direction from `/oauth` on this Application. That surface is
+  // outbound — which external providers this Application's users may sign in
+  // WITH. These are inbound: clients registered against this Application, which
+  // is acting as their authorization server.
+  //
+  // Registration is unauthenticated by design (RFC 7591, gated per Application
+  // by `authConfig.dynamicClientRegistration`), so until now an operator could
+  // neither see what had registered nor remove it. Open registration you cannot
+  // audit is not a considered trade-off, it is an oversight.
+
+  app.get(
+    '/:id/oauth-clients',
+    {
+      schema: {
+        tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
+        summary: 'List OAuth clients registered against this Application',
+        description:
+          'Clients that registered with this Application as their authorization server ' +
+          '(RFC 7591 dynamic registration, or the MCP connector flow). Requires **read** ' +
+          'access to the Application.\n\n' +
+          'No secrets are returned because none exist: registration issues PUBLIC clients ' +
+          'that authenticate with PKCE, so the `client_id` is not confidential.',
+        params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+        querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          // Paged, not a bare array: registrations accumulate — every MCP
+          // client that ever connected leaves one — so a caller needs `total`
+          // to know it is not looking at a truncated list.
+          200: okPage(
+            {
+              type: 'object',
+              properties: {
+                clientId: { type: 'string' },
+                clientName: { type: 'string', nullable: true },
+                redirectUris: { type: 'array', items: { type: 'string' } },
+                createdAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['clientId', 'clientName', 'redirectUris', 'createdAt'],
+            },
+            'A page of registered clients, newest first.',
+          ),
+          ...errs({
+            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            ...APP_READ_ERRORS,
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'read');
+      const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
+      const [rows, total] = await Promise.all([
+        prisma.oAuthClient.findMany({
+          where: { applicationId: id },
+          orderBy: { createdAt: 'desc' },
+          take,
+          skip,
+          select: { id: true, clientName: true, redirectUris: true, createdAt: true },
+        }),
+        prisma.oAuthClient.count({ where: { applicationId: id } }),
+      ]);
+      return {
+        success: true,
+        data: paged(
+          rows.map((r) => ({
+            clientId: r.id,
+            clientName: r.clientName,
+            redirectUris: r.redirectUris,
+            createdAt: r.createdAt,
+          })),
+          total,
+          take,
+          skip,
+        ),
+      };
+    },
+  );
+
+  app.delete(
+    '/:id/oauth-clients/:clientId',
+    {
+      schema: {
+        tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
+        summary: 'Revoke a registered OAuth client',
+        description:
+          'Deletes the client registration. Authorization codes and tokens already issued to ' +
+          'it stop being redeemable, because both are resolved through the client row. ' +
+          'Requires **write** access to the Application.\n\n' +
+          'Scoped by `applicationId` as well as by client id: a client id belonging to ' +
+          'another Application answers 404 rather than deleting across the tenancy boundary.',
+        params: {
+          type: 'object',
+          required: ['id', 'clientId'],
+          properties: { id: { type: 'string' }, clientId: { type: 'string' } },
+        },
+        response: {
+          200: ok(
+            { type: 'object', properties: { revoked: { type: 'boolean' } }, required: ['revoked'] },
+            'The client registration is gone.',
+          ),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            404: 'OAUTH_CLIENT_NOT_FOUND — no such client on this Application.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      const clientId = String((req.params as { clientId?: string }).clientId ?? '');
+      await ensureAppAccess(req, id, 'write');
+      // deleteMany, not delete: it takes the applicationId in the same
+      // statement, so a client id from another Application cannot be removed
+      // by guessing it. A count of 0 is the 404.
+      const { count } = await prisma.oAuthClient.deleteMany({
+        where: { id: clientId, applicationId: id },
+      });
+      if (count === 0) {
+        throw new RekeyError({
+          statusCode: 404,
+          code: 'OAUTH_CLIENT_NOT_FOUND',
+          message: 'No such OAuth client on this Application.',
+          fix: 'List the registered clients to get a current client id.',
+        });
+      }
+      return { success: true, data: { revoked: true } };
+    },
+  );
+
   // ---------- Network access controls (IP allowlist + per-app CORS) ----------
 
   // `.strict()`: both fields are optional and replace-in-full, so `{ipAllowlst:

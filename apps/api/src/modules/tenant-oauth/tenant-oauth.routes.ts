@@ -81,6 +81,10 @@ const ProviderParam = z.object({ provider: z.string().min(1).max(40) });
 const StartBody = z.object({ state: z.string().min(1).max(512) });
 const CallbackBody = z.object({
   code: z.string().min(1).max(4096),
+  // The state this flow started with. The panel has already checked it against
+  // its own one-shot cookie; here it is the key the PKCE verifier was stored
+  // under. Optional so a caller that never started a PKCE flow still works.
+  state: z.string().min(1).max(512).optional(),
   // Single-use invite key — only consulted when this OAuth login would create
   // a NEW operator under OPERATOR_SIGNUP_MODE='invite'.
   inviteKey: z.string().min(1).max(512).optional(),
@@ -191,10 +195,11 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
     },
     async (req) => {
       const { provider } = ProviderParam.parse(req.params);
-      const { code, inviteKey } = CallbackBody.parse(req.body);
+      const { code, state, inviteKey } = CallbackBody.parse(req.body);
       const result = await tenantOAuthService.handleCallback({
         provider,
         code,
+        ...(state !== undefined && { state }),
         ...(inviteKey !== undefined && { inviteKey }),
         device: deviceContext(req as { headers: Record<string, unknown>; ip: string }),
       });

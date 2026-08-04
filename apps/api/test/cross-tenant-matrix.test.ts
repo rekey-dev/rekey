@@ -60,6 +60,16 @@ const PROBES: Probe[] = [
   { subResource: '', method: 'GET', suffix: '' },
   { subResource: 'access', method: 'GET', suffix: '/access' },
   { subResource: 'api-keys', method: 'GET', suffix: '/api-keys' },
+  // Clients registered against the Application as their authorization server.
+  // The DELETE matters more than the GET here: a client id is a public value,
+  // so revoke-by-id must be scoped by applicationId or anyone who has seen one
+  // can remove it from someone else's Application.
+  { subResource: 'oauth-clients', method: 'GET', suffix: '/oauth-clients' },
+  {
+    subResource: 'oauth-clients',
+    method: 'DELETE',
+    suffix: '/oauth-clients/some-client-id',
+  },
   { subResource: 'auth-config', method: 'PATCH', suffix: '/auth-config', payload: {} },
   { subResource: 'billing-config', method: 'PATCH', suffix: '/billing-config', payload: {} },
   // The encrypted Stripe/PayPal/Razorpay keys. Worst possible omission.

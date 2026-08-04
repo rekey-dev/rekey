@@ -82,7 +82,10 @@ export async function GET(
   try {
     result = await publicPost<CallbackResult>(
       `/api/v1/tenant/auth/oauth/${encodeURIComponent(provider)}/callback`,
-      { code },
+      // `state` goes with the code: it has already served its CSRF purpose
+      // above, and the API uses it to retrieve the PKCE verifier it stored when
+      // this flow started. The verifier itself never touches the browser.
+      { code, state },
     );
   } catch (err) {
     if (err instanceof PanelApiError) return fail(err.code);

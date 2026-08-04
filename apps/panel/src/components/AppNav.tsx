@@ -104,7 +104,13 @@ export function AppNav({
       label: 'Authentication',
       children: [
         { seg: 'auth', label: 'Methods' },
-        { seg: 'oauth', label: 'OAuth' },
+        // Two directions, and the labels are the only thing that keeps them
+        // apart: "Sign-in providers" is outbound (who your users may sign in
+        // WITH); "OAuth clients" is inbound (apps that sign users in USING this
+        // Application). Naming both of them "OAuth" is what made an operator
+        // paste a client id into the provider form.
+        { seg: 'oauth', label: 'Sign-in providers' },
+        { seg: 'oauth-clients', label: 'OAuth clients' },
         { seg: 'mcp', label: 'MCP' },
       ],
     },

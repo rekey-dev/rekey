@@ -35,13 +35,25 @@ export interface BuildAuthUrlInput {
   state: string;
   /** Optional scope override. Falls back to provider default. */
   scopes?: string[];
+  /**
+   * PKCE verifier (RFC 7636). The provider derives the `code_challenge` from
+   * it and only sends one if the issuer advertises S256 — see `oidc.ts`. The
+   * CALLER owns this value and must present the same one at exchange, so it
+   * has to survive the redirect; storing it against `state` is what the
+   * operator OAuth service does.
+   */
+  codeVerifier?: string;
 }
 
 export interface ExchangeInput {
   config: OAuthProviderConfig;
   /** The `code` query param returned to our callback URL. */
   code: string;
-  /** Optional code verifier for PKCE flows (Google etc.). */
+  /**
+   * PKCE verifier — must be the same value whose challenge was sent on
+   * authorize. Was declared here long before anything sent one; `oidc.ts` now
+   * does, when the issuer advertises S256.
+   */
   codeVerifier?: string;
 }
 

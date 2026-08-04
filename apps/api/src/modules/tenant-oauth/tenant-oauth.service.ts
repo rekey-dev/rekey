@@ -22,6 +22,8 @@ import { panelBaseUrl } from '../../lib/panel-url.js';
 import { RekeyError } from '../../lib/error.js';
 import { verifyOperatorAssertionIdToken } from '../../lib/jwt.js';
 import { claimAssertionOnce } from '../../lib/assertion-replay.js';
+import { rememberVerifier, takeVerifier } from '../../lib/pkce-store.js';
+import { randomBytes } from 'node:crypto';
 import { getOAuthProvider, buildAuthUrl as buildAuthUrlVia } from '../oauth/providers/index.js';
 import type { OAuthProviderConfig } from '../oauth/providers/index.js';
 import { tenantAuthService, type TenantSignInOutcome, type TenantDeviceContext } from '../tenant-auth/tenant-auth.service.js';
@@ -42,7 +44,32 @@ function assertionConfig(): { issuer: string; audience: string } | null {
 }
 
 /** Providers we support for operator login. Subset of the registry. */
-const OPERATOR_PROVIDERS = ['google', 'github'] as const;
+/**
+ * `rekey` is this deployment signing operators in against one of its OWN
+ * Applications — the arrangement Rekey Cloud uses, where buyers already have an
+ * account on the marketing site and should not need a second password to reach
+ * the panel. It has no bespoke implementation: it is the generic `oidc`
+ * provider pointed at that Application's issuer, which is a compliant OIDC
+ * provider like any other.
+ *
+ * It grants no authority of its own. A first-time sign-in still lands in the
+ * new-operator branch of `findOrCreateOAuthOperator` and still answers to
+ * `OPERATOR_SIGNUP_MODE`, so on an invite-only deployment somebody who merely
+ * has an account on the issuer is refused. Someone who paid already has an
+ * operator (provisioning created it), so they take the existing-operator branch
+ * — including after their subscription lapses, which is deliberate: they need
+ * to get in to fix the payment, and their entitlements fall to the free ceiling
+ * on their own.
+ */
+const OPERATOR_PROVIDERS = ['google', 'github', 'rekey'] as const;
+
+/**
+ * Which registered implementation drives a provider. Only `rekey` differs from
+ * its own name — see above.
+ */
+function implNameFor(provider: OperatorProvider): string {
+  return provider === 'rekey' ? 'oidc' : provider;
+}
 type OperatorProvider = (typeof OPERATOR_PROVIDERS)[number];
 
 function isOperatorProvider(name: string): name is OperatorProvider {
@@ -54,9 +81,22 @@ function providerCreds(provider: OperatorProvider): { clientId: string; clientSe
   const map: Record<OperatorProvider, { id: string | undefined; secret: string | undefined }> = {
     google: { id: env.PANEL_OAUTH_GOOGLE_CLIENT_ID, secret: env.PANEL_OAUTH_GOOGLE_CLIENT_SECRET },
     github: { id: env.PANEL_OAUTH_GITHUB_CLIENT_ID, secret: env.PANEL_OAUTH_GITHUB_CLIENT_SECRET },
+    rekey: { id: env.PANEL_OAUTH_REKEY_CLIENT_ID, secret: env.PANEL_OAUTH_REKEY_CLIENT_SECRET },
   };
   const e = map[provider];
-  return e.id && e.secret ? { clientId: e.id, clientSecret: e.secret } : null;
+  if (!e.id) return null;
+  if (provider === 'rekey') {
+    // Without an issuer it is not half-configured, it is unusable.
+    if (!env.PANEL_OAUTH_REKEY_ISSUER) return null;
+    // The secret is OPTIONAL here and required for the others. An Application
+    // acting as an identity provider issues PUBLIC clients — PKCE, no secret,
+    // `token_endpoint_auth_methods_supported: ["none"]` — so requiring one
+    // would mean asking the operator to invent a value nothing checks. The
+    // provider omits it at the token endpoint when the issuer says `none`.
+    return { clientId: e.id, clientSecret: e.secret ?? '' };
+  }
+  if (!e.secret) return null;
+  return { clientId: e.id, clientSecret: e.secret };
 }
 
 /** Where the provider redirects after consent — the panel callback route. */
@@ -83,7 +123,21 @@ function configFor(provider: OperatorProvider): OAuthProviderConfig {
       fix: `Set PANEL_OAUTH_${provider.toUpperCase()}_CLIENT_ID and _CLIENT_SECRET.`,
     });
   }
-  return { clientId: creds.clientId, clientSecret: creds.clientSecret, redirectUri: redirectUri(provider) };
+  return {
+    clientId: creds.clientId,
+    clientSecret: creds.clientSecret,
+    redirectUri: redirectUri(provider),
+    // Ignored by the static providers; required by `oidc`, which discovers the
+    // endpoints from `${issuerUrl}/.well-known/openid-configuration`.
+    //
+    // `providerCreds` already refuses to report `rekey` as configured without
+    // an issuer, so reaching here with one unset is impossible — but the
+    // compiler cannot see that across the two functions, and narrowing it here
+    // is better than asserting it away.
+    ...(provider === 'rekey' && env.PANEL_OAUTH_REKEY_ISSUER
+      ? { issuerUrl: env.PANEL_OAUTH_REKEY_ISSUER }
+      : {}),
+  };
 }
 
 function requireProvider(name: string): OperatorProvider {
@@ -108,7 +162,7 @@ export const tenantOAuthService = {
   /** Build the provider authorization URL. `state` is the panel's CSRF token. */
   async buildAuthUrl(args: { provider: string; state: string }): Promise<{ authorizationUrl: string }> {
     const provider = requireProvider(args.provider);
-    const impl = getOAuthProvider(provider);
+    const impl = getOAuthProvider(implNameFor(provider));
     if (!impl) {
       throw new RekeyError({
         statusCode: 404,
@@ -117,7 +171,17 @@ export const tenantOAuthService = {
         fix: `Use one of: ${OPERATOR_PROVIDERS.join(', ')}.`,
       });
     }
-    const authorizationUrl = await buildAuthUrlVia(impl, { config: configFor(provider), state: args.state });
+    // Minted for every provider, used only by those whose issuer advertises
+    // S256 — the provider decides from its discovery document. Generating it
+    // unconditionally keeps this layer from having to know which providers
+    // speak PKCE, and an unused verifier costs one Redis key that expires.
+    const codeVerifier = randomBytes(32).toString('base64url');
+    const authorizationUrl = await buildAuthUrlVia(impl, {
+      config: configFor(provider),
+      state: args.state,
+      codeVerifier,
+    });
+    await rememberVerifier(args.state, codeVerifier);
     return { authorizationUrl };
   },
 
@@ -133,10 +197,16 @@ export const tenantOAuthService = {
     code: string;
     /** Single-use invite key — only used if this login creates a new operator. */
     inviteKey?: string;
+    /**
+     * The CSRF state this flow started with. Also the key the PKCE verifier was
+     * stored under, which is why the callback needs it — the panel has already
+     * verified it against its own cookie by the time we see it.
+     */
+    state?: string;
     device?: TenantDeviceContext;
   }): Promise<TenantSignInOutcome> {
     const provider = requireProvider(args.provider);
-    const impl = getOAuthProvider(provider);
+    const impl = getOAuthProvider(implNameFor(provider));
     if (!impl) {
       throw new RekeyError({
         statusCode: 404,
@@ -145,7 +215,16 @@ export const tenantOAuthService = {
         fix: `Use one of: ${OPERATOR_PROVIDERS.join(', ')}.`,
       });
     }
-    const identity = await impl.exchange({ config: configFor(provider), code: args.code });
+    // Absent for a flow that never stored one (a provider without PKCE), and
+    // absent for a replayed or expired callback. The provider tells those apart
+    // — it only sends `code_verifier` when the issuer wants one, so a missing
+    // verifier fails the exchange exactly where it should.
+    const codeVerifier = args.state ? await takeVerifier(args.state) : null;
+    const identity = await impl.exchange({
+      config: configFor(provider),
+      code: args.code,
+      ...(codeVerifier ? { codeVerifier } : {}),
+    });
     if (!identity.email) {
       throw new RekeyError({
         statusCode: 400,

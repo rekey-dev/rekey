@@ -207,6 +207,12 @@ services:
       PANEL_OAUTH_GOOGLE_CLIENT_SECRET: ${PANEL_OAUTH_GOOGLE_CLIENT_SECRET:-}
       PANEL_OAUTH_GITHUB_CLIENT_ID: ${PANEL_OAUTH_GITHUB_CLIENT_ID:-}
       PANEL_OAUTH_GITHUB_CLIENT_SECRET: ${PANEL_OAUTH_GITHUB_CLIENT_SECRET:-}
+      # "Sign in with <this deployment>" — operator sign-in against one of this
+      # deployment's own Applications, via the generic OIDC provider. All three
+      # are needed together; the issuer is `https://<api>/api/v1/mcp/<slug>`.
+      PANEL_OAUTH_REKEY_CLIENT_ID: ${PANEL_OAUTH_REKEY_CLIENT_ID:-}
+      PANEL_OAUTH_REKEY_CLIENT_SECRET: ${PANEL_OAUTH_REKEY_CLIENT_SECRET:-}
+      PANEL_OAUTH_REKEY_ISSUER: ${PANEL_OAUTH_REKEY_ISSUER:-}
 
       # ── Feature switches + limits ────────────────────────────────────────
       # Operator/tenant MCP HTTP surface. Empty = enabled; only the literal

@@ -10,8 +10,10 @@
  * endpoint rotations are picked up within a day (or immediately on restart).
  */
 
+import { createHash } from 'node:crypto';
 import { decodeJwtPayload, emailFromClaims, fetchJsonWithTimeout } from './_oauth2-base.js';
 import { assertSafeUrl } from '../../../lib/ssrf-guard.js';
+import { RekeyError } from '../../../lib/error.js';
 import type {
   BuildAuthUrlInput,
   ExchangeInput,
@@ -24,6 +26,46 @@ interface DiscoveryDoc {
   token_endpoint: string;
   userinfo_endpoint?: string;
   issuer: string;
+  /**
+   * RFC 8414. When the issuer advertises S256 we send PKCE; when it says
+   * nothing we do not. Reading the answer off discovery rather than making it
+   * a config flag means an issuer that REQUIRES PKCE — OAuth 2.1 mandates it,
+   * and Rekey's own Applications enforce it — works without anyone knowing to
+   * tick a box, and one that has never heard of it is unaffected.
+   */
+  code_challenge_methods_supported?: string[];
+  /**
+   * `['none']` means the issuer authenticates public clients by PKCE alone and
+   * has no notion of a client secret. Sending one anyway is at best ignored and
+   * at worst a 401 — and demanding the operator invent one is worse than both.
+   */
+  token_endpoint_auth_methods_supported?: string[];
+}
+
+/**
+ * RFC 7636 §4.2: BASE64URL(SHA256(ASCII(verifier))), unpadded. The verifier
+ * itself never leaves this server until the exchange, so an attacker who
+ * intercepts the redirect holds a code they cannot spend.
+ */
+function challengeFor(verifier: string): string {
+  return createHash('sha256').update(verifier, 'ascii').digest('base64url');
+}
+
+/** Does this issuer accept — and therefore expect — PKCE with S256? */
+function wantsPkce(doc: DiscoveryDoc): boolean {
+  return (doc.code_challenge_methods_supported ?? []).includes('S256');
+}
+
+/**
+ * A confidential client sends its secret; a public one has none to send.
+ * Decided by the issuer's advertised auth methods, falling back to "send it if
+ * we have one", which is how every pre-existing configuration behaved.
+ */
+function sendsClientSecret(doc: DiscoveryDoc, secret: string | undefined): boolean {
+  if (!secret) return false;
+  const methods = doc.token_endpoint_auth_methods_supported;
+  if (!methods || methods.length === 0) return true;
+  return methods.some((m) => m !== 'none');
 }
 
 const DEFAULT_SCOPES = ['openid', 'email', 'profile'];
@@ -106,6 +148,14 @@ export class OidcProvider implements OAuthProvider {
       scope: (input.scopes ?? DEFAULT_SCOPES).join(' '),
       state: input.state,
     });
+    // Only when the issuer says it understands S256. An issuer that requires
+    // PKCE rejects an authorize request without a challenge outright, and one
+    // that has never heard of it must not receive parameters it did not ask
+    // for — so the discovery document decides, not a config flag.
+    if (input.codeVerifier && wantsPkce(doc)) {
+      params.set('code_challenge', challengeFor(input.codeVerifier));
+      params.set('code_challenge_method', 'S256');
+    }
     return `${doc.authorization_endpoint}?${params.toString()}`;
   }
 
@@ -119,9 +169,17 @@ export class OidcProvider implements OAuthProvider {
       grant_type: 'authorization_code',
       code: input.code,
       client_id: input.config.clientId,
-      client_secret: input.config.clientSecret,
       redirect_uri: input.config.redirectUri,
     });
+    // A public client has no secret and the issuer has no field for one.
+    if (sendsClientSecret(doc, input.config.clientSecret)) {
+      tokenBody.set('client_secret', input.config.clientSecret);
+    }
+    // Proves this exchange belongs to the browser that started the flow. For a
+    // public client it IS the client authentication.
+    if (input.codeVerifier && wantsPkce(doc)) {
+      tokenBody.set('code_verifier', input.codeVerifier);
+    }
     // Discovered endpoints are attacker-influenceable too (a malicious
     // discovery doc can point them anywhere) — validate before fetching.
     await assertSafeUrl(doc.token_endpoint);
@@ -132,7 +190,30 @@ export class OidcProvider implements OAuthProvider {
       redirect: 'error',
     });
     if (!tokenRes.ok) {
-      throw new Error(`OIDC token exchange failed (${input.config.issuerUrl}): HTTP ${tokenRes.status}`);
+      // The authorization server says why in the body (RFC 6749 §5.2:
+      // `invalid_grant`, `invalid_client`, …). Throwing a bare Error discarded
+      // it and surfaced every failure as an opaque 500, which is useless to the
+      // person stuck in the flow AND to the operator reading logs — the two
+      // audiences who need it most.
+      //
+      // The upstream `error` code is safe to pass on: it is a fixed OAuth
+      // vocabulary describing OUR request, not the user's data, and it is what
+      // distinguishes "that code was already used" from "this client is
+      // misconfigured". `error_description` is NOT forwarded — it is free text
+      // from an operator-configured issuer.
+      const body = (tokenRes.data ?? {}) as { error?: unknown; error_description?: unknown };
+      const upstream = typeof body.error === 'string' ? body.error : null;
+      throw new RekeyError({
+        statusCode: 502,
+        code: 'OAUTH_TOKEN_EXCHANGE_FAILED',
+        message: upstream
+          ? `The identity provider refused the token exchange (${upstream}).`
+          : `The identity provider refused the token exchange (HTTP ${tokenRes.status}).`,
+        fix:
+          upstream === 'invalid_grant'
+            ? 'The authorization code was already used, expired, or was issued for a different client or redirect URI. Start the sign-in again.'
+            : 'Check the client id, redirect URI and issuer configured for this provider against what the identity provider expects.',
+      });
     }
     const tokenData = (tokenRes.data ?? {}) as { id_token?: string; access_token?: string };
 

@@ -40,6 +40,10 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
   const sendVerificationEmailOnSignUp = formData.get('sendVerificationEmailOnSignUp') === 'on';
   const requireEmailVerification = formData.get('requireEmailVerification') === 'on';
   const oidcEnabled = formData.get('oidcEnabled') === 'on';
+  // Only ever HS256 or RS256 — anything else is a crafted form post, and the
+  // API would reject it anyway. Falling back to HS256 keeps the default.
+  const rawAlg = String(formData.get('tokenAlg') ?? '');
+  const tokenAlg = rawAlg === 'RS256' ? 'RS256' : 'HS256';
   const redirectUrls = String(formData.get('redirectUrls') ?? '')
     .split('\n')
     .map((s) => s.trim())
@@ -63,6 +67,7 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
         sendVerificationEmailOnSignUp,
         requireEmailVerification,
         oidcEnabled,
+        tokenAlg,
         redirectUrls,
         appUrl,
       },
@@ -120,6 +125,10 @@ export default async function AuthMethodsPage({
   // Off by default, same as `requireEmailVerification` — an app saved before
   // the field existed must read back as OFF, never as "we're already an IdP".
   const oidcEnabled = app.authConfig.oidcEnabled === true;
+  // HS256 unless explicitly RS256 — matches the schema default, so an app
+  // saved before the field existed reads back what the API actually applies.
+  const tokenAlg =
+    (app.authConfig as { tokenAlg?: string }).tokenAlg === 'RS256' ? 'RS256' : 'HS256';
   const redirectUrls = app.authConfig.redirectUrls ?? [];
   const appUrl = (app.authConfig as { appUrl?: string }).appUrl ?? '';
   // What emails would actually link to today if the operator saves nothing:
@@ -342,9 +351,16 @@ export default async function AuthMethodsPage({
                   sign-in screen a &ldquo;send it again&rdquo; button on{' '}
                   <code className="text-xs">EMAIL_NOT_VERIFIED</code>, wired to{' '}
                   <code className="text-xs">POST /api/v1/auth/resend-verification</code> — it takes
-                  no session, which is the point. Magic-link
-                  and OAuth sign-in pass the gate rather than skip it: each proves the address and
-                  now records it.{' '}
+                  no session, which is the point. Magic-link sign-in passes the gate rather than
+                  skipping it — clicking the link proves the address, and it is recorded.{' '}
+                  <strong>OAuth does not verify an address by itself</strong>: the account is
+                  marked verified only when the provider asserts it (Google&apos;s{' '}
+                  <code className="text-xs">email_verified</code>, GitHub&apos;s verified-emails
+                  list, Discord&apos;s <code className="text-xs">verified</code>). A provider that
+                  asserts nothing — some generic OIDC servers, Microsoft consumer accounts — leaves
+                  the account unverified, and that user hits this gate like any other. Trusting the
+                  provider&apos;s claim and nothing more is deliberate: an address a provider will
+                  not vouch for is one anybody could have registered.{' '}
                   <strong>Required for the OpenID Connect `email` scope</strong> — while this is
                   off, an Application acting as an identity provider will not assert an address it
                   has no proof of, and omits <code className="text-xs">email</code> from its
@@ -370,16 +386,41 @@ export default async function AuthMethodsPage({
                   <code className="text-xs">openid</code> scope, and exposes{' '}
                   <code className="text-xs">/oauth/userinfo</code>. Relying parties self-register
                   themselves by default, so anyone who finds the issuer can put a password prompt
-                  on it — leave this off unless you actually want to be an identity provider, and
-                  see{' '}
-                  <code className="text-xs">docs/oidc-provider.md</code> for how to close
-                  registration once yours are set up. Independent of the MCP server switch on the
+                  on it — leave this off unless you actually want to be an identity provider.
+                  Once your relying parties are registered, close registration on the{' '}
+                  <strong>OAuth clients</strong> tab, where you can also see and revoke whatever
+                  has registered. Independent of the MCP server switch on the
                   MCP tab; either one mounts the shared OAuth endpoints. The{' '}
                   <code className="text-xs">email</code> claim additionally needs{' '}
                   <strong>Require a verified email</strong> above.
                 </>
               }
             />
+
+            <Field
+              label="End-user token signing"
+              hint={
+                <>
+                  <strong>HS256</strong> signs end-user access tokens with this deployment&apos;s
+                  shared secret — fine when only your own backend verifies them, because verifying
+                  requires the secret. <strong>RS256</strong> signs with a keypair and publishes the
+                  public half at <code className="text-xs">/.well-known/jwks.json</code>, so a third
+                  party can verify a token without being able to mint one. Required in practice for
+                  OpenID Connect: a relying party has no way to check an HS256 id_token without a
+                  credential that would also let it forge one. Changing this invalidates tokens
+                  signed with the old algorithm, so expect a round of sign-ins.
+                </>
+              }
+            >
+              <select
+                name="tokenAlg"
+                defaultValue={tokenAlg}
+                className="w-full max-w-xs rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+              >
+                <option value="HS256">HS256 — shared secret (default)</option>
+                <option value="RS256">RS256 — public keypair, third parties can verify</option>
+              </select>
+            </Field>
 
             <Field
               label="Minimum password length"

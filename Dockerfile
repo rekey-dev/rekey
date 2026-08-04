@@ -86,9 +86,14 @@ ARG NEXT_PUBLIC_GA_MEASUREMENT_ID=
 ARG NEXT_PUBLIC_PORTAL_URL=
 ARG NEXT_PUBLIC_CHATWOOT_TOKEN=
 ARG NEXT_PUBLIC_AHREFS_KEY=
+# Names the "Continue with …" button when this deployment signs operators in
+# against one of its own Applications. No default: a self-hoster's button must
+# not say "Rekey.dev", and the app falls back to a generic label when unset.
+ARG NEXT_PUBLIC_PANEL_OAUTH_REKEY_LABEL=
 RUN NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL \
     NEXT_PUBLIC_GA_MEASUREMENT_ID=$NEXT_PUBLIC_GA_MEASUREMENT_ID \
     NEXT_PUBLIC_PORTAL_URL=$NEXT_PUBLIC_PORTAL_URL \
+    NEXT_PUBLIC_PANEL_OAUTH_REKEY_LABEL=$NEXT_PUBLIC_PANEL_OAUTH_REKEY_LABEL \
     pnpm --filter @rekey.dev/panel build
 RUN pnpm --filter @rekey.dev/portal build
 

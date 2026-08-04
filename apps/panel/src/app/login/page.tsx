@@ -155,10 +155,34 @@ async function startOAuth(provider: string, next: string | null, _formData: Form
   redirect(authorizationUrl);
 }
 
+/**
+ * What the `rekey` provider is called on the button. A deployment signing its
+ * operators in against its own Application knows the brand; nothing else does,
+ * so this is configurable and falls back to something honest rather than
+ * guessing a name.
+ */
+const PANEL_OAUTH_REKEY_LABEL = process.env.NEXT_PUBLIC_PANEL_OAUTH_REKEY_LABEL || 'your account';
+
 const PROVIDER_LABELS: Record<string, string> = {
   google: 'Continue with Google',
   github: 'Continue with GitHub',
+  // Operator sign-in against one of this deployment's own Applications. The
+  // label names the site the operator already has an account on, which is the
+  // only thing that makes the button meaningful — "Continue with Rekey" on
+  // Rekey's own panel would say nothing.
+  rekey: `Continue with ${PANEL_OAUTH_REKEY_LABEL}`,
 };
+
+/**
+ * Make the password form secondary, behind a disclosure.
+ *
+ * For a deployment where nearly every operator arrives through the OIDC button,
+ * a password form sitting above it is the wrong default: it is the path almost
+ * nobody should take, occupying the position that says "take this path".
+ * Password sign-in is not removed — an operator who set one, or who needs it
+ * when the provider is down, still has it one click away.
+ */
+const PASSWORD_SECONDARY = process.env.PANEL_PASSWORD_LOGIN_SECONDARY === 'true';
 
 export const metadata: Metadata = { title: 'Sign in · Rekey' };
 
@@ -201,12 +225,23 @@ export default async function LoginPage({
   // Round-tripped through the form so accept-invite (etc.) can resume after
   // sign-in. The server action re-validates it before redirecting.
   const next = typeof params.next === 'string' ? params.next : undefined;
+  // `?password=1` is how the disclosure below reveals the form. The flag only
+  // decides the DEFAULT — a deployment can demote password sign-in without
+  // taking it away, which matters when the identity provider is the thing
+  // that is down.
+  const passwordRequested = params.password === '1';
 
   // Which social providers are enabled on this deployment (server env). Empty
   // (or unreachable API) → no social buttons, just password + passkey.
   const oauthProviders = await publicGet<{ providers: string[] }>('/api/v1/tenant/auth/oauth/providers')
     .then((d) => d.providers)
     .catch(() => [] as string[]);
+
+  // Demote the password form only when the flag is on, the reader has not asked
+  // for it, AND there is actually another way in. Hiding it with no provider
+  // configured would lock every operator out of their own panel.
+  const showPasswordSecondary =
+    PASSWORD_SECONDARY && !passwordRequested && oauthProviders.length > 0;
 
   const inputCls =
     'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
@@ -243,10 +278,25 @@ export default async function LoginPage({
                   </form>
                 ))}
             </div>
-            <OrDivider />
+            {!showPasswordSecondary && <OrDivider />}
           </>
         )}
 
+        {showPasswordSecondary && (
+          <p className="text-center text-sm text-[var(--color-text-muted)]">
+            {/* A plain link, not client state: this page is a server component
+                and the disclosure has to work with JS off — which is the whole
+                reason for keeping a password path at all. */}
+            <Link
+              href={`/login?password=1${next ? `&next=${encodeURIComponent(next)}` : ''}`}
+              className="underline"
+            >
+              Use a password instead
+            </Link>
+          </p>
+        )}
+
+        {!showPasswordSecondary && (
         <form action={signIn} className="space-y-5">
           {/* `hidden` attr keeps Tailwind's space-y sibling selector from
               shifting the first label's margin. */}
@@ -268,9 +318,10 @@ export default async function LoginPage({
             Sign in
           </SubmitButton>
         </form>
+        )}
 
         {/* Passwordless alternative — phishing-resistant, no second factor needed. */}
-        <OrDivider />
+        {!showPasswordSecondary && <OrDivider />}
         <PasskeyLoginButton start={startPasskeyLogin} complete={completePasskeyLogin} next={next} />
 
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-sm text-[var(--color-muted-fg)] pt-2 border-t border-[var(--color-border)]">
