@@ -405,10 +405,11 @@ export default async function AuthMethodsPage({
                   shared secret — fine when only your own backend verifies them, because verifying
                   requires the secret. <strong>RS256</strong> signs with a keypair and publishes the
                   public half at <code className="text-xs">/.well-known/jwks.json</code>, so a third
-                  party can verify a token without being able to mint one. Required in practice for
-                  OpenID Connect: a relying party has no way to check an HS256 id_token without a
-                  credential that would also let it forge one. Changing this invalidates tokens
-                  signed with the old algorithm, so expect a round of sign-ins.
+                  party can verify a token without being able to mint one. This governs the
+                  access tokens your own backend checks. It does not affect OpenID Connect:
+                  id_tokens are always RS256 and always verifiable from the published JWKS,
+                  because a relying party only ever sees that. Changing this invalidates access
+                  tokens signed with the old algorithm, so expect a round of sign-ins.
                 </>
               }
             >

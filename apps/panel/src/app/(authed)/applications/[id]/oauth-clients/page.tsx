@@ -115,7 +115,7 @@ export default async function OAuthClientsPage({
         title="OAuth clients"
         description={
           <>
-            Software that signs users in <strong>using</strong> this Application — MCP clients,
+            Software that signs users in <strong>using</strong> this Application: MCP clients,
             and any relying party that treats it as an OpenID Connect provider. This is the
             opposite of <strong>Sign-in providers</strong>, which is where you configure the
             providers your users sign in <em>with</em>.
@@ -133,7 +133,7 @@ export default async function OAuthClientsPage({
               {registrationOpen ? (
                 <>
                   Anyone can register a client with{' '}
-                  <code className="text-xs">POST /oauth/register</code> — no credential needed.
+                  <code className="text-xs">POST /oauth/register</code>, with no credential needed.
                   That is the RFC 7591 behaviour MCP clients rely on to connect themselves. Turn it
                   off once your relying parties are registered: on a public issuer it lets anyone
                   put a sign-in prompt on this Application&apos;s origin.

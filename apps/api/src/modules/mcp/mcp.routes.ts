@@ -435,7 +435,7 @@ button{flex:1;padding:.5625rem 1rem;border-radius:.375rem;border:0;cursor:pointe
          entering the wrong credentials, because on a deployment that runs its
          own panel the reader assumes it means their operator login. It does
          not: this is the end-user account for this Application. -->
-    <p class="who">${esc(opts.clientName)} is asking for access. Use your ${esc(shown)} account — the one you sign in to ${esc(shown)} with, not an administrator login.</p>
+    <p class="who">${esc(opts.clientName)} is asking for access. Sign in with your ${esc(shown)} account, the one you use for ${esc(shown)} itself. An administrator login will not work here.</p>
     <div class="grants">
       <p>It will be able to:</p>
       <ul>${grants}</ul>
