@@ -35,7 +35,7 @@ Pass it to `@rekey.dev/react`:
 ```ts
 // Browser, no backend:
 const out = await client.signIn({ email, password });   // → SignInOutcome
-const plans = await client.getPlans();                   // public catalogue
+const { items: plans } = await client.getPlans();         // public catalogue ({items, page})
 const lic = await client.verifyLicense({ key, machineFingerprint });
 ```
 
@@ -48,7 +48,7 @@ const lic = await client.verifyLicense({ key, machineFingerprint });
 | `licenses/verify` | `credits/*` (balance, consume, ledger) |
 | `billing/plans` + `billing/providers` (catalogue) | |
 | † account management: change-password, list/revoke passkeys + sessions, sign-out-everywhere | |
-| † self-service billing: entitlements, payments, checkout, subscription cancel | |
+| † self-service billing: entitlements, payments, checkout, `billing/coupons/validate`, subscription cancel | |
 | † org management (`users/me/organizations/*`) | |
 | ‡ passkey **enrollment** (`passkey/register/*`) | |
 

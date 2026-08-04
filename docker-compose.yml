@@ -9,6 +9,12 @@
 #   cp .env.example .env   (then edit secrets — JWT_SECRET, ENCRYPTION_KEY, …)
 #   docker compose --profile full up -d --build
 #
+# Every published port here binds to 127.0.0.1. This is the LOCAL stack; the
+# internet-facing one is docker-compose.prod.yml (Traefik, no published ports).
+# To expose this file anyway, set BIND_ADDRESS=0.0.0.0 — and set
+# OPERATOR_SIGNUP_MODE=invite at the same time, or the first stranger to find
+# the host can create an operator account.
+#
 # Database migrations run automatically on api boot (the api-runtime image runs
 # `prisma migrate deploy` before starting the server) — no manual step needed.
 
@@ -114,7 +120,18 @@ services:
       # Local hosted-portal origin — auto-allowed for publishable-key calls.
       PUBLIC_PORTAL_URL: ${PUBLIC_PORTAL_URL:-http://localhost:3050}
       # Who can create operator (admin) accounts: open | invite | closed.
-      # Default open for first-boot; switch to invite/closed on a private deploy.
+      #
+      # `open` is kept as the default because first-boot has to be able to
+      # create the first operator, and every documented first-boot path
+      # (README, docs/quickstart.md §3 "Prefer clicking?") is self-serve
+      # sign-up in the panel. It is only safe because the ports below are
+      # loopback-bound by default: `open` + a published 0.0.0.0 port meant the
+      # first stranger to portscan the host could claim an operator account on
+      # somebody else's deployment.
+      #
+      # If you set BIND_ADDRESS=0.0.0.0 to expose this stack, set this to
+      # `invite` (or `closed`) in the same edit. The API logs a warning at boot
+      # when it finds `open` with NODE_ENV=production.
       OPERATOR_SIGNUP_MODE: ${OPERATOR_SIGNUP_MODE:-open}
       # Starting ceilings for every workspace this deployment creates (JSON,
       # TenantLimitsSchema — e.g. {"maxProductionApps":1}). Empty = unlimited,
@@ -126,8 +143,29 @@ services:
       WORKSPACE_CREATION: ${WORKSPACE_CREATION:-open}
       # Operator MCP server (agent read + operate). On by default; false to disable.
       OPERATOR_MCP_ENABLED: ${OPERATOR_MCP_ENABLED:-true}
+      # RFC 7591 dynamic client registration on the OPERATOR MCP authorization
+      # server: open (default) | disabled. Open is what lets Claude Desktop /
+      # Claude Code / Cursor connect without you hand-registering a client, and
+      # is the documented flow. Set `disabled` once your clients are connected:
+      # an anonymous registration's only prize is an ALLOWLISTED redirect_uri,
+      # which is the one ingredient a consent-phishing link needs.
+      OPERATOR_MCP_DYNAMIC_REGISTRATION: ${OPERATOR_MCP_DYNAMIC_REGISTRATION:-open}
     ports:
-      - "3030:3030"
+      # Loopback by default, like postgres and redis above — but for a
+      # different reason. The datastores are loopback because nothing outside
+      # this compose network should ever reach them. The API genuinely does
+      # need to be reachable; what it should not do is become reachable by
+      # accident, on a file whose every documented URL is `localhost:<port>`
+      # and whose OPERATOR_SIGNUP_MODE default is `open`. Somebody bringing
+      # this stack up on a VPS to try it published an unauthenticated
+      # operator-signup endpoint on the internet without choosing to.
+      #
+      # The internet-facing path is docker-compose.prod.yml, which publishes no
+      # ports at all and routes through Traefik on hostnames you supply.
+      # If you nonetheless want THIS file exposed, say so:
+      #   BIND_ADDRESS=0.0.0.0 docker compose --profile full up -d
+      # and set OPERATOR_SIGNUP_MODE=invite in the same breath.
+      - "${BIND_ADDRESS:-127.0.0.1}:3030:3030"
     healthcheck:
       # Liveness, deliberately not /health/ready: restarting the API cannot fix
       # a Postgres or Redis outage, and a restart loop during one makes recovery
@@ -158,7 +196,8 @@ services:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3030}
       PANEL_URL:   ${PANEL_URL:-http://localhost:3031}
     ports:
-      - "3031:3031"
+      # Loopback by default — see the api service above.
+      - "${BIND_ADDRESS:-127.0.0.1}:3031:3031"
 
   # Hosted multi-app customer portal (Portal V2). ONE deployment serves every
   # opted-in Application at /<slug> — no per-app secret key. Enable an app's
@@ -180,7 +219,8 @@ services:
       REKEY_URL: http://api:3030
       PORTAL_BASE_URL: http://localhost:3050
     ports:
-      - "3050:3050"
+      # Loopback by default — see the api service above.
+      - "${BIND_ADDRESS:-127.0.0.1}:3050:3050"
 
 volumes:
   rekey_postgres:

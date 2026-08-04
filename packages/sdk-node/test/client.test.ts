@@ -185,7 +185,15 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
 
   it('billing.getPlans GETs /api/v1/billing/plans (no user JWT needed)', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(
-      jsonResponse(200, { success: true, data: [{ slug: 'pro_monthly', amount: 999 }] }),
+      jsonResponse(200, {
+        success: true,
+        // `{items, page}` — the list envelope. Every list method resolves to
+        // this; a bare array cannot report that it was truncated.
+        data: {
+          items: [{ slug: 'pro_monthly', amount: 999 }],
+          page: { total: 3, limit: 1, offset: 0, hasMore: true },
+        },
+      }),
     );
     const client = makeClient(fetchSpy);
     const plans = await client.billing.getPlans();
@@ -194,7 +202,10 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     expect(init.method).toBe('GET');
     // No X-Rekey-User-Token on the public plan list.
     expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBeUndefined();
-    expect(plans).toHaveLength(1);
+    expect(plans.items).toHaveLength(1);
+    // The whole point of the envelope: one row on the wire, three in the
+    // catalogue, and the caller is told rather than left to guess.
+    expect(plans.page).toEqual({ total: 3, limit: 1, offset: 0, hasMore: true });
   });
 
   it('billing.getSubscription passes the user JWT and returns null when none', async () => {

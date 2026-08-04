@@ -8,7 +8,8 @@
     "dev": "next dev -p 3031",
     "start": "next start -p 3031",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "echo \"(eslint not yet wired)\""
+    "lint": "echo \"(eslint not yet wired)\"",
+    "test": "vitest run"
   },
   "dependencies": {
     "@rekey.dev/shared-types": "workspace:*",
@@ -27,6 +28,7 @@
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
   }
 }

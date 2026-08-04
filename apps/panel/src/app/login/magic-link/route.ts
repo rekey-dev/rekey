@@ -10,6 +10,7 @@
 
 import { type NextRequest, NextResponse } from 'next/server';
 import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE } from '@/lib/api';
+import { cookieSecure } from '@/lib/cookie-secure';
 
 type VerifyResult =
   | { mfaRequired: true; mfaChallengeToken: string }
@@ -45,7 +46,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return seeOther(`/mfa-verify?challenge=${encodeURIComponent(result.mfaChallengeToken)}`);
   }
 
-  const secure = process.env.NODE_ENV === 'production';
+  const secure = await cookieSecure();
   const res = seeOther('/applications');
   res.cookies.set(ACCESS_COOKIE, result.accessToken, {
     httpOnly: true, sameSite: 'strict', secure, path: '/', maxAge: ACCESS_MAX_AGE,

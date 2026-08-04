@@ -1,13 +1,7 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import {
-  api,
-  PanelApiError,
-  type ApplicationRow,
-  type MemberRow,
-  type InvitationRow,
-  type MeDto,
-} from '@/lib/api';
+import { api, PanelApiError, type ApplicationRow, type MemberRow, type InvitationRow, getMe } from '@/lib/api';
+import { emptyPage, type Page } from '@/lib/paginate';
 import { CopyButton } from '@/components/CopyButton';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
@@ -132,20 +126,24 @@ export default async function TeamPage({
   const inviteToken = typeof sp.inviteToken === 'string' ? sp.inviteToken : undefined;
   const inviteEmailSent = sp.emailSent === '1';
 
-  const [me, members, invitations] = await Promise.all([
-    api<MeDto>({ method: 'GET', path: '/api/v1/tenant/auth/me' }),
-    api<MemberRow[]>({ method: 'GET', path: '/api/v1/tenant/workspace/members' }),
-    api<InvitationRow[]>({ method: 'GET', path: '/api/v1/tenant/workspace/invitations' }),
+  const [me, memberPage, invitationPage] = await Promise.all([
+    getMe(),
+    api<Page<MemberRow>>({ method: 'GET', path: '/api/v1/tenant/workspace/members' }),
+    api<Page<InvitationRow>>({ method: 'GET', path: '/api/v1/tenant/workspace/invitations' }),
   ]);
+  const members = memberPage.items;
+  const invitations = invitationPage.items;
 
   const canManage = me.activeRole === 'OWNER' || me.activeRole === 'ADMIN';
   // Application list for the grants picker. Members may only see a subset
   // (or fail member-role fetch edge cases) — degrade to an empty picker.
   const applications = canManage
-    ? await api<ApplicationRow[]>({
-        method: 'GET',
-        path: '/api/v1/tenant/applications/?limit=100&offset=0',
-      }).catch(() => [] as ApplicationRow[])
+    ? (
+        await api<Page<ApplicationRow>>({
+          method: 'GET',
+          path: '/api/v1/tenant/applications/?limit=100&offset=0',
+        }).catch(() => emptyPage<ApplicationRow>(100))
+      ).items
     : [];
   const memberRows = members.filter((m) => m.role === 'MEMBER');
   // PANEL_URL is server-only and on some deploys is an in-cluster host (e.g.
@@ -247,9 +245,10 @@ export default async function TeamPage({
       <div className="space-y-3">
         <SectionHeader title="Application access" />
         <p className="text-sm text-[var(--color-muted-fg)]">
-          Members with no grants can read every application but change nothing (legacy default).
-          Granting access to specific applications limits a member to those applications at the
-          chosen level. Owners and admins always have full access to everything.
+          A member sees only the applications you grant them, at the level you choose. A member with
+          no grants sees <strong>nothing</strong> — which is the state accepting an invitation
+          produces, so grant a new teammate an application before expecting them to find their way
+          around. Owners and admins always have full access to everything.
         </p>
         {error && (error === 'grant-missing' || error === 'APP_GRANT_MEMBER_ONLY') && (
           <p role="alert" className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
@@ -278,10 +277,25 @@ export default async function TeamPage({
                         <span className="ml-1.5 text-xs font-normal text-[var(--color-muted-fg)]">(you)</span>
                       )}
                     </p>
-                    <Badge tone={m.grants.length > 0 ? 'success' : 'neutral'}>
+                    {/* Zero grants is no longer "all apps, read-only" (#326) —
+                        it is no access at all, unless the API flags this
+                        membership as grandfathered by the backfill. Saying
+                        "all apps" for a member who can see none of them is the
+                        one thing an owner must not be told. */}
+                    <Badge
+                      tone={
+                        m.grants.length > 0
+                          ? 'success'
+                          : m.legacyWorkspaceRead
+                            ? 'warning'
+                            : 'neutral'
+                      }
+                    >
                       {m.grants.length > 0
                         ? `${m.grants.length} granted app${m.grants.length === 1 ? '' : 's'}`
-                        : 'All apps · read-only'}
+                        : m.legacyWorkspaceRead
+                          ? 'All apps · read-only (legacy)'
+                          : 'No access yet'}
                     </Badge>
                   </div>
 
@@ -301,7 +315,7 @@ export default async function TeamPage({
                             {canManage && (
                               <form action={removeGrant.bind(null, m.membershipId, g.applicationId)}>
                                 <ConfirmButton
-                                  confirm={`Remove ${m.email}'s ${g.role} access to ${g.applicationName}? If this is their last grant they fall back to read-only access on every application.`}
+                                  confirm={`Remove ${m.email}'s ${g.role} access to ${g.applicationName}?${m.grants.length === 1 ? ' This is their last grant — they will be left with access to no application at all.' : ''}`}
                                 >
                                   Remove
                                 </ConfirmButton>
@@ -435,9 +449,14 @@ export default async function TeamPage({
                   className={fieldInputCls}
                 />
               </Field>
-              <Field label="Role">
+              <Field
+                label="Role"
+                hint={
+                  'A member joins with access to no application — grant them one under Application access above. Admins see everything.'
+                }
+              >
                 <select name="role" defaultValue="MEMBER" className={fieldInputCls}>
-                  <option value="MEMBER">Member (read-only)</option>
+                  <option value="MEMBER">Member (per-application access)</option>
                   <option value="ADMIN">Admin</option>
                   {me.activeRole === 'OWNER' && <option value="OWNER">Owner</option>}
                 </select>

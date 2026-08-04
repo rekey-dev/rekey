@@ -57,7 +57,9 @@ Each DTO ships as both a Zod schema (`…Schema`) and an inferred type. Highligh
 
 ## Gotchas
 
-- **`RekeyError` is the canonical class.** `@rekey.dev/node` and `@rekey.dev/react` re-export *this same* class, so `instanceof RekeyError` is consistent across packages.
+- **`RekeyError` is the canonical class.** `@rekey.dev/node` and `@rekey.dev/react` re-export *this same* class, so `instanceof RekeyError` is consistent across packages. It lives in the dependency-free `@rekey.dev/shared-types/error` entry — import it from there in browser code and you get the class without zod (346 B vs 77 KB in a measured esbuild bundle). The barrel re-exports the identical class object, so either path is safe for `instanceof`.
+- **Server-authored enums are open unions.** `WebhookEventType`, `SubscriptionStatusType`, `PlanKindType`, `CreditReasonType` and `PaymentStatusType` are `… | (string & {})`, because a deployment one minor version ahead sends values this package predates. The known literals still autocomplete; your `switch` needs a `default`. The closed set is exported alongside as `KnownWebhookEventType`, `KnownSubscriptionStatus`, `KnownPlanKind`, `KnownCreditReason`, `KnownPaymentStatus` — use those for registries and label maps you own, and `isKnownWebhookEvent` to narrow at runtime. Filter/query types you *send* stay closed.
+- **`ApplicationDto.environment` is optional.** `GET /api/v1/me` does not return it. Narrow before use.
 - **Money is integer-only**, in the smallest currency unit (cents/paise/sen). `PlanDto.amount`, `CheckoutResultDto.discountAmount`, etc. are never floats.
 - **Coupon `amountOff`**: PERCENT is basis points (`1500` = 15%); AMOUNT is the smallest currency unit.
 - **Discriminated unions**: branch on the discriminator before reading fields — `SignInOutcomeDto` on `mfaRequired`, `LicenseVerifyResultDto` on `ok`.

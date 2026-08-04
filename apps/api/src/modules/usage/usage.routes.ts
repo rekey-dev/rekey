@@ -11,13 +11,50 @@ import { requireBillingEnabled } from '../../middleware/billing-enabled.js';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
+import { positiveBoundedInt } from '../../lib/bounded-int.js';
+import { ok, errs, ref, type JsonSchema } from '../../lib/openapi.js';
+
+/**
+ * Auth/gate errors shared by every route in this file: `requireApiKey`
+ * (secret key only) + `requireBillingEnabled`, then the per-route `requireScope`.
+ */
+const READ_GATE_ERRORS = {
+  401:
+    'API_KEY_MISSING — no Authorization header; or API_KEY_INVALID — the presented credential ' +
+    'is not a valid Application secret key, or is unknown/revoked/expired.',
+  403:
+    "IP_NOT_ALLOWED — caller IP outside the key's allowlist; or BILLING_DISABLED — billing is " +
+    'not enabled for this application; or API_KEY_SCOPE_INSUFFICIENT — the key lacks the ' +
+    '`billing:read` scope.',
+  429: 'RATE_LIMITED — too many requests. Honour the Retry-After header.',
+} as const;
+
+const WRITE_GATE_ERRORS = {
+  401: READ_GATE_ERRORS[401],
+  403: READ_GATE_ERRORS[403].replace('billing:read', 'billing:write'),
+  429: READ_GATE_ERRORS[429],
+} as const;
+
+/*
+ * The two schemas that used to live here (`RawUsageRecord`, `UsageAggregateResult`)
+ * are gone. They existed only to describe handlers that disagreed with their own
+ * published DTOs — `POST /record` returned the raw Prisma row, missing the
+ * `applicationId` and `meterSlug` that `UsageRecordDto` requires, and
+ * `/aggregate` returned `{total, count}` where `UsageAggregateDto` promised
+ * `{meterSlug, total, from, to}`.
+ *
+ * Documenting the disagreement was the right call at the time — a schema that
+ * matches a wrong response is better than one that lies. Both handlers now
+ * return what the DTO says, so the components describe them and the workaround
+ * is dead.
+ */
 
 const RecordBody = z.object({
   meterSlug: z.string().min(1).max(40),
   // Positive integers only. Negative/zero quantities would let a billing:write
   // key deflate a metered total below true consumption (under-billing) or poison
   // aggregates — usage events represent consumption, which is never negative.
-  quantity: z.number().int().positive(),
+  quantity: positiveBoundedInt(),
   endUserId: z.string().min(1).optional(),
   organizationId: z.string().min(1).optional(),
   occurredAt: z.string().datetime().optional(),
@@ -115,7 +152,7 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
           required: ['meterSlug', 'quantity'],
           properties: {
             meterSlug: { type: 'string', minLength: 1, maxLength: 40 },
-            quantity: { type: 'integer', minimum: 1 },
+            quantity: { type: 'integer', minimum: 1, maximum: 2147483647 },
             endUserId: { type: 'string' },
             organizationId: { type: 'string' },
             occurredAt: { type: 'string', format: 'date-time' },
@@ -129,6 +166,27 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
                 'UsageRecord instead of double-counting. Omit for each-call-counts behavior.',
             },
           },
+        },
+        response: {
+          201: ok(ref('UsageRecord'), 'The recorded usage event.'),
+          ...errs({
+            400:
+              'VALIDATION_ERROR — the body failed schema validation; or ' +
+              'IDEMPOTENCY_KEY_INVALID — the Idempotency-Key header is empty or exceeds 200 ' +
+              'characters; or USAGE_SUBJECT_AMBIGUOUS — both `endUserId` and `organizationId` ' +
+              'were passed; or USAGE_METER_INACTIVE — the meter exists but does not accept records.',
+            ...WRITE_GATE_ERRORS,
+            402: 'USAGE_QUOTA_EXCEEDED — the subject\'s plan-included quota for this meter is exhausted this period.',
+            404:
+              'USAGE_METER_NOT_FOUND — no meter with that slug in this application; or ' +
+              'ORGANIZATION_NOT_FOUND — `organizationId` does not name an organization in this ' +
+              'application; or END_USER_NOT_FOUND — `endUserId` does not name an end-user in ' +
+              'this application.',
+            409:
+              'IDEMPOTENCY_KEY_IN_FLIGHT — a request with this Idempotency-Key is still being ' +
+              'processed; or IDEMPOTENCY_KEY_REUSED — the key was already used for a different ' +
+              'method, path, or body.',
+          }),
         },
       },
     },
@@ -145,7 +203,22 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
         ...(body.metadata !== undefined && { metadata: body.metadata }),
         ...(body.idempotencyKey !== undefined && { idempotencyKey: body.idempotencyKey }),
       });
-      return reply.status(201).send({ success: true, data: record });
+      // Shaped into UsageRecordDto rather than sent raw. The row stores
+      // `meterId`, and `applicationId` lives on the meter, not the record — so
+      // returning it raw omitted BOTH fields the published DTO requires while
+      // shipping an internal id the caller cannot resolve.
+      return reply.status(201).send({
+        success: true,
+        data: {
+          id: record.id,
+          applicationId: req.application!.id,
+          meterSlug: body.meterSlug,
+          quantity: record.quantity,
+          endUserId: record.endUserId,
+          organizationId: record.organizationId,
+          occurredAt: record.occurredAt.toISOString(),
+        },
+      });
     },
   );
 
@@ -172,6 +245,19 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
           },
         },
         security: [{ apiKey: [] }],
+        response: {
+          200: ok(ref('UsageAggregate'), 'Summed quantity for the meter over the requested window.'),
+          ...errs({
+            400:
+              'VALIDATION_ERROR — the querystring failed schema validation; or ' +
+              'USAGE_SUBJECT_AMBIGUOUS — both `endUserId` and `organizationId` were passed.',
+            ...READ_GATE_ERRORS,
+            404:
+              'USAGE_METER_NOT_FOUND — no meter with that slug; or ORGANIZATION_NOT_FOUND — ' +
+              '`organizationId` does not name an organization in this application; or ' +
+              'END_USER_NOT_FOUND — `endUserId` does not name an end-user in this application.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -185,7 +271,19 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
         ...(q.endUserId !== undefined && { endUserId: q.endUserId }),
         ...(q.organizationId !== undefined && { organizationId: q.organizationId }),
       });
-      return { success: true, data: result };
+      // Echo the meter and window back. They are inputs, but a caller holding
+      // several aggregate responses has no other way to tell them apart, and
+      // the published DTO has always promised them.
+      return {
+        success: true,
+        data: {
+          meterSlug: q.meterSlug,
+          total: result.total,
+          count: result.count,
+          from: q.from ?? null,
+          to: q.to ?? null,
+        },
+      };
     },
   );
 }

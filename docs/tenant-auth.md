@@ -24,7 +24,7 @@ One operator can belong to many Tenants. The active workspace is encoded in the 
 |---|---|
 | `OWNER` | Invite anyone in any role · remove anyone · change anyone's role · delete the workspace · everything ADMIN can |
 | `ADMIN` | Invite ADMIN/MEMBER · remove MEMBERs · change MEMBER roles · CRUD Applications + Plans + Coupons + API keys |
-| `MEMBER` | Read-only by default; scopable per Application via grants (below) |
+| `MEMBER` | **No Application access by default** — access is granted per Application (below). Read the workspace member list; nothing else. |
 
 A workspace **always has at least one OWNER**. Removing or demoting the last OWNER fails with `CANNOT_REMOVE_LAST_OWNER`.
 
@@ -44,11 +44,25 @@ unique per member+application):
 Semantics:
 
 - **OWNER/ADMIN never consult grants** — implicit full access to every Application (unchanged).
-- A `MEMBER` with **zero grants** keeps the legacy behavior: read-only on every Application in the workspace. This is deliberate back-compat for memberships created before grants existed; writes still fail with `TENANT_ROLE_INSUFFICIENT`.
-- The moment a member holds **≥ 1 grant, grants become authoritative**: Applications without a grant disappear from `GET /tenant/applications` (which also feeds the panel sidebar and command palette) and return `404 APPLICATION_NOT_FOUND` on direct access. Insufficient grant level on a granted app → `403 APP_ACCESS_DENIED`.
-- Removing a member's **last** grant returns them to the legacy read-only-everywhere mode; it does not lock them out.
+- A `MEMBER` with **zero grants sees no Application at all.** This is the default a freshly accepted invitation lands in: `GET /tenant/applications` returns `[]`, and every `/tenant/applications/:id/*` route answers `404 APPLICATION_NOT_FOUND`. **Grants are additive from nothing** — a member has exactly the Applications somebody granted them, and no others.
+- Grants are always authoritative: an Application without a grant disappears from `GET /tenant/applications` (which also feeds the panel sidebar and command palette) and returns `404 APPLICATION_NOT_FOUND` on direct access — deliberately the same answer an absent Application gives, so a denied app is not an enumeration oracle. Insufficient grant *level* on a granted app → `403 APP_ACCESS_DENIED`.
+- Removing a member's **last** grant leaves them with nothing, not with workspace-wide read. De-scoping a member never widens their access.
 - Grants survive role changes but are only consulted while the role is `MEMBER` (promote to ADMIN → inert; demote back → re-armed). Setting a grant on an OWNER/ADMIN membership is rejected with `APP_GRANT_MEMBER_ONLY`.
 - Workspace-level surfaces are unaffected: team/workspace/audit-log writes stay OWNER/ADMIN-only, and the extra-sensitive per-app routes (request log, end-user DSAR export, impersonation) remain OWNER/ADMIN-only even for `APP_ADMIN` grant holders.
+
+> **Grandfathered memberships.** Fail-closed became the default in 2.0.0-rc.3.
+> Memberships that already existed **and held no grant** at upgrade time were
+> backfilled with `TenantMembership.legacyWorkspaceRead = true`, which preserves
+> the old behaviour for them: read-only on every Application in the workspace,
+> with writes still refused as `TENANT_ROLE_INSUFFICIENT`. Flipping those members
+> to "access nothing" during an upgrade would have revoked, unannounced, access
+> their colleagues were using.
+>
+> The flag is reported per member on `GET /tenant/workspace/members` so an owner
+> can find everyone still on it, and it is **cleared permanently the first time
+> any grant is set** on that membership — after which the member is on the normal
+> grant-scoped rules, including when their last grant is later removed. New
+> memberships are always created with the flag `false`.
 
 Managed via (OWNER/ADMIN only — members see their own grants in the members list and on the panel **Team** page):
 
@@ -94,13 +108,15 @@ POST /api/v1/tenant/auth/switch-workspace        { tenantId }       → new pair
 POST /api/v1/tenant/auth/change-password         { currentPassword, newPassword }
 POST /api/v1/tenant/auth/sign-out-everywhere
 
-GET    /api/v1/tenant/workspace/members
-DELETE /api/v1/tenant/workspace/members/:id
-PATCH  /api/v1/tenant/workspace/members/:id      { role }
+GET    /api/v1/tenant/workspace/members                            ← any role
+DELETE /api/v1/tenant/workspace/members/:id                        ← OWNER/ADMIN
+PATCH  /api/v1/tenant/workspace/members/:id      { role }          ← OWNER/ADMIN
 
-GET    /api/v1/tenant/workspace/invitations
-POST   /api/v1/tenant/workspace/invitations      { email, role }   → returns one-time-show token
-DELETE /api/v1/tenant/workspace/invitations/:id
+GET    /api/v1/tenant/workspace/invitations                        ← OWNER/ADMIN
+POST   /api/v1/tenant/workspace/invitations      { email, role }   ← OWNER/ADMIN, returns one-time-show token
+DELETE /api/v1/tenant/workspace/invitations/:id                    ← OWNER/ADMIN
+
+GET    /api/v1/tenant/workspace/email-logs                         ← OWNER/ADMIN
 
 POST   /api/v1/tenant/invitations/accept         { token }         → joins workspace + new session
 
@@ -111,6 +127,13 @@ GET/POST/DELETE /api/v1/tenant/applications/:id/api-keys[/keyId]
 GET/POST/PATCH  /api/v1/tenant/applications/:id/plans[/slug]
 GET/POST/PATCH  /api/v1/tenant/applications/:id/coupons[/code]
 ```
+
+The invitation list and `email-logs` sit at the OWNER/ADMIN floor their sibling
+writes already had: `email-logs` carries every operator's address plus the
+subject and delivery status of workspace mail, which is the same class of thing
+`GET /tenant/security-events` is ADMIN-only for. `GET /workspace/members` is
+deliberately left open to every role — seeing the team roster is ordinary
+collaboration, and it is also how a member reads their own grants.
 
 ## Self-serve sign-up flow
 
@@ -154,7 +177,7 @@ Properties:
 - **Single-use.** Replaying an accepted token returns `INVITATION_NOT_USABLE`.
 - **7-day expiry by default.**
 - **Hash-only DB** — the raw token leaves the server exactly once at creation.
-- **Recipient identity is whoever holds the link.** The `email` field is informational only — used to show "invited X" in the UI and to block invites to existing members.
+- **Acceptance is bound to the invited address.** The accepting session's email must equal the invitation's `email`, case-insensitively; anything else is refused with `403 INVITATION_EMAIL_MISMATCH`. Invite links travel by email and chat and are trivially forwarded, so "whoever holds the link" would mean a forwarded link is a workspace takeover at the invited role — up to OWNER.
 - **Concurrent-accept safe** — the consume + membership-create happen in one transaction.
 
 ## Multi-workspace sessions

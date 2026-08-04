@@ -1,12 +1,7 @@
 import * as React from 'react';
 import Link from 'next/link';
-import {
-  api,
-  type ApplicationRow,
-  type BillingStatsRow,
-  type DunningCaseRow,
-  type PaymentRow,
-} from '@/lib/api';
+import { api, type BillingStatsRow, type DunningCaseRow, type PaymentRow, getApplication } from '@/lib/api';
+import { emptyPage, type Page } from '@/lib/paginate';
 import { formatMoney } from '@/lib/format';
 import { formatDateTime } from '@/lib/date';
 import { SectionHeader } from '@/components/Card';
@@ -30,7 +25,7 @@ export default async function BillingOverviewPage({
   const { id } = await params;
   const basePath = `/api/v1/tenant/applications/${encodeURIComponent(id)}`;
 
-  const app = await api<ApplicationRow>({ method: 'GET', path: basePath });
+  const app = await getApplication(id);
 
   if (!app.billingConfig.enabled) {
     return (
@@ -57,15 +52,19 @@ export default async function BillingOverviewPage({
 
   // Stats + recent payments + open dunning cases in parallel; the page stays
   // useful if one fails.
-  const [stats, recentPayments, openDunning] = await Promise.all([
+  const [stats, paymentPage, dunningPage] = await Promise.all([
     api<BillingStatsRow>({ method: 'GET', path: `${basePath}/billing/stats` }).catch(() => null),
-    api<PaymentRow[]>({ method: 'GET', path: `${basePath}/payments?limit=8` }).catch(
-      () => [] as PaymentRow[],
+    api<Page<PaymentRow>>({ method: 'GET', path: `${basePath}/payments?limit=8` }).catch(() =>
+      emptyPage<PaymentRow>(8),
     ),
-    api<DunningCaseRow[]>({ method: 'GET', path: `${basePath}/dunning?status=OPEN&limit=100` }).catch(
-      () => [] as DunningCaseRow[],
-    ),
+    api<Page<DunningCaseRow>>({
+      method: 'GET',
+      path: `${basePath}/dunning?status=OPEN&limit=100`,
+    }).catch(() => emptyPage<DunningCaseRow>(100)),
   ]);
+
+  const recentPayments = paymentPage.items;
+  const openDunning = dunningPage.items;
 
   const currency = app.billingConfig.currency || 'USD';
 

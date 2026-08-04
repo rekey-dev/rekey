@@ -20,9 +20,19 @@ export function readOffset(sp: SearchParams): number {
 
 /**
  * Offset Prev/Next control + a 10/25/100 per-page selector for operator list
- * pages. Unknown-total: a full page back (`count === pageSize`) implies there
- * may be more, so we offer Next without a `count()`. Renders nothing when the
- * list fits on a single first page (nothing to page or resize meaningfully).
+ * pages. Renders nothing when the list fits on a single first page (nothing to
+ * page or resize meaningfully).
+ *
+ * `hasMore` is required, and it is the API's answer. Every paginated tenant
+ * list endpoint returns `{ items, page: { total, limit, offset, hasMore } }`,
+ * so the caller reads `page.hasMore` off the response and passes it straight
+ * through (`lib/paginate.ts`). This component neither guesses nor infers.
+ *
+ * It used to do both, in turn: first `count === pageSize`, which is wrong for
+ * every result set that is an exact multiple of the page size — 25 rows at
+ * 25/page rendered a "Next →" onto a page that said "No results" — and then an
+ * over-fetch of one extra row, which was correct but could not work at the
+ * 100/page size the API caps `limit` at. Both are gone.
  *
  * `extraParams` preserves other query state (e.g. a search term); the current
  * page size (`ps`) is preserved automatically across nav links.
@@ -32,15 +42,18 @@ export function Pager({
   offset,
   pageSize,
   count,
+  hasMore,
   extraParams,
 }: {
   basePath: string;
   offset: number;
   pageSize: number;
+  /** Rows actually rendered on this page — drives the "Showing 1–25" label. */
   count: number;
+  /** True when a further page exists — the API's `page.hasMore`. */
+  hasMore: boolean;
   extraParams?: Record<string, string>;
 }): React.JSX.Element | null {
-  const hasMore = count === pageSize;
   if (offset === 0 && !hasMore) return null;
 
   const link = (next: { offset?: number; ps?: number }): string => {

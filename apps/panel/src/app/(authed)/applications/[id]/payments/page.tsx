@@ -1,10 +1,11 @@
 import * as React from 'react';
 import Link from 'next/link';
-import { api, type ApplicationRow, type PaymentRow } from '@/lib/api';
+import { api, type PaymentRow, getApplication } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { formatMoney } from '@/lib/format';
 import { formatDateTime } from '@/lib/date';
 import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
+import type { Page } from '@/lib/paginate';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
 import { StatusPill } from '@/components/StatusPill';
@@ -37,10 +38,7 @@ export default async function PaymentsPage({
   const sorted = readSort(sp, ['createdAt', 'amount', 'status'] as const);
 
   // Billing master switch off → point at the switch instead of an empty table.
-  const app = await api<ApplicationRow>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-  });
+  const app = await getApplication(id);
   if (!app.billingConfig.enabled) {
     return (
       <div className="space-y-5">
@@ -64,7 +62,7 @@ export default async function PaymentsPage({
     qs.set('order', sorted.order);
   }
 
-  const payments = await api<PaymentRow[]>({
+  const { items: payments, page } = await api<Page<PaymentRow>>({
     method: 'GET',
     path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/payments?${qs.toString()}`,
   });
@@ -200,6 +198,7 @@ export default async function PaymentsPage({
         offset={offset}
         pageSize={PAGE_SIZE}
         count={payments.length}
+        hasMore={page.hasMore}
         extraParams={Object.keys(extraParams).length ? extraParams : undefined}
       />
     </div>

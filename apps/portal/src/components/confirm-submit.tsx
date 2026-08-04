@@ -9,12 +9,64 @@
  */
 
 import * as React from 'react';
+import { useFormStatus } from 'react-dom';
+
+/**
+ * The dialog's two buttons. Split out so they can call `useFormStatus`, which
+ * reports the pending state of the ancestor `<form>` — and only works from a
+ * component rendered inside it.
+ *
+ * Both are locked while the action is in flight. Previously neither was, and
+ * the confirm button also closed the dialog on click: a customer on a slow
+ * connection was handed back a live, re-openable trigger while their checkout
+ * or cancellation was still running. Two clicks, two checkout sessions.
+ *
+ * The dialog now stays up showing the pending label until the action's redirect
+ * unmounts it — which is also the page's only feedback that anything happened.
+ */
+function ConfirmActions({
+  label,
+  pendingLabel,
+  confirmClassName,
+  cancelClassName,
+  onCancel,
+}: {
+  label: string;
+  pendingLabel: string;
+  confirmClassName: string;
+  cancelClassName: string;
+  onCancel: () => void;
+}): React.JSX.Element {
+  const { pending } = useFormStatus();
+  const lock = ' disabled:opacity-50 disabled:cursor-not-allowed';
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onCancel}
+        disabled={pending}
+        className={cancelClassName + lock}
+      >
+        Keep it
+      </button>
+      <button
+        type="submit"
+        disabled={pending}
+        aria-busy={pending || undefined}
+        className={confirmClassName + lock}
+      >
+        {pending ? pendingLabel : label}
+      </button>
+    </>
+  );
+}
 
 export function ConfirmSubmit({
   label,
   title,
   message,
   confirmLabel,
+  pendingLabel,
   variant = 'primary',
   size = 'md',
   children,
@@ -27,6 +79,8 @@ export function ConfirmSubmit({
   message: string;
   /** Confirm button text. Defaults to `label`. */
   confirmLabel?: string;
+  /** Confirm button text while the action is in flight. */
+  pendingLabel?: string;
   variant?: 'primary' | 'neutral';
   size?: 'sm' | 'md';
   /**
@@ -78,20 +132,13 @@ export function ConfirmSubmit({
         <p className="mt-1 text-sm text-[var(--color-muted-fg)]">{message}</p>
         {children && <div className="mt-4">{children}</div>}
         <div className="mt-5 flex items-center justify-end gap-2">
-          <button
-            type="button"
-            onClick={close}
-            className={`rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-bg)] ${focusRing}`}
-          >
-            Keep it
-          </button>
-          <button
-            type="submit"
-            onClick={close}
-            className={`rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] ${focusRing}`}
-          >
-            {confirmLabel ?? label}
-          </button>
+          <ConfirmActions
+            label={confirmLabel ?? label}
+            pendingLabel={pendingLabel ?? 'Working…'}
+            onCancel={close}
+            cancelClassName={`rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-bg)] ${focusRing}`}
+            confirmClassName={`rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] ${focusRing}`}
+          />
         </div>
       </dialog>
     </>

@@ -2,7 +2,7 @@ import * as React from 'react';
 import Link from 'next/link';
 import { forgotPasswordAction } from '@/lib/actions';
 import { Banner } from '@/components/banner';
-import { Button } from '@/components/button';
+import { SubmitButton } from '@/components/submit-button';
 
 export default async function ForgotPasswordPage({
   params,
@@ -49,9 +49,9 @@ export default async function ForgotPasswordPage({
                 className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
               />
             </label>
-            <Button type="submit" className="w-full">
+            <SubmitButton pendingLabel="Sending…" className="w-full">
               Send reset link
-            </Button>
+            </SubmitButton>
           </form>
           <p className="text-sm text-[var(--color-muted-fg)]">
             <Link href={`/${slug}/login`} className="underline hover:text-[var(--color-fg)]">

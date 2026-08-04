@@ -51,16 +51,19 @@ delivery queue runs on it and the API refuses to start if Redis is unreachable.
 ### Run the whole stack in Docker
 
 Instead of `pnpm dev`, you can boot the full stack (Postgres + Redis + API +
-panel) with one command — the API auto-migrates on start:
+panel + portal) with one command — the API auto-migrates on start:
 
 ```bash
 cp .env.example .env                  # fill the required secrets
 docker compose --profile full up      # add --build after changing app code
 ```
 
-The `full` profile is what pulls in the API and the panel; a bare
+The `full` profile is what pulls in the API, the panel and the portal; a bare
 `docker compose up` starts only Postgres and Redis, which is the right thing
 when you are running the apps from your shell.
+
+Every published port binds to `127.0.0.1` unless you set `BIND_ADDRESS`, so this
+stack is not reachable from outside the machine even on a remote host.
 
 ### Create your first tenant
 
@@ -75,7 +78,6 @@ end-to-end walkthrough (boot → Tenant → Application → API key → first ca
 | `pnpm dev` | run all apps in watch mode |
 | `pnpm build` | build every workspace |
 | `pnpm test` | run the vitest suites |
-| `pnpm lint` | lint all workspaces |
 | `pnpm typecheck` | typecheck all workspaces |
 | `pnpm db:migrate` | create + apply a dev migration |
 | `pnpm db:studio` | open Prisma Studio |
@@ -84,13 +86,20 @@ Before opening a PR, make sure `pnpm build`, `pnpm typecheck`, and `pnpm test`
 pass. The `apps/api` suite shares one Postgres + Redis in a single fork, so a
 cross-file failure is sometimes transient — re-run before assuming a regression.
 
+**There is no linter yet.** `pnpm lint` exists and every workspace's `lint`
+script is `echo "(eslint not yet wired)"`, so running it proves nothing — this
+guide used to list it as "lint all workspaces", which was a promise the repo
+does not keep. It is deliberately not wired into CI either: a green check that
+runs no rules is worse than an absent one. Formatting and style are reviewed by
+humans until someone wires a real config, which is its own change.
+
 ## Pull requests
 
 1. Fork and branch from `main` (`feat/…`, `fix/…`, `docs/…`).
 2. Keep the change focused; add or update tests next to the code you touch.
 3. Conventional-commit style is appreciated (`feat:`, `fix:`, `docs:`, `chore:`).
 4. Describe the change and how you verified it. Link any related issue.
-5. CI runs build + typecheck + tests on every PR.
+5. CI runs build + typecheck + tests + the config guards on every PR.
 
 A few invariants worth knowing before you touch auth or billing (full list in
 ARCHITECTURE.md §6):
@@ -105,9 +114,10 @@ ARCHITECTURE.md §6):
 
 ## Deploying
 
-Rekey is a self-hostable monolith — `docker compose up` boots the whole
-stack. For a production deployment (Traefik + TLS, env template, migrations),
-see **[DEPLOY.md](DEPLOY.md)**.
+Rekey is a self-hostable monolith — `docker compose --profile full up` boots the
+whole stack locally. For a production deployment (Traefik + TLS, env template,
+migrations), see **[DEPLOY.md](DEPLOY.md)**, which uses `docker-compose.prod.yml`
+rather than this file.
 
 ## License
 

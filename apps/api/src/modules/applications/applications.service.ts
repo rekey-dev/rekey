@@ -99,24 +99,38 @@ function defaultBillingConfig(provider: BillingProvider): BillingConfig {
   return { enabled: false, dunningEnabled: false, provider, billingSubject: 'user', currency: 'USD', metadata: {} };
 }
 
+/**
+ * The filter `list` and `count` share.
+ *
+ * Deliberately one function used by both: a `count` taken over a slightly
+ * different `where` than the rows is worse than no count at all, because the
+ * caller then pages off the end of a list the server told it was longer.
+ */
+function listWhere(tenantId?: string, ids?: string[]): Prisma.ApplicationWhereInput {
+  return {
+    ...(tenantId !== undefined && { tenantId }),
+    // Per-app grant scoping (roadmap #8): a workspace MEMBER with
+    // grants only sees the granted Applications.
+    ...(ids !== undefined && { id: { in: ids } }),
+  };
+}
+
 export const applicationsService = {
   async list(
     tenantId?: string,
     opts?: { take?: number; skip?: number; ids?: string[] },
   ): Promise<Application[]> {
     return prisma.application.findMany({
-      ...((tenantId !== undefined || opts?.ids !== undefined) && {
-        where: {
-          ...(tenantId !== undefined && { tenantId }),
-          // Per-app grant scoping (roadmap #8): a workspace MEMBER with
-          // grants only sees the granted Applications.
-          ...(opts?.ids !== undefined && { id: { in: opts.ids } }),
-        },
-      }),
+      where: listWhere(tenantId, opts?.ids),
       orderBy: { createdAt: 'desc' },
       ...(opts?.take !== undefined ? { take: opts.take } : {}),
       ...(opts?.skip !== undefined ? { skip: opts.skip } : {}),
     });
+  },
+
+  /** Total Applications matching `list`'s filter, ignoring take/skip. */
+  async count(tenantId?: string, opts?: { ids?: string[] }): Promise<number> {
+    return prisma.application.count({ where: listWhere(tenantId, opts?.ids) });
   },
 
   async get(id: string): Promise<Application> {

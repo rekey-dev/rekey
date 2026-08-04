@@ -232,6 +232,90 @@ export function euLoginLockScope(applicationId: string, email: string): string {
   return `${EU_LOGIN_LOCK_SCOPE_PREFIX}${applicationId}:${email.toLowerCase()}`;
 }
 
+/**
+ * Scope prefix for OPERATOR password sign-in lockouts. The operator twin of
+ * `EU_LOGIN_LOCK_SCOPE_PREFIX`, and here for the same reason: a lock is a
+ * `bf:lock:*` key with a TTL and nothing else, so the deployment-wide
+ * "who is locked out right now" surface can only find it by scanning a prefix
+ * it agrees on with the writer.
+ */
+export const OP_LOGIN_LOCK_SCOPE_PREFIX = 'op:login:';
+
+/**
+ * THE scope for an operator's password sign-in lockout.
+ *
+ * Was a private `operatorLockScope()` inside tenant-auth.service. Exported for
+ * the same reason `euLoginLockScope` is: the super-admin locked-accounts view
+ * reads these locks back and has to build the key byte-for-byte the way
+ * sign-in built it, or it silently reports "not locked" for a locked operator
+ * — which is exactly how the end-user version of this surface once reported
+ * the opposite of the truth.
+ *
+ * There is no workspace in the key. An operator signs in BEFORE choosing one,
+ * so at lockout time the only identifier that exists is the email.
+ */
+export function operatorLoginLockScope(email: string): string {
+  return `${OP_LOGIN_LOCK_SCOPE_PREFIX}${email.toLowerCase()}`;
+}
+
+/** One operator account currently locked out of password sign-in. */
+export interface ActiveOperatorLock {
+  email: string;
+  /** Remaining lock duration, seconds (from the key's TTL). */
+  ttlSec: number;
+}
+
+/**
+ * Enumerate the operator sign-in scopes currently locked — the operator twin of
+ * `scanActiveLoginLocks`.
+ *
+ * This exists because a locked-out operator is invisible everywhere else. The
+ * workspace security log gets `operator.locked_out` (see
+ * `tenantAuthService.signIn`), but the account it names may own every workspace
+ * in the deployment and therefore have nobody else who can read that log. The
+ * super-admin surface is the one place that is reachable when the owner is
+ * locked out of theirs.
+ *
+ * Fail-open like its twin: no Redis (including NODE_ENV=test) reads as "no
+ * locks". This drives a dashboard, not a gate.
+ */
+export async function scanActiveOperatorLoginLocks(
+  limit: number,
+): Promise<{ total: number; locks: ActiveOperatorLock[] }> {
+  const r = getRedis();
+  if (!r) return { total: 0, locks: [] };
+  const pattern = `${LOCK_KEY_PREFIX}${OP_LOGIN_LOCK_SCOPE_PREFIX}*`;
+  const keys: string[] = [];
+  try {
+    let cursor = '0';
+    do {
+      const [next, batch] = await r.scan(cursor, 'MATCH', pattern, 'COUNT', 500);
+      cursor = next;
+      keys.push(...batch);
+      if (keys.length >= 10_000) break;
+    } while (cursor !== '0');
+  } catch {
+    return { total: 0, locks: [] }; // fail-open
+  }
+  const total = keys.length;
+  const slice = limit > 0 ? keys.slice(0, limit) : [];
+  const resolved = await Promise.all(
+    slice.map(async (key): Promise<ActiveOperatorLock> => {
+      // key === `bf:lock:op:login:${email}` — the remainder IS the email.
+      const email = key.slice(LOCK_KEY_PREFIX.length + OP_LOGIN_LOCK_SCOPE_PREFIX.length);
+      let ttlSec = 0;
+      try {
+        const t = await r.ttl(key);
+        ttlSec = t > 0 ? t : 0;
+      } catch {
+        ttlSec = 0;
+      }
+      return { email, ttlSec };
+    }),
+  );
+  return { total, locks: resolved };
+}
+
 /** Live lockout state of one scope, for read-only operator surfaces. */
 export interface ScopeLockState {
   /** Remaining lock duration in seconds. `null` when the scope is NOT locked. */

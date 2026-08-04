@@ -44,6 +44,11 @@ export const usageService = {
     });
   },
 
+  /** Total usage meters on this Application, ignoring take/skip. */
+  async countMeters(applicationId: string): Promise<number> {
+    return prisma.usageMeter.count({ where: { applicationId } });
+  },
+
   async createMeter(args: {
     applicationId: string;
     slug: string;

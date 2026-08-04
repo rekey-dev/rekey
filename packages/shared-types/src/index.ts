@@ -27,8 +27,25 @@ export {
 // Errors
 // ============================================================================
 
+// `RekeyError` + `RekeyErrorShape` live in their own zero-import module so a
+// browser bundle can reach the class without dragging zod and every schema in
+// this file along with it (see ./error.ts for the measurement). They are
+// re-exported here unchanged — same class identity, so `instanceof` holds
+// whichever path you import from.
+export { RekeyError } from './error.js';
+export type { RekeyErrorShape } from './error.js';
+import { type RekeyErrorShape } from './error.js';
+
+// Decides the `Secure` attribute on a session cookie from the REQUEST rather
+// than from a build-time NODE_ENV. Lives in its own zero-import module for the
+// same reason RekeyError does — Edge middleware and client-adjacent code reach
+// for it without pulling zod in.
+export { cookieSecureFor } from './cookie-security.js';
+export type { CookieSecurityInput } from './cookie-security.js';
+
 /**
- * The error envelope every Rekey API response uses on failure.
+ * The error envelope every Rekey API response uses on failure. The runtime
+ * schema; `RekeyErrorShape` (from `./error.js`) is the identical static type.
  *
  * @example
  * ```ts
@@ -42,35 +59,120 @@ export const RekeyErrorSchema = z.object({
   fix: z.string().optional(),
   /** Documentation URL for this error code. */
   docs: z.string().url().optional(),
+  /**
+   * Seconds to wait before retrying. The API has always sent this on
+   * `RATE_LIMITED` (mirrored in `Retry-After`) and on the idempotency in-flight
+   * conflict; it was simply never declared here, so it arrived untyped.
+   */
+  retryAfterSeconds: z.number().int().nonnegative().optional(),
 });
-/** The error envelope shape (just the data fields). */
-export type RekeyErrorShape = z.infer<typeof RekeyErrorSchema>;
+
+// The schema and the hand-written interface must not drift. Splitting them
+// across two files is what makes the tree-shake possible, so this asserts at
+// compile time that they describe exactly the same shape.
+type _Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+  ? true
+  : false;
+type _Assert<T extends true> = T;
+type _RekeyErrorShapeMatchesSchema = _Assert<
+  _Equal<z.infer<typeof RekeyErrorSchema>, RekeyErrorShape>
+>;
+
+// ============================================================================
+// Pagination
+// ============================================================================
 
 /**
- * The canonical SDK error. Both @rekey.dev/node and @rekey.dev/react re-export
- * this class, so `instanceof RekeyError` is consistent across packages.
- * Always carries a stable `code` and, when the server provided one, a concrete
- * `fix` — read `error.fix` first when debugging.
+ * Offset-pagination metadata. The `page` half of every list response.
+ *
+ * @example
+ * ```json
+ * { "total": 36, "limit": 25, "offset": 0, "hasMore": true }
+ * ```
  */
-export class RekeyError extends Error implements RekeyErrorShape {
-  public readonly code: string;
-  public readonly fix: string | undefined;
-  public readonly docs: string | undefined;
-  /** HTTP status, when the error came from an API response. */
-  public readonly statusCode: number | undefined;
-  /** Server-assigned request id — share with support to find the log entry. */
-  public readonly requestId: string | undefined;
+export const PageMetaSchema = z.object({
+  /** Rows matching the query, ignoring `limit`/`offset`. */
+  total: z.number().int().nonnegative(),
+  /** Rows requested for this window. */
+  limit: z.number().int().nonnegative(),
+  /** Rows skipped before this window. */
+  offset: z.number().int().nonnegative(),
+  /** True when another page exists — i.e. `offset + limit < total`. */
+  hasMore: z.boolean(),
+});
+export type PageMeta = z.infer<typeof PageMetaSchema>;
 
-  constructor(error: RekeyErrorShape & { statusCode?: number; requestId?: string }) {
-    super(error.message);
-    this.name = 'RekeyError';
-    this.code = error.code;
-    this.fix = error.fix;
-    this.docs = error.docs;
-    this.statusCode = error.statusCode;
-    this.requestId = error.requestId;
-  }
+/**
+ * The `data` of every paginated list response: `{items, page}`.
+ *
+ * Until 2.0.0-rc.3 these endpoints returned a bare array. A bare array cannot
+ * carry `total`, so a caller that did not pass `limit` could not tell a
+ * complete list from a truncated one — 36 rows in the database, 25 on the wire,
+ * nothing saying so. `page` makes truncation a fact in the response.
+ *
+ * @example
+ * ```ts
+ * const { items, page } = await rekey.billing.getPlans();
+ * if (page.hasMore) {
+ *   const next = await rekey.billing.getPlans({ offset: page.offset + page.limit });
+ * }
+ * ```
+ */
+export interface Paged<T> {
+  items: T[];
+  page: PageMeta;
 }
+
+/** Build the zod schema for a `Paged<T>` from the schema of one item. */
+export function PagedSchema<T extends z.ZodTypeAny>(
+  item: T,
+): z.ZodObject<{ items: z.ZodArray<T>; page: typeof PageMetaSchema }> {
+  return z.object({ items: z.array(item), page: PageMetaSchema });
+}
+
+/**
+ * Offset-pagination request params, accepted by every list endpoint.
+ *
+ * `limit` defaults to 50 and is capped at 100 on most endpoints (a few
+ * log-shaped ones allow 200 — each method's docblock says which).
+ */
+export interface ListPage {
+  limit?: number;
+  offset?: number;
+}
+
+// ============================================================================
+// Open unions
+// ============================================================================
+
+/**
+ * Widen a closed string union so a value the SDK predates still type-checks.
+ *
+ * A server can grow a new subscription status, plan kind or webhook event in a
+ * MINOR release. If the SDK types those fields as a closed union, a consumer
+ * who wrote an exhaustive `switch` compiles fine today and breaks on upgrade —
+ * and, worse, a `never` in the default branch tells them the case is
+ * impossible when it is merely unreleased. So every field that carries a
+ * server-authored enum over the wire is typed `Open<…>`: the literals still
+ * autocomplete (that is what `string & {}` buys), but TypeScript makes you
+ * handle the unknown case.
+ *
+ * The closed union stays available as `Known…` for the places that own the
+ * registry (validation schemas, exhaustive label maps you control).
+ *
+ * This is the same call `humanizeSecurityEventType` already makes by taking a
+ * plain `string`; it is applied consistently here.
+ *
+ * @example
+ * ```ts
+ * switch (sub.status) {
+ *   case 'ACTIVE': return grant();
+ *   case 'CANCELED': return revoke();
+ *   default: return leaveAlone(); // ← a 2.1.0 'TRIALING' lands here, not in a compile error
+ * }
+ * ```
+ */
+export type Open<T extends string> = T | (string & {});
 
 export const ApiResponseSchema = <T extends z.ZodTypeAny>(data: T) =>
   z.discriminatedUnion('success', [
@@ -112,7 +214,7 @@ export const TenantLimitsSchema = z.object({
    * this number, creating a *new* end-user fails with `TENANT_QUOTA_EXCEEDED`;
    * end-users that already exist keep signing in normally.
    */
-  maxActiveEndUsers: z.number().int().min(0).nullable().optional(),
+  maxActiveEndUsers: z.number().int().min(0).max(2_147_483_647).nullable().optional(),
 
   /**
    * Maximum Applications in the workspace whose `environment` is `PRODUCTION`.
@@ -126,7 +228,7 @@ export const TenantLimitsSchema = z.object({
    * a workspace cannot dodge this by creating a DEVELOPMENT app and promoting
    * it later.
    */
-  maxProductionApps: z.number().int().min(0).nullable().optional(),
+  maxProductionApps: z.number().int().min(0).max(2_147_483_647).nullable().optional(),
 });
 export type TenantLimits = z.infer<typeof TenantLimitsSchema>;
 
@@ -161,7 +263,7 @@ export type TokenAlg = z.infer<typeof TokenAlgSchema>;
 export const AuthConfigSchema = z.object({
   /** Which primary methods are enabled. Empty array = OAuth-only app. */
   methods: z.array(AuthMethodSchema),
-  passwordMinLength: z.number().int().min(8).default(8),
+  passwordMinLength: z.number().int().min(8).max(1024).default(8),
   /** Where to send the user after sign-in / sign-up. */
   redirectUrls: z.array(z.string().url()),
   /**
@@ -257,11 +359,28 @@ export const AuthConfigSchema = z.object({
    * stays the operator's deliberate act rather than something a version bump
    * does to them.
    *
-   * Enforced at the session chokepoint, not per credential. Magic-link and
-   * OAuth sign-in each carry their own proof of the address and mark it
-   * verified, so they pass the gate rather than bypass it. Refresh re-checks,
+   * Enforced at the session chokepoint, not per credential. Refresh re-checks,
    * so flipping the switch on ends the sessions of users who never confirmed
    * within one access-token lifetime instead of after 30 days.
+   *
+   * **Magic-link passes the gate. OAuth only usually does.** Completing a
+   * magic link is itself proof of the address, and it sets `emailVerified`
+   * unconditionally. An OAuth sign-up instead records the PROVIDER's claim —
+   * `emailVerified: identity.emailVerified` — which some providers do not
+   * assert. Google and Discord do; generic OIDC and Microsoft consumer
+   * accounts may not.
+   *
+   * So a first-time OAuth sign-up from a non-asserting provider creates the
+   * account and is then refused a session by this gate — an account with no
+   * password and no way in. The two `OAUTH_EMAIL_NOT_VERIFIED` refusals do not
+   * cover it: one is an auto-link takeover guard that fires only when an
+   * account with that address already exists, and the other is in
+   * `linkIdentity`, which runs only for an already-authenticated user adding a
+   * provider.
+   *
+   * This docblock previously claimed OAuth "marks it verified", which made the
+   * verification flow look optional when OAuth was on offer. It is not: with
+   * this switch on, a verification path is required infrastructure.
    */
   requireEmailVerification: z.boolean().default(false),
   /**
@@ -431,7 +550,17 @@ export const ApplicationDtoSchema = z.object({
   tenantId: z.string(),
   name: z.string(),
   slug: z.string(),
-  environment: AppEnvironmentSchema,
+  /**
+   * OPTIONAL — `GET /api/v1/me` (the endpoint `applications.me()` calls, and
+   * the documented SDK smoke test) does not return this field. It was declared
+   * required here, so `rekey.applications.me().environment` typed as a
+   * guaranteed enum and was `undefined` at runtime for every caller.
+   *
+   * Typed optional rather than "fixed" in the API: adding a field to a
+   * response is a server change, and until every deployment ships it a client
+   * that assumes its presence is wrong. Narrow before use.
+   */
+  environment: AppEnvironmentSchema.optional(),
   publicKey: z.string(),
   authConfig: AuthConfigSchema,
   billingConfig: BillingConfigSchema,
@@ -628,14 +757,20 @@ export type PlanIntervalType = z.infer<typeof PlanIntervalSchema>;
 
 /** What a plan sells. SUBSCRIPTION = recurring; LICENSE = key issued on purchase; USAGE = metered; CREDIT = prepaid balance / lead pack. */
 export const PlanKindSchema = z.enum(['SUBSCRIPTION', 'LICENSE', 'USAGE', 'CREDIT']);
-export type PlanKindType = z.infer<typeof PlanKindSchema>;
+/** The plan kinds this SDK version knows about. Closed — use it for registries. */
+export type KnownPlanKind = z.infer<typeof PlanKindSchema>;
+/** {@link Open}. A newer deployment may sell a kind this SDK predates. */
+export type PlanKindType = Open<KnownPlanKind>;
 
 /** Shape of a LICENSE-kind plan's key. PERPETUAL = never expires; TIMED = N-day; SEATS = capped activations. */
 export const LicenseKindSchema = z.enum(['PERPETUAL', 'TIMED', 'SEATS']);
 export type LicenseKindType = z.infer<typeof LicenseKindSchema>;
 
 export const SubscriptionStatusSchema = z.enum(['PENDING', 'ACTIVE', 'PAST_DUE', 'CANCELED', 'EXPIRED']);
-export type SubscriptionStatusType = z.infer<typeof SubscriptionStatusSchema>;
+/** The statuses this SDK version knows about. Closed — use it for registries. */
+export type KnownSubscriptionStatus = z.infer<typeof SubscriptionStatusSchema>;
+/** {@link Open}. `TRIALING` is the obvious next one; handle the default branch. */
+export type SubscriptionStatusType = Open<KnownSubscriptionStatus>;
 
 export const PlanDtoSchema = z.object({
   id: z.string(),
@@ -666,18 +801,30 @@ export const PlanDtoSchema = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });
-export type PlanDto = z.infer<typeof PlanDtoSchema>;
+export type PlanDto = Omit<z.infer<typeof PlanDtoSchema>, 'kind'> & {
+  /** {@link Open} — always give your `switch` a default branch. */
+  kind: PlanKindType;
+};
 
 // ── Credits (prepaid balance / lead-pack drawdown) ──
 export const CreditReasonSchema = z.enum(['PURCHASE', 'GRANT', 'CONSUME', 'REFUND', 'ADJUST']);
-export type CreditReasonType = z.infer<typeof CreditReasonSchema>;
+/** The ledger reasons this SDK version knows about. Closed — use it for registries. */
+export type KnownCreditReason = z.infer<typeof CreditReasonSchema>;
+/** {@link Open}. */
+export type CreditReasonType = Open<KnownCreditReason>;
 
 export const CreditBalanceDtoSchema = z.object({
   applicationId: z.string(),
-  endUserId: z.string(),
+  /**
+   * Exactly one of these is present, naming whose balance this is.
+   *
+   * `endUserId` used to be required, which was wrong: a credit pool can belong
+   * to an organization, and those responses have never carried an end-user id.
+   */
+  endUserId: z.string().optional(),
+  organizationId: z.string().optional(),
   /** Current spendable balance (whole credits, never negative). */
   balance: z.number().int(),
-  updatedAt: z.string().datetime(),
 });
 export type CreditBalanceDto = z.infer<typeof CreditBalanceDtoSchema>;
 
@@ -692,7 +839,10 @@ export const CreditLedgerEntryDtoSchema = z.object({
   metadata: z.record(z.unknown()),
   createdAt: z.string().datetime(),
 });
-export type CreditLedgerEntryDto = z.infer<typeof CreditLedgerEntryDtoSchema>;
+export type CreditLedgerEntryDto = Omit<z.infer<typeof CreditLedgerEntryDtoSchema>, 'reason'> & {
+  /** {@link Open} — always give your `switch` a default branch. */
+  reason: CreditReasonType;
+};
 
 /** Body for POST /api/v1/credits/consume (end-user drawdown). */
 export const ConsumeCreditsRequestSchema = z.object({
@@ -710,8 +860,14 @@ export type ConsumeCreditsRequest = z.infer<typeof ConsumeCreditsRequestSchema>;
 
 /** Body for the operator grant endpoint (manual top-up / adjustment). */
 export const GrantCreditsRequestSchema = z.object({
-  /** Credits to add (positive) or remove (negative, for ADJUST). */
-  amount: z.number().int(),
+  /**
+   * Credits to add (positive) or remove (negative, for ADJUST).
+   *
+   * Bounded both ways by what an `integer` column holds. Unbounded, a grant of
+   * `Number.MAX_SAFE_INTEGER` passed validation and Postgres answered `22003
+   * value out of range`, which surfaced to the operator as a 500.
+   */
+  amount: z.number().int().min(-2_147_483_647).max(2_147_483_647),
   reason: z.enum(['GRANT', 'REFUND', 'ADJUST']).default('GRANT'),
   idempotencyKey: z.string().min(1).max(200).optional(),
   description: z.string().max(500).optional(),
@@ -733,7 +889,66 @@ export const SubscriptionDtoSchema = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });
-export type SubscriptionDto = z.infer<typeof SubscriptionDtoSchema>;
+export type SubscriptionDto = Omit<z.infer<typeof SubscriptionDtoSchema>, 'status'> & {
+  /** {@link Open} — always give your `switch` a default branch. */
+  status: SubscriptionStatusType;
+};
+
+/**
+ * The fields that decide whether a cancellation can be SCHEDULED. Accepts a
+ * `Date` as well as an ISO string so the API (Prisma rows) and a client (the
+ * serialized DTO) can ask the same question of the same subscription.
+ */
+export interface CancellationTimingInput {
+  status: string;
+  currentPeriodEnd: Date | string | null;
+}
+
+/**
+ * Would `POST /billing/subscription/cancel` with the default
+ * `atPeriodEnd: true` actually leave this subscriber the rest of the period
+ * they have already paid for?
+ *
+ * `atPeriodEnd: true` is a REQUEST, not a guarantee. When this returns false
+ * the API cancels on the spot: the row goes `CANCELED` immediately,
+ * `subscription.canceled` fires, entitlements drop the same moment, and there
+ * is no refund for the unused remainder. Anything that asks a customer to
+ * confirm a cancellation should ask this first and say which of the two they
+ * are about to get — promising "you keep access until <date>" to someone who
+ * loses it on click is how a buyer gives up time they paid for.
+ *
+ * The two cases that still cancel immediately:
+ *
+ *   - **Not ACTIVE.** A `PAST_DUE` subscription (entitled, but the provider is
+ *     mid-dunning) and an abandoned `PENDING` checkout both end at once. There
+ *     is no settled period to run out.
+ *   - **No `currentPeriodEnd`.** Nothing to schedule against.
+ *
+ * Having a payment provider is deliberately NOT part of this. It was until
+ * 2026-08-03: a hand-provisioned subscription with no provider record was
+ * cancelled outright however politely you asked, which is what Rekey Cloud —
+ * selling with checkout closed — did to every buyer who cancelled. A provider
+ * decides who TERMINATES the subscription when the date arrives (its webhook,
+ * versus the API expiring the row locally), not when the paid time ends.
+ *
+ * ## Why this lives in shared-types
+ *
+ * It is one rule with two readers — the server that applies it and the UI that
+ * has to describe it before the call is made — and the UI cannot derive it
+ * from the response, because it has to speak first. Written out twice, it
+ * drifted apart within a day of being written: the API stopped requiring a
+ * provider and marketing's copy went on warning buyers about an immediate
+ * cancellation that no longer happened. One implementation, imported by both.
+ *
+ * Known third site, deliberately NOT unified: `cancelSubscriptionById` (the
+ * operator/MCP cancel-by-id path) still requires a provider. Relaxing it there
+ * would leave provider-less rows scheduled with nothing to expire them —
+ * `expireIfDue` only runs from `getCurrentSubscription`, which an operator
+ * action does not go through. That needs the expiry seam widened first.
+ */
+export function cancelsAtPeriodEnd(sub: CancellationTimingInput): boolean {
+  return sub.status === 'ACTIVE' && sub.currentPeriodEnd !== null;
+}
 
 export const CreateCheckoutRequestSchema = z.object({
   planSlug: z.string().min(1).max(40),
@@ -844,8 +1059,26 @@ export const ValidateCouponRequestSchema = z.object({
 });
 export type ValidateCouponRequest = z.infer<typeof ValidateCouponRequestSchema>;
 
+/**
+ * What a BUYER may see of a coupon — everything needed to render "15% off" and
+ * nothing else.
+ *
+ * `CouponDto` above is the operator's view and stays that way. The public
+ * validate endpoint used to return it verbatim, so any holder of the
+ * publishable key could read `maxRedemptions`, `maxRedemptionsPerUser` and the
+ * operator's private `metadata` off a pricing page.
+ */
+export const PublicCouponDtoSchema = z.object({
+  code: z.string(),
+  discountType: CouponDiscountTypeSchema,
+  /** PERCENT: basis points (1500 = 15.00%). AMOUNT: smallest currency unit. */
+  amountOff: z.number().int().min(0),
+  currency: z.string().nullable(),
+});
+export type PublicCouponDto = z.infer<typeof PublicCouponDtoSchema>;
+
 export const ValidateCouponResultDtoSchema = z.object({
-  coupon: CouponDtoSchema,
+  coupon: PublicCouponDtoSchema,
   plan: z.object({
     slug: z.string(),
     name: z.string(),
@@ -1031,16 +1264,31 @@ export type LicenseVerifyResultDto = z.infer<typeof LicenseVerifyResultDtoSchema
 export const UsageRecordDtoSchema = z.object({
   id: z.string(),
   applicationId: z.string(),
+  /**
+   * The meter's slug, not its internal id.
+   *
+   * The row stores `meterId`; the caller passed a slug and has no way to
+   * resolve an id back. The route shapes the row into this DTO rather than
+   * returning it raw — which is what it used to do, so `applicationId` and
+   * `meterSlug` were both promised here and absent from the wire.
+   */
   meterSlug: z.string(),
   quantity: z.number(),
+  /** Set when the usage was attributed to an end-user. Exclusive with `organizationId`. */
   endUserId: z.string().nullable(),
+  /** Set when the usage was attributed to an organization. Exclusive with `endUserId`. */
+  organizationId: z.string().nullable(),
   occurredAt: z.string().datetime(),
 });
 export type UsageRecordDto = z.infer<typeof UsageRecordDtoSchema>;
 
 export const UsageAggregateDtoSchema = z.object({
   meterSlug: z.string(),
+  /** Summed `quantity` over the window. */
   total: z.number(),
+  /** How many records contributed to `total`. Always returned; previously undocumented. */
+  count: z.number(),
+  /** Echoes the requested window. Null means unbounded on that side. */
   from: z.string().datetime().nullable(),
   to: z.string().datetime().nullable(),
 });
@@ -1158,20 +1406,32 @@ export const WEBHOOK_EVENTS = [
   },
 ] as const;
 
-/** Union of every outbound webhook event name (e.g. `'user.created'`). */
-export type WebhookEventType = (typeof WEBHOOK_EVENTS)[number]['name'];
+/**
+ * Union of every outbound webhook event name this SDK version ships in its
+ * registry (e.g. `'user.created'`). Closed — it IS the registry.
+ */
+export type KnownWebhookEventType = (typeof WEBHOOK_EVENTS)[number]['name'];
+
+/**
+ * {@link Open}. What actually arrives on the wire: a deployment one minor
+ * version ahead sends events this SDK's registry does not list, so
+ * `WebhookEventEnvelope.type` is this and your `switch` needs a default branch.
+ * Narrow to the closed set with {@link isKnownWebhookEvent}.
+ */
+export type WebhookEventType = Open<KnownWebhookEventType>;
 
 /** Just the event names, in registry order — mirrors the API's KNOWN_WEBHOOK_EVENTS. */
-export const KNOWN_WEBHOOK_EVENTS: ReadonlyArray<WebhookEventType> = WEBHOOK_EVENTS.map(
+export const KNOWN_WEBHOOK_EVENTS: ReadonlyArray<KnownWebhookEventType> = WEBHOOK_EVENTS.map(
   (e) => e.name,
 );
 
-export function isKnownWebhookEvent(s: string): s is WebhookEventType {
+/** Type guard narrowing an open event name down to this SDK's registry. */
+export function isKnownWebhookEvent(s: string): s is KnownWebhookEventType {
   return (KNOWN_WEBHOOK_EVENTS as ReadonlyArray<string>).includes(s);
 }
 
 export const WebhookEventTypeSchema = z.enum(
-  KNOWN_WEBHOOK_EVENTS as [WebhookEventType, ...WebhookEventType[]],
+  KNOWN_WEBHOOK_EVENTS as [KnownWebhookEventType, ...KnownWebhookEventType[]],
 );
 
 /**
@@ -1243,7 +1503,10 @@ export type RetryWebhookDeliveryResultDto = z.infer<typeof RetryWebhookDeliveryR
 // and any session-bearing automation share one definition.
 
 export const PaymentStatusSchema = z.enum(['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED']);
-export type PaymentStatusType = z.infer<typeof PaymentStatusSchema>;
+/** The payment statuses this SDK version knows about. Closed — use it for registries. */
+export type KnownPaymentStatus = z.infer<typeof PaymentStatusSchema>;
+/** {@link Open}. */
+export type PaymentStatusType = Open<KnownPaymentStatus>;
 
 /** One row of GET /api/v1/tenant/applications/:id/payments (operator billing view). */
 export const TenantPaymentDtoSchema = z.object({
@@ -1260,11 +1523,15 @@ export const TenantPaymentDtoSchema = z.object({
   /** Joined from the paying end-user, when the payment is attributable to one. */
   endUserEmail: z.string().nullable(),
 });
-export type TenantPaymentDto = z.infer<typeof TenantPaymentDtoSchema>;
+export type TenantPaymentDto = Omit<z.infer<typeof TenantPaymentDtoSchema>, 'status'> & {
+  /** {@link Open} — always give your `switch` a default branch. */
+  status: PaymentStatusType;
+};
 
 /** Query params of GET /api/v1/tenant/applications/:id/payments. */
 export interface TenantPaymentsListQuery {
-  status?: PaymentStatusType;
+  /** Closed on purpose — this is a filter you SEND, so only real statuses are valid. */
+  status?: KnownPaymentStatus;
   /** Inclusive createdAt window — ISO date-times. */
   from?: string;
   to?: string;
@@ -1333,8 +1600,8 @@ export interface TenantEndUsersListQuery {
   /** Substring match on email (lowercased server-side). */
   search?: string;
   emailVerified?: boolean;
-  /** Only users holding at least one subscription with this status. */
-  subscriptionStatus?: SubscriptionStatusType;
+  /** Only users holding at least one subscription with this status. Closed — you SEND this. */
+  subscriptionStatus?: KnownSubscriptionStatus;
   /** Default `createdAt`. */
   sort?: 'createdAt' | 'email';
   /** Default `desc`. */

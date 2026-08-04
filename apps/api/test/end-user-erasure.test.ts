@@ -437,7 +437,7 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
     expect((second.json().data as { alreadyErased: boolean }).alreadyErased).toBe(true);
   });
 
-  it('MEMBER operators get 403 TENANT_ROLE_INSUFFICIENT', async () => {
+  it('MEMBER operators cannot erase — a grant-less member cannot even see the Application', async () => {
     const b = await bootstrap('rolegate');
     const { euid } = await signUpUser(b, 'gated@example.com');
 
@@ -467,9 +467,13 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
     });
     const memberAccess = (accept.json().data as { accessToken: string }).accessToken;
 
+    // 404, not 403, since 2.0.0-rc.3: a freshly invited MEMBER holds no
+    // grants, so the Application is invisible to them and the refusal happens
+    // in ensureAppAccess before the OWNER/ADMIN role gate is ever consulted.
+    // Same non-disclosure posture as the cross-tenant case below.
     const res = await erase(b, euid, memberAccess);
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error.code).toBe('TENANT_ROLE_INSUFFICIENT');
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe('APPLICATION_NOT_FOUND');
     // Not erased.
     const still = await prisma.endUser.findUniqueOrThrow({ where: { id: euid } });
     expect(still.erasedAt).toBeNull();

@@ -137,14 +137,22 @@ describe('credits', () => {
   it('ledger records grant + consume entries newest-first', async () => {
     await grant(100);
     await consume(25, { idempotencyKey: 'lead-x', description: 'one lead' });
-    const entries = await app
+    const { items: entries, page } = await app
       .inject({
         method: 'GET',
         url: `/api/v1/credits/ledger?endUserId=${endUserId}`,
         headers: { authorization: `Bearer ${liveKey}` },
       })
-      .then((r) => r.json().data as Array<{ delta: number; reason: string; balanceAfter: number }>);
+      .then(
+        (r) =>
+          r.json().data as {
+            items: Array<{ delta: number; reason: string; balanceAfter: number }>;
+            page: { total: number; hasMore: boolean };
+          },
+      );
     expect(entries).toHaveLength(2);
+    // Two rows and nothing behind them: the whole history is on this page.
+    expect(page).toMatchObject({ total: 2, hasMore: false });
     expect(entries[0]!.reason).toBe('CONSUME');
     expect(entries[0]!.delta).toBe(-25);
     expect(entries[0]!.balanceAfter).toBe(75);
@@ -165,26 +173,47 @@ describe('credits', () => {
           url: `/api/v1/credits/ledger?endUserId=${endUserId}&${qs}`,
           headers: { authorization: `Bearer ${liveKey}` },
         })
-        .then((r) => r.json().data as Array<{ delta: number; reason: string }>);
+        .then(
+          (r) =>
+            r.json().data as {
+              items: Array<{ delta: number; reason: string }>;
+              page: { total: number; limit: number; offset: number; hasMore: boolean };
+            },
+        );
 
     const page1 = await fetchPage('limit=2&offset=0');
     const page2 = await fetchPage('limit=2&offset=2');
     const page3 = await fetchPage('limit=2&offset=4');
 
-    expect(page1).toHaveLength(2);
-    expect(page2).toHaveLength(2);
-    expect(page3).toHaveLength(2);
+    expect(page1.items).toHaveLength(2);
+    expect(page2.items).toHaveLength(2);
+    expect(page3.items).toHaveLength(2);
+
+    // Every window reports the same 6-row history behind it, echoes the window
+    // it was asked for, and says whether anything follows. This is the whole
+    // point of the envelope: a pager never has to over-fetch to find the end.
+    expect(page1.page).toEqual({ total: 6, limit: 2, offset: 0, hasMore: true });
+    expect(page2.page).toEqual({ total: 6, limit: 2, offset: 2, hasMore: true });
+    expect(page3.page).toEqual({ total: 6, limit: 2, offset: 4, hasMore: false });
 
     // Windows are disjoint and cover the whole 6-row history newest-first.
-    expect(page1.every((e) => e.reason === 'CONSUME')).toBe(true);
+    expect(page1.items.every((e) => e.reason === 'CONSUME')).toBe(true);
     // The oldest row (last page) is the original GRANT — reachable only via offset.
-    expect(page3[1]!.reason).toBe('GRANT');
-    expect(page3[1]!.delta).toBe(100);
+    expect(page3.items[1]!.reason).toBe('GRANT');
+    expect(page3.items[1]!.delta).toBe(100);
 
     // No overlap between page 1 and page 2.
     const full = await fetchPage('limit=200&offset=0');
-    expect(full).toHaveLength(6);
-    expect([page1[0], page1[1], page2[0], page2[1], page3[0], page3[1]]).toEqual(full);
+    expect(full.items).toHaveLength(6);
+    expect(full.page).toMatchObject({ total: 6, hasMore: false });
+    expect([
+      page1.items[0],
+      page1.items[1],
+      page2.items[0],
+      page2.items[1],
+      page3.items[0],
+      page3.items[1],
+    ]).toEqual(full.items);
   });
 
   // ---------- CREDIT-kind plan ----------

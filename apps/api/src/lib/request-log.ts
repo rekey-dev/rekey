@@ -145,20 +145,34 @@ export interface ApiRequestLogQuery {
   skip: number;
 }
 
-/** List request-log rows newest-first for a single app or operator. */
+/**
+ * List request-log rows newest-first for a single app or operator, with the
+ * total behind the window.
+ *
+ * `total` counts what the pruner has left, not every request ever made — this
+ * is a capped convenience tail, and the endpoints say so. It is still the
+ * honest answer to "is there another page", which is what a caller needs and
+ * what a bare `{requests: [...]}` could not give them.
+ */
 export async function listApiRequests(
   query: ApiRequestLogQuery,
-): Promise<ApiRequestLogRow[]> {
-  const rows = await prisma.apiRequestLog.findMany({
-    where: {
-      ...(query.applicationId !== undefined && { applicationId: query.applicationId }),
-      ...(query.operatorUserId !== undefined && { operatorUserId: query.operatorUserId }),
-    },
-    orderBy: { createdAt: 'desc' },
-    take: query.take,
-    skip: query.skip,
-  });
-  return rows.map((r) => ({
+): Promise<{ items: ApiRequestLogRow[]; total: number }> {
+  // One filter object for both queries — a count over a different `where` than
+  // the rows is a pager that walks off the end.
+  const where = {
+    ...(query.applicationId !== undefined && { applicationId: query.applicationId }),
+    ...(query.operatorUserId !== undefined && { operatorUserId: query.operatorUserId }),
+  };
+  const [rows, total] = await Promise.all([
+    prisma.apiRequestLog.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: query.take,
+      skip: query.skip,
+    }),
+    prisma.apiRequestLog.count({ where }),
+  ]);
+  const items = rows.map((r) => ({
     id: r.id,
     method: r.method,
     routePath: r.routePath,
@@ -170,6 +184,7 @@ export async function listApiRequests(
     ip: r.ip,
     createdAt: r.createdAt,
   }));
+  return { items, total };
 }
 
 /**

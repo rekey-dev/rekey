@@ -76,6 +76,53 @@ async function loadDefaultPlan(applicationId: string): Promise<Plan | null> {
  */
 const ENTITLING_STATUSES: SubscriptionStatus[] = ['ACTIVE', 'PAST_DUE'];
 
+/**
+ * The `where` fragment that defines "currently entitling".
+ *
+ * Status alone is not enough. A subscription scheduled to cancel at the end of
+ * its period stays ACTIVE until something terminates it — the provider's
+ * webhook for a provider-backed row, and `expireIfDue` on read for a row
+ * without one. That lazy expiry only runs from `getCurrentSubscription`, and
+ * entitlement resolution queries the table directly, so a provider-less row
+ * whose `cancelAt` had passed kept granting entitlements until some unrelated
+ * portal read happened to flip it. Rekey Cloud's subscriptions are all
+ * provider-less, so that was all of them.
+ *
+ * Fixed here as a FILTER rather than another write. A read path that has to
+ * mutate before it can answer is a race and a hot-path write; excluding the
+ * lapsed row is neither, it is correct the first time, and it covers every
+ * future caller that forgets the expiry exists. `expireIfDue` still runs on
+ * the portal read to settle the row's status and emit the event — this makes
+ * the entitlement answer independent of whether that has happened yet.
+ *
+ * Provider-backed rows are filtered the same way, which they did not used to
+ * be. The carve-out said the provider is the authority on when a subscription
+ * truly ends, so pre-empting it here would cut access off before the provider
+ * agreed it had lapsed. That was sound only where the provider can schedule a
+ * cancellation and will send an event when it lands.
+ *
+ * PayPal can do neither. Its only cancel is immediate, so a period-end request
+ * terminates the agreement at once and the paid period is held open on our side
+ * instead — `applySubscriptionStatusMirror` deliberately declines to let
+ * PayPal's own CANCELLED event shorten it. No further event is coming, so under
+ * the carve-out the lapsed row went on granting everything the buyer had
+ * cancelled, indefinitely, until an unrelated portal read happened to run
+ * `expireIfDue`. That is the exact defect this filter was written to fix,
+ * wearing a provider id.
+ *
+ * The precondition that makes it safe is the same either way: `cancelAt` on a
+ * provider-backed row is only ever written after the provider CONFIRMED the
+ * cancellation — `cancelSubscription` throws on failure and the row is left
+ * untouched — or mirrored from the provider's own schedule. A date in the past
+ * therefore means the provider has agreed.
+ */
+function stillEntitling(now: Date) {
+  return {
+    status: { in: ENTITLING_STATUSES },
+    OR: [{ cancelAt: null }, { cancelAt: { gt: now } }],
+  };
+}
+
 export interface ResolvedEntitlement {
   kind: PlanEntitlementKind;
   key: string;
@@ -450,7 +497,7 @@ export const entitlementsService = {
         where: {
           applicationId,
           beneficiaryOrgId: opts.organizationId,
-          status: { in: ENTITLING_STATUSES },
+          ...stillEntitling(new Date()),
         },
         include: { plan: true },
       });
@@ -464,8 +511,17 @@ export const entitlementsService = {
       subs = await prisma.subscription.findMany({
         where: {
           applicationId,
-          status: { in: ENTITLING_STATUSES },
-          OR: [{ endUserId }, ...(orgIds.length > 0 ? [{ beneficiaryOrgId: { in: orgIds } }] : [])],
+          // `stillEntitling` owns the top-level OR, so the subject match goes
+          // under AND rather than colliding with it.
+          AND: [
+            stillEntitling(new Date()),
+            {
+              OR: [
+                { endUserId },
+                ...(orgIds.length > 0 ? [{ beneficiaryOrgId: { in: orgIds } }] : []),
+              ],
+            },
+          ],
         },
         include: { plan: true },
       });
@@ -551,7 +607,7 @@ export const entitlementsService = {
           applicationId,
           endUserId: subject.endUserId!,
           beneficiaryOrgId: null,
-          status: { in: ENTITLING_STATUSES },
+          ...stillEntitling(new Date()),
         };
     const subs = await prisma.subscription.findMany({ where, include: { plan: true } });
     // One query for every plan, same reason as resolveForEndUser: this runs on

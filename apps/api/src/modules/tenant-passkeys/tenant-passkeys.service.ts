@@ -3,9 +3,16 @@
  *
  * Manages TenantWebAuthnCredential rows for tenant users. Two ceremonies:
  *
- *   - Registration (authenticated): add a passkey to the current operator.
+ *   - Registration (authenticated + stepped up): add a passkey to the current
+ *     operator. The step-up is at the route — a passkey signs its holder in
+ *     with no password and no second factor, so a stolen panel session must
+ *     not be able to enroll one.
  *   - Authentication (unauthenticated): sign in directly with a passkey,
- *     bypassing password + MFA (the passkey is itself a strong factor).
+ *     bypassing password + MFA. That bypass rests on the ceremony requiring
+ *     USER VERIFICATION (`lib/tenant-webauthn.ts`), so the assertion proves
+ *     possession of the authenticator and that the human unlocked it. With UV
+ *     merely "preferred", as it was, the bypass traded an operator's password
+ *     and TOTP for a touch.
  *
  * Anti-replay is enforced server-side via the challenge store
  * (`lib/webauthn-challenge.ts`): `*Start` persists the challenge and

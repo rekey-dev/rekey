@@ -157,7 +157,9 @@ describe('Outbound webhooks', () => {
       url: `/api/v1/tenant/applications/${b.applicationId}/webhooks`,
       headers: { authorization: `Bearer ${b.tenantAccess}` },
     });
-    expect((list.json().data as unknown[])).toHaveLength(1);
+    const listed = list.json().data as { items: unknown[]; page: { total: number } };
+    expect(listed.items).toHaveLength(1);
+    expect(listed.page.total).toBe(1);
 
     const update = await app.inject({
       method: 'PATCH',

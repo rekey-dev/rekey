@@ -11,12 +11,14 @@ import { listApiRequests } from '../../lib/request-log.js';
 import {
   PaginationQuery,
   parsePagination,
+  paged,
   paginationJsonSchema,
 } from '../../lib/pagination.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
 import { operatorTokensService } from './operator-tokens.service.js';
 import { OPERATOR_TOKEN_SCOPES } from '../../lib/operator-token.js';
 import { operatorSignupMode } from './operator-signup-policy.js';
+import { ok, okPage, okFlag, errs, ref } from '../../lib/openapi.js';
 
 function deviceContext(req: FastifyRequest): { userAgent: string | null; ip: string | null } {
   const ua = req.headers['user-agent'];
@@ -110,6 +112,79 @@ function shapeOperatorToken(
   };
 }
 
+// ---------------------------------------------------------------------------
+// OpenAPI response fragments
+// ---------------------------------------------------------------------------
+
+/**
+ * `AuthSessionResult` (see `shape()` above) — a full operator session. `OperatorSession` (the
+ * corrected component) already requires `user` / `memberships` (as `MembershipSummary[]`) /
+ * `activeTenantId` / `activeRole` alongside the token pair, so this only needs to `allOf` in the
+ * one field it adds on top: `shape()` stamps `mfaRequired: false` that isn't part of
+ * `AuthSessionResult` itself.
+ */
+const TenantSession = {
+  description: 'An operator session — token pair, memberships, and the active workspace.',
+  allOf: [
+    ref('OperatorSession'),
+    {
+      type: 'object',
+      properties: {
+        mfaRequired: { type: 'boolean', enum: [false], description: 'Always `false` here.' },
+      },
+      required: ['mfaRequired'],
+    },
+  ],
+};
+
+/** `TenantMfaChallengeResult` — the primary factor passed; a second is required. */
+const TenantMfaChallenge = {
+  type: 'object',
+  description: 'The primary factor passed but MFA is enrolled. Resolve via POST /mfa-verify.',
+  properties: {
+    mfaRequired: { type: 'boolean', enum: [true] },
+    user: ref('Operator'),
+    mfaChallengeToken: {
+      type: 'string',
+      description: 'Single-use, expires after 5 minutes. POST to /mfa-verify.',
+    },
+    mfaChallengeExpiresAt: { type: 'string', format: 'date-time' },
+  },
+  required: ['mfaRequired', 'user', 'mfaChallengeToken', 'mfaChallengeExpiresAt'],
+};
+
+/** `TenantSignInOutcome` — discriminated union on `mfaRequired`. */
+const TenantSignInOutcome = {
+  description:
+    'Either a full session (`mfaRequired: false`) or an MFA challenge ' +
+    '(`mfaRequired: true`) to resolve via POST /mfa-verify.',
+  oneOf: [TenantSession, TenantMfaChallenge],
+};
+
+/** One row of GET /sessions. Dates are pre-serialised to ISO strings by the handler. */
+const SessionItem = {
+  type: 'object',
+  properties: {
+    id: { type: 'string' },
+    createdAt: { type: 'string', format: 'date-time' },
+    expiresAt: { type: 'string', format: 'date-time' },
+    userAgent: { type: 'string', nullable: true },
+    ip: { type: 'string', nullable: true },
+  },
+  required: ['id', 'createdAt', 'expiresAt'],
+};
+
+/**
+ * The 401/403 pair `requireTenantSession` (middleware/tenant-session.ts) produces, shared by
+ * every route in `tenantAuthAuthenticatedRoutes` below.
+ */
+const TENANT_SESSION_ERRORS = {
+  401:
+    'TENANT_SESSION_MISSING — no `Authorization: Bearer` header; or TENANT_SESSION_INVALID — ' +
+    'the session JWT is malformed, expired, or its operator no longer exists.',
+  403: "TENANT_MEMBERSHIP_REVOKED — the session's workspace no longer has a live membership for this operator.",
+} as const;
+
 /**
  * Unauthenticated tenant-auth endpoints. Mounted under /api/v1/tenant/auth —
  * the SAME prefix as `tenantAuthAuthenticatedRoutes` below, but no hook is
@@ -134,6 +209,17 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
           'Public UX hint so the sign-up page can render the right state: an invite-key ' +
           'field (invite), a "registration closed" notice (closed), or the plain form (open). ' +
           'Not a secret — enforcement happens server-side at every creation path regardless.',
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: { mode: { type: 'string', enum: ['open', 'invite', 'closed'] } },
+              required: ['mode'],
+            },
+            'The deployment\'s operator-registration mode.',
+          ),
+          ...errs({ 429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.' }),
+        },
       },
     },
     async () => ({ success: true, data: { mode: operatorSignupMode() } }),
@@ -165,6 +251,22 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
             },
           },
         },
+        response: {
+          201: ok(TenantSession, 'The newly created operator session.'),
+          ...errs({
+            400:
+              'PASSWORD_TOO_SHORT — password shorter than 8 characters; or PASSWORD_BREACHED — ' +
+              'found in a known breach corpus (unless HIBP_BREACH_CHECK_DISABLED).',
+            403:
+              'OPERATOR_SIGNUP_CLOSED — sign-up is disabled on this deployment; or ' +
+              'OPERATOR_INVITE_REQUIRED — invite mode requires `inviteKey`; or ' +
+              'OPERATOR_INVITE_INVALID — the invite key does not match a pending invite; or ' +
+              'OPERATOR_INVITE_EXPIRED — the invite has expired.',
+            409:
+              'EMAIL_ALREADY_EXISTS — an operator with that email already exists; or ' +
+              'OPERATOR_INVITE_USED — the invite was already consumed (race lost).',
+          }),
+        },
       },
     },
     async (req, reply) => {
@@ -192,6 +294,17 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
             email: { type: 'string', format: 'email' },
             password: { type: 'string', minLength: 1 },
           },
+        },
+        response: {
+          200: ok(TenantSignInOutcome, 'A session, or an MFA challenge to resolve via /mfa-verify.'),
+          ...errs({
+            401: 'INVALID_CREDENTIALS — email/password did not match.',
+            403: 'NO_TENANT_MEMBERSHIPS — the operator has no workspace memberships.',
+            429:
+              'TOO_MANY_FAILED_ATTEMPTS — brute-force lockout after repeated bad credentials; ' +
+              'or RATE_LIMITED — too many requests to this endpoint. Honour `Retry-After`.',
+            503: 'DEPENDENCY_UNAVAILABLE — the lockout store (Redis) is unreachable.',
+          }),
         },
       },
     },
@@ -239,6 +352,16 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
             code: { type: 'string', minLength: 1, maxLength: 64 },
           },
         },
+        response: {
+          200: ok(TenantSession, 'The resolved operator session.'),
+          ...errs({
+            401:
+              'MFA_CHALLENGE_INVALID — the challenge token is unknown, expired, or malformed; ' +
+              'or MFA_CODE_INVALID — the TOTP/backup code did not verify.',
+            403: 'NO_TENANT_MEMBERSHIPS — the operator has no workspace memberships.',
+            429: 'RATE_LIMITED — too many requests. Honour `Retry-After`.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -263,6 +386,16 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
           required: ['refreshToken'],
           properties: { refreshToken: { type: 'string', minLength: 1, maxLength: 512 } },
         },
+        response: {
+          200: ok(TenantSession, 'A newly rotated session.'),
+          ...errs({
+            401:
+              'REFRESH_TOKEN_INVALID — the token is unknown; or REFRESH_TOKEN_REUSED — a ' +
+              'rotated token was replayed (every session for the operator is revoked); or ' +
+              'REFRESH_TOKEN_REVOKED — it was already revoked; or REFRESH_TOKEN_EXPIRED.',
+            403: 'NO_TENANT_MEMBERSHIPS — the operator has no workspace memberships.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -283,6 +416,21 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
           type: 'object',
           required: ['refreshToken'],
           properties: { refreshToken: { type: 'string', minLength: 1, maxLength: 512 } },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: { signedOut: { type: 'boolean', enum: [true] } },
+              required: ['signedOut'],
+            },
+            'Always succeeds — revocation is idempotent, so an unknown/expired token still ' +
+              'reports `signedOut: true`.',
+          ),
+          ...errs({
+            400: 'VALIDATION_ERROR — `refreshToken` is missing or outside 1-512 chars.',
+            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+          }),
         },
       },
     },
@@ -305,6 +453,28 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
           type: 'object',
           required: ['email'],
           properties: { email: { type: 'string', format: 'email' } },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              description:
+                'Enumeration-safe: this shape is returned whether or not the email exists.',
+              properties: {
+                delivered: { type: 'boolean', enum: [true] },
+                resetToken: {
+                  type: 'string',
+                  nullable: true,
+                  description:
+                    'The raw reset token. Present only when no email transport is configured ' +
+                    '(dev convenience) — otherwise `null` and the token is emailed instead.',
+                },
+              },
+              required: ['delivered', 'resetToken'],
+            },
+            'Always reports delivered, regardless of whether the email exists.',
+          ),
+          ...errs({ 429: 'RATE_LIMITED — too many requests. Honour `Retry-After`.' }),
         },
       },
     },
@@ -331,6 +501,18 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
             newPassword: { type: 'string', minLength: 8, maxLength: 256 },
           },
         },
+        response: {
+          200: okFlag('Password changed; every session for the operator is revoked.'),
+          ...errs({
+            400:
+              'PASSWORD_TOO_SHORT — password shorter than 8 characters; or PASSWORD_BREACHED — ' +
+              'found in a known breach corpus (unless HIBP_BREACH_CHECK_DISABLED).',
+            401:
+              'PASSWORD_RESET_TOKEN_INVALID — unknown token; or PASSWORD_RESET_TOKEN_USED — ' +
+              'already consumed; or PASSWORD_RESET_TOKEN_EXPIRED.',
+            429: 'RATE_LIMITED — too many requests. Honour `Retry-After`.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -352,6 +534,28 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
           type: 'object',
           required: ['email'],
           properties: { email: { type: 'string', format: 'email' } },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              description:
+                'Enumeration-safe: this shape is returned whether or not the email exists.',
+              properties: {
+                delivered: { type: 'boolean', enum: [true] },
+                token: {
+                  type: 'string',
+                  nullable: true,
+                  description:
+                    'The raw magic-link token. Present only when no email transport is ' +
+                    'configured (dev convenience) — otherwise `null` and the token is emailed.',
+                },
+              },
+              required: ['delivered', 'token'],
+            },
+            'Always reports delivered, regardless of whether the email exists.',
+          ),
+          ...errs({ 429: 'RATE_LIMITED — too many requests. Honour `Retry-After`.' }),
         },
       },
     },
@@ -375,6 +579,16 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
           type: 'object',
           required: ['token'],
           properties: { token: { type: 'string', minLength: 1, maxLength: 512 } },
+        },
+        response: {
+          200: ok(TenantSignInOutcome, 'A session, or an MFA challenge to resolve via /mfa-verify.'),
+          ...errs({
+            401:
+              'MAGIC_LINK_TOKEN_INVALID — unknown token; or MAGIC_LINK_TOKEN_USED — already ' +
+              'consumed; or MAGIC_LINK_TOKEN_EXPIRED.',
+            403: 'NO_TENANT_MEMBERSHIPS — the operator has no workspace memberships.',
+            429: 'RATE_LIMITED — too many requests. Honour `Retry-After`.',
+          }),
         },
       },
     },
@@ -400,6 +614,25 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
         tags: ['Tenant · Auth'],
         security: [{ tenantSession: [] }],
         summary: 'Current operator + memberships + active workspace',
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                user: ref('Operator'),
+                memberships: { type: 'array', items: ref('MembershipSummary') },
+                activeTenantId: { type: 'string' },
+                activeRole: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+              },
+              required: ['user', 'memberships', 'activeTenantId', 'activeRole'],
+            },
+            'The calling operator.',
+          ),
+          ...errs({
+            ...TENANT_SESSION_ERRORS,
+            404: 'TENANT_USER_NOT_FOUND — the operator behind this session no longer exists.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -428,6 +661,16 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
           required: ['tenantId'],
           properties: { tenantId: { type: 'string', minLength: 1 } },
         },
+        response: {
+          200: ok(TenantSession, 'A new session pair scoped to the target workspace.'),
+          ...errs({
+            401: TENANT_SESSION_ERRORS[401],
+            403:
+              "TENANT_MEMBERSHIP_REVOKED — the session's current workspace no longer has a " +
+              'live membership; or NOT_A_MEMBER — the operator has no membership in the ' +
+              'requested `tenantId`.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -452,19 +695,36 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
           'Returns active sessions (live refresh tokens) ordered newest-first, with the ' +
           'User-Agent + IP captured at issue time. Use the returned `id` to revoke individual ' +
           'sessions via DELETE /sessions/:id.',
+        querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(SessionItem, "A page of the operator's active sessions, newest first."),
+          ...errs({
+            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            ...TENANT_SESSION_ERRORS,
+          }),
+        },
       },
     },
     async (req) => {
-      const rows = await tenantAuthService.listSessions(req.tenantUser!.id);
+      const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
+      const { items, total } = await tenantAuthService.listSessions(req.tenantUser!.id, {
+        take,
+        skip,
+      });
       return {
         success: true,
-        data: rows.map((r) => ({
-          id: r.id,
-          createdAt: r.createdAt.toISOString(),
-          expiresAt: r.expiresAt.toISOString(),
-          userAgent: r.userAgent,
-          ip: r.ip,
-        })),
+        data: paged(
+          items.map((r) => ({
+            id: r.id,
+            createdAt: r.createdAt.toISOString(),
+            expiresAt: r.expiresAt.toISOString(),
+            userAgent: r.userAgent,
+            ip: r.ip,
+          })),
+          total,
+          take,
+          skip,
+        ),
       };
     },
   );
@@ -486,6 +746,18 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
           type: 'object',
           required: ['id'],
           properties: { id: { type: 'string', minLength: 1, maxLength: 64 } },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: { revoked: { type: 'boolean' } },
+              required: ['revoked'],
+            },
+            'Whether a live session matching that id was found and revoked (`false` if it was ' +
+              'already gone — this endpoint is idempotent).',
+          ),
+          ...errs(TENANT_SESSION_ERRORS),
         },
       },
     },
@@ -520,16 +792,27 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
           'periodic pruner — a convenience tail, not a billing-grade audit trail. ' +
           'Paginated via ?limit&offset.',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          // `page.total` is what the pruner has left for this operator, not
+          // every request they have ever made — the description says so. It is
+          // still the honest answer to "is there another page", which the old
+          // `{requests: [...]}` wrapper could not give at all.
+          200: okPage(
+            ref('ApiRequestLog'),
+            "A page of the operator's own recent API requests, newest first.",
+          ),
+          ...errs(TENANT_SESSION_ERRORS),
+        },
       },
     },
     async (req) => {
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
-      const requests = await listApiRequests({
+      const { items, total } = await listApiRequests({
         operatorUserId: req.tenantUser!.id,
         take,
         skip,
       });
-      return { success: true, data: { requests } };
+      return { success: true, data: paged(items, total, take, skip) };
     },
   );
 
@@ -540,6 +823,17 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
         tags: ['Tenant · Auth'],
         security: [{ tenantSession: [] }],
         summary: 'Revoke every refresh token for the calling operator (logout all devices)',
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: { revokedCount: { type: 'integer' } },
+              required: ['revokedCount'],
+            },
+            'Count of live sessions revoked.',
+          ),
+          ...errs(TENANT_SESSION_ERRORS),
+        },
       },
     },
     async (req) => {
@@ -569,6 +863,16 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
             currentPassword: { type: 'string', minLength: 1, maxLength: 256 },
             newPassword: { type: 'string', minLength: 8, maxLength: 256 },
           },
+        },
+        response: {
+          200: okFlag('Password changed; other sessions for the operator are revoked.'),
+          ...errs({
+            400:
+              'PASSWORD_TOO_SHORT — password shorter than 8 characters; or PASSWORD_BREACHED — ' +
+              'found in a known breach corpus (unless HIBP_BREACH_CHECK_DISABLED).',
+            401: TENANT_SESSION_ERRORS[401] + '; or INVALID_CREDENTIALS — currentPassword did not match.',
+            403: TENANT_SESSION_ERRORS[403],
+          }),
         },
       },
     },
@@ -616,6 +920,31 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
             expiresAt: { type: 'string', format: 'date-time' },
           },
         },
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: {
+                apiToken: ref('OperatorToken'),
+                rawToken: { type: 'string', description: 'The raw `rp_op_…` secret. Shown once.' },
+                warning: { type: 'string' },
+              },
+              required: ['apiToken', 'rawToken', 'warning'],
+            },
+            'The minted personal-access-token. `rawToken` is shown exactly once.',
+          ),
+          ...errs({
+            400:
+              'OPERATOR_SCOPE_UNKNOWN — an unrecognised scope was requested; or ' +
+              'OPERATOR_TOKEN_EXPIRY_IN_PAST — `expiresAt` is not in the future; or ' +
+              'OPERATOR_TOKEN_LIMIT_REACHED — the operator already has 25 active tokens.',
+            401: TENANT_SESSION_ERRORS[401],
+            403:
+              "TENANT_MEMBERSHIP_REVOKED — the session's workspace no longer has a live " +
+              'membership; or TENANT_ROLE_INSUFFICIENT — the caller is not OWNER or ADMIN in ' +
+              'this workspace.',
+          }),
+        },
       },
     },
     async (req, reply) => {
@@ -654,11 +983,20 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
         tags: ['Tenant · Auth'],
         security: [{ tenantSession: [] }],
         summary: "List the operator's active personal-access-tokens (redacted — no hash)",
+        querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(ref('OperatorToken'), "A page of the operator's personal-access-tokens."),
+          ...errs({
+            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            ...TENANT_SESSION_ERRORS,
+          }),
+        },
       },
     },
     async (req) => {
-      const tokens = await operatorTokensService.list(req.tenantUser!.id);
-      return { success: true, data: tokens.map(shapeOperatorToken) };
+      const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
+      const { items, total } = await operatorTokensService.list(req.tenantUser!.id, { take, skip });
+      return { success: true, data: paged(items.map(shapeOperatorToken), total, take, skip) };
     },
   );
 
@@ -683,6 +1021,13 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
           type: 'object',
           required: ['id'],
           properties: { id: { type: 'string', minLength: 1, maxLength: 64 } },
+        },
+        response: {
+          200: ok(ref('OperatorToken'), 'The revoked token (already-revoked is a no-op success).'),
+          ...errs({
+            ...TENANT_SESSION_ERRORS,
+            404: 'OPERATOR_TOKEN_NOT_FOUND — no token with that id owned by the calling operator.',
+          }),
         },
       },
     },

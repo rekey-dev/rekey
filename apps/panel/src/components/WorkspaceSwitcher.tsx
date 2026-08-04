@@ -40,7 +40,12 @@ export function WorkspaceSwitcher({
   memberships: Membership[];
   activeTenantId: string;
   switchAction: (formData: FormData) => Promise<void>;
-  createAction: (formData: FormData) => Promise<void>;
+  /**
+   * Omitted when this deployment does not allow additional workspaces
+   * (`WORKSPACE_CREATION=disabled`). The entry and its modal are then not
+   * rendered at all — an operator is never shown a door that will not open.
+   */
+  createAction?: ((formData: FormData) => Promise<void>) | undefined;
 }): React.JSX.Element {
   // Hidden form so any DropdownMenuItem can submit a switch by setting the
   // tenantId input + calling submit().
@@ -105,43 +110,49 @@ export function WorkspaceSwitcher({
               </div>
             </DropdownMenuItem>
           ))}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => newModalTriggerRef.current?.click()}>
-            <span className="text-[var(--color-primary)] font-medium">+ New workspace…</span>
-          </DropdownMenuItem>
+          {createAction && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => newModalTriggerRef.current?.click()}>
+                <span className="text-[var(--color-primary)] font-medium">+ New workspace…</span>
+              </DropdownMenuItem>
+            </>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
 
       {/* The "+ New workspace" entry triggers this Modal. We ref the Modal's
           own (hidden) trigger button so the dropdown item can .click() it
           programmatically — no nested <button>. */}
-      <Modal
-        title="Create workspace"
-        description="Workspaces are isolated — applications, members, billing creds, and API keys don't leak between them."
-        trigger="open"
-        triggerClassName="hidden"
-        triggerRef={newModalTriggerRef}
-      >
-        <form action={createAction} className="space-y-3">
-          <label className="block space-y-1">
-            <span className="text-xs font-medium">Workspace name</span>
-            <input
-              type="text"
-              name="name"
-              required
-              autoFocus
-              minLength={2}
-              maxLength={80}
-              placeholder="Side project"
-              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
-            />
-            <span className="block text-xs text-[var(--color-muted-fg)]">
-              You'll be the OWNER. Invite teammates from the Team page after.
-            </span>
-          </label>
-          <SubmitButton pendingLabel="Creating workspace…">Create + switch</SubmitButton>
-        </form>
-      </Modal>
+      {createAction && (
+        <Modal
+          title="Create workspace"
+          description="Workspaces are isolated — applications, members, billing creds, and API keys don't leak between them."
+          trigger="open"
+          triggerClassName="hidden"
+          triggerRef={newModalTriggerRef}
+        >
+          <form action={createAction} className="space-y-3">
+            <label className="block space-y-1">
+              <span className="text-xs font-medium">Workspace name</span>
+              <input
+                type="text"
+                name="name"
+                required
+                autoFocus
+                minLength={2}
+                maxLength={80}
+                placeholder="Side project"
+                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
+              />
+              <span className="block text-xs text-[var(--color-muted-fg)]">
+                You'll be the OWNER. Invite teammates from the Team page after.
+              </span>
+            </label>
+            <SubmitButton pendingLabel="Creating workspace…">Create + switch</SubmitButton>
+          </form>
+        </Modal>
+      )}
     </>
   );
 }

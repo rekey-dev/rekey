@@ -2,12 +2,7 @@ import * as React from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import {
-  publicPost,
-  setSessionCookies,
-  PanelApiError,
-  type AuthResponse,
-} from '@/lib/api';
+import { publicPost, setSessionCookies, PanelApiError, type AuthResponse } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
 

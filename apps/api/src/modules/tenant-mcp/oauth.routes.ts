@@ -38,6 +38,89 @@ import {
   operatorMcpOAuthService,
   operatorProtectedResourceMetadata,
 } from './oauth.service.js';
+import { ok, errs, ref, raw, type JsonSchema } from '../../lib/openapi.js';
+
+// This plugin only mounts when OPERATOR_MCP_ENABLED is on (see app.ts), so
+// there is no per-request feature-toggle 404 here. Most of these are OAuth
+// 2.1 / RFC-defined endpoints and answer with spec-shaped bodies, NOT the
+// Rekey `{success, data}` envelope — see the module header. `POST
+// /oauth/grant`, called by the panel (not an external OAuth client), is the
+// one exception: it deliberately wraps its response in the Rekey envelope so
+// the panel's `api()` helper can unwrap `.data`.
+
+/**
+ * The two discovery routes below (and their path-insertion twins in
+ * `well-known.routes.ts`) document `ROUTE_NOT_FOUND` because, unlike every
+ * other operation in this file, they are reachable even on a deployment that
+ * disabled the operator MCP surface after having advertised it — a
+ * self-hoster flipping `OPERATOR_MCP_ENABLED` off unregisters this whole
+ * plugin, and every path under it (including these) then falls through to
+ * `app.ts`'s generic not-found handler.
+ */
+const OPERATOR_MCP_DISABLED_404 = {
+  404:
+    'ROUTE_NOT_FOUND — this deployment has `OPERATOR_MCP_ENABLED=false`, so the whole operator ' +
+    'MCP surface (including this discovery document) does not exist.',
+};
+
+/** RFC 9728 protected-resource metadata. No registered component covers this shape. */
+const ProtectedResourceMetadata: JsonSchema = {
+  type: 'object',
+  properties: {
+    resource: { type: 'string', format: 'uri' },
+    authorization_servers: { type: 'array', items: { type: 'string', format: 'uri' } },
+    scopes_supported: { type: 'array', items: { type: 'string' } },
+    bearer_methods_supported: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['resource', 'authorization_servers'],
+};
+
+/** RFC 7591 dynamic client registration response. Public client — no secret is issued. */
+const ClientRegistrationResponse: JsonSchema = {
+  type: 'object',
+  properties: {
+    client_id: { type: 'string' },
+    client_id_issued_at: { type: 'integer', description: 'Unix seconds.' },
+    client_name: { type: 'string' },
+    redirect_uris: { type: 'array', items: { type: 'string' } },
+    grant_types: { type: 'array', items: { type: 'string' } },
+    response_types: { type: 'array', items: { type: 'string' } },
+    token_endpoint_auth_method: { type: 'string', enum: ['none'] },
+  },
+  required: [
+    'client_id',
+    'redirect_uris',
+    'grant_types',
+    'response_types',
+    'token_endpoint_auth_method',
+  ],
+};
+
+/** RFC 6749 token response. No `id_token` — this AS has no OIDC surface. */
+const TokenResponse: JsonSchema = {
+  type: 'object',
+  properties: {
+    access_token: { type: 'string' },
+    token_type: { type: 'string', enum: ['Bearer'] },
+    expires_in: { type: 'integer', description: 'Seconds until the access token expires.' },
+    refresh_token: { type: 'string' },
+    scope: { type: 'string' },
+  },
+  required: ['access_token', 'token_type', 'expires_in', 'refresh_token', 'scope'],
+};
+
+/** RFC 6749 §5.2 error body. */
+function oauthError(description: string): JsonSchema {
+  return {
+    description,
+    type: 'object',
+    properties: {
+      error: { type: 'string' },
+      error_description: { type: 'string' },
+    },
+    required: ['error'],
+  };
+}
 
 // --- Zod schemas -----------------------------------------------------------
 
@@ -102,6 +185,13 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         tags: ['MCP · Operator · OAuth'],
         security: [],
         summary: 'Authorization-server metadata (RFC 8414)',
+        response: {
+          200: { description: 'Authorization-server metadata.', ...ref('OAuthAuthServerMetadata') },
+          ...errs({
+            ...OPERATOR_MCP_DISABLED_404,
+            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+          }),
+        },
       },
     },
     async () => operatorAuthServerMetadata(),
@@ -114,6 +204,13 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         tags: ['MCP · Operator · OAuth'],
         security: [],
         summary: 'Protected-resource metadata (RFC 9728)',
+        response: {
+          200: { description: 'Protected-resource metadata.', ...ProtectedResourceMetadata },
+          ...errs({
+            ...OPERATOR_MCP_DISABLED_404,
+            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+          }),
+        },
       },
     },
     async () => operatorProtectedResourceMetadata(),
@@ -131,7 +228,13 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         summary: 'Dynamic client registration (RFC 7591)',
         description:
           'Unauthenticated by design (RFC 7591 open registration). Registers a PUBLIC ' +
-          'client — PKCE, no client secret — so there is nothing to authenticate with yet.',
+          'client — PKCE, no client secret — so there is nothing to authenticate with yet. ' +
+          'Governed by `OPERATOR_MCP_DYNAMIC_REGISTRATION` (default `open`); when set to ' +
+          '`disabled` this answers 403 `CLIENT_REGISTRATION_DISABLED` and disappears from ' +
+          'the RFC 8414 metadata. Registering grants no access on its own — an operator ' +
+          'still has to approve at the panel consent screen — but it DOES allowlist a ' +
+          'redirect_uri of the registrant\'s choosing, which is the ingredient a ' +
+          'consent-phishing link needs. Close it once your clients are connected.',
         body: {
           type: 'object',
           required: ['redirect_uris'],
@@ -144,6 +247,21 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
             },
             client_name: { type: 'string', maxLength: 120 },
           },
+        },
+        response: {
+          201: { description: 'The registered public client.', ...ClientRegistrationResponse },
+          ...errs({
+            400:
+              'INVALID_REDIRECT_URI — a `redirect_uris` entry is not an https URL, an http(s) ' +
+              'loopback URL, or a well-formed custom scheme; or VALIDATION_ERROR — the body ' +
+              'failed schema validation.',
+            403:
+              'CLIENT_REGISTRATION_DISABLED — this deployment sets ' +
+              '`OPERATOR_MCP_DYNAMIC_REGISTRATION=disabled`, so open registration is closed. ' +
+              'The endpoint stays routed (it answers 403 rather than 404) but is also absent ' +
+              'from the RFC 8414 metadata, so a compliant client will not attempt it.',
+            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+          }),
         },
       },
     },
@@ -173,6 +291,23 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         description:
           'Redirects the browser into the panel consent screen. No credential — the operator ' +
           'may not be signed in yet; the panel handles that and then calls /oauth/grant.',
+        response: {
+          302: {
+            description:
+              'Success — redirect to `PANEL_URL`/mcp-consent with the OAuth params. Also used ' +
+              'for an unsupported `response_type` / `code_challenge_method` (redirect to the ' +
+              'client `redirect_uri` with `error=invalid_request` instead).',
+          },
+          400: raw(
+            'Invalid authorization request, or unknown `client_id` / unregistered `redirect_uri` ' +
+              '— rendered as an HTML error page, not JSON (there is no validated redirect target ' +
+              'to bounce the browser to yet).',
+            'text/html',
+          ),
+          ...errs({
+            503: 'PANEL_URL_NOT_CONFIGURED — this deployment has not set `PANEL_URL`.',
+          }),
+        },
       },
     },
     async (req, reply) => {
@@ -237,6 +372,39 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
           'access token (not a PAT) — the session bearer doubles as the CSRF guard, since it ' +
           "cannot be forged cross-site. The operator's membership of the requested workspace " +
           'is confirmed before the code is minted.',
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                redirect: {
+                  type: 'string',
+                  format: 'uri',
+                  description:
+                    "The client's `redirect_uri` — with `code` (+ `state`) on approval, or " +
+                    '`error=access_denied` (+ `state`) when the operator clicked Deny.',
+                },
+              },
+              required: ['redirect'],
+            },
+            'The panel should navigate the browser to `data.redirect`.',
+          ),
+          ...errs({
+            400:
+              'MCP_GRANT_INVALID — the body did not parse; MCP_GRANT_INVALID_CLIENT — unknown ' +
+              '`client_id` or unregistered `redirect_uri`; or MCP_GRANT_PKCE_REQUIRED — ' +
+              '`code_challenge_method` is not `S256`.',
+            401:
+              'TENANT_SESSION_MISSING — no `Authorization: Bearer` session token; or ' +
+              'TENANT_SESSION_INVALID — the token is invalid, expired, or its operator no ' +
+              'longer exists.',
+            403:
+              'TENANT_MEMBERSHIP_REVOKED — the session operator is no longer a member of ANY ' +
+              'workspace; or TENANT_MEMBERSHIP_REQUIRED — the session operator is not a member ' +
+              'of the specific `tenant_id` they picked at consent.',
+            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+          }),
+        },
       },
     },
     async (req, reply) => {
@@ -331,6 +499,19 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
           'No Rekey credential and no client secret: clients are public and prove ' +
           'themselves with PKCE. The `code` + `code_verifier` (or `refresh_token`) in the ' +
           'form body are the credential.',
+        response: {
+          200: { description: 'Tokens issued.', ...TokenResponse },
+          400: oauthError(
+            'invalid_request — the body did not parse, or a required parameter (code / ' +
+              'code_verifier / redirect_uri / refresh_token) is missing; invalid_grant — the ' +
+              'code, PKCE verifier, or refresh_token is invalid, expired, already used, or the ' +
+              "operator is no longer a member of the code/token's workspace; or " +
+              'unsupported_grant_type — `grant_type` is neither `authorization_code` nor `refresh_token`.',
+          ),
+          ...errs({
+            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+          }),
+        },
       },
     },
     async (req, reply) => {
@@ -378,7 +559,10 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         });
       } catch (err) {
         if (err instanceof OAuthError) {
-          return reply.status(err.status).send({
+          // `err.status` is typed as a plain `number` (see OAuthError in oauth.service.ts);
+          // the schema.response literal below narrows reply.status()'s accepted values, so
+          // narrow here too. Every throw site in operatorMcpOAuthService uses the 400 default.
+          return reply.status(err.status as 400).send({
             error: err.error,
             error_description: err.errorDescription,
           });
@@ -413,6 +597,18 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
           'Requires an operator PAT. Answers only about tokens in the caller\'s own ' +
           'workspace; an unknown, expired, or out-of-workspace token returns ' +
           '`{ active: false }`.',
+        response: {
+          // `introspect()` also returns `tid` (the workspace id), which
+          // `OAuthIntrospectionResponse` does not model — components are a
+          // documented floor, not a ceiling (see lib/openapi.ts), so this is
+          // still accurate, just incomplete. Noted in the report for this file.
+          200: { description: 'Token state (RFC 7662).', ...ref('OAuthIntrospectionResponse') },
+          ...errs({
+            401: 'OPERATOR_TOKEN_INVALID — the PAT is missing, invalid, revoked, or expired.',
+            403: 'TENANT_MEMBERSHIP_REVOKED — the PAT holder is no longer a member of its workspace.',
+            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+          }),
+        },
       },
     },
     async (req, reply) => {

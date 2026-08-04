@@ -8,21 +8,33 @@ import { requireSuperAdmin } from '../../middleware/admin-auth.js';
 import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { requireBillingEnabled } from '../../middleware/billing-enabled.js';
+import { moneyAmount, positiveBoundedInt } from '../../lib/bounded-int.js';
+import { ok, okPage, errs, ref } from '../../lib/openapi.js';
+import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
+
+/** The 401/403 pair every `/api/v1/admin/*` route shares. */
+const SUPER_ADMIN_ERRORS = {
+  401:
+    'ADMIN_AUTH_MISSING — no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID — the ' +
+    'value does not match `SUPER_ADMIN_KEY`.',
+  403: 'ADMIN_IP_NOT_ALLOWED — the caller IP is outside `ADMIN_IP_ALLOWLIST`.',
+  429: 'RATE_LIMITED — too many requests. Honour the Retry-After header.',
+} as const;
 
 const Params = z.object({ id: z.string().min(1) });
 const CodeParams = z.object({ id: z.string().min(1), code: z.string().min(1) });
-const ListQuery = z.object({ includeInactive: z.coerce.boolean().optional() });
+const ListQuery = z.object({ includeInactive: z.coerce.boolean().optional() }).merge(PaginationQuery);
 
 const CreateBody = z.object({
   code: z.string().min(1).max(40),
   discountType: z.enum(['PERCENT', 'AMOUNT']),
-  amountOff: z.number().int().min(0),
+  amountOff: moneyAmount(),
   currency: z.string().length(3).optional(),
   planSlugs: z.array(z.string().min(1).max(40)).optional(),
   startsAt: z.string().datetime().optional(),
   endsAt: z.string().datetime().optional(),
-  maxRedemptions: z.number().int().min(1).optional(),
-  maxRedemptionsPerUser: z.number().int().min(1).optional(),
+  maxRedemptions: positiveBoundedInt().optional(),
+  maxRedemptionsPerUser: positiveBoundedInt().optional(),
   metadata: z.record(z.unknown()).optional(),
 });
 const ActiveBody = z.object({ active: z.boolean() });
@@ -43,14 +55,30 @@ export async function couponsAdminRoutes(app: FastifyInstance): Promise<void> {
         security: [{ superAdminKey: [] }],
         summary: 'List coupons for an application',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
-        querystring: { type: 'object', properties: { includeInactive: { type: 'boolean' } } },
+        querystring: {
+          type: 'object',
+          properties: { includeInactive: { type: 'boolean' }, ...paginationJsonSchema },
+        },
+        response: {
+          200: okPage(ref('Coupon'), 'A page of coupons for this application.'),
+          ...errs({
+            400: 'VALIDATION_ERROR — `includeInactive` is not a boolean.',
+            ...SUPER_ADMIN_ERRORS,
+            404: 'APPLICATION_NOT_FOUND — no application with that id.',
+          }),
+        },
       },
     },
     async (req) => {
       const { id } = Params.parse(req.params);
-      const { includeInactive } = ListQuery.parse(req.query);
+      const { includeInactive, ...page } = ListQuery.parse(req.query);
       await applicationsService.get(id);
-      return { success: true, data: await couponsService.list(id, includeInactive ?? false) };
+      const { take, skip } = parsePagination(page);
+      const [items, total] = await Promise.all([
+        couponsService.list(id, includeInactive ?? false, { take, skip }),
+        couponsService.count(id, includeInactive ?? false),
+      ]);
+      return { success: true, data: paged(items, total, take, skip) };
     },
   );
 
@@ -71,15 +99,27 @@ export async function couponsAdminRoutes(app: FastifyInstance): Promise<void> {
           properties: {
             code: { type: 'string', minLength: 1, maxLength: 40 },
             discountType: { type: 'string', enum: ['PERCENT', 'AMOUNT'] },
-            amountOff: { type: 'integer', minimum: 0 },
+            amountOff: { type: 'integer', minimum: 0, maximum: 2147483647 },
             currency: { type: 'string', minLength: 3, maxLength: 3 },
             planSlugs: { type: 'array', items: { type: 'string' } },
             startsAt: { type: 'string', format: 'date-time' },
             endsAt: { type: 'string', format: 'date-time' },
-            maxRedemptions: { type: 'integer', minimum: 1 },
-            maxRedemptionsPerUser: { type: 'integer', minimum: 1 },
+            maxRedemptions: { type: 'integer', minimum: 1, maximum: 2147483647 },
+            maxRedemptionsPerUser: { type: 'integer', minimum: 1, maximum: 2147483647 },
             metadata: { type: 'object', additionalProperties: true },
           },
+        },
+        response: {
+          201: ok(ref('Coupon'), 'The created coupon.'),
+          ...errs({
+            400:
+              'VALIDATION_ERROR — a field failed schema validation; or COUPON_CODE_INVALID — ' +
+              'the code is not 1-40 alphanumerics/underscores/hyphens; or COUPON_AMOUNT_INVALID ' +
+              '— `amountOff` is negative, or a PERCENT discount exceeds 10000 basis points.',
+            ...SUPER_ADMIN_ERRORS,
+            404: 'APPLICATION_NOT_FOUND — no application with that id.',
+            409: 'COUPON_CODE_TAKEN — another coupon on this application already uses that code.',
+          }),
         },
       },
     },
@@ -122,6 +162,14 @@ export async function couponsAdminRoutes(app: FastifyInstance): Promise<void> {
           type: 'object',
           required: ['active'],
           properties: { active: { type: 'boolean' } },
+        },
+        response: {
+          200: ok(ref('Coupon'), 'The updated coupon.'),
+          ...errs({
+            400: 'VALIDATION_ERROR — `active` is missing or not a boolean.',
+            ...SUPER_ADMIN_ERRORS,
+            404: 'COUPON_NOT_FOUND — no coupon with that code on this application.',
+          }),
         },
       },
     },
@@ -178,6 +226,29 @@ export async function couponsPublicRoutes(app: FastifyInstance): Promise<void> {
             planSlug: { type: 'string', minLength: 1, maxLength: 40 },
           },
         },
+        response: {
+          200: ok(ref('ValidateCouponResult'), 'The discount this coupon resolves to for this plan.'),
+          ...errs({
+            400:
+              'VALIDATION_ERROR — the body failed schema validation; or COUPON_INACTIVE / ' +
+              'COUPON_NOT_YET_STARTED / COUPON_EXPIRED / COUPON_NOT_APPLICABLE / ' +
+              'COUPON_CURRENCY_MISMATCH / COUPON_REDEMPTION_LIMIT_REACHED / ' +
+              'COUPON_USER_LIMIT_REACHED — the coupon fails validation for this plan/user.',
+            401:
+              'API_KEY_MISSING / API_KEY_INVALID — the secret key is missing, malformed, or ' +
+              'unknown/revoked/expired; or PUBLISHABLE_KEY_INVALID — the publishable key is ' +
+              'unknown or has rotated out; or USER_TOKEN_MISSING — no X-Rekey-User-Token ' +
+              'header; or USER_TOKEN_INVALID — the token is invalid/expired/wrong-secret; or ' +
+              'USER_TOKEN_WRONG_APPLICATION — the token was issued for a different Application; ' +
+              'or IMPERSONATION_SESSION_ENDED — the impersonation session behind this token has ended.',
+            403:
+              "IP_NOT_ALLOWED — caller IP outside the secret key's allowlist; or " +
+              "ORIGIN_NOT_ALLOWED — the Origin is outside the publishable key's CORS allowlist; " +
+              'or BILLING_DISABLED — billing is not enabled for this application.',
+            404: 'PLAN_NOT_FOUND — no plan with that slug; or COUPON_NOT_FOUND — no active coupon matching the code.',
+            429: 'RATE_LIMITED — too many requests. Honour the Retry-After header.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -194,7 +265,22 @@ export async function couponsPublicRoutes(app: FastifyInstance): Promise<void> {
       return {
         success: true,
         data: {
-          coupon: result.coupon,
+          // A PROJECTION, not the row. This endpoint answers to anyone holding
+          // the publishable key and a user token — a pricing page — and it used
+          // to hand back the whole `Coupon`: `maxRedemptions`,
+          // `maxRedemptionsPerUser`, the operator's private `metadata`, the
+          // internal id, the full plan allow-list. None of that is a buyer's
+          // business, and the limits in particular tell a scraper exactly how
+          // much of a campaign is left to burn. What a buyer needs to render
+          // "15% off" is the code, the kind of discount, and its size; the
+          // money they actually care about is already `discountAmount` /
+          // `amountAfterDiscount` below.
+          coupon: {
+            code: result.coupon.code,
+            discountType: result.coupon.discountType,
+            amountOff: result.coupon.amountOff,
+            currency: result.coupon.currency,
+          },
           plan: { slug: plan.slug, name: plan.name, amount: plan.amount, currency: plan.currency },
           discountAmount: result.discountAmount,
           amountAfterDiscount: result.amountAfterDiscount,

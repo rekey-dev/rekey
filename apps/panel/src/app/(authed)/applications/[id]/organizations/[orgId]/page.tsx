@@ -3,16 +3,19 @@ import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { api, PanelApiError, type OrganizationDetail, type EndUserRow, type OrgBillingDto } from '@/lib/api';
+import type { Page } from '@/lib/paginate';
 import { Modal } from '@/components/Modal';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { CopyButton } from '@/components/CopyButton';
 import { Card, SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
+import { StatusPill } from '@/components/StatusPill';
 import { EmptyState } from '@/components/EmptyState';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
 import { Banner } from '@/components/Banner';
+import { cookieSecure } from '@/lib/cookie-secure';
 
 const ROLES = ['OWNER', 'ADMIN', 'MEMBER'] as const;
 
@@ -40,19 +43,6 @@ function RoleBadge({ role }: { role: 'OWNER' | 'ADMIN' | 'MEMBER' }): React.JSX.
   );
 }
 
-/** Same tone mapping as end-users/[euid] — keep subscription states consistent. */
-const STATUS_TONE: Record<string, BadgeTone> = {
-  ACTIVE: 'success',
-  PENDING: 'warning',
-  PAST_DUE: 'warning',
-  CANCELED: 'neutral',
-  CANCELLED: 'neutral',
-  EXPIRED: 'neutral',
-  SUSPENDED: 'danger',
-};
-function statusTone(s: string): BadgeTone {
-  return STATUS_TONE[s] ?? 'neutral';
-}
 
 // ─── Actions ─────────────────────────────────────────────────────────
 
@@ -161,7 +151,7 @@ async function revealOrgLicenseKey(
     jar.set('rekey_reveal_org_license', result.rawKey, {
       httpOnly: true,
       sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
+      secure: await cookieSecure(),
       path: pageUrl(applicationId, orgId),
       maxAge: 120,
     });
@@ -198,7 +188,7 @@ export default async function OrganizationDetailPage({
     if (err instanceof PanelApiError && err.statusCode === 404) notFound();
     throw err;
   }
-  const endUsers = await api<EndUserRow[]>({
+  const { items: endUsers } = await api<Page<EndUserRow>>({
     method: 'GET',
     path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users?limit=100`,
   });
@@ -399,7 +389,7 @@ export default async function OrganizationDetailPage({
                   <TR key={s.id} hover>
                     <TD>{s.planName} <span className="font-mono text-[11px] text-[var(--color-muted-fg)]">{s.planSlug}</span></TD>
                     <TD>
-                      <Badge tone={statusTone(s.status)} dot>{s.status.toLowerCase()}</Badge>
+                      <StatusPill status={s.status} />
                     </TD>
                     <TD>
                       <Link href={`/applications/${id}/end-users/${s.ownerEndUserId}`} title={s.ownerEndUserId} className="inline-block max-w-[12rem] truncate align-bottom font-mono text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline">

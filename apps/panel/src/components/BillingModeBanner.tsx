@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { api, type ApplicationRow, type BillingCredentialRow } from '@/lib/api';
+import { api, type BillingCredentialRow, getApplication } from '@/lib/api';
 
 /**
  * Live/test billing-mode banner for the billing tab group (Providers /
@@ -51,10 +51,7 @@ export async function BillingModeBanner({
   applicationId: string;
 }): Promise<React.JSX.Element | null> {
   const [app, rows] = await Promise.all([
-    api<ApplicationRow>({
-      method: 'GET',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}`,
-    }),
+    getApplication(applicationId),
     api<BillingCredentialRow[]>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials`,

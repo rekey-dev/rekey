@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { assertSafeUrl, isPrivateIp } from '../src/lib/ssrf-guard.js';
+import { assertSafeUrl, assertSafeUrlResolved, isPrivateIp } from '../src/lib/ssrf-guard.js';
 
 describe('isPrivateIp', () => {
   it('flags private / loopback / link-local / metadata ranges', () => {
@@ -118,4 +118,36 @@ describe('reserved IPv4 ranges that are not RFC 1918', () => {
   for (const ip of ['192.0.0.1', '198.18.0.1', '192.0.2.1', '198.51.100.1', '203.0.113.1']) {
     it(`blocks ${ip}`, () => expect(isPrivateIp(ip)).toBe(true));
   }
+});
+
+describe('assertSafeUrlResolved returns the addresses it approved', () => {
+  // The addresses are the whole point of the function. Validating a hostname
+  // and then handing the raw URL to `fetch` lets the runtime resolve again
+  // independently — the DNS-rebinding TOCTOU. The caller pins the connection
+  // to what came back here, so if this ever returns an empty array for a real
+  // host, the pinning silently stops happening and nothing else notices.
+  // The suite sets WEBHOOK_ALLOW_PRIVATE_TARGETS=true so fixtures can point at
+  // localhost, and that flag short-circuits before resolution — so these cases
+  // opt out explicitly, or they would assert nothing.
+  it('returns at least one address for a public host', async () => {
+    const addresses = await assertSafeUrlResolved('https://example.com/hook', {
+      allowPrivate: false,
+    });
+    expect(addresses.length).toBeGreaterThan(0);
+    for (const a of addresses) expect(isPrivateIp(a)).toBe(false);
+  });
+
+  it('still refuses a private target', async () => {
+    await expect(
+      assertSafeUrlResolved('http://127.0.0.1/hook', { allowPrivate: false }),
+    ).rejects.toThrow();
+  });
+
+  it('returns an empty array when private targets are explicitly allowed', async () => {
+    // The escape hatch short-circuits before resolution, so there is nothing
+    // to pin — the caller must fall back to an unpinned fetch rather than
+    // pinning to nothing.
+    const addresses = await assertSafeUrlResolved('http://127.0.0.1/hook', { allowPrivate: true });
+    expect(addresses).toEqual([]);
+  });
 });

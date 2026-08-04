@@ -130,23 +130,28 @@ export interface TenantSessionSummary {
 
 export async function listActiveTenantSessions(
   tenantUserId: string,
-): Promise<TenantSessionSummary[]> {
-  const rows = await prisma.tenantRefreshToken.findMany({
-    where: {
-      tenantUserId,
-      revokedAt: null,
-      expiresAt: { gt: new Date() },
-    },
-    orderBy: { createdAt: 'desc' },
-    select: {
-      id: true,
-      createdAt: true,
-      expiresAt: true,
-      userAgent: true,
-      ip: true,
-    },
-  });
-  return rows;
+  opts: { take?: number; skip?: number } = {},
+): Promise<{ items: TenantSessionSummary[]; total: number }> {
+  // One `now` for rows and count — see listActiveSessions (lib/refresh-tokens.ts).
+  const now = new Date();
+  const where = { tenantUserId, revokedAt: null, expiresAt: { gt: now } };
+  const [items, total] = await Promise.all([
+    prisma.tenantRefreshToken.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        createdAt: true,
+        expiresAt: true,
+        userAgent: true,
+        ip: true,
+      },
+      ...(opts.take !== undefined && { take: opts.take }),
+      ...(opts.skip !== undefined && { skip: opts.skip }),
+    }),
+    prisma.tenantRefreshToken.count({ where }),
+  ]);
+  return { items, total };
 }
 
 export async function revokeSessionForTenantUser(

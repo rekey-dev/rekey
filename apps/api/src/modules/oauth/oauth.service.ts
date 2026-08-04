@@ -139,7 +139,12 @@ export const oauthService = {
     // 1. Existing identity? Sign that user in.
     const existing = await prisma.oAuthIdentity.findUnique({
       where: {
-        provider_providerAccountId: {
+        // Scoped by Application. Globally unique meant the first Application to
+        // link a Google account claimed it deployment-wide — the same person
+        // signing in to another Application got a hard 401 they could never
+        // clear.
+        applicationId_provider_providerAccountId: {
+          applicationId: args.application.id,
           provider: args.providerName,
           providerAccountId: identity.providerAccountId,
         },
@@ -147,9 +152,14 @@ export const oauthService = {
       include: { endUser: true },
     });
     if (existing) {
-      // Cross-application guard — refuse to sign in if the link belongs to a
-      // different Application. Should never happen via normal flows but
-      // guards against config errors.
+      // Defence in depth, and now genuinely unreachable: the lookup above is
+      // scoped by `applicationId`, so a cross-Application row cannot come back.
+      //
+      // Kept because it is one branch and it fails closed if that query is ever
+      // widened again. The previous version of this comment claimed the case
+      // "should never happen via normal flows" while the lookup WAS global —
+      // so it happened to every multi-Application deployment, and the person
+      // hitting it could never clear it.
       if (existing.applicationId !== args.application.id) {
         throw new RekeyError({
           statusCode: 401,
@@ -337,7 +347,12 @@ export const oauthService = {
     // Already linked anywhere? Decide.
     const existing = await prisma.oAuthIdentity.findUnique({
       where: {
-        provider_providerAccountId: {
+        // Scoped by Application. Globally unique meant the first Application to
+        // link a Google account claimed it deployment-wide — the same person
+        // signing in to another Application got a hard 401 they could never
+        // clear.
+        applicationId_provider_providerAccountId: {
+          applicationId: args.application.id,
           provider: args.providerName,
           providerAccountId: identity.providerAccountId,
         },

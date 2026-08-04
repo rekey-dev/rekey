@@ -46,7 +46,15 @@ export interface CreateApiKeyResult {
 }
 
 const DEFAULT_SCOPES = ['*'];
-const MAX_KEYS_PER_APP = 25;
+/**
+ * Hard ceiling on ACTIVE keys per Application, enforced at mint time.
+ *
+ * Exported because it is what makes this list bounded by construction — the
+ * three routes that serve it lean on that fact (two return a bare array,
+ * allow-listed in `test/openapi-contract.test.ts`; the operator-PAT one
+ * reports this value as its page `limit`).
+ */
+export const MAX_KEYS_PER_APP = 25;
 
 export const apiKeysService = {
   async listForApplication(applicationId: string): Promise<PublicApiKey[]> {

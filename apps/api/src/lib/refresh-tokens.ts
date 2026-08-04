@@ -227,23 +227,33 @@ export interface SessionSummary {
   ip: string | null;
 }
 
-export async function listActiveSessions(endUserId: string): Promise<SessionSummary[]> {
-  const rows = await prisma.refreshToken.findMany({
-    where: {
-      endUserId,
-      revokedAt: null,
-      expiresAt: { gt: new Date() },
-    },
-    orderBy: { createdAt: 'desc' },
-    select: {
-      id: true,
-      createdAt: true,
-      expiresAt: true,
-      userAgent: true,
-      ip: true,
-    },
-  });
-  return rows;
+export async function listActiveSessions(
+  endUserId: string,
+  opts: { take?: number; skip?: number } = {},
+): Promise<{ items: SessionSummary[]; total: number }> {
+  // One `now` for both queries. Two `new Date()` calls straddle the boundary
+  // for any session expiring in the microseconds between them, and a `total`
+  // computed against a different instant than the rows is exactly the kind of
+  // off-by-one that makes a pager render a page that is not there.
+  const now = new Date();
+  const where = { endUserId, revokedAt: null, expiresAt: { gt: now } };
+  const [items, total] = await Promise.all([
+    prisma.refreshToken.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        createdAt: true,
+        expiresAt: true,
+        userAgent: true,
+        ip: true,
+      },
+      ...(opts.take !== undefined && { take: opts.take }),
+      ...(opts.skip !== undefined && { skip: opts.skip }),
+    }),
+    prisma.refreshToken.count({ where }),
+  ]);
+  return { items, total };
 }
 
 /**

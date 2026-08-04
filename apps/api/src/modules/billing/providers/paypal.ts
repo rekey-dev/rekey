@@ -383,15 +383,81 @@ export class RealPaypalProvider implements BillingProvider {
     throw new Error(`PayPal webhook register failed: HTTP ${res.status} ${text}`);
   }
 
+  /**
+   * Cancel the agreement at PayPal. **Always immediately — PayPal has no other
+   * kind.**
+   *
+   * ## Why `input.atPeriodEnd` is not forwarded
+   *
+   * Subscriptions v1 exposes exactly one cancellation,
+   * `POST /v1/billing/subscriptions/:id/cancel`, and it terminates the
+   * agreement on the spot. There is no `cancel_at_period_end` (Stripe), no
+   * `cancel_at_cycle_end` (Razorpay), and no scheduling parameter of any kind —
+   * the request body takes a `reason` string and nothing else. `suspend` is the
+   * only neighbouring verb and it means "dunning pause, reactivatable", not
+   * "cancel later"; our own webhook translate maps PayPal's SUSPENDED to
+   * PAST_DUE and opens a dunning case, so borrowing it here would put a
+   * cancelling buyer into collections.
+   *
+   * So the flag has nowhere to go, and inventing a body field to carry it would
+   * be a lie PayPal ignores. This method used to send the same immediate cancel
+   * whatever it was asked for, silently — which is defensible as a wire call
+   * and indefensible as a promise, because `cancelCurrentSubscription` had
+   * already told the buyer "you keep everything you paid for until <date>" and
+   * then PayPal's CANCELLED webhook took it away seconds later.
+   *
+   * ## Where the paid period is honoured instead
+   *
+   * Cancelling at PayPal NOW is the only thing that reliably stops the money,
+   * and stopping the money is the part that cannot be allowed to fail. What it
+   * does not have to mean is that entitlements end now: that is Rekey's own
+   * decision, not PayPal's. So the period-end promise is kept **locally** —
+   * `cancelAt` is recorded, the row stays ACTIVE, `applySubscriptionStatusChanged`
+   * declines to let the resulting CANCELLED webhook shorten a period the buyer
+   * has paid for, and `expireIfDue` ends it on the day.
+   *
+   * That ordering is deliberate, and it is the opposite of scheduling the
+   * PayPal call for later. Both designs have a failure mode; only one of them
+   * costs the buyer money:
+   *
+   *   - Call PayPal later (a local scheduler): if the sweep is late, missed, or
+   *     lands after PayPal's own anniversary — and our period anchor is a local
+   *     approximation, so it can — PayPal takes another payment. Money leaves a
+   *     buyer's account for a subscription they cancelled.
+   *   - Call PayPal now (this): if the local expiry is late, the buyer keeps
+   *     access a little longer than they paid for. Costs us, not them.
+   *
+   * The consequence to be honest about: unlike Stripe's
+   * `cancel_at_period_end`, this is not reversible at the provider. Changing
+   * their mind means a new agreement, which is what "Resubscribe" does.
+   *
+   * ## Failures are failures
+   *
+   * The response used to be discarded entirely. A cancel PayPal refused
+   * resolved successfully, `cancelCurrentSubscription` stamped the local row
+   * cancelled, and the agreement went on billing — the buyer having been told
+   * it was over, and seeing no subscription left to cancel. Throwing surfaces
+   * it as `BILLING_PROVIDER_ERROR` (502) so the buyer knows to try again and
+   * the local row is left untouched.
+   *
+   * 404 / RESOURCE_NOT_FOUND is treated as success on purpose: it is what
+   * PayPal answers for an agreement it has already terminated, so a retry after
+   * a partial failure settles instead of wedging.
+   */
   async cancelSubscription(input: CancelSubscriptionInput): Promise<void> {
     const providerSubId = input.subscription.providerSubId;
     if (!providerSubId) return;
     const token = await this.accessToken();
-    await paypalFetch(`${this.base}/v1/billing/subscriptions/${providerSubId}/cancel`, {
+    const res = await paypalFetch(`${this.base}/v1/billing/subscriptions/${providerSubId}/cancel`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ reason: 'Cancelled via Rekey' }),
     });
+    if (res.ok || res.status === 404) return;
+    const text = await res.text();
+    // Already cancelled/expired at PayPal — the outcome we asked for.
+    if (res.status === 422 && text.includes('SUBSCRIPTION_STATUS_INVALID')) return;
+    throw new Error(`PayPal subscription cancel failed: HTTP ${res.status} ${text}`);
   }
 }
 

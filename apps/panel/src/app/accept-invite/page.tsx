@@ -12,13 +12,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import {
-  publicGet,
-  setSessionCookies,
-  ACCESS_COOKIE,
-  PanelApiError,
-  api,
-} from '@/lib/api';
+import { publicGet, setSessionCookies, ACCESS_COOKIE, PanelApiError, api } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
 import { AuthCard } from '@/components/AuthCard';
 import { formatDateTime } from '@/lib/date';

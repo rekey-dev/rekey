@@ -1,9 +1,10 @@
 import * as React from 'react';
 import Link from 'next/link';
-import { api, type ApplicationRow, type DunningCaseRow } from '@/lib/api';
+import { api, type DunningCaseRow, getApplication } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { formatDateTime } from '@/lib/date';
 import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
+import type { Page } from '@/lib/paginate';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
 import { Badge } from '@/components/Badge';
@@ -50,10 +51,7 @@ export default async function DunningPage({
   const sorted = readSort(sp, ['openedAt', 'nextActionAt', 'status'] as const);
 
   // Billing master switch off → point at the switch instead of an empty table.
-  const app = await api<ApplicationRow>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-  });
+  const app = await getApplication(id);
   if (!app.billingConfig.enabled) {
     return (
       <div className="space-y-5">
@@ -76,7 +74,7 @@ export default async function DunningPage({
     qs.set('order', sorted.order);
   }
 
-  const cases = await api<DunningCaseRow[]>({
+  const { items: cases, page } = await api<Page<DunningCaseRow>>({
     method: 'GET',
     path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/dunning?${qs.toString()}`,
   });
@@ -247,6 +245,7 @@ export default async function DunningPage({
         offset={offset}
         pageSize={PAGE_SIZE}
         count={cases.length}
+        hasMore={page.hasMore}
         extraParams={Object.keys(extraParams).length ? extraParams : undefined}
       />
         </>

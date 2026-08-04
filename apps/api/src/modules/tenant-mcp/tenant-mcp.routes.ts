@@ -49,6 +49,57 @@ import { requestContext } from '../../lib/security-events.js';
 import { resolveOperatorMcpBearer } from './bearer-auth.js';
 import { scopeHasWrite, scopeHasAdmin } from './oauth.service.js';
 import { handleOperatorMcpMessage, type JsonRpcMessage } from './tenant-mcp-server.js';
+import { errs, type JsonSchema } from '../../lib/openapi.js';
+
+// This whole plugin only mounts when OPERATOR_MCP_ENABLED is on (see app.ts) —
+// there is no per-request feature-toggle 404 to document here, unlike the
+// per-Application MCP module. The `onRequest` hook (`resolveOperatorMcpBearer`)
+// runs before every handler in this file and throws the Rekey-enveloped 401
+// below on any auth failure.
+
+const AUTH_401 = {
+  401:
+    'OPERATOR_MCP_UNAUTHORIZED — no `Authorization: Bearer` header, or the presented PAT / ' +
+    'OAuth access token is unknown, revoked, expired, wrong-audience, or belongs to an ' +
+    'operator no longer a member of the token\'s workspace.',
+};
+
+const JsonRpcSuccess: JsonSchema = {
+  type: 'object',
+  properties: {
+    jsonrpc: { type: 'string', enum: ['2.0'] },
+    id: { description: 'Echoes the request id — string, number, or null.' },
+    result: {
+      description:
+        'Present on success. Shape depends on the method (initialize / tools/list / tools/call / ping).',
+    },
+  },
+  required: ['jsonrpc', 'id', 'result'],
+};
+
+const JsonRpcFailure: JsonSchema = {
+  type: 'object',
+  properties: {
+    jsonrpc: { type: 'string', enum: ['2.0'] },
+    id: { description: 'Echoes the request id — string, number, or null.' },
+    error: {
+      type: 'object',
+      properties: { code: { type: 'integer' }, message: { type: 'string' } },
+      required: ['code', 'message'],
+    },
+  },
+  required: ['jsonrpc', 'id', 'error'],
+};
+
+/**
+ * Unlike the per-Application MCP endpoint, this route accepts one JSON-RPC
+ * message per POST (never a batch array) — see `handleOperatorMcpMessage`,
+ * which takes a single `JsonRpcMessage`.
+ */
+const JsonRpcResponse: JsonSchema = {
+  description: 'A single JSON-RPC 2.0 response — a `result` or an `error`, never both.',
+  oneOf: [JsonRpcSuccess, JsonRpcFailure],
+};
 
 export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
   // Hybrid Bearer guard: accepts either an operator PAT (`rp_op_…`, Phase 1)
@@ -85,6 +136,13 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
           '`tools/call`, so an under-privileged credential does not even see them. ' +
           'Destructive / financial tools are gated further on `mcp:operator:admin`, which only ' +
           'the OAuth path can carry — a PAT can never reach them.',
+        response: {
+          200: { description: 'JSON-RPC response.', ...JsonRpcResponse },
+          204: {
+            description: 'The request was a JSON-RPC notification (no `id`) — accepted, no reply body.',
+          },
+          ...errs(AUTH_401),
+        },
       },
     },
     async (req, reply) => {
@@ -123,6 +181,10 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
           tenantUserId: req.tenantUser.id,
           tenantId: req.tenantId,
           role: req.tenantRole ?? 'MEMBER',
+          // Both auth paths in bearer-auth.ts set this. It is what the read
+          // tools resolve a MEMBER's per-Application grants from; absent, they
+          // fail closed rather than serving the whole workspace.
+          tenantMembershipId: req.tenantMembershipId,
           canWrite,
           canAdmin,
           ip,
@@ -150,22 +212,47 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Always 405 with `Allow: POST`. Still authenticated: the plugin-level Bearer hook ' +
           'runs first, so an unauthenticated GET gets 401 rather than this 405.',
+        response: {
+          // NOTE: hand-rolled in the handler as `{success: false, error: {code, message,
+          // fix}}` — the shape of the Rekey envelope, but WITHOUT the `requestId` field
+          // every other error response carries (it isn't built via RekeyError/the error
+          // handler, just written inline). Declared literally rather than via
+          // `ref('ErrorResponse')`/`errs()`, which would incorrectly promise a
+          // `requestId`. See the report for this file.
+          405: {
+            description: 'METHOD_NOT_ALLOWED — use POST for MCP JSON-RPC.',
+            type: 'object',
+            properties: {
+              success: { type: 'boolean', enum: [false] },
+              error: {
+                type: 'object',
+                properties: {
+                  code: { type: 'string', enum: ['METHOD_NOT_ALLOWED'] },
+                  message: { type: 'string' },
+                  fix: { type: 'string' },
+                },
+                required: ['code', 'message', 'fix'],
+              },
+            },
+            required: ['success', 'error'],
+          },
+          ...errs(AUTH_401),
+        },
       },
     },
     async (_req, reply) => {
-      reply
-        .code(405)
-        .header('Allow', 'POST')
-        .send({
-          success: false,
-          error: {
-            code: 'METHOD_NOT_ALLOWED',
-            message:
-              'The MCP endpoint accepts JSON-RPC 2.0 over POST only. ' +
-              'GET is rejected so curl-typers see the violation explicitly.',
-            fix: 'POST a JSON-RPC body with Authorization: Bearer rp_op_… instead.',
-          },
-        });
+      // Set the header, then THROW — a hand-built `reply.send({ success:
+      // false, error: {...} })` never reaches `rekeyErrorHandler` and so
+      // omits `requestId`. Headers already on the reply survive the throw.
+      reply.header('Allow', 'POST');
+      throw new RekeyError({
+        statusCode: 405,
+        code: 'METHOD_NOT_ALLOWED',
+        message:
+          'The MCP endpoint accepts JSON-RPC 2.0 over POST only. ' +
+          'GET is rejected so curl-typers see the violation explicitly.',
+        fix: 'POST a JSON-RPC body with Authorization: Bearer rp_op_… instead.',
+      });
     },
   );
 }

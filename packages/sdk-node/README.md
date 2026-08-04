@@ -135,10 +135,10 @@ if (!r.emailSent && r.resetToken) {
 ### `rekey.billing`
 | Method | Description |
 | --- | --- |
-| `getPlans()` | List the Application's active plans (public — render pricing pages). |
-| `getSubscription(accessToken)` | The user's active subscription, or `null`. |
+| `getPlans(page?)` | List the Application's active plans (public — render pricing pages). Returns `{items, page}`. |
+| `getSubscription(accessToken, { organizationId?, includeEnded? })` | The user's active subscription, or `null`. `includeEnded: true` falls back to their most recent CANCELED/EXPIRED subscription **only when the answer would otherwise be null** — so a billing page can say what a former subscriber was on and when it ended, instead of showing them the same blank state as somebody who never subscribed. It never replaces a live subscription; leave it off for entitlement checks. |
 | `createCheckout(accessToken, { planSlug, successUrl, cancelUrl, couponCode?, organizationId? })` | Start hosted checkout; returns the redirect URL + a PENDING subscription. Activation happens via the provider webhook. |
-| `cancelSubscription(accessToken, { atPeriodEnd?, organizationId? })` | Cancel the user's subscription. Defaults to **at period end** — the row stays ACTIVE with `cancelAt` set until the provider webhook terminates it, so read `cancelAt`, not `status`. Pass `atPeriodEnd: false` to end it immediately. |
+| `cancelSubscription(accessToken, { atPeriodEnd?, organizationId? })` | Cancel the user's subscription. Defaults to **at period end** — the row stays ACTIVE with `cancelAt` set until the day arrives, so read `cancelAt`, not `status`. Pass `atPeriodEnd: false` to end it immediately. The default is a *request*: a PAST_DUE subscription, a PENDING checkout, or an ACTIVE row with no known period end is canceled on the spot regardless. Ask `cancelsAtPeriodEnd(sub)` (exported from this package) before showing a confirmation, so you promise the outcome the caller will actually get. |
 | `validateCoupon(accessToken, { code, planSlug })` | Price-check a coupon without applying it. |
 | `getProviders(country?)` | The geo-routed list of enabled billing providers. |
 | `getEntitlements(accessToken, { organizationId? })` | Resolve feature flags + limits + live credit balance. **Gate your app on this.** Cache it with a ~5-min TTL / stale-while-revalidate and bust on checkout success — see ["Caching entitlements" in docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md#caching-entitlements). |
@@ -164,7 +164,7 @@ if (!r.emailSent && r.resetToken) {
 | --- | --- |
 | `getBalance(subject)` | Spendable balance for `{ endUserId }` or `{ organizationId }`. |
 | `consume(subject & { amount, idempotencyKey? })` | Idempotent drawdown. Throws `CREDITS_INSUFFICIENT` (402) when too low. |
-| `listLedger(subject, limit?, offset?)` | Ledger entries, newest first (default 50, max 200). |
+| `listLedger(subject, limit?, offset?)` | Ledger entries, newest first (default 50, max 200). Returns `{items, page}`. |
 
 #### `idempotencyKey` scoping & retry semantics
 
@@ -200,26 +200,43 @@ Retry semantics: a repeat with the same key (timeout retry, queue redelivery, do
 | Export | Description |
 | --- | --- |
 | `verifyWebhookSignature({ header, payload, secret, toleranceSeconds? })` | Verify the HMAC on a webhook **Rekey sends to your app** (user-lifecycle + billing events) against the **raw body bytes** + the `X-Rekey-Signature` header. Not for Stripe/PayPal webhooks — those go to Rekey, never to you (see [docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md)). |
-| `verifyAccessToken(token, { jwksUrl \| jwks })` | Verify an end-user access token **offline** (no API round-trip) against your deployment's `GET /.well-known/jwks.json`. RS256 only — the Application must opt in via `authConfig.tokenAlg: "RS256"`; default HS256 tokens still need `auth.getCurrentUser`. Fetches + caches the JWKS for 5 minutes, checks `kid`/signature/`exp`/`typ`, and returns the claims (`sub`, `applicationId`, `oid?`, …). Check `claims.applicationId` against your own app id. See [docs/jwks.md](https://github.com/rekey-dev/rekey/blob/main/docs/jwks.md). |
+| `verifyAccessToken(token, { applicationId, jwksUrl \| jwks })` | Verify an end-user access token **offline** (no API round-trip) against your deployment's `GET /.well-known/jwks.json`. RS256 only — the Application must opt in via `authConfig.tokenAlg: "RS256"`; default HS256 tokens still need `auth.getCurrentUser`. Fetches + caches the JWKS for 5 minutes, checks `kid`/signature/`exp`/`typ`, and returns the claims (`sub`, `applicationId`, `oid?`, …). **`applicationId` is required** — the RS256 keypair is deployment-wide, so without it a token minted for any other Application on the same deployment would verify here. (The HS256 default is unaffected: its key is derived per Application.) See [docs/jwks.md](https://github.com/rekey-dev/rekey/blob/main/docs/jwks.md). |
 | `WEBHOOK_EVENTS` / `KNOWN_WEBHOOK_EVENTS` / `isKnownWebhookEvent` | The full outbound-event registry — `{ name, description }` pairs (and just the names) for the 17 events Rekey can send: `user.created/updated/deleted/erased`, `session.revoked`, `mfa.enabled/disabled`, `password.changed`, `email.verified`, `subscription.activated/canceled/past_due`, `payment.succeeded/failed`, `dunning.case_opened/case_recovered/case_exhausted`. Mirrors the API exactly; use it for event pickers / autocompleting an endpoint's `events` array rather than hardcoding this list. See [docs/webhooks.md](https://github.com/rekey-dev/rekey/blob/main/docs/webhooks.md). |
 | `WebhookEventType` / `WebhookEventEnvelope<TData>` | Types for the event-name union and the delivery envelope (`{ eventId, occurredAt, type, applicationId, data }`). Dedupe on `eventId` — retries reuse it. |
 | `RekeyError` | The canonical error class — `instanceof`-consistent across SDK packages. |
 
 ### Pagination
 
-All list pagination is `{ limit, offset }`. Per-endpoint windows (server-enforced — passing a larger `limit` is clamped or rejected):
+Every list method resolves to the same envelope:
+
+```ts
+const { items, page } = await rekey.billing.getPlans();
+// page → { total: 80, limit: 50, offset: 0, hasMore: true }
+```
+
+`page.total` is the count of matching rows ignoring `limit`/`offset`, so you can
+tell a complete list from a window without over-fetching. **This is a breaking
+change in 2.0.0-rc.3** — these methods used to resolve to a bare array, which
+could not report that it had been truncated.
+
+Request pagination is `{ limit, offset }` everywhere. Per-endpoint windows
+(server-enforced — a larger `limit` is clamped or rejected):
 
 | Method | Default `limit` | Max `limit` |
 | --- | --- | --- |
 | `organizations.listMine(accessToken, page?)` | 50 | 100 |
 | `organizations.listMembers(accessToken, orgId, page?)` | 50 | 100 |
 | `credits.listLedger(subject, limit?, offset?)` | 50 | 200 |
-| `auth.listSessions` / `listPasskeys` / `listOAuthIdentities` | — (returns the full set; these are small, bounded lists) | — |
-| `billing.getPlans()` | — (all active plans) | — |
+| `auth.listSessions(accessToken, page?)` | 50 | 100 |
+| `auth.listPasskeys(accessToken, page?)` | 50 | 100 |
+| `billing.getPlans(page?)` | 50 | 100 |
+| `auth.listOAuthIdentities` | — (bare array; one row per provider the user linked, bounded by the Application's provider list) | — |
 
 ## Errors
 
-Every failure is a `RekeyError` with `code`, `message`, and usually a concrete `fix` (plus optional `docs`, `statusCode`, `requestId`). **Read `error.fix` first.**
+Every failure is a `RekeyError` with `code`, `message`, and usually a concrete `fix` (plus optional `docs`, `statusCode`, `requestId`, `retryAfterSeconds`). **Read `error.fix` first.**
+
+That includes failures where no server answered. A refused connection, a DNS failure or an expired deadline is a `RekeyError` too — one `catch` covers everything:
 
 ```ts
 import { RekeyError } from '@rekey.dev/node';
@@ -231,6 +248,46 @@ try {
   throw err;
 }
 ```
+
+Transport codes, and what each one asks you to do:
+
+| `code` | Meaning | What to do |
+| --- | --- | --- |
+| `REQUEST_TIMEOUT` | The deadline expired before a response. | Retry, or raise `timeoutMs`. |
+| `NETWORK_ERROR` | The request never reached a server (refused, DNS, TLS). | Check `apiUrl` and reachability. `error.cause` has the original. |
+| `REQUEST_ABORTED` | An `AbortSignal` you passed fired. | Your own cancellation — usually swallow it. |
+| `RATE_LIMITED` | Too many requests. | Wait `error.retryAfterSeconds`, then retry. |
+
+## Timeouts and cancellation
+
+Every request carries a **10-second deadline** by default — the same one the Rekey API uses for its own outbound webhooks. Without it the effective timeout is undici's `headersTimeout`, five minutes, which is long enough for one unreachable deployment to pin a request handler.
+
+```ts
+// Client-wide.
+const rekey = new Rekey({ apiUrl, secretKey, timeoutMs: 5_000 });
+
+// One call. `with()` returns a cheap scoped clone; it works on every method.
+const plans = await rekey.with({ timeoutMs: 2_000 }).billing.getPlans();
+
+// Tie Rekey calls to an inbound request's lifetime.
+app.get('/me', async (req, res) => {
+  const scoped = rekey.with({ signal: AbortSignal.any([req.signal]) });
+  res.json(await scoped.auth.getCurrentUser(token));
+});
+```
+
+Pass `timeoutMs: 0` to opt out. `verifyAccessToken` takes its own `timeoutMs` / `signal` for the JWKS fetch.
+
+## Calling an endpoint the SDK does not wrap
+
+`rekey.request()` is a supported escape hatch — you keep the auth header, the `{ success, data }` unwrapping, the `RekeyError` mapping and the deadline:
+
+```ts
+const seats = await rekey.request<{ used: number }>('GET', '/api/v1/seats');
+await rekey.request('POST', '/api/v1/seats', { body: { count: 5 }, timeoutMs: 30_000 });
+```
+
+Prefer a namespace method wherever one exists — those carry the endpoint's real types.
 
 ## Gotchas
 

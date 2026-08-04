@@ -414,7 +414,15 @@ function ensureEmailVerified(application: Application, endUser: EndUser): void {
     statusCode: 403,
     code: 'EMAIL_NOT_VERIFIED',
     message: 'Confirm your email address before using this account — check your inbox for the verification link.',
-    fix: 'The user has to click the link in their verification email; sign-up always sends one while this setting is on. If it never arrived, POST /api/v1/auth/resend-verification with their address — it needs no session, precisely because this refusal denies them one. Failing that, an operator can mark the address verified from Panel → Application → End-users.',
+    // The precondition in the middle sentence is load-bearing and used to be
+    // missing. An external audit followed this `fix` on a bare deployment —
+    // no mail transport, no `authConfig.appUrl` — and got
+    // `{"emailSent":false,"verificationToken":null}`: no token, no mail, and
+    // sign-in still refused, so the account was unreachable and the error that
+    // sent them there gave no hint why. `deliverVerificationEmail` declines to
+    // mint a token when no link would resolve, which is correct, but the
+    // caller has to know that to get out of the loop.
+    fix: 'The user has to click the link in their verification email; sign-up always sends one while this setting is on. If it never arrived, POST /api/v1/auth/resend-verification with their address — it needs no session, precisely because this refusal denies them one. That call only returns a token if a link can be built, so pass `verifyUrl` explicitly or set `authConfig.appUrl` first; without either it answers `verificationToken: null` and nothing is sent. Failing that, an operator can mark the address verified from Panel → Application → End-users.',
   });
 }
 
@@ -1731,6 +1739,25 @@ export const authService = {
     const endUser = await prisma.endUser.findUniqueOrThrow({
       where: { id: outcome.token.endUserId },
     });
+    // A GDPR-erased account cannot be verified into existence again.
+    //
+    // `resendVerificationEmail` has always short-circuited on `erasedAt`, but
+    // this path did not — so a token minted BEFORE the erasure stayed
+    // redeemable after it. Redeeming flipped `emailVerified`, emitted
+    // `email.verified` about a record that is supposed to be erased, and told
+    // the person "Email confirmed" — after which every sign-in was refused by
+    // `assertEndUserNotErased` at the session chokepoint. The success message
+    // was a lie and the write should not have happened.
+    //
+    // Checked BEFORE `consumeVerificationToken` so the refusal does not also
+    // burn the token, and reusing the same 410 `END_USER_ERASED` the
+    // authenticate paths raise rather than inventing a second erasure code.
+    //
+    // Only the SOFT erasure path needs this: a hard-deleted EndUser takes its
+    // tokens with it (`EmailVerificationToken.endUser` is `onDelete: Cascade`),
+    // so the lookup misses and the caller already gets
+    // EMAIL_VERIFICATION_TOKEN_INVALID.
+    assertEndUserNotErased(endUser);
     if (endUser.email !== outcome.token.email) {
       // Email changed since token was issued — verification belongs to a
       // stale address. Refuse rather than retroactively trust the old one.
@@ -1768,8 +1795,11 @@ export const authService = {
    * List active sessions (= live refresh tokens) for the current user.
    * Used by /me/sessions to render the "signed in on these devices" panel.
    */
-  async listSessions(endUserId: string): Promise<SessionSummary[]> {
-    return listActiveSessions(endUserId);
+  async listSessions(
+    endUserId: string,
+    opts: { take?: number; skip?: number } = {},
+  ): Promise<{ items: SessionSummary[]; total: number }> {
+    return listActiveSessions(endUserId, opts);
   },
 
   /**
@@ -2028,34 +2058,49 @@ export const authService = {
     const endUser = await prisma.endUser.findUniqueOrThrow({
       where: { id: credential.endUserId },
     });
-    // Passkeys are themselves a strong factor — they bypass MFA challenge
-    // (typical Clerk/Auth0 behavior). Customers who want passkey + TOTP
-    // belt-and-braces can opt in by not bypassing here in their own flow;
-    // we make the simpler trade.
+    // Passkeys bypass the MFA challenge (typical Clerk/Auth0 behavior), and
+    // `verifyAuthentication` is what earns that: it requires user
+    // verification, so the assertion above proves possession of the
+    // authenticator AND that the human unlocked it. Without that requirement
+    // this line downgraded password + TOTP to a bare touch — see the "User
+    // verification is REQUIRED" note in lib/webauthn.ts.
+    //
+    // Customers who want passkey + TOTP belt-and-braces can opt in by not
+    // bypassing here in their own flow; we make the simpler trade.
     const result = await issuePair(input.application, endUser, input.device);
     return { mfaRequired: false, ...result };
   },
 
-  async listPasskeys(endUserId: string): Promise<
-    Array<{
+  async listPasskeys(
+    endUserId: string,
+    opts: { take?: number; skip?: number } = {},
+  ): Promise<{
+    items: Array<{
       id: string;
       credentialId: string;
       deviceName: string | null;
       lastUsedAt: Date | null;
       createdAt: Date;
-    }>
-  > {
-    return prisma.webAuthnCredential.findMany({
-      where: { endUserId },
-      orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        credentialId: true,
-        deviceName: true,
-        lastUsedAt: true,
-        createdAt: true,
-      },
-    });
+    }>;
+    total: number;
+  }> {
+    const [items, total] = await Promise.all([
+      prisma.webAuthnCredential.findMany({
+        where: { endUserId },
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          credentialId: true,
+          deviceName: true,
+          lastUsedAt: true,
+          createdAt: true,
+        },
+        ...(opts.take !== undefined && { take: opts.take }),
+        ...(opts.skip !== undefined && { skip: opts.skip }),
+      }),
+      prisma.webAuthnCredential.count({ where: { endUserId } }),
+    ]);
+    return { items, total };
   },
 
   async deletePasskey(args: {

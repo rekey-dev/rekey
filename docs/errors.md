@@ -9,11 +9,17 @@ Every error from a Rekey API or SDK has the same shape:
     "code": "TENANT_NOT_FOUND",
     "message": "Tenant \"ckxxx\" not found.",
     "fix": "List tenants with GET /api/v1/admin/tenants to see valid ids.",
-    "docs": "https://rekey.dev/errors/TENANT_NOT_FOUND",
     "requestId": "9f1c0a3e-8b47-4d21-9f0e-2c5a7b13d840"
   }
 }
 ```
+
+`code`, `message`, `fix` and `requestId` are always present. Two fields are optional and appear only where they apply:
+
+- **`issues`** — on `VALIDATION_ERROR` (400): an array of `{ path, message }` naming each field that failed, capped at 10 entries. This is what tells you *which* key a `.strict()` endpoint refused.
+- **`retryAfterSeconds`** — on the retryable codes listed below.
+
+There is also a `docs` field in the envelope type, reserved for a per-code documentation URL. **No error the API emits sets it today**, so do not branch on its presence — this page is the reference it would point at.
 
 **Read `error.fix` first.** It is the most actionable field. We treat the absence of a `fix` on any new error as a bug.
 
@@ -21,7 +27,7 @@ Every response also carries an `X-Request-Id` header (and, on errors, `error.req
 
 Retryable errors carry a `Retry-After` header **and** `error.retryAfterSeconds` (same value, in seconds): `RATE_LIMITED` (429), `TOO_MANY_FAILED_ATTEMPTS` / `MFA_TOO_MANY_ATTEMPTS` (429), `IDEMPOTENCY_KEY_IN_FLIGHT` (409), and `DEPENDENCY_UNAVAILABLE` (503). Honour it before retrying; nothing else in this document is worth retrying without a code change.
 
-`error.code` is always one of the codes listed below. Fastify's internal `FST_ERR_*` identifiers are normalised away before the response is written (`FST_ERR_VALIDATION` and `FST_ERR_CTP_INVALID_JSON_BODY` → `BAD_REQUEST`, `FST_ERR_CTP_INVALID_MEDIA_TYPE` → `UNSUPPORTED_MEDIA_TYPE`, and so on) — if you ever see one, that's a bug.
+`error.code` is one of the codes listed below. Fastify's internal `FST_ERR_*` identifiers are normalised away before the response is written (`FST_ERR_VALIDATION` and `FST_ERR_CTP_INVALID_JSON_BODY` → `BAD_REQUEST`, `FST_ERR_CTP_INVALID_MEDIA_TYPE` → `UNSUPPORTED_MEDIA_TYPE`, and so on) — if you ever see one, that's a bug. Write your client so an unrecognised code degrades to "handle by status class" rather than throwing: a 4xx thrown by a plugin with a `code` of its own can still reach you verbatim, and this list grows.
 
 ## How errors propagate
 
@@ -67,7 +73,10 @@ The complete list of codes the API emits today, grouped by domain. This list is 
 | `DEPENDENCY_UNAVAILABLE` | 503 | A backing service this deployment owns is unreachable — the `message` names which (PostgreSQL or Redis). Never carries a host, port, or connection string. | `GET /health/ready` reports `db` and `redis` separately; restore the failed one. Honour `Retry-After`. |
 | `ROUTE_NOT_FOUND` | 404 | No route matches the method + path. | Check the path against `/docs` (OpenAPI). Usually a typo or a missing trailing segment. |
 | `METHOD_NOT_ALLOWED` | 405 | The path exists but not for this verb (e.g. `GET` on an MCP JSON-RPC endpoint). | Read the `Allow` header. |
-| `BAD_REQUEST` | 400 | Schema validation failed, or the JSON body didn't parse. Also the catch-all for any Fastify-native 4xx without a code of its own. | Compare the request body/query against the route schema in `/docs`. |
+| `BAD_REQUEST` | 400 | The route's JSON-schema validation failed (the `message` names the field and the constraint, e.g. `body/amount must be <= 100000000000`), or the JSON body didn't parse. Also the catch-all for any Fastify-native 4xx without a code of its own. | Compare the request body/query against the route schema in `/docs`. Money fields cap at 10^11 minor units and counts at the `int4` range — a value past those is refused here rather than 500-ing at the database. |
+| `VALIDATION_ERROR` | 400 | A handler's own schema parse failed — as opposed to the route-level one that raises `BAD_REQUEST`. Carries an **`issues`** array of `{ path, message }` (max 10). This is what the config `PATCH` endpoints answer for an **unrecognised key**: `auth-config`, `billing-config`, `portal`, `access`, `end-user-roles` and `usage-meters` all reject keys they don't know rather than accepting the request and ignoring them, so a typo like `mfaa` for `mfa` can no longer report success while changing nothing. | Read `issues` — it names the offending keys verbatim (`Unrecognized key(s) in object: 'mfaa'`). |
+| `INVALID_BODY` | 400 | The JSON body contains a **NUL byte** (`\u0000`), anywhere — nested objects, array entries, or object *keys*. Postgres cannot store it, so it is refused at the edge instead of surfacing as a 500. The guard runs ahead of routing, so a NUL body on a path that doesn't exist answers 400 rather than 404; a clean body on an unknown path still 404s. | Strip `\u0000` from the value before sending. It is almost always a truncation bug or a probe, not data you meant to store. |
+| `INVALID_QUERY` | 400 | Same, for a `%00` sequence in the URL's query string. | Remove the `%00` from the request URL. |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | The request body's `Content-Type` isn't JSON on an endpoint that only takes JSON. Form-encoded bodies are accepted **only** on the MCP OAuth endpoints, where RFC 6749/7662 require them. | Send `Content-Type: application/json`. A form-encoded body used to parse and then fail validation as a missing field — this is that mistake, reported honestly. |
 | `PAYLOAD_TOO_LARGE` | 413 | The whole request body is over the 1 MiB limit, rejected by the HTTP layer before any handler runs. Not to be confused with `METADATA_TOO_LARGE` (400) — see the note under [Auth — end-user sessions & passwords](#auth--end-user-sessions--passwords). | Split the request. |
 | `SSRF_BLOCKED` | 400 | A server-side fetch target (e.g. a webhook URL) resolved to a private/loopback address. | Use a publicly routable URL. |
@@ -143,8 +152,11 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `USER_TOKEN_MISSING` | 401 | Per-user endpoint called without the `X-Rekey-User-Token` header. | Pass the user's access JWT as the per-user argument in the SDK. |
 | `USER_TOKEN_INVALID` | 401 | User JWT malformed, expired, or signed with a different secret. | Refresh the session (`auth.refresh`) and retry once. |
 | `USER_TOKEN_WRONG_APPLICATION` | 401 | JWT issued by a different Application than the calling secret key. **The cross-tenant guard.** | You're mixing credentials from two Applications — fix your config. |
+| `IMPERSONATION_SESSION_ENDED` | 401 | The presented token is an operator impersonation token whose `impersonation_audits` row has been ended (`POST /api/v1/tenant/applications/:id/end-users/:euid/impersonate/end`), or that names no live row at all. Impersonation is revocable: ending the row invalidates the token immediately, ahead of its 5-minute expiry. | Mint a fresh token via the impersonate route if the session is still needed. |
+| `IMPERSONATION_ACTION_FORBIDDEN` | 403 | An impersonating operator tried a credential-changing route — password change, MFA setup/disable, passkey enrolment or removal. Those changes outlive the 5-minute token permanently and the user cannot tell who made them, so they are refused for impersonated sessions regardless of who holds the token. Reads, billing, organizations and profile edits are unaffected. | Ask the user to perform the action themselves, or act through the operator panel. |
 | `REFRESH_TOKEN_INVALID` | 401 | Refresh token unknown to the server (or not valid for session refresh). | Send the user through sign-in again. |
 | `REFRESH_TOKEN_REUSED` | 401 | Refresh token already used. **Treat as a compromise signal** — all sessions for the user are revoked as a precaution. | Force re-authentication; investigate where the old token leaked. |
+| `REFRESH_TOKEN_REVOKED` | 401 | The token was explicitly revoked — sign-out, sign-out-everywhere, an operator ending the session, or the family being burned by a `REFRESH_TOKEN_REUSED` elsewhere. Distinct from `_REUSED`: this token was never presented twice, it was invalidated by something else. | Send the user through sign-in again. Not on its own a compromise signal. |
 | `REFRESH_TOKEN_EXPIRED` | 401 | Refresh token past its 30-day window. | Send the user through sign-in again. |
 | `REFRESH_TOKEN_WRONG_APPLICATION` | 401 | Refresh token belongs to a different Application. | Fix the credential mix-up. |
 
@@ -171,9 +183,9 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 |---|---|---|---|
 | `MFA_NOT_ENABLED` | 403 | MFA endpoints called but two-factor is not enabled for the Application. | Enable MFA in `authConfig` first. |
 | `MFA_NOT_INITIATED` | 400 | `/mfa/setup-confirm` called before `/mfa/setup`. | Call setup first; confirm with the code from the authenticator. |
-| `STEP_UP_REQUIRED` | 401 | A publishable-key caller tried a privileged self-service action (currently: enrolling a passkey) without re-proving identity. | Send `password` with the account password, or `code` with a current authenticator or unused backup code. Secret-key callers are exempt. |
+| `STEP_UP_REQUIRED` | 401 | A privileged self-service action was attempted without re-proving identity. End-user: enrolling a passkey (publishable callers only — secret-key callers are exempt). Operator: enrolling a passkey, and re-running `/tenant/auth/mfa/setup` or `/tenant/auth/mfa/disable` while MFA is enrolled. | Send `password` with the account password, or `code` with a current authenticator or unused backup code. **While an operator has MFA enrolled, the MFA routes accept only `code`** — the password is deliberately refused, since someone holding a stolen session and the password is who the second factor exists to stop. |
 | `STEP_UP_UNAVAILABLE` | 400 | The account has neither a password nor enrolled MFA, so there is no second factor to confirm with. The access token is its only credential. | Have the user set a password or enroll MFA first, then retry. |
-| `MFA_CODE_INVALID` | 401 (sign-in verify) / 422 (setup-confirm) | TOTP or backup code didn't verify. | Prompt the user to retry; codes are time-based. |
+| `MFA_CODE_INVALID` | 401 (sign-in verify, or re-enrolling MFA from a browser) / 422 (setup-confirm) | TOTP or backup code didn't verify, or was not sent when re-running `/auth/mfa/setup` over a completed enrollment. | Prompt the user to retry; codes are time-based. |
 | `MFA_CHALLENGE_INVALID` | 401 | MFA challenge token invalid or past its 5-minute lifetime. | Restart sign-in to get a new challenge. |
 | `MFA_CHALLENGE_WRONG_APPLICATION` | 401 | Challenge token issued under a different Application. | Fix the credential mix-up. |
 | `MFA_TOO_MANY_ATTEMPTS` | 429 | MFA verification throttled after repeated failures. | Wait for `Retry-After`, then retry. |
@@ -207,7 +219,7 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `OAUTH_IDENTITY_WRONG_APPLICATION` | 401 | Provider account already linked under a different Application. | Fix the credential mix-up. |
 | `OAUTH_UNLINK_WOULD_LOCK_OUT` | 409 | Unlinking would leave the account with no sign-in method. | Add a password or another provider before unlinking. |
 | `INVALID_REDIRECT_URI` | 400 | MCP OAuth dynamic registration: `redirect_uris` empty, >20 entries, or a URI fails validation. | Register 1–20 valid redirect URIs. |
-| `CLIENT_REGISTRATION_DISABLED` | 403 | `POST /oauth/register` on an Application with `authConfig.dynamicClientRegistration = false`. The endpoint exists and the Application is real; the operator has closed registration, and `registration_endpoint` is absent from both discovery documents. | Ask the operator to register your redirect URIs and issue a `client_id`, or to re-open registration. |
+| `CLIENT_REGISTRATION_DISABLED` | 403 | `POST /oauth/register` on an Application with `authConfig.dynamicClientRegistration = false`, or on the **operator** MCP authorization server with `OPERATOR_MCP_DYNAMIC_REGISTRATION=disabled`. The endpoint exists and the deployment is real; the operator has closed registration, and `registration_endpoint` is absent from the discovery documents. | Ask the operator to register your redirect URIs and issue a `client_id`, or to re-open registration. |
 | `MCP_NOT_FOUND` | 404 | No MCP server at this path — the Application is missing, or neither `mcpEnabled` nor (for the shared OAuth endpoints) `oidcEnabled` is set. | Check the Application slug in the MCP URL, and the toggle. |
 | `OIDC_NOT_FOUND` | 404 | No OpenID Provider at this path (`/.well-known/openid-configuration`, `/oauth/userinfo`). The Application is missing or `oidcEnabled` is off. | Set `authConfig.oidcEnabled = true`, and check the slug. |
 | `OPERATOR_MCP_UNAUTHORIZED` | 401 | Operator MCP called without a PAT (`rp_op_…`) or OAuth access token. | Pass a valid operator credential. |
@@ -226,13 +238,14 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `BILLING_PROVIDER_SWITCH_BLOCKED` | 409 | User already has an active subscription on this plan via a different provider. | Cancel the existing subscription first, or keep the same provider. |
 | `BILLING_PROVIDER_NOT_AVAILABLE` | 400 | Checkout requested a provider that isn't enabled for this Application. | Omit `provider` (geo router picks) or use one from `billing.getProviders()`. |
 | `BILLING_CREDENTIALS_MODE_CONTRADICTED` | 400 | The submitted `mode` disagrees with what the credential itself says (e.g. an `sk_live_…` key sent as `mode: test`). The key decides — the provider SDK authenticates with the key, not with our label. | Send the credentials for the mode you meant, or omit `mode` and let it be read from the key. |
-| `BILLING_CREDENTIALS_NOT_CONFIGURED` | 400/503 | No credentials for the provider — on checkout, on webhook auto-registration (400), or when a provider webhook arrives for an Application with no BYO credentials / webhook secret (503). There is no stub fallback in any environment. | Set the provider credentials + webhook secret in the panel. |
+| `BILLING_CREDENTIALS_NOT_CONFIGURED` | 400/404/503 | No credentials for the provider. **400** on checkout and on webhook auto-registration; **404** when an operator route addresses credentials that were never stored (e.g. setting the mode on them); **503** when a provider webhook arrives for an Application with no BYO credentials / webhook secret. There is no stub fallback in any environment. | Set the provider credentials + webhook secret in the panel. |
 | `BILLING_CREDENTIALS_INVALID` | 400 | Submitted credentials fail shape validation (wrong fields for the provider). | Match the documented per-provider body shape. |
 | `BILLING_CREDENTIALS_DECRYPT_FAILED` | 500 | Stored credentials can't be decrypted (e.g. `ENCRYPTION_KEY` changed). | Re-save the credentials; keep `ENCRYPTION_KEY` stable. |
 | `BILLING_CREDENTIALS_PROVIDER_MISMATCH` / `BILLING_CREDENTIALS_SHAPE_INVALID` | 500 | Stored credentials are internally inconsistent. | Re-save the provider credentials. |
 | `BILLING_WEBHOOK_AUTOCONFIG_UNSUPPORTED` | 400 | Automatic webhook registration isn't supported for this provider. | Create the webhook in the provider dashboard and paste the secret. |
 | `BILLING_WEBHOOK_BASE_NOT_PUBLIC` | 400 | Webhook auto-config needs a public base URL but the deployment's base is private/localhost. | Use a public URL (or a tunnel in dev). |
 | `BILLING_WEBHOOK_REGISTRATION_FAILED` | 502 | The provider's API rejected webhook registration. | Read the message; fix credentials/permissions at the provider, retry. |
+| `BILLING_PROVIDER_ERROR` | 502 | A call to the payment provider's API failed — checkout, plan registration, or subscription cancellation. Most often the stored credentials are wrong or for the other mode (live keys with `mode=test`). **Branch on this** for "the provider, not the caller, is at fault": before 2.0.0-rc.3 these surfaced as `500 INTERNAL_ERROR` or as the provider's own `401` relabelled `BAD_REQUEST`, so there was no billing-specific code to switch on. | Operator responses carry the provider's own message; end-user responses deliberately do not (it can contain credential fragments) — those are in the server log against the `requestId`. Re-check the Application's billing credentials + mode, then retry. |
 | `BILLING_PROVIDER_UNKNOWN` | 400 | A provider name that isn't in the module registry at all (distinct from `BILLING_PROVIDER_NOT_AVAILABLE`, which is a real provider this Application hasn't enabled). | Use a registered provider name. |
 | `BILLING_DISCOUNT_UNSUPPORTED` | 400 | Checkout carried a `couponCode`, but the provider it routed to cannot apply a discount on that flow (PayPal and Razorpay: recurring subscriptions). Nothing is charged and nothing is redeemed. | Retry without the coupon, or pass an explicit `provider` that supports it — see `capabilities.discounts` in `GET /billing/providers`. |
 | `SUBSCRIPTION_NOT_FOUND` | 404 | Subscription id unknown in this Application/workspace. | List subscriptions to get a valid id. |
@@ -243,9 +256,11 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 |---|---|---|---|
 | `PLAN_NOT_FOUND` | 404 | Plan slug unknown for this Application. | `rekey plans list` or `GET /billing/plans`. |
 | `PLAN_SLUG_INVALID` | 400 | Plan slug fails the regex (lowercase alphanumerics + `-` + `_`). | Fix the slug. |
-| `PLAN_SLUG_TAKEN` | 409 | Plan slug already exists for this Application. | Pick another slug. |
+| `PLAN_SLUG_TAKEN` | 409 | Plan slug already exists for this Application. | Pick another slug — or, if the existing plan failed provider registration, repair it in place (`PATCH .../plans/:slug`, then `POST .../plans/:slug/register`). The `fix` says which. |
 | `PLAN_AMOUNT_INVALID` | 400 | Plan amount is negative. (Amount is the smallest currency unit — integers only.) | Pass an integer ≥ 0. |
 | `PLAN_INACTIVE` | 400 | Checkout requested for a deactivated plan. | Reactivate the plan or point checkout at an active one. |
+| `PLAN_NOT_REGISTERED_WITH_PROVIDER` | 409 | The plan has no price at the payment provider — its registration was refused, or it predates the registration column. Raised at checkout, and when an operator tries to activate such a plan. | Operator: fix the provider credentials if they were the cause, then `POST /api/v1/tenant/applications/:id/plans/:slug/register`. |
+| `PLAN_PRICE_IMMUTABLE` | 409 | `PATCH` tried to change `amount`/`currency`/`interval` on a plan already registered with a provider. | A provider price object cannot be re-priced. Retire the plan (`{"active": false}`) and create a replacement. Price edits are accepted only while the plan is unregistered. |
 | `PLAN_CREDITS_AMOUNT_REQUIRED` | 400 | CREDIT-kind plan missing a positive credit amount. | Set `creditsAmount`. |
 | `PLAN_LICENSE_KIND_REQUIRED` / `PLAN_LICENSE_DURATION_REQUIRED` / `PLAN_LICENSE_SEATS_REQUIRED` | 400 | LICENSE-kind plan missing its kind / TIMED duration / SEATS count. | Fill the license config for the chosen kind. |
 | `PLAN_USAGE_CONFIG_REQUIRED` / `PLAN_USAGE_METER_UNKNOWN` | 400 | USAGE-kind plan missing usage config, or referencing a meter that doesn't exist. | Create the meter first; reference its slug. |
@@ -265,9 +280,10 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `COUPON_NOT_YET_STARTED` / `COUPON_EXPIRED` | 400 | Validate — outside the `startsAt`/`endsAt` window. | Surface to the user. |
 | `COUPON_NOT_APPLICABLE` | 400 | Validate — plan slug not in the coupon's `planSlugs`. | Surface to the user. |
 | `COUPON_CURRENCY_MISMATCH` | 400 | Validate — AMOUNT coupon in a different currency than the plan. | Surface to the user. |
-| `COUPON_REDEMPTION_LIMIT_REACHED` / `COUPON_USER_LIMIT_REACHED` | 400 | Validate — total / per-user redemption cap hit. | Surface to the user. |
+| `COUPON_REDEMPTION_LIMIT_REACHED` / `COUPON_USER_LIMIT_REACHED` | 400 | Validate — total / per-user redemption cap hit. `COUPON_REDEMPTION_LIMIT_REACHED` also fires at **checkout** when every remaining redemption is reserved by a checkout already in progress: the global limit counts recorded redemptions plus in-flight checkouts, so a one-use coupon cannot be discounted by five concurrent buyers. Reservations expire within 30 minutes, so an abandoned checkout frees its slot. | Surface to the user. If the coupon has redemptions left on paper, another buyer is mid-checkout — retrying shortly may succeed. |
 | `COUPON_NO_DISCOUNT` | 400 | Checkout — the discount rounds down to zero at this price (a small PERCENT coupon on a cheap plan). | Use a coupon worth at least one unit of the plan currency. Nothing is redeemed. |
 | `COUPON_FULL_DISCOUNT_UNSUPPORTED` | 400 | Checkout — the coupon covers 100% of a ONE-TIME purchase, and no provider will check out a zero-value order. | Use a smaller coupon, or grant the credits/licence directly. (A 100% coupon on a recurring plan is fine.) |
+| `COUPON_CHECKOUT_ALREADY_OPEN` | 409 | Checkout — this end-user already has a live checkout holding this coupon's reserved slot. One buyer cannot hold two reservations against the same code; the discount already minted is still payable. | Finish or abandon the open checkout — the reservation frees itself within 24 hours. Do **not** advise a different coupon; the one they have still works. |
 | `COUPON_DISCOUNT_EXCEEDS_PRICE` | 500 | Checkout — the discount came out larger than the plan. This is a Rekey bug; the coupon service is supposed to clamp it. | Report it with the coupon code and plan slug. |
 | `COUPON_PROVIDER_REJECTED` | 502 | Checkout — the payment provider refused to create the ad-hoc discount object (currency or amount restrictions on the operator's account). Nothing is charged and nothing is redeemed. | Retry without the coupon, or check the provider account. Previously surfaced as an opaque 500. |
 
@@ -317,6 +333,7 @@ Note: the public `licenses.verify` endpoint **never throws for an invalid key** 
 | `ORGANIZATION_INVITATION_NOT_FOUND` | 404 | Invitation token/id unknown. | Re-issue the invitation. |
 | `ORGANIZATION_INVITATION_EXPIRED` / `ORGANIZATION_INVITATION_NOT_USABLE` | 400 | Invitation expired / revoked / already accepted. | Re-issue the invitation. |
 | `ORGANIZATION_INVITATION_WRONG_APPLICATION` | 401 | Invitation belongs to a different Application. | Fix the credential mix-up. |
+| `ORGANIZATION_INVITATION_EMAIL_MISMATCH` | 403 | The signed-in user's email is not the address the invitation names. Invite links travel by email or chat and can be forwarded, so acceptance is bound to the invited address. | Sign in as the invited address, or have an OWNER / ADMIN re-invite the address in hand. |
 
 ### End-user roles
 
@@ -338,7 +355,9 @@ Two directions — see the "Webhooks — two directions" section of [billing.md]
 | `WEBHOOK_RAW_BODY_MISSING` | 400 | Internal — `fastify-raw-body` wasn't configured for the route. | Server bug; report it. |
 | `WEBHOOK_SIGNATURE_MISSING` | 401 | Inbound provider webhook (Stripe) arrived with no `stripe-signature` header. | Point the provider at the correct Rekey endpoint; don't proxy through anything that strips headers. |
 | `WEBHOOK_SIGNATURE_INVALID` | 401 | Provider webhook signature didn't validate against the configured secret. | The webhook secret in the panel must match the provider dashboard's signing secret. |
+| `WEBHOOK_VERIFICATION_UNAVAILABLE` | 503 | PayPal's signature-verification call did not answer in time, so Rekey **could not tell** whether the signature was good. Deliberately not `WEBHOOK_SIGNATURE_INVALID` — telling PayPal a signature was bad when the real fault is that we could not reach PayPal to ask is how an endpoint gets disabled for an outage. Still fail-closed: the event is not processed. | Transient; PayPal retries. If it persists, check PayPal's status and this deployment's egress to `api-m.paypal.com`. |
 | `WEBHOOK_PAYLOAD_INVALID` | 400 | PayPal webhook body isn't a recognisable event. | Check the provider configuration. |
+| `WEBHOOK_APPLICATION_MISMATCH` | 400 | An inbound provider event named a different Application than the credential that signed it. | Point the provider at the route for the Application whose webhook secret signs its events. |
 | `WEBHOOK_ENDPOINT_NOT_FOUND` | 404 | Outbound-webhook endpoint id unknown in this Application. | List the Application's webhook endpoints. |
 | `WEBHOOK_URL_UNSAFE` | 400 | Outbound webhook URL points at a private/loopback address (SSRF guard). | Use a publicly routable HTTPS URL. |
 | `WEBHOOK_PROVIDER_UNKNOWN` | 404 | The `/webhooks/billing/<provider>` path segment isn't a registered provider. | Fix the webhook URL at the provider. |

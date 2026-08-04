@@ -373,8 +373,12 @@ describe('tenant-auth + workspaces', () => {
       url: '/api/v1/tenant/applications/',
       headers: { authorization: `Bearer ${b.accessToken}` },
     });
-    const aSlugs = (aList.json().data as Array<{ slug: string }>).map((x) => x.slug);
-    const bSlugs = (bList.json().data as Array<{ slug: string }>).map((x) => x.slug);
+    const aSlugs = (aList.json().data as { items: Array<{ slug: string }> }).items.map(
+      (x) => x.slug,
+    );
+    const bSlugs = (bList.json().data as { items: Array<{ slug: string }> }).items.map(
+      (x) => x.slug,
+    );
     expect(aSlugs.some((s) => s.startsWith('list-a-'))).toBe(true);
     expect(aSlugs.some((s) => s.startsWith('list-b-'))).toBe(false);
     expect(bSlugs.some((s) => s.startsWith('list-b-'))).toBe(true);
@@ -390,7 +394,8 @@ describe('tenant-auth + workspaces', () => {
       url: '/api/v1/tenant/workspace/members',
       headers: { authorization: `Bearer ${owner.accessToken}` },
     });
-    const membershipId = (me.json().data as Array<{ membershipId: string }>)[0]!.membershipId;
+    const membershipId = (me.json().data as { items: Array<{ membershipId: string }> }).items[0]!
+      .membershipId;
 
     const r = await app.inject({
       method: 'DELETE',

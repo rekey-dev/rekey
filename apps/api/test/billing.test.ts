@@ -136,14 +136,20 @@ describe('billing scaffold', () => {
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
     });
-    expect((activeOnly.json().data as unknown[]).length).toBe(1);
+    const activePage = activeOnly.json().data as { items: unknown[]; page: { total: number } };
+    expect(activePage.items).toHaveLength(1);
+    // `total` counts behind the same filter, so it moves with `includeInactive`
+    // rather than reporting the whole table.
+    expect(activePage.page.total).toBe(1);
 
     const all = await app.inject({
       method: 'GET',
       url: `/api/v1/admin/applications/${applicationId}/plans?includeInactive=true`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
     });
-    expect((all.json().data as unknown[]).length).toBe(2);
+    const allPage = all.json().data as { items: unknown[]; page: { total: number } };
+    expect(allPage.items).toHaveLength(2);
+    expect(allPage.page.total).toBe(2);
   });
 
   // ---------- public /billing/plans ----------
@@ -156,8 +162,8 @@ describe('billing scaffold', () => {
       headers: { authorization: `Bearer ${liveKey}` },
     });
     expect(res.statusCode).toBe(200);
-    const data = res.json().data as Array<{ slug: string }>;
-    expect(data.map((p) => p.slug)).toContain('lite');
+    const data = res.json().data as { items: Array<{ slug: string }> };
+    expect(data.items.map((p) => p.slug)).toContain('lite');
   });
 
   it('GET /billing/plans rejects without an API key', async () => {

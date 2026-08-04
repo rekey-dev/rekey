@@ -167,7 +167,12 @@ describe('Audit-2 regression', () => {
 
   // ---------- Coupon redemption timing + idempotency ----------
 
-  it('checkout with a coupon does NOT record a redemption (deferred to payment-success webhook)', async () => {
+  // Checkout now takes a RESERVATION, not a confirmed redemption. Deferring
+  // everything to payment-success is what let a maxRedemptions:1 coupon
+  // discount an unlimited number of concurrent checkouts — the limit was
+  // counted against rows that did not exist yet. The reservation holds the
+  // slot; only payment success confirms it.
+  it('checkout with a coupon reserves the slot but does not confirm a redemption', async () => {
     const b = await bootstrap('coup-defer');
     await app.inject({
       method: 'POST',
@@ -194,10 +199,17 @@ describe('Audit-2 regression', () => {
       },
     });
     expect(res.statusCode).toBe(200);
-    const redemptions = await prisma.couponRedemption.count({
-      where: { applicationId: b.applicationId },
+    const confirmed = await prisma.couponRedemption.count({
+      where: { applicationId: b.applicationId, status: 'CONFIRMED' },
     });
-    expect(redemptions).toBe(0);
+    expect(confirmed).toBe(0);
+
+    // The slot IS held, which is the point — a second concurrent checkout on a
+    // single-use coupon must not also get the discount.
+    const reserved = await prisma.couponRedemption.count({
+      where: { applicationId: b.applicationId, status: 'RESERVED' },
+    });
+    expect(reserved).toBe(1);
   });
 
   it('coupon redemption is idempotent per checkout session — webhook replay-safe', async () => {

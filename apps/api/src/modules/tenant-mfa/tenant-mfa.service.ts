@@ -16,6 +16,17 @@ import {
 import { assertNotLocked, registerFailure, clearFailures, MFA_POLICY } from '../../lib/brute-force.js';
 
 export const tenantMfaService = {
+  /**
+   * Mint a fresh secret + backup codes. Enrollment is not complete until
+   * `/setup-confirm`.
+   *
+   * **Re-enrolment is a credential change and the route steps it up.** This
+   * method resets `enrolledAt: null` on an EXISTING credential, which was a way
+   * around the disable guard: call setup, and the operator's enrolled
+   * authenticator stops counting without anyone proving they hold it. The
+   * step-up lives at the route (see `tenant-mfa.routes.ts`) because that is
+   * where the caller's proof arrives; keep them together if either moves.
+   */
   async setup(args: { tenantUserId: string; email: string; issuer?: string }): Promise<{
     otpauthUrl: string;
     backupCodes: string[];
@@ -98,8 +109,22 @@ export const tenantMfaService = {
     return true;
   },
 
+  /**
+   * Turn operator MFA off. The step-up is at the route, for the same reason as
+   * `setup` — and it is the whole control here: nothing else stands between a
+   * stolen panel access token and the factor that exists to survive one.
+   */
   async disable(tenantUserId: string): Promise<void> {
     await prisma.tenantMfaCredential.deleteMany({ where: { tenantUserId } });
+  },
+
+  /** Whether this operator has COMPLETED enrollment — the gate the step-up keys off. */
+  async enrollmentComplete(tenantUserId: string): Promise<boolean> {
+    const cred = await prisma.tenantMfaCredential.findUnique({
+      where: { tenantUserId },
+      select: { enrolledAt: true },
+    });
+    return cred?.enrolledAt != null;
   },
 
   async status(tenantUserId: string): Promise<{ enabled: boolean; remainingBackupCodes: number | null }> {

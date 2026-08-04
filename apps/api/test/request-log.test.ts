@@ -189,8 +189,9 @@ describe('API request log', () => {
       headers: { authorization: `Bearer ${op.accessToken}` },
     });
     expect(res.statusCode).toBe(200);
-    const { requests } = res.json().data as {
-      requests: Array<{ applicationId: string | null; routePath: string }>;
+    const { items: requests } = res.json().data as {
+      items: Array<{ applicationId: string | null; routePath: string }>;
+      page: { total: number };
     };
     expect(requests.length).toBeGreaterThanOrEqual(1);
     expect(requests.every((r) => r.applicationId === created.id)).toBe(true);
@@ -239,16 +240,26 @@ describe('API request log', () => {
       headers: { authorization: `Bearer ${op.accessToken}` },
     });
     expect(page1.statusCode).toBe(200);
-    const r1 = (page1.json().data as { requests: unknown[] }).requests;
-    expect(r1.length).toBe(2);
+    const p1 = page1.json().data as {
+      items: unknown[];
+      page: { total: number; limit: number; offset: number; hasMore: boolean };
+    };
+    expect(p1.items.length).toBe(2);
+    // Two rows requested, more behind them — the caller is told rather than
+    // left to infer truncation from getting exactly `limit` rows back.
+    expect(p1.page.limit).toBe(2);
+    expect(p1.page.offset).toBe(0);
+    expect(p1.page.total).toBeGreaterThan(2);
+    expect(p1.page.hasMore).toBe(true);
 
     const page2 = await app.inject({
       method: 'GET',
       url: '/api/v1/tenant/auth/requests?limit=2&offset=2',
       headers: { authorization: `Bearer ${op.accessToken}` },
     });
-    const r2 = (page2.json().data as { requests: Array<{ operatorUserId: string | null }> })
-      .requests;
+    const r2 = (
+      page2.json().data as { items: Array<{ operatorUserId: string | null }> }
+    ).items;
     expect(r2.length).toBeGreaterThanOrEqual(1);
     expect(r2.every((r) => r.operatorUserId === op.tenantUserId)).toBe(true);
   });

@@ -24,8 +24,32 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { stripeModule } from '../providers/modules/stripe/index.js';
 import { handleBillingProviderWebhook } from './pipeline.js';
+import { errs, type JsonSchema } from '../../../lib/openapi.js';
 
 const SlugParam = z.object({ slug: z.string().min(1).max(40) });
+
+/**
+ * The webhook pipeline's own ack body — NOT the `{success, data}` envelope.
+ * Matches what `handleBillingProviderWebhook` (pipeline.ts) actually sends:
+ *   - 200 `{received: true, processed: true, eventId}` — applied.
+ *   - 200 `{received: true, processed: false, reason: 'duplicate'}` — replay.
+ *   - 500 `{received: true, processed: false, eventId}` — applier threw;
+ *     Stripe retries with backoff.
+ * A thrown `RekeyError` (bad slug, no rawBody, no credentials, bad
+ * signature, cross-application event) instead falls through to the standard
+ * `ErrorResponse` envelope via the global error handler.
+ */
+const WebhookAck: JsonSchema = {
+  type: 'object',
+  description: 'The webhook pipeline acknowledgement body (not the `{success, data}` envelope).',
+  properties: {
+    received: { type: 'boolean', enum: [true] },
+    processed: { type: 'boolean' },
+    eventId: { type: 'string', description: "The provider's event id, when known." },
+    reason: { type: 'string', enum: ['duplicate'], description: 'Present only on a duplicate-skip.' },
+  },
+  required: ['received', 'processed'],
+};
 
 export async function stripeWebhookRoutes(app: FastifyInstance): Promise<void> {
   app.post(
@@ -46,6 +70,35 @@ export async function stripeWebhookRoutes(app: FastifyInstance): Promise<void> {
           "against the Application's own webhook signing secret. `security: []` here means " +
           '"no Rekey credential", not "unprotected".',
         params: { type: 'object', properties: { slug: { type: 'string' } }, required: ['slug'] },
+        response: {
+          200: {
+            ...WebhookAck,
+            description:
+              'Event durably recorded. `processed` is `true` once applied, or `false` on a ' +
+              'duplicate replay (`reason: "duplicate"`) or an unhandled event type.',
+          },
+          500: {
+            ...WebhookAck,
+            description:
+              'Event was durably stored but applying it threw. `processed` is `false`; Stripe ' +
+              'retries with backoff, and the retry re-attempts rather than duplicate-skips.',
+          },
+          ...errs({
+            400:
+              'VALIDATION_ERROR — the `:slug` path segment is empty; or WEBHOOK_RAW_BODY_MISSING ' +
+              '— internal misconfiguration (fastify-raw-body not wired); or ' +
+              "WEBHOOK_APPLICATION_MISMATCH — the event's `metadata.applicationId` names a " +
+              "different Application than the one whose secret signed this request.",
+            401:
+              'WEBHOOK_SIGNATURE_MISSING — no `stripe-signature` header; or ' +
+              "WEBHOOK_SIGNATURE_INVALID — the signature does not verify against this " +
+              "Application's stored webhook secret.",
+            404: 'APPLICATION_NOT_FOUND — no application with that slug.',
+            503:
+              'BILLING_CREDENTIALS_NOT_CONFIGURED — this Application has no Stripe webhook ' +
+              'secret configured.',
+          }),
+        },
       },
     },
     async (request, reply) => {

@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 import { getPortalUser } from '@/lib/session';
 import { signInAction, mfaVerifyAction } from '@/lib/actions';
 import { Banner } from '@/components/banner';
-import { Button } from '@/components/button';
+import { SubmitButton } from '@/components/submit-button';
 
 const inputCls =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm';
@@ -24,6 +24,7 @@ export default async function LoginPage({
   const error = typeof sp.error === 'string' ? sp.error : undefined;
   const reason = typeof sp.reason === 'string' ? sp.reason : undefined;
   const mfaChallenge = typeof sp.mfa === 'string' ? sp.mfa : undefined;
+  const lastEmail = typeof sp.email === 'string' ? sp.email : undefined;
 
   // ---- MFA code step: sign-in succeeded, account is MFA-enrolled ----
   if (mfaChallenge) {
@@ -55,9 +56,9 @@ export default async function LoginPage({
               className={inputCls}
             />
           </label>
-          <Button type="submit" className="w-full">
+          <SubmitButton pendingLabel="Verifying…" className="w-full">
             Verify
-          </Button>
+          </SubmitButton>
         </form>
         <p className="text-sm text-[var(--color-muted-fg)]">
           <Link href={`/${slug}/login`} className="underline hover:text-[var(--color-fg)]">
@@ -87,6 +88,7 @@ export default async function LoginPage({
             required
             autoFocus
             autoComplete="email"
+            defaultValue={lastEmail}
             placeholder="you@example.com"
             className={inputCls}
           />
@@ -102,9 +104,9 @@ export default async function LoginPage({
             className={inputCls}
           />
         </label>
-        <Button type="submit" className="w-full">
+        <SubmitButton pendingLabel="Signing in…" className="w-full">
           Sign in
-        </Button>
+        </SubmitButton>
       </form>
       <p className="text-sm text-[var(--color-muted-fg)]">
         <Link

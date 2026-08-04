@@ -450,12 +450,37 @@ export const billingCredentialsService = {
     });
   },
 
+  /**
+   * Refuse before touching a row that is not there.
+   *
+   * `setMode` has always done this; `setRouting` and `remove` went straight to
+   * a Prisma `update`/`delete`, which throws `P2025` on a missing row and
+   * reaches the error handler as a 500. An external audit hit it on all three
+   * providers. A caller asking to change or remove credentials that were never
+   * stored has made an ordinary mistake, not caused a server fault — and the
+   * in-module convention for it already existed one method up.
+   */
+  async assertConfigured(applicationId: string, provider: BillingProviderName): Promise<void> {
+    const row = await prisma.billingCredentials.findUnique({
+      where: { applicationId_provider: { applicationId, provider } },
+      select: { id: true },
+    });
+    if (row) return;
+    throw new RekeyError({
+      statusCode: 404,
+      code: 'BILLING_CREDENTIALS_NOT_CONFIGURED',
+      message: `No ${provider} credentials are stored for this Application.`,
+      fix: `Save the ${provider} credentials first.`,
+    });
+  },
+
   async setRouting(
     applicationId: string,
     provider: BillingProviderName,
     countries: string[],
     priority: number,
   ): Promise<void> {
+    await this.assertConfigured(applicationId, provider);
     await prisma.billingCredentials.update({
       where: { applicationId_provider: { applicationId, provider } },
       data: {
@@ -466,6 +491,7 @@ export const billingCredentialsService = {
   },
 
   async remove(applicationId: string, provider: BillingProviderName): Promise<void> {
+    await this.assertConfigured(applicationId, provider);
     await prisma.billingCredentials.delete({
       where: { applicationId_provider: { applicationId, provider } },
     });

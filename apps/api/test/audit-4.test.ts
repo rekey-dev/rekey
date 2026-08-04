@@ -206,7 +206,7 @@ describe('Audit-4 passkeys', () => {
       },
     });
     expect(list.statusCode).toBe(200);
-    const passkeys = list.json().data as Array<{ credentialId: string }>;
+    const passkeys = (list.json().data as { items: Array<{ credentialId: string }> }).items;
     expect(passkeys.find((p) => p.credentialId === 'cred-test-fixture')).toBeTruthy();
   });
 
@@ -468,8 +468,9 @@ describe('Audit-4 passkeys', () => {
       headers: { authorization: `Bearer ${b.tenantAccess}` },
     });
     expect(log.statusCode).toBe(200);
-    const events = (log.json().data as { events: Array<{ type: string; applicationId: string | null }> })
-      .events;
+    const events = (
+      log.json().data as { items: Array<{ type: string; applicationId: string | null }> }
+    ).items;
     expect(events.some((e) => e.type === 'app.sessions_rotated' && e.applicationId === b.applicationId)).toBe(
       true,
     );

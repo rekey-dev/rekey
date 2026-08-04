@@ -69,7 +69,7 @@ Selected high-value mutating routes accept an **`Idempotency-Key` header** (any 
 
 Semantics:
 
-- **Scope** — the key belongs to the authenticated principal: the Application for secret-key calls, the workspace (tenant) for operator calls. Different Applications can use the same key string without collision.
+- **Scope** — the key belongs to the authenticated principal, **including the subject acting**: `app:<applicationId>:user:<endUserId>` when an end-user token is present (falling back to `app:<applicationId>`), and `tenant:<tenantId>:member:<membershipId>` when a membership is (falling back to `tenant:<tenantId>`). Different Applications, and different users within one Application, can use the same key string without collision. The actor is part of the scope on purpose: without it, one end-user replaying another's key on `POST /billing/subscription/cancel` — whose body is `{}` for everyone, so the fingerprint protects nothing — would receive that user's stored response.
 - **First request executes**; its `{status, body}` is stored for **24 h** (2xx and 4xx only — a 5xx is never cached, so retrying after a server error re-executes).
 - **Retry with the same key + identical request** (method, path, body) → the stored response is returned verbatim with an `Idempotency-Replayed: true` header. Nothing re-executes.
 - **Same key, different request** → `409 IDEMPOTENCY_KEY_REUSED`. One key = one logical operation.
@@ -82,11 +82,16 @@ Routes with their own deduplication are deliberately **not** opted in: provider 
 
 One Rekey deployment often hosts several independent teams — a platform team running Rekey for the whole company, a lab running it for a handful of internal products. **Workspace limits** stop one workspace from consuming the deployment: a super-admin can put a ceiling on a Tenant, and Rekey enforces it.
 
-Ceilings live in `Tenant.limits` (a jsonb column). Today there is one key:
+Ceilings live in `Tenant.limits` (a jsonb column). Today there are two keys:
 
 | Key | Meaning |
 |---|---|
 | `maxActiveEndUsers` | Maximum non-erased EndUsers across **all** Applications in the workspace. |
+| `maxProductionApps` | Maximum Applications in the workspace whose `environment` is `PRODUCTION`. STAGING and DEVELOPMENT Applications are never counted, so a workspace at its ceiling can still create as many non-production Applications as it likes. |
+
+A deployment can stamp defaults onto every workspace it creates with the
+`DEFAULT_TENANT_LIMITS` env var (JSON matching the same shape). Unset — the
+default — means new workspaces get `null` limits, i.e. unlimited.
 
 Managed through two super-admin routes:
 
@@ -94,12 +99,13 @@ Managed through two super-admin routes:
 # Read the ceilings and what's currently counted against them
 curl -H "Authorization: Bearer $SUPER_ADMIN_KEY" \
   https://your-rekey/api/v1/admin/tenants/$TENANT_ID/limits
-# → { "limits": { "maxActiveEndUsers": 500 }, "usage": { "activeEndUsers": 312 } }
+# → { "limits": { "maxActiveEndUsers": 500, "maxProductionApps": 3 },
+#     "usage":  { "activeEndUsers": 312, "productionApps": 2 } }
 
 # Set them (PUT semantics — an omitted key becomes unlimited; `{}` clears all)
 curl -X PUT -H "Authorization: Bearer $SUPER_ADMIN_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"maxActiveEndUsers":500}' \
+  -d '{"maxActiveEndUsers":500,"maxProductionApps":3}' \
   https://your-rekey/api/v1/admin/tenants/$TENANT_ID/limits
 ```
 
@@ -107,7 +113,7 @@ The rules that matter:
 
 - **Unset means unlimited.** `limits` is null on every workspace until someone sets it, so a deployment that ignores this feature behaves exactly as it did before the column existed. An absent or `null` key inside the object means the same for that one limit.
 - **Only a super-admin can set them.** The routes sit behind `SUPER_ADMIN_KEY`, not a workspace session — a quota an operator can raise themselves isn't a quota. There is no operator-facing write path.
-- **Creation is gated; authentication never is.** Hitting the ceiling makes *new* end-users fail with `403 TENANT_QUOTA_EXCEEDED` — via SDK sign-up, magic-link first login, OAuth first login, and operator-driven manual create alike. End-users who already exist keep signing in, refreshing, and resetting passwords normally. Lowering a limit below current usage is allowed and strands nobody; it just freezes new sign-ups until the count drops back under the line.
+- **Creation is gated; authentication never is.** Hitting `maxActiveEndUsers` makes *new* end-users fail with `403 TENANT_QUOTA_EXCEEDED` — via SDK sign-up, magic-link first login, OAuth first login, and operator-driven manual create alike. Hitting `maxProductionApps` fails the creation of a *new* `PRODUCTION` Application with the same code. End-users and Applications that already exist are untouched: end-users keep signing in, refreshing, and resetting passwords normally. Lowering a limit below current usage is allowed and strands nobody; it just freezes new sign-ups until the count drops back under the line.
 - **Counting is workspace-wide.** Users are summed across every Application the Tenant owns, not counted per-Application. [Erased](data-erasure.md) (tombstoned) users don't count — the row survives for foreign-key integrity, but the person is gone.
 - **Enforcement is check-then-act.** The count is exact at the moment it's read, but nothing serialises concurrent sign-ups, so a burst racing at the boundary can overshoot by a few. That's deliberate: a hard ceiling would mean locking one row per workspace on the hottest write path in the product. See `apps/api/src/lib/tenant-limits.ts`.
 

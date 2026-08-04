@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
+import { api, PanelApiError, getApplication } from '@/lib/api';
 import { CopyButton } from '@/components/CopyButton';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, SectionHeader } from '@/components/Card';
@@ -59,10 +59,7 @@ export default async function McpPage({
   const error = typeof sp.error === 'string' ? sp.error : undefined;
   const saved = sp.saved === '1';
 
-  const app = await api<ApplicationRow>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-  });
+  const app = await getApplication(id);
   const enabled = app.authConfig.mcpEnabled === true;
   const mcpUrl = app.mcpUrl ?? `${fallbackBase()}/api/v1/mcp/${app.slug}`;
   const claudeCodeSnippet = `claude mcp add --transport http ${app.slug} ${mcpUrl}`;

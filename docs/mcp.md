@@ -152,7 +152,7 @@ Mounted at `/api/v1/tenant/mcp`. JSON-RPC over HTTP POST. Bearer-authed by
 
 Two credentials, one hybrid guard (`tenant-mcp/bearer-auth.ts`): a PAT resolved
 via `resolveOperatorToken`, or an OAuth JWT verified by
-`tenant-mcp/operator-mcp-jwt.ts`. The PAT was Phase 1; OAuth landed in Phase 2 so
+`lib/operator-mcp-jwt.ts`. The PAT was Phase 1; OAuth landed in Phase 2 so
 an operator's Claude Desktop / Cursor client can run the browser flow instead of
 being handed a long-lived secret to paste.
 
@@ -161,7 +161,10 @@ being handed a long-lived secret to paste.
 - Membership is re-checked on every request, on **both** paths. Removing the
   operator from the workspace instantly invalidates every token bound to it.
 - Read tools need `read` (the default scope every PAT has) or
-  `mcp:operator:read`.
+  `mcp:operator:read`. Two of them additionally carry a role floor:
+  `list_invitations` and `recent_security_events` are `minRole: 'ADMIN'`, so a
+  MEMBER cannot pull the workspace security log through an agent when the HTTP
+  route refuses them. `minRole` is honoured on read tools, not only writes.
 - Write tools are default-deny on two independent axes: write capability
   (`mcp:operator:write` on the OAuth path, `applications:write` for a PAT) **and**
   a workspace role clearing the tool's `minRole` (ADMIN unless the tool says
@@ -178,10 +181,10 @@ being handed a long-lived secret to paste.
 | `get_workspace_overview` | counts + MRR per currency |
 | `list_applications` | per-app endUserCount, activeSubs, apiRequestsLast24h |
 | `list_members` | operators in workspace + role |
-| `list_invitations` | pending workspace invitations |
+| `list_invitations` | pending workspace invitations — **`minRole: ADMIN`** |
 | `recent_payments` | filter by `status`, `limit` |
 | `recent_subscriptions` | filter by `status`, `limit` |
-| `recent_security_events` | filter by `actorType`, `limit` |
+| `recent_security_events` | filter by `actorType`, `limit` — **`minRole: ADMIN`** |
 | `recent_webhook_events` | filter by `provider`, `onlyFailed`, `limit` |
 | `recent_failed_webhook_deliveries` | last-N FAILED outbound deliveries |
 | `application_health` | per-app payment success rate (30d) + outbound webhook success rate (24h), sorted by failure count |
@@ -217,7 +220,7 @@ workspace at consent.
 
 | Concern | File |
 |---|---|
-| OAuth routes (register / authorize / token / introspect / well-known) | `apps/api/src/modules/tenant-mcp/oauth.routes.ts` |
+| OAuth routes (register / authorize / grant / token / introspect / well-known) | `apps/api/src/modules/tenant-mcp/oauth.routes.ts` |
 | OAuth service (PKCE verify, code mint, token issue, refresh rotation) | `apps/api/src/modules/tenant-mcp/oauth.service.ts` |
 | Access-token signing + verify | `apps/api/src/lib/operator-mcp-jwt.ts` (JWT `typ: 'op_mcp_access'`, audience-bound to issuer URL) |
 | Hybrid Bearer guard (PAT OR JWT) on the MCP endpoint | `apps/api/src/modules/tenant-mcp/bearer-auth.ts` |
@@ -228,10 +231,17 @@ workspace at consent.
 |---|---|
 | Authorization-server metadata (RFC 8414) | `…/.well-known/oauth-authorization-server` |
 | Protected-resource metadata (RFC 9728) | `…/.well-known/oauth-protected-resource` |
-| Dynamic client registration (RFC 7591) | `POST …/oauth/register` |
-| Authorization (login + workspace pick + consent) | `GET/POST …/oauth/authorize` |
+| Dynamic client registration (RFC 7591) | `POST …/oauth/register` — open by default; `OPERATOR_MCP_DYNAMIC_REGISTRATION=disabled` closes it (403 `CLIENT_REGISTRATION_DISABLED`, and `registration_endpoint` drops out of the metadata). Close it once your clients are connected: registration grants no access on its own, but it allowlists a `redirect_uri` of the registrant's choosing, which is what a consent-phishing link needs. |
+| Authorization (redirects the operator to the panel to sign in + pick a workspace) | `GET …/oauth/authorize` — **GET only**; `POST` here is a 404 |
+| Consent decision (the panel posts the operator's approval back) | `POST …/oauth/grant` — guarded by `requireTenantSession`, i.e. a panel **session** token; a PAT is deliberately not accepted, because consent is a human act |
 | Token (auth-code + refresh) | `POST …/oauth/token` |
 | Introspection (RFC 7662) | `POST …/oauth/introspect` |
+
+The consent screen names the **host the authorization code will be delivered to**
+— the registered `redirect_uri`'s origin — and marks it as not vouched for by
+this deployment. That is the paired mitigation for leaving registration open by
+default: the one thing on the screen that is not the operator's own is now the
+thing the screen points at.
 
 #### Scopes + grants
 
@@ -249,7 +259,7 @@ Three new tables added in migration `20260531230000_operator_mcp_oauth`:
 
 - `tenant_oauth_clients` — RFC 7591 dynamically-registered clients (id, name, redirect_uris, metadata, created_at).
 - `tenant_oauth_auth_codes` — single-use 60s codes bound to `(clientId, tenantUserId, tenantId, redirectUri, codeChallenge, scope)`.
-- `tenant_mcp_refresh_tokens` — hash-only refresh tokens bound to `(tenantUserId, tenantId, clientId)`; atomically rotated on redeem (reuse → revocation).
+- `tenant_mcp_refresh_tokens` — hash-only refresh tokens bound to `(tenantUserId, tenantId, clientId)`; atomically rotated on redeem. Replaying an **already-rotated** token revokes the whole family — every live token for that `(tenantUserId, tenantId, clientId)` triple, not just the replayed one — because on a leak the attacker rotates first and the replay is the legitimate client arriving second. A token that was deliberately revoked (sign-out) is refused without burning anything.
 
 #### Token shape
 

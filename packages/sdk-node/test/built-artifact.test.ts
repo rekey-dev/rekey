@@ -21,18 +21,35 @@
 import { describe, expect, it, beforeAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const distEntry = path.resolve(here, '..', 'dist', 'index.js');
+const pkgRoot = path.resolve(here, '..');
+const distEntry = path.resolve(pkgRoot, 'dist', 'index.js');
+const distTypes = path.resolve(pkgRoot, 'dist', 'index.d.ts');
 
 /** Run a snippet as real ESM, with the built entry importable by path. */
 function runEsm(source: string): string {
   return execFileSync(process.execPath, ['--input-type=module', '-e', source], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+/**
+ * Run a snippet as real CommonJS, from inside the package directory so that
+ * `require('@rekey.dev/node')` resolves by NAME through the package's own
+ * `exports` map (Node's package self-reference). That matters: the resolver
+ * only consults `exports` for bare specifiers, and CJS resolution runs with
+ * conditions `["require","node"]` — the exact path that was broken.
+ */
+function runCjs(source: string): string {
+  return execFileSync(process.execPath, ['--input-type=commonjs', '-e', source], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: pkgRoot,
   }).trim();
 }
 
@@ -141,5 +158,93 @@ describe('the published ESM artifact', () => {
     `);
 
     expect(out).toBe('none');
+  });
+});
+
+describe('the published CommonJS contract', () => {
+  beforeAll(() => {
+    if (!existsSync(distEntry)) {
+      throw new Error('dist/ is missing — run `pnpm --filter @rekey.dev/node build` first.');
+    }
+  });
+
+  // Node ≥22.12 can `require()` a synchronous ESM module, but only if the
+  // resolver finds a target. CJS resolution walks the `exports` map with
+  // conditions ["require","node"]; a map containing only `types` + `import`
+  // matches neither, so every `require('@rekey.dev/node')` failed with
+  // ERR_PACKAGE_PATH_NOT_EXPORTED — Jest-CJS, ts-node, and any CommonJS
+  // consumer, on a package that otherwise works fine. The fix is a `default`
+  // condition; no CJS build is involved, which is why this must be verified by
+  // actually requiring rather than by reading the manifest.
+  it('can be require()d by name', () => {
+    const out = runCjs(`
+      const m = require('@rekey.dev/node');
+      console.log([typeof m.Rekey, typeof m.RekeyError, typeof m.verifyWebhookSignature].join(','));
+    `);
+    expect(out).toBe('function,function,function');
+  });
+
+  it('gives require() and import() the same RekeyError class', () => {
+    // Two copies of the class would make `instanceof` silently false across
+    // the boundary — the exact failure mode this package's error contract
+    // depends on not having.
+    const out = runCjs(`
+      const cjs = require('@rekey.dev/node');
+      import('@rekey.dev/node').then((esm) => {
+        console.log(cjs.RekeyError === esm.RekeyError);
+      });
+    `);
+    expect(out).toBe('true');
+  });
+
+  // The same defect shipped in all six published packages, so this checks all
+  // six rather than only the one this suite lives in. A package whose exports
+  // map omits `default` is unreachable from `require()` no matter what its
+  // build produced, and that is invisible until a CJS consumer complains.
+  it.each([
+    'shared-types',
+    'sdk-node',
+    'sdk-react',
+    'sdk-nextjs',
+    'cli',
+    'mcp',
+  ])('packages/%s declares a `default` condition on every exports subpath', (dir) => {
+    const manifest = path.resolve(pkgRoot, '..', dir, 'package.json');
+    const pkg = JSON.parse(readFileSync(manifest, 'utf8')) as {
+      name: string;
+      exports: Record<string, unknown>;
+    };
+    for (const [subpath, target] of Object.entries(pkg.exports)) {
+      if (typeof target === 'string') continue; // e.g. "./package.json"
+      expect(
+        target,
+        `${pkg.name} exports["${subpath}"] has no "default" condition — CJS ` +
+          `resolution runs with ["require","node"] and will not match "import".`,
+      ).toHaveProperty('default');
+    }
+  });
+});
+
+describe('the published type surface', () => {
+  // `stripInternal` is what keeps `@internal`-marked members out of the .d.ts.
+  // Without it, a test hook and two positional transport methods were part of
+  // the public API — and 2.0.0 would have frozen them there.
+  it('does not publish the JWKS test hook', () => {
+    expect(readFileSync(distTypes, 'utf8')).not.toContain('_clearJwksCacheForTests');
+  });
+
+  it('does not publish the internal positional transport methods', () => {
+    const types = readFileSync(distTypes, 'utf8');
+    expect(types).not.toMatch(/^\s*send<T>/m);
+    expect(types).not.toMatch(/^\s*requestRaw<T>/m);
+  });
+
+  it('publishes `request` as a supported options-object escape hatch', () => {
+    // Deliberately kept, deliberately NOT positional: this is the shape a
+    // consumer reaches for when an endpoint is not wrapped yet, and adding a
+    // knob to it later must not need a new overload.
+    const types = readFileSync(distTypes, 'utf8');
+    expect(types).toContain('request<T>(method: string, path: string, options?: RekeyRequestOptions)');
+    expect(types).toContain('interface RekeyRequestOptions');
   });
 });

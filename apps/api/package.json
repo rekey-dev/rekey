@@ -12,6 +12,7 @@
     "lint": "echo \"(eslint not yet wired)\"",
     "test": "pnpm run test:prepare && vitest run",
     "test:coverage": "pnpm run test:prepare && vitest run --coverage",
+    "test:providers": "pnpm run test:prepare && vitest run --config vitest.providers.config.ts",
     "test:prepare": "pnpm --filter @rekey.dev/shared-types run build && pnpm run db:generate",
     "db:generate": "prisma generate --schema ../../prisma/schema.prisma",
     "db:migrate": "prisma migrate dev --schema ../../prisma/schema.prisma",
@@ -43,13 +44,18 @@
     "razorpay": "^2.9.6",
     "resend": "^6.12.3",
     "stripe": "^17.4.0",
-    "zod": "^3.23.8"
+    "undici": "^7",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.24.1"
   },
   "devDependencies": {
+    "@apidevtools/swagger-parser": "^10.1.1",
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.9.0",
     "@types/nodemailer": "^6.4.17",
     "@vitest/coverage-v8": "^2.1.5",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
     "prisma": "6.10.1",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",

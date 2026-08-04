@@ -14,6 +14,47 @@ import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { requireApiKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireBillingEnabled } from '../../middleware/billing-enabled.js';
+import { positiveBoundedInt } from '../../lib/bounded-int.js';
+import { ok, okPage, errs, ref, type JsonSchema } from '../../lib/openapi.js';
+import { paged } from '../../lib/pagination.js';
+
+/**
+ * Auth/gate errors shared by every route in this file: `requireApiKey`
+ * (secret key only — the publishable key is rejected outright) +
+ * `requireBillingEnabled`, then the per-route `requireScope`.
+ */
+const READ_GATE_ERRORS = {
+  401:
+    'API_KEY_MISSING — no Authorization header; or API_KEY_INVALID — the presented credential ' +
+    'is not a valid Application secret key, or is unknown/revoked/expired.',
+  403:
+    "IP_NOT_ALLOWED — caller IP outside the key's allowlist; or BILLING_DISABLED — billing is " +
+    'not enabled for this application; or API_KEY_SCOPE_INSUFFICIENT — the key lacks the ' +
+    '`billing:read` scope.',
+  429: 'RATE_LIMITED — too many requests. Honour the Retry-After header.',
+} as const;
+
+const WRITE_GATE_ERRORS = {
+  401: READ_GATE_ERRORS[401],
+  403: READ_GATE_ERRORS[403].replace('billing:read', 'billing:write'),
+  429: READ_GATE_ERRORS[429],
+} as const;
+
+/** `resolveSubject` refuses an org/end-user id that doesn't belong to this Application. */
+const SUBJECT_NOT_FOUND =
+  'ORGANIZATION_NOT_FOUND — `organizationId` does not name an organization in this ' +
+  'application; or END_USER_NOT_FOUND — `endUserId` does not name an end-user in this application.';
+
+/*
+ * `data` for `GET /balance` is now `ref('CreditBalance')`.
+ *
+ * This used to be a local schema because `CreditBalanceDtoSchema` disagreed
+ * with the handler: it required `endUserId`, which an ORGANIZATION balance
+ * cannot have, and an `updatedAt` that does not exist — the balance is summed
+ * from the ledger, not stored on a row with a timestamp. The DTO has been
+ * corrected to match (both subject fields optional, no `updatedAt`), so the
+ * component describes the response and this local copy is dead.
+ */
 
 const subjectFields = {
   endUserId: z.string().min(1).optional(),
@@ -36,7 +77,7 @@ const LedgerQuery = z
 const ConsumeBody = z
   .object({
     ...subjectFields,
-    amount: z.number().int().positive(),
+    amount: positiveBoundedInt(),
     idempotencyKey: z.string().min(1).max(200).optional(),
     description: z.string().max(500).optional(),
     metadata: z.record(z.unknown()).optional(),
@@ -102,6 +143,14 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
           type: 'object',
           properties: { endUserId: { type: 'string' }, organizationId: { type: 'string' } },
         },
+        response: {
+          200: ok(ref('CreditBalance'), "The subject's current credit balance."),
+          ...errs({
+            400: 'VALIDATION_ERROR — pass exactly one of `endUserId` or `organizationId`.',
+            ...READ_GATE_ERRORS,
+            404: SUBJECT_NOT_FOUND,
+          }),
+        },
       },
     },
     async (req) => {
@@ -134,11 +183,26 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
           properties: {
             endUserId: { type: 'string' },
             organizationId: { type: 'string' },
-            amount: { type: 'integer', minimum: 1 },
+            amount: { type: 'integer', minimum: 1, maximum: 2147483647 },
             idempotencyKey: { type: 'string', minLength: 1, maxLength: 200 },
             description: { type: 'string', maxLength: 500 },
             metadata: { type: 'object', additionalProperties: true },
           },
+        },
+        response: {
+          200: ok(ref('ConsumeCreditsResult'), 'The balance after the drawdown.'),
+          ...errs({
+            400:
+              'VALIDATION_ERROR — pass exactly one of `endUserId` or `organizationId`; or ' +
+              'IDEMPOTENCY_KEY_INVALID — the Idempotency-Key header is empty or exceeds 200 characters.',
+            ...WRITE_GATE_ERRORS,
+            402: 'CREDITS_INSUFFICIENT — the balance is below `amount`.',
+            404: SUBJECT_NOT_FOUND,
+            409:
+              'IDEMPOTENCY_KEY_IN_FLIGHT — a request with this Idempotency-Key is still being ' +
+              'processed; or IDEMPOTENCY_KEY_REUSED — the key was already used for a different ' +
+              'method, path, or body.',
+          }),
         },
       },
     },
@@ -175,8 +239,16 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
             endUserId: { type: 'string' },
             organizationId: { type: 'string' },
             limit: { type: 'integer', minimum: 1, maximum: 200 },
-            offset: { type: 'integer', minimum: 0 },
+            offset: { type: 'integer', minimum: 0, maximum: 2147483647 },
           },
+        },
+        response: {
+          200: okPage(ref('CreditLedgerEntry'), "A page of the subject's credit ledger entries, newest first."),
+          ...errs({
+            400: 'VALIDATION_ERROR — pass exactly one of `endUserId` or `organizationId`.',
+            ...READ_GATE_ERRORS,
+            404: SUBJECT_NOT_FOUND,
+          }),
         },
       },
     },
@@ -184,11 +256,15 @@ export async function creditsPublicRoutes(app: FastifyInstance): Promise<void> {
       const applicationId = req.application!.id;
       const q = LedgerQuery.parse(req.query);
       const { subject } = await resolveSubject(applicationId, q);
-      const entries = await creditsService.listLedger(applicationId, subject, {
-        limit: q.limit ?? 50,
-        ...(q.offset !== undefined && { offset: q.offset }),
-      });
-      return { success: true, data: entries };
+      // The service clamps to 1..200 / >=0; mirror the clamp here so `page`
+      // reports the window that was actually served.
+      const limit = Math.min(Math.max(q.limit ?? 50, 1), 200);
+      const offset = Math.max(q.offset ?? 0, 0);
+      const [entries, total] = await Promise.all([
+        creditsService.listLedger(applicationId, subject, { limit, offset }),
+        creditsService.countLedger(applicationId, subject),
+      ]);
+      return { success: true, data: paged(entries, total, limit, offset) };
     },
   );
 }

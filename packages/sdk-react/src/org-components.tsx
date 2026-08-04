@@ -28,28 +28,47 @@
 import * as React from 'react';
 import { Themed, useCx, type AppearanceProp } from './theme.js';
 import type { FormAction } from './auth-components.js';
+import type {
+  OrganizationInvitationDto,
+  OrganizationMemberDto,
+  OrganizationWithRoleDto,
+} from '@rekey.dev/shared-types';
 
-/** Minimal org shape the switcher needs — matches `OrganizationWithRoleDto`. */
-export interface OrgSummary {
-  id: string;
-  name: string;
+// ── Why these are `Pick<Dto, …>` and not hand-written interfaces ─────────────
+//
+// They used to be standalone interfaces "matching" the DTOs. They did not.
+// `OrgMember` was declared `{ id; email; role }`, but `OrganizationMemberDto`
+// carries BOTH `id` (the membership row) and `endUserId` (the user), populated
+// from different columns — and TypeScript could not catch the drift, because
+// the real DTO is structurally assignable to the smaller shape. So passing
+// `organizations.listMembers()` straight in type-checked cleanly while
+// `<OrganizationProfile>` posted the membership id into the `endUserId` field
+// its own docs tell you to read: every role change and every removal silently
+// targeted nothing.
+//
+// Deriving from the DTO makes a future column rename a compile error here
+// instead of a no-op in production. `Pick` keeps the props narrow, so callers
+// who assemble these by hand still only owe the fields actually rendered.
+
+/** The org fields the switcher renders. A slice of `OrganizationWithRoleDto`. */
+export type OrgSummary = Pick<OrganizationWithRoleDto, 'id' | 'name'> & {
   /** The caller's role, when known. */
   role?: string;
-}
+};
 
-/** Minimal member shape — matches `OrganizationMemberDto`. */
-export interface OrgMember {
-  id: string;
-  email: string;
+/**
+ * The member fields the profile renders. A slice of `OrganizationMemberDto` —
+ * note it needs BOTH ids: `id` keys the row, `endUserId` is what the mutation
+ * endpoints address.
+ */
+export type OrgMember = Pick<OrganizationMemberDto, 'id' | 'endUserId' | 'email'> & {
   role: string;
-}
+};
 
-/** Minimal pending-invitation shape — matches `OrganizationInvitationDto`. */
-export interface OrgInvitation {
-  id: string;
-  email: string;
+/** The invitation fields the profile renders. A slice of `OrganizationInvitationDto`. */
+export type OrgInvitation = Pick<OrganizationInvitationDto, 'id' | 'email'> & {
   role: string;
-}
+};
 
 // ---------------------------------------------------------------------------
 // <OrganizationSwitcher>
@@ -351,7 +370,8 @@ function OrganizationProfileBody({
             {manage && setRoleAction ? (
               <form action={setRoleAction} className="rekey-row rekey-spacer">
                 <HiddenFields fields={hiddenFields} />
-                <input type="hidden" name="endUserId" value={m.id} />
+                {/* `endUserId`, NOT `id` — see the note on OrgMember. */}
+                <input type="hidden" name="endUserId" value={m.endUserId} />
                 <select name="role" defaultValue={m.role} aria-label={`Role for ${m.email}`} className={cx('rekey-select', 'input')} style={{ padding: '4px 8px', width: 'auto' }}>
                   {ROLES.map((r) => (
                     <option key={r} value={r}>{r.charAt(0) + r.slice(1).toLowerCase()}</option>
@@ -365,7 +385,8 @@ function OrganizationProfileBody({
             {manage && removeAction && (
               <form action={removeAction}>
                 <HiddenFields fields={hiddenFields} />
-                <input type="hidden" name="endUserId" value={m.id} />
+                {/* `endUserId`, NOT `id` — see the note on OrgMember. */}
+                <input type="hidden" name="endUserId" value={m.endUserId} />
                 <button type="submit" className="rekey-link" style={{ color: 'var(--rekey-color-danger)' }}>
                   Remove
                 </button>

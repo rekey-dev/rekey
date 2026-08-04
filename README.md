@@ -20,7 +20,15 @@ cp .env.example .env             # fill POSTGRES_PASSWORD, REDIS_PASSWORD,
                                  # then paste the datastore passwords into
                                  # DATABASE_URL/REDIS_URL — compose does not do it for you
 docker compose --profile full up # Postgres + Redis + API (:3030) + panel (:3031)
+                                 #                       + portal (:3050)
 ```
+
+Every published port binds to `127.0.0.1`, so this is a **local** stack — bringing
+it up on a VPS does not put it on the internet. `BIND_ADDRESS=0.0.0.0` overrides
+that, and if you set it, set `OPERATOR_SIGNUP_MODE=invite` in the same edit or the
+first stranger to find the host can create an operator account. The
+internet-facing file is [`docker-compose.prod.yml`](docker-compose.prod.yml)
+(Traefik, no published ports) — see [DEPLOY.md](DEPLOY.md).
 
 Prefer to run from source (watch mode)? Start just the datastores in Docker:
 
@@ -61,7 +69,6 @@ Apps (each runs on a fixed dev port):
 |---|---|---|---|
 | `apps/api` | `@rekey.dev/api` | 3030 | Fastify monolith — auth + billing + admin API |
 | `apps/panel` | `@rekey.dev/panel` | 3031 | Next.js admin panel (panel.rekey.dev) |
-| `apps/admin` | `@rekey.dev/admin` | — | Read-only super-admin dashboard (admin.rekey.dev) |
 | `apps/portal` | `@rekey.dev/portal` | 3050 | Hosted customer portal V2 (portal.rekey.dev) |
 
 `examples/` is currently empty: the previous demo apps were removed in #261

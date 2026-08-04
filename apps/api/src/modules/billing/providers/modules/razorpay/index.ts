@@ -2,7 +2,7 @@
  * Razorpay ProviderModule (docs/specs/billing-provider-modules.md, P2).
  *
  * Bundles what used to be spread across razorpay.routes.ts (offline
- * HMAC-SHA256 verification, header-borne event id) and razorpay.handler.ts
+ * HMAC-SHA256 verification, event id) and razorpay.handler.ts
  * (the 7-event dispatch switch) into one descriptor. Every mapping is a
  * straight port — CI's razorpay-webhook suite pins the behavior through the
  * legacy alias URL.
@@ -106,19 +106,30 @@ async function verify(req: RawWebhookReq, creds: Record<string, string>, _ctx: V
 }
 
 /**
- * Razorpay has no event id in the body — its per-delivery unique id rides
- * on the `x-razorpay-event-id` header. Fall back to a deterministic
- * composite if (only ever in non-Razorpay test harnesses) it's absent, so
- * idempotency still has a stable key.
+ * Razorpay has no event id in the body, so the idempotency key is DERIVED from
+ * the body — a digest of the exact bytes the signature covers, plus the two
+ * identifying fields, so the key is readable in a log.
+ *
+ * `x-razorpay-event-id` is deliberately ignored, and this is a security
+ * property rather than a preference. The HMAC at `verify` is computed over the
+ * raw body only; the header sits outside it, and Razorpay's scheme carries no
+ * timestamp for `verify` to bound. So one captured signed body, replayed with a
+ * fresh header id, passed verification and got a brand-new
+ * `UNIQUE(applicationId, provider, providerEventId)` slot every time — an
+ * unlimited supply of "new" events out of one recording. That is a delivery
+ * vehicle, not a corner case: it is how a stale `subscription.activated` is
+ * re-presented after a cancellation.
+ *
+ * The cost is that two genuinely distinct deliveries with byte-identical
+ * bodies collapse into one event. Razorpay's own retries are exactly that and
+ * SHOULD collapse; two distinct events differ in `created_at`, the payment id,
+ * or the subscription state they carry.
  */
 function extractEventId(payload: unknown, req?: RawWebhookReq): string {
-  const headerId = req?.headers['x-razorpay-event-id'];
-  if (typeof headerId === 'string' && headerId.length > 0) return headerId;
   const e = payload as RazorpayEventPayload;
   const bodyDigest = createHash('sha256')
     .update(req?.rawBody ?? '')
-    .digest('hex')
-    .slice(0, 24);
+    .digest('hex');
   return `rzp_${e.event ?? 'unknown'}_${e.created_at ?? ''}_${bodyDigest}`;
 }
 

@@ -1,13 +1,7 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import {
-  api,
-  PanelApiError,
-  type ApplicationRow,
-  type PlanRow,
-  type UsageMeterRow,
-  type PlanEntitlementRow,
-} from '@/lib/api';
+import { api, PanelApiError, type PlanRow, type UsageMeterRow, type PlanEntitlementRow, getApplication } from '@/lib/api';
+import { emptyPage, type Page } from '@/lib/paginate';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { formatMoney } from '@/lib/format';
 import { BillingModeBanner } from '@/components/BillingModeBanner';
@@ -95,6 +89,18 @@ async function createPlan(applicationId: string, formData: FormData): Promise<vo
   redirect(`/applications/${applicationId}/plans?created=${slug}&e=plan_created`);
 }
 
+async function registerPlan(applicationId: string, slug: string): Promise<void> {
+  'use server';
+  await api({
+    method: 'POST',
+    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/plans/${encodeURIComponent(slug)}/register`,
+  });
+  // `redirect`, not `revalidatePath` — matching every other action in this
+  // file. A same-action revalidatePath kills Next's seeded prefetch here and
+  // the page renders blank for a full RSC round-trip.
+  redirect(`/applications/${applicationId}/plans`);
+}
+
 async function setPlanActive(applicationId: string, slug: string, active: boolean): Promise<void> {
   'use server';
   await api({
@@ -176,6 +182,13 @@ const ERR: Record<string, string> = {
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage plans.',
   PLAN_ENTITLEMENT_INVALID: 'Entitlement is missing required fields for its kind.',
   PLAN_ENTITLEMENT_NOT_FOUND: 'Entitlement not found.',
+  // The plan row is written either way and lands as "not registered" — say so,
+  // rather than leaving the operator with the bare code and no idea whether
+  // anything was saved.
+  BILLING_PROVIDER_ERROR:
+    'Your payment provider refused to register this plan, so it was saved but is not on sale. Check the credentials under Billing → Providers, then use “Retry registration” on the plan.',
+  BILLING_CREDENTIALS_NOT_CONFIGURED:
+    'No payment provider is configured yet. Add one under Billing → Providers before creating plans.',
 };
 
 export default async function PlansPage({
@@ -195,10 +208,7 @@ export default async function PlansPage({
   // Billing master switch off → point at the switch instead of an empty table
   // (same guard the Revenue page renders; the tab group is hidden but the URL
   // stays reachable).
-  const app = await api<ApplicationRow>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-  });
+  const app = await getApplication(id);
   if (!app.billingConfig.enabled) {
     return (
       <div className="space-y-5">
@@ -211,16 +221,18 @@ export default async function PlansPage({
     );
   }
 
-  const [plans, meters] = await Promise.all([
-    api<PlanRow[]>({
+  const [planPage, meterPage] = await Promise.all([
+    api<Page<PlanRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/plans`,
     }),
-    api<UsageMeterRow[]>({
+    api<Page<UsageMeterRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/usage-meters`,
-    }).catch(() => []),
+    }).catch(() => emptyPage<UsageMeterRow>()),
   ]);
+  const plans = planPage.items;
+  const meters = meterPage.items;
   // Per-plan entitlement bundles (one round-trip each; plan counts are small).
   const entLists = await Promise.all(
     plans.map((p) =>
@@ -372,7 +384,26 @@ function PlansTable({
                 {p.kind === 'CREDIT' || (p.kind === 'LICENSE' && p.licenseKind !== 'TIMED') ? 'one-time' : p.interval}
               </TD>
               <TD>
-                {p.active ? (
+                {p.registrationStatus === 'FAILED' ? (
+                  // The provider's own reason is the only actionable thing
+                  // here ("Invalid API Key provided: sk_test_…"), and it was
+                  // reachable only by hovering — invisible on touch and to
+                  // keyboard users. Show it inline; keep the title for the
+                  // full text when it is truncated.
+                  <span
+                    className="inline-flex flex-col items-start gap-0.5"
+                    title={p.registrationError ?? undefined}
+                  >
+                    <Badge tone="danger" dot>not registered</Badge>
+                    {p.registrationError && (
+                      <span className="block max-w-[9rem] truncate text-[10px] text-[var(--color-muted-fg)]">
+                        {p.registrationError}
+                      </span>
+                    )}
+                  </span>
+                ) : p.registrationStatus === 'PENDING' ? (
+                  <Badge tone="neutral" dot>registering…</Badge>
+                ) : p.active ? (
                   <Badge tone="success" dot>active</Badge>
                 ) : (
                   <Badge tone="neutral" dot>archived</Badge>
@@ -413,6 +444,21 @@ function PlansTable({
                       <EntitlementForm action={addEntitlement.bind(null, applicationId, p.slug)} />
                     </div>
                   </Modal>
+                  {p.registrationStatus === 'FAILED' || p.registrationStatus === 'PENDING' ? (
+                    // Activating an unregistered plan is refused by the API —
+                    // nothing can be sold against it until the provider accepts
+                    // it. Offering "Reactivate" here would be a button whose
+                    // only outcome is an error, so this offers the repair the
+                    // API actually wants instead.
+                    <form action={registerPlan.bind(null, applicationId, p.slug)} className="inline">
+                      <SubmitButton
+                        pendingLabel="Registering…"
+                        className="rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
+                      >
+                        Retry registration
+                      </SubmitButton>
+                    </form>
+                  ) : (
                   <form action={setPlanActive.bind(null, applicationId, p.slug, !p.active)} className="inline">
                     {p.active ? (
                       <ConfirmButton confirm={`Archive plan "${p.slug}"? End-users on this plan stay subscribed; new sign-ups are blocked.`}>
@@ -427,6 +473,7 @@ function PlansTable({
                       </SubmitButton>
                     )}
                   </form>
+                  )}
                 </div>
               </TD>
             </TR>

@@ -94,9 +94,15 @@ describe('<CreateOrganization>', () => {
 });
 
 describe('<OrganizationProfile> — viewer role gating', () => {
+  // The two ids are DELIBERATELY different, and deliberately not
+  // interchangeable-looking. `OrganizationMemberDto` carries both: `id` is the
+  // membership row, `endUserId` is the user the mutation endpoints address.
+  // The old fixture used a single `id: 'eu_1'` — an end-user-shaped value in
+  // the membership slot — which is how a component posting `m.id` into the
+  // `endUserId` field looked correct in every assertion for two releases.
   const members: OrgMember[] = [
-    { id: 'eu_1', email: 'owner@x.com', role: 'OWNER' },
-    { id: 'eu_2', email: 'member@x.com', role: 'MEMBER' },
+    { id: 'om_1', endUserId: 'eu_1', email: 'owner@x.com', role: 'OWNER' },
+    { id: 'om_2', endUserId: 'eu_2', email: 'member@x.com', role: 'MEMBER' },
   ];
 
   it('shows the invite form + manage controls for an OWNER viewer', () => {
@@ -117,6 +123,32 @@ describe('<OrganizationProfile> — viewer role gating', () => {
     expect(screen.getAllByRole('button', { name: /remove/i }).length).toBe(members.length);
     // Role-change selects carry the endUserId hidden field.
     expect(container.querySelector('input[name="endUserId"]')).not.toBeNull();
+  });
+
+  it('posts endUserId — the END-USER id, not the membership row id', () => {
+    // The regression this guards: `<input name="endUserId" value={m.id} />`.
+    // Asserting the field EXISTS (the test above) passes either way; only the
+    // value distinguishes a working role change from a silent no-op.
+    const { container } = render(
+      <OrganizationProfile
+        organization={{ id: 'org_1', name: 'Acme' }}
+        members={members}
+        viewerRole="OWNER"
+        setRoleAction={noop}
+        removeAction={noop}
+      />,
+    );
+
+    const posted = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="endUserId"]'),
+    ).map((i) => i.value);
+
+    // One set-role form + one remove form per member.
+    expect(posted.length).toBe(members.length * 2);
+    expect(new Set(posted)).toEqual(new Set(['eu_1', 'eu_2']));
+    // And specifically NOT the membership row ids.
+    expect(posted).not.toContain('om_1');
+    expect(posted).not.toContain('om_2');
   });
 
   it('hides invite + manage controls for a MEMBER viewer', () => {

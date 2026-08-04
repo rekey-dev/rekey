@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
+import { api, PanelApiError, getApplication } from '@/lib/api';
+import type { Page } from '@/lib/paginate';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { Modal } from '@/components/Modal';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -87,10 +88,7 @@ export default async function UsagePage({
   const created = typeof sp.created === 'string' ? sp.created : undefined;
 
   // Billing master switch off → point at the switch instead of an empty table.
-  const app = await api<ApplicationRow>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-  });
+  const app = await getApplication(id);
   if (!app.billingConfig.enabled) {
     return (
       <div className="space-y-5">
@@ -103,7 +101,7 @@ export default async function UsagePage({
     );
   }
 
-  const meters = await api<MeterRow[]>({
+  const { items: meters } = await api<Page<MeterRow>>({
     method: 'GET',
     path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/usage-meters`,
   });

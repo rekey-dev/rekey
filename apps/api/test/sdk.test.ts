@@ -216,8 +216,9 @@ describe('@rekey.dev/node SDK integration', () => {
     expect(created.membership.role).toBe('OWNER');
 
     const mine = await rekey.organizations.listMine(owner.accessToken);
-    expect(mine).toHaveLength(1);
-    expect(mine[0]!.role).toBe('OWNER');
+    expect(mine.items).toHaveLength(1);
+    expect(mine.page).toMatchObject({ total: 1, hasMore: false });
+    expect(mine.items[0]!.role).toBe('OWNER');
 
     const fetched = await rekey.organizations.get(
       owner.accessToken,
@@ -247,8 +248,9 @@ describe('@rekey.dev/node SDK integration', () => {
       owner.accessToken,
       created.organization.id,
     );
-    expect(members).toHaveLength(2);
-    const inviteeMember = members.find((m) => m.email === 'invitee@example.com')!;
+    expect(members.items).toHaveLength(2);
+    expect(members.page.total).toBe(2);
+    const inviteeMember = members.items.find((m) => m.email === 'invitee@example.com')!;
 
     const promoted = await rekey.organizations.setMemberRole(
       owner.accessToken,
@@ -263,7 +265,8 @@ describe('@rekey.dev/node SDK integration', () => {
       owner.accessToken,
       created.organization.id,
     );
-    expect(after).toHaveLength(1);
+    expect(after.items).toHaveLength(1);
+    expect(after.page.total).toBe(1);
   });
 
   it('OWNER leave is refused via the SDK (billing is tied to the owner)', async () => {

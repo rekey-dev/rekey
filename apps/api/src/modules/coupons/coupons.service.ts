@@ -15,20 +15,37 @@
  *
  * `code` is case-insensitive — we lowercase on storage and on validation.
  *
- * Redemption is recorded in `CouponRedemption` when the provider tells us the
- * purchase went through — `webhooks/apply.ts` calls `redeemForCheckout` from
- * checkout completion (one-time flows, where fulfilment happens) and from
- * payment success (recurring flows). Until then the coupon just rides along on
- * `Subscription.metadata.couponBySession`.
+ * ## Redemption is two-phase, and has to be
  *
- * It used to be recorded at apply time, on the theory that slight overcounting
- * was harmless. It wasn't: abandoning checkouts in a loop let an attacker burn
- * through `maxRedemptions` / `maxRedemptionsPerUser` without ever paying, which
- * is a denial-of-discount against every other customer. Don't move it back
- * earlier — a redemption should cost money.
+ * A `CouponRedemption` row exists from the moment the discount is MINTED
+ * (`reserveForCheckout`, status RESERVED) and is settled when the provider says
+ * the money landed (`redeemForCheckout`, status CONFIRMED). Both states hold a
+ * slot against `maxRedemptions` / `maxRedemptionsPerUser`.
  *
- * It was then recorded ONLY at payment-success, which was wrong in both
- * directions and is why `redeemForCheckout` exists:
+ * The history is worth keeping, because both single-phase spellings were wrong
+ * and the second one cost real money:
+ *
+ *   - **Recorded at apply time.** Abandoning checkouts in a loop burned through
+ *     the limits without ever paying — a denial-of-discount against every other
+ *     customer.
+ *   - **Recorded only at payment-success.** The ceiling was then checked
+ *     against rows written by a webhook that had not fired yet, while the
+ *     provider-side discount went live the instant the checkout session was
+ *     created and stayed payable for that session's whole ~24h life. Five
+ *     checkouts on a `maxRedemptions: 1` coupon charged five discounts and left
+ *     one redemption row. Not a race — the window is the session lifetime.
+ *
+ * A reservation is the only shape that closes both: it exists when the discount
+ * exists, and it EXPIRES, so an abandoned checkout releases its slot without
+ * anyone having to notice (`RESERVATION_TTL_MS`). Its cost is bounded too — a
+ * buyer holds at most `maxRedemptionsPerUser ?? 1` live reservations on one
+ * coupon, so a single account cannot sit on a whole global ceiling.
+ *
+ * `redeemForCheckout` also has to work with NO reservation in hand, and that is
+ * not a legacy path — it is how the flows that never went through our checkout
+ * settle, and how a purchase whose reservation aged out is still recorded. It
+ * exists in its own right because payment-success alone was wrong in both
+ * directions:
  *
  *   - **Never, for a one-time purchase.** Neither Stripe's `mode: 'payment'`
  *     session nor a PayPal Orders v2 capture produces the invoice event the
@@ -45,12 +62,141 @@
  * a caller that is in the middle of writing money.
  */
 
-import type { Coupon } from '@prisma/client';
+import type { Coupon, Prisma } from '@prisma/client';
 import { CouponDiscountType } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 
 const CODE_RE = /^[A-Za-z0-9_-]{1,40}$/;
+
+/**
+ * How long a checkout reservation holds its slot against the coupon's limits.
+ *
+ * Pinned to the longest a provider checkout session — and the ad-hoc discount
+ * minted alongside it — stays payable. Stripe Checkout Sessions expire after
+ * 24 hours, and PayPal orders and Razorpay payment links are in the same range.
+ * A shorter TTL would let the slot come back while the discount was still
+ * chargeable, which is precisely the hole reservations exist to close.
+ *
+ * It is deliberately not longer, either: a reservation nobody releases is a
+ * denial-of-discount primitive, the exact mirror of the over-issue bug.
+ */
+export const RESERVATION_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Rows that currently hold a slot against a coupon's GLOBAL ceiling: every
+ * settled redemption, plus reservations that have not aged out.
+ *
+ * `excludeReservationsFor` drops one buyer's own live reservations. Every
+ * caller that is about to reserve, or is pricing a checkout for that buyer,
+ * passes it: their existing reservation is a slot they already hold, and
+ * counting it against them would make their own open checkout look like
+ * somebody else's.
+ */
+function slotHolderWhere(
+  couponId: string,
+  now: Date,
+  excludeReservationsFor?: string,
+): Prisma.CouponRedemptionWhereInput {
+  return {
+    couponId,
+    OR: [
+      { status: 'CONFIRMED' },
+      {
+        status: 'RESERVED',
+        expiresAt: { gt: now },
+        ...(excludeReservationsFor !== undefined && {
+          endUserId: { not: excludeReservationsFor },
+        }),
+      },
+    ],
+  };
+}
+
+/** Either the module-level client or a `$transaction` one. */
+type Db = Pick<typeof prisma, 'couponRedemption'> | Prisma.TransactionClient;
+
+/**
+ * Refuse unless this buyer may take ONE more slot on this coupon. Shared by the
+ * advisory `validate` and the authoritative `reserveForCheckout` so the two can
+ * never disagree about who is allowed to check out.
+ *
+ * Three rules, and the middle one is the reason a reservation cannot be abused
+ * as a denial primitive:
+ *
+ *   1. The GLOBAL ceiling counts settled redemptions plus everyone ELSE's live
+ *      reservations. This buyer's own reservation is a slot they already hold;
+ *      counting it here would refuse them their own open checkout.
+ *   2. A buyer holds at most `maxRedemptionsPerUser ?? 1` live reservations, so
+ *      one account cannot mint an unbounded number of payable discounts, nor
+ *      sit on a whole global ceiling by opening checkouts in a loop.
+ *   3. Settled + reserved must stay within `maxRedemptionsPerUser`, so a
+ *      reservation is never minted that could not legally settle.
+ */
+async function assertLimitsAllowOneMore(
+  db: Db,
+  coupon: Coupon,
+  endUserId: string,
+  displayCode: string,
+): Promise<void> {
+  const now = new Date();
+
+  if (coupon.maxRedemptions !== null) {
+    const held = await db.couponRedemption.count({
+      where: slotHolderWhere(coupon.id, now, endUserId),
+    });
+    if (held >= coupon.maxRedemptions) {
+      throw new RekeyError({
+        statusCode: 400,
+        code: 'COUPON_REDEMPTION_LIMIT_REACHED',
+        message: `Coupon "${displayCode}" has reached its redemption limit.`,
+        fix: 'Use a different coupon — this one is fully consumed.',
+      });
+    }
+  }
+
+  const confirmedByUser = await db.couponRedemption.count({
+    where: { couponId: coupon.id, endUserId, status: 'CONFIRMED' },
+  });
+  const reservedByUser = await db.couponRedemption.count({
+    where: { couponId: coupon.id, endUserId, status: 'RESERVED', expiresAt: { gt: now } },
+  });
+
+  if (
+    coupon.maxRedemptionsPerUser !== null &&
+    confirmedByUser + reservedByUser >= coupon.maxRedemptionsPerUser
+  ) {
+    if (confirmedByUser >= coupon.maxRedemptionsPerUser) {
+      throw new RekeyError({
+        statusCode: 400,
+        code: 'COUPON_USER_LIMIT_REACHED',
+        message: `You have already used coupon "${displayCode}" the maximum number of times.`,
+        fix: 'Use a different coupon for this purchase.',
+      });
+    }
+    throw checkoutAlreadyOpen(displayCode);
+  }
+  // Only bites when the coupon has no per-user limit at all — rule 3 covers
+  // the rest.
+  if (reservedByUser >= (coupon.maxRedemptionsPerUser ?? 1)) {
+    throw checkoutAlreadyOpen(displayCode);
+  }
+}
+
+/**
+ * The buyer's own still-live checkout is holding the slot. Deliberately its own
+ * code rather than the limit ones: nothing is exhausted, the discount they
+ * already minted is still payable, and telling them to "use a different coupon"
+ * would be wrong advice.
+ */
+function checkoutAlreadyOpen(displayCode: string): RekeyError {
+  return new RekeyError({
+    statusCode: 409,
+    code: 'COUPON_CHECKOUT_ALREADY_OPEN',
+    message: `You already have a checkout open with coupon "${displayCode}".`,
+    fix: 'Finish paying for that checkout, or wait for it to expire (it holds the discount for up to 24 hours) before starting another with this code.',
+  });
+}
 
 export interface CreateCouponInput {
   applicationId: string;
@@ -88,7 +234,11 @@ function normaliseCode(code: string): string {
 }
 
 export interface CouponWithStats extends Coupon {
-  /** How many times this coupon has been redeemed (rows in coupon_redemptions). */
+  /**
+   * How many times this coupon has been redeemed — CONFIRMED rows only.
+   * Reservations are money that has not moved, and an operator reading
+   * "redeemed 4 times" off open checkouts would be reading a forecast.
+   */
   redemptionCount: number;
   /**
    * Total discount granted across redemptions, in the smallest currency unit.
@@ -125,6 +275,11 @@ function computeDiscount(coupon: Coupon, amount: number): number {
   return Math.min(coupon.amountOff, amount);
 }
 
+/** The filter `list`, `listWithStats` and `count` share. */
+function couponListWhere(applicationId: string, includeInactive: boolean) {
+  return { applicationId, ...(includeInactive ? {} : { active: true }) };
+}
+
 export const couponsService = {
   async list(
     applicationId: string,
@@ -132,11 +287,16 @@ export const couponsService = {
     opts?: { take?: number; skip?: number },
   ): Promise<Coupon[]> {
     return prisma.coupon.findMany({
-      where: { applicationId, ...(includeInactive ? {} : { active: true }) },
+      where: couponListWhere(applicationId, includeInactive),
       orderBy: { createdAt: 'desc' },
       ...(opts?.take !== undefined ? { take: opts.take } : {}),
       ...(opts?.skip !== undefined ? { skip: opts.skip } : {}),
     });
+  },
+
+  /** Total coupons matching `list`/`listWithStats`, ignoring take/skip. */
+  async count(applicationId: string, includeInactive = false): Promise<number> {
+    return prisma.coupon.count({ where: couponListWhere(applicationId, includeInactive) });
   },
 
   /**
@@ -167,7 +327,8 @@ export const couponsService = {
 
     const grouped = await prisma.couponRedemption.groupBy({
       by: ['couponId'],
-      where: { couponId: { in: coupons.map((c) => c.id) } },
+      // CONFIRMED only — see CouponWithStats.redemptionCount.
+      where: { couponId: { in: coupons.map((c) => c.id) }, status: 'CONFIRMED' },
       _count: { _all: true, discountAmount: true },
       _sum: { discountAmount: true },
     });
@@ -325,30 +486,10 @@ export const couponsService = {
         fix: 'Pick a coupon in the matching currency, or one without a currency restriction.',
       });
     }
-    if (coupon.maxRedemptions !== null) {
-      const total = await prisma.couponRedemption.count({ where: { couponId: coupon.id } });
-      if (total >= coupon.maxRedemptions) {
-        throw new RekeyError({
-          statusCode: 400,
-          code: 'COUPON_REDEMPTION_LIMIT_REACHED',
-          message: `Coupon "${input.code}" has reached its redemption limit.`,
-          fix: 'Use a different coupon — this one is fully consumed.',
-        });
-      }
-    }
-    if (coupon.maxRedemptionsPerUser !== null) {
-      const userCount = await prisma.couponRedemption.count({
-        where: { couponId: coupon.id, endUserId: input.endUserId },
-      });
-      if (userCount >= coupon.maxRedemptionsPerUser) {
-        throw new RekeyError({
-          statusCode: 400,
-          code: 'COUPON_USER_LIMIT_REACHED',
-          message: `You have already used coupon "${input.code}" the maximum number of times.`,
-          fix: 'Use a different coupon for this purchase.',
-        });
-      }
-    }
+    // Limits, counted the same way `reserveForCheckout` counts them — a
+    // pricing page that quotes a discount checkout is about to refuse is worse
+    // than no quote at all. See assertLimitsAllowOneMore.
+    await assertLimitsAllowOneMore(prisma, coupon, input.endUserId, input.code);
 
     const discount = computeDiscount(coupon, input.amount);
     return {
@@ -359,11 +500,113 @@ export const couponsService = {
   },
 
   /**
-   * Record the redemption of a coupon against ONE completed checkout session,
+   * Take a RESERVED slot on a coupon for a checkout that is about to be
+   * created, and return its id. Throws the same `RekeyError` codes `validate`
+   * does when the coupon has no slot left for this buyer.
+   *
+   * THIS is the authoritative limit check, not `validate`: it runs inside a
+   * transaction that holds the coupon row `FOR UPDATE`, so concurrent checkouts
+   * on the same coupon serialise here rather than all reading the same count.
+   *
+   * Called BEFORE the provider round-trip, and therefore before a session id
+   * exists — that ordering is the whole point. The provider mints the discount
+   * inside `createCheckoutSession`; a slot taken afterwards would be taken
+   * after the money was already discountable. `bindReservationToSession` fills
+   * the session in once the provider answers, and `releaseReservation` gives
+   * the slot straight back when it doesn't.
+   */
+  async reserveForCheckout(args: {
+    couponId: string;
+    applicationId: string;
+    endUserId: string;
+    /** Display form of the code, for the refusal messages. */
+    code: string;
+    /** Discount in the smallest currency unit, as resolved at checkout time. */
+    discountAmount: number;
+  }): Promise<{ reservationId: string; expiresAt: Date }> {
+    return prisma.$transaction(async (tx) => {
+      // Same pessimistic lock the settle path takes, so a reservation and a
+      // settlement on one coupon can never interleave between the count and
+      // the write.
+      await tx.$queryRaw`SELECT id FROM coupons WHERE id = ${args.couponId} FOR UPDATE`;
+      const coupon = await tx.coupon.findUniqueOrThrow({ where: { id: args.couponId } });
+
+      // Drop this coupon's aged-out reservations first, so the counts below
+      // are about live slots and the table does not accumulate rows that mean
+      // nothing. Safe to do here and nowhere else: every writer of a RESERVED
+      // row holds the same coupon lock.
+      await tx.couponRedemption.deleteMany({
+        where: { couponId: coupon.id, status: 'RESERVED', expiresAt: { lte: new Date() } },
+      });
+
+      await assertLimitsAllowOneMore(tx, coupon, args.endUserId, args.code);
+
+      const expiresAt = new Date(Date.now() + RESERVATION_TTL_MS);
+      const row = await tx.couponRedemption.create({
+        data: {
+          couponId: args.couponId,
+          applicationId: args.applicationId,
+          endUserId: args.endUserId,
+          // Filled by bindReservationToSession once the provider hands one
+          // back. NULLs are distinct in Postgres, so the unique
+          // (couponId, checkoutSessionId) index tolerates the gap.
+          checkoutSessionId: null,
+          discountAmount: args.discountAmount,
+          status: 'RESERVED',
+          expiresAt,
+        },
+        select: { id: true },
+      });
+      return { reservationId: row.id, expiresAt };
+    });
+  },
+
+  /**
+   * Point a reservation at the checkout session the provider just created.
+   * From here the row is findable by (coupon, session), which is how the
+   * webhook appliers settle it.
+   */
+  async bindReservationToSession(reservationId: string, checkoutSessionId: string): Promise<void> {
+    await prisma.couponRedemption.update({
+      where: { id: reservationId },
+      data: { checkoutSessionId },
+    });
+  },
+
+  /**
+   * Hand a reservation's slot back. Called when the checkout that took it never
+   * happened — the provider call threw, so no discount was ever minted and
+   * nothing should be holding a slot for the next 24 hours.
+   *
+   * Best-effort by construction: the caller is already unwinding a failure, and
+   * a reservation that survives is corrected by its own expiry rather than by
+   * turning one error into two.
+   */
+  async releaseReservation(reservationId: string): Promise<void> {
+    await prisma.couponRedemption.deleteMany({
+      where: { id: reservationId, status: 'RESERVED' },
+    });
+  },
+
+  /**
+   * Settle the redemption of a coupon against ONE completed checkout session,
    * with the limit re-check. The earlier `validate` call is an *advisory* gate
-   * (TOCTOU-vulnerable); this is the authoritative one. It runs in a
+   * (TOCTOU-vulnerable); the reservation is the binding one. This runs in a
    * transaction with a row-level lock on the coupon row so two concurrent
    * webhook handlers cannot both pass the count check.
+   *
+   * ## Confirming beats counting
+   *
+   * When the session has a RESERVED row, this only flips it to CONFIRMED — no
+   * limit check at all, deliberately. The slot was taken when the discount was
+   * minted; re-testing a ceiling that this very row is counted in would refuse
+   * the settlement of a purchase the buyer was entitled to make. That includes
+   * a reservation that has aged out: the money moved, and a redemption whose
+   * expiry raced the provider's webhook is still a redemption.
+   *
+   * The no-reservation path (a provider flow that never went through our
+   * checkout, a reservation swept between binding and settlement) keeps the
+   * historical behaviour — count CONFIRMED rows, and report rather than throw.
    *
    * ## Idempotent, by (coupon, checkout session)
    *
@@ -414,17 +657,35 @@ export const couponsService = {
 
         const coupon = await tx.coupon.findUniqueOrThrow({ where: { id: args.couponId } });
 
-        // Checked BEFORE the limits, and inside the lock: an already-recorded
+        // Checked BEFORE the limits, and inside the lock: an already-settled
         // session is a no-op even when the coupon is now exhausted, so a
-        // replayed webhook cannot be reported as a limit failure.
+        // replayed webhook cannot be reported as a limit failure. A RESERVED
+        // row is this sale's own slot — confirm it rather than count it.
         const existing = await tx.couponRedemption.findFirst({
           where: { couponId: coupon.id, checkoutSessionId: args.checkoutSessionId },
-          select: { id: true },
+          select: { id: true, status: true },
         });
-        if (existing) return { recorded: false, reason: 'already-redeemed' };
+        if (existing?.status === 'CONFIRMED') return { recorded: false, reason: 'already-redeemed' };
+        if (existing) {
+          await tx.couponRedemption.update({
+            where: { id: existing.id },
+            data: {
+              status: 'CONFIRMED',
+              // A settled redemption never expires — clearing this is what
+              // takes the row out of the "aged out, sweep me" population.
+              expiresAt: null,
+              ...(args.subscriptionId !== undefined && { subscriptionId: args.subscriptionId }),
+              ...(args.paymentId !== undefined && { paymentId: args.paymentId }),
+              ...(args.discountAmount !== undefined && { discountAmount: args.discountAmount }),
+            },
+          });
+          return { recorded: true };
+        }
 
         if (coupon.maxRedemptions !== null) {
-          const total = await tx.couponRedemption.count({ where: { couponId: coupon.id } });
+          const total = await tx.couponRedemption.count({
+            where: { couponId: coupon.id, status: 'CONFIRMED' },
+          });
           if (total >= coupon.maxRedemptions) {
             return {
               recorded: false,
@@ -436,7 +697,7 @@ export const couponsService = {
         }
         if (coupon.maxRedemptionsPerUser !== null) {
           const userCount = await tx.couponRedemption.count({
-            where: { couponId: coupon.id, endUserId: args.endUserId },
+            where: { couponId: coupon.id, endUserId: args.endUserId, status: 'CONFIRMED' },
           });
           if (userCount >= coupon.maxRedemptionsPerUser) {
             return {
@@ -457,6 +718,9 @@ export const couponsService = {
             subscriptionId: args.subscriptionId ?? null,
             paymentId: args.paymentId ?? null,
             discountAmount: args.discountAmount ?? null,
+            // Settled on arrival — this path exists precisely for the sales
+            // that reached us with no reservation to confirm.
+            status: 'CONFIRMED',
           },
         });
         return { recorded: true };

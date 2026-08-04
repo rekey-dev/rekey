@@ -58,7 +58,7 @@ describe('Audit — credential + auth-config mutations write SecurityEvents', ()
         url: '/api/v1/tenant/security-events',
         headers: { authorization: `Bearer ${b.tenantAccess}` },
       });
-      rows = (log.json().data as { events: typeof rows }).events;
+      rows = (log.json().data as { items: typeof rows }).items;
       if (rows.length > 0 || Date.now() > deadline) return rows;
       await new Promise((r) => setTimeout(r, 25));
     }

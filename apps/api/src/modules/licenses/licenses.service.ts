@@ -92,6 +92,11 @@ export const licensesService = {
     return rows.map(redactLicense);
   },
 
+  /** Total licenses on this Application, ignoring take/skip. */
+  async countForApplication(applicationId: string): Promise<number> {
+    return prisma.license.count({ where: { applicationId } });
+  },
+
   /** Licenses pooled to an org (beneficiary). Seats are shared by the team. */
   async listForOrganization(applicationId: string, organizationId: string): Promise<PublicLicense[]> {
     const rows = await prisma.license.findMany({

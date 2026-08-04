@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
+import { api, PanelApiError, getApplication } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { Modal } from '@/components/Modal';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -9,11 +9,13 @@ import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
 import { CopyButton } from '@/components/CopyButton';
 import { Pager, readPageSize } from '@/components/Pager';
+import type { Page } from '@/lib/paginate';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
+import { cookieSecure } from '@/lib/cookie-secure';
 
 const LICENSE_STATUS: Record<LicenseRow['status'], { tone: BadgeTone; label: string }> = {
   ACTIVE: { tone: 'success', label: 'active' },
@@ -85,7 +87,7 @@ async function issueLicense(applicationId: string, formData: FormData): Promise<
     jar.set('rekey_reveal_license', result.rawKey, {
       httpOnly: true,
       sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
+      secure: await cookieSecure(),
       path: `/applications/${applicationId}/licenses`,
       maxAge: 120,
     });
@@ -130,10 +132,7 @@ export default async function LicensesPage({
   const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
 
   // Billing master switch off → point at the switch instead of an empty table.
-  const app = await api<ApplicationRow>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-  });
+  const app = await getApplication(id);
   if (!app.billingConfig.enabled) {
     return (
       <div className="space-y-5">
@@ -146,10 +145,13 @@ export default async function LicensesPage({
     );
   }
 
-  const [licenses, endUsers] = await Promise.all([
-    api<LicenseRow[]>({ method: 'GET', path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/licenses?limit=${PAGE_SIZE}&offset=${offset}` }),
-    api<EndUserRow[]>({ method: 'GET', path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users?limit=100` }),
+  const [licensePage, endUserPage] = await Promise.all([
+    api<Page<LicenseRow>>({ method: 'GET', path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/licenses?limit=${PAGE_SIZE}&offset=${offset}` }),
+    // End-user picker for the issue-license modal — one window, never paged.
+    api<Page<EndUserRow>>({ method: 'GET', path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users?limit=100` }),
   ]);
+  const { items: licenses, page } = licensePage;
+  const endUsers = endUserPage.items;
 
   return (
     <div className="space-y-5">
@@ -310,7 +312,13 @@ export default async function LicensesPage({
         </Table>
       )}
 
-      <Pager basePath={`/applications/${id}/licenses`} offset={offset} pageSize={PAGE_SIZE} count={licenses.length} />
+      <Pager
+        basePath={`/applications/${id}/licenses`}
+        offset={offset}
+        pageSize={PAGE_SIZE}
+        count={licenses.length}
+        hasMore={page.hasMore}
+      />
     </div>
   );
 }

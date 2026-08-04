@@ -2,14 +2,9 @@ import * as React from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import {
-  publicPost,
-  publicGet,
-  setSessionCookies,
-  PanelApiError,
-  type AuthResponse,
-} from '@/lib/api';
+import { publicPost, publicGet, setSessionCookies, PanelApiError, type AuthResponse } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
+import { normalizeErrorCode } from '@/lib/error-code';
 import { AuthCard } from '@/components/AuthCard';
 import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
@@ -66,7 +61,8 @@ async function signUp(formData: FormData): Promise<void> {
     await setSessionCookies({ accessToken: auth.accessToken, refreshToken: auth.refreshToken });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/sign-up?error=${encodeURIComponent(err.code)}${keep}`);
+      const code = normalizeErrorCode(err.code, ERROR_MESSAGES);
+      redirect(`/sign-up?error=${encodeURIComponent(code)}${keep}`);
     }
     throw err;
   }
@@ -85,6 +81,15 @@ const ERROR_MESSAGES: Record<string, string> = {
   OPERATOR_INVITE_USED: 'That invite key has already been used. Ask for a fresh one.',
   OPERATOR_INVITE_EXPIRED: 'That invite key has expired. Ask for a fresh one.',
   INTERNAL_ERROR: 'Something went wrong creating your workspace. Please try again.',
+  BAD_REQUEST:
+    'Check the details above — the workspace name, email, or password was rejected. Passwords need at least 8 characters.',
+  VALIDATION_ERROR:
+    'Check the details above — the workspace name, email, or password was rejected. Passwords need at least 8 characters.',
+  // Catch-all the server action maps unrecognised API codes to, so a failure
+  // never renders as a blank form. `?error=` is in the URL, so a value that
+  // isn't in this map still renders nothing — a hand-crafted link can't paint
+  // a fake error on a healthy form.
+  unknown: 'Could not create your workspace. Please try again.',
 };
 
 const INPUT_BASE =

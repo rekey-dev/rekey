@@ -160,6 +160,35 @@ export const env = createEnv({
       .optional()
       .transform((v) => v !== 'false'),
 
+    // RFC 7591 dynamic client registration on the OPERATOR MCP authorization
+    // server (POST /api/v1/tenant/mcp/oauth/register).
+    //
+    //   - 'open' (default): anyone may register a public client. This is what
+    //     lets Claude Desktop / Claude Code / Cursor connect by discovery
+    //     alone, which is the flow docs/mcp.md and the panel's connection
+    //     guide document, so it stays the default.
+    //   - 'disabled': the endpoint answers 403 CLIENT_REGISTRATION_DISABLED
+    //     and `registration_endpoint` disappears from the RFC 8414 metadata.
+    //     Clients holding a client_id already are unaffected.
+    //
+    // Worth knowing before you leave it open. Registration itself hands out no
+    // data and no token — the authorization code is only minted after an
+    // operator signs into the panel and approves. What it DOES hand out is an
+    // allowlisted redirect_uri of the registrant's choosing, and /oauth/authorize
+    // refuses any redirect_uri its client did not register. That allowlist entry
+    // is the missing ingredient in a consent-phishing link: register
+    // `https://evil.example/cb` under a plausible client_name, send an operator
+    // an authorize URL on their OWN deployment, and one Allow click delivers a
+    // workspace-admin grant to the attacker. The consent screen now names the
+    // destination host for exactly this reason; closing registration once your
+    // clients are connected removes the ingredient entirely.
+    //
+    // The per-Application MCP twin has had the same switch since it was written
+    // (`authConfig.dynamicClientRegistration`); this is the operator analogue,
+    // deployment-wide because the operator AS has no Application to hang it on.
+    // Boot-validated so a typo crashes rather than silently reopening.
+    OPERATOR_MCP_DYNAMIC_REGISTRATION: z.enum(['open', 'disabled']).default('open'),
+
     // Deploy-time control of OPERATOR (TenantUser) registration. Gates every
     // path that would CREATE a new operator + workspace (password sign-up and
     // OAuth-first-login). Existing operators always sign in regardless.
@@ -242,6 +271,29 @@ export const env = createEnv({
     // provider console). Falls back to the first CORS_ALLOWED_ORIGINS entry
     // (preferring a `panel.` host) when unset.
     PANEL_OAUTH_REDIRECT_BASE: z.string().optional(),
+
+    // Operator sign-in by OIDC ID Token assertion
+    // (POST /api/v1/tenant/auth/oidc/assert).
+    //
+    // Lets an operator session be established from an ID Token this deployment
+    // ITSELF issued, for one of its own Applications acting as an OpenID
+    // Provider. That is how Rekey Cloud signs a buyer into the panel with the
+    // account they already have on the marketing site: one identity, no invite
+    // key, no second password.
+    //
+    // Both must be set or the endpoint 404s — a deployment that has not opted
+    // in has no assertion surface at all. The pair is the entire trust
+    // statement: `ISSUER` names the Application whose ID Tokens are believed
+    // (its `sub`/`email` become an operator identity), and `CLIENT_ID` is the
+    // audience they must carry, so a token minted for any OTHER client of the
+    // same Application is refused rather than replayed into an operator login.
+    //
+    // Deliberately limited to issuers this deployment hosts: the token is
+    // verified against the local JWKS, not fetched from a remote well-known.
+    // A third-party operator IdP is a different feature with a different threat
+    // model (see docs/operator-oidc-assertion.md).
+    OPERATOR_OIDC_ISSUER: z.string().optional(),
+    OPERATOR_OIDC_CLIENT_ID: z.string().optional(),
 
     // Comma-separated list of origins allowed to call the API with credentials.
     // Reflective CORS (`origin: true`) is unsafe when combined with cookies —
@@ -328,6 +380,49 @@ if (
     '[SECURITY] REKEY_DEV_ECHO_AUTH_TOKENS=true is not allowed in production — refusing to boot. ' +
       'It returns raw password-reset and magic-link tokens in API responses. Unset it and configure email transport.',
   );
+}
+
+/**
+ * Warn — loudly, once, at boot — when a production deployment is running with
+ * self-serve operator registration open.
+ *
+ * `OPERATOR_SIGNUP_MODE=open` means anyone who can reach this API can create an
+ * operator account and a workspace on it. That is correct and necessary on
+ * first boot: somebody has to make the first account, and every documented
+ * first-boot path is self-serve sign-up in the panel. It stops being correct
+ * the moment the deployment is reachable by anyone who isn't you, and nothing
+ * in the product said so — `docker-compose.yml` shipped `open` alongside an
+ * API published on 0.0.0.0, and the combination is "the first stranger to
+ * portscan the host owns a workspace here".
+ *
+ * The port binding is fixed in compose (loopback by default now). This warning
+ * covers every OTHER way to deploy — Kubernetes, systemd, a hand-rolled
+ * compose, a PaaS — where we cannot see the network at all.
+ *
+ * A warning and not a refusal, deliberately: an operator running an invite-only
+ * private deployment behind a VPN may legitimately want `open`, and a product
+ * that will not boot in a valid configuration teaches people to ignore it. This
+ * is the one case where the right answer genuinely depends on a network we
+ * cannot observe.
+ */
+export function openSignupWarning(
+  nodeEnv: string | undefined,
+  mode: string | undefined,
+): string | null {
+  if (nodeEnv !== 'production' || mode !== 'open') return null;
+  return (
+    '[SECURITY] OPERATOR_SIGNUP_MODE=open in production: anyone who can reach this API ' +
+    'can create an operator account and a workspace on it. That is intended for first ' +
+    'boot only. Once your own account exists, set OPERATOR_SIGNUP_MODE=invite (super-admin ' +
+    'mints keys at POST /api/v1/admin/operator-invites) or =closed. If this deployment is ' +
+    'not reachable from the internet, you can ignore this.'
+  );
+}
+
+{
+  const warning = openSignupWarning(env.NODE_ENV, env.OPERATOR_SIGNUP_MODE);
+  // eslint-disable-next-line no-console
+  if (warning) console.warn(warning);
 }
 
 export type Env = typeof env;

@@ -14,7 +14,7 @@ import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import { api, PanelApiError, type MeDto, type OperatorSessionRow } from '@/lib/api';
+import { api, PanelApiError, type OperatorSessionRow, getMe } from '@/lib/api';
 import { describeUserAgent } from '@/lib/format';
 import { QrCode } from '@/components/QrCode';
 import { CopyButton } from '@/components/CopyButton';
@@ -27,6 +27,8 @@ import { PageHeader } from '@/components/PageHeader';
 import { Card, SectionHeader } from '@/components/Card';
 import { Badge } from '@/components/Badge';
 import { Banner } from '@/components/Banner';
+import { cookieSecure } from '@/lib/cookie-secure';
+import type { Page } from '@/lib/paginate';
 
 const inputCls =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
@@ -67,7 +69,7 @@ async function setupMfa(): Promise<void> {
   jar.set(MFA_SETUP_COOKIE, JSON.stringify(result), {
     httpOnly: true,
     sameSite: 'strict',
-    secure: process.env.NODE_ENV === 'production',
+    secure: await cookieSecure(),
     path: '/account/security',
     maxAge: MFA_SETUP_COOKIE_MAX_AGE,
   });
@@ -178,13 +180,13 @@ export default async function SecurityPage({
     method: 'GET',
     path: '/api/v1/tenant/auth/mfa/status',
   });
-  const sessions = await api<OperatorSessionRow[]>({
+  const { items: sessions } = await api<Page<OperatorSessionRow>>({
     method: 'GET',
     path: '/api/v1/tenant/auth/sessions',
   });
   // Operator email for the change-password form's hidden username field —
   // best-effort: the form works without it.
-  const operatorEmail = await api<MeDto>({ method: 'GET', path: '/api/v1/tenant/auth/me' })
+  const operatorEmail = await getMe()
     .then((me) => me.user.email)
     .catch(() => null);
   const sessionRevoked = sp.session_revoked === '1';

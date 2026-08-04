@@ -191,8 +191,24 @@ export class RealRazorpayProvider implements BillingProvider {
   async cancelSubscription(input: CancelSubscriptionInput): Promise<void> {
     const providerSubId = input.subscription.providerSubId;
     if (!providerSubId) return;
+    // The second argument is razorpay-node's `cancelAtCycleEnd`, which it
+    // turns into `cancel_at_cycle_end: 1` when truthy
+    // (razorpay@2.9.6 dist/resources/subscriptions.js). It means the same
+    // thing as our `atPeriodEnd`, so it takes the same value.
+    //
+    // It used to be NEGATED, and the two arguments cancel out to read almost
+    // plausibly, which is how it survived: "cancel at period end" sent
+    // `cancel_at_cycle_end: 0` and Razorpay terminated the subscription on the
+    // spot, mid-period, while Rekey's own row stayed ACTIVE with a `cancelAt`
+    // in the future — the buyer lost the time they had paid for and the portal
+    // told them they still had it. "Cancel immediately" did the reverse and
+    // left them billed for another cycle. This is the same defect PR #336
+    // fixed on the provider-less path, one provider over, and no test could
+    // see it: the suite's fake provider records the call and never asks
+    // Razorpay what it meant.
+    const cancelAtCycleEnd = input.atPeriodEnd !== false;
     await this.withTimeout(
-      this.client.subscriptions.cancel(providerSubId, !input.atPeriodEnd /* cancel_at_cycle_end */),
+      this.client.subscriptions.cancel(providerSubId, cancelAtCycleEnd),
       'subscriptions.cancel',
     );
   }

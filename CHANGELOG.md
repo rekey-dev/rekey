@@ -4,8 +4,1477 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
-## 2.0.0-rc.3
+## 2.0.0-rc.4
 
+### Record a sale that no payment provider saw
+
+`POST /api/v1/admin/applications/:id/subscriptions`
+
+Until now the only way a subscription could become `ACTIVE` was a webhook from
+Stripe, PayPal or Razorpay. If you sell by invoice, take a bank transfer, comp
+an account, or are migrating off another billing system, there was no supported
+way to record that at all — the closest thing to a documented procedure was
+writing SQL against your production database.
+
+A row written that way is inert. It skips the entitlement provisioner, so the
+credits and licences the plan promises are never issued, and it emits nothing,
+so every webhook consumer you have built on `subscription.activated` hears
+nothing. Granting through this endpoint takes the same path a real activation
+takes, so both happen:
+
+```bash
+curl -X POST https://api.example.com/api/v1/admin/applications/$APP_ID/subscriptions \
+  -H "Authorization: Bearer $SUPER_ADMIN_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"planSlug":"pro","email":"buyer@example.com","note":"invoice INV-2026-0031"}'
+```
+
+- **Idempotent.** A subscriber already `ACTIVE` or `PAST_DUE` on the plan comes
+  back with `activated: false` and a `200` instead of a `201`; nothing is
+  written, re-provisioned or re-announced. It will not extend a live period — to
+  move a grant to a new term, cancel it and grant again.
+- **The period is real.** Defaults to one plan interval from now, on calendar
+  anniversaries; pass `currentPeriodEnd` for whatever term you agreed. A one-off
+  purchase (credit pack, perpetual licence) gets none, because it has none.
+- **Cancel already works on it.** A granted subscription carries no provider,
+  which is exactly what lets the existing cancel path schedule it to end at
+  period end and the local expiry terminate it when the date arrives.
+- **Audited.** Every grant writes `app.subscription_granted` to the security
+  event trail — who, for whom, on what plan, until when, and why — visible to
+  the workspace that owns the Application.
+
+Deliberately behind `SUPER_ADMIN_KEY` rather than a workspace role: it is the
+only billing write that creates entitlement with nothing behind it but an
+assertion, and on a deployment where the operator is also the buyer that is a
+lever aimed at your own limits. See `decisions.md`, 2026-08-03.
+
+**Rekey Cloud**: this is the missing half of "your workspace exists as soon as
+you have paid" below. Cloud sells with checkout off, so no activation was ever
+emitted and the provisioning that shipped for it fired for nobody. It does now.
+
+### Cancelling a PayPal subscription now does what the screen says
+
+If you pay through PayPal, cancelling was not doing what you were told it would.
+
+**You keep the time you paid for.** Asking to cancel at the end of the period
+said "you keep everything you paid for until <date>" and then took it away
+within seconds — mid-period, with no refund. PayPal has only one kind of
+cancellation and it takes effect immediately, so that promise had nothing behind
+it. Your access now runs to the date you were shown, and the last charge is the
+last one: nothing is billed after you cancel.
+
+**The first month counts too.** For a brand-new PayPal subscription there was no
+renewal date on file, so every cancellation in the first period was treated as
+immediate whatever you chose — the most common case, and the one the promise was
+least true for. The renewal date is now recorded when the subscription starts.
+
+**Subscribing again gives you a working Cancel button.** If you cancelled and
+later resubscribed, the new subscription inherited the old cancellation: your
+account page showed "Cancelling — ends" with a date that had already passed, the
+Cancel button was replaced by Resubscribe, and cancelling through the API
+reported success without doing anything — while the payments carried on. A
+resubscribe now starts clean, and you can always cancel again.
+
+**A failed cancellation is reported as one.** If PayPal refuses a cancellation,
+you now get an error and can try again. Previously it was recorded on our side
+as cancelled while PayPal kept billing, so nothing on the screen or in the
+account page showed that anything was still running.
+
+The customer-facing portal also stops promising a period end it cannot deliver:
+when a cancellation really will take effect immediately, it now says so before
+you confirm, instead of after.
+
+### rekey.dev can confirm your email address
+
+There is now a page at `rekey.dev/verify` that redeems the link in your
+confirmation email. Until now the email was sent, the link 404'd, and an account
+that needed confirming could not be confirmed — so a sign-up that asked you to
+check your inbox was a dead end.
+
+It answers every state honestly, because most of them are recoverable and the
+old behaviour was to say nothing:
+
+- **Confirmed** — you are done, and it names the address it confirmed.
+- **Already confirmed** — the link was used once already, which is *fine*: the
+  address is confirmed. This is a success message, not an error. Corporate mail
+  scanners follow links before you do, and you should not be told your account
+  is broken because your employer's security software clicked first.
+- **Expired** — links last 24 hours; ask for another from the same page.
+- **This link is for an older address** — you changed your email after the link
+  was sent.
+- **Not valid** — mangled link, or the account is gone.
+- **No code** — you reached the page without a link.
+
+Every one of those except "we could not reach the server" offers a way forward
+on the page itself, so nothing sends you to support to make progress.
+
+### Sign-up and sign-in stopped lying about unconfirmed accounts
+
+Signing up for Rekey Cloud with confirmation required used to answer
+**"Could not create your account. Please try again."** The account *had* been
+created. Pressing the button again then said the email was already taken, which
+reads as "somebody else has your address". It now says your account exists and
+points you at your inbox.
+
+Signing in with a correct password on an unconfirmed address used to give a
+generic failure, which sent people round the reset-password loop fixing a
+password that was never wrong. It now tells you to confirm your address, with a
+link to ask for another confirmation email.
+
+### "Forgot password?" exists
+
+rekey.dev's sign-in page had no password-reset link at all. It has one now, and
+`rekey.dev/reset` — where the reset email points — is a real page.
+
+### Sign in to Rekey Cloud with Google or Discord
+
+rekey.dev now offers social sign-in. Both providers assert a confirmed email
+address, so signing in this way normally skips confirmation entirely.
+
+Rekey has supported these providers for your own applications for some time;
+this is Rekey Cloud finally using them for its own. Operators wanting the same
+on their own sites configure it per Application under
+Panel → Application → OAuth — unchanged.
+
+### Sign operators in with an account they already have
+
+An Application that is an OpenID Provider can now be the login for the operator
+panel itself. Set two variables and the panel accepts an ID Token your own
+deployment minted:
+
+```bash
+OPERATOR_OIDC_ISSUER=https://api.example.com/api/v1/mcp/account
+OPERATOR_OIDC_CLIENT_ID=<client_id from POST /oauth/register>
+```
+
+Someone signing in this way is matched to an existing operator **by verified
+email**, so anyone who already has an operator account keeps it — same
+workspaces, same MFA, same passkeys. Nothing is duplicated and nothing is
+orphaned. A first-time sign-in creates an operator subject to
+`OPERATOR_SIGNUP_MODE` exactly like any other, so this is not a way around an
+invite-only deployment.
+
+Off unless you set both variables — `POST /api/v1/tenant/auth/oidc/assert`
+answers `404` otherwise. Limited to issuers your own deployment hosts; a
+third-party IdP is not supported yet. See `docs/operator-oidc-assertion.md`.
+
+### Your own server can finish a sign-in it already did
+
+`POST /api/v1/mcp/:slug/oauth/authorize/grant`
+
+The interactive `/oauth/authorize` asks the user for a password, because there
+is no SSO session to reuse. That is correct for someone else's app and wrong for
+**your** server, which already holds a live session for the user it is asking
+about — it was re-prompting for a password it had just accepted.
+
+Present your Application secret key together with the user's live access token
+and you get an authorization code for one of your own registered clients,
+redeemable at `/oauth/token` like any other:
+
+```
+POST /api/v1/mcp/account/oauth/authorize/grant
+Authorization: Bearer rp_live_...
+X-Rekey-User-Token: <the user's live access token>
+
+{ "client_id": "...", "redirect_uri": "...",
+  "code_challenge": "...", "code_challenge_method": "S256",
+  "scope": "openid email" }
+-> { "code": "...", "expires_in": 60 }
+```
+
+This grants nothing a secret key could not already do — and because it demands
+a live user token, it cannot be used on someone who has not signed in. A
+publishable key is refused, an impersonated session is refused, the code is
+single-use and PKCE-bound like any other, and every use is recorded in your
+security events as `user.session_handoff_granted` naming the user and the
+client.
+
+### BREAKING · Every list endpoint now returns `{items, page}` instead of a bare array
+
+A functional audit called `GET /api/v1/tenant/applications/:id/end-users` with
+no `limit`. There were 36 end-users in the database. It answered `200` with 25
+rows, and **nothing in the response said the other 11 existed**:
+
+```
+GET /api/v1/tenant/applications/{id}/end-users     (no limit passed)
+-> 200 [ ...25 rows... ]              actual rows in the database: 36
+```
+
+A client that does not pass `limit` could not tell a complete list from a
+truncated one. Twenty-six list endpoints had that shape. A schema audit then
+validated 86 operations against the published document and found the same thing
+from the other side: the document declared `{items, page}` for those operations
+and the handlers returned an array.
+
+**Before**
+
+```json
+{
+  "success": true,
+  "data": [
+    { "id": "eu_1", "email": "a@example.com" },
+    { "id": "eu_2", "email": "b@example.com" }
+  ]
+}
+```
+
+**After**
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      { "id": "eu_1", "email": "a@example.com" },
+      { "id": "eu_2", "email": "b@example.com" }
+    ],
+    "page": { "total": 36, "limit": 25, "offset": 0, "hasMore": true }
+  }
+}
+```
+
+`page.total` is the count of rows matching the query, ignoring `limit`/`offset`.
+`page.hasMore` is `offset + limit < total`. Both come from `pageMeta()` in
+`apps/api/src/lib/pagination.ts`, which every one of these endpoints now uses.
+
+**46 operations changed** — the 44 the document already declared `okPage` for,
+plus the two request-log endpoints (below):
+
+- **Public / end-user:** `GET /auth/passkeys`, `GET /auth/sessions`,
+  `GET /users/me/organizations`, `GET /users/me/organizations/{id}/members`,
+  `GET /billing/plans`, `GET /billing/payments`, `GET /credits/ledger`.
+- **Operator (tenant):** `GET /tenant/applications` and its
+  `/{id}/plans`, `/{id}/coupons`, `/{id}/payments`, `/{id}/dunning`,
+  `/{id}/end-users`, `/{id}/licenses`, `/{id}/usage-meters`,
+  `/{id}/organizations`, `/{id}/email-logs`, `/{id}/webhooks`,
+  `/{id}/webhooks/{endpointId}/deliveries`,
+  `/{id}/billing-credentials/webhook-events`;
+  `GET /tenant/auth/sessions`, `GET /tenant/auth/api-tokens`,
+  `GET /tenant/workspace/members`, `.../members/{id}/grants`,
+  `.../invitations`, `.../email-logs`, `GET /tenant/security-events`,
+  `GET /tenant/operator/applications`,
+  `GET /tenant/operator/applications/{id}/api-keys`.
+- **Super-admin:** `GET /admin/tenants`, `GET /admin/applications`,
+  `GET /admin/applications/{id}/plans`, `.../coupons`,
+  `GET /admin/operator-invites`, and the ten `GET /admin/metrics/*` list
+  endpoints.
+
+Three of those were wrong in their own particular way and are also fixed:
+
+- `GET /tenant/security-events` returned `{ "events": [...] }` — a key that
+  appeared in no schema anywhere.
+- `GET /admin/operator-invites` and all ten `GET /admin/metrics/*` endpoints
+  returned pagination **flattened** next to the rows
+  (`{items, total, limit, offset}`), one level up from where the document
+  declared it, and with no `hasMore` at all.
+
+Two more moved for the same reason even though the document already described
+them accurately: `GET /tenant/auth/requests` and
+`GET /tenant/applications/{id}/requests` wrapped their rows as
+`{ "requests": [...] }` with no total. Both are backed by `api_request_logs`,
+which grows with every request the deployment serves, and the panel had to keep
+an over-fetch probe alive purely for them. Their `page.total` counts what the
+pruner has left rather than every request ever made — these are capped
+convenience tails, and the endpoint descriptions say so — but it is still the
+real answer to "is there another page".
+
+**Nine list endpoints are deliberately unchanged** — they remain bare arrays
+because they are bounded by construction and cannot truncate: a user's linked
+OAuth identities, an Application's API keys (hard-capped at 25 on the write
+path, on both the tenant and admin routes), a plan's entitlement bundle, the
+three configured billing-credential slots, per-Application end-user roles, the
+fixed email-template registry, and the two `.slice(0, 20)` top-N metrics
+(`webhook-endpoint-health`, `payments-by-app`). They are enumerated with their
+reasons in `ALLOWED_BARE_ARRAYS` in `apps/api/test/openapi-contract.test.ts`.
+
+**Migrating.** Read `.items` where you read the array, and `page.hasMore` where
+you inferred "is there a next page" from `rows.length === pageSize`:
+
+```ts
+// before
+const plans = await rekey.billing.getPlans();
+plans.map(render);
+
+// after
+const { items, page } = await rekey.billing.getPlans();
+items.map(render);
+if (page.hasMore) { /* fetch offset: page.offset + page.limit */ }
+```
+
+Every consumer in this repo moved with it: the operator panel (its
+`splitPage()` over-fetch shim is gone — it existed only because there was no
+`total` to read), the super-admin console, the hosted portal, the marketing
+account page, `@rekey.dev/node`, `@rekey.dev/react`, `@rekey.dev/cli`
+(`apps list` and `plans list` gained `--limit` / `--offset` and now report
+"showing N of M"), and `@rekey.dev/mcp` (every list tool gained `limit`/`offset`
+and its description tells the model to check `page.hasMore`).
+
+Several endpoints that had no bound at all are now bounded as a side effect —
+`GET /tenant/operator/applications`, `GET /tenant/workspace/members`,
+`.../invitations`, `GET /tenant/auth/sessions`, `GET /auth/sessions`,
+`GET /auth/passkeys` and `GET /tenant/auth/api-tokens` all ran an unbounded
+`findMany`. They take `limit`/`offset` now, defaulting to 50.
+
+`PageMeta`, `Paged<T>` and `ListPage` are exported from
+`@rekey.dev/shared-types` (and re-exported from `@rekey.dev/node` and
+`@rekey.dev/react`) so the API, the SDKs and the consoles name one shape.
+
+### BREAKING · Application responses no longer carry the encrypted-credential columns
+
+`GET /api/v1/tenant/applications/:id` (and the list, create and super-admin
+equivalents) returned the Prisma row verbatim, which includes
+`billingCredentialsCiphertext`, `oauthCredentialsCiphertext` and
+`emailCredentialsCiphertext` — the AES-256-GCM ciphertexts of the operator's
+payment-provider keys, their per-provider OAuth client secrets, and their SMTP
+or Resend credentials. Measured, not inferred: the Application detail response
+carried 15 fields the `Application` schema does not declare, and three of them
+were those.
+
+They are useless to a client (only the API holds the key) and they are the one
+thing on that row that must never leave the process, so they are stripped at
+the response boundary. The dedicated read surfaces
+(`GET .../billing-credentials`, `GET .../email/config`) already reported
+presence as a boolean and never the material; nothing in this repo read the
+ciphertexts off a response.
+
+### Rekey Cloud: your workspace exists as soon as you have paid
+
+Paying is now what creates your workspace. Previously the workspace was made
+when you pressed **Open your workspace** on the account page — so between
+paying and finding that button you owned nothing, and if you closed the tab
+there was nothing waiting for you when you came back.
+
+Now the subscription going active creates your operator account, your workspace
+and your ownership of it, and writes the ceiling your plan pays for. When you
+next sign in to rekey.dev, it is already there. The button still works and still
+does the right thing if you press it — pressing it twice, or pressing it after
+this has already run, will never give you a second workspace.
+
+**One condition: your email address has to be verified.** Your workspace is tied
+to your rekey.dev account by your verified email — that is what lets you sign in
+to panel.rekey.dev in one click, with no key to copy. If your address is not
+verified yet, we will not create an account under it, because doing so would
+mean handing your workspace to whoever verifies that address afterwards. Verify
+your email and the workspace is created within the minute; nothing is lost in
+the meantime and your plan's ceiling is applied the moment it appears.
+
+### Fixed (Rekey Cloud): a workspace key you had not redeemed did not count against your plan
+
+Your plan covers a set number of workspaces. Until now the account page only
+counted the workspaces that had actually been created — so a key you had been
+issued and not yet redeemed counted for nothing, and you could keep pressing
+**Generate a new key** and collect as many live keys as you liked. Every one of
+them still turns into a real workspace when somebody signs up with it, which
+meant a one-workspace plan could quietly become any number of workspaces.
+
+Keys you are holding now count towards your allowance, exactly like the
+workspaces you have already made. Concretely, if your plan covers one workspace:
+
+- You have no workspace and no key → **Generate a new key** issues one.
+- You are holding that key and have not redeemed it → the account page says so,
+  and points you at panel.rekey.dev/sign-up to redeem it.
+- You lost the key (it is only ever shown once) → **Replace key** revokes the
+  old one and issues you a fresh one. Anyone still holding the old key can no
+  longer use it. Your allowance does not change, and you are never left with two
+  working keys at the same time.
+- You have redeemed it and the workspace exists → the page tells you the
+  allowance is used up and how to ask for more, as it did before.
+
+Nothing you are holding today stopped working when this shipped. Keys already
+outstanding stay valid and redeemable; they simply start counting from now on,
+so the next key you ask for is the first one this rule applies to.
+
+### Fixed (Rekey Cloud): cancelling made your subscription disappear from the account page
+
+Cancelling takes effect at the end of the period you have already paid for — you
+keep everything until then. The account page did not say so. The moment you
+cancelled, the subscription card was replaced by "You are on the free plan",
+dropping your plan name, the status, and the date your access actually runs to,
+with no way back except emailing us.
+
+The account page now shows what is really true:
+
+- **Cancelling.** Your plan, `Cancelling`, and **Ends** with the date. Plus a
+  sentence saying you keep everything you paid for until then and that nothing
+  is deleted afterwards — your applications keep serving, you just cannot add
+  more — and a **Resubscribe** button if you change your mind.
+- **Ended.** The date it ended, what the free plan gives you, and the same
+  **Resubscribe** button.
+
+The confirmation step is also more careful. Cancelling normally schedules the
+end of your subscription for the date you are paid up to, but that is only
+possible for a subscription your payment provider is managing. For anything else
+— including a subscription we set up for you by hand — cancelling ends it
+immediately with no refund for the rest of the period. The confirmation now says
+which of the two you are about to get, in those words, before you confirm.
+
+### Fixed (Rekey Cloud): the cancel confirmation warned you about a loss that no longer happens
+
+Hours after the paragraph above was written, the API stopped requiring a payment
+provider to schedule a cancellation — precisely because subscriptions we set up
+by hand were being ended on the spot when their owner asked for the end of the
+period. Every Rekey Cloud subscription is one of those. The confirmation dialog
+was not updated, so it went on telling every subscriber on the site that
+cancelling would cost them the remainder of a period they would in fact have
+kept. The same defect as the original, pointed the other way: copy frightening
+people out of a cancellation that was perfectly safe.
+
+The dialog now says what actually happens:
+
+- **An active subscription with a renewal date** — the ordinary case, whether or
+  not a payment provider is involved — keeps everything you paid for until that
+  date. Confirming reads **Yes, cancel at period end**.
+- **A subscription whose last payment has not gone through**, or one with no
+  renewal date recorded, still ends straight away, and each now says which of
+  the two it is instead of "this cannot be scheduled". If you think you have
+  paid for time you have not used, get in touch and we will sort it out.
+
+The rule behind this is no longer written down twice. It lives in
+`@rekey.dev/shared-types` as `cancelsAtPeriodEnd`, exported from
+`@rekey.dev/node`, and the API cancels from that same function — so what a
+confirmation dialog promises and what the server does cannot drift apart again.
+If you have built your own cancel confirmation, call it rather than
+re-implementing the rule:
+
+```ts
+import { cancelsAtPeriodEnd } from '@rekey.dev/node';
+
+const sub = await rekey.billing.getSubscription(userAccessToken);
+const message = sub && cancelsAtPeriodEnd(sub)
+  ? `You keep access until ${sub.currentPeriodEnd}.`
+  : 'Cancelling takes effect straight away.';
+```
+
+### Added: `GET /billing/subscription?includeEnded=true` — a cancelled subscription stops vanishing
+
+`GET /api/v1/billing/subscription` answers with the ACTIVE, PAST_DUE or PENDING
+subscription and `null` otherwise. `null` is also the answer for somebody who
+has never subscribed, so once a subscription reached CANCELED there was no way
+for a billing page to tell a former customer apart from a stranger. It said the
+only thing it could: "you are on the free plan". Cancel, reload the next day,
+and your plan, your status and your end date were gone.
+
+Pass `?includeEnded=true` and the endpoint falls back to your most recent
+CANCELED or EXPIRED subscription **when, and only when, the answer would
+otherwise have been null**. It cannot replace a live subscription: someone who
+cancelled and resubscribed still gets the one they are paying for, and an
+unfinished checkout still comes back as PENDING. So it is safe to add to a call
+you already make — though leave it off where you are deciding access, because
+there the strict question is the one you want.
+
+```ts
+// Billing page — "your Standard subscription ended on 1 July", not a blank slate
+const sub = await rekey.billing.getSubscription(token, { includeEnded: true });
+
+// Entitlement check — unchanged, and should stay that way
+const live = await rekey.billing.getSubscription(token);
+```
+
+Default behaviour is unchanged, so existing SDK, portal and integrator calls
+carry on exactly as before. `getSubscription` in `@rekey.dev/node` also gained
+the `organizationId` option it had been missing, which `@rekey.dev/react`
+already had.
+
+Rekey Cloud's own account page now uses it, so a buyer who cancelled last month
+comes back to the plan they were on and the date it ended, with a Resubscribe
+button — rather than the page it showed somebody who had never bought anything.
+
+### Three response schemas that described something the endpoint never returns
+
+- **`GET /users/me` and `GET /auth/me` were structurally unsatisfiable.** Both
+  declared `allOf: [EndUser, {required: [activeOrganizationId]}]`, and the
+  `EndUser` component carried `additionalProperties: false` (generated from a
+  `.strict()` zod schema). No JSON object could ever validate: with the field
+  it is "additional", without it it is "required". The generator now strips
+  `additionalProperties: false` from every component, which is what
+  `lib/openapi.ts` has always said it does — its own header states these
+  schemas describe "a floor, not a ceiling", and its `fromZod` comment claimed
+  to delete the flag while deleting only `$schema`. 40 of the 55 components
+  were shipping closed. Both `me` endpoints additionally now declare the
+  `role`, `updatedAt`, `erasedAt` and `erasedBy` fields they return.
+- **`GET /tenant/applications/{id}/end-users/{euid}/export`** declared
+  `{"type": "string"}` — because it is documented as a file download — and
+  returns a JSON object. A generated client typed it `Promise<string>`. It now
+  references a new `EndUserExport` component written field-for-field against
+  `EndUserExportDocument` in `@rekey.dev/shared-types`.
+- **Closed-schema violations** are gone with the change above: a response may
+  now legitimately carry more than its schema names, which is what these
+  handlers have always done.
+
+`apps/api/test/openapi-contract.test.ts` gained two assertions that keep all of
+this from sliding back: no component may declare `additionalProperties: false`,
+and every entry in `ALLOWED_BARE_ARRAYS` must still name a live bare-array
+operation (so the list cannot keep dead entries that later read as permission).
+
+### The published OpenAPI document now describes responses
+
+`/docs/json` — and the copy shipped at `apps/marketing/public/openapi.json` —
+described **one** response across the entire API. 275 of 276 operations carried
+nothing but:
+
+```json
+"200": { "description": "Default Response" }
+```
+
+Request bodies and query parameters were complete and accurate; responses were
+absent. So you could not generate a typed client, the `{success, data}` /
+`{success, error}` envelope appeared nowhere, no error shape was described at
+all, and every response field an integrator used had to be discovered by calling
+the endpoint and reading what came back. Two independent external audits called
+it half a contract.
+
+Now: **275 of 278 operations declare a response schema**, over **55 named
+components** in `components.schemas`. The envelope is defined once and
+referenced, not inlined 278 times. Domain objects (`Application`, `Plan`,
+`EndUser`, `Subscription`, `Payment`, `Coupon`, `License`, `Organization`,
+`WebhookEndpoint`, `CreditLedgerEntry`, …) are **derived from the same
+`@rekey.dev/shared-types` zod schemas the SDKs compile against**, so the document
+cannot drift from the types.
+
+Error responses are declared per operation from what the handler actually
+throws, not as a blanket 400/401/500 — a route that can answer `402
+CREDITS_INSUFFICIENT` or `409 PLAN_SLUG_TAKEN` now says so, with the `code`
+string you will switch on.
+
+Three operations declare no 2xx body because they have none: `GET
+/api/v1/mcp/{slug}` and `GET /api/v1/tenant/mcp` answer `405` unconditionally
+(the endpoints are POST-only JSON-RPC), and `GET
+/api/v1/tenant/mcp/oauth/authorize` only ever redirects or renders HTML.
+
+**These schemas are documentation, not serialisation.** Fastify normally
+compiles `schema.response` with fast-json-stringify, which drops any field the
+schema does not declare. A pass-through serializer is installed so that adding
+these schemas cannot silently truncate a live response — runtime output is
+byte-identical to before. The guard against drift is
+`apps/api/test/openapi-contract.test.ts`, which fails if any operation loses its
+response schema, if any declares no failure mode, or if a list endpoint declares
+a bare array.
+
+### Fixed: the published OpenAPI document was never valid OpenAPI 3.0
+
+Four request-body properties used the draft-07 type-array form
+(`type: ['string','null']`, `type: ['integer','null']`), which OpenAPI 3.0 —
+the version this document declares — does not allow. Every real validator
+rejected the file, so anyone who tried to generate a client got a parse error at
+the door. That is plausibly why nobody reported the missing response schemas:
+you could not get far enough to notice.
+
+They are now `nullable: true`, which Fastify's ajv treats identically at runtime
+(verified: `null` accepted, the typed value accepted, a wrong type still 400s).
+The affected fields were `maxActiveEndUsers` and `maxProductionApps` on `PUT
+/api/v1/admin/tenants/{id}/limits`, `appUrl` on `PATCH
+/api/v1/tenant/applications/{id}/auth-config`, and `defaultPlanSlug` on `PATCH
+/api/v1/tenant/applications/{id}/billing-config`. The document is now validated
+by `@apidevtools/swagger-parser` in the test suite.
+
+### Fixed: the OpenAPI document announced itself as `1.1.1`
+
+The version was a hardcoded string in `apps/api/src/lib/swagger.ts` and had gone
+three minor versions stale — the document about to become the frozen 2.0.0
+public contract described itself as a 1.x document to every client generator,
+registry, and integrator diffing it against the previous release.
+
+It is now derived from `@rekey.dev/shared-types`'s `package.json` (the version
+the packages, API, panel and portal share), and the test suite asserts that the
+document version, the package version, and the top CHANGELOG heading all agree —
+so a release cannot bump one and forget the others.
+
+### Changed: session cookies decide `Secure` from the request, not from `NODE_ENV`
+
+**Operator-visible effect:** the panel, admin portal, hosted portal, rekey.dev
+account pages and `@rekey.dev/nextjs` now set `Secure` on every cookie they
+write whenever the request did not arrive as plain HTTP on a loopback host —
+regardless of what `NODE_ENV` is set to.
+
+Every cookie in the stack previously decided `Secure` with
+`process.env.NODE_ENV === 'production'`. That is a build-time answer to a
+request-time question, and it failed in the direction that costs you the
+session: a deployment behind TLS whose `NODE_ENV` was unset, or `staging`, or
+anything Next did not inline as exactly `"production"`, handed out session
+cookies with no `Secure` flag. A browser will replay those over plain HTTP.
+Nothing about it was visible — the apps worked normally.
+
+The decision now reads `X-Forwarded-Proto` (first hop), falling back to the
+`Host`. Loopback hosts (`localhost`, `127.0.0.1`, `[::1]`, `*.localhost`) are
+treated as the developer machine they are and get no `Secure`; everything else
+does. **If you terminate TLS somewhere the app cannot observe and your proxy
+sets no `X-Forwarded-Proto`, set `REKEY_COOKIE_SECURE=false`** — otherwise the
+browser will refuse the cookie and sign-in will not complete. That is the
+intended failure: the insecure case is now something you opt into rather than
+something you fall into.
+
+### Changed: `docker-compose.yml` publishes on loopback by default
+
+**Operator-visible effect:** after `docker compose --profile full up`, the API,
+panel and portal are reachable at `localhost:3030` / `:3031` / `:3050` as
+before, but no longer on the host's public interfaces. To expose them, set
+`BIND_ADDRESS=0.0.0.0`.
+
+Postgres and Redis were moved to loopback earlier for the same reason; the web
+services were left publishing on `0.0.0.0` while `OPERATOR_SIGNUP_MODE`
+defaulted to `open`. Together that meant bringing this stack up on a VPS to try
+it out put an unauthenticated operator-signup endpoint on the internet, without
+anyone choosing to. `docker-compose.prod.yml` — the file `DEPLOY.md` documents
+for real deployments — is unaffected: it publishes no ports at all and routes
+through Traefik.
+
+`OPERATOR_SIGNUP_MODE` still defaults to `open`, because first boot has to be
+able to create the first operator. The API now logs a `[SECURITY]` warning at
+boot when it finds `open` under `NODE_ENV=production`, which covers deployments
+that do not use this compose file. **If you set `BIND_ADDRESS=0.0.0.0`, set
+`OPERATOR_SIGNUP_MODE=invite` in the same edit.**
+
+### Added: `OPERATOR_MCP_DYNAMIC_REGISTRATION` closes anonymous MCP client registration
+
+**Operator-visible effect:** none by default — the value is `open`, matching
+today's behaviour, so Claude Desktop / Claude Code / Cursor keep connecting by
+discovery alone. Set it to `disabled` once your clients are connected and
+`POST /api/v1/tenant/mcp/oauth/register` answers `403
+CLIENT_REGISTRATION_DISABLED`, with `registration_endpoint` dropped from the
+RFC 8414 metadata. Clients that already hold a `client_id` are unaffected.
+
+RFC 7591 registration on the operator authorization server was unconditionally
+open, with no way to close it — unlike the per-Application MCP twin, which has
+had `authConfig.dynamicClientRegistration` since it was written. Registering
+grants no access on its own: an authorization code is only minted after an
+operator signs into the panel and approves. What it does grant is an
+*allowlisted* `redirect_uri` of the registrant's choosing, and `/oauth/authorize`
+refuses any `redirect_uri` its client did not register. That allowlist entry is
+the missing ingredient in a consent-phishing link.
+
+The panel consent screen now also names the host the authorization code will be
+delivered to, and says plainly that Rekey does not vouch for it.
+
+### Fixed: operator MCP refresh-token reuse now revokes the whole family
+
+**Operator-visible effect:** replaying an already-rotated operator MCP refresh
+token revokes every live token for that operator, workspace and client, not just
+the replayed one. Reconnect the MCP client to get a fresh grant.
+
+Reuse detection refused only the presented token. On a leak that is backwards:
+the attacker rotates first, so the replay is the *legitimate* client arriving
+second — it got a single unexplained `invalid_grant` while the token the
+attacker rotated into stayed valid for its full 30 days. The end-user refresh
+path has burned the family on reuse for some time; this surface was left as a
+seam. It now matches, including the same discrimination the end-user path makes:
+a token that was rotated and then replayed burns the family, a token that was
+deliberately revoked (sign-out) does not.
+
+### Fixed: a well-formed request could make the API answer 500
+
+An external black-box audit exercised all 276 operations and found two ways to
+get a 500 out of a request that passed every auth check — one of them without
+any credential at all.
+
+**A NUL byte in any JSON string.** Postgres cannot store `\u0000` in a text
+column, so it came back `22021 invalid byte sequence for encoding "UTF8"` and
+19 routes turned that into a 500 — including `POST /api/v1/tenant/auth/sign-up`
+and MCP dynamic client registration, both unauthenticated. A guard for exactly
+this already existed for the query string; the body never got one. There is now
+a `preValidation` hook that walks the whole parsed body — nested objects,
+arrays, and object *keys* — and answers `400 INVALID_BODY`.
+
+**An integer past what the column holds.** Every money and metering field was
+written with a floor and no ceiling, so `Number.MAX_SAFE_INTEGER` passed
+validation and Postgres answered `22003 value out of range for type integer`.
+The audit reproduced it on usage quantity, plan amount and credit grants; the
+same shape was present on 28 integer schemas in total, all now bounded — money
+at 10^11 minor units, counts at `int4` range.
+
+Neither was a privilege escalation: the audit confirmed cross-tenant isolation
+and role gating held throughout (147 operations swept, zero leaks). They matter
+because an unauthenticated caller could drive the error rate at will, and
+because a 400 that names the field is the difference between a caller fixing
+their own request and a caller filing a bug.
+
+`GrantCreditsRequestSchema`, `TenantLimitsSchema` and `AuthConfigSchema` in
+`@rekey.dev/shared-types` gained upper bounds to match. This narrows those
+types: a value that was previously accepted and then failed at the database now
+fails validation instead.
+
+The published `openapi.json` was regenerated and picked up unrelated staleness
+along with the new bounds — the MFA re-enrollment `code` requirement and the
+organization-invitation email binding were both shipped without the document
+being rebuilt.
+
+### Behaviour change: a workspace MEMBER now starts with access to NO Application
+
+**This changes what your existing members can see. Read the migration note.**
+
+Per-application grants shipped with a back-compat rule: a MEMBER holding zero
+grants kept the pre-grants behaviour — read-only access to **every** Application
+in the workspace. That was written as an accommodation for members who predated
+grants. But zero grants is also the state a freshly accepted MEMBER invitation
+lands in, so the accommodation *was the live default*:
+
+> Invite a contractor as MEMBER → they immediately read every Application's
+> end-user roster (with email addresses), API-key metadata, billing-credential
+> status, payments, webhooks, coupons, licences, organizations, email logs and
+> per-app stats. An external audit confirmed 31 read endpoints on an
+> Application nobody had granted them.
+
+Grant-scoped access is now the default, not a mode the first grant opts you
+into. A MEMBER with no grant on an Application gets `404 APPLICATION_NOT_FOUND`
+— the same non-disclosure answer an ungranted Application already returned for
+a member who held grants elsewhere. `GET /api/v1/tenant/applications` returns
+`[]`. The operator MCP surface (`list_applications` and every tool built on it)
+follows the same rule.
+
+**Existing memberships are grandfathered, not broken.** The migration adds
+`tenant_memberships.legacy_workspace_read` (default `false`) and backfills it
+to `true` for every MEMBER row that already existed *and holds no grant*.
+Those members keep exactly the access they have today. Only memberships created
+from this release onward start closed. Revoking access your colleagues are
+using right now, without an operator asking and on an upgrade whose timing they
+do not control, would be an availability incident dressed as a security fix.
+
+What changed for the grandfathered rows is that they are now **visible**:
+`GET /api/v1/tenant/workspace/members` reports `legacyWorkspaceRead` per member,
+so an owner can find everyone still on the blanket read and scope them. Setting
+any grant on a membership clears the flag permanently.
+
+One related fix: removing a member's **last** grant used to return them to
+workspace-wide read — a de-scoping action that *widened* access. It now leaves
+them with nothing, which is what the operator asked for.
+
+**If you rely on the old behaviour**, grant explicitly:
+`PUT /api/v1/tenant/workspace/members/:id/grants` with `APP_VIEWER`,
+`APP_BILLING` or `APP_ADMIN` per Application.
+
+### Contract change: config PATCH bodies reject unrecognised keys
+
+`PATCH /api/v1/tenant/applications/:id/auth-config` answered **200** for a body
+of entirely unrecognised keys and changed nothing:
+
+```
+PATCH …/auth-config
+{"mfaa":"required","tokenAlgorithm":"none","sessionTtl":999999,"bogus":1}
+→ 200, authConfig byte-identical afterwards
+```
+
+`mfaa` for `mfa` and `tokenAlgorithm` for `tokenAlg` — a one-character typo
+silently no-opped the Application's **MFA policy** and **token signing
+algorithm**, and the caller was told it succeeded. A patch body whose keys are
+all optional has no shape left to fail on except the key names, so those are
+now the check.
+
+These bodies now answer `400 VALIDATION_ERROR` with an `issues` array naming
+the offending key, matching `billing-config` (which already did this):
+
+- `PATCH …/auth-config`
+- `PATCH …/billing-config` (unchanged — the pattern the rest were aligned to)
+- `PATCH …/portal`
+- `PUT …/access` — the worst of them: `{"ipAllowlst": […]}` reported success
+  while writing nothing, leaving an operator believing they had locked their
+  secret keys to an office CIDR
+- `POST …/end-user-roles`, `PATCH …/end-user-roles/:name`
+- `PATCH …/usage-meters/:slug`
+
+`PATCH …/usage-meters/:slug` was worse than the rest: it accepted the meter's
+**own** fields, `{"name":"RENAMED","unit":"widget","active":true}`, applied only
+`active`, and returned 200 echoing the *pre-edit* row — so the response itself
+read as confirmation the rename had happened. `active` is the only editable
+field and is now the only accepted one; its request body is also declared in
+`/docs/json`, which previously published the operation with no `requestBody` at
+all while `active` was in fact mandatory. Renaming a meter is deliberately not
+implemented here: `slug` is what `Plan.meterSlug` binds against and `unit` is
+the label every already-recorded usage row was measured in.
+
+Injected `role` / `tenantId` / `applicationId` / `emailVerified` / `id` were
+already correctly ignored on these bodies. The defect was that they were
+ignored *silently*; callers are now told.
+
+**If you send extra keys today**, they were already having no effect — you will
+now get a 400 that names them instead of a 200 that hides them.
+
+### Fixed: a payment-provider failure no longer surfaces as a 500 or a bogus 401
+
+An exception from a provider SDK reached the global error handler unmapped, and
+got whatever it could infer. A `StripeError` carries `.statusCode` and
+`.message`, which was enough to be duck-typed as a framework 4xx:
+
+```
+POST /api/v1/billing/checkout        → 500 INTERNAL_ERROR ("contact support")
+POST /api/v1/tenant/applications/{id}/plans
+  → 401 {"code":"BAD_REQUEST","message":"Invalid API Key provided: sk_test_************2345",
+         "fix":"Check the request shape against the route schema in /docs."}
+```
+
+Three signals disagreeing about one wrong stored credential — an upstream
+status, a code meaning "your request was malformed", and a `fix` blaming the
+caller's request shape — with a fragment of the operator's own key echoed back.
+`POST …/billing-credentials/:provider/register-webhook` already did this right
+(502, a stable code, an accurate `fix`); every provider call site now goes
+through that same mapper.
+
+All provider-SDK failures answer **502 `BILLING_PROVIDER_ERROR`** (documented in
+`docs/errors.md`, so integrators can finally branch on "the provider, not the
+caller, is at fault"). The mapper distinguishes who is reading:
+
+- **Operator** routes (`/api/v1/tenant/*`) get the provider's own message,
+  framed and length-bounded — they own the credential and it is the only thing
+  that tells them which key is wrong.
+- **End-user** routes (`/api/v1/billing/*`) do not. The caller is somebody's
+  customer; they can do nothing about it and must never be shown the operator's
+  provider internals. The provider's message goes to the server log against the
+  response's `requestId`.
+
+Affected: `POST /billing/checkout`, `POST /billing/subscription/cancel`,
+`POST …/plans` (tenant and admin), and operator-side subscription cancellation.
+The cancel case was the sharpest: the buyer was told their *request shape* was
+wrong, with a 401, while the subscription they asked to cancel kept billing.
+
+Two supporting changes: a 5xx `RekeyError` is now logged server-side (mapping an
+upstream failure onto a clean 502 must not also erase it from the log), and any
+unmapped provider-SDK error is caught by a last-resort guard in the error
+handler rather than passing its status and message through.
+
+### Fixed: three error responses were missing `requestId`
+
+`POST /api/v1/tenant/applications/:id/licenses` built its 404 envelope by hand
+instead of throwing the shared error type, so it bypassed the error handler and
+returned neither the `requestId` field nor the `X-Request-Id` header — the sole
+envelope break across 244 operations an external audit checked. Two more had the
+same shape and are fixed alongside it: the 409 `EMAIL_ALREADY_EXISTS` on
+end-user create, and the 405 on `GET` of the operator MCP endpoint.
+
+The underlying problem was not three forgetful routes — it was that the envelope
+is only guaranteed where `RekeyError` is thrown, and nothing enforced that. The
+other 241 operations were consistent by habit. There is now a static test
+asserting that every object literal in `apps/api/src` carrying `success: false`
+also carries `requestId`; it fails with the exact `file:line` of the next one
+somebody writes.
+
+### Fixed: workspace audit surfaces now share one role floor
+
+`GET /api/v1/tenant/workspace/email-logs` was readable by any MEMBER while
+`GET /api/v1/tenant/security-events` was OWNER/ADMIN-only — the same class of
+data (operator email addresses, subjects, delivery status vs. IPs and event
+metadata) behind two different gates. Likewise `GET
+/api/v1/tenant/workspace/invitations` was open to MEMBERs while the `POST` that
+creates one was ADMIN-gated, so any member could read every pending invitee's
+address and the workspace role they had been offered.
+
+Both `GET`s now require **OWNER or ADMIN**, matching their siblings. `GET
+/workspace/members` is deliberately unchanged — a member seeing the team roster
+is normal collaboration, not an audit surface.
+
+### Fixed (money): a plan the payment provider refused went on sale anyway
+
+Creating a plan inserted the row and *then* registered it with Stripe. When the
+provider refused — a rejected API key, a currency the account cannot take — the
+create returned an error and the plan stayed committed, `active: true`, on the
+public catalogue:
+
+```
+POST /api/v1/tenant/applications/{id}/plans  {"slug":"brokenplan", ...}
+  → 401 "Invalid API Key provided: sk_test_****0001"
+
+GET  /api/v1/billing/plans
+  → 200 [... {"slug":"brokenplan","amount":4900,"active":true,"metadata":{}} ...]
+
+POST /api/v1/billing/checkout  {"planSlug":"brokenplan", ...}
+  → 500 {"code":"INTERNAL_ERROR","message":"An unexpected error occurred."}
+```
+
+Nothing on the row distinguished it from a working plan, and the real cause
+(`Plan "…" has no Stripe priceId in metadata`) reached only the server log. It
+could not be repaired either: re-`POST`ing the slug answered `409
+PLAN_SLUG_TAKEN`, and `PATCH .../plans/{slug}` accepted exactly one field,
+`{"active": boolean}`. The only way out was a new slug — which is not a remedy
+for a slug already in a customer's pricing page.
+
+Three changes:
+
+**Registration is write-ahead.** A plan owed an eager registration is inserted
+`active: false` with the new `registrationStatus: PENDING`, and is promoted to
+`REGISTERED` + active only once the provider answers. A refusal settles it to
+`FAILED` and records the provider's message in `registrationError`. The provider
+call is a network call and is deliberately *not* wrapped in a database
+transaction; the ordering is what makes it safe, so a refusal, a timeout, or a
+process death all leave a plan nobody can buy. `PENDING` and `FAILED` plans are
+excluded from the public catalogue and refuse activation with the new
+`PLAN_NOT_REGISTERED_WITH_PROVIDER`.
+
+**Plans are repairable in place, keeping their slug.**
+`PATCH /api/v1/tenant/applications/{id}/plans/{slug}` (and the `/admin` twin) now
+takes `active`, `name`, `metadata`, and — while the plan has never registered —
+`amount`, `currency`, `interval`. That is the old immutability rule stated
+honestly rather than loosened: a provider price object cannot be re-priced, but a
+plan that has no price object has nothing to contradict. A registered plan
+answers the new `PLAN_PRICE_IMMUTABLE`. New:
+`POST /api/v1/tenant/applications/{id}/plans/{slug}/register` retries
+registration and puts the plan back on sale. Idempotent.
+
+**Checkout no longer 500s on a plan with no provider price.** The bare
+`throw new Error(...)` in the Stripe provider is now a `409
+PLAN_NOT_REGISTERED_WITH_PROVIDER` carrying a `fix` aimed at the operator, who is
+the only party who can act on it.
+
+Coupons were checked for the same commit-then-register shape and do not have it:
+nothing is registered with a provider at coupon-create time — the discount is
+minted per checkout and discarded if the session fails. There is a regression
+test pinning that, so an eager registration added later fails it.
+
+**Migration:** `20260802160000_plan_registration_status` adds
+`plans.registration_status` and `plans.registration_error`. Existing rows with a
+`metadata.stripe.priceId` backfill to `REGISTERED`; everything else to
+`NOT_REQUIRED` — the migration cannot tell a broken Stripe plan from a healthy
+Razorpay one, and guessing `FAILED` would take working plans off sale. A plan
+broken by the old behaviour therefore keeps its row and now surfaces at checkout
+as a 409 naming the repair, instead of a 500.
+
+### Breaking: `verifyAccessToken` now requires `applicationId`
+
+```ts
+await verifyAccessToken(token, { applicationId: MY_APP_ID, jwksUrl });
+```
+
+The RS256 keypair is **deployment-wide** — `SigningKey` has no per-Application
+column — and `eu_access` tokens carry no `iss`/`aud`. So a token minted for any
+other Application on the same deployment verified here with a perfectly valid
+signature, and a multi-app self-host accepted someone else's end-user as its
+own.
+
+The docs already told callers to compare `claims.applicationId` afterwards,
+which is exactly the problem: it made the shortest correct path the one nobody
+takes. It is now checked inside the function, and a mismatch raises
+`USER_TOKEN_INVALID`.
+
+This does **not** affect the HS256 default, where the key is derived per
+Application as `HMAC-SHA256(JWT_SECRET, applicationId:tokenGeneration)` and a
+foreign token fails the signature outright. It applies precisely to the RS256
+opt-in — which is the only path this helper serves.
+
+
+### Security: the self-host compose sent your payment webhooks to our server
+
+`docker-compose.prod.yml` — the file DEPLOY.md tells you to deploy — carried
+Rekey's own hostnames as **literals**, not variables:
+
+```yaml
+API_URL: https://api.rekey.dev
+PUBLIC_WEBHOOK_BASE_URL: https://api.rekey.dev
+PUBLIC_PORTAL_URL: https://portal.rekey.dev
+CORS_ALLOWED_ORIGINS: https://panel.rekey.dev,https://rekey.dev,https://portal.rekey.dev
+RESEND_DEFAULT_FROM: support@rekey.dev
+```
+
+`PUBLIC_WEBHOOK_BASE_URL` is the origin Rekey **auto-registers with
+Stripe/PayPal**. A self-hoster who clicked "auto-configure webhook" therefore
+configured their own payment provider to POST their customers' payment events
+at `api.rekey.dev`. The same block sent their transactional mail as
+`support@rekey.dev` and advertised `api.rekey.dev` as their MCP OAuth issuer.
+The strip that produces the public mirror only removed the marketing service;
+every one of these shipped verbatim.
+
+Every deployment-specific value is now `${VAR}` with no Rekey default, and the
+three hostnames (`API_HOST`, `PANEL_HOST`, `PORTAL_HOST`) have no default at
+all — `docker compose` refuses to run until you set them. The file is now
+explicitly the **self-host** stack; Rekey Cloud runs per-unit composes and
+never used this one. `rekey.dev`'s landing page is no longer a service in it.
+
+**If you deployed this file:** check the webhook endpoint registered in your
+Stripe/PayPal dashboard, and re-run auto-configure once `API_HOST` is set.
+
+
+### Fixed: no way to close operator registration on a self-host
+
+`OPERATOR_SIGNUP_MODE` was absent from `docker-compose.prod.yml`. A compose
+`environment:` block is an allowlist, so setting it in Dokploy did nothing and
+self-serve operator sign-up stayed open on every deployment built from the
+documented file — the same trap that file already warned about twice, for other
+variables.
+
+That block is now complete: every variable `apps/api/src/config/env.ts` reads is
+named in it, including `OPERATOR_SIGNUP_MODE`, `WORKSPACE_CREATION`, the
+WebAuthn and operator-OAuth settings, the rate limits and the pool sizing. All
+of them are empty by default, and empty is the same as unset.
+
+
+### Added: CI fails when a compose file cannot express a setting
+
+`.github/scripts/check-compose-env.mjs` asserts that every key declared in
+`env.ts` appears in the `environment:` block of each compose file that runs an
+API — or is exempt with a written reason — and that the self-host compose
+contains no Rekey hostname. It runs as its own CI job, in the shape of the
+`prisma migrate diff --exit-code` step next to it.
+
+This class of bug has now happened five times (`ADMIN_IP_ALLOWLIST`,
+`DEFAULT_APP_URL`, `DEFAULT_TENANT_LIMITS`, `PANEL_URL`,
+`OPERATOR_SIGNUP_MODE`), each time leaving behind a comment and no guard.
+Comments do not fail builds.
+
+
+### Fixed: CI ran none of the 119 tests on the money path
+
+The test job filtered `@rekey.dev/api` plus `./packages/*`. The two commercial
+apps — 70 tests and 49 tests over the checkout path, the entitlement gate and
+webhook HMAC verification — were maintained, passing, and executed by nothing.
+They are in the filter now; neither needs Postgres or Redis, so the job costs
+seconds more.
+
+`pnpm lint` was also documented in CONTRIBUTING.md as "lint all workspaces"
+while every workspace's `lint` script is `echo "(eslint not yet wired)"`. The
+doc now says so. Wiring it into CI was deliberately not done: a green check that
+runs no rules is worse than an absent one.
+
+
+### Fixed (money): a deferred activation asked the API to delete itself
+
+The purchase order is pay → key → workspace, so `subscription.activated` always
+lands before the workspace it configures exists. The billing service answered
+that with **HTTP 200** and `action: 'deferred'`. The API maps any 2xx to
+`SUCCEEDED` and permanently discards the event — and `subscription.activated`
+fires once, on a real status transition, and is never re-emitted. The service
+then held the only remaining copy in an in-memory `Map`, and added the event id
+to its dedupe set, so even a hand-triggered redelivery came back `duplicate`.
+
+It now answers **503 `WORKSPACE_NOT_READY`** and does not remember the id, so
+the API's existing durable retry holds the event and redelivers it. No new
+infrastructure. The in-memory queue stays as a backstop for buyers who take
+longer than the API's retry budget, and is now correctly described as one.
+
+
+### Fixed: the release workflow could succeed while shipping nothing
+
+Three defects in `publish-public.yml`:
+
+- **Silent failures.** Workflows never set `shell:`, so steps ran under
+  `bash -e` with pipefail **off**, and two steps were `curl -sf … | jq -r`. A
+  4xx made curl exit 22, the pipeline reported jq's 0, and `PR_NUMBER` /
+  `MERGE_SHA` became empty strings **in a green step**. The job now sets
+  `shell: bash` (pipefail on), captures HTTP status codes explicitly, and fails
+  with the API's own message.
+- **An unrecoverable window.** Between creating the tag ref and creating the
+  Release there was no way back: a re-run died at `git commit` because the tree
+  was identical, leaving the public repo with code and a tag but no Release —
+  and the Release is what triggers npm publish. The commit is now
+  `--allow-empty`, and the PR, merge, tag and Release steps all adopt what a
+  previous attempt created.
+- **Stale-version tags.** Nothing compared `${TAG#v}` to the package versions,
+  so tagging without bumping produced a fully green run that published nothing.
+  The workflow now refuses a tag that matches no package version, and prints
+  every package's version in the run summary.
+
+### Fixed: `@rekey.dev/node` had no request timeout
+
+Every call passed no `signal` to `fetch`, so the effective deadline was undici's
+`headersTimeout` — **five minutes**. Against a server that accepts the
+connection and then goes silent, a call was measured still pending at 70
+seconds; `@rekey.dev/nextjs`'s `auth()` makes three of those in sequence on the
+refresh path, so one unreachable deployment could pin a request handler for a
+quarter of an hour.
+
+Requests now carry a **10-second deadline by default** — the same number
+`apps/api` uses for its own outbound webhooks. Against the same black-hole
+server the call now rejects at 10,006ms, or at 302ms with a per-call override.
+
+- `RekeyConfig` gains `timeoutMs` and `signal`.
+- `rekey.with({ timeoutMs, signal })` returns a scoped clone, so any single call
+  can have its own deadline or be tied to an inbound request's lifetime.
+- `timeoutMs: 0` opts out.
+- `verifyAccessToken`'s JWKS fetch is bounded too — it usually sits in a hot
+  request path.
+
+### Fixed: transport failures were not `RekeyError`s
+
+There was no try/catch around `fetch`, so `ECONNREFUSED`, DNS and TLS failures
+escaped as bare `TypeError`s. The documented
+`catch (e) { if (e instanceof RekeyError) … }` pattern missed all of them.
+
+Every failure mode is now a `RekeyError`, with three codes because they call for
+three different responses: **`REQUEST_ABORTED`** (your own `AbortSignal` fired),
+**`REQUEST_TIMEOUT`** (retry, or raise `timeoutMs`), **`NETWORK_ERROR`** (check
+the URL, DNS, reachability). The underlying error is on `error.cause`.
+
+`RekeyErrorSchema` also now declares **`retryAfterSeconds`**. The API has always
+sent it on `RATE_LIMITED` (mirroring the `Retry-After` header) and on the
+idempotency conflict; it was simply never named, so it arrived untyped.
+
+### Fixed: `<OrganizationProfile>` silently targeted nothing
+
+`@rekey.dev/react` posted `<input name="endUserId" value={m.id} />`.
+`OrganizationMemberDto` carries **both** `id` (the membership row) and
+`endUserId` (the user), set from different columns — so **every role change and
+every member removal in `<OrganizationProfile>` was a no-op**, with no error.
+
+TypeScript could not see it: the component re-declared `OrgMember` as
+`{ id, email, role }`, and the real DTO is structurally assignable to that, so
+handing `organizations.listMembers()` straight to the component type-checked
+cleanly. `OrgSummary`, `OrgInvitation`, `PricingPlan` and `ProviderOption` had
+the same problem waiting to happen.
+
+All five are now `Pick<…>` of the real DTO. Callers who assemble these by hand
+still only owe the fields that render, but a column rename is now a compile
+error in the SDK rather than a silent no-op in your app.
+
+**Action required if you build `OrgMember[]` by hand:** add `endUserId`. If you
+pass `organizations.listMembers()` through, nothing changes.
+
+### Fixed: `require()` failed on all six packages
+
+Every `exports` map declared only `types` and `import`. Node ≥22.12 can
+`require()` a synchronous ESM module, but that path was never reached: CJS
+resolution runs with conditions `["require","node"]`, which matched nothing, so
+`require('@rekey.dev/node')` failed outright. Adding a `default` condition (no
+CommonJS build involved) unblocks Jest-CJS, ts-node and every `require()`
+consumer. Verified by actually requiring each built package.
+
+### Changed: server-authored enums are now open unions
+
+`WebhookEventEnvelope.type` was a closed 18-member union. Writing the exhaustive
+`switch` the type invites means your build breaks when 2.1.0 adds a 19th event —
+and the `never` in your default branch claims the case is impossible when it is
+merely unreleased.
+
+`WebhookEventType`, `SubscriptionStatusType` (`TRIALING` is coming),
+`PlanKindType`, `CreditReasonType` and `PaymentStatusType` are now
+`… | (string & {})`: the known literals still autocomplete, but a default branch
+is required. The closed set is still exported for registries and label maps, as
+`KnownWebhookEventType`, `KnownSubscriptionStatus`, `KnownPlanKind`,
+`KnownCreditReason`, `KnownPaymentStatus`. Filter/query types you *send* stay
+closed. Narrow an event name with the existing `isKnownWebhookEvent`.
+
+**Action required:** an exhaustive `switch` over these needs a `default` branch.
+
+### Changed: `@rekey.dev/react` no longer bundles zod
+
+Importing anything that touches `RekeyBrowserClient` pulled in the shared-types
+barrel, which evaluates ~60 `z.object(...)` calls at module scope, so zod came
+along. `RekeyError` — the only value the package needs from shared-types — now
+lives in a dependency-free `@rekey.dev/shared-types/error` entry, and both
+packages declare `"sideEffects": false`.
+
+Measured with esbuild over the built `dist/`, minified:
+
+| import | before | after |
+|---|---|---|
+| `useUser` alone | 77,655 B (zod) | **346 B** |
+| `RekeyBrowserClient` | 81,797 B (zod) | **4,397 B** |
+| the whole barrel | 111,028 B (zod) | **37,248 B** |
+
+Same class object via either import path, so `instanceof RekeyError` is
+unaffected.
+
+### Added: `@rekey.dev/nextjs/cookies`
+
+`ACCESS_COOKIE` / `REFRESH_COOKIE` were reachable only from the root barrel,
+which also re-exports the middleware (importing `next/server`) and the
+secret-key server helpers. A client component that wanted a cookie name had to
+pull all of that in — a guaranteed build break. The new subpath has no
+dependencies. The root barrel keeps exporting them.
+
+### Fixed: importing `@rekey.dev/mcp` or `@rekey.dev/cli` hijacked the host process
+
+Both declare `main`/`types`/`exports` like libraries, and both did real work at
+module scope: `@rekey.dev/mcp` read the environment and called `process.exit(1)`,
+killing the importing process outright; `@rekey.dev/cli` ran
+`program.parseAsync(process.argv)`, so it parsed *your* program's arguments and
+printed its own help. Neither is catchable by an importer.
+
+Both now run only when they are the process entry point, and expose
+`createServer()` / `buildProgram()` for importers. The `rekey` and `rekey-mcp`
+binaries behave exactly as before.
+
+### Fixed: `applications.me().environment` was always `undefined`
+
+`ApplicationDto.environment` was declared required, but `GET /api/v1/me` — the
+documented SDK smoke test — does not return it. The field is now optional.
+Narrow before use; a deployment that does send it still parses.
+
+### Changed: internal deps use carets, and internal symbols stay unpublished
+
+Workspace dependencies moved from `workspace:*` to `workspace:^`. pnpm published
+the former as an **exact** pin, so `@rekey.dev/node@2.0.0` alongside
+`@rekey.dev/react@2.1.0` installed two copies of shared-types — two `RekeyError`
+classes, and `instanceof` silently false across the two packages — plus two
+copies of zod.
+
+`stripInternal` is now enabled in all six packages. `@internal`-marked symbols
+were being published as public API; the JWKS test hook
+(`_clearJwksCacheForTests`) and the positional `requestRaw` are gone from the
+`.d.ts`.
+
+`Rekey.request()` is the exception and is now **supported**: it is the escape
+hatch for endpoints the SDK does not wrap yet. Its signature changed from
+positional `(method, path, body?, headers?)` to
+`(method, path, options?)` — done now, before 2.0.0 freezes it, because a fifth
+positional argument could never be added later.
+
+**Action required if you call `rekey.request(...)`:**
+`request('POST', '/x', body, headers)` becomes `request('POST', '/x', { body, headers })`.
+
+### Fixed: the portal quoted a different price than the SDK, on every plan shape
+
+The hosted portal formats plan prices with its own helper, because the SDK's
+`formatPrice` is in a `'use client'` module and the portal renders plans on the
+server. The copy had drifted on **all six** plan shapes it can render:
+
+| plan | `@rekey.dev/react` | portal (before) |
+|---|---|---|
+| Free tier | `Free` | `$0.00/month` |
+| One-time licence | `$499` | `$499.00 one-time` |
+| Credit pack | `$9 · 500 credits` | `$9.00 one-time` |
+| ¥1000/mo subscription | `¥10 /month` | `¥10/month` |
+
+The credit pack is the one that costs money: `one-time` erases the only fact
+that distinguishes one credit pack from another, so the customer could not tell
+what they were buying. And the helper's own docblock claimed it followed the
+same rule as the SDK "which already got this right", so nobody would check.
+
+Both now agree, in `apps/portal/src/lib/format.ts`, with the duplication and its
+reason stated at the top of the file and every shape pinned by a test.
+
+One difference is deliberate and marked as such: JPY, KRW, VND and the other
+zero-decimal currencies have no minor unit, so a ¥1000 plan is ¥1000, not ¥10.
+The portal now divides by the currency's actual exponent. `formatPrice` in
+`@rekey.dev/react` still divides everything by 100 and needs the same fix.
+
+
+### Fixed: no error boundary anywhere in the customer-facing portal
+
+`getPortalConfig` throws on any non-404 response from the API, and it is the
+first thing `[slug]/layout.tsx` does. With no `error.tsx` in the app, a single
+API blip put **Next's default error page in front of a merchant's paying
+customer** — on the app whose `not-found.tsx` is explicit that this audience
+never sees a Rekey error code or an operator instruction.
+
+The portal now has three boundaries: `[slug]/error.tsx` (keeps the merchant's
+header and branding), `app/error.tsx` (catches the layout itself), and
+`app/global-error.tsx`. All three speak to the customer — no codes, no digest,
+and an explicit "nothing has been charged or changed".
+
+The panel, admin and marketing apps also had gaps. Panel had a boundary for
+`(authed)` only, so every unauthed route was bare — including
+`/mcp-consent/review`, which resolves an OAuth request mid-consent. Admin and
+marketing had none at all. Each app now has a root `error.tsx` and a
+`global-error.tsx`; the global ones are inline-styled and import-free, because
+`global-error` replaces the root layout and therefore never gets its stylesheet.
+
+
+### Fixed: concurrent token refreshes signed customers and buyers out
+
+The panel dedupes in-flight refresh exchanges because refresh tokens rotate and
+are single-use: two concurrent exchanges of one token means one wins and the
+other is told its token is spent, then bounced to sign-in. The portal and the
+marketing site had the identical code and no dedupe.
+
+The portal made it the common case rather than a race: `[slug]/layout.tsx` and
+`[slug]/page.tsx` both call `getPortalUser`, and React renders them
+concurrently — so the first navigation after the 15-minute access token expired
+fired two refreshes in the same tick. Both apps now dedupe on the token, and
+`getPortalUser` is `cache()`d per request so the layout and page share one read
+instead of issuing two.
+
+
+### Fixed: `GET /sign-out` in the panel was CSRF-triggerable
+
+`<img src="https://panel.rekey.dev/sign-out">` on any page an operator visited
+logged them out. The admin app had already fixed this by making its sign-out
+POST-only; the panel could not copy that, because Next forbids cookie writes in
+a Server Component and `api()` therefore `redirect()`s here — a GET — when it
+finds an expired session.
+
+The panel route now rejects a GET whose `Sec-Fetch-Site` is `cross-site` with
+405, and accepts POST unconditionally. Same-origin, same-site, address-bar
+(`none`) and non-browser clients are unaffected, so the internal redirect keeps
+working.
+
+
+### Changed: one status-tone map instead of five
+
+`CANCELED` was grey in the panel and portal and **red in admin** — an app whose
+own `environmentTone` docblock says it "reserves red for things that need
+attention". `PAST_DUE` was amber for the operator and red for the customer, so
+one account looked routine to support and alarming to the person paying.
+Labels came out as `Past due`, `past due` and raw `PAST_DUE` depending on the
+screen, the middle one via a non-global `replace('_', ' ')` that mangles any
+two-underscore enum (`NOT_CONFIGURED` → `Not_configured`).
+
+`apps/panel/src/components/StatusPill.tsx` is now the canonical map; the portal
+and admin copies mirror it and say so. Two panel pages that had re-created their
+own local maps use `<StatusPill>`. Red now means a fault: `FAILED`, `REVOKED`,
+`SUSPENDED`, `EXHAUSTED`, `DOWN`. Endings are grey.
+
+
+### Fixed: one payment, two formats — and a 100× hazard in the marketing app
+
+The same payment rendered `$9.99` on the panel's payments page and `9.99 USD`
+on the end-user detail page, from two formatters in the same app. The detail
+page now uses the shared `formatMoney`.
+
+`formatCurrency` in `apps/marketing/src/lib/utils.ts` is deleted. It formatted
+its argument **without dividing by 100** while every other layer in the product
+speaks minor units. It had zero call sites, which is what made it dangerous: a
+generic, correct-looking helper in the shared utils of the app that runs
+checkout, one import away from rendering a $9.99 plan as $999.00.
+
+
+### Performance: the panel fetched the same application up to three times a page
+
+Server Components resolve independently, so `applications/[id]/layout.tsx` and
+the page inside it each fetched `GET /tenant/applications/:id` — and on
+`plans`, `payments`, `dunning` and `coupons`, `<BillingModeBanner>` fetched it a
+third time. `/tenant/auth/me` was fetched by the authed layout and again by
+`/applications`, `/team`, `/workspace` and `/account/security`.
+
+`lib/api.ts` gains `apiGet` / `getApplication` / `getMe`, memoised with
+`React.cache`. This is per-request and per-render, not a data cache: two
+components in one render share one response, the next navigation fetches again.
+
+The audit log also lost a serial round-trip — its workspace-members read sat in
+a `Promise.all` **over a single element**, so the per-actor fan-out could not
+start until it resolved. Both waves now go together.
+
+
+### Fixed: "Next →" onto an empty page
+
+Every panel list inferred `hasMore` from `count === pageSize`, which is
+confidently wrong whenever a result set is an exact multiple of the page size —
+25 end users at 25/page rendered a Next arrow onto a page reading "No results".
+
+All thirteen paged lists now ask the API for one row more than they render and
+pass a `hasMore` they actually measured (`apps/panel/src/lib/paginate.ts`).
+`<Pager>` keeps the old inference only as an explicit opt-out.
+
+Note for anyone reading the original report: the tenant list endpoints do **not**
+return `{total, limit, offset, hasMore}` and never have — `pageMeta` exists in
+`apps/api/src/lib/pagination.ts` but only `GET /admin/operator-invites` uses it.
+So no `count()` was being computed and thrown away. One case remains
+un-fixable client-side: at 100 rows/page the over-fetch would be `limit=101`,
+which `parsePagination` rejects, so that page size still falls back to the guess.
+
+
+### Removed: a `localStorage` token client in the marketing app
+
+`apps/marketing/src/lib/api.ts` read an auth token out of `localStorage` — in
+the app whose `session.ts` docblock explains that this pattern turns "a single
+XSS into session takeover". It had no importers, but it exported a
+ready-configured axios instance named `api`, and its provider tree pulled
+`@tanstack/react-query`, `axios` and `sonner` into every page for zero
+consumers. Deleted, along with `hooks/use-api.ts`, `lib/react-query.ts`, the
+query and toast providers, and the four dependencies.
+
+
+### Added: tests for the three apps that had none
+
+`apps/panel`, `apps/portal` and `apps/admin` had no test script. Each now has
+the same setup as `apps/marketing` (one `vitest.config.ts` and a `server-only`
+stub) and covers what is cheapest and most load-bearing:
+
+- **portal** — `safeCssColor` / `safeHttpUrl`, the validators standing between
+  operator-supplied values and an inline `style` and an `<img src>` on a
+  customer-facing page; plus every plan-price shape.
+- **admin** — `lib/auth.ts` end to end: `verifyKey`'s length pre-check before
+  `timingSafeEqual` (which throws on mismatched lengths), `validateSession`'s
+  sliding expiry, and `checkAndCountLoginAttempt`'s exactly-five-then-refuse.
+- **panel** — the refresh dedup, proved with a counting fetch stub that 401s a
+  reused token exactly as the API does; `describeUserAgent`'s order-dependent
+  cascade including the `node|undici|next` branch that stops an operator
+  revoking their own session; and the status and pagination helpers.
+
+### Security: ten auth and authorization defects, from an adversarial review
+
+Every one of these was reproduced against a running server. Several change
+behaviour a caller can observe — those are called out as **contract change**.
+
+**Operator failed sign-ins and lockouts are now recorded.** Ten failed operator
+sign-ins produced zero rows in `security_events`. The lockout fired — the Redis
+key was there with a TTL — and was invisible in every operator- and
+admin-facing surface, including for a locked-out workspace OWNER, the account
+that owns every application, key and payment credential in a workspace. Sign-in
+now emits `operator.sign_in_failed` per attempt and `operator.locked_out` once
+per lockout, attributed to the operator's primary workspace (an operator
+failure happens before a workspace is chosen, and every reader of the audit log
+is workspace-scoped, so `tenantId: null` would have been another way of writing
+nothing). `GET /api/v1/admin/metrics/locked-accounts` gained `operators` and
+`operatorsTotal` alongside the existing end-user `accounts`.
+
+**MFA can no longer be removed with a stolen token.** `POST /auth/mfa/setup`
+reset `enrolledAt` on an existing credential with no proof of anything, which
+reached the same end as `/mfa/disable` without passing its guard. The operator
+twin, `POST /tenant/auth/mfa/disable`, required no factor at all.
+*Contract change:* both surfaces now demand a current authenticator or backup
+code before re-enrolling over a completed enrollment, and the operator disable
+route demands one too. The account password is deliberately not accepted while
+an authenticator is enrolled. First-time setup is unaffected, as are secret-key
+callers on the end-user surface.
+
+**Passkey verification is no longer downgradeable.** *Contract change.* All four
+WebAuthn ceremonies asked for user verification as "preferred" and verified with
+the requirement off, while a passkey assertion mints a session directly and
+skips the MFA challenge — so an authenticator that declined the PIN/biometric
+turned password + TOTP into a touch, on both the end-user and operator
+vocabularies. User verification is now **required** on both ends of both
+ceremonies. A security key with no PIN configured is refused rather than
+silently accepted. Operator passkey enrolment also gained the step-up the
+end-user route has had.
+
+**Organization invitations are bound to the invited email.** *Contract change.*
+`POST /auth/organizations/accept-invitation` did not check that the accepting
+session's address matched the invitation, so anyone holding a forwarded invite
+link joined at the invited role — up to OWNER. It now answers 403
+`ORGANIZATION_INVITATION_EMAIL_MISMATCH`. The operator twin has enforced this
+all along; this is that check, ported.
+
+**Impersonation is revocable, and bounded in what it can do.** *Contract change.*
+`impersonation_audits.endedAt` was documented in the schema and written by no
+code path, so a minted token ran to expiry no matter what anyone did. The audit
+row is now created before the token and its id rides in the JWT, so
+`POST /tenant/applications/:id/end-users/:euid/impersonate/end` (new,
+OWNER/ADMIN) revokes every live session on that end-user immediately. Separately,
+an impersonated session is now refused on the routes that rebind credentials —
+password change, MFA setup/disable, passkey enrolment and removal — with 403
+`IMPERSONATION_ACTION_FORBIDDEN`; those changes outlive the five-minute token
+permanently, which is the one thing a lifetime cannot bound. Reads, billing and
+profile edits are untouched. Tokens minted by an older build are refused.
+
+**The operator surface is no longer an account-existence oracle.**
+*Contract change.* `/tenant/auth/forgot-password` and
+`/tenant/auth/magic-link/request` answered `delivered: false` for an address
+with no operator account and `true` for one that had; both now return one
+constant body whatever happened, matching the end-user surface's posture. Sign-in
+skipped argon2 entirely for an unknown email (measured 9.0 ms vs 3.3 ms, no
+overlap) and counted failures only for accounts that exist, so the 429 after ten
+attempts answered the same question without any measurement — both are fixed.
+Sign-up still answers 409 for a duplicate address, consistent with the end-user
+surface, because a sign-up form has to tell a person why their account was not
+created.
+
+**Operator MCP read tools apply the role gate and per-application grants.**
+*Contract change.* An `APP_VIEWER` MEMBER — granted sight of exactly one
+Application — could self-grant an OAuth token and read another Application's
+end-users plus the full workspace security log, IPs and user agents included,
+while the REST equivalents answered 404 and 403 for the same account. Read tools
+now resolve their Application set through the same matrix `lib/app-access.ts`
+applies (including the legacy rule that a MEMBER with zero grants keeps
+workspace-wide read), and `recent_security_events` / `list_invitations` require
+OWNER or ADMIN, matching their REST routes. They are no longer listed to a
+caller who cannot call them.
+
+**Coupon `maxRedemptions` now bounds discounts, not just bookkeeping.**
+*Contract change.* Five concurrent checkouts on a `maxRedemptions: 1` coupon
+were all discounted at the provider and produced one redemption row: the
+discount is committed at checkout, the limit was counted against rows written at
+payment. Checkout now reserves the slot up front with a 30-minute expiring hold,
+so the limit counts recorded redemptions plus in-flight checkouts. Losers get
+400 `COUPON_REDEMPTION_LIMIT_REACHED`. The hold expires by itself, so an
+abandoned checkout does not exhaust the coupon — which is why redemptions were
+moved off checkout-creation in the first place.
+
+**An unknown email `eventKey` is a 404, not a 500.** The preview and test-send
+routes passed a URL path segment into a bare `throw new Error`, so a stale event
+name in an operator's URL produced `INTERNAL_ERROR` and a page in the error log.
+It now answers 404 `EMAIL_EVENT_UNKNOWN`, the same code the sibling GET/PUT
+routes on the identical parameter already returned.
+
+**`GET /api/v1/me` matches its published `ApplicationDto`.** The documented SDK
+smoke test omitted `environment` — required in the schema, so callers read
+`undefined` typed as an enum — and returned `authConfig` / `billingConfig` as
+raw Prisma JSON, so `AuthConfigSchema`'s defaults never ran and a field added
+after a row was written came back `undefined`. Both are now sent, and the
+shaper's return type is the DTO, so the next divergence is a compile error.
 ### Fixed: the Developer section was unreachable on a phone
 
 At a 375px viewport the application's primary nav measured 457px of pills

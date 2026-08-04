@@ -4,19 +4,14 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { randomUUID } from 'node:crypto';
-import {
-  publicPost,
-  publicGet,
-  setSessionCookies,
-  PanelApiError,
-  type SignInResponse,
-} from '@/lib/api';
+import { publicPost, publicGet, setSessionCookies, PanelApiError, type SignInResponse } from '@/lib/api';
 import { PasskeyLoginButton } from '@/components/PasskeyLoginButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { AuthCard, OrDivider } from '@/components/AuthCard';
 import { Banner } from '@/components/Banner';
 import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
+import { cookieSecure } from '@/lib/cookie-secure';
 
 /**
  * Only follow a post-auth `next` target that is a local path: must start
@@ -130,7 +125,7 @@ async function startOAuth(provider: string, next: string | null, _formData: Form
   'use server';
   const state = randomUUID();
   const jar = await cookies();
-  const secure = process.env.NODE_ENV === 'production';
+  const secure = await cookieSecure();
   // `lax`, not `strict`: the provider redirects back via a top-level cross-site
   // GET on which a Strict cookie is NOT sent — which would break the CSRF check.
   const opts = { httpOnly: true as const, sameSite: 'lax' as const, secure, path: '/', maxAge: 600 };
@@ -185,6 +180,9 @@ const ERROR_MESSAGES: Record<string, string> = {
   OAUTH_NO_EMAIL: 'Your provider account did not share an email. Grant email access, then retry.',
   oauth_state: 'Sign-in session expired or could not be verified. Please try again.',
   oauth_denied: 'Sign-in was cancelled at the provider.',
+  cloud_handoff: 'That sign-in link is missing its token. Start again from rekey.dev.',
+  OIDC_ASSERTION_INVALID: 'That sign-in link is not valid — they are single-use and short-lived. Start again from rekey.dev.',
+  OIDC_ASSERTION_NOT_CONFIGURED: 'This deployment does not accept that kind of sign-in.',
   magic_link_missing: 'That sign-in link is missing its token. Request a fresh one.',
   MAGIC_LINK_TOKEN_INVALID: 'That sign-in link is invalid. Request a fresh one.',
   MAGIC_LINK_TOKEN_USED: 'That sign-in link was already used. Request a fresh one.',

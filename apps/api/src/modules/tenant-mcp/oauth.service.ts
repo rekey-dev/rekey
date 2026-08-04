@@ -119,13 +119,37 @@ export function operatorMcpIssuer(): string {
   return `${publicBase()}/api/v1/tenant/mcp`;
 }
 
+/**
+ * Whether anonymous RFC 7591 registration is accepted on this deployment.
+ *
+ * Canonically defined and boot-validated in config/env.ts; read LIVE from
+ * process.env here so an operator can close registration without a restart
+ * (and so tests can exercise both modes). An out-of-range live value falls
+ * back to the boot-validated one — a fat-fingered `disabeld` must never read
+ * as "not disabled" and quietly reopen the door.
+ *
+ * Mirrors `operatorSignupMode()` in modules/tenant-auth.
+ */
+export function operatorMcpRegistrationOpen(): boolean {
+  const live = process.env.OPERATOR_MCP_DYNAMIC_REGISTRATION;
+  if (live === 'open') return true;
+  if (live === 'disabled') return false;
+  return env.OPERATOR_MCP_DYNAMIC_REGISTRATION === 'open';
+}
+
 export function operatorAuthServerMetadata(): Record<string, unknown> {
   const issuer = operatorMcpIssuer();
   return {
     issuer,
     authorization_endpoint: `${issuer}/oauth/authorize`,
     token_endpoint: `${issuer}/oauth/token`,
-    registration_endpoint: `${issuer}/oauth/register`,
+    // Omitted entirely when registration is closed, rather than advertised and
+    // then refused: a client that reads the document learns to ask the operator
+    // for a client_id instead of retrying a 403 forever. Same shape as the
+    // per-Application twin (modules/mcp/oidc.service.ts).
+    ...(operatorMcpRegistrationOpen()
+      ? { registration_endpoint: `${issuer}/oauth/register` }
+      : {}),
     introspection_endpoint: `${issuer}/oauth/introspect`,
     scopes_supported: [...OPERATOR_MCP_SCOPES_SUPPORTED],
     response_types_supported: ['code'],
@@ -182,6 +206,19 @@ export interface RegisterClientInput {
 export const operatorMcpOAuthService = {
   /** RFC 7591 dynamic client registration. Public client (PKCE, no secret). */
   async registerClient(input: RegisterClientInput): Promise<Record<string, unknown>> {
+    // Enforced in the service, not only at the route, so no future caller can
+    // reach registration around the gate.
+    if (!operatorMcpRegistrationOpen()) {
+      // 403, not 404: the endpoint exists and the deployment is real — the
+      // operator closed it. Same code and status as the per-Application twin,
+      // already documented in docs/errors.md.
+      throw new RekeyError({
+        statusCode: 403,
+        code: 'CLIENT_REGISTRATION_DISABLED',
+        message: 'This deployment does not accept dynamic client registration for operator MCP.',
+        fix: 'Ask the deployment administrator for a client_id, or to set OPERATOR_MCP_DYNAMIC_REGISTRATION=open.',
+      });
+    }
     const redirectUris = input.redirectUris.map((u) => u.trim()).filter(Boolean);
     if (redirectUris.length === 0 || redirectUris.length > 20) {
       throw new RekeyError({
@@ -326,6 +363,38 @@ export const operatorMcpOAuthService = {
     });
   },
 
+  /**
+   * Revoke every live refresh token in a chain's family — the operator MCP
+   * analogue of `revokeAllForEndUser` on the end-user surface.
+   *
+   * There is no `familyId` column, and there does not need to be: a chain is
+   * pinned to `(tenantUserId, tenantId, clientId)` at issue time and every
+   * rotation carries the triple forward verbatim, so the triple IS the family.
+   * Walking `replacedById` would be one query per link and would miss any chain
+   * the attacker had already forked off; the triple catches both halves of a
+   * fork in a single statement, which is what "burn the family" has to mean.
+   *
+   * Access tokens are stateless JWTs and are NOT revoked here — same as the
+   * end-user surface. The 15-minute lifetime bounds that; the refresh chain is
+   * the durable credential and it is what a leak actually costs you.
+   */
+  async revokeRefreshFamily(family: {
+    tenantUserId: string;
+    tenantId: string;
+    clientId: string;
+  }): Promise<number> {
+    const { count } = await prisma.tenantMcpRefreshToken.updateMany({
+      where: {
+        tenantUserId: family.tenantUserId,
+        tenantId: family.tenantId,
+        clientId: family.clientId,
+        revokedAt: null,
+      },
+      data: { revokedAt: new Date() },
+    });
+    return count;
+  },
+
   /** refresh_token grant: rotate the refresh token, issue a fresh access token. */
   async refreshGrant(args: {
     refreshToken: string;
@@ -339,18 +408,48 @@ export const operatorMcpOAuthService = {
     const invalid = (): never => {
       throw new OAuthError('invalid_grant', 'Refresh token is invalid, expired, or revoked.');
     };
-    if (!row || row.expiresAt <= new Date() || row.revokedAt !== null) invalid();
+    // An unknown hash names no family, so there is nothing to burn — and
+    // burning on an unknown token would hand anyone a denial-of-service.
+    if (!row) invalid();
     if (row!.clientId !== args.clientId) {
       throw new OAuthError('invalid_grant', 'Refresh token is not valid for this client.');
     }
-    // Atomic revoke — losing the race means somebody already redeemed this
-    // token (reuse attempt → refuse).
+    // Reuse of an ALREADY-ROTATED token is the compromise signal: the chain
+    // moved on, and something is replaying the spent link. Either a thief holds
+    // a copy or the client raced itself, and nothing here can tell those apart —
+    // so the whole family loses value. This is the same discrimination the
+    // end-user path makes (auth.service.ts): `replacedById !== null` means
+    // rotated-then-replayed (burn), `null` means somebody deliberately revoked
+    // this token, and signing the operator out of every other client session
+    // because one was revoked on purpose is the opposite of what they asked for.
+    //
+    // Until this landed the MCP path only ever refused the presented token,
+    // which is exactly backwards: the replay is the legitimate client arriving
+    // second, and the token the ATTACKER rotated into stayed live.
+    if (row!.revokedAt !== null) {
+      if (row!.replacedById !== null) {
+        await this.revokeRefreshFamily(row!);
+        throw new OAuthError(
+          'invalid_grant',
+          'Refresh token has already been used. Every operator MCP token for this client and workspace has been revoked as a precaution.',
+        );
+      }
+      invalid();
+    }
+    if (row!.expiresAt <= new Date()) invalid();
+    // Atomic revoke — losing the race means a concurrent request redeemed the
+    // same token between the read above and here. Indistinguishable from a
+    // replay from this side, so it gets the same treatment.
     const revoked = await prisma.tenantMcpRefreshToken.updateMany({
       where: { id: row!.id, revokedAt: null },
       data: { revokedAt: new Date() },
     });
     if (revoked.count !== 1) {
-      throw new OAuthError('invalid_grant', 'Refresh token could not be rotated (possible reuse).');
+      await this.revokeRefreshFamily(row!);
+      throw new OAuthError(
+        'invalid_grant',
+        'Refresh token rotation lost a race with another request. Every operator MCP token for this client and workspace has been revoked as a precaution.',
+      );
     }
     // Re-confirm membership.
     const membership = await prisma.tenantMembership.findUnique({

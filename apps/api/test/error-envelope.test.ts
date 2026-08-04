@@ -447,3 +447,90 @@ describe('Fastify-internal codes', () => {
     expect(body.error.fix).toMatch(/JSON/);
   });
 });
+
+/**
+ * The envelope is only guaranteed where `RekeyError` is used, and until now
+ * nothing enforced that.
+ *
+ * Three routes built the envelope by hand and so never reached
+ * `rekeyErrorHandler`: `POST …/applications/:id/licenses` (404), `POST
+ * …/applications/:id/end-users` (409), and `GET /api/v1/tenant/mcp` (405).
+ * Each therefore returned neither the `requestId` field nor the
+ * `X-Request-Id` header — and an external audit found the first of them as the
+ * single envelope break across 244 operations checked. That is not "three
+ * routes forgot a field", it is an invariant with no enforcement: the other
+ * 241 are consistent only because their authors happened to throw.
+ *
+ * This is a STATIC check, deliberately. Walking every registered route at
+ * runtime would mean authenticating 244 operations and provoking an error on
+ * each — expensive, and it would still only cover the errors we managed to
+ * provoke. Grepping the source covers every branch whether or not a test can
+ * reach it, in milliseconds, and fails on the next one somebody writes.
+ *
+ * The rule: any object literal in `src/` carrying `success: false` must also
+ * carry `requestId`. Responses that are deliberately NOT this envelope don't
+ * match at all — the OAuth2/RFC-6749 `{error, error_description}` bodies in
+ * `mcp.routes.ts` and `tenant-mcp/oauth.routes.ts`, the `/health` probe body,
+ * and the `{received, processed}` webhook receipt.
+ */
+describe('error envelope invariant (static)', () => {
+  it('every hand-built `success: false` response in src/ also carries requestId', async () => {
+    const { readdir, readFile } = await import('node:fs/promises');
+    const path = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const srcDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../src');
+
+    async function walk(dir: string): Promise<string[]> {
+      const entries = await readdir(dir, { withFileTypes: true });
+      const out: string[] = [];
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) out.push(...(await walk(full)));
+        else if (e.name.endsWith('.ts')) out.push(full);
+      }
+      return out;
+    }
+
+    /**
+     * `lib/openapi.ts` DESCRIBES the envelope rather than building one.
+     *
+     * Its `ErrorResponseSchema` is a JSON Schema whose `success` property is
+     * `enum: [false]`, and the `requestId` it requires lives in a separate
+     * const (`RekeyErrorObject`) further up the file — outside the 14-line
+     * window this scan reads. So the scan sees a `success: false` with no
+     * `requestId` near it and reports a schema definition as a hand-built
+     * response.
+     *
+     * Excluded by path rather than by widening the window: a wider window
+     * would start swallowing the *next* statement in real route files, which
+     * is exactly how this check would stop catching the thing it exists for.
+     * This file constructs no runtime response at all, so there is nothing
+     * here for it to miss.
+     */
+    const SCHEMA_ONLY = new Set(['lib/openapi.ts']);
+
+    const offenders: string[] = [];
+    for (const file of await walk(srcDir)) {
+      if (SCHEMA_ONLY.has(path.relative(srcDir, file))) continue;
+      const text = await readFile(file, 'utf8');
+      const lines = text.split('\n');
+      lines.forEach((line, i) => {
+        if (!/success:\s*false/.test(line)) return;
+        // The envelope is at most a handful of lines long; `requestId` has to
+        // appear inside it. 14 lines comfortably spans the longest real one
+        // (the dependency-outage branch) without reaching the next statement.
+        const window = lines.slice(i, i + 14).join('\n');
+        if (!/requestId/.test(window)) {
+          offenders.push(`${path.relative(srcDir, file)}:${i + 1}`);
+        }
+      });
+    }
+
+    expect(
+      offenders,
+      'These build the error envelope by hand without `requestId`, so they bypass ' +
+        'rekeyErrorHandler. Throw a RekeyError instead — it supplies requestId and the ' +
+        'X-Request-Id header for free.',
+    ).toEqual([]);
+  });
+});

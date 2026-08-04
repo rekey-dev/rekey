@@ -20,8 +20,9 @@
  */
 
 import type { Command } from 'commander';
+import type { Paged } from '@rekey.dev/node';
 import { ok, fail, readGlobalOpts } from '../lib/output.js';
-import { adminRequest } from '../lib/api.js';
+import { adminRequest, listQuery, readListOpts, withListOptions } from '../lib/api.js';
 
 interface PlanDto {
   id: string;
@@ -44,18 +45,27 @@ interface PlanDto {
 export function registerPlansCommand(program: Command): void {
   const plans = program.command('plans').description('Manage Plans');
 
-  plans
-    .command('list')
-    .description('List Plans for an Application')
-    .requiredOption('--app <id>', 'Application id')
-    .option('--include-inactive', 'Include deactivated plans', false)
-    .action(async function (this: Command, opts: { app: string; includeInactive: boolean }) {
+  withListOptions(
+    plans
+      .command('list')
+      .description('List Plans for an Application')
+      .requiredOption('--app <id>', 'Application id')
+      .option('--include-inactive', 'Include deactivated plans', false),
+  )
+    .action(async function (
+      this: Command,
+      opts: { app: string; includeInactive: boolean; limit?: string; offset?: string },
+    ) {
       const ctx = readGlobalOpts(this);
-      const path = `/api/v1/admin/applications/${encodeURIComponent(opts.app)}/plans${
-        opts.includeInactive ? '?includeInactive=true' : ''
-      }`;
-      const data = await adminRequest<PlanDto[]>({ ctx, method: 'GET', path });
-      ok(ctx, { plans: data }, (d) => {
+      const qs = listQuery({
+        ...(opts.includeInactive ? { includeInactive: 'true' } : {}),
+        ...readListOpts(opts),
+      });
+      const path = `/api/v1/admin/applications/${encodeURIComponent(opts.app)}/plans${qs}`;
+      // `{items, page}` since 2.0.0-rc.3 — see `apps list` for why the page is
+      // printed rather than silently dropped.
+      const data = await adminRequest<Paged<PlanDto>>({ ctx, method: 'GET', path });
+      ok(ctx, { plans: data.items, page: data.page }, (d) => {
         if (d.plans.length === 0) {
           process.stdout.write('(no plans)\n');
           return;
@@ -64,6 +74,13 @@ export function registerPlansCommand(program: Command): void {
           const flag = p.active ? '  ' : ' [inactive] ';
           process.stdout.write(
             `${p.slug.padEnd(20)} ${String(p.amount).padStart(8)} ${p.currency}/${p.interval}${flag}${p.name}\n`,
+          );
+        }
+        if (d.page.hasMore) {
+          process.stdout.write(
+            `\nShowing ${d.plans.length} of ${d.page.total}. Pass --offset ${
+              d.page.offset + d.page.limit
+            } for the next page.\n`,
           );
         }
       });

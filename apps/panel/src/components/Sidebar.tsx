@@ -32,6 +32,26 @@ interface NavItem {
   icon: React.JSX.Element;
   /** Optional hover tooltip — for items whose label needs a one-line gloss. */
   title?: string;
+  /**
+   * Hide this item below this role.
+   *
+   * The nav used to list every destination to everyone, which was survivable
+   * only because the pages behind them happened to be readable by everyone.
+   * Once the workspace audit surfaces were lowered to an ADMIN floor, a MEMBER
+   * was left with links that navigate to a 403 — the worst version of a
+   * permission error, because the product itself suggested the click.
+   *
+   * Gating the nav is presentation, not enforcement: the API is the only thing
+   * that decides, and it still refuses these routes for a MEMBER who types the
+   * URL. This just stops us advertising a door that is locked.
+   */
+  minRole?: 'ADMIN';
+}
+
+/** OWNER outranks ADMIN outranks MEMBER; anything unrecognised is treated as lowest. */
+function meetsRole(activeRole: string, minRole: NavItem['minRole']): boolean {
+  if (!minRole) return true;
+  return activeRole === 'OWNER' || activeRole === 'ADMIN';
 }
 
 const ICONS = {
@@ -146,8 +166,8 @@ const NAV: NavSection[] = [
     // Everything log/history-shaped, grouped together.
     heading: 'Logs',
     items: [
-      { href: '/audit-log', label: 'Audit log', icon: ICONS.audit },
-      { href: '/email-logs', label: 'Email logs', icon: ICONS.mail },
+      { href: '/audit-log', label: 'Audit log', icon: ICONS.audit, minRole: 'ADMIN' },
+      { href: '/email-logs', label: 'Email logs', icon: ICONS.mail, minRole: 'ADMIN' },
       { href: '/account/activity', label: 'My requests', icon: ICONS.activity },
     ],
   },
@@ -180,7 +200,8 @@ export function Sidebar({
   activeRole: string;
   userEmail: string;
   switchAction: (formData: FormData) => Promise<void>;
-  createWorkspaceAction: (formData: FormData) => Promise<void>;
+  /** Omitted when this deployment does not allow additional workspaces. */
+  createWorkspaceAction?: ((formData: FormData) => Promise<void>) | undefined;
   signOutAction: () => Promise<void>;
 }): React.JSX.Element {
   const pathname = usePathname();
@@ -204,7 +225,7 @@ export function Sidebar({
           memberships={memberships}
           activeTenantId={activeTenantId}
           switchAction={switchAction}
-          createAction={createWorkspaceAction}
+          {...(createWorkspaceAction && { createAction: createWorkspaceAction })}
         />
         <p className="mt-2 text-[10px] font-medium uppercase tracking-wider text-[var(--color-faint-fg)]">
           {activeRole}
@@ -213,12 +234,19 @@ export function Sidebar({
       </div>
 
       <nav className="flex-1 space-y-2 overflow-y-auto px-2 py-2">
-        {NAV.map((section) => (
+        {NAV.filter((section) =>
+          // A heading with nothing under it reads as a broken nav rather than a
+          // permission boundary. Today no section empties out for any role, but
+          // gating one more item would silently produce one.
+          section.items.some((item) => meetsRole(activeRole, item.minRole)),
+        ).map((section) => (
           <div key={section.heading} className="space-y-0.5">
             <p className="px-2 pt-2 pb-1 text-[10px] font-medium uppercase tracking-wider text-[var(--color-faint-fg)]">
               {section.heading}
             </p>
-            {section.items.map((item) => {
+            {section.items
+              .filter((item) => meetsRole(activeRole, item.minRole))
+              .map((item) => {
               const active = isActive(item.href);
               return (
                 <Link

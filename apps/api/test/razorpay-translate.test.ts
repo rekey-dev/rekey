@@ -197,7 +197,11 @@ describe('razorpay module translate', () => {
     ).toBeNull();
   });
 
-  it('extractEventId prefers the x-razorpay-event-id header, falls back deterministically', () => {
+  // The header is OUTSIDE the HMAC, so preferring it meant one captured signed
+  // body replayed forever under fresh header ids — defeating the
+  // (applicationId, provider, providerEventId) uniqueness that stops replays.
+  // The id is now derived from signed content only.
+  it('extractEventId ignores the unsigned x-razorpay-event-id header', () => {
     const payload = { event: 'subscription.charged', created_at: 123 };
     const req = (headers: Record<string, string>): RawWebhookReq => ({
       rawBody: JSON.stringify(payload),
@@ -205,11 +209,18 @@ describe('razorpay module translate', () => {
       params: { provider: 'razorpay', slug: 'app' },
       payload,
     });
-    expect(razorpayModule.webhook.extractEventId(payload, req({ 'x-razorpay-event-id': 'evt_h' }))).toBe(
-      'evt_h',
+    const withHeader = razorpayModule.webhook.extractEventId(
+      payload,
+      req({ 'x-razorpay-event-id': 'evt_h' }),
     );
+    const without = razorpayModule.webhook.extractEventId(payload, req({}));
+    // Same signed body → same id, whatever the attacker puts in the header.
+    expect(withHeader).toBe(without);
+    expect(withHeader).not.toBe('evt_h');
     const fallback = razorpayModule.webhook.extractEventId(payload, req({}));
-    expect(fallback).toMatch(/^rzp_subscription\.charged_123_[0-9a-f]{24}$/);
+    // Full sha256 of the signed body — length is an implementation detail,
+    // that it is derived from the body is the property that matters.
+    expect(fallback).toMatch(/^rzp_subscription\.charged_123_[0-9a-f]+$/);
     // Deterministic — the same body yields the same idempotency key.
     expect(razorpayModule.webhook.extractEventId(payload, req({}))).toBe(fallback);
   });

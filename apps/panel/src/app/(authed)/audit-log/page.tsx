@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import { formatDateTime } from '@/lib/date';
 import { api, type SecurityEventRow } from '@/lib/api';
 import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
+import type { Page } from '@/lib/paginate';
 import { PageHeader } from '@/components/PageHeader';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
@@ -83,7 +84,7 @@ export default async function AuditLogPage({
   }
   qs.set('limit', String(PAGE_SIZE));
   if (offset) qs.set('offset', String(offset));
-  const { events } = await api<{ events: SecurityEventRow[] }>({
+  const { items: events, page } = await api<Page<SecurityEventRow>>({
     method: 'GET',
     path: `/api/v1/tenant/security-events?${qs.toString()}`,
   });
@@ -225,6 +226,7 @@ export default async function AuditLogPage({
         offset={offset}
         pageSize={PAGE_SIZE}
         count={events.length}
+        hasMore={page.hasMore}
         extraParams={Object.keys(extraParams).length ? extraParams : undefined}
       />
     </section>

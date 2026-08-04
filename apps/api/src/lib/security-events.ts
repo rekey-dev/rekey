@@ -15,6 +15,25 @@ import { prisma } from './prisma.js';
 
 export type SecurityActorType = 'operator' | 'end_user' | 'system';
 
+/**
+ * Event types this API emits that `@rekey.dev/shared-types` does not label yet.
+ *
+ * The rule stays what it was — an emit site names a type from the shared union,
+ * so the panel can label it — and this is the documented exception, not a way
+ * around it. Both entries are the operator counterparts of `user.sign_in_failed`
+ * / `user.locked_out`, added when operator sign-in failures were found to be
+ * recorded nowhere at all. `humanizeSecurityEventType` degrades an unlabelled
+ * key gracefully ("Sign in failed", "Locked out") rather than printing it raw,
+ * so the panel is readable in the meantime.
+ *
+ * **Delete these two entries the moment shared-types carries them.** Nothing
+ * breaks if you forget — the union just stops narrowing usefully.
+ */
+export type PendingSecurityEventType = 'operator.sign_in_failed' | 'operator.locked_out';
+
+/** Every type an emit site in this API may name. */
+export type EmittableSecurityEventType = SecurityEventType | PendingSecurityEventType;
+
 export interface SecurityEventInput {
   /**
    * Dotted event name, e.g. "operator.sign_in", "app.sessions_rotated".
@@ -24,9 +43,11 @@ export interface SecurityEventInput {
    * a bare `string` on both sides is how the panel ended up rendering 44 of
    * the 54 types as raw keys: nothing connected an emit site to the list of
    * things anyone could display. Adding an event now means adding it there,
-   * with a label, or this does not compile.
+   * with a label, or this does not compile — the sole exception being
+   * `PendingSecurityEventType`, which is enumerated above and is not a hole a
+   * new event can slip through unnoticed.
    */
-  type: SecurityEventType;
+  type: EmittableSecurityEventType;
   actorType: SecurityActorType;
   actorId?: string | null;
   tenantId?: string | null;
@@ -88,6 +109,32 @@ export interface SecurityEventQuery {
   cap?: number | undefined;
 }
 
+/**
+ * The filter `listSecurityEvents` and `countSecurityEvents` share.
+ *
+ * One builder for both: a `total` computed over a different filter than the
+ * rows is a pager that walks off the end of the log.
+ */
+function securityEventWhere(query: SecurityEventQuery) {
+  return {
+    tenantId: query.tenantId,
+    ...(query.applicationId !== undefined && { applicationId: query.applicationId }),
+    ...(query.type !== undefined && { type: query.type }),
+    ...(query.actorType !== undefined && { actorType: query.actorType }),
+    ...((query.from || query.to) && {
+      createdAt: {
+        ...(query.from && { gte: query.from }),
+        ...(query.to && { lte: query.to }),
+      },
+    }),
+  };
+}
+
+/** Total events matching the same filters `listSecurityEvents` applies. */
+export async function countSecurityEvents(query: SecurityEventQuery): Promise<number> {
+  return prisma.securityEvent.count({ where: securityEventWhere(query) });
+}
+
 /** List recent security events for a tenant (newest first, capped at `cap` — default 200). */
 export async function listSecurityEvents(query: SecurityEventQuery): Promise<
   Array<{
@@ -103,18 +150,7 @@ export async function listSecurityEvents(query: SecurityEventQuery): Promise<
   }>
 > {
   const rows = await prisma.securityEvent.findMany({
-    where: {
-      tenantId: query.tenantId,
-      ...(query.applicationId !== undefined && { applicationId: query.applicationId }),
-      ...(query.type !== undefined && { type: query.type }),
-      ...(query.actorType !== undefined && { actorType: query.actorType }),
-      ...((query.from || query.to) && {
-        createdAt: {
-          ...(query.from && { gte: query.from }),
-          ...(query.to && { lte: query.to }),
-        },
-      }),
-    },
+    where: securityEventWhere(query),
     // Stable secondary order by id keeps pagination consistent on ties.
     orderBy: [
       query.sort === 'type'

@@ -34,7 +34,59 @@ import { organizationsService } from './organizations.service.js';
 import { authService } from '../auth/auth.service.js';
 import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
-import { PaginationQuery, parsePagination, paginationJsonSchema } from '../../lib/pagination.js';
+import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
+import { ok, okPage, errs, ref, type JsonSchema } from '../../lib/openapi.js';
+
+/**
+ * The auth errors shared by every route in both plugins below —
+ * `requirePublishableOrSecretKey` + `requireScope('auth:write')` +
+ * `requireUserSession` all run as `onRequest` hooks before any handler.
+ */
+const ORG_AUTH_ERRORS = {
+  401:
+    'API_KEY_MISSING / API_KEY_INVALID / PUBLISHABLE_KEY_INVALID — missing or invalid ' +
+    'Application credential; or USER_TOKEN_MISSING / USER_TOKEN_INVALID / ' +
+    'USER_TOKEN_WRONG_APPLICATION / IMPERSONATION_SESSION_ENDED — missing, invalid, or ' +
+    "mismatched end-user token (X-Rekey-User-Token).",
+  403:
+    'IP_NOT_ALLOWED / ORIGIN_NOT_ALLOWED — the caller is outside the presented key\'s ' +
+    "allowlist; or API_KEY_SCOPE_INSUFFICIENT — a secret key was presented without the " +
+    '`auth:write` scope.',
+} as const;
+
+/**
+ * `setMemberRole` / `acceptInvitation` return a trimmed membership row without
+ * `email` (unlike `OrganizationMemberDtoSchema`, which requires it) — write it
+ * inline rather than `ref('OrganizationMember')` so the doc does not claim a
+ * field these two responses never carry.
+ */
+const ORG_MEMBERSHIP_CORE_PROPERTIES = {
+  id: { type: 'string' },
+  organizationId: { type: 'string' },
+  endUserId: { type: 'string' },
+  role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+} as const;
+
+const OrgMembershipCore: JsonSchema = {
+  type: 'object',
+  properties: ORG_MEMBERSHIP_CORE_PROPERTIES,
+  required: ['id', 'organizationId', 'endUserId', 'role'],
+};
+
+const OrgMembershipWithCreatedAt: JsonSchema = {
+  type: 'object',
+  properties: {
+    ...ORG_MEMBERSHIP_CORE_PROPERTIES,
+    createdAt: { type: 'string', format: 'date-time' },
+  },
+  required: ['id', 'organizationId', 'endUserId', 'role', 'createdAt'],
+};
+
+const RemovedFlag: JsonSchema = {
+  type: 'object',
+  properties: { removed: { type: 'boolean' } },
+  required: ['removed'],
+};
 
 const OrgRoleZ = z.enum(['OWNER', 'ADMIN', 'MEMBER']);
 
@@ -97,6 +149,23 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           },
         },
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: { organization: ref('Organization'), membership: OrgMembershipWithCreatedAt },
+              required: ['organization', 'membership'],
+            },
+            'The created organization and the caller\'s (OWNER) membership.',
+          ),
+          ...errs({
+            ...ORG_AUTH_ERRORS,
+            400:
+              'ORGANIZATIONS_NOT_ENABLED — `authConfig.organizationsEnabled` is false on this ' +
+              'Application; or ORGANIZATION_SLUG_INVALID — slug fails `[a-z0-9-]`, 1-40 chars.',
+            409: 'ORGANIZATION_SLUG_TAKEN — another organization on this Application already uses that slug.',
+          }),
+        },
       },
     },
     async (req, reply) => {
@@ -120,19 +189,34 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         summary: 'List the caller\'s organizations (with their role in each)',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(ref('OrganizationWithRole'), 'A page of organizations the caller belongs to.'),
+          ...errs(ORG_AUTH_ERRORS),
+        },
       },
     },
     async (req) => {
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
-      const rows = await organizationsService.listMine({
-        application: req.application!,
-        endUserId: req.endUser!.id,
-        take,
-        skip,
-      });
+      const [rows, total] = await Promise.all([
+        organizationsService.listMine({
+          application: req.application!,
+          endUserId: req.endUser!.id,
+          take,
+          skip,
+        }),
+        organizationsService.countMine({
+          application: req.application!,
+          endUserId: req.endUser!.id,
+        }),
+      ]);
       return {
         success: true,
-        data: rows.map((r) => ({ ...shapeOrg(r), role: r.role })),
+        data: paged(
+          rows.map((r) => ({ ...shapeOrg(r), role: r.role })),
+          total,
+          take,
+          skip,
+        ),
       };
     },
   );
@@ -144,6 +228,13 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         tags: ['Public · Organizations'],
         summary: 'Fetch one organization the caller belongs to',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        response: {
+          200: ok(ref('OrganizationWithRole'), 'The organization, with the caller\'s role.'),
+          ...errs({
+            ...ORG_AUTH_ERRORS,
+            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member of this organization.`,
+          }),
+        },
       },
     },
     async (req) => {
@@ -171,6 +262,16 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           },
         },
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        response: {
+          200: ok(ref('Organization'), 'The updated organization.'),
+          ...errs({
+            ...ORG_AUTH_ERRORS,
+            403:
+              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member ` +
+              'of this organization; or ORGANIZATION_ROLE_INSUFFICIENT — the caller is a MEMBER ' +
+              '(update requires OWNER or ADMIN).',
+          }),
+        },
       },
     },
     async (req) => {
@@ -195,28 +296,47 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         summary: 'List members of an org the caller belongs to',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(ref('OrganizationMember'), 'A page of members of the organization.'),
+          ...errs({
+            ...ORG_AUTH_ERRORS,
+            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member of this organization.`,
+          }),
+        },
       },
     },
     async (req) => {
       const { id } = OrgParam.parse(req.params);
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
-      const rows = await organizationsService.listMembers({
-        application: req.application!,
-        actorEndUserId: req.endUser!.id,
-        organizationId: id,
-        take,
-        skip,
-      });
+      const [rows, total] = await Promise.all([
+        organizationsService.listMembers({
+          application: req.application!,
+          actorEndUserId: req.endUser!.id,
+          organizationId: id,
+          take,
+          skip,
+        }),
+        organizationsService.countMembers({
+          application: req.application!,
+          actorEndUserId: req.endUser!.id,
+          organizationId: id,
+        }),
+      ]);
       return {
         success: true,
-        data: rows.map((r) => ({
-          id: r.id,
-          organizationId: r.organizationId,
-          endUserId: r.endUserId,
-          email: r.email,
-          role: r.role,
-          createdAt: r.createdAt.toISOString(),
-        })),
+        data: paged(
+          rows.map((r) => ({
+            id: r.id,
+            organizationId: r.organizationId,
+            endUserId: r.endUserId,
+            email: r.email,
+            role: r.role,
+            createdAt: r.createdAt.toISOString(),
+          })),
+          total,
+          take,
+          skip,
+        ),
       };
     },
   );
@@ -236,6 +356,31 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           },
         },
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: {
+                invitation: ref('OrganizationInvitation'),
+                token: {
+                  type: 'string',
+                  description: 'Raw invitation token. Shown exactly once — store it now.',
+                },
+                warning: { type: 'string' },
+              },
+              required: ['invitation', 'token', 'warning'],
+            },
+            'The created invitation.',
+          ),
+          ...errs({
+            ...ORG_AUTH_ERRORS,
+            403:
+              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member ` +
+              'of this organization; or ORGANIZATION_ROLE_INSUFFICIENT — the caller\'s role ' +
+              'cannot invite to the requested role (ADMIN cannot invite an OWNER).',
+            409: 'ORGANIZATION_ALREADY_MEMBER — that email is already a member of this organization.',
+          }),
+        },
       },
     },
     async (req, reply) => {
@@ -274,6 +419,24 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         tags: ['Public · Organizations'],
         summary: 'Revoke a pending invitation (OWNER + ADMIN)',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: { revoked: { type: 'boolean' } },
+              required: ['revoked'],
+            },
+            'Whether the invitation was revoked (false if it was already accepted/revoked).',
+          ),
+          ...errs({
+            ...ORG_AUTH_ERRORS,
+            403:
+              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member ` +
+              'of this organization; or ORGANIZATION_ROLE_INSUFFICIENT — the caller is a MEMBER ' +
+              '(revoke requires OWNER or ADMIN).',
+            404: 'ORGANIZATION_INVITATION_NOT_FOUND — no invitation with that id in this organization.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -300,6 +463,18 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           properties: { role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] } },
         },
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        response: {
+          200: ok(OrgMembershipCore, "The target's updated membership."),
+          ...errs({
+            ...ORG_AUTH_ERRORS,
+            403:
+              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member ` +
+              "of this organization; or ORGANIZATION_ROLE_INSUFFICIENT — the caller's role " +
+              "cannot manage the target's current or requested role.",
+            404: 'ORGANIZATION_MEMBER_NOT_FOUND — that user is not a member of this organization.',
+            409: 'ORGANIZATION_LAST_OWNER — cannot demote the only OWNER; promote another member first.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -331,6 +506,17 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         tags: ['Public · Organizations'],
         summary: 'Remove a member (or self). Refuses removing the last OWNER.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        response: {
+          200: ok(RemovedFlag, 'Whether the member was removed (false if they were never a member).'),
+          ...errs({
+            ...ORG_AUTH_ERRORS,
+            403:
+              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member ` +
+              "of this organization; or ORGANIZATION_ROLE_INSUFFICIENT — the caller's role " +
+              'cannot remove the target (self-removal is always allowed).',
+            409: 'ORGANIZATION_LAST_OWNER — cannot remove the only OWNER; transfer ownership first.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -352,6 +538,14 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         tags: ['Public · Organizations'],
         summary: 'Self-leave. OWNERs cannot leave (billing is tied to them) — transfer ownership first.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        response: {
+          200: ok(RemovedFlag, 'Whether the caller was removed.'),
+          ...errs({
+            ...ORG_AUTH_ERRORS,
+            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member of this organization.`,
+            409: 'ORGANIZATION_OWNER_CANNOT_LEAVE — an OWNER cannot leave; transfer ownership first.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -379,6 +573,13 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           'without an explicit `organizationId`. The active org survives refresh until you switch ' +
           'again, clear it, or leave the org.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        response: {
+          200: ok(ref('AuthResult'), 'A fresh session pair carrying the active org.'),
+          ...errs({
+            ...ORG_AUTH_ERRORS,
+            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member of this organization.`,
+          }),
+        },
       },
     },
     async (req) => {
@@ -405,6 +606,10 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         tags: ['Public · Organizations'],
         summary: 'Clear the active org (back to the personal pool); re-mints the token pair',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        response: {
+          200: ok(ref('AuthResult'), 'A fresh session pair with no active org.'),
+          ...errs(ORG_AUTH_ERRORS),
+        },
       },
     },
     async (req) => {
@@ -447,7 +652,11 @@ export async function organizationsAcceptInvitationRoutes(app: FastifyInstance):
           'Callable from a browser with the publishable key plus the invitee\'s own ' +
           'end-user token. Creating an invitation already accepted the publishable ' +
           'key, so requiring a secret key here left the flow dead-ended: a portal ' +
-          'could invite someone but never let them accept.',
+          'could invite someone but never let them accept.\n\n' +
+          'The signed-in user\'s email must MATCH the address the invitation names — ' +
+          '403 `ORGANIZATION_INVITATION_EMAIL_MISMATCH` otherwise. An invite link travels ' +
+          'by email or chat and can be forwarded, so without that binding anyone holding ' +
+          'the link joins at the invited role (up to OWNER).',
         body: {
           type: 'object',
           required: ['token'],
@@ -457,6 +666,27 @@ export async function organizationsAcceptInvitationRoutes(app: FastifyInstance):
           { publishableKey: [], userToken: [] },
           { apiKey: [], userToken: [] },
         ],
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: { membership: OrgMembershipWithCreatedAt },
+              required: ['membership'],
+            },
+            'The newly created membership.',
+          ),
+          ...errs({
+            ...ORG_AUTH_ERRORS,
+            400:
+              'ORGANIZATION_INVITATION_NOT_USABLE — the token is missing, revoked, or already ' +
+              'accepted; or ORGANIZATION_INVITATION_EXPIRED — past its `expiresAt`.',
+            401: `${ORG_AUTH_ERRORS[401]} Or ORGANIZATION_INVITATION_WRONG_APPLICATION — the ` +
+              'invitation belongs to a different Application than the presented key.',
+            403:
+              `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_INVITATION_EMAIL_MISMATCH — the signed-in ` +
+              "end-user's email does not match the invited address.",
+          }),
+        },
       },
     },
     async (req) => {

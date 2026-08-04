@@ -38,6 +38,15 @@ export interface SessionCoupon {
   couponId: string;
   /** Discount in the smallest currency unit, as resolved at checkout time. */
   discountAmount: number;
+  /**
+   * The `maxRedemptions` reservation this checkout took, when the coupon has a
+   * global limit (see the RESERVED rows in coupons.service.ts). Carried on the session rather than
+   * the row because the hold belongs to ONE checkout: completing session N must
+   * release session N's slot and nobody else's. Absent for unlimited coupons
+   * and for sessions written before holds existed — releasing is a no-op then,
+   * and the hold expires on its own TTL either way.
+   */
+  holdId?: string;
 }
 
 /** Shape of the subscription metadata this module owns. */
@@ -91,6 +100,7 @@ export function buildCheckoutSessionMetadata(input: {
     couponBySession[id] = {
       couponId: entry.couponId,
       discountAmount: typeof entry.discountAmount === 'number' ? entry.discountAmount : 0,
+      ...(typeof entry.holdId === 'string' && { holdId: entry.holdId }),
     };
   }
   if (input.coupon) couponBySession[input.sessionId] = input.coupon;
@@ -151,6 +161,7 @@ export function couponForSession(metadata: unknown, sessionId: string): SessionC
       couponId: perSession.couponId,
       discountAmount:
         typeof perSession.discountAmount === 'number' ? perSession.discountAmount : 0,
+      ...(typeof perSession.holdId === 'string' && { holdId: perSession.holdId }),
     };
   }
   if (meta.checkoutSessionId === sessionId && typeof meta.couponId === 'string') {
@@ -162,8 +173,10 @@ export function couponForSession(metadata: unknown, sessionId: string): SessionC
   return null;
 }
 
-/** The row's newest checkout session id, or null when it has none. */
-export function newestCheckoutSessionId(metadata: unknown): string | null {
-  const meta = asRecord(metadata);
-  return typeof meta.checkoutSessionId === 'string' ? meta.checkoutSessionId : null;
-}
+// There was a `newestCheckoutSessionId(metadata)` helper here, and it is gone
+// on purpose. Its one caller was the payment applier, which used it to pick the
+// coupon a payment redeemed — and "the row's newest session" is not "the
+// session this payment settled". Opening a new discounted checkout and then
+// letting the existing subscription renew redeemed the new coupon off the
+// renewal invoice, for free, every period. Appliers key off the session the
+// EVENT names; nothing should reach for the newest again.

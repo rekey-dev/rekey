@@ -196,10 +196,13 @@ describe('coupons', () => {
 
   // ---------- apply on checkout ----------
 
-  it('applies a coupon on checkout WITHOUT recording redemption (deferred to payment success)', async () => {
-    // Audit fix 2026-05-19: redemption is recorded by the Stripe webhook
-    // at invoice.paid time, not at checkout creation. Abandoned checkouts
-    // no longer consume per-user / global redemption limits.
+  it('applies a coupon on checkout as a RESERVED redemption, settled at payment', async () => {
+    // Two audits, two halves of the same rule. 2026-05-19: a redemption is not
+    // SETTLED at checkout, so an abandoned checkout does not permanently burn a
+    // per-user / global limit. 2026-08-02: it is RESERVED at checkout, because
+    // the discount reaches the processor the moment the session is created and
+    // a limit checked against rows the payment webhook has not written yet
+    // bounds nothing.
     await createCoupon({ code: 'half', discountType: 'PERCENT', amountOff: 5000 });
 
     const res = await app.inject({
@@ -216,18 +219,32 @@ describe('coupons', () => {
     expect(res.statusCode).toBe(200);
     const data = res.json().data as {
       discountAmount: number;
-      subscription: { id: string; metadata: { couponId?: string; discountAmount?: number } };
+      subscription: {
+        id: string;
+        metadata: { couponId?: string; discountAmount?: number; checkoutSessionId: string };
+      };
     };
     expect(data.discountAmount).toBe(499); // 50% of 999 floor
     // The couponId rides on subscription metadata so the webhook can find
     // it at payment-success time.
     expect(data.subscription.metadata.couponId).toBeTruthy();
 
-    // Critically: no redemption row exists yet.
-    const redemptions = await prisma.couponRedemption.findMany({
-      where: { applicationId, subscriptionId: data.subscription.id },
+    // A reservation exists, bound to the session the provider just minted the
+    // discount on, and it expires on its own so an abandoned checkout gives the
+    // slot back.
+    const redemptions = await prisma.couponRedemption.findMany({ where: { applicationId } });
+    expect(redemptions).toHaveLength(1);
+    expect(redemptions[0]!).toMatchObject({
+      status: 'RESERVED',
+      checkoutSessionId: data.subscription.metadata.checkoutSessionId,
+      discountAmount: 499,
     });
-    expect(redemptions).toHaveLength(0);
+    expect(redemptions[0]!.expiresAt!.getTime()).toBeGreaterThan(Date.now());
+    // Nothing is SETTLED — no money has moved, and the operator's redemption
+    // stats must not count an open checkout.
+    expect(
+      await prisma.couponRedemption.count({ where: { applicationId, status: 'CONFIRMED' } }),
+    ).toBe(0);
   });
 
   it('a bad coupon on checkout rejects the whole checkout', async () => {

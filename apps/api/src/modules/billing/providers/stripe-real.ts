@@ -13,6 +13,7 @@
 
 import Stripe from 'stripe';
 import { RekeyError } from '../../../lib/error.js';
+import { planNotRegisteredError } from '../../plans/plan-registration.js';
 import type {
   BillingProvider,
   CancelSubscriptionInput,
@@ -188,11 +189,18 @@ export class RealStripeProvider implements BillingProvider {
   async createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
     const priceId = (input.plan.metadata as { stripe?: { priceId?: string } } | null)?.stripe?.priceId;
     if (!priceId) {
-      // Should never happen — plansService.create calls ensurePlanRegistered
-      // first. Belt-and-braces: bail loudly.
-      throw new Error(
-        `Plan "${input.plan.slug}" has no Stripe priceId in metadata. Re-create the plan to register it.`,
-      );
+      // Reachable, and it was reached: a plan whose eager registration was
+      // refused used to be committed active anyway, so it sat on the pricing
+      // page until a buyer clicked it and arrived here. `plansService` now
+      // keeps such a plan off the catalogue, and a legacy row from before that
+      // fix still lands here — with a named 409 and the operator's repair
+      // instead of the bare `Error` that became "An unexpected error occurred",
+      // 500, and a cause visible only in a server log.
+      throw planNotRegisteredError({
+        planSlug: input.plan.slug,
+        provider: 'Stripe',
+        applicationId: input.application.id,
+      });
     }
 
     const minted = input.discount ? await this.createDiscount(input.discount) : undefined;

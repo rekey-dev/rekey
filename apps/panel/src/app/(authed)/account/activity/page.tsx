@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { api, type ApiRequestLogRow } from '@/lib/api';
+import type { Page } from '@/lib/paginate';
 import { RequestLogTable } from '@/components/RequestLogTable';
 import { Pager, readPageSize } from '@/components/Pager';
 
@@ -22,7 +23,11 @@ export default async function AccountActivityPage({
   const qs = new URLSearchParams({ limit: String(PAGE_SIZE) });
   if (offset) qs.set('offset', String(offset));
 
-  const { requests } = await api<{ requests: ApiRequestLogRow[] }>({
+  // `page.total` counts what the pruner has left for this operator, not every
+  // request they have ever made — the route is a capped convenience tail. It is
+  // still the real answer to "is there another page", which the old
+  // `{requests: […]}` wrapper could not give at all.
+  const { items: requests, page } = await api<Page<ApiRequestLogRow>>({
     method: 'GET',
     path: `/api/v1/tenant/auth/requests?${qs.toString()}`,
   });
@@ -46,7 +51,13 @@ export default async function AccountActivityPage({
         <RequestLogTable rows={requests} />
       )}
 
-      <Pager basePath="/account/activity" offset={offset} pageSize={PAGE_SIZE} count={requests.length} />
+      <Pager
+        basePath="/account/activity"
+        offset={offset}
+        pageSize={PAGE_SIZE}
+        count={requests.length}
+        hasMore={page.hasMore}
+      />
     </section>
   );
 }

@@ -21,6 +21,15 @@
  * use the modal pass it both here and in their server-action redirects:
  *   redirect(`/.../page?error=…&newPlan=1`) → modalKey="newPlan"
  *
+ * When a page renders ONE modal PER ROW, the flag has to say which row —
+ * pass `modalValue` and redirect with that value instead of `1`:
+ *   redirect(`/.../page?error=…&editUser=${id}`) → modalKey="editUser"
+ *                                                  modalValue={user.id}
+ * Only the row whose value matches reopens. Encoding the row into the key
+ * itself (modalKey={`editUser_${id}`} + `?editUser=${id}`) does NOT work:
+ * the lookup is by key, so it misses and the modal silently stays shut while
+ * the error renders inside a closed <dialog> — invisible.
+ *
  * If you don't need reopen-on-error, omit `modalKey`.
  *
  * **A11y model (post-Audit-3):**
@@ -36,6 +45,7 @@
 
 import * as React from 'react';
 import { useSearchParams, useRouter, usePathname } from 'next/navigation';
+import { shouldReopen } from '@/lib/modal-reopen';
 
 /**
  * Stable dialog id, identical on the server and the client.
@@ -130,6 +140,7 @@ export function Modal({
   description,
   children,
   modalKey,
+  modalValue,
   triggerClassName,
   triggerRef,
   size = 'md',
@@ -139,6 +150,12 @@ export function Modal({
   description?: string;
   children: React.ReactNode;
   modalKey?: string;
+  /**
+   * Value `modalKey` must hold for THIS modal to reopen. Defaults to `'1'`.
+   * Set it when one page renders a modal per row, so the flag identifies the
+   * row (`?editUser=<id>` + modalKey="editUser" + modalValue={id}).
+   */
+  modalValue?: string;
   /**
    * Tailwind classes applied to the trigger `<button>`. Defaults to a primary
    * pill style; pass `""` to opt out and style via children, or pass your
@@ -175,9 +192,10 @@ export function Modal({
     document.documentElement.style.overflow = '';
   }
 
-  // Reopen on error: if the URL has ?modalKey=1, force the dialog open.
+  // Reopen on error: if the URL carries this modal's flag, force it open.
+  const reopen = shouldReopen(search, modalKey, modalValue);
   React.useEffect(() => {
-    if (modalKey && search.get(modalKey) === '1' && ref.current && !ref.current.open) {
+    if (reopen && ref.current && !ref.current.open) {
       // showModal() may throw `InvalidStateError` if the dialog is already in
       // the modal-state (e.g. duplicate mount). Catch and ignore — the second
       // instance becoming a no-op is preferable to crashing the page.
@@ -188,7 +206,7 @@ export function Modal({
         /* already-open or detached — safe to ignore */
       }
     }
-  }, [modalKey, search]);
+  }, [reopen]);
 
   // Always release the scroll lock if the component unmounts while open.
   React.useEffect(() => () => unlockScroll(), []);

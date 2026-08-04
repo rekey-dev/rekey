@@ -12,6 +12,12 @@ handling, and the panel's configuration form.
 > merged. All three built-in providers (Stripe, PayPal, Razorpay) run through
 > this system in production.
 
+> **Before you ship one**: the ordinary test suite replaces every provider with
+> a fake, so a module that passes it has only been checked against our own
+> reading of the processor's semantics. Add a suite under
+> `apps/api/test-providers/` that drives your processor's real sandbox, and see
+> [Testing against a real payment provider](./provider-sandbox-testing.md).
+
 ## The shape of a module
 
 A module lives at `apps/api/src/modules/billing/providers/modules/<name>/` and
@@ -64,10 +70,15 @@ four functions and applies the results atomically. Your `translate` returns
 events from a fixed set —
 
 ```
-checkout.completed          payment.succeeded        payment.failed
-payment.refunded            subscription.activated   subscription.canceled
-subscription.past_due       subscription.period_advanced
+checkout.completed          checkout.approved        payment.succeeded
+payment.failed              payment.refunded         subscription.activated
+subscription.canceled       subscription.past_due    subscription.period_advanced
 ```
+
+`checkout.approved` is the buyer-approved-but-not-yet-captured case: emit it
+instead of `checkout.completed` when your processor separates approval from
+capture (PayPal Orders v2 does — that is what `capabilities.captureStep` above
+declares). Core will not provision against it.
 
 — and core takes it from there: payment rows, subscription status, dunning,
 entitlements, outbound webhooks to the operator's own endpoints. If your

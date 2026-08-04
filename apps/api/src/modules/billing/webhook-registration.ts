@@ -15,6 +15,7 @@
 
 import { env } from '../../config/env.js';
 import { RekeyError } from '../../lib/error.js';
+import { withProviderErrors } from '../../lib/provider-errors.js';
 import { applicationsService } from '../applications/applications.service.js';
 import {
   billingCredentialsService,
@@ -73,17 +74,23 @@ export async function registerProviderWebhook(
   // commonly invalid credentials (e.g. PayPal 401 invalid_client), but also
   // rate limits or transient network errors. Surface a clean, actionable
   // error instead of bubbling a raw 500.
-  let result: { secret?: string; webhookId?: string };
-  try {
-    result = await inst.registerWebhook(url);
-  } catch (e) {
-    throw new RekeyError({
-      statusCode: 502,
+  //
+  // This route is the one the external audit found already CORRECT, so its
+  // observable contract is preserved exactly — 502, the established
+  // `BILLING_WEBHOOK_REGISTRATION_FAILED` code, and the same `fix`. What
+  // changed is that the mapping now goes through the shared helper every other
+  // provider call site was moved onto, so there is one place to fix rather
+  // than one correct place and six wrong ones.
+  const result = await withProviderErrors(
+    {
+      provider,
+      operation: 'webhook registration',
+      audience: 'operator',
       code: 'BILLING_WEBHOOK_REGISTRATION_FAILED',
-      message: `The ${provider} API rejected webhook registration: ${(e as Error).message}`,
       fix: 'Most often the provider credentials are wrong or for the other mode (e.g. live keys with mode=test). Re-check the API key / client secret + mode, then retry.',
-    });
-  }
+    },
+    () => inst.registerWebhook!(url),
+  );
   const merged = {
     ...current,
     ...(result.secret !== undefined && { webhookSecret: result.secret }),

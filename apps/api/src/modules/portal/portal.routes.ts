@@ -18,6 +18,25 @@ import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { BillingConfigSchema } from '@rekey.dev/shared-types';
+import { ok, errs, type JsonSchema } from '../../lib/openapi.js';
+
+/** `data` for `GET /config/:slug` — no registered component matches this projection. */
+const PortalConfig: JsonSchema = {
+  type: 'object',
+  properties: {
+    slug: { type: 'string' },
+    name: { type: 'string' },
+    publishableKey: { type: 'string', description: 'Public by design — safe to ship in a browser bundle.' },
+    billingEnabled: { type: 'boolean' },
+    billingSubject: {
+      type: 'string',
+      enum: ['user', 'org'],
+      description: "'user' = individuals self-serve; 'org' = billing is per-team.",
+    },
+    branding: { type: 'object', additionalProperties: true },
+  },
+  required: ['slug', 'name', 'publishableKey', 'billingEnabled', 'billingSubject', 'branding'],
+};
 
 const SlugParam = z.object({ slug: z.string().min(1).max(120) });
 
@@ -39,6 +58,17 @@ export async function portalConfigRoutes(app: FastifyInstance): Promise<void> {
           'Returns { slug, name, publishableKey, billingEnabled, branding } when the app has ' +
           'opted into the hosted portal. 404 otherwise (existence-hiding).',
         params: { type: 'object', required: ['slug'], properties: { slug: { type: 'string' } } },
+        response: {
+          200: ok(PortalConfig, 'Public config for this application\'s hosted portal.'),
+          ...errs({
+            400: 'VALIDATION_ERROR — the slug exceeds 120 characters.',
+            404:
+              'PORTAL_NOT_FOUND — no application with that slug, or it has not opted into the ' +
+              'hosted portal (the same response either way, so a disabled portal cannot be ' +
+              'told apart from a non-existent slug).',
+            429: 'RATE_LIMITED — too many requests. Honour the Retry-After header.',
+          }),
+        },
       },
     },
     async (req) => {

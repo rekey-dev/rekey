@@ -92,8 +92,8 @@ describe('Operator organization CRUD', () => {
 
     const list = await app
       .inject({ method: 'GET', url: orgsUrl(), headers: auth() })
-      .then((r) => r.json().data as Array<{ id: string; memberCount: number }>);
-    expect(list.find((o) => o.id === orgId)?.memberCount).toBe(1);
+      .then((r) => r.json().data as { items: Array<{ id: string; memberCount: number }> });
+    expect(list.items.find((o) => o.id === orgId)?.memberCount).toBe(1);
   });
 
   it('add member → set role → remove member', async () => {

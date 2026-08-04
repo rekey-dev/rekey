@@ -229,7 +229,26 @@ covers the drop-in `<SignIn />` / `<SignUp />` / `<UserButton />` family.
 |---|---|---|---|---|
 | Email transport configured, user exists | `true` | `true` | `null` | Nothing — the user has the email. |
 | No transport (or send failed), user exists | `true` | `false` | the raw token | **You** email the link via your own provider. |
-| Unknown email | `false` | `false` | `null` | Nothing. Show the same "check your inbox" UI — never reveal. |
+| Unknown email — **password reset** | `false` | `false` | `null` | Nothing. Show the same "check your inbox" UI — never reveal. |
+| Unknown email — **magic link** | `true` | per transport | per transport | Treat as a **sign-up**. See below. |
+
+### Magic links sign people up
+
+The last row is the one that surprises people. `requestPasswordReset` on an
+address nobody has registered does nothing, as you would expect. **`requestMagicLink`
+on an unknown address creates the account**, and completing the link signs the
+new user in with `emailVerified: true` — clicking a link sent to an address is
+itself proof of controlling it, so there is no separate verification step.
+
+That is deliberate: it is what makes magic links a one-step sign-up rather than
+a sign-in method you can only use after signing up some other way. But it means
+a typo'd address creates a real end-user, and it means magic links are **not**
+enumeration-safe in the way password reset is — the response differs for known
+and unknown addresses.
+
+If you do not want that, set `signupMode: 'invite_only'` on the Application.
+Magic link then respects it exactly: unknown addresses get `delivered: false`,
+a `null` token, and no user is created.
 
 ```ts
 const result = await rekey.auth.requestPasswordReset({
@@ -264,7 +283,9 @@ npx @rekey.dev/cli plans create --app <applicationId> \
 ```
 
 After that `rekey.billing.getPlans()`, `createCheckout()`, `getSubscription()`
-and `getEntitlements()` all work. Read [docs/billing.md](billing.md) first —
+and `getEntitlements()` all work. `getPlans()` — like every list method —
+resolves to `{ items, page }`, not a bare array; `page.hasMore` tells you
+whether there is another window. Read [docs/billing.md](billing.md) first —
 checkout is asynchronous (the subscription flips to ACTIVE on the provider's
 webhook, not on the redirect), and that shapes how you write the success page.
 

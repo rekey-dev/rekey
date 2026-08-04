@@ -39,15 +39,16 @@ Switching is non-breaking in both directions: the API verifies **both** algorith
 import { verifyAccessToken } from '@rekey.dev/node';
 
 const claims = await verifyAccessToken(token, {
+  applicationId: MY_REKEY_APP_ID, // required — see below
   jwksUrl: 'https://rekey.example.com/.well-known/jwks.json',
 });
 // claims: { typ: 'eu_access', sub, applicationId, oid?, iat, exp }
-if (claims.applicationId !== MY_REKEY_APP_ID) throw new Error('wrong application');
 ```
 
 - The JWKS is fetched lazily and cached **5 minutes**; an unknown `kid` triggers one immediate refetch (covers fresh rotations). Pass `jwks: {...}` instead of `jwksUrl` to skip the network entirely.
 - It verifies what can be verified offline: RS256 signature against a published `kid` (strict allowlist — never the token's claimed algorithm), `exp`, and `typ === "eu_access"`. HS256 tokens are refused with `TOKEN_ALG_NOT_RS256`.
-- **Always check `claims.applicationId` yourself** — the JWKS is deployment-wide, so a token from another Application on the same deployment carries a valid signature.
+- **`applicationId` is required, and this is why:** the JWKS is deployment-wide — `SigningKey` has no per-Application column — so a token minted for another Application on the same deployment carries a perfectly valid signature. This used to be a note telling you to compare `claims.applicationId` afterwards, which made the shortest correct path the one nobody takes. It is now enforced inside the function, and a mismatch raises `USER_TOKEN_INVALID`.
+- Note this applies to the RS256 opt-in only. The **HS256 default is already per-Application**: its key is derived as `HMAC-SHA256(JWT_SECRET, applicationId:tokenGeneration)`, so a foreign token fails the signature outright.
 - Node-only (uses `node:crypto`). Any standard JWT library (jose, jwks-rsa, …) works too — the endpoint is plain RFC 7517.
 
 ## What offline verification cannot see

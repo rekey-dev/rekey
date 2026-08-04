@@ -1,11 +1,11 @@
 {
   "name": "@rekey.dev/mcp",
-  "version": "2.0.0-rc.3",
+  "version": "2.0.0-rc.4",
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
   },
-  "description": "Model Context Protocol server for Rekey — lets Claude Desktop / Cursor / Claude Code introspect a deployment.",
+  "description": "Model Context Protocol server for Rekey \u2014 lets Claude Desktop / Cursor / Claude Code introspect a deployment.",
   "type": "module",
   "bin": {
     "rekey-mcp": "./dist/index.js"
@@ -15,8 +15,10 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -27,7 +29,7 @@
     "build": "tsc -p tsconfig.json && chmod +x dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo \"(eslint not yet wired)\"",
-    "test": "vitest run"
+    "test": "tsc -p tsconfig.json && vitest run"
   },
   "keywords": [
     "rekey",

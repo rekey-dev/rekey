@@ -35,7 +35,7 @@ import { licensesService } from '../licenses/licenses.service.js';
 import { usageService } from '../usage/usage.service.js';
 import { creditsService } from '../credits/credits.service.js';
 import { prisma } from '../../lib/prisma.js';
-import { PaginationQuery, parsePagination, paginationJsonSchema } from '../../lib/pagination.js';
+import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
 import { listApiRequests } from '../../lib/request-log.js';
 import { CouponDiscountType, type LicenseKind } from '@prisma/client';
 import { AppEnvironmentSchema, BillingProviderSchema, GrantCreditsRequestSchema } from '@rekey.dev/shared-types';
@@ -54,6 +54,7 @@ import {
   ensureAppAccess,
   appAccessScope,
   redactApplicationForBilling,
+  stripApplicationSecrets,
 } from '../../lib/app-access.js';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
 import { refreshCorsOrigins } from '../../lib/cors-origins.js';
@@ -62,6 +63,68 @@ import { eraseEndUser } from './end-user-erasure.service.js';
 import { billingService } from '../billing/billing.service.js';
 import { emitDetached } from '../webhooks/webhook.service.js';
 import { euLoginLockScope, getScopeLockState, LOGIN_POLICY } from '../../lib/brute-force.js';
+import { moneyAmount, positiveBoundedInt } from '../../lib/bounded-int.js';
+import { ok, okPage, okArray, okFlag, errs, ref, type JsonSchema } from '../../lib/openapi.js';
+
+// ---------------------------------------------------------------------------
+// Shared error groups
+//
+// Every route in this file sits behind `requireTenantSession` (the `onRequest`
+// hook registered below), so TENANT_SESSION_{MISSING,INVALID} (401) and
+// TENANT_MEMBERSHIP_REVOKED (403) are possible on every operation. Most routes
+// additionally call `ensureAppAccess(req, id, need)` (see lib/app-access.ts),
+// which adds APPLICATION_NOT_FOUND (404, also the non-disclosure response for
+// "no grant on this app") and, for 'write'/'billing-write' needs, a 403 that is
+// either the legacy TENANT_ROLE_INSUFFICIENT (grant-less MEMBER) or the
+// grant-aware APP_ACCESS_DENIED (MEMBER with an insufficient grant role).
+// ---------------------------------------------------------------------------
+
+/** Every route: the `requireTenantSession` onRequest hook. */
+const TENANT_SESSION_ERRORS = {
+  401:
+    'TENANT_SESSION_MISSING — no `Authorization: Bearer` header; or TENANT_SESSION_INVALID — ' +
+    'the token is invalid, expired, or the operator account no longer exists.',
+  403: 'TENANT_MEMBERSHIP_REVOKED — the operator is no longer a member of this workspace.',
+} as const;
+
+/** Routes calling `ensureAppAccess(req, id, 'read')`. */
+const APP_READ_ERRORS = {
+  ...TENANT_SESSION_ERRORS,
+  404:
+    'APPLICATION_NOT_FOUND — no application with that id in this workspace (also returned to a ' +
+    'MEMBER with per-app grants who holds no grant on it — same non-disclosure posture).',
+} as const;
+
+/** Routes calling `ensureAppAccess(req, id, 'write')`. */
+const APP_WRITE_ERRORS = {
+  401: TENANT_SESSION_ERRORS[401],
+  403:
+    'TENANT_MEMBERSHIP_REVOKED — the operator is no longer a member of this workspace; or ' +
+    'TENANT_ROLE_INSUFFICIENT — a legacy MEMBER (zero application grants) attempted a write; ' +
+    "or APP_ACCESS_DENIED — the operator's grant on this Application (below APP_ADMIN) does " +
+    'not permit this action.',
+  404: APP_READ_ERRORS[404],
+} as const;
+
+/** Routes calling `ensureAppAccess(req, id, 'billing-write')`. */
+const APP_BILLING_WRITE_ERRORS = {
+  401: TENANT_SESSION_ERRORS[401],
+  403:
+    'TENANT_MEMBERSHIP_REVOKED — the operator is no longer a member of this workspace; or ' +
+    'TENANT_ROLE_INSUFFICIENT — a legacy MEMBER (zero application grants) attempted a billing ' +
+    "write; or APP_ACCESS_DENIED — the operator's grant on this Application (needs APP_BILLING " +
+    'or APP_ADMIN) does not permit this action.',
+  404: APP_READ_ERRORS[404],
+} as const;
+
+/** Routes additionally gated by `requireTenantRole(['OWNER','ADMIN'])` before any app-access check. */
+const OWNER_ADMIN_ONLY_ERRORS = {
+  401: TENANT_SESSION_ERRORS[401],
+  403:
+    'TENANT_MEMBERSHIP_REVOKED — the operator is no longer a member of this workspace; or ' +
+    'TENANT_ROLE_INSUFFICIENT — the operator is a MEMBER (this route requires OWNER or ADMIN, ' +
+    'no grant unlocks it).',
+} as const;
 
 // Per-route access control: `ensureAppAccess(req, appId, need)` replaces the
 // old `ensureAppInTenant` helper. It both confirms the Application belongs to
@@ -140,30 +203,51 @@ const CreateKeyBody = z.object({
 const CreatePlanBody = z.object({
   slug: z.string().min(1).max(40),
   name: z.string().min(1).max(120),
-  amount: z.number().int().min(0),
+  amount: moneyAmount(),
   currency: z.string().length(3).optional(),
   interval: z.enum(['MONTH', 'YEAR']).optional(),
   kind: z.enum(['SUBSCRIPTION', 'LICENSE', 'USAGE', 'CREDIT']).optional(),
   licenseKind: z.enum(['PERPETUAL', 'TIMED', 'SEATS']).optional(),
-  licenseSeatsAllowed: z.number().int().positive().optional(),
-  licenseDurationDays: z.number().int().positive().optional(),
+  licenseSeatsAllowed: positiveBoundedInt().optional(),
+  licenseDurationDays: positiveBoundedInt().optional(),
   meterSlug: z.string().min(1).max(40).optional(),
-  pricePerUnitCents: z.number().int().min(0).optional(),
-  creditsAmount: z.number().int().positive().optional(),
+  pricePerUnitCents: moneyAmount().optional(),
+  creditsAmount: positiveBoundedInt().optional(),
   metadata: z.record(z.unknown()).optional(),
 });
-const PlanActiveBody = z.object({ active: z.boolean() });
+/**
+ * Plan edit. Every field optional, at least one required — this used to accept
+ * `{ active }` and nothing else, which left a plan the provider had refused
+ * with no repair at all: the slug was taken, so it could not be re-created, and
+ * nothing on it could be corrected.
+ *
+ * Price fields are accepted HERE and refused in the service when the plan is
+ * already registered (`PLAN_PRICE_IMMUTABLE`) — the rule depends on stored
+ * state, so it cannot live in a body schema.
+ */
+const UpdatePlanBody = z
+  .object({
+    active: z.boolean().optional(),
+    name: z.string().min(1).max(120).optional(),
+    amount: z.number().int().min(0).optional(),
+    currency: z.string().length(3).optional(),
+    interval: z.enum(['MONTH', 'YEAR']).optional(),
+    metadata: z.record(z.unknown()).optional(),
+  })
+  .refine((b) => Object.values(b).some((v) => v !== undefined), {
+    message: 'Send at least one field to change.',
+  });
 
 const CreateCouponBody = z.object({
   code: z.string().min(1).max(40),
   discountType: z.enum(['PERCENT', 'AMOUNT']),
-  amountOff: z.number().int().min(0),
+  amountOff: moneyAmount(),
   currency: z.string().length(3).optional(),
   planSlugs: z.array(z.string().min(1).max(40)).optional(),
   startsAt: z.string().datetime().optional(),
   endsAt: z.string().datetime().optional(),
-  maxRedemptions: z.number().int().min(1).optional(),
-  maxRedemptionsPerUser: z.number().int().min(1).optional(),
+  maxRedemptions: positiveBoundedInt().optional(),
+  maxRedemptionsPerUser: positiveBoundedInt().optional(),
 });
 const CouponActiveBody = z.object({ active: z.boolean() });
 
@@ -181,6 +265,17 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         security: [{ tenantSession: [] }],
         summary: 'List Applications in the active workspace',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(
+            ref('Application'),
+            'A page of Applications in the active workspace, newest first. A MEMBER with ' +
+              'per-app grants sees only granted Applications (APP_BILLING entries redacted).',
+          ),
+          ...errs({
+            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            ...TENANT_SESSION_ERRORS,
+          }),
+        },
       },
     },
     async (req) => {
@@ -189,17 +284,29 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // this single filter also scopes the panel sidebar + command palette,
       // which are both fed by this endpoint.
       const scope = await appAccessScope(req);
-      const apps = await applicationsService.list(req.tenantId!, {
-        take,
-        skip,
-        ...(scope.restricted && { ids: scope.applicationIds }),
-      });
+      const scopeIds = scope.restricted ? { ids: scope.applicationIds } : {};
+      const [apps, total] = await Promise.all([
+        applicationsService.list(req.tenantId!, { take, skip, ...scopeIds }),
+        // Counted through the SAME grant scoping, not over the whole
+        // workspace: a MEMBER told there are 40 Applications when they may
+        // read 3 has been handed an existence oracle, not a page count.
+        applicationsService.count(req.tenantId!, scopeIds),
+      ]);
       return {
         success: true,
-        data: apps.map((a) =>
-          scope.roleByApplicationId.get(a.id) === 'APP_BILLING'
-            ? redactApplicationForBilling(a)
-            : a,
+        // Secrets stripped for EVERY audience; the billing redaction is the
+        // extra, role-specific layer on top.
+        data: paged(
+          apps.map((a) =>
+            stripApplicationSecrets(
+              scope.roleByApplicationId.get(a.id) === 'APP_BILLING'
+                ? redactApplicationForBilling(a)
+                : a,
+            ),
+          ),
+          total,
+          take,
+          skip,
         ),
       };
     },
@@ -219,6 +326,28 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           type: 'object',
           required: ['slug'],
           properties: { slug: { type: 'string', minLength: 1, maxLength: 40 } },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                slug: { type: 'string' },
+                available: { type: 'boolean' },
+                reason: {
+                  type: 'string',
+                  enum: ['invalid', 'taken'],
+                  description: 'Present only when `available` is false.',
+                },
+              },
+              required: ['slug', 'available'],
+            },
+            'Slug availability. Never discloses which tenant owns a taken slug.',
+          ),
+          ...errs({
+            400: 'VALIDATION_ERROR — `slug` missing or outside 1-40 chars.',
+            ...TENANT_SESSION_ERRORS,
+          }),
         },
       },
     },
@@ -253,8 +382,32 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'Get one Application (must belong to the active workspace)',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        response: {
+          200: ok(
+            {
+              allOf: [
+                ref('Application'),
+                {
+                  type: 'object',
+                  properties: {
+                    mcpUrl: {
+                      type: 'string',
+                      description:
+                        'Externally-reachable hosted MCP server URL, derived from ' +
+                        'PUBLIC_WEBHOOK_BASE_URL/API_URL (not the in-cluster REKEY_URL).',
+                    },
+                  },
+                  required: ['mcpUrl'],
+                },
+              ],
+            },
+            'The application. An operator holding only the APP_BILLING grant gets authConfig ' +
+              'and oauthConfig redacted to {}.',
+          ),
+          ...errs(APP_READ_ERRORS),
+        },
       },
     },
     async (req) => {
@@ -268,7 +421,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // Billing managers see money, not sign-in: hide the auth/OAuth config.
       return {
         success: true,
-        data: access.level === 'APP_BILLING' ? redactApplicationForBilling(data) : data,
+        data: stripApplicationSecrets(
+          access.level === 'APP_BILLING' ? redactApplicationForBilling(data) : data,
+        ),
       };
     },
   );
@@ -282,10 +437,71 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'Dashboard stats for one Application (Overview tiles)',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
+          'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
           'End-user totals + 30-day sign-up trend, security-events summary, billing snapshot, ' +
           'and a usage/credits roll-up. Scoped to the active workspace.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                users: {
+                  type: 'object',
+                  properties: {
+                    total: { type: 'integer' },
+                    verified: { type: 'integer' },
+                    newLast7d: { type: 'integer' },
+                    newLast30d: { type: 'integer' },
+                    signupTrend: {
+                      type: 'array',
+                      description: 'One entry per day for the last 30 days (oldest first), gap-filled with zeroes.',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          date: { type: 'string', format: 'date' },
+                          count: { type: 'integer' },
+                        },
+                        required: ['date', 'count'],
+                      },
+                    },
+                  },
+                  required: ['total', 'verified', 'newLast7d', 'newLast30d', 'signupTrend'],
+                },
+                security: {
+                  type: 'object',
+                  properties: {
+                    eventsLast30d: { type: 'integer' },
+                    signInsLast30d: { type: 'integer' },
+                    signUpsLast30d: { type: 'integer' },
+                  },
+                  required: ['eventsLast30d', 'signInsLast30d', 'signUpsLast30d'],
+                },
+                billing: {
+                  type: 'object',
+                  properties: {
+                    enabled: { type: 'boolean' },
+                    activeSubscriptions: { type: 'integer' },
+                    plansActive: { type: 'integer' },
+                    plansTotal: { type: 'integer' },
+                  },
+                  required: ['enabled', 'activeSubscriptions', 'plansActive', 'plansTotal'],
+                },
+                usage: {
+                  type: 'object',
+                  properties: {
+                    creditsOutstanding: { type: 'integer' },
+                    usageLast30d: { type: 'number' },
+                  },
+                  required: ['creditsOutstanding', 'usageLast30d'],
+                },
+              },
+              required: ['users', 'security', 'billing', 'usage'],
+            },
+            'Overview-tile dashboard stats for one Application.',
+          ),
+          ...errs(APP_READ_ERRORS),
+        },
       },
     },
     async (req) => {
@@ -313,14 +529,25 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           'a convenience tail, not a billing-grade audit trail. Paginated via ?limit&offset.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          // `page.total` is what the pruner has left for this Application, not
+          // every request it has ever served — the description says so. It is
+          // still the honest answer to "is there another page", which the old
+          // `{requests: [...]}` wrapper could not give at all.
+          200: okPage(
+            ref('ApiRequestLog'),
+            "A page of recent inbound requests to this Application's public API, newest first.",
+          ),
+          ...errs({ ...OWNER_ADMIN_ONLY_ERRORS, 404: APP_READ_ERRORS[404] }),
+        },
       },
     },
     async (req) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'read');
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
-      const requests = await listApiRequests({ applicationId: id, take, skip });
-      return { success: true, data: { requests } };
+      const { items, total } = await listApiRequests({ applicationId: id, take, skip });
+      return { success: true, data: paged(items, total, take, skip) };
     },
   );
 
@@ -362,6 +589,20 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             },
           },
         },
+        response: {
+          201: ok(ref('Application'), 'The created application.'),
+          ...errs({
+            400:
+              'VALIDATION_ERROR — a field failed schema validation; or ' +
+              'APPLICATION_SLUG_INVALID — the slug is not URL-safe.',
+            ...OWNER_ADMIN_ONLY_ERRORS,
+            403:
+              OWNER_ADMIN_ONLY_ERRORS[403] +
+              ' Or TENANT_QUOTA_EXCEEDED — creating a PRODUCTION application would exceed ' +
+              "the workspace's `maxProductionApps`.",
+            409: 'APPLICATION_SLUG_TAKEN — another application already uses that slug (slugs are unique deployment-wide).',
+          }),
+        },
       },
     },
     async (req, reply) => {
@@ -374,7 +615,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...(body.billingProvider !== undefined && { billingProvider: body.billingProvider }),
         ...(body.enableBilling !== undefined && { enableBilling: body.enableBilling }),
       });
-      return reply.status(201).send({ success: true, data: created });
+      return reply
+        .status(201)
+        .send({ success: true, data: stripApplicationSecrets(created) });
     },
   );
 
@@ -402,7 +645,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             passwordMinLength: { type: 'integer', minimum: 8, maximum: 128 },
             redirectUrls: { type: 'array', items: { type: 'string', format: 'uri' } },
             appUrl: {
-              type: ['string', 'null'],
+              // `nullable: true`, not `type: ['string', 'null']`. The draft-07
+              // type-array form is not valid OpenAPI 3.0 (what this document
+              // declares), so it made the published openapi.json fail every
+              // real validator. Fastify's ajv treats the two identically at
+              // runtime, so this is a spelling change, not a contract change.
+              type: 'string',
+              nullable: true,
               description:
                 "Base URL of your own application — what transactional emails link back to " +
                 '(the welcome mail CTA, and the base for reset/verify/magic-link URLs when the ' +
@@ -458,11 +707,27 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             },
           },
         },
+        response: {
+          200: ok(
+            { type: 'object', properties: { authConfig: ref('AuthConfig') }, required: ['authConfig'] },
+            'The Application, patched auth configuration.',
+          ),
+          ...errs({ 400: 'VALIDATION_ERROR — a field failed schema validation.', ...APP_WRITE_ERRORS }),
+        },
       },
     },
     async (req) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'write');
+      // `.strict()`, matching the billing-config patch below. Every key is
+      // optional, so a non-strict object accepted `{"mfaa":"required",
+      // "tokenAlgorithm":"none"}`, dropped both, and answered 200 with an
+      // unchanged authConfig — a one-character typo silently no-opping this
+      // Application's MFA policy and token signing algorithm while telling
+      // the caller it worked. A patch body whose keys are ALL optional has no
+      // shape left to fail on except the key names, so those have to be the
+      // check. Unknown keys now surface as 400 VALIDATION_ERROR naming the
+      // offender (see the ZodError branch in lib/error.ts).
       const body = z
         .object({
           methods: z.array(z.string().min(1).max(40)).optional(),
@@ -484,7 +749,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           dynamicClientRegistration: z.boolean().optional(),
           tokenAlg: z.enum(['HS256', 'RS256']).optional(),
         })
-        .parse(req.body);
+        .strict()
+        .parse(req.body ?? {});
       const updated = await applicationsService.updateAuthConfig({
         applicationId: id,
         patch: body,
@@ -526,11 +792,25 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             dunningEnabled: { type: 'boolean', description: 'Failed-payment recovery: reminders (day 0/3/7) + day-14 auto-cancel for PAST_DUE subscriptions. Off by default; opt in per app.' },
             billingSubject: { type: 'string', enum: ['user', 'org'], description: 'Bill the individual end-user or their organization (owner+beneficiary).' },
             defaultPlanSlug: {
-              type: ['string', 'null'],
+              // See the note on `appUrl` in the auth-config route above.
+              type: 'string',
+              nullable: true,
               description:
                 'Free-tier fallback. Slug of an active plan whose FEATURE flags + included usage quota apply to end-users with no active subscription. null clears it.',
             },
           },
+        },
+        response: {
+          200: ok(
+            { type: 'object', properties: { billingConfig: ref('BillingConfig') }, required: ['billingConfig'] },
+            'The Application, patched billing configuration.',
+          ),
+          ...errs({
+            400:
+              'VALIDATION_ERROR — an unknown key or a field failed schema validation; or ' +
+              'DEFAULT_PLAN_NOT_FOUND — `defaultPlanSlug` does not match an active plan on this Application.',
+            ...APP_WRITE_ERRORS,
+          }),
         },
       },
     },
@@ -598,8 +878,14 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'List active API keys for an application',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        response: {
+          // Bounded by construction: `create()` refuses a 26th active key
+          // (API_KEY_LIMIT_REACHED, cap 25), so this cannot grow unbounded.
+          200: okArray(ref('ApiKey'), 'Active (non-revoked) API keys for this Application.'),
+          ...errs(APP_READ_ERRORS),
+        },
       },
     },
     async (req) => {
@@ -633,6 +919,27 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             scopes: { type: 'array', items: { type: 'string' } },
             expiresAt: { type: 'string', format: 'date-time' },
           },
+        },
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: {
+                apiKey: ref('ApiKey'),
+                rawKey: { type: 'string', description: 'Shown exactly once — store it now.' },
+                warning: { type: 'string' },
+              },
+              required: ['apiKey', 'rawKey', 'warning'],
+            },
+            'The minted key metadata plus the raw secret (shown once).',
+          ),
+          ...errs({
+            400:
+              'API_KEY_EXPIRY_IN_PAST — `expiresAt` is not in the future; or ' +
+              'API_KEY_LIMIT_REACHED — the Application already has 25 active keys; or ' +
+              'VALIDATION_ERROR — a field failed schema validation.',
+            ...APP_WRITE_ERRORS,
+          }),
         },
       },
     },
@@ -682,6 +989,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           properties: { id: { type: 'string' }, keyId: { type: 'string' } },
           required: ['id', 'keyId'],
         },
+        response: {
+          200: ok(ref('ApiKey'), 'The revoked key.'),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            404: 'API_KEY_NOT_FOUND — no key with that id on this Application; or ' + APP_WRITE_ERRORS[404],
+          }),
+        },
       },
     },
     async (req) => {
@@ -712,15 +1026,23 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'List Plans',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(ref('Plan'), 'A page of Plans (active and inactive), newest first.'),
+          ...errs({ 400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
+        },
       },
     },
     async (req) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'read');
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
-      return { success: true, data: await plansService.listForApplication(id, true, { take, skip }) };
+      const [items, total] = await Promise.all([
+        plansService.listForApplication(id, true, { take, skip }),
+        plansService.countForApplication(id, true),
+      ]);
+      return { success: true, data: paged(items, total, take, skip) };
     },
   );
 
@@ -743,18 +1065,33 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           properties: {
             slug: { type: 'string', minLength: 1, maxLength: 40 },
             name: { type: 'string', minLength: 1, maxLength: 120 },
-            amount: { type: 'integer', minimum: 0 },
+            amount: { type: 'integer', minimum: 0, maximum: 2147483647 },
             currency: { type: 'string', minLength: 3, maxLength: 3 },
             interval: { type: 'string', enum: ['MONTH', 'YEAR'] },
             kind: { type: 'string', enum: ['SUBSCRIPTION', 'LICENSE', 'USAGE', 'CREDIT'] },
             licenseKind: { type: 'string', enum: ['PERPETUAL', 'TIMED', 'SEATS'] },
-            licenseSeatsAllowed: { type: 'integer', minimum: 1 },
-            licenseDurationDays: { type: 'integer', minimum: 1 },
+            licenseSeatsAllowed: { type: 'integer', minimum: 1, maximum: 2147483647 },
+            licenseDurationDays: { type: 'integer', minimum: 1, maximum: 2147483647 },
             meterSlug: { type: 'string', minLength: 1, maxLength: 40 },
-            pricePerUnitCents: { type: 'integer', minimum: 0 },
-            creditsAmount: { type: 'integer', minimum: 1 },
+            pricePerUnitCents: { type: 'integer', minimum: 0, maximum: 2147483647 },
+            creditsAmount: { type: 'integer', minimum: 1, maximum: 2147483647 },
             metadata: { type: 'object', additionalProperties: true },
           },
+        },
+        response: {
+          201: ok(ref('Plan'), 'The created plan.'),
+          ...errs({
+            400:
+              'PLAN_SLUG_INVALID — the slug is not URL-safe; or PLAN_AMOUNT_INVALID — `amount` ' +
+              'is negative; or PLAN_LICENSE_KIND_REQUIRED / PLAN_LICENSE_DURATION_REQUIRED / ' +
+              'PLAN_LICENSE_SEATS_REQUIRED — a LICENSE-kind plan is missing a required field; or ' +
+              'PLAN_USAGE_CONFIG_REQUIRED / PLAN_USAGE_METER_UNKNOWN — a USAGE-kind plan is ' +
+              'missing `meterSlug`/`pricePerUnitCents` or the meter does not exist; or ' +
+              'PLAN_CREDITS_AMOUNT_REQUIRED — a CREDIT-kind plan is missing `creditsAmount`; or ' +
+              'VALIDATION_ERROR — a field failed schema validation.',
+            ...APP_BILLING_WRITE_ERRORS,
+            409: 'PLAN_SLUG_TAKEN — another plan on this Application already uses that slug.',
+          }),
         },
       },
     },
@@ -799,10 +1136,17 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       schema: {
         tags: ['Tenant · Plans'],
         security: [{ tenantSession: [] }],
-        summary: 'Toggle a Plan\'s active flag',
+        summary: 'Update a Plan',
         description:
           'Requires **billing-write** access to this Application — OWNER/ADMIN, or a MEMBER ' +
-          'with an `APP_ADMIN` or `APP_BILLING` grant on it.',
+          'with an `APP_ADMIN` or `APP_BILLING` grant on it.\n\n' +
+          'Send any subset of the fields. `amount`, `currency` and `interval` are only accepted ' +
+          'while the plan has **not** been registered with a payment provider — a provider price ' +
+          'object is immutable once minted, so a registered plan answers `PLAN_PRICE_IMMUTABLE` ' +
+          'and must be retired and replaced instead. This is the repair path for a plan whose ' +
+          'registration was refused: correct it here, then `POST .../plans/{slug}/register`.\n\n' +
+          '`active: true` is refused with `PLAN_NOT_REGISTERED_WITH_PROVIDER` for a plan that has ' +
+          'no provider price — publishing one puts a dead checkout on the pricing page.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, slug: { type: 'string' } },
@@ -810,16 +1154,49 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         },
         body: {
           type: 'object',
-          required: ['active'],
-          properties: { active: { type: 'boolean' } },
+          properties: {
+            active: { type: 'boolean' },
+            name: { type: 'string', minLength: 1, maxLength: 120 },
+            amount: {
+              type: 'integer',
+              minimum: 0,
+              description: 'Smallest currency unit. Unregistered plans only.',
+            },
+            currency: {
+              type: 'string',
+              minLength: 3,
+              maxLength: 3,
+              description: 'ISO 4217. Unregistered plans only.',
+            },
+            interval: {
+              type: 'string',
+              enum: ['MONTH', 'YEAR'],
+              description: 'Unregistered plans only.',
+            },
+            metadata: { type: 'object', additionalProperties: true },
+          },
+        },
+        response: {
+          200: ok(ref('Plan'), 'The plan, with `active` updated.'),
+          ...errs({
+            ...APP_BILLING_WRITE_ERRORS,
+            404: 'PLAN_NOT_FOUND — no plan with that slug on this Application.',
+          }),
         },
       },
     },
     async (req) => {
       const { id, slug } = PlanSlugParam.parse(req.params);
       await ensureAppAccess(req, id, 'billing-write');
-      const body = PlanActiveBody.parse(req.body);
-      const updated = await plansService.setActive(id, slug, body.active);
+      const body = UpdatePlanBody.parse(req.body);
+      const updated = await plansService.update(id, slug, {
+        ...(body.active !== undefined && { active: body.active }),
+        ...(body.name !== undefined && { name: body.name }),
+        ...(body.amount !== undefined && { amount: body.amount }),
+        ...(body.currency !== undefined && { currency: body.currency }),
+        ...(body.interval !== undefined && { interval: body.interval }),
+        ...(body.metadata !== undefined && { metadata: body.metadata }),
+      });
       void recordSecurityEvent({
         type: 'app.plan_updated',
         actorType: 'operator',
@@ -827,9 +1204,69 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         tenantId: req.tenantId!,
         applicationId: id,
         ...requestContext(req),
-        metadata: { slug, active: body.active },
+        // Money changed hands on the strength of these numbers — record which
+        // fields moved, not just that "a plan was updated".
+        metadata: { slug, changed: Object.keys(body).sort(), ...(body.active !== undefined && { active: body.active }) },
       });
       return { success: true, data: updated };
+    },
+  );
+
+  app.post(
+    '/:id/plans/:slug/register',
+    {
+      schema: {
+        tags: ['Tenant · Plans'],
+        security: [{ tenantSession: [] }],
+        summary: 'Register (or re-register) a Plan with the payment provider',
+        description:
+          'Requires **billing-write** access to this Application — OWNER/ADMIN, or a MEMBER ' +
+          'with an `APP_ADMIN` or `APP_BILLING` grant on it.\n\n' +
+          'Creates the Stripe Product + Price for a plan that has none and stores the price id ' +
+          'on the plan. This is the repair for a plan whose registration was refused at create ' +
+          'time — fix the credentials (or the plan, via PATCH) and call this; the plan goes back ' +
+          'on sale on success, keeping its slug. Idempotent: a plan that is already registered ' +
+          'is returned unchanged without calling the provider.',
+        params: {
+          type: 'object',
+          properties: { id: { type: 'string' }, slug: { type: 'string' } },
+          required: ['id', 'slug'],
+        },
+        response: {
+          200: ok(
+            ref('Plan'),
+            "The plan with its registrationStatus settled — REGISTERED if this attempt " +
+              'succeeded, unchanged if it was already REGISTERED or NOT_REQUIRED.',
+          ),
+          ...errs({
+            400: 'BILLING_CREDENTIALS_NOT_CONFIGURED — this Application has no stripe credentials configured.',
+            ...APP_BILLING_WRITE_ERRORS,
+            404:
+              'PLAN_NOT_FOUND — no plan with that slug on this Application; or ' +
+              APP_BILLING_WRITE_ERRORS[404],
+            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+            502:
+              'BILLING_PROVIDER_ERROR — stripe rejected the registration attempt (only reachable ' +
+              'while the plan was PENDING/FAILED). The plan\'s registrationStatus is now FAILED ' +
+              "with the provider's message attached (`registrationError`), and it stays off sale.",
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id, slug } = PlanSlugParam.parse(req.params);
+      await ensureAppAccess(req, id, 'billing-write');
+      const plan = await plansService.registerWithProvider(id, slug);
+      void recordSecurityEvent({
+        type: 'app.plan_updated',
+        actorType: 'operator',
+        actorId: req.tenantUser!.id,
+        tenantId: req.tenantId!,
+        applicationId: id,
+        ...requestContext(req),
+        metadata: { slug, registrationStatus: plan.registrationStatus, active: plan.active },
+      });
+      return { success: true, data: plan };
     },
   );
 
@@ -844,11 +1281,37 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: "List a plan's entitlements (the benefit bundle it grants)",
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, slug: { type: 'string' } },
           required: ['id', 'slug'],
+        },
+        response: {
+          // Bounded by construction: entitlements are hand-added one at a time
+          // in the plan editor, not a table that grows with end-user usage.
+          200: okArray(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                kind: { type: 'string', enum: ['FEATURE', 'CREDIT', 'LICENSE', 'USAGE'] },
+                key: { type: 'string', nullable: true },
+                valueType: { type: 'string', enum: ['BOOL', 'INT', 'STRING'], nullable: true },
+                value: { type: 'string', nullable: true },
+                quantity: { type: 'integer', nullable: true },
+                licenseKind: { type: 'string', enum: ['PERPETUAL', 'TIMED', 'SEATS'], nullable: true },
+                rollover: { type: 'boolean' },
+                createdAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['id', 'kind', 'rollover', 'createdAt'],
+            },
+            "The plan's entitlement bundle.",
+          ),
+          ...errs({
+            ...APP_READ_ERRORS,
+            404: 'PLAN_NOT_FOUND — no plan with that slug on this Application.',
+          }),
         },
       },
     },
@@ -897,10 +1360,29 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             key: { type: 'string', maxLength: 80 },
             valueType: { type: 'string', enum: ['BOOL', 'INT', 'STRING'] },
             value: { type: 'string', maxLength: 200 },
-            quantity: { type: 'integer' },
+            quantity: { type: 'integer', maximum: 2147483647 },
             licenseKind: { type: 'string', enum: ['PERPETUAL', 'TIMED', 'SEATS'] },
             rollover: { type: 'boolean' },
           },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                kind: { type: 'string', enum: ['FEATURE', 'CREDIT', 'LICENSE', 'USAGE'] },
+                key: { type: 'string', nullable: true },
+              },
+              required: ['id', 'kind'],
+            },
+            'The upserted entitlement (id/kind/key).',
+          ),
+          ...errs({
+            400: 'PLAN_ENTITLEMENT_INVALID — the field combination required for this `kind` is incomplete or invalid.',
+            ...APP_BILLING_WRITE_ERRORS,
+            404: 'PLAN_NOT_FOUND — no plan with that slug on this Application.',
+          }),
         },
       },
     },
@@ -914,7 +1396,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           key: z.string().max(80).optional(),
           valueType: z.enum(['BOOL', 'INT', 'STRING']).optional(),
           value: z.string().max(200).optional(),
-          quantity: z.number().int().optional(),
+          quantity: positiveBoundedInt().optional(),
           licenseKind: z.enum(['PERPETUAL', 'TIMED', 'SEATS']).optional(),
           rollover: z.boolean().optional(),
         })
@@ -957,6 +1439,18 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           properties: { id: { type: 'string' }, slug: { type: 'string' }, entId: { type: 'string' } },
           required: ['id', 'slug', 'entId'],
         },
+        response: {
+          200: ok(
+            { type: 'object', properties: { removed: { type: 'boolean', enum: [true] } }, required: ['removed'] },
+            'Confirmation of removal.',
+          ),
+          ...errs({
+            ...APP_BILLING_WRITE_ERRORS,
+            404:
+              'PLAN_NOT_FOUND — no plan with that slug on this Application; or ' +
+              'PLAN_ENTITLEMENT_NOT_FOUND — no entitlement with that id on this plan.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -990,17 +1484,43 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'List Coupons (with redemption stats)',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
+          'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
           'Each coupon carries `redemptionCount` and `totalDiscountIssued` (smallest ' +
           'currency unit) aggregated from the redemptions table.',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(
+            {
+              allOf: [
+                ref('Coupon'),
+                {
+                  type: 'object',
+                  properties: {
+                    redemptionCount: { type: 'integer' },
+                    totalDiscountIssued: {
+                      type: 'integer',
+                      description: 'Smallest currency unit, summed across redemptions.',
+                    },
+                  },
+                  required: ['redemptionCount', 'totalDiscountIssued'],
+                },
+              ],
+            },
+            'A page of coupons (active and inactive), each with redemption stats.',
+          ),
+          ...errs({ 400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
+        },
       },
     },
     async (req) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'read');
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
-      return { success: true, data: await couponsService.listWithStats(id, true, { take, skip }) };
+      const [items, total] = await Promise.all([
+        couponsService.listWithStats(id, true, { take, skip }),
+        couponsService.count(id, true),
+      ]);
+      return { success: true, data: paged(items, total, take, skip) };
     },
   );
 
@@ -1023,14 +1543,25 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           properties: {
             code: { type: 'string', minLength: 1, maxLength: 40 },
             discountType: { type: 'string', enum: ['PERCENT', 'AMOUNT'] },
-            amountOff: { type: 'integer', minimum: 0 },
+            amountOff: { type: 'integer', minimum: 0, maximum: 2147483647 },
             currency: { type: 'string', minLength: 3, maxLength: 3 },
             planSlugs: { type: 'array', items: { type: 'string' } },
             startsAt: { type: 'string', format: 'date-time' },
             endsAt: { type: 'string', format: 'date-time' },
-            maxRedemptions: { type: 'integer', minimum: 1 },
-            maxRedemptionsPerUser: { type: 'integer', minimum: 1 },
+            maxRedemptions: { type: 'integer', minimum: 1, maximum: 2147483647 },
+            maxRedemptionsPerUser: { type: 'integer', minimum: 1, maximum: 2147483647 },
           },
+        },
+        response: {
+          201: ok(ref('Coupon'), 'The created coupon.'),
+          ...errs({
+            400:
+              'COUPON_CODE_INVALID — the code is not 1-40 alphanumerics/underscores/hyphens; or ' +
+              'COUPON_AMOUNT_INVALID — `amountOff` is negative, or a PERCENT discount exceeds ' +
+              '10000 basis points (100%); or VALIDATION_ERROR — a field failed schema validation.',
+            ...APP_BILLING_WRITE_ERRORS,
+            409: 'COUPON_CODE_TAKEN — another coupon on this Application already uses that code.',
+          }),
         },
       },
     },
@@ -1085,6 +1616,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           required: ['active'],
           properties: { active: { type: 'boolean' } },
         },
+        response: {
+          200: ok(ref('Coupon'), 'The coupon, with `active` updated.'),
+          ...errs({
+            ...APP_BILLING_WRITE_ERRORS,
+            404: 'COUPON_NOT_FOUND — no coupon with that code on this Application.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -1132,13 +1670,90 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'Discover all registered billing provider modules (+ per-app status)',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
+          'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
           'One entry per REGISTERED provider module (in registry order), whether or not this ' +
           'Application has configured it: display metadata (label, docs URL, default countries, ' +
           'priority), capabilities, and the credential field schema the panel renders forms from. ' +
           '`status` is null until the provider is configured for this Application. ' +
           'Never returns credential values — those are write-only.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                providers: {
+                  type: 'array',
+                  description: 'Bounded — one entry per registered provider module (currently 3).',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      name: { type: 'string' },
+                      label: { type: 'string' },
+                      docsUrl: { type: 'string', format: 'uri' },
+                      defaultCountries: { type: 'array', items: { type: 'string' } },
+                      priority: { type: 'integer' },
+                      capabilities: {
+                        type: 'object',
+                        description: 'Feature flags this provider module supports.',
+                        properties: {
+                          oneTime: { type: 'boolean' },
+                          captureStep: { type: 'boolean' },
+                          autoWebhookRegister: { type: 'boolean' },
+                          periodRotationEvents: { type: 'boolean' },
+                          onlineVerify: { type: 'boolean' },
+                        },
+                        additionalProperties: true,
+                      },
+                      credentialFields: {
+                        type: 'array',
+                        description: 'Field schema the panel renders the credential form from. Never a stored value.',
+                        items: {
+                          type: 'object',
+                          properties: {
+                            key: { type: 'string' },
+                            label: { type: 'string' },
+                            secret: { type: 'boolean' },
+                            optional: { type: 'boolean' },
+                            placeholder: { type: 'string' },
+                            help: { type: 'string' },
+                            pattern: {
+                              type: 'object',
+                              properties: { message: { type: 'string' } },
+                              required: ['message'],
+                            },
+                          },
+                          required: ['key', 'label', 'secret', 'optional'],
+                        },
+                      },
+                      configured: { type: 'boolean' },
+                      status: {
+                        nullable: true,
+                        type: 'object',
+                        description: 'null until this provider is configured for this Application.',
+                        properties: {
+                          enabled: { type: 'boolean' },
+                          mode: { type: 'string', enum: ['test', 'live'] },
+                          countries: { type: 'array', items: { type: 'string' } },
+                          priority: { type: 'integer' },
+                          webhookConfigured: { type: 'boolean' },
+                        },
+                        required: ['enabled', 'mode', 'countries', 'priority', 'webhookConfigured'],
+                      },
+                    },
+                    required: [
+                      'name', 'label', 'docsUrl', 'defaultCountries', 'priority',
+                      'capabilities', 'credentialFields', 'configured', 'status',
+                    ],
+                  },
+                },
+              },
+              required: ['providers'],
+            },
+            'Every registered billing provider module, with this Application\'s per-provider status.',
+          ),
+          ...errs(APP_READ_ERRORS),
+        },
       },
     },
     async (req) => {
@@ -1180,10 +1795,30 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'List all billing providers configured for this Application',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
+          'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
           'Returns one entry per configured provider with its enabled flag, country list, and priority. ' +
           'Never returns the credentials themselves — those are write-only.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        response: {
+          200: okArray(
+            {
+              type: 'object',
+              properties: {
+                provider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] },
+                configured: { type: 'boolean', enum: [true] },
+                enabled: { type: 'boolean' },
+                mode: { type: 'string', enum: ['test', 'live'] },
+                countries: { type: 'array', items: { type: 'string' } },
+                priority: { type: 'integer' },
+                webhookConfigured: { type: 'boolean' },
+              },
+              required: ['provider', 'configured', 'enabled', 'mode', 'countries', 'priority', 'webhookConfigured'],
+            },
+            // Bounded by construction: at most one row per registered provider (3 today).
+            'Providers configured for this Application. Never includes credential values.',
+          ),
+          ...errs(APP_READ_ERRORS),
+        },
       },
     },
     async (req) => {
@@ -1222,6 +1857,27 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             provider: { type: 'string', enum: registryNames },
           },
           required: ['id', 'provider'],
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                configured: { type: 'boolean', enum: [true] },
+                provider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] },
+              },
+              required: ['configured', 'provider'],
+            },
+            'Confirmation — credential values are never echoed back.',
+          ),
+          ...errs({
+            400:
+              'BILLING_CREDENTIALS_INVALID — a required field is missing or fails the ' +
+              "provider's pattern rule; or BILLING_CREDENTIALS_MODE_CONTRADICTED — the key " +
+              'material states a mode that contradicts the submitted `mode`; or ' +
+              'VALIDATION_ERROR — a field failed schema validation.',
+            ...APP_WRITE_ERRORS,
+          }),
         },
       },
     },
@@ -1296,6 +1952,25 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             mode: { type: 'string', enum: ['test', 'live'] },
           },
         },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: { provider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] } },
+              required: ['provider'],
+            },
+            'Confirmation.',
+          ),
+          ...errs({
+            400:
+              'BILLING_CREDENTIALS_MODE_CONTRADICTED — the stored key material states a mode ' +
+              'that contradicts the submitted `mode`; or VALIDATION_ERROR — a field failed schema validation.',
+            ...APP_WRITE_ERRORS,
+            404:
+              APP_WRITE_ERRORS[404] +
+              ' Or BILLING_CREDENTIALS_NOT_CONFIGURED — `mode` was sent but no credentials are stored for this provider yet.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -1357,6 +2032,24 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           },
           required: ['id', 'provider'],
         },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                configured: { type: 'boolean', enum: [false] },
+                provider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] },
+              },
+              required: ['configured', 'provider'],
+            },
+            'Confirmation.',
+          ),
+          // NOTE: `billingCredentialsService.remove` is an unconditional prisma.delete — deleting
+          // a provider with no stored row throws an uncaught Prisma P2025, which the global error
+          // handler turns into a generic 500, not a 404. Not declared here for that reason; see
+          // the handler/schema contradictions note in the final report.
+          ...errs(APP_WRITE_ERRORS),
+        },
       },
     },
     async (req) => {
@@ -1399,6 +2092,29 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           },
           required: ['id', 'provider'],
         },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                provider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] },
+                webhookConfigured: { type: 'boolean' },
+                url: { type: 'string', format: 'uri' },
+              },
+              required: ['provider', 'webhookConfigured', 'url'],
+            },
+            'The registered webhook endpoint.',
+          ),
+          ...errs({
+            400:
+              'BILLING_WEBHOOK_BASE_NOT_PUBLIC — PUBLIC_WEBHOOK_BASE_URL/API_URL is not a ' +
+              'public URL; or BILLING_CREDENTIALS_NOT_CONFIGURED — save provider credentials ' +
+              'first; or BILLING_WEBHOOK_AUTOCONFIG_UNSUPPORTED — this provider (Razorpay) has ' +
+              'no auto-register API.',
+            ...APP_WRITE_ERRORS,
+            502: 'BILLING_WEBHOOK_REGISTRATION_FAILED — the provider API rejected the registration call.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -1425,7 +2141,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'List recent INBOUND provider webhook events (Stripe/PayPal/Razorpay)',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
+          'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
           'The events Rekey received from the billing provider (subscription activated, ' +
           'payment captured, etc.). Filter by `?provider=`. This is the inbound log — distinct ' +
           "from outbound webhook deliveries (this Application's own /webhooks endpoints).",
@@ -1435,6 +2151,26 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             provider: { type: 'string', enum: registryNames },
             ...paginationJsonSchema,
           },
+        },
+        response: {
+          200: okPage(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                provider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] },
+                providerEventId: { type: 'string' },
+                eventType: { type: 'string' },
+                receivedAt: { type: 'string', format: 'date-time' },
+                processedAt: { type: 'string', format: 'date-time', nullable: true },
+                processingError: { type: 'string', nullable: true },
+                status: { type: 'string', enum: ['error', 'processed', 'received'] },
+              },
+              required: ['id', 'provider', 'providerEventId', 'eventType', 'receivedAt', 'status'],
+            },
+            'A page of inbound provider webhook events, newest first.',
+          ),
+          ...errs({ 400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
         },
       },
     },
@@ -1446,30 +2182,42 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         .parse(req.query);
       await ensureAppAccess(req, params.id, 'read');
       const { take, skip } = parsePagination(query);
-      const events = await prisma.webhookEvent.findMany({
-        where: { applicationId: params.id, ...(query.provider ? { provider: query.provider } : {}) },
-        select: {
-          id: true,
-          provider: true,
-          providerEventId: true,
-          eventType: true,
-          receivedAt: true,
-          processedAt: true,
-          processingError: true,
-        },
-        orderBy: { receivedAt: 'desc' },
-        take,
-        skip,
-      });
+      const where = {
+        applicationId: params.id,
+        ...(query.provider ? { provider: query.provider } : {}),
+      };
+      const [events, total] = await Promise.all([
+        prisma.webhookEvent.findMany({
+          where,
+          select: {
+            id: true,
+            provider: true,
+            providerEventId: true,
+            eventType: true,
+            receivedAt: true,
+            processedAt: true,
+            processingError: true,
+          },
+          orderBy: { receivedAt: 'desc' },
+          take,
+          skip,
+        }),
+        prisma.webhookEvent.count({ where }),
+      ]);
       return {
         success: true,
-        data: events.map((e) => ({
-          ...e,
-          // processed cleanly → ok; recorded but errored → error; not yet processed → received.
-          status: e.processingError ? 'error' : e.processedAt ? 'processed' : 'received',
-          receivedAt: e.receivedAt.toISOString(),
-          processedAt: e.processedAt?.toISOString() ?? null,
-        })),
+        data: paged(
+          events.map((e) => ({
+            ...e,
+            // processed cleanly → ok; recorded but errored → error; not yet processed → received.
+            status: e.processingError ? 'error' : e.processedAt ? 'processed' : 'received',
+            receivedAt: e.receivedAt.toISOString(),
+            processedAt: e.processedAt?.toISOString() ?? null,
+          })),
+          total,
+          take,
+          skip,
+        ),
       };
     },
   );
@@ -1485,12 +2233,16 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'Revenue / subscription stats for this Application (Billing Overview tiles)',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
+          'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
           'Subscription counters (active, past-due, canceled/new in the last 30 days), MRR ' +
           '(ACTIVE recurring SUBSCRIPTION plans, yearly normalized to monthly), 30-day payment ' +
           'volume + success/failure counts, and a 12-month UTC monthly revenue series. ' +
           'All amounts are in the smallest currency unit.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        response: {
+          200: ok(ref('BillingStats'), 'Revenue and subscription stats for this Application.'),
+          ...errs(APP_READ_ERRORS),
+        },
       },
     },
     async (req) => {
@@ -1511,7 +2263,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'List payments for this Application (newest first)',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
+          'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
           'Operator view of every Payment row — subscription invoices and one-time charges. ' +
           'Filter by `status` and a `from`/`to` createdAt window. Joined with the paying ' +
           "end-user's email where the payment is attributable to one. " +
@@ -1527,6 +2279,32 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             order: { type: 'string', enum: ['asc', 'desc'] },
             ...paginationJsonSchema,
           },
+        },
+        response: {
+          200: okPage(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                endUserId: { type: 'string', nullable: true },
+                subscriptionId: { type: 'string', nullable: true },
+                amount: { type: 'integer' },
+                currency: { type: 'string' },
+                status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED'] },
+                providerPaymentId: { type: 'string', nullable: true },
+                description: { type: 'string', nullable: true },
+                createdAt: { type: 'string', format: 'date-time' },
+                endUserEmail: {
+                  type: 'string',
+                  nullable: true,
+                  description: 'Joined from EndUser; null when the payment is not attributable to one.',
+                },
+              },
+              required: ['id', 'amount', 'currency', 'status', 'createdAt', 'endUserEmail'],
+            },
+            'A page of payments, sorted per `?sort`/`?order` (default createdAt desc).',
+          ),
+          ...errs({ 400: 'VALIDATION_ERROR — `limit`/`offset` out of range, or an invalid `status`/`sort`/`order`.', ...APP_READ_ERRORS }),
         },
       },
     },
@@ -1551,34 +2329,38 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           : q.sort === 'status'
             ? { status: order }
             : { createdAt: order };
-      const payments = await prisma.payment.findMany({
-        where: {
-          applicationId: id,
-          ...(q.status && { status: q.status }),
-          ...((q.from || q.to) && {
-            createdAt: {
-              ...(q.from && { gte: q.from }),
-              ...(q.to && { lte: q.to }),
-            },
-          }),
-        },
-        select: {
-          id: true,
-          endUserId: true,
-          subscriptionId: true,
-          amount: true,
-          currency: true,
-          status: true,
-          providerPaymentId: true,
-          description: true,
-          createdAt: true,
-        },
-        // Stable secondary order by id so pages never overlap/skip when many
-        // rows share the same sort value (e.g. equal amounts).
-        orderBy: [primaryOrder, { id: 'desc' }],
-        take,
-        skip,
-      });
+      const where = {
+        applicationId: id,
+        ...(q.status && { status: q.status }),
+        ...((q.from || q.to) && {
+          createdAt: {
+            ...(q.from && { gte: q.from }),
+            ...(q.to && { lte: q.to }),
+          },
+        }),
+      };
+      const [payments, total] = await Promise.all([
+        prisma.payment.findMany({
+          where,
+          select: {
+            id: true,
+            endUserId: true,
+            subscriptionId: true,
+            amount: true,
+            currency: true,
+            status: true,
+            providerPaymentId: true,
+            description: true,
+            createdAt: true,
+          },
+          // Stable secondary order by id so pages never overlap/skip when many
+          // rows share the same sort value (e.g. equal amounts).
+          orderBy: [primaryOrder, { id: 'desc' }],
+          take,
+          skip,
+        }),
+        prisma.payment.count({ where }),
+      ]);
       // Payment has no Prisma relation to EndUser (endUserId is a plain
       // column) — join the email with a second bounded query.
       const userIds = [...new Set(payments.map((p) => p.endUserId).filter((v): v is string => v !== null))];
@@ -1591,11 +2373,16 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const emailById = new Map(users.map((u) => [u.id, u.email]));
       return {
         success: true,
-        data: payments.map((p) => ({
-          ...p,
-          endUserEmail: p.endUserId ? (emailById.get(p.endUserId) ?? null) : null,
-          createdAt: p.createdAt.toISOString(),
-        })),
+        data: paged(
+          payments.map((p) => ({
+            ...p,
+            endUserEmail: p.endUserId ? (emailById.get(p.endUserId) ?? null) : null,
+            createdAt: p.createdAt.toISOString(),
+          })),
+          total,
+          take,
+          skip,
+        ),
       };
     },
   );
@@ -1611,7 +2398,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'List dunning cases for this Application (newest first)',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
+          'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
           'Failed-payment recovery cases. A case opens when a subscription goes PAST_DUE, ' +
           'sends reminder emails on day 0/3/7, and exhausts on day 14 (subscription canceled). ' +
           'The provider drives the actual card retries — see docs/billing.md → Dunning. ' +
@@ -1626,6 +2413,32 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             order: { type: 'string', enum: ['asc', 'desc'] },
             ...paginationJsonSchema,
           },
+        },
+        response: {
+          200: okPage(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                subscriptionId: { type: 'string' },
+                endUserId: { type: 'string', nullable: true },
+                endUserEmail: { type: 'string', nullable: true },
+                organizationId: { type: 'string', nullable: true },
+                status: { type: 'string', enum: ['OPEN', 'RECOVERED', 'EXHAUSTED', 'CANCELED'] },
+                planSlug: { type: 'string' },
+                planName: { type: 'string' },
+                failedAttempts: { type: 'integer' },
+                remindersSent: { type: 'integer' },
+                lastFailureAt: { type: 'string', format: 'date-time', nullable: true },
+                nextActionAt: { type: 'string', format: 'date-time', nullable: true },
+                openedAt: { type: 'string', format: 'date-time' },
+                closedAt: { type: 'string', format: 'date-time', nullable: true },
+              },
+              required: ['id', 'subscriptionId', 'status', 'planSlug', 'planName', 'failedAttempts', 'remindersSent', 'openedAt'],
+            },
+            'A page of dunning cases, sorted per `?sort`/`?order` (default openedAt desc).',
+          ),
+          ...errs({ 400: 'VALIDATION_ERROR — `limit`/`offset` out of range, or an invalid `status`/`sort`/`order`.', ...APP_READ_ERRORS }),
         },
       },
     },
@@ -1648,14 +2461,18 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           : q.sort === 'status'
             ? { status: order }
             : { openedAt: order };
-      const cases = await prisma.dunningCase.findMany({
-        where: { applicationId: id, ...(q.status && { status: q.status }) },
-        include: { subscription: { select: { plan: { select: { slug: true, name: true } } } } },
-        // Stable secondary order by id so pages never overlap/skip.
-        orderBy: [primaryOrder, { id: 'desc' }],
-        take,
-        skip,
-      });
+      const where = { applicationId: id, ...(q.status && { status: q.status }) };
+      const [cases, total] = await Promise.all([
+        prisma.dunningCase.findMany({
+          where,
+          include: { subscription: { select: { plan: { select: { slug: true, name: true } } } } },
+          // Stable secondary order by id so pages never overlap/skip.
+          orderBy: [primaryOrder, { id: 'desc' }],
+          take,
+          skip,
+        }),
+        prisma.dunningCase.count({ where }),
+      ]);
       // DunningCase.endUserId is a plain column (like Payment) — join the
       // emails with a second bounded query.
       const userIds = [
@@ -1670,22 +2487,27 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const emailById = new Map(users.map((u) => [u.id, u.email]));
       return {
         success: true,
-        data: cases.map((c) => ({
-          id: c.id,
-          subscriptionId: c.subscriptionId,
-          endUserId: c.endUserId,
-          endUserEmail: c.endUserId ? (emailById.get(c.endUserId) ?? null) : null,
-          organizationId: c.organizationId,
-          status: c.status,
-          planSlug: c.subscription.plan.slug,
-          planName: c.subscription.plan.name,
-          failedAttempts: c.failedAttempts,
-          remindersSent: c.remindersSent,
-          lastFailureAt: c.lastFailureAt?.toISOString() ?? null,
-          nextActionAt: c.nextActionAt?.toISOString() ?? null,
-          openedAt: c.openedAt.toISOString(),
-          closedAt: c.closedAt?.toISOString() ?? null,
-        })),
+        data: paged(
+          cases.map((c) => ({
+            id: c.id,
+            subscriptionId: c.subscriptionId,
+            endUserId: c.endUserId,
+            endUserEmail: c.endUserId ? (emailById.get(c.endUserId) ?? null) : null,
+            organizationId: c.organizationId,
+            status: c.status,
+            planSlug: c.subscription.plan.slug,
+            planName: c.subscription.plan.name,
+            failedAttempts: c.failedAttempts,
+            remindersSent: c.remindersSent,
+            lastFailureAt: c.lastFailureAt?.toISOString() ?? null,
+            nextActionAt: c.nextActionAt?.toISOString() ?? null,
+            openedAt: c.openedAt.toISOString(),
+            closedAt: c.closedAt?.toISOString() ?? null,
+          })),
+          total,
+          take,
+          skip,
+        ),
       };
     },
   );
@@ -1720,6 +2542,23 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             scopes: { type: 'array', items: { type: 'string' } },
             issuerUrl: { type: 'string', format: 'uri' },
           },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                provider: { type: 'string', enum: ['google', 'github', 'microsoft', 'discord', 'gitlab', 'slack', 'oidc'] },
+                configured: { type: 'boolean', enum: [true] },
+              },
+              required: ['provider', 'configured'],
+            },
+            'Confirmation — clientSecret is never echoed back.',
+          ),
+          ...errs({
+            400: 'VALIDATION_ERROR — `provider` unsupported, or a field failed schema validation.',
+            ...APP_WRITE_ERRORS,
+          }),
         },
       },
     },
@@ -1772,6 +2611,23 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           properties: { id: { type: 'string' }, provider: { type: 'string' } },
           required: ['id', 'provider'],
         },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                provider: { type: 'string', enum: ['google', 'github', 'microsoft', 'discord', 'gitlab', 'slack', 'oidc'] },
+                configured: { type: 'boolean', enum: [false] },
+              },
+              required: ['provider', 'configured'],
+            },
+            'Confirmation. Idempotent — removing an already-unconfigured provider still 200s.',
+          ),
+          ...errs({
+            400: 'VALIDATION_ERROR — `provider` unsupported.',
+            ...APP_WRITE_ERRORS,
+          }),
+        },
       },
     },
     async (req) => {
@@ -1796,7 +2652,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'List recent end-users (for license issuance pickers etc.)',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
+          'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
           'Sort with `?sort=createdAt|email&order=asc|desc` (default createdAt desc).',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         querystring: {
@@ -1812,6 +2668,24 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             order: { type: 'string', enum: ['asc', 'desc'] },
             ...paginationJsonSchema,
           },
+        },
+        response: {
+          200: okPage(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                email: { type: 'string', format: 'email' },
+                emailVerified: { type: 'boolean' },
+                role: { type: 'string' },
+                metadata: { type: 'object', nullable: true, additionalProperties: true },
+                createdAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['id', 'email', 'emailVerified', 'role', 'createdAt'],
+            },
+            'A page of end-users, sorted per `?sort`/`?order` (default createdAt desc, default page size 25).',
+          ),
+          ...errs({ 400: 'VALIDATION_ERROR — `limit`/`offset` out of range, or an invalid `sort`/`order`/`subscriptionStatus`.', ...APP_READ_ERRORS }),
         },
       },
     },
@@ -1834,24 +2708,31 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         .parse(req.query);
       const { take, skip } = parsePagination(q, 25);
       const order = q.order ?? 'desc';
-      const users = await prisma.endUser.findMany({
-        where: {
-          applicationId: id,
-          ...(q.search && { email: { contains: q.search.toLowerCase() } }),
-          ...(q.emailVerified !== undefined && { emailVerified: q.emailVerified }),
-          ...(q.subscriptionStatus && {
-            subscriptions: { some: { status: q.subscriptionStatus } },
-          }),
-        },
-        // Stable secondary order by id keeps pagination consistent on ties.
-        orderBy: [q.sort === 'email' ? { email: order } : { createdAt: order }, { id: 'desc' }],
-        take,
-        skip,
-        select: {
-          id: true, email: true, emailVerified: true, role: true, metadata: true, createdAt: true,
-        },
-      });
-      return { success: true, data: users };
+      // The endpoint the functional audit caught truncating: 36 rows in the
+      // database, 25 returned, and nothing in the response saying so. `total`
+      // and `hasMore` are the fix.
+      const where = {
+        applicationId: id,
+        ...(q.search && { email: { contains: q.search.toLowerCase() } }),
+        ...(q.emailVerified !== undefined && { emailVerified: q.emailVerified }),
+        ...(q.subscriptionStatus && {
+          subscriptions: { some: { status: q.subscriptionStatus } },
+        }),
+      };
+      const [users, total] = await Promise.all([
+        prisma.endUser.findMany({
+          where,
+          // Stable secondary order by id keeps pagination consistent on ties.
+          orderBy: [q.sort === 'email' ? { email: order } : { createdAt: order }, { id: 'desc' }],
+          take,
+          skip,
+          select: {
+            id: true, email: true, emailVerified: true, role: true, metadata: true, createdAt: true,
+          },
+        }),
+        prisma.endUser.count({ where }),
+      ]);
+      return { success: true, data: paged(users, total, take, skip) };
     },
   );
 
@@ -1888,6 +2769,39 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             metadata: { type: 'object', additionalProperties: true },
             emailVerified: { type: 'boolean' },
           },
+        },
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                email: { type: 'string', format: 'email' },
+                emailVerified: { type: 'boolean' },
+                role: { type: 'string' },
+                metadata: { type: 'object', nullable: true, additionalProperties: true },
+                createdAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['id', 'email', 'emailVerified', 'role', 'createdAt'],
+            },
+            'The created end-user.',
+          ),
+          // NOTE: 409 is declared as its own literal key (not folded into the `errs()` spread
+          // below) because the handler's catch block calls `reply.status(409)` directly — with
+          // Fastify's typed reply, `.status()` only accepts status codes that appear as literal
+          // keys of `schema.response`, and a spread of `errs()`'s `Record<number, JsonSchema>`
+          // return type doesn't preserve individual literals. This 409 is also hand-built in the
+          // handler's catch block, bypassing the normal RekeyError path — it omits `requestId`
+          // (present on every other error this API returns). See the final report.
+          409: errs({ 409: 'EMAIL_ALREADY_EXISTS — another end-user in this Application already uses that email.' })[409],
+          ...errs({
+            400:
+              'METADATA_TOO_LARGE — `metadata` exceeds the size limit; or ' +
+              'END_USER_ROLE_UNKNOWN — `role` is not defined for this Application; or ' +
+              'VALIDATION_ERROR — a field failed schema validation.',
+            ...APP_WRITE_ERRORS,
+            403: APP_WRITE_ERRORS[403] + ' Or TENANT_QUOTA_EXCEEDED — the workspace end-user limit is reached.',
+          }),
         },
       },
     },
@@ -1935,13 +2849,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         return reply.status(201).send({ success: true, data: created });
       } catch (e) {
         if ((e as { code?: string }).code === 'P2002') {
-          return reply.status(409).send({
-            success: false,
-            error: {
-              code: 'EMAIL_ALREADY_EXISTS',
-              message: 'An end-user with that email already exists in this Application.',
-              fix: 'Pick a different email or use the existing user.',
-            },
+          // Same reason as the licenses 404 below: hand-building the envelope
+          // bypasses `rekeyErrorHandler` and drops `requestId`.
+          throw new RekeyError({
+            statusCode: 409,
+            code: 'EMAIL_ALREADY_EXISTS',
+            message: 'An end-user with that email already exists in this Application.',
+            fix: 'Pick a different email or use the existing user.',
           });
         }
         throw e;
@@ -1958,7 +2872,77 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'Get one end-user with their passkeys + recent impersonation audits',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                endUser: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    applicationId: { type: 'string' },
+                    email: { type: 'string', format: 'email' },
+                    emailVerified: { type: 'boolean' },
+                    role: { type: 'string' },
+                    metadata: { type: 'object', nullable: true, additionalProperties: true },
+                    erasedAt: { type: 'string', format: 'date-time', nullable: true },
+                    erasedBy: { type: 'string', nullable: true },
+                    createdAt: { type: 'string', format: 'date-time' },
+                    updatedAt: { type: 'string', format: 'date-time' },
+                    failedSignInAttempts: {
+                      type: 'integer',
+                      description: 'Sourced live from the Redis brute-force limiter, not a stored column.',
+                    },
+                    lockedUntil: { type: 'string', format: 'date-time', nullable: true },
+                  },
+                  required: [
+                    'id', 'applicationId', 'email', 'emailVerified', 'role', 'createdAt',
+                    'updatedAt', 'failedSignInAttempts', 'lockedUntil',
+                  ],
+                },
+                passkeys: {
+                  type: 'array',
+                  // Bounded by construction — an end-user registers a handful of authenticators.
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      credentialId: { type: 'string' },
+                      deviceName: { type: 'string', nullable: true },
+                      lastUsedAt: { type: 'string', format: 'date-time', nullable: true },
+                      createdAt: { type: 'string', format: 'date-time' },
+                    },
+                    required: ['id', 'credentialId', 'createdAt'],
+                  },
+                },
+                recentImpersonations: {
+                  type: 'array',
+                  description: 'Most recent 20 impersonation-audit rows for this end-user.',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      operatorUserId: { type: 'string' },
+                      reason: { type: 'string', nullable: true },
+                      startedAt: { type: 'string', format: 'date-time' },
+                      endedAt: { type: 'string', format: 'date-time', nullable: true },
+                      ip: { type: 'string', nullable: true },
+                    },
+                    required: ['id', 'operatorUserId', 'startedAt'],
+                  },
+                },
+              },
+              required: ['endUser', 'passkeys', 'recentImpersonations'],
+            },
+            'The end-user plus their passkeys and recent impersonation audit trail.',
+          ),
+          ...errs({
+            ...APP_READ_ERRORS,
+            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -2035,7 +3019,94 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: "Get an end-user's subscriptions, payments + licenses (operator billing view)",
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                subscriptions: {
+                  type: 'array',
+                  description: 'Most recent 100, newest first.',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      status: { type: 'string', enum: ['PENDING', 'ACTIVE', 'PAST_DUE', 'CANCELED', 'EXPIRED'] },
+                      provider: { type: 'string' },
+                      providerSubId: { type: 'string', nullable: true },
+                      currentPeriodEnd: { type: 'string', format: 'date-time', nullable: true },
+                      cancelAt: { type: 'string', format: 'date-time', nullable: true },
+                      canceledAt: { type: 'string', format: 'date-time', nullable: true },
+                      beneficiaryOrgId: { type: 'string', nullable: true },
+                      createdAt: { type: 'string', format: 'date-time' },
+                      plan: {
+                        type: 'object',
+                        properties: {
+                          slug: { type: 'string' },
+                          name: { type: 'string' },
+                          kind: { type: 'string' },
+                          amount: { type: 'integer' },
+                          currency: { type: 'string' },
+                          interval: { type: 'string', nullable: true },
+                        },
+                        required: ['slug', 'name', 'kind', 'amount', 'currency'],
+                      },
+                    },
+                    required: ['id', 'status', 'provider', 'createdAt', 'plan'],
+                  },
+                },
+                payments: {
+                  type: 'array',
+                  description: 'Most recent 50, newest first.',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      amount: { type: 'integer' },
+                      currency: { type: 'string' },
+                      status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED'] },
+                      description: { type: 'string', nullable: true },
+                      providerPaymentId: { type: 'string', nullable: true },
+                      subscriptionId: { type: 'string', nullable: true },
+                      createdAt: { type: 'string', format: 'date-time' },
+                    },
+                    required: ['id', 'amount', 'currency', 'status', 'createdAt'],
+                  },
+                },
+                licenses: {
+                  type: 'array',
+                  description: 'Most recent 100, newest first.',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      kind: { type: 'string', enum: ['PERPETUAL', 'TIMED', 'SEATS'] },
+                      status: { type: 'string' },
+                      keyPrefix: { type: 'string' },
+                      seatsAllowed: { type: 'integer', nullable: true },
+                      organizationId: { type: 'string', nullable: true },
+                      expiresAt: { type: 'string', format: 'date-time', nullable: true },
+                      createdAt: { type: 'string', format: 'date-time' },
+                      plan: {
+                        type: 'object',
+                        properties: { slug: { type: 'string' }, name: { type: 'string' } },
+                        required: ['slug', 'name'],
+                      },
+                    },
+                    required: ['id', 'kind', 'status', 'keyPrefix', 'createdAt', 'plan'],
+                  },
+                },
+              },
+              required: ['subscriptions', 'payments', 'licenses'],
+            },
+            "The end-user's billing history. Each array is a bounded recent-N tail, not paginated.",
+          ),
+          ...errs({
+            ...APP_READ_ERRORS,
+            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -2147,6 +3218,31 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             emailVerified: { type: 'boolean' },
           },
         },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                email: { type: 'string', format: 'email' },
+                emailVerified: { type: 'boolean' },
+                role: { type: 'string' },
+                metadata: { type: 'object', nullable: true, additionalProperties: true },
+                createdAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['id', 'email', 'emailVerified', 'role', 'createdAt'],
+            },
+            'The patched end-user.',
+          ),
+          ...errs({
+            400:
+              'METADATA_TOO_LARGE — `metadata` exceeds the size limit; or ' +
+              'END_USER_ROLE_UNKNOWN — `role` is not defined for this Application; or ' +
+              'VALIDATION_ERROR — a field failed schema validation.',
+            ...APP_WRITE_ERRORS,
+            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -2236,6 +3332,39 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                 'instead of a hard cascade delete. OWNER/ADMIN only.',
             },
           },
+        },
+        response: {
+          200: ok(
+            {
+              oneOf: [
+                {
+                  type: 'object',
+                  description: 'Plain delete (default, `?erasure` unset or "false").',
+                  properties: { removed: { type: 'boolean', enum: [true] } },
+                  required: ['removed'],
+                },
+                {
+                  type: 'object',
+                  description: 'GDPR erasure (`?erasure=true`).',
+                  properties: {
+                    erased: { type: 'boolean', description: 'False when the end-user was already a tombstone (idempotent no-op).' },
+                    erasedAt: { type: 'string', format: 'date-time' },
+                    alreadyErased: { type: 'boolean' },
+                  },
+                  required: ['erased', 'erasedAt', 'alreadyErased'],
+                },
+              ],
+            },
+            'Confirmation. Shape depends on `?erasure`.',
+          ),
+          ...errs({
+            403:
+              APP_WRITE_ERRORS[403] +
+              ' Or TENANT_ROLE_INSUFFICIENT — `?erasure=true` requires the OWNER or ADMIN workspace role (no grant unlocks it).',
+            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            401: APP_WRITE_ERRORS[401],
+            502: 'PROVIDER_CANCEL_FAILED — a plain delete (not erasure) is refused when the billing provider will not cancel the end-user\'s active subscription (avoids leaving a live charge behind).',
+          }),
         },
       },
     },
@@ -2407,7 +3536,28 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: "Get an end-user's credit balance + recent ledger",
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                balance: { type: 'integer' },
+                ledger: {
+                  type: 'array',
+                  // Bounded by construction: this route always requests limit:50.
+                  items: ref('CreditLedgerEntry'),
+                },
+              },
+              required: ['balance', 'ledger'],
+            },
+            "The end-user's credit balance and most recent 50 ledger entries.",
+          ),
+          ...errs({
+            ...APP_READ_ERRORS,
+            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -2450,12 +3600,31 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           type: 'object',
           required: ['amount'],
           properties: {
-            amount: { type: 'integer' },
+            amount: { type: 'integer', maximum: 2147483647 },
             reason: { type: 'string', enum: ['GRANT', 'REFUND', 'ADJUST'] },
             idempotencyKey: { type: 'string', minLength: 1, maxLength: 200 },
             description: { type: 'string', maxLength: 500 },
             metadata: { type: 'object', additionalProperties: true },
           },
+        },
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: {
+                balance: { type: 'integer', description: 'Balance after applying this grant.' },
+                entryId: { type: 'string' },
+                applied: { type: 'boolean' },
+              },
+              required: ['balance', 'entryId', 'applied'],
+            },
+            'The ledger entry created and the resulting balance.',
+          ),
+          ...errs({
+            400: 'CREDITS_AMOUNT_INVALID — `amount` is zero, non-integer, or (for a debit) would overdraw the balance.',
+            ...APP_BILLING_WRITE_ERRORS,
+            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+          }),
         },
       },
     },
@@ -2518,6 +3687,29 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           type: 'object',
           properties: { id: { type: 'string' }, euid: { type: 'string' } },
           required: ['id', 'euid'],
+        },
+        response: {
+          // NOT the {success, data} envelope: this handler sends the document itself
+          // under a Content-Disposition attachment header (a downloadable file),
+          // bypassing the envelope every other route uses.
+          //
+          // It used to be declared `raw(..., 'application/json')`, which emits
+          // `{"type": "string"}` — describing a JSON string where the endpoint
+          // returns a JSON object, so a generated client typed this
+          // `Promise<string>`. The real shape is the `EndUserExport` component,
+          // written against `EndUserExportDocument` in @rekey.dev/shared-types.
+          200: {
+            description:
+              'Downloadable JSON document of everything Rekey stores about this end-user ' +
+              '(GDPR/DSAR). Sent as `attachment; filename="end-user-<id>-export.json"`, and ' +
+              'NOT wrapped in the {success, data} envelope — the body is the document itself.',
+            content: { 'application/json': { schema: ref('EndUserExport') } },
+          },
+          ...errs({
+            ...APP_READ_ERRORS,
+            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            403: APP_READ_ERRORS[403] + ' Or TENANT_ROLE_INSUFFICIENT — this route requires the OWNER or ADMIN workspace role (no grant unlocks it).',
+          }),
         },
       },
     },
@@ -2812,12 +4004,25 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   // POST /:id/end-users/:euid/impersonate
   //
   // OWNER/ADMIN-only. Mints a 5-minute `eu_access` token whose payload
-  // carries `imp = <operator user id>` alongside the normal `sub`
-  // (end-user id). The operator's customer-facing service uses this token
-  // exactly like a real session token — every route the user could call
-  // becomes callable as them, except routes that explicitly refuse
-  // impersonation (none today, but `claims.imp` is the seam to add such
-  // checks). Bounded lifetime + no refresh + durable audit row.
+  // carries `imp = <operator user id>` and `impid = <audit row id>` alongside
+  // the normal `sub` (end-user id). The operator's customer-facing service uses
+  // this token much like a real session token — most routes the user could call
+  // become callable as them.
+  //
+  // Two bounds, not one. The lifetime was the only bound for a long time, and
+  // it was not enough on its own:
+  //
+  //   - **Revocable.** The audit row is minted FIRST and its id rides in the
+  //     token, so `requireUserSession` can refuse a token whose row has been
+  //     ended. Before this, `impersonation_audits.endedAt` was described in the
+  //     schema and written by nothing — a minted token ran to expiry no matter
+  //     what anyone did, and "end impersonation" was not an operation that
+  //     existed. See POST .../impersonate/end below.
+  //   - **Bounded in what it can do.** `refuseWhileImpersonating`
+  //     (middleware/impersonation.ts) refuses the credential-changing routes.
+  //     A password change, an MFA rebind or a passkey enrolment made during
+  //     impersonation outlives the token permanently, which is the one thing a
+  //     5-minute limit cannot contain.
   app.post(
     '/:id/end-users/:euid/impersonate',
     {
@@ -2839,6 +4044,35 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           properties: {
             reason: { type: 'string', maxLength: 280, description: 'Short justification, captured in audit.' },
           },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                impersonationId: { type: 'string' },
+                accessToken: { type: 'string' },
+                accessTokenExpiresAt: { type: 'string', format: 'date-time' },
+                impersonatedUser: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    email: { type: 'string', format: 'email' },
+                    role: { type: 'string' },
+                  },
+                  required: ['id', 'email', 'role'],
+                },
+                warning: { type: 'string' },
+              },
+              required: ['impersonationId', 'accessToken', 'accessTokenExpiresAt', 'impersonatedUser', 'warning'],
+            },
+            'A 5-minute impersonation access token (no refresh) plus the audit row id.',
+          ),
+          ...errs({
+            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            401: APP_READ_ERRORS[401],
+            403: APP_READ_ERRORS[403] + ' Or TENANT_ROLE_INSUFFICIENT — this route requires the OWNER or ADMIN workspace role (no grant unlocks it).',
+          }),
         },
       },
     },
@@ -2864,14 +4098,22 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         where: { id: endUser.applicationId },
         select: { tokenGeneration: true },
       });
-      const minted = issueImpersonationToken(
-        endUser.id,
-        endUser.applicationId,
-        req.tenantUser!.id,
-        impApp.tokenGeneration,
-      );
       const ua = req.headers['user-agent'];
-      await prisma.impersonationAudit.create({
+      // Any session this operator still has open on this user is ended first.
+      // Otherwise re-minting would leave the previous token live and
+      // unrevocable-by-id: ending the new one would not touch it.
+      await prisma.impersonationAudit.updateMany({
+        where: {
+          applicationId: params.id,
+          endUserId: endUser.id,
+          operatorUserId: req.tenantUser!.id,
+          endedAt: null,
+        },
+        data: { endedAt: new Date() },
+      });
+      // The audit row is created BEFORE the token, because its id is what makes
+      // the token revocable — see the `impid` claim in lib/jwt.ts.
+      const audit = await prisma.impersonationAudit.create({
         data: {
           applicationId: params.id,
           tenantId: req.tenantId!,
@@ -2882,9 +4124,17 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           ip: req.ip || null,
         },
       });
+      const minted = issueImpersonationToken(
+        endUser.id,
+        endUser.applicationId,
+        req.tenantUser!.id,
+        impApp.tokenGeneration,
+        audit.id,
+      );
       return {
         success: true,
         data: {
+          impersonationId: audit.id,
           accessToken: minted.token,
           accessTokenExpiresAt: minted.expiresAt.toISOString(),
           impersonatedUser: {
@@ -2893,9 +4143,69 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             role: endUser.role,
           },
           warning:
-            'This token expires in 5 minutes and has NO refresh. Every action taken with it is recorded with the `imp` claim pointing at your operator id.',
+            'This token expires in 5 minutes and has NO refresh. Every action taken with it is recorded with the `imp` claim pointing at your operator id. It cannot change this account\'s password, MFA or passkeys, and you can revoke it early via POST .../impersonate/end.',
         },
       };
+    },
+  );
+
+  // POST /:id/end-users/:euid/impersonate/end
+  //
+  // The kill switch the audit trail always claimed to have. Ends every live
+  // impersonation session on this end-user — whoever started them — by stamping
+  // `endedAt`, which `requireUserSession` reads on every request carrying an
+  // `imp` token. So this revokes the credential, it does not merely annotate
+  // history.
+  //
+  // Deliberately not scoped to the calling operator: the case that matters is
+  // "someone is impersonating this user and should not be", and an OWNER/ADMIN
+  // investigating that must be able to stop it without being the one who
+  // started it. Idempotent — ending nothing returns `{ ended: 0 }`.
+  app.post(
+    '/:id/end-users/:euid/impersonate/end',
+    {
+      preHandler: requireTenantRole(['OWNER', 'ADMIN']),
+      schema: {
+        tags: ['Tenant · End-users'],
+        security: [{ tenantSession: [] }],
+        summary: 'Revoke every live impersonation session on an end-user',
+        description:
+          'Requires the **OWNER or ADMIN** workspace role.\n\n' +
+          'Stamps `endedAt` on every open `impersonation_audits` row for this end-user, ' +
+          'which immediately invalidates the impersonation tokens those rows issued — any ' +
+          'operator, not just you. Idempotent.',
+        response: {
+          200: ok(
+            { type: 'object', properties: { ended: { type: 'integer' } }, required: ['ended'] },
+            'Count of impersonation sessions ended. 0 when none were live (idempotent).',
+          ),
+          ...errs({
+            404: 'END_USER_NOT_FOUND — no end-user with that id in this Application.',
+            401: APP_READ_ERRORS[401],
+            403: APP_READ_ERRORS[403] + ' Or TENANT_ROLE_INSUFFICIENT — this route requires the OWNER or ADMIN workspace role (no grant unlocks it).',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const params = z
+        .object({ id: z.string().min(1), euid: z.string().min(1) })
+        .parse(req.params);
+      await ensureAppAccess(req, params.id, 'read');
+      const endUser = await prisma.endUser.findUnique({ where: { id: params.euid } });
+      if (!endUser || endUser.applicationId !== params.id) {
+        throw new RekeyError({
+          statusCode: 404,
+          code: 'END_USER_NOT_FOUND',
+          message: `End-user "${params.euid}" not found in this Application.`,
+          fix: 'List end-users to confirm the id.',
+        });
+      }
+      const result = await prisma.impersonationAudit.updateMany({
+        where: { applicationId: params.id, endUserId: endUser.id, endedAt: null },
+        data: { endedAt: new Date() },
+      });
+      return { success: true, data: { ended: result.count } };
     },
   );
 
@@ -2919,6 +4229,22 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           'MFA-challenge tokens) and revokes every active refresh token. End-users ' +
           'must sign in again. Irreversible.',
         params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+        // No `body` schema is declared, and the handler never reads req.body — confirmed this
+        // route needs no request body (deliberately left undeclared, not an oversight).
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                tokenGeneration: { type: 'integer' },
+                sessionsRevoked: { type: 'integer' },
+              },
+              required: ['tokenGeneration', 'sessionsRevoked'],
+            },
+            'The new token generation and how many refresh tokens were revoked.',
+          ),
+          ...errs(APP_WRITE_ERRORS),
+        },
       },
     },
     async (req) => {
@@ -2957,6 +4283,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   app.post(
     '/:id/rotate-public-key',
     {
+      // Every field is optional, so a caller may POST with no body at all.
+      // Fastify validates a missing body against `{type:'object'}` and answers
+      // 400 "body must be object" — the same trap documented on tenant-mfa's
+      // /setup route. Default it to {} before schema validation runs.
+      preValidation: async (req) => {
+        if (req.body === undefined || req.body === null) req.body = {};
+      },
       schema: {
         tags: ['Tenant · Applications'],
         security: [{ tenantSession: [] }],
@@ -2966,7 +4299,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           '`APP_ADMIN` grant on it.\n\n' +
           'Mints a new rp_pub_ key and keeps the old one valid for `graceDays` (default 30, ' +
           'max 90) so clients shipped with the old key keep working until you redeploy. ' +
-          'Roll the new key out to your frontends/installs during the window.',
+          'Roll the new key out to your frontends/installs during the window. Body is optional ' +
+          '— POST with no body to rotate with the defaults.',
         params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
         body: {
           type: 'object',
@@ -2974,6 +4308,24 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             graceDays: { type: 'integer', minimum: 1, maximum: 90, default: 30 },
             force: { type: 'boolean', default: false },
           },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                publicKey: { type: 'string', description: 'The new rp_pub_ key.' },
+                previousPublicKey: { type: 'string', nullable: true },
+                previousPublicKeyValidUntil: { type: 'string', format: 'date-time', nullable: true },
+              },
+              required: ['publicKey', 'previousPublicKey', 'previousPublicKeyValidUntil'],
+            },
+            'The rotated Application (new + previous publishable key, with the grace deadline).',
+          ),
+          ...errs({
+            409: 'PUBLIC_KEY_ROTATION_IN_GRACE — a previous key is still inside its grace window; pass `force: true` to drop it and rotate anyway.',
+            ...APP_WRITE_ERRORS,
+          }),
         },
       },
     },
@@ -3015,6 +4367,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   // Opt this Application into (or out of) the Rekey-hosted customer portal at
   // portal.rekey.dev/<slug>, and set its branding. Enabling auto-allows the
   // portal origin for this app's publishable key. OWNER/ADMIN.
+  // `.strict()` (applied below): all-optional config patch, so an unrecognised
+  // key is the only thing left to validate. See the auth-config note above.
   const PortalConfigBody = z.object({
     enabled: z.boolean().optional(),
     branding: z.record(z.unknown()).optional(),
@@ -3025,7 +4379,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         z.string().max(253).regex(/^[a-z0-9.-]+\.[a-z]{2,}$/i, 'must be a bare hostname like billing.yourapp.com'),
       ])
       .optional(),
-  });
+  }).strict();
   app.patch(
     '/:id/portal',
     {
@@ -3044,6 +4398,26 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             branding: { type: 'object', additionalProperties: true },
             portalDomain: { type: 'string' },
           },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                hostedPortalEnabled: { type: 'boolean' },
+                portalDomain: { type: 'string', nullable: true },
+                portalDomainVerifiedAt: { type: 'string', format: 'date-time', nullable: true },
+                portalBranding: { type: 'object', nullable: true, additionalProperties: true },
+              },
+              required: ['hostedPortalEnabled', 'portalDomain', 'portalDomainVerifiedAt', 'portalBranding'],
+            },
+            'The Application, patched portal configuration.',
+          ),
+          ...errs({
+            400: 'VALIDATION_ERROR — `portalDomain` is not a bare hostname, or a field failed schema validation.',
+            ...APP_WRITE_ERRORS,
+            409: 'PORTAL_DOMAIN_TAKEN — another Application already uses that portal domain.',
+          }),
         },
       },
     },
@@ -3093,6 +4467,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
 
   // ---------- Network access controls (IP allowlist + per-app CORS) ----------
 
+  // `.strict()`: both fields are optional and replace-in-full, so `{ipAllowlst:
+  // [...]}` used to answer 200 having changed nothing — an operator believing
+  // they had locked their secret keys to an office CIDR. See auth-config above.
   const AccessConfigBody = z.object({
     // CIDRs or bare IPs (v4/v6). Enforced on server-side secret-key calls only.
     ipAllowlist: z
@@ -3104,7 +4481,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       .array(z.string().max(256).regex(/^https?:\/\/[^/\s]+$/, 'must be an origin like https://app.example.com'))
       .max(100)
       .optional(),
-  });
+  }).strict();
 
   app.get(
     '/:id/access',
@@ -3115,8 +4492,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'Get the Application IP allowlist + CORS origins',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
         params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+        response: {
+          200: ok(ref('AccessConfig'), 'The IP allowlist and CORS origins.'),
+          ...errs(APP_READ_ERRORS),
+        },
       },
     },
     async (req) => {
@@ -3158,6 +4539,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               items: { type: 'string', maxLength: 256, pattern: '^https?://[^/\\s]+$' },
             },
           },
+        },
+        response: {
+          200: ok(ref('AccessConfig'), 'The Application, patched IP allowlist / CORS origins.'),
+          ...errs({
+            400: 'VALIDATION_ERROR — an entry is not a valid IP/CIDR or origin, or a field failed schema validation.',
+            ...APP_WRITE_ERRORS,
+          }),
         },
       },
     },
@@ -3204,7 +4592,28 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'List the role catalog for an Application',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
+        response: {
+          // Bounded by construction — an operator-curated catalog, not a table that grows
+          // with end-user signups.
+          200: okArray(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                applicationId: { type: 'string' },
+                name: { type: 'string' },
+                description: { type: 'string', nullable: true },
+                isDefault: { type: 'boolean' },
+                createdAt: { type: 'string', format: 'date-time' },
+                updatedAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['id', 'applicationId', 'name', 'isDefault', 'createdAt', 'updatedAt'],
+            },
+            'The role catalog, default role first then alphabetical.',
+          ),
+          ...errs(APP_READ_ERRORS),
+        },
       },
     },
     async (req) => {
@@ -3233,17 +4642,44 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             isDefault: { type: 'boolean' },
           },
         },
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                applicationId: { type: 'string' },
+                name: { type: 'string' },
+                description: { type: 'string', nullable: true },
+                isDefault: { type: 'boolean' },
+                createdAt: { type: 'string', format: 'date-time' },
+                updatedAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['id', 'applicationId', 'name', 'isDefault', 'createdAt', 'updatedAt'],
+            },
+            'The created role.',
+          ),
+          ...errs({
+            400: 'END_USER_ROLE_NAME_INVALID — the name is not lowercase letters/digits/hyphens/underscores (2-40 chars, edges alphanumeric).',
+            ...APP_WRITE_ERRORS,
+            409: 'END_USER_ROLE_NAME_TAKEN — another role on this Application already uses that name.',
+          }),
+        },
       },
     },
     async (req, reply) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'write');
+      // `.strict()` — same rule as the config patches. This route answered 201
+      // for keys it dropped, which is how a tester lost an afternoon to
+      // `{"allowMagicLink": true}` being "accepted".
       const body = z
         .object({
           name: z.string().min(2).max(40),
           description: z.string().max(240).optional(),
           isDefault: z.boolean().optional(),
         })
+        .strict()
         .parse(req.body);
       const created = await endUserRolesService.create({
         applicationId: id,
@@ -3272,6 +4708,28 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             isDefault: { type: 'boolean' },
           },
         },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                applicationId: { type: 'string' },
+                name: { type: 'string' },
+                description: { type: 'string', nullable: true },
+                isDefault: { type: 'boolean' },
+                createdAt: { type: 'string', format: 'date-time' },
+                updatedAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['id', 'applicationId', 'name', 'isDefault', 'createdAt', 'updatedAt'],
+            },
+            'The patched role.',
+          ),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            404: 'END_USER_ROLE_NOT_FOUND — no role with that name on this Application.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -3279,12 +4737,15 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         .object({ id: z.string().min(1), name: z.string().min(1) })
         .parse(req.params);
       await ensureAppAccess(req, params.id, 'write');
+      // All-optional patch body → unknown keys are the only thing left to
+      // validate. Same rule as auth-config / billing-config / portal / access.
       const body = z
         .object({
           description: z.string().max(240).nullable().optional(),
           isDefault: z.boolean().optional(),
         })
-        .parse(req.body);
+        .strict()
+        .parse(req.body ?? {});
       const updated = await endUserRolesService.update({
         applicationId: params.id,
         name: params.name,
@@ -3308,6 +4769,28 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         querystring: {
           type: 'object',
           properties: { reassignTo: { type: 'string', minLength: 1, maxLength: 40 } },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                removed: { type: 'boolean', enum: [true] },
+                reassigned: { type: 'integer', description: 'End-users moved to `reassignTo`, when passed.' },
+              },
+              required: ['removed', 'reassigned'],
+            },
+            'Confirmation of removal.',
+          ),
+          ...errs({
+            400:
+              'END_USER_ROLE_IS_DEFAULT — cannot delete the Application\'s default role; or ' +
+              'END_USER_ROLE_IN_USE — end-users still hold this role and no `reassignTo` was given; or ' +
+              'END_USER_ROLE_REASSIGN_SELF — `reassignTo` names the role being deleted; or ' +
+              'END_USER_ROLE_REASSIGN_TARGET_UNKNOWN — `reassignTo` does not exist.',
+            ...APP_WRITE_ERRORS,
+            404: 'END_USER_ROLE_NOT_FOUND — no role with that name on this Application.',
+          }),
         },
       },
     },
@@ -3337,15 +4820,23 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'List licenses for an Application',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(ref('License'), 'A page of licenses, newest first.'),
+          ...errs({ 400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
+        },
       },
     },
     async (req) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'read');
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
-      return { success: true, data: await licensesService.listForApplication(id, { take, skip }) };
+      const [items, total] = await Promise.all([
+        licensesService.listForApplication(id, { take, skip }),
+        licensesService.countForApplication(id),
+      ]);
+      return { success: true, data: paged(items, total, take, skip) };
     },
   );
 
@@ -3373,9 +4864,41 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             kind: { type: 'string', enum: ['PERPETUAL', 'TIMED', 'SEATS'] },
             planId: { type: 'string' },
             expiresAt: { type: 'string', format: 'date-time' },
-            seatsAllowed: { type: 'integer', minimum: 1 },
+            seatsAllowed: { type: 'integer', minimum: 1, maximum: 2147483647 },
             metadata: { type: 'object', additionalProperties: true },
           },
+        },
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: {
+                license: ref('License'),
+                rawKey: { type: 'string', description: 'Shown exactly once — store it now.' },
+                warning: { type: 'string' },
+              },
+              required: ['license', 'rawKey', 'warning'],
+            },
+            'The issued license plus its raw key (shown once).',
+          ),
+          // NOTE: 404 is declared as its own literal key (not folded into the `errs()` spread
+          // below) because the handler calls `reply.status(404)` directly for the cross-app
+          // endUserId check — Fastify's typed reply only accepts status codes that appear as
+          // literal keys of `schema.response`, and a spread of `errs()`'s Record<number,
+          // JsonSchema> return type doesn't preserve individual literals. This branch is also
+          // hand-built, bypassing the normal RekeyError path — it omits `requestId`. See the
+          // final report.
+          404: errs({
+            404: 'END_USER_NOT_FOUND — `endUserId` does not belong to this Application. Or ' + APP_WRITE_ERRORS[404],
+          })[404],
+          ...errs({
+            400:
+              'LICENSE_EXPIRES_AT_REQUIRED — a TIMED license is missing `expiresAt`; or ' +
+              'LICENSE_SEATS_REQUIRED — a SEATS license is missing a valid `seatsAllowed`; or ' +
+              'VALIDATION_ERROR — a field failed schema validation.',
+            401: APP_WRITE_ERRORS[401],
+            403: APP_WRITE_ERRORS[403],
+          }),
         },
       },
     },
@@ -3388,7 +4911,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           kind: z.enum(['PERPETUAL', 'TIMED', 'SEATS']),
           planId: z.string().optional(),
           expiresAt: z.string().datetime().optional(),
-          seatsAllowed: z.number().int().min(1).optional(),
+          seatsAllowed: positiveBoundedInt().optional(),
           metadata: z.record(z.unknown()).optional(),
         })
         .parse(req.body);
@@ -3397,13 +4920,16 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // we enforce here.)
       const endUser = await prisma.endUser.findUnique({ where: { id: body.endUserId } });
       if (!endUser || endUser.applicationId !== id) {
-        return reply.status(404).send({
-          success: false,
-          error: {
-            code: 'END_USER_NOT_FOUND',
-            message: `EndUser "${body.endUserId}" not found in this Application.`,
-            fix: 'Verify the user id and that they signed up under this Application.',
-          },
+        // Throw, never hand-build the envelope. A `reply.status(404).send({
+        // success: false, error: {...} })` here skipped `rekeyErrorHandler`
+        // entirely, so this was the one error response in the whole API with
+        // no `requestId` field and no `X-Request-Id` header — the two things
+        // a caller needs to get support to find the matching server log.
+        throw new RekeyError({
+          statusCode: 404,
+          code: 'END_USER_NOT_FOUND',
+          message: `EndUser "${body.endUserId}" not found in this Application.`,
+          fix: 'Verify the user id and that they signed up under this Application.',
         });
       }
       const application = await applicationsService.get(id);
@@ -3443,6 +4969,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           properties: { id: { type: 'string' }, licenseId: { type: 'string' } },
           required: ['id', 'licenseId'],
         },
+        response: {
+          200: ok(ref('License'), 'The revoked license. Idempotent — revoking an already-revoked license 200s unchanged.'),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            404: 'LICENSE_NOT_FOUND — no license with that id on this Application.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -3466,15 +4999,23 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'List usage meters',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(ref('UsageMeter'), 'A page of usage meters.'),
+          ...errs({ 400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
+        },
       },
     },
     async (req) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'read');
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
-      return { success: true, data: await usageService.listMeters(id, { take, skip }) };
+      const [items, total] = await Promise.all([
+        usageService.listMeters(id, { take, skip }),
+        usageService.countMeters(id),
+      ]);
+      return { success: true, data: paged(items, total, take, skip) };
     },
   );
 
@@ -3496,6 +5037,14 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             name: { type: 'string', minLength: 1, maxLength: 120 },
             unit: { type: 'string', minLength: 1, maxLength: 40 },
           },
+        },
+        response: {
+          201: ok(ref('UsageMeter'), 'The created usage meter.'),
+          ...errs({
+            400: 'USAGE_METER_SLUG_INVALID — the slug is not lowercase alphanumerics + - / _; or VALIDATION_ERROR — a field failed schema validation.',
+            ...APP_WRITE_ERRORS,
+            409: 'USAGE_METER_SLUG_TAKEN — another meter on this Application already uses that slug.',
+          }),
         },
       },
     },
@@ -3523,7 +5072,26 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'Toggle a usage meter active/inactive',
         description:
           'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
-          '`APP_ADMIN` grant on it.',
+          '`APP_ADMIN` grant on it.\n\n' +
+          '`active` is the ONLY editable field, and it is required. A meter\'s `slug`, ' +
+          '`name` and `unit` are fixed at creation — sending them is a 400, not a silent ' +
+          'no-op. Delete and recreate the meter to change them.',
+        // This body was undeclared, so `/docs/json` published the operation with
+        // no requestBody at all while `active` was in fact mandatory — there was
+        // no documented way to discover the shape. (Landed on main in #326; this
+        // branch had found the same omission independently.)
+        body: {
+          type: 'object',
+          required: ['active'],
+          properties: { active: { type: 'boolean' } },
+        },
+        response: {
+          200: ok(ref('UsageMeter'), 'The meter, with `active` updated.'),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            404: 'USAGE_METER_NOT_FOUND — no meter with that slug on this Application.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -3531,7 +5099,19 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         .object({ id: z.string().min(1), slug: z.string().min(1) })
         .parse(req.params);
       await ensureAppAccess(req, id, 'write');
-      const body = z.object({ active: z.boolean() }).parse(req.body);
+      // `.strict()`. This route is `setActive` and nothing else, but it used to
+      // accept `{"name":"RENAMED","unit":"widget","active":true}`, apply only
+      // `active`, and answer 200 echoing the PRE-EDIT row — so the response the
+      // caller got back was itself the evidence that nothing happened, and read
+      // as if it had. Worse than the auth-config case: `name` and `unit` are the
+      // object's OWN fields, not unrecognised ones.
+      //
+      // Rejecting rather than implementing rename is deliberate. `slug` is what
+      // `Plan.meterSlug` binds against, and `unit` is the label every usage
+      // record ALREADY WRITTEN was measured in — retitling a meter silently
+      // relabels history. That is a product decision, not something to smuggle
+      // into an endpoint whose summary is "toggle"; see decisions.md.
+      const body = z.object({ active: z.boolean() }).strict().parse(req.body ?? {});
       return { success: true, data: await usageService.setActive(id, slug, body.active) };
     },
   );
@@ -3546,6 +5126,16 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         description:
           'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.',
+        response: {
+          200: ok(
+            { type: 'object', properties: { removed: { type: 'boolean', enum: [true] } }, required: ['removed'] },
+            'Confirmation. The meter and its usage records were deleted.',
+          ),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            404: 'USAGE_METER_NOT_FOUND — no meter with that slug on this Application.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -3575,28 +5165,56 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'List end-user organizations in this Application',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                name: { type: 'string' },
+                slug: { type: 'string' },
+                metadata: { type: 'object', nullable: true, additionalProperties: true },
+                memberCount: { type: 'integer' },
+                pendingInvitationCount: { type: 'integer' },
+                createdAt: { type: 'string', format: 'date-time' },
+                updatedAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['id', 'name', 'slug', 'memberCount', 'pendingInvitationCount', 'createdAt', 'updatedAt'],
+            },
+            'A page of end-user organizations.',
+          ),
+          ...errs({ 400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.', ...APP_READ_ERRORS }),
+        },
       },
     },
     async (req) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'read');
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
-      const rows = await organizationsService.adminList({ applicationId: id, take, skip });
+      const [rows, total] = await Promise.all([
+        organizationsService.adminList({ applicationId: id, take, skip }),
+        organizationsService.adminCount({ applicationId: id }),
+      ]);
       return {
         success: true,
-        data: rows.map((o) => ({
-          id: o.id,
-          name: o.name,
-          slug: o.slug,
-          metadata: o.metadata ?? null,
-          memberCount: o.memberCount,
-          pendingInvitationCount: o.pendingInvitationCount,
-          createdAt: o.createdAt.toISOString(),
-          updatedAt: o.updatedAt.toISOString(),
-        })),
+        data: paged(
+          rows.map((o) => ({
+            id: o.id,
+            name: o.name,
+            slug: o.slug,
+            metadata: o.metadata ?? null,
+            memberCount: o.memberCount,
+            pendingInvitationCount: o.pendingInvitationCount,
+            createdAt: o.createdAt.toISOString(),
+            updatedAt: o.updatedAt.toISOString(),
+          })),
+          total,
+          take,
+          skip,
+        ),
       };
     },
   );
@@ -3610,11 +5228,67 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'Get one organization with its members + pending invitations',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, orgId: { type: 'string' } },
           required: ['id', 'orgId'],
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                organization: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    name: { type: 'string' },
+                    slug: { type: 'string' },
+                    metadata: { type: 'object', nullable: true, additionalProperties: true },
+                    createdAt: { type: 'string', format: 'date-time' },
+                    updatedAt: { type: 'string', format: 'date-time' },
+                  },
+                  required: ['id', 'name', 'slug', 'createdAt', 'updatedAt'],
+                },
+                members: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      endUserId: { type: 'string' },
+                      email: { type: 'string', format: 'email' },
+                      role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                      createdAt: { type: 'string', format: 'date-time' },
+                    },
+                    required: ['id', 'endUserId', 'email', 'role', 'createdAt'],
+                  },
+                },
+                invitations: {
+                  type: 'array',
+                  description: 'Pending (unaccepted, unrevoked) invitations.',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      email: { type: 'string', format: 'email' },
+                      role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                      expiresAt: { type: 'string', format: 'date-time' },
+                      createdAt: { type: 'string', format: 'date-time' },
+                    },
+                    required: ['id', 'email', 'role', 'expiresAt', 'createdAt'],
+                  },
+                },
+              },
+              required: ['organization', 'members', 'invitations'],
+            },
+            'The organization plus its members and pending invitations.',
+          ),
+          ...errs({
+            ...APP_READ_ERRORS,
+            404: 'ORGANIZATION_NOT_FOUND — no organization with that id on this Application.',
+          }),
         },
       },
     },
@@ -3670,6 +5344,16 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           properties: { id: { type: 'string' }, orgId: { type: 'string' } },
           required: ['id', 'orgId'],
         },
+        response: {
+          200: ok(
+            { type: 'object', properties: { deleted: { type: 'boolean', enum: [true] } }, required: ['deleted'] },
+            'Confirmation.',
+          ),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            404: 'ORGANIZATION_NOT_FOUND — no organization with that id on this Application.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -3708,6 +5392,29 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             metadata: { type: 'object', additionalProperties: true },
             ownerEndUserId: { type: 'string', minLength: 1 },
           },
+        },
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                name: { type: 'string' },
+                slug: { type: 'string' },
+                metadata: { type: 'object', nullable: true, additionalProperties: true },
+                createdAt: { type: 'string', format: 'date-time' },
+                updatedAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['id', 'name', 'slug', 'createdAt', 'updatedAt'],
+            },
+            'The created organization.',
+          ),
+          ...errs({
+            400: 'ORGANIZATION_SLUG_INVALID — the slug is not 1-40 chars of [a-z0-9-]; or VALIDATION_ERROR — a field failed schema validation.',
+            ...APP_WRITE_ERRORS,
+            404: 'END_USER_NOT_FOUND — `ownerEndUserId` does not belong to this Application.',
+            409: 'ORGANIZATION_SLUG_TAKEN — another organization on this Application already uses that slug.',
+          }),
         },
       },
     },
@@ -3765,6 +5472,27 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             metadata: { type: 'object', additionalProperties: true },
           },
         },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                name: { type: 'string' },
+                slug: { type: 'string' },
+                metadata: { type: 'object', nullable: true, additionalProperties: true },
+                createdAt: { type: 'string', format: 'date-time' },
+                updatedAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['id', 'name', 'slug', 'createdAt', 'updatedAt'],
+            },
+            'The patched organization.',
+          ),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            404: 'ORGANIZATION_NOT_FOUND — no organization with that id on this Application.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -3819,6 +5547,30 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
           },
         },
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                organizationId: { type: 'string' },
+                endUserId: { type: 'string' },
+                email: { type: 'string', format: 'email' },
+                role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                createdAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['id', 'organizationId', 'endUserId', 'email', 'role', 'createdAt'],
+            },
+            'The created membership.',
+          ),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            404:
+              'ORGANIZATION_NOT_FOUND — no organization with that id on this Application; or ' +
+              'END_USER_NOT_FOUND — `endUserId` does not belong to this Application.',
+            409: 'ORGANIZATION_ALREADY_MEMBER — that end-user is already a member of this organization.',
+          }),
+        },
       },
     },
     async (req, reply) => {
@@ -3867,6 +5619,28 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           required: ['role'],
           properties: { role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] } },
         },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                organizationId: { type: 'string' },
+                endUserId: { type: 'string' },
+                role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                createdAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['id', 'organizationId', 'endUserId', 'role', 'createdAt'],
+            },
+            'The membership, with `role` updated.',
+          ),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            404:
+              'ORGANIZATION_NOT_FOUND — no organization with that id on this Application; or ' +
+              'ORGANIZATION_MEMBER_NOT_FOUND — that end-user is not a member of this organization.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -3909,6 +5683,22 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           properties: { id: { type: 'string' }, orgId: { type: 'string' }, euid: { type: 'string' } },
           required: ['id', 'orgId', 'euid'],
         },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                removed: { type: 'boolean', description: 'False when the end-user was already not a member (idempotent).' },
+              },
+              required: ['removed'],
+            },
+            'Confirmation.',
+          ),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            404: 'ORGANIZATION_NOT_FOUND — no organization with that id on this Application.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -3936,11 +5726,81 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'Org billing summary — entitlements, shared credit pool, beneficiary subscriptions',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
         params: {
           type: 'object',
           properties: { id: { type: 'string' }, orgId: { type: 'string' } },
           required: ['id', 'orgId'],
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                creditBalance: { type: 'integer' },
+                features: {
+                  type: 'object',
+                  description: 'Resolved FEATURE entitlements as key → typed value.',
+                  additionalProperties: true,
+                },
+                entitlements: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      kind: { type: 'string', enum: ['FEATURE', 'CREDIT', 'LICENSE', 'USAGE'] },
+                      key: { type: 'string' },
+                      valueType: { type: 'string', enum: ['BOOL', 'INT', 'STRING'], nullable: true },
+                      value: { type: 'string', nullable: true },
+                      quantity: { type: 'integer', nullable: true },
+                      licenseKind: { type: 'string', enum: ['PERPETUAL', 'TIMED', 'SEATS'], nullable: true },
+                      rollover: { type: 'boolean' },
+                    },
+                    required: ['kind', 'key', 'rollover'],
+                  },
+                },
+                subscriptions: {
+                  type: 'array',
+                  description: 'Most recent 100 subscriptions whose beneficiary is this org.',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      planSlug: { type: 'string' },
+                      planName: { type: 'string' },
+                      status: { type: 'string', enum: ['PENDING', 'ACTIVE', 'PAST_DUE', 'CANCELED', 'EXPIRED'] },
+                      ownerEndUserId: { type: 'string' },
+                      currentPeriodEnd: { type: 'string', format: 'date-time', nullable: true },
+                    },
+                    required: ['id', 'planSlug', 'planName', 'status', 'ownerEndUserId'],
+                  },
+                },
+                licenses: {
+                  type: 'array',
+                  description: 'Org-pooled licenses (most recent 100).',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      kind: { type: 'string', enum: ['PERPETUAL', 'TIMED', 'SEATS'] },
+                      status: { type: 'string' },
+                      keyPrefix: { type: 'string' },
+                      seatsAllowed: { type: 'integer', nullable: true },
+                      ownerEndUserId: { type: 'string', nullable: true },
+                      expiresAt: { type: 'string', format: 'date-time', nullable: true },
+                    },
+                    required: ['id', 'kind', 'status', 'keyPrefix'],
+                  },
+                },
+              },
+              required: ['creditBalance', 'features', 'entitlements', 'subscriptions', 'licenses'],
+            },
+            "The org's resolved entitlements, shared credit pool, and beneficiary subscriptions/licenses.",
+          ),
+          ...errs({
+            ...APP_READ_ERRORS,
+            404: 'ORGANIZATION_NOT_FOUND — no organization with that id on this Application.',
+          }),
         },
       },
     },
@@ -4024,6 +5884,28 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             licenseId: { type: 'string' },
           },
           required: ['id', 'orgId', 'licenseId'],
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                license: ref('License'),
+                rawKey: { type: 'string', description: 'Shown exactly once — store it now.' },
+                activationsReset: { type: 'integer', description: 'Prior activations invalidated by the rotation.' },
+                warning: { type: 'string' },
+              },
+              required: ['license', 'rawKey', 'activationsReset', 'warning'],
+            },
+            'The rotated org-pooled license plus its fresh raw key (shown once).',
+          ),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            404:
+              'ORGANIZATION_NOT_FOUND — no organization with that id on this Application; or ' +
+              'LICENSE_NOT_FOUND — no such license pooled to this organization.',
+            409: 'LICENSE_REVOKED — cannot rotate the key of a revoked license.',
+          }),
         },
       },
     },

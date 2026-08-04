@@ -81,7 +81,7 @@ beforeEach(() => {
 describe('verifyAccessToken — happy path', () => {
   it('verifies a valid RS256 token against an inline JWKS and returns the claims', async () => {
     const token = signRs256(claims({ oid: 'org_9' }), keyA.privateKey, keyA.kid);
-    const verified = await verifyAccessToken(token, { jwks, now });
+    const verified = await verifyAccessToken(token, { jwks, now, applicationId: 'app_1' });
     expect(verified).toMatchObject({
       typ: 'eu_access',
       sub: 'user_1',
@@ -98,7 +98,7 @@ describe('verifyAccessToken — happy path', () => {
       }),
     );
     const token = signRs256(claims(), keyA.privateKey, keyA.kid);
-    const opts = { jwksUrl: 'https://api.test/.well-known/jwks.json', fetch: fetchSpy, now };
+    const opts = { jwksUrl: 'https://api.test/.well-known/jwks.json', fetch: fetchSpy, now, applicationId: 'app_1' };
 
     await verifyAccessToken(token, opts);
     await verifyAccessToken(token, opts);
@@ -111,7 +111,7 @@ describe('verifyAccessToken — happy path', () => {
     const stale = new Response(JSON.stringify({ keys: [keyB.jwk] }), { status: 200 });
     const fresh = new Response(JSON.stringify({ keys: [keyB.jwk, keyA.jwk] }), { status: 200 });
     const fetchSpy = vi.fn().mockResolvedValueOnce(stale).mockResolvedValueOnce(fresh);
-    const opts = { jwksUrl: 'https://api.test/.well-known/jwks.json', fetch: fetchSpy, now };
+    const opts = { jwksUrl: 'https://api.test/.well-known/jwks.json', fetch: fetchSpy, now, applicationId: 'app_1' };
 
     // Prime the cache with the stale set…
     await verifyAccessToken(signRs256(claims(), keyB.privateKey, keyB.kid), opts);
@@ -130,14 +130,14 @@ describe('verifyAccessToken — rejections', () => {
       keyA.privateKey,
       keyA.kid,
     );
-    await expect(verifyAccessToken(token, { jwks, now })).rejects.toMatchObject({
+    await expect(verifyAccessToken(token, { jwks, now, applicationId: 'app_1' })).rejects.toMatchObject({
       code: 'USER_TOKEN_EXPIRED',
     });
   });
 
   it('rejects the wrong typ (an MFA challenge token must never pass as a session)', async () => {
     const token = signRs256(claims({ typ: 'eu_mfa_challenge' }), keyA.privateKey, keyA.kid);
-    await expect(verifyAccessToken(token, { jwks, now })).rejects.toMatchObject({
+    await expect(verifyAccessToken(token, { jwks, now, applicationId: 'app_1' })).rejects.toMatchObject({
       code: 'USER_TOKEN_INVALID',
     });
   });
@@ -150,21 +150,21 @@ describe('verifyAccessToken — rejections', () => {
     const header = { alg: 'HS256', typ: 'JWT', kid: keyA.kid };
     const signingInput = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(claims()))}`;
     const sig = createHmac('sha256', publicPem).update(signingInput).digest('base64url');
-    await expect(verifyAccessToken(`${signingInput}.${sig}`, { jwks, now })).rejects.toMatchObject({
+    await expect(verifyAccessToken(`${signingInput}.${sig}`, { jwks, now, applicationId: 'app_1' })).rejects.toMatchObject({
       code: 'TOKEN_ALG_NOT_RS256',
     });
   });
 
   it('rejects an unknown kid with TOKEN_KID_UNKNOWN', async () => {
     const token = signRs256(claims(), keyB.privateKey, keyB.kid); // keyB not in jwks
-    await expect(verifyAccessToken(token, { jwks, now })).rejects.toMatchObject({
+    await expect(verifyAccessToken(token, { jwks, now, applicationId: 'app_1' })).rejects.toMatchObject({
       code: 'TOKEN_KID_UNKNOWN',
     });
   });
 
   it('rejects a token signed by a DIFFERENT key claiming a known kid', async () => {
     const forged = signRs256(claims(), keyB.privateKey, keyA.kid); // kid spoofed to keyA
-    await expect(verifyAccessToken(forged, { jwks, now })).rejects.toMatchObject({
+    await expect(verifyAccessToken(forged, { jwks, now, applicationId: 'app_1' })).rejects.toMatchObject({
       code: 'USER_TOKEN_INVALID',
     });
   });
@@ -173,13 +173,13 @@ describe('verifyAccessToken — rejections', () => {
     const token = signRs256(claims(), keyA.privateKey, keyA.kid);
     const [h, , s] = token.split('.');
     const tampered = `${h}.${b64url(JSON.stringify(claims({ sub: 'user_evil' })))}.${s}`;
-    await expect(verifyAccessToken(tampered, { jwks, now })).rejects.toMatchObject({
+    await expect(verifyAccessToken(tampered, { jwks, now, applicationId: 'app_1' })).rejects.toMatchObject({
       code: 'USER_TOKEN_INVALID',
     });
   });
 
   it('rejects garbage with USER_TOKEN_INVALID and missing config with CONFIG_MISSING_JWKS', async () => {
-    await expect(verifyAccessToken('not-a-jwt', { jwks, now })).rejects.toMatchObject({
+    await expect(verifyAccessToken('not-a-jwt', { jwks, now, applicationId: 'app_1' })).rejects.toMatchObject({
       code: 'USER_TOKEN_INVALID',
     });
     const token = signRs256(claims(), keyA.privateKey, keyA.kid);
@@ -193,7 +193,41 @@ describe('verifyAccessToken — rejections', () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response('nope', { status: 503 }));
     const token = signRs256(claims(), keyA.privateKey, keyA.kid);
     await expect(
-      verifyAccessToken(token, { jwksUrl: 'https://api.test/jwks', fetch: fetchSpy, now }),
+      verifyAccessToken(token, { jwksUrl: 'https://api.test/jwks', fetch: fetchSpy, now, applicationId: 'app_1' }),
     ).rejects.toMatchObject({ code: 'JWKS_FETCH_FAILED' });
+  });
+});
+
+describe('verifyAccessToken — Application binding', () => {
+  /**
+   * The RS256 keypair is deployment-wide: `SigningKey` has no `applicationId`
+   * column and `eu_access` tokens carry no `iss`/`aud`. So a token minted for a
+   * DIFFERENT Application on the same deployment is cryptographically valid
+   * here — signature, kid, expiry and `typ` all check out. Only the claim
+   * comparison stops it.
+   *
+   * Note this does NOT apply to the HS256 default path, where the key is
+   * derived per Application as `HMAC-SHA256(JWT_SECRET, appId:tokenGeneration)`
+   * and a foreign token fails the signature outright. It applies precisely to
+   * the path this function exists for.
+   */
+  it('refuses a validly-signed token minted for another Application', async () => {
+    const token = signRs256(claims({ applicationId: 'app_OTHER' }), keyA.privateKey, keyA.kid);
+
+    await expect(
+      verifyAccessToken(token, { jwks, now, applicationId: 'app_1' }),
+    ).rejects.toMatchObject({ code: 'USER_TOKEN_INVALID' });
+  });
+
+  it('accepts the same token for the Application it was minted for', async () => {
+    const token = signRs256(claims({ applicationId: 'app_OTHER' }), keyA.privateKey, keyA.kid);
+
+    const verified = await verifyAccessToken(token, {
+      jwks,
+      now,
+      applicationId: 'app_OTHER',
+    });
+
+    expect(verified.applicationId).toBe('app_OTHER');
   });
 });

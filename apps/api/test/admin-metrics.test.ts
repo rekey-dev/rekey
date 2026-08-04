@@ -11,7 +11,10 @@
  *      without it. Driven from the live route table, so a new endpoint that
  *      forgets the `requireSuperAdmin` hook fails this file.
  *   2. The list endpoints return the documented `Page<T>`
- *      (`{ items, total, limit, offset }`) and `offset` really skips.
+ *      (`{ items, page: { total, limit, offset, hasMore } }`) and `offset`
+ *      really skips. These endpoints used to flatten the pagination one level
+ *      up (`{ items, total, limit, offset }`), which disagreed with the
+ *      published OpenAPI document on every one of them.
  *   3. The rollups report the rows that exist, not zeros.
  *
  * `services.redis` is asserted as `not_configured` on purpose — `lib/redis.ts`
@@ -29,7 +32,11 @@ import { flushApiRequestLogs } from '../src/lib/request-log.js';
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const BASE = '/api/v1/admin/metrics';
 
-/** Endpoints returning a bare object rollup. */
+/**
+ * Endpoints that are NOT paginated: a bare object rollup, or (for
+ * `webhook-endpoint-health` and `payments-by-app`) a bare array, because their
+ * result set is bounded by the deployment rather than by usage.
+ */
 const ROLLUP_ENDPOINTS = [
   'overview',
   'services',
@@ -59,9 +66,7 @@ const ALL_ENDPOINTS = [...ROLLUP_ENDPOINTS, ...PAGED_ENDPOINTS];
 
 interface Page {
   items: unknown[];
-  total: number;
-  limit: number;
-  offset: number;
+  page: { total: number; limit: number; offset: number; hasMore: boolean };
 }
 
 describe('admin metrics', () => {
@@ -155,13 +160,15 @@ describe('admin metrics', () => {
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
     });
     expect(res.statusCode).toBe(200);
-    const page = res.json().data as Page;
-    expect(Array.isArray(page.items)).toBe(true);
-    expect(typeof page.total).toBe('number');
+    const body = res.json().data as Page;
+    expect(Array.isArray(body.items)).toBe(true);
+    expect(typeof body.page.total).toBe('number');
     // limit/offset are echoed so the caller can build page links without
     // re-deriving what the server clamped to.
-    expect(page.limit).toBe(7);
-    expect(page.offset).toBe(3);
+    expect(body.page.limit).toBe(7);
+    expect(body.page.offset).toBe(3);
+    // `hasMore` is derived from the other three, never asserted independently.
+    expect(body.page.hasMore).toBe(body.page.offset + body.page.limit < body.page.total);
   });
 
   it('offset actually skips rows and total counts the whole match set', async () => {
@@ -171,12 +178,14 @@ describe('admin metrics', () => {
 
     const first = await get('tenants?limit=2');
     const firstPage = first.json().data as Page & { items: Array<{ id: string }> };
-    expect(firstPage.total).toBe(3);
+    expect(firstPage.page.total).toBe(3);
+    expect(firstPage.page.hasMore).toBe(true);
     expect(firstPage.items).toHaveLength(2);
 
     const second = await get('tenants?limit=2&offset=2');
     const secondPage = second.json().data as Page & { items: Array<{ id: string }> };
-    expect(secondPage.total).toBe(3);
+    expect(secondPage.page.total).toBe(3);
+    expect(secondPage.page.hasMore).toBe(false);
     expect(secondPage.items).toHaveLength(1);
 
     // No overlap — the second page is genuinely further down the list.
@@ -351,9 +360,9 @@ describe('admin metrics', () => {
     await createApplication(t2, `f2-${Math.random().toString(36).slice(2, 8)}`);
 
     const res = await get(`applications?tenantId=${t1}`);
-    const page = res.json().data as Page & { items: Array<{ slug: string }> };
-    expect(page.total).toBe(1);
-    expect(page.items[0]!.slug).toBe(slug1);
+    const filtered = res.json().data as Page & { items: Array<{ slug: string }> };
+    expect(filtered.page.total).toBe(1);
+    expect(filtered.items[0]!.slug).toBe(slug1);
   });
 
   it('api-requests reads the access log and filters by route path', async () => {
@@ -363,16 +372,16 @@ describe('admin metrics', () => {
     await flushApiRequestLogs();
 
     const res = await get('api-requests?pathContains=/api/v1/admin/tenants');
-    const page = res.json().data as Page & {
+    const matching = res.json().data as Page & {
       items: Array<{ routePath: string; method: string; statusCode: number }>;
     };
-    expect(page.items.length).toBeGreaterThan(0);
-    expect(page.total).toBe(page.items.length);
-    for (const row of page.items) {
+    expect(matching.items.length).toBeGreaterThan(0);
+    expect(matching.page.total).toBe(matching.items.length);
+    for (const row of matching.items) {
       // `pathContains` matches the route *pattern*, not the concrete URL.
       expect(row.routePath).toContain('/api/v1/admin/tenants');
     }
-    expect(page.items.some((r) => r.method === 'POST' && r.statusCode === 201)).toBe(true);
+    expect(matching.items.some((r) => r.method === 'POST' && r.statusCode === 201)).toBe(true);
 
     // The filter excludes as well as includes — without this the assertion
     // above would pass on an unfiltered dump of the whole log.
@@ -388,6 +397,6 @@ describe('admin metrics', () => {
     await flushApiRequestLogs();
     const unfiltered = await get('api-requests');
     const all = unfiltered.json().data as Page;
-    expect(all.total).toBeGreaterThan(page.total);
+    expect(all.page.total).toBeGreaterThan(matching.page.total);
   });
 });

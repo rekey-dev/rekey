@@ -21,6 +21,7 @@
 
 import type { Application, EmailTemplate } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
+import { RekeyError } from '../../lib/error.js';
 import {
   sendEmail,
   sendEmailSystem,
@@ -80,6 +81,27 @@ export interface RenderResult {
 }
 
 /**
+ * An `eventKey` that is not in the registry.
+ *
+ * Every one of these reaches the service from a URL path segment, so it is
+ * user input, and a bare `throw new Error` made it a 500 INTERNAL_ERROR — an
+ * operator typing a stale event name got "something went wrong on our end" and
+ * a page in the error log. The two routes that already parsed the segment
+ * themselves answered 404 EMAIL_EVENT_UNKNOWN; the preview and test-send routes
+ * did not, and passed it straight through. Same code and status as those two,
+ * because a third answer for the same bad input on the same resource is just
+ * another thing to look up.
+ */
+function unknownEmailEvent(eventKey: string): RekeyError {
+  return new RekeyError({
+    statusCode: 404,
+    code: 'EMAIL_EVENT_UNKNOWN',
+    message: `Email event "${eventKey}" is not in the registry.`,
+    fix: 'Use one of the events returned by GET /api/v1/tenant/applications/:id/email-templates.',
+  });
+}
+
+/**
  * Render a template without sending. Used by the panel's preview pane and
  * by tests that want to assert template output.
  */
@@ -89,7 +111,7 @@ export async function renderForEvent(
   variables: Record<string, unknown>,
 ): Promise<RenderResult> {
   if (!isKnownEvent(eventKey)) {
-    throw new Error(`Unknown email event: ${eventKey}`);
+    throw unknownEmailEvent(eventKey);
   }
   const tpl = await resolveTemplate(applicationId, eventKey);
   const vars = pickEventVariables(eventKey, variables);
@@ -222,7 +244,7 @@ export const emailService = {
     bodyText?: string | null;
   }): Promise<EmailTemplate> {
     if (!isKnownEvent(args.eventKey)) {
-      throw new Error(`Unknown email event: ${args.eventKey}`);
+      throw unknownEmailEvent(args.eventKey);
     }
     return prisma.emailTemplate.upsert({
       where: {
@@ -255,10 +277,14 @@ export const emailService = {
     });
   },
 
-  /** Render a template with the event's sample values — for the panel preview. */
+  /**
+   * Render a template with the event's sample values — for the panel preview
+   * and the test-send route. Both take `eventKey` from the URL, so an unknown
+   * one is a 404, not a 500.
+   */
   async previewWithSamples(applicationId: string, eventKey: string): Promise<RenderResult> {
     if (!isKnownEvent(eventKey)) {
-      throw new Error(`Unknown email event: ${eventKey}`);
+      throw unknownEmailEvent(eventKey);
     }
     return renderForEvent(applicationId, eventKey, EMAIL_EVENTS[eventKey].sampleValues);
   },
@@ -320,6 +346,19 @@ export const emailService = {
     return rows.map(shapeLog);
   },
 
+  /** Total send-log rows matching `listAppLogs`, ignoring limit/offset. */
+  async countAppLogs(args: {
+    applicationId: string;
+    status?: EmailLogStatus;
+  }): Promise<number> {
+    return prisma.emailLog.count({
+      where: {
+        applicationId: args.applicationId,
+        ...(args.status && { status: args.status }),
+      },
+    });
+  },
+
   /**
    * Recent send-log rows across a whole Tenant (workspace view). Every send
    * — per-app and tenant system mail — carries the denormalised `tenantId`,
@@ -352,6 +391,21 @@ export const emailService = {
         ? { id: r.application.id, name: r.application.name, slug: r.application.slug }
         : null,
     }));
+  },
+
+  /** Total send-log rows matching `listTenantLogs`, ignoring limit/offset. */
+  async countTenantLogs(args: {
+    tenantId: string;
+    status?: EmailLogStatus;
+    systemOnly?: boolean;
+  }): Promise<number> {
+    return prisma.emailLog.count({
+      where: {
+        tenantId: args.tenantId,
+        ...(args.systemOnly ? { applicationId: null } : {}),
+        ...(args.status && { status: args.status }),
+      },
+    });
   },
 };
 

@@ -37,6 +37,8 @@ import { webhookService } from './webhook.service.js';
 import { KNOWN_WEBHOOK_EVENTS } from './events.js';
 import { isWebhookUrlSafe } from '../../lib/webhook-signing.js';
 import { env } from '../../config/env.js';
+import { ok, okPage, errs, ref } from '../../lib/openapi.js';
+import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
 
 /**
  * Ceiling on the stored `responseBody` this route returns per delivery.
@@ -78,6 +80,53 @@ const UpdateBody = z.object({
 // secrets, so mutations are 'write' (APP_ADMIN grant or workspace
 // OWNER/ADMIN); listings/deliveries are 'read'.
 
+/** Every route here sits behind `requireTenantSession` (plugin `onRequest` hook). */
+const TENANT_SESSION_ERRORS = {
+  401:
+    'TENANT_SESSION_MISSING — no `Authorization: Bearer <accessToken>` header; or ' +
+    'TENANT_SESSION_INVALID — the token is invalid, expired, or the operator account no ' +
+    'longer exists.',
+  429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+} as const;
+
+/** Errors from `ensureAppAccess(req, id, 'read')`. */
+const APP_READ_ERRORS = {
+  ...TENANT_SESSION_ERRORS,
+  403: 'TENANT_MEMBERSHIP_REVOKED — you are no longer a member of this workspace.',
+  404:
+    'APPLICATION_NOT_FOUND — no Application with that id in this workspace (also returned, ' +
+    'without disclosing existence, when a MEMBER holds no grant on it).',
+};
+
+/** Errors from `ensureAppAccess(req, id, 'write')`. */
+const APP_WRITE_ERRORS = {
+  ...TENANT_SESSION_ERRORS,
+  403:
+    'TENANT_MEMBERSHIP_REVOKED — you are no longer a member of this workspace; or ' +
+    'TENANT_ROLE_INSUFFICIENT — a legacy MEMBER (no application grants anywhere) cannot ' +
+    'write; or APP_ACCESS_DENIED — your application grant role does not allow this action ' +
+    '(requires APP_ADMIN).',
+  404:
+    'APPLICATION_NOT_FOUND — no Application with that id in this workspace (also returned, ' +
+    'without disclosing existence, when a MEMBER holds no grant on it).',
+};
+
+/** `WEBHOOK_ENDPOINT_NOT_FOUND`, from `ensureEndpointInApp` — folded into the write/read 404. */
+const ENDPOINT_NOT_FOUND_DESC =
+  'WEBHOOK_ENDPOINT_NOT_FOUND — no webhook endpoint with that id on this Application.';
+
+const WebhookEndpointSchema = {
+  type: 'object',
+  properties: {
+    id: { type: 'string' },
+    url: { type: 'string', format: 'uri' },
+    events: { type: 'array', items: { type: 'string' }, description: '`["*"]` means every event.' },
+    enabled: { type: 'boolean' },
+    createdAt: { type: 'string', format: 'date-time' },
+  },
+  required: ['id', 'url', 'events', 'enabled', 'createdAt'],
+} as const;
+
 async function ensureEndpointInApp(applicationId: string, endpointId: string): Promise<void> {
   const ep = await prisma.webhookEndpoint.findUnique({
     where: { id: endpointId },
@@ -105,22 +154,41 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
         summary: 'List webhook endpoints for an Application',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.',
+        querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(WebhookEndpointSchema, 'A page of webhook endpoints for this Application.'),
+          ...errs({
+            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            ...APP_READ_ERRORS,
+          }),
+        },
       },
     },
     async (req) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'read');
-      const endpoints = await webhookService.listEndpoints(id);
+      // Default page size 100, matching the hard `take: 100` this route used
+      // before it could page — so an existing caller sees the same rows.
+      const { take, skip } = parsePagination(PaginationQuery.parse(req.query), 100);
+      const [endpoints, total] = await Promise.all([
+        webhookService.listEndpoints(id, { take, skip }),
+        webhookService.countEndpoints(id),
+      ]);
       return {
         success: true,
-        data: endpoints.map((e) => ({
-          id: e.id,
-          url: e.url,
-          events: e.events,
-          enabled: e.enabled,
-          createdAt: e.createdAt.toISOString(),
-        })),
+        data: paged(
+          endpoints.map((e) => ({
+            id: e.id,
+            url: e.url,
+            events: e.events,
+            enabled: e.enabled,
+            createdAt: e.createdAt.toISOString(),
+          })),
+          total,
+          take,
+          skip,
+        ),
       };
     },
   );
@@ -142,6 +210,36 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
             url: { type: 'string', format: 'uri', maxLength: 2048 },
             events: { type: 'array', items: { type: 'string' }, minItems: 1 },
           },
+        },
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                url: { type: 'string', format: 'uri' },
+                events: { type: 'array', items: { type: 'string' } },
+                enabled: { type: 'boolean' },
+                createdAt: { type: 'string', format: 'date-time' },
+                secret: {
+                  type: 'string',
+                  description:
+                    'The signing secret, in plaintext. Shown exactly ONCE — store it now. ' +
+                    'Use it to verify the `X-Rekey-Signature` header on inbound deliveries.',
+                },
+                warning: { type: 'string' },
+              },
+              required: ['id', 'url', 'events', 'enabled', 'createdAt', 'secret', 'warning'],
+            },
+            'The created endpoint, including the signing secret (shown once).',
+          ),
+          ...errs({
+            400:
+              'VALIDATION_ERROR — `url` or `events` failed schema validation; or ' +
+              'WEBHOOK_URL_UNSAFE — the URL resolves to a private/loopback/link-local address ' +
+              '(unless `WEBHOOK_ALLOW_PRIVATE_TARGETS=true` on a self-hosted deploy).',
+            ...APP_WRITE_ERRORS,
+          }),
         },
       },
     },
@@ -191,6 +289,30 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.',
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              // NOTE: unlike GET (list) and POST (create), this handler does not
+              // return `createdAt` — see the module report.
+              properties: {
+                id: { type: 'string' },
+                url: { type: 'string', format: 'uri' },
+                events: { type: 'array', items: { type: 'string' } },
+                enabled: { type: 'boolean' },
+              },
+              required: ['id', 'url', 'events', 'enabled'],
+            },
+            'The updated endpoint.',
+          ),
+          ...errs({
+            400:
+              'VALIDATION_ERROR — `url` or `events` failed schema validation; or ' +
+              'WEBHOOK_URL_UNSAFE — the new URL resolves to a private/loopback/link-local address.',
+            ...APP_WRITE_ERRORS,
+            404: `${APP_WRITE_ERRORS[404]}; or ${ENDPOINT_NOT_FOUND_DESC}`,
+          }),
+        },
       },
     },
     async (req) => {
@@ -240,6 +362,20 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.',
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: { deleted: { type: 'boolean', enum: [true] } },
+              required: ['deleted'],
+            },
+            // deleteEndpoint is a scoped deleteMany with no existence check —
+            // this always answers 200, even when endpointId does not exist
+            // (or belongs to a different Application). Idempotent by design.
+            'Deleted (idempotent — also 200 when the id did not exist).',
+          ),
+          ...errs(APP_WRITE_ERRORS),
+        },
       },
     },
     async (req) => {
@@ -260,6 +396,23 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.',
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                secret: {
+                  type: 'string',
+                  description: 'The new signing secret, in plaintext. Shown exactly ONCE.',
+                },
+                warning: { type: 'string' },
+              },
+              required: ['secret', 'warning'],
+            },
+            'The new signing secret (shown once).',
+          ),
+          ...errs({ ...APP_WRITE_ERRORS, 404: `${APP_WRITE_ERRORS[404]}; or ${ENDPOINT_NOT_FOUND_DESC}` }),
+        },
       },
     },
     async (req) => {
@@ -287,7 +440,7 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
         summary: 'List recent delivery attempts for an endpoint',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it (grant-less legacy members keep workspace-wide read).\n\n' +
+          'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
           'Each row carries the `payload` that was POSTed and the consumer\'s `responseBody` ' +
           '(truncated) — the two things you actually need when an endpoint is failing. ' +
           'Filter with `?status=FAILED` and page with `limit` / `offset`.',
@@ -297,8 +450,50 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
             status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED'] },
             eventType: { type: 'string', maxLength: 100 },
             limit: { type: 'integer', minimum: 1, maximum: 100 },
-            offset: { type: 'integer', minimum: 0 },
+            offset: { type: 'integer', minimum: 0, maximum: 2147483647 },
           },
+        },
+        response: {
+          200: okPage(
+            {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                eventId: { type: 'string' },
+                eventType: { type: 'string' },
+                status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED'] },
+                attempts: { type: 'integer' },
+                responseStatus: { type: 'integer', nullable: true },
+                error: { type: 'string', nullable: true },
+                createdAt: { type: 'string', format: 'date-time' },
+                nextAttemptAt: { type: 'string', format: 'date-time', nullable: true },
+                payload: {
+                  type: 'object',
+                  description: 'The event envelope that was POSTed to the endpoint.',
+                },
+                responseBody: {
+                  type: 'string',
+                  nullable: true,
+                  description: "The consumer's response body, truncated to 4 KiB.",
+                },
+              },
+              required: [
+                'id',
+                'eventId',
+                'eventType',
+                'status',
+                'attempts',
+                'responseStatus',
+                'error',
+                'createdAt',
+                'nextAttemptAt',
+                'payload',
+                'responseBody',
+              ],
+            },
+            'Recent delivery attempts for this endpoint, newest first.',
+          ),
+          ...errs({ ...APP_READ_ERRORS, 404: `${APP_READ_ERRORS[404]}; or ${ENDPOINT_NOT_FOUND_DESC}` }),
         },
       },
     },
@@ -319,38 +514,49 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
           offset: z.coerce.number().int().min(0).max(1_000_000).optional(),
         })
         .parse(req.query ?? {});
-      const rows = await webhookService.listDeliveries(id, endpointId, {
+      const filters = {
         ...(q.status !== undefined && { status: q.status }),
         ...(q.eventType !== undefined && { eventType: q.eventType }),
-        ...(q.limit !== undefined && { limit: q.limit }),
-        ...(q.offset !== undefined && { offset: q.offset }),
-      });
+      };
+      // The service clamps limit to 1..100 and defaults it to 50 — mirror both
+      // so `page` describes the window that was served.
+      const limit = Math.min(q.limit ?? 50, 100);
+      const offset = q.offset ?? 0;
+      const [rows, total] = await Promise.all([
+        webhookService.listDeliveries(id, endpointId, { ...filters, limit, offset }),
+        webhookService.countDeliveries(id, endpointId, filters),
+      ]);
       return {
         success: true,
-        data: rows.map((r) => ({
-          id: r.id,
-          eventId: r.eventId,
-          eventType: r.eventType,
-          status: r.status,
-          attempts: r.attempts,
-          responseStatus: r.responseStatus,
-          error: r.error,
-          createdAt: r.createdAt.toISOString(),
-          nextAttemptAt: r.nextAttemptAt?.toISOString() ?? null,
-          // The two fields this route read out of the database and then threw
-          // away, while its own docblock said it returned them. An operator
-          // looking at "12/12 failing" needs to see what was sent and what came
-          // back; without these the page can only say that it failed.
-          //
-          // Neither is a new disclosure: `payload` is the event this operator's
-          // own Application emitted, and `responseBody` is their own consumer's
-          // reply. Both are already capped at write time (4 KiB for the
-          // response body, see webhook.service.ts) and re-capped here so a row
-          // written before that cap existed cannot bloat this page.
-          payload: r.payload,
-          responseBody:
-            r.responseBody === null ? null : r.responseBody.slice(0, MAX_RESPONSE_BODY_CHARS),
-        })),
+        data: paged(
+          rows.map((r) => ({
+            id: r.id,
+            eventId: r.eventId,
+            eventType: r.eventType,
+            status: r.status,
+            attempts: r.attempts,
+            responseStatus: r.responseStatus,
+            error: r.error,
+            createdAt: r.createdAt.toISOString(),
+            nextAttemptAt: r.nextAttemptAt?.toISOString() ?? null,
+            // The two fields this route read out of the database and then threw
+            // away, while its own docblock said it returned them. An operator
+            // looking at "12/12 failing" needs to see what was sent and what came
+            // back; without these the page can only say that it failed.
+            //
+            // Neither is a new disclosure: `payload` is the event this operator's
+            // own Application emitted, and `responseBody` is their own consumer's
+            // reply. Both are already capped at write time (4 KiB for the
+            // response body, see webhook.service.ts) and re-capped here so a row
+            // written before that cap existed cannot bloat this page.
+            payload: r.payload,
+            responseBody:
+              r.responseBody === null ? null : r.responseBody.slice(0, MAX_RESPONSE_BODY_CHARS),
+          })),
+          total,
+          limit,
+          offset,
+        ),
       };
     },
   );
@@ -365,6 +571,16 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.',
+        response: {
+          200: ok(ref('RetryWebhookDeliveryResult'), 'The retry was queued.'),
+          ...errs({
+            ...APP_WRITE_ERRORS,
+            404:
+              `${APP_WRITE_ERRORS[404]}; or ${ENDPOINT_NOT_FOUND_DESC}; or ` +
+              'WEBHOOK_DELIVERY_NOT_FOUND — no delivery with that id on this endpoint, or it ' +
+              'already SUCCEEDED.',
+          }),
+        },
       },
     },
     async (req) => {

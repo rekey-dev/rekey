@@ -81,9 +81,9 @@ describe('per-app activity log', () => {
     expect(log.statusCode).toBe(200);
     const events = (
       log.json().data as {
-        events: Array<{ type: string; actorType: string; actorId: string | null; applicationId: string | null }>;
+        items: Array<{ type: string; actorType: string; actorId: string | null; applicationId: string | null }>;
       }
-    ).events;
+    ).items;
 
     // All returned rows are end-user events for this application.
     expect(events.every((e) => e.actorType === 'end_user' && e.applicationId === applicationId)).toBe(true);

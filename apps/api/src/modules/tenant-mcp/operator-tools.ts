@@ -11,15 +11,37 @@
  * MCP JSON-RPC layer in `tenant-mcp-server.ts` lists + dispatches them. Kept
  * transport- and SDK-agnostic so the handlers are unit-testable directly.
  *
- * Authorization is the caller's responsibility: each tool runs with a fixed
- * (tenantUserId, tenantId) context the auth guard supplied.
- *
  * Two credentials reach here (see `bearer-auth.ts`): a PAT, whose workspace is
  * pinned by `TenantApiToken.tenantId`, or an OAuth access token, whose workspace
  * comes from the `tid` the operator consented to. Both re-check membership on
  * every request. But tenant isolation itself is each handler filtering on
  * `ctx.tenantId` — a convention every new tool must follow, not a property the
  * type system or the guard can enforce for you.
+ *
+ * ## Reads are authorized, not merely tenant-scoped
+ *
+ * "Authorization is the caller's responsibility" used to be the whole model
+ * here, and the write tools were the only ones that had any. Read tools were
+ * described as "always available", which in practice meant an `APP_VIEWER`
+ * MEMBER — someone granted sight of exactly one Application — could mint
+ * themselves an OAuth token and read every OTHER Application's end-users plus
+ * the full workspace security log, IPs and user agents included. The REST
+ * equivalents answer 404 and 403 for the same caller. Two authorization models
+ * over one dataset is one authorization model plus a bypass.
+ *
+ * So the read tools now apply the same two gates the REST routes do:
+ *
+ *   - **Role.** `minRole` is honoured for read tools, not just write ones.
+ *     `recent_security_events` and `list_invitations` are OWNER/ADMIN, matching
+ *     `securityEventsRoutes` and the workspace invitations list.
+ *   - **Per-application grants.** Every tool that reads Application-scoped data
+ *     resolves its Application set through `accessibleApplicationIds`, which
+ *     mirrors `lib/app-access.ts` exactly — including the legacy rule that a
+ *     MEMBER with zero grants anywhere keeps workspace-wide READ.
+ *
+ * `get_end_user` is the one that needed both, and it is the pattern for any new
+ * tool that takes an `applicationId`: resolve through the helper, and report a
+ * denied Application identically to a non-existent one.
  */
 
 import type { TenantRole } from '@prisma/client';
@@ -31,6 +53,13 @@ export interface OperatorToolContext {
   tenantId: string;
   /** The operator's live role in `tenantId`, re-checked by the auth guard. */
   role: TenantRole;
+  /**
+   * The caller's `TenantMembership.id` in `tenantId` — the key
+   * `ApplicationGrant` rows hang off. Set by both auth paths in
+   * `bearer-auth.ts`; without it a MEMBER's grants cannot be resolved and
+   * `accessibleApplicationIds` refuses rather than guessing.
+   */
+  tenantMembershipId?: string | undefined;
   /** Whether this token carries write scope (`mcp:operator:write` / PAT `applications:write`). */
   canWrite: boolean;
   /** Whether this token carries admin scope (`mcp:operator:admin`) — destructive/financial ops. */
@@ -63,8 +92,15 @@ export interface OperatorTool {
    */
   admin?: boolean;
   /**
-   * Minimum tenant role allowed to call a write/admin tool. Defaults to `ADMIN`
-   * (so OWNER + ADMIN may call; MEMBER may not). Ignored for read tools.
+   * Minimum tenant role allowed to call this tool.
+   *
+   * For write/admin tools it defaults to `ADMIN` (so OWNER + ADMIN may call;
+   * MEMBER may not). For READ tools there is no default — most workspace reads
+   * are open to any member, as they are over REST — but setting it here gates
+   * them, and it is honoured. It used to be documented as "ignored for read
+   * tools", which is how the workspace security log (IPs, user agents, every
+   * sign-in) ended up readable by a MEMBER through MCP while the REST route
+   * answered 403.
    */
   minRole?: TenantRole;
   handler: (ctx: OperatorToolContext, args: Record<string, unknown>) => Promise<unknown>;
@@ -86,20 +122,75 @@ function clampLimit(raw: unknown, def = 25): number {
   return Math.min(Math.max(1, Math.floor(n)), 200);
 }
 
+/**
+ * The Applications this caller may READ, as ids — the MCP equivalent of
+ * `appAccessScope` + `ensureAppAccess(…, 'read')` in `lib/app-access.ts`.
+ *
+ * The matrix is that file's, reproduced here rather than shared because the
+ * REST helper takes a `FastifyRequest` and these handlers have no request:
+ *
+ *   OWNER / ADMIN     → every Application in the workspace.
+ *   MEMBER            → exactly the granted Applications, at any grant role
+ *                       (APP_VIEWER included — every grant confers read).
+ *                       Zero grants therefore means zero Applications: since
+ *                       2.0.0-rc.3 grant-scoped access is the DEFAULT, not a
+ *                       mode you opt into with your first grant.
+ *   MEMBER, with      → every Application in the workspace (LEGACY read).
+ *   legacyWorkspace     Set only by the 2.0.0-rc.3 backfill, for memberships
+ *   Read = true         that predate grant-scoped-by-default.
+ *
+ * If the two ever diverge, this is the copy to fix: REST is the contract.
+ *
+ * Returns `[]` for a caller with grants that name no Application, which every
+ * handler treats as "nothing to show" — the same empty result an operator with
+ * no Applications gets, so a denied Application is indistinguishable from an
+ * absent one.
+ */
+async function accessibleApplicationIds(ctx: OperatorToolContext): Promise<string[]> {
+  const all = await prisma.application.findMany({
+    where: { tenantId: ctx.tenantId },
+    select: { id: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  const allIds = all.map((a) => a.id);
+  if (ctx.role === 'OWNER' || ctx.role === 'ADMIN') return allIds;
+  // No membership id means grants cannot be resolved. Fail CLOSED: a MEMBER
+  // whose grants we cannot read must not be handed the workspace.
+  if (!ctx.tenantMembershipId) return [];
+  const [grants, membership] = await Promise.all([
+    prisma.applicationGrant.findMany({
+      where: { tenantMembershipId: ctx.tenantMembershipId },
+      select: { applicationId: true },
+    }),
+    prisma.tenantMembership.findUnique({
+      where: { id: ctx.tenantMembershipId },
+      select: { legacyWorkspaceRead: true },
+    }),
+  ]);
+  // Grandfathered pre-grants membership only. Zero grants alone now means
+  // zero Applications, matching lib/app-access.ts.
+  if (grants.length === 0 && membership?.legacyWorkspaceRead === true) return allIds;
+  const granted = new Set(grants.map((g) => g.applicationId));
+  return allIds.filter((id) => granted.has(id));
+}
+
 export const operatorTools: OperatorTool[] = [
   {
     name: 'get_workspace_overview',
     description:
-      "Top-level rollup for the authenticated operator's active workspace: " +
-      'application count, end-user count, organization count, active ' +
-      'subscriptions and MRR (in minor currency units, e.g. cents).',
+      "Top-level rollup for the Applications the authenticated operator can " +
+      'read in their active workspace: application count, end-user count, ' +
+      'organization count, active subscriptions and MRR (in minor currency ' +
+      'units, e.g. cents).',
     inputSchema: NO_ARGS,
     handler: async (ctx) => {
+      // Grant-scoped: a MEMBER with one APP_VIEWER grant used to get counts and
+      // revenue for the whole workspace out of this rollup.
+      const appIds = await accessibleApplicationIds(ctx);
       const apps = await prisma.application.findMany({
-        where: { tenantId: ctx.tenantId },
+        where: { id: { in: appIds } },
         select: { id: true, slug: true, name: true },
       });
-      const appIds = apps.map((a) => a.id);
       if (appIds.length === 0) {
         return {
           tenantId: ctx.tenantId,
@@ -146,13 +237,15 @@ export const operatorTools: OperatorTool[] = [
   {
     name: 'list_applications',
     description:
-      "List all Applications in the operator's active workspace — id, slug, " +
-      'name, end-user count, active-subscription count, request volume in last 24h.',
+      "List the Applications the operator can read in their active workspace — " +
+      'id, slug, name, end-user count, active-subscription count, request volume ' +
+      'in last 24h. A MEMBER with per-application grants sees only the granted ones.',
     inputSchema: NO_ARGS,
     handler: async (ctx) => {
       const since24h = new Date(Date.now() - DAY_MS);
+      const appIds = await accessibleApplicationIds(ctx);
       const apps = await prisma.application.findMany({
-        where: { tenantId: ctx.tenantId },
+        where: { id: { in: appIds } },
         orderBy: { createdAt: 'asc' },
         select: { id: true, slug: true, name: true, createdAt: true },
       });
@@ -211,10 +304,18 @@ export const operatorTools: OperatorTool[] = [
     name: 'list_invitations',
     description:
       'List workspace invitations and their status (pending / accepted / expired / revoked). ' +
-      'Use an id here with revoke_invitation. No invite tokens are returned.',
+      'Use an id here with revoke_invitation. No invite tokens are returned. ' +
+      'Requires the OWNER or ADMIN workspace role.',
+    // Matches GET /api/v1/tenant/workspace/invitations, which is OWNER/ADMIN.
+    // A pending-invite list names people the workspace is recruiting.
+    minRole: 'ADMIN',
     inputSchema: NO_ARGS,
     handler: async (ctx) => {
-      const rows = await tenantWorkspacesService.listInvitations(ctx.tenantId);
+      // Bounded like every other MCP list tool — the service now pages, and an
+      // unbounded call would hand a model the entire invitation history.
+      const { items: rows } = await tenantWorkspacesService.listInvitations(ctx.tenantId, {
+        take: 100,
+      });
       return {
         invitations: rows.map((r) => ({
           id: r.id,
@@ -230,7 +331,7 @@ export const operatorTools: OperatorTool[] = [
   {
     name: 'recent_payments',
     description:
-      "Recent Payment rows across the workspace's Applications — by default " +
+      'Recent Payment rows across the Applications the operator can read — by default ' +
       'the last 25, max 200. Filter optionally by `status` (SUCCEEDED / FAILED / ' +
       "PENDING / REFUNDED). Each row reports its Application's environment.",
     inputSchema: {
@@ -244,11 +345,8 @@ export const operatorTools: OperatorTool[] = [
     handler: async (ctx, args) => {
       const limit = clampLimit(args.limit);
       const status = typeof args.status === 'string' ? args.status : undefined;
-      const apps = await prisma.application.findMany({
-        where: { tenantId: ctx.tenantId },
-        select: { id: true },
-      });
-      const appIds = apps.map((a) => a.id);
+      // Grant-scoped, not merely tenant-scoped — see `accessibleApplicationIds`.
+      const appIds = await accessibleApplicationIds(ctx);
       if (appIds.length === 0) return { payments: [] };
       const rows = await prisma.payment.findMany({
         where: {
@@ -294,11 +392,8 @@ export const operatorTools: OperatorTool[] = [
     handler: async (ctx, args) => {
       const limit = clampLimit(args.limit);
       const status = typeof args.status === 'string' ? args.status : undefined;
-      const apps = await prisma.application.findMany({
-        where: { tenantId: ctx.tenantId },
-        select: { id: true },
-      });
-      const appIds = apps.map((a) => a.id);
+      // Grant-scoped, not merely tenant-scoped — see `accessibleApplicationIds`.
+      const appIds = await accessibleApplicationIds(ctx);
       if (appIds.length === 0) return { subscriptions: [] };
       const rows = await prisma.subscription.findMany({
         where: {
@@ -336,7 +431,12 @@ export const operatorTools: OperatorTool[] = [
     name: 'recent_security_events',
     description:
       "Most recent rows from the workspace's security audit log. Best for incident " +
-      'response — answers "what did IP X do?" / "who signed in when?".',
+      'response — answers "what did IP X do?" / "who signed in when?". Requires the ' +
+      'OWNER or ADMIN workspace role.',
+    // Matches GET /api/v1/tenant/security-events, which is OWNER/ADMIN because
+    // the log carries IPs and user agents for every operator and end-user in
+    // the workspace. Reachable by any MEMBER here until now.
+    minRole: 'ADMIN',
     inputSchema: {
       type: 'object',
       properties: {
@@ -390,11 +490,8 @@ export const operatorTools: OperatorTool[] = [
       const limit = clampLimit(args.limit);
       const provider = typeof args.provider === 'string' ? args.provider : undefined;
       const onlyFailed = args.onlyFailed === true;
-      const apps = await prisma.application.findMany({
-        where: { tenantId: ctx.tenantId },
-        select: { id: true },
-      });
-      const appIds = apps.map((a) => a.id);
+      // Grant-scoped, not merely tenant-scoped — see `accessibleApplicationIds`.
+      const appIds = await accessibleApplicationIds(ctx);
       if (appIds.length === 0) return { events: [] };
       const rows = await prisma.webhookEvent.findMany({
         where: {
@@ -434,11 +531,8 @@ export const operatorTools: OperatorTool[] = [
     },
     handler: async (ctx, args) => {
       const limit = clampLimit(args.limit);
-      const apps = await prisma.application.findMany({
-        where: { tenantId: ctx.tenantId },
-        select: { id: true },
-      });
-      const appIds = apps.map((a) => a.id);
+      // Grant-scoped, not merely tenant-scoped — see `accessibleApplicationIds`.
+      const appIds = await accessibleApplicationIds(ctx);
       if (appIds.length === 0) return { deliveries: [] };
       const rows = await prisma.webhookDelivery.findMany({
         where: {
@@ -476,7 +570,7 @@ export const operatorTools: OperatorTool[] = [
       const since24h = new Date(Date.now() - DAY_MS);
       const since30d = new Date(Date.now() - 30 * DAY_MS);
       const apps = await prisma.application.findMany({
-        where: { tenantId: ctx.tenantId },
+        where: { id: { in: await accessibleApplicationIds(ctx) } },
         select: { id: true, slug: true, name: true },
       });
       if (apps.length === 0) return { applications: [] };
@@ -530,12 +624,21 @@ export const operatorTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      // Scope to the operator's workspace: the application must belong to it,
-      // otherwise an arbitrary applicationId could read another tenant's users.
-      const app = await prisma.application.findFirst({
-        where: { id: String(args.applicationId), tenantId: ctx.tenantId },
-        select: { id: true, environment: true },
-      });
+      // Scope to the Applications this operator may READ — not merely to the
+      // workspace. Tenant scoping alone let an APP_VIEWER MEMBER granted one
+      // Application read any other Application's end-users by passing its id,
+      // which the REST end-user routes answer 404 for.
+      //
+      // A denied Application returns the same `application_not_found_in_workspace`
+      // as one in another tenant, matching `ensureAppAccess`'s non-disclosure
+      // posture: existence must not leak through the refusal.
+      const readable = await accessibleApplicationIds(ctx);
+      const app = readable.includes(String(args.applicationId))
+        ? await prisma.application.findFirst({
+            where: { id: String(args.applicationId), tenantId: ctx.tenantId },
+            select: { id: true, environment: true },
+          })
+        : null;
       if (!app) {
         return { found: false, reason: 'application_not_found_in_workspace' };
       }

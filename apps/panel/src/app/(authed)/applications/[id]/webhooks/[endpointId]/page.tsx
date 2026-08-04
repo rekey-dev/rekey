@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { api } from '@/lib/api';
+import type { Page } from '@/lib/paginate';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
@@ -14,6 +15,7 @@ import { Card, SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
+import { cookieSecure } from '@/lib/cookie-secure';
 
 interface EndpointRow {
   id: string;
@@ -69,7 +71,7 @@ async function rotateSecret(applicationId: string, endpointId: string): Promise<
   jar.set('rekey_reveal_whsec', result.secret, {
     httpOnly: true,
     sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
+    secure: await cookieSecure(),
     path: `/applications/${applicationId}/webhooks/${endpointId}`,
     maxAge: 120,
   });
@@ -104,7 +106,7 @@ async function retryDelivery(
  */
 async function retryAllFailed(applicationId: string, endpointId: string): Promise<void> {
   'use server';
-  const rows = await api<DeliveryRow[]>({
+  const { items: rows } = await api<Page<DeliveryRow>>({
     method: 'GET',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/webhooks/${encodeURIComponent(endpointId)}/deliveries`,
   });
@@ -250,16 +252,18 @@ export default async function WebhookDetailPage({
   const retriedAll = typeof sp.retriedAll === 'string' ? sp.retriedAll : null;
   const retriedAllOf = typeof sp.of === 'string' ? sp.of : null;
 
-  const [endpoints, deliveries] = await Promise.all([
-    api<EndpointRow[]>({
+  const [endpointPage, deliveryPage] = await Promise.all([
+    api<Page<EndpointRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/webhooks`,
     }),
-    api<DeliveryRow[]>({
+    api<Page<DeliveryRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/webhooks/${encodeURIComponent(endpointId)}/deliveries`,
     }),
   ]);
+  const endpoints = endpointPage.items;
+  const deliveries = deliveryPage.items;
 
   const backLink = (
     <Link

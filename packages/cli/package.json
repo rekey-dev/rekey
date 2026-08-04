@@ -1,11 +1,11 @@
 {
   "name": "@rekey.dev/cli",
-  "version": "2.0.0-rc.3",
+  "version": "2.0.0-rc.4",
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
   },
-  "description": "Rekey command-line interface — designed for both human developers and AI agents.",
+  "description": "Rekey command-line interface \u2014 designed for both human developers and AI agents.",
   "type": "module",
   "bin": {
     "rekey": "./dist/index.js"
@@ -15,8 +15,10 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -27,7 +29,7 @@
     "build": "tsc -p tsconfig.json && chmod +x dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo \"(eslint not yet wired)\"",
-    "test": "vitest run"
+    "test": "tsc -p tsconfig.json && vitest run"
   },
   "keywords": [
     "rekey",
@@ -36,7 +38,7 @@
     "billing"
   ],
   "dependencies": {
-    "@rekey.dev/node": "workspace:*",
+    "@rekey.dev/node": "workspace:^",
     "commander": "^12.1.0"
   },
   "devDependencies": {

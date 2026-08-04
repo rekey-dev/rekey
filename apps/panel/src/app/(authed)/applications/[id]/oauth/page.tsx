@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
+import { api, PanelApiError, getApplication } from '@/lib/api';
 import { Modal } from '@/components/Modal';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
@@ -135,10 +135,7 @@ export default async function OAuthPage({
   const error = typeof sp.error === 'string' ? sp.error : undefined;
   const saved = typeof sp.saved === 'string' ? sp.saved : undefined;
 
-  const app = await api<ApplicationRow>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-  });
+  const app = await getApplication(id);
   const configured = (app.oauthConfig ?? {}) as Record<string, { clientId: string; redirectUri: string; issuerUrl?: string }>;
 
   return (

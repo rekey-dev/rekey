@@ -63,7 +63,9 @@ import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
 import { signWebhook, generateWebhookSecret } from '../../lib/webhook-signing.js';
-import { assertSafeUrl } from '../../lib/ssrf-guard.js';
+import type { LookupAddress, LookupOptions } from 'node:dns';
+import { Agent } from 'undici';
+import { assertSafeUrlResolved } from '../../lib/ssrf-guard.js';
 import {
   endpointMatches,
   isKnownWebhookEvent,
@@ -86,6 +88,52 @@ const MAX_ATTEMPTS = 5;
 // deciding which of the two the intent was.
 const RETRY_DELAYS_SECONDS = [30, 120, 600, 3600, 14400];
 const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * An undici dispatcher whose DNS lookup answers only from a pre-validated set.
+ *
+ * This is what closes the rebinding window: the guard resolved the host and
+ * approved these addresses, and the socket must go to one of *them* rather
+ * than to whatever a second DNS query returns a moment later. TLS still
+ * validates against the original hostname, because undici keeps the URL's
+ * servername — pinning the address is not the same as connecting by IP, which
+ * would break certificate verification.
+ *
+ * Built per delivery rather than cached: the validated set is specific to this
+ * attempt, and a pool keyed on the host would outlive it.
+ */
+function pinnedDispatcher(allowed: string[]): Agent {
+  return new Agent({
+    connect: {
+      lookup: (
+        _hostname: string,
+        options: LookupOptions,
+        callback: (
+          err: NodeJS.ErrnoException | null,
+          address: string | LookupAddress[],
+          family?: number,
+        ) => void,
+      ): void => {
+        const entries = allowed.map((address) => ({
+          address,
+          family: address.includes(':') ? 6 : 4,
+        }));
+        if (options.all) {
+          callback(null, entries);
+          return;
+        }
+        const first = entries[0];
+        if (!first) {
+          callback(new Error('no validated address to connect to'), '');
+          return;
+        }
+        callback(null, first.address, first.family);
+      },
+    },
+  });
+}
+
+
 // Max stored response-body bytes. We stop READING at this point too (not
 // just truncating after the fact) so a receiver streaming an endless body
 // can't balloon memory — see readBodyCapped.
@@ -252,7 +300,22 @@ async function postOnce(args: {
     // This catches DNS-rebind / public-host-with-private-A-record that the
     // registration-time URL check can't (it doesn't resolve DNS). A block here
     // surfaces as a normal delivery failure (retried, then FAILED).
-    await assertSafeUrl(args.url);
+    //
+    // The addresses are then PINNED to the connection. Validating a hostname
+    // and handing the raw URL to `fetch` let the runtime resolve again
+    // independently, so a record with a short TTL alternating public and
+    // private won the race — and the attacker got many attempts, since each
+    // event allows up to 5 deliveries and a tenant can emit unlimited events
+    // against their own application. The dispatcher's `lookup` below answers
+    // from the validated set instead of asking DNS a second time.
+    const allowed = await assertSafeUrlResolved(args.url);
+    // `dispatcher` is not in the DOM RequestInit that TS resolves here — Node's
+    // fetch accepts it and undici reads it. Narrowed at the call site rather
+    // than widening the global type.
+    const pinned =
+      allowed.length > 0
+        ? ({ dispatcher: pinnedDispatcher(allowed) } as unknown as RequestInit)
+        : ({} as RequestInit);
     const res = await fetch(args.url, {
       method: 'POST',
       headers: {
@@ -264,6 +327,7 @@ async function postOnce(args: {
       },
       body: args.body,
       signal: controller.signal,
+      ...pinned,
       // Never follow redirects — a validated public URL could otherwise 3xx us
       // onto an internal host, bypassing the guard above.
       redirect: 'manual',
@@ -478,12 +542,21 @@ export const webhookService = {
 
   // ---------- Endpoint CRUD ----------
 
-  async listEndpoints(applicationId: string): Promise<WebhookEndpoint[]> {
+  async listEndpoints(
+    applicationId: string,
+    opts: { take?: number; skip?: number } = {},
+  ): Promise<WebhookEndpoint[]> {
     return prisma.webhookEndpoint.findMany({
       where: { applicationId },
       orderBy: { createdAt: 'desc' },
-      take: 100,
+      take: Math.min(opts.take ?? 100, 100),
+      ...(opts.skip !== undefined && { skip: opts.skip }),
     });
+  },
+
+  /** Total webhook endpoints on this Application, ignoring take/skip. */
+  async countEndpoints(applicationId: string): Promise<number> {
+    return prisma.webhookEndpoint.count({ where: { applicationId } });
   },
 
   async createEndpoint(args: {
@@ -584,6 +657,22 @@ export const webhookService = {
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: Math.min(opts.limit ?? 50, 100),
       ...(opts.offset !== undefined && { skip: opts.offset }),
+    });
+  },
+
+  /** Total deliveries matching `listDeliveries`' filters, ignoring limit/offset. */
+  async countDeliveries(
+    applicationId: string,
+    endpointId: string,
+    opts: { status?: WebhookDeliveryStatus; eventType?: string } = {},
+  ): Promise<number> {
+    return prisma.webhookDelivery.count({
+      where: {
+        applicationId,
+        endpointId,
+        ...(opts.status !== undefined && { status: opts.status }),
+        ...(opts.eventType !== undefined && { eventType: opts.eventType }),
+      },
     });
   },
 

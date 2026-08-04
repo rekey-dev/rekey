@@ -45,7 +45,7 @@ Wrap the app once, seeded from your server session.
 
 | Prop | Type | Default | What |
 |---|---|---|---|
-| `apiUrl` | `string` | — | Base URL of your Rekey deployment. Not a secret. |
+| `apiUrl` | `string` | **required** | Base URL of your Rekey deployment. Not a secret. |
 | `publishableKey` | `string` | — | `rp_pub_…`. Required only for [backendless mode](#backendless-mode). |
 | `initialUser` | `EndUserDto \| null` | `null` | Pre-fetched user, so the first render needs no fetch. |
 | `accessToken` | `string \| null` | `null` | The end-user's access token. The provider re-fetches when it changes. |
@@ -132,7 +132,7 @@ import { SignedIn, SignedOut, RekeyLoading, RekeyLoaded } from '@rekey.dev/react
 | `feature` | `string` | — | Require `authorization.features[feature]` to be truthy. |
 | `role` | `string \| string[]` | — | Require `authorization.role` to match one of these. |
 | `condition` | `(auth) => boolean` | — | Arbitrary predicate — numeric limits, compound checks. |
-| `children` | `ReactNode` | — | Rendered when signed in **and** every supplied check passes. |
+| `children` | `ReactNode` | **required** | Rendered when signed in **and** every supplied check passes. |
 | `fallback` | `ReactNode` | `null` | Rendered otherwise. |
 
 `<Protect>` does not fetch entitlements. It could — `/billing/entitlements`
@@ -215,8 +215,22 @@ export async function signInAction(formData: FormData) {
 }
 ```
 
-`signIn` can return an MFA challenge rather than a session — branch on
-`mfaRequired` before you redirect. See [auth.md](auth.md).
+`signIn` can return an MFA challenge rather than a session. The server helper
+returns a `SignInOutcome`, a union discriminated on **`kind`** — branch on that
+before you redirect:
+
+```ts
+const outcome = await signIn({ email, password });
+if (outcome.kind === 'mfa_required') {
+  // No cookies were set — `mfaChallengeToken` is not a session.
+  return redirect(`/mfa?challenge=${outcome.mfaChallengeToken}`);
+}
+// outcome.kind === 'session'
+```
+
+(The **browser** client's `signIn` is a different shape: it returns
+`SignInOutcomeDto`, which uses a boolean `mfaRequired` field. Don't mix the two.)
+See [auth.md](auth.md).
 
 ### `<SignUp>`
 
@@ -284,13 +298,17 @@ Reads come in as props you resolved server-side with `@rekey.dev/node`
 (`organizations.listMine`, `organizations.listMembers`); writes are your
 actions.
 
+Both list methods resolve to `{ items, page }`, so pass `.items` to the
+component and use `page.total` / `page.hasMore` if you render a count or a
+pager: `const { items: orgs, page } = await rekey.organizations.listMine(token)`.
+
 ### `<OrganizationSwitcher>`
 
 | Prop | Type | Default | What |
 |---|---|---|---|
-| `organizations` | `OrgSummary[]` | — | `{ id, name, role? }`. From `organizations.listMine()`. |
+| `organizations` | `OrgSummary[]` | **required** | `{ id, name, role? }`. From `organizations.listMine()` — pass its `.items`. |
 | `activeOrganizationId` | `string \| null` | `null` | The current active org. |
-| `switchAction` | `FormAction` | — | Receives `orgId` (empty string = back to personal). |
+| `switchAction` | `FormAction` | **required** | Receives `orgId` (empty string = back to personal). |
 | `createAction` | `FormAction` | — | Reads `name`. Enables the "Create team" affordance. |
 | `billingSubject` | `'user' \| 'org'` | `'user'` | `'org'` surfaces the "select a team to continue" nudge. |
 | `allowPersonal` | `boolean` | `true` | Ignored when `billingSubject === 'org'`. |
@@ -317,7 +335,7 @@ empty `orgId` (which org-billing forbids) and steers them to "Create team".
 
 | Prop | Type | Default |
 |---|---|---|
-| `action` | `FormAction` | — (reads `name`, and `slug` when `withSlug`) |
+| `action` | `FormAction` | **required** (reads `name`, and `slug` when `withSlug`) |
 | `withSlug` | `boolean` | `false` |
 | `error` | `ReactNode` | — |
 | `title` | `string` | `Create a team` |
@@ -333,8 +351,8 @@ only when `viewerRole` is `OWNER` or `ADMIN`.
 
 | Prop | Type | What |
 |---|---|---|
-| `organization` | `OrgSummary` | The org being managed. |
-| `members` | `OrgMember[]` | `{ id, email, role }`. From `organizations.listMembers()`. |
+| `organization` | `OrgSummary` | **Required.** The org being managed. |
+| `members` | `OrgMember[]` | **Required.** `{ id, endUserId, email, role }` — **both** ids. `id` keys the row; `endUserId` is what `setRoleAction` / `removeAction` post, so omitting it ships forms that submit `undefined`. From `organizations.listMembers()` (pass its `.items`), which returns both. |
 | `invitations` | `OrgInvitation[]` | Optional pending invites. |
 | `viewerRole` | `string` | Gates the manage affordances. |
 | `inviteAction` | `FormAction` | Reads `email` + `role`. |
@@ -347,7 +365,7 @@ only when `viewerRole` is `OWNER` or `ADMIN`.
 ```tsx
 <OrganizationProfile
   organization={{ id: org.id, name: org.name }}
-  members={members}
+  members={members} // [{ id, endUserId, email, role }, …]
   invitations={pendingInvites}
   viewerRole={myRole}
   inviteAction={inviteMemberAction}
@@ -370,8 +388,8 @@ get an error back if someone tries to demote or remove the final owner.
 
 | Prop | Type | Default | What |
 |---|---|---|---|
-| `plans` | `PricingPlan[]` | — | From `billing.getPlans()`. `amount` is an integer in minor units. |
-| `checkoutAction` | `FormAction` | — | Reads `planSlug` (+ `provider` when a picker is shown). |
+| `plans` | `PricingPlan[]` | **required** | From `billing.getPlans()` — pass its `.items`. `amount` is an integer in minor units. |
+| `checkoutAction` | `FormAction` | **required** | Reads `planSlug` (+ `provider` when a picker is shown). |
 | `currentPlanSlug` | `string \| null` | `null` | Marks that plan "Current" and disables its button. |
 | `hiddenFields` | `Record<string, string>` | — | Appended to every checkout form. |
 | `orgGateBlocking` | `boolean` | `false` | Renders a "team required" gate instead of the grid. |
@@ -382,7 +400,9 @@ get an error back if someone tries to demote or remove the final owner.
 
 ```tsx
 // app/pricing/page.tsx — Server Component
-const plans = await rekey.billing.getPlans();
+// getPlans() resolves to `{items, page}`; `page.hasMore` tells you whether the
+// catalogue is longer than the window you were served.
+const { items: plans } = await rekey.billing.getPlans();
 
 <PricingTable
   plans={plans}
@@ -399,8 +419,8 @@ A single-plan CTA, for pages that aren't a full pricing grid.
 
 | Prop | Type | Default |
 |---|---|---|
-| `planSlug` | `string` | — (posted as `planSlug`) |
-| `action` | `FormAction` | — |
+| `planSlug` | `string` | **required** (posted as `planSlug`) |
+| `action` | `FormAction` | **required** |
 | `hiddenFields` | `Record<string, string>` | — |
 | `variant` | `'primary' \| 'secondary'` | `primary` |
 | `block` | `boolean` | `false` (full width when `true`) |
@@ -420,7 +440,7 @@ component lets the end-user override that with a "Pay with…" radio group.
 
 | Prop | Type | Default | What |
 |---|---|---|---|
-| `providers` | `ProviderOption[]` | — | `{ provider, label?, priority?, countries? }`. The first entry is the router's top pick. |
+| `providers` | `ProviderOption[]` | **required** | `{ provider, label?, priority?, countries? }`. The first entry is the router's top pick. |
 | `name` | `string` | `provider` | Form field name — matches `createCheckout`'s `provider`. |
 | `defaultValue` | `BillingProvider` | first entry | Uncontrolled initial selection. |
 | `value` + `onChange` | | — | Controlled mode. |
@@ -487,9 +507,12 @@ silently rots.
 
 ## Theming
 
-Every component takes `appearance` and `className`. The stylesheet is
-tokens-based: one `<style>` block, injected once, scoped under `.rekey-root`,
-depending on nothing but the cascade.
+Every component that renders markup takes `appearance` and `className`. The
+seven that render none of their own — `<RekeyProvider>`, `<SignedIn>`,
+`<SignedOut>`, `<Loading>`, `<RekeyLoading>`, `<RekeyLoaded>` and `<Protect>` —
+take neither, because there is nothing to style. The stylesheet is tokens-based:
+one `<style>` block, injected once, scoped under `.rekey-root`, depending on
+nothing but the cascade.
 
 ### Light / dark
 
@@ -528,7 +551,14 @@ An explicit pin wins over the OS preference.
 | `borderRadius`, `fontFamily`, `fontSize`, `spacing` | shape and typography |
 
 The same values are readable as `--rekey-*` custom properties, so you can theme
-app-wide from your own CSS instead of per component.
+app-wide from your own CSS instead of per component. The property name is the
+kebab-cased variable — `colorPrimary` → `--rekey-color-primary` — with **two
+exceptions that are shortened**:
+
+| Variable | Custom property |
+|---|---|
+| `borderRadius` | `--rekey-radius` (not `--rekey-border-radius`) |
+| `fontFamily` | `--rekey-font` (not `--rekey-font-family`) |
 
 ### Per-element classes
 
@@ -563,7 +593,7 @@ import { RekeyBrowserClient } from '@rekey.dev/react';
 const client = new RekeyBrowserClient({ apiUrl, publishableKey: 'rp_pub_…' });
 
 const outcome = await client.signIn({ email, password }); // branch on mfaRequired
-const plans   = await client.getPlans();
+const { items: plans } = await client.getPlans();          // {items, page}
 const lic     = await client.verifyLicense({ key, machineFingerprint });
 ```
 

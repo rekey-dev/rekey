@@ -13,8 +13,13 @@
 
 import type { AppEnvironment } from '@rekey.dev/shared-types';
 import { prisma } from '../../lib/prisma.js';
+import { paged, type Paged } from '../../lib/pagination.js';
 import { getRedis } from '../../lib/redis.js';
-import { scanActiveLoginLocks, LOGIN_POLICY } from '../../lib/brute-force.js';
+import {
+  scanActiveLoginLocks,
+  scanActiveOperatorLoginLocks,
+  LOGIN_POLICY,
+} from '../../lib/brute-force.js';
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -30,15 +35,18 @@ function clampOffset(raw: number | undefined): number {
 }
 
 /**
- * One page of a list endpoint. `total` is the full count of matching rows
- * (independent of limit/offset) so the UI can render "X–Y of Z" + page nav.
+ * One page of a list endpoint: `{items, page}`.
+ *
+ * This used to be a FLAT `{items, total, limit, offset}` — pagination one
+ * level higher than the published document declared for all ten of these
+ * operations, and with no `hasMore`. It is now the same `{items, page:
+ * PageMeta}` every other list endpoint in the API returns, aliased through
+ * `lib/pagination.ts` so there is exactly one definition of the shape.
+ *
+ * `page.total` is the full count of matching rows (independent of
+ * limit/offset) so the UI can render "X–Y of Z" + page nav.
  */
-export interface Page<T> {
-  items: T[];
-  total: number;
-  limit: number;
-  offset: number;
-}
+export type Page<T> = Paged<T>;
 
 /**
  * Upper bound on rows scanned for a COMPUTED-sort page (MRR, end-user count,
@@ -548,7 +556,7 @@ export const adminMetricsService = {
             offset + limit,
           )
         : enriched;
-    return { items, total, limit, offset };
+    return paged(items, total, limit, offset);
   },
 
   async applications(
@@ -638,7 +646,7 @@ export const adminMetricsService = {
             offset + limit,
           )
         : enriched;
-    return { items, total, limit, offset };
+    return paged(items, total, limit, offset);
   },
 
   async endUsers(
@@ -709,7 +717,7 @@ export const adminMetricsService = {
     const items = isComputedSort
       ? sortByField(enriched, 'lastSeenAt', query.order ?? 'desc').slice(offset, offset + limit)
       : enriched;
-    return { items, total, limit, offset };
+    return paged(items, total, limit, offset);
   },
 
   async tenantUsers(
@@ -774,7 +782,7 @@ export const adminMetricsService = {
     const items = isComputedSort
       ? sortByField(enriched, 'lastSeenAt', query.order ?? 'desc').slice(offset, offset + limit)
       : enriched;
-    return { items, total, limit, offset };
+    return paged(items, total, limit, offset);
   },
 
   async securityEvents(
@@ -875,7 +883,7 @@ export const adminMetricsService = {
         createdAt: r.createdAt.toISOString(),
       };
     });
-    return { items, total, limit, offset };
+    return paged(items, total, limit, offset);
   },
 
   async apiRequests(
@@ -948,7 +956,7 @@ export const adminMetricsService = {
       ip: r.ip,
       createdAt: r.createdAt.toISOString(),
     }));
-    return { items, total, limit, offset };
+    return paged(items, total, limit, offset);
   },
 
   async payments(
@@ -1008,7 +1016,7 @@ export const adminMetricsService = {
       status: r.status,
       createdAt: r.createdAt.toISOString(),
     }));
-    return { items, total, limit, offset };
+    return paged(items, total, limit, offset);
   },
 
   async subscriptions(
@@ -1067,7 +1075,7 @@ export const adminMetricsService = {
       createdAt: r.createdAt.toISOString(),
       currentPeriodEnd: r.currentPeriodEnd?.toISOString() ?? null,
     }));
-    return { items, total, limit, offset };
+    return paged(items, total, limit, offset);
   },
 
   async webhookEvents(
@@ -1115,7 +1123,7 @@ export const adminMetricsService = {
       processedAt: r.processedAt?.toISOString() ?? null,
       processingError: r.processingError,
     }));
-    return { items, total, limit, offset };
+    return paged(items, total, limit, offset);
   },
 
   async webhookDeliveries(
@@ -1165,7 +1173,7 @@ export const adminMetricsService = {
       responseStatus: r.responseStatus,
       createdAt: r.createdAt.toISOString(),
     }));
-    return { items, total, limit, offset };
+    return paged(items, total, limit, offset);
   },
 
   /**
@@ -1214,7 +1222,22 @@ export const adminMetricsService = {
   },
 
   /**
-   * End-user accounts currently inside the failed-sign-in lockout window.
+   * Accounts currently inside the failed-sign-in lockout window — **end-users
+   * AND operators**.
+   *
+   * The operator half was missing, and its absence was the sharper problem of
+   * the two. A locked-out workspace OWNER — the account that owns every
+   * Application, API key and billing credential in their workspace — appeared
+   * in no operator- or admin-facing surface at all: this endpoint read only
+   * `bf:lock:eu:login:*`, and the workspace security log they might otherwise
+   * have been visible in is behind the sign-in they cannot complete. The
+   * super-admin surface is the one place reachable when the owner is locked out
+   * of their own.
+   *
+   * `operators` therefore sits alongside `accounts` rather than being folded
+   * into it: the two carry different identities (an operator lock has no
+   * Application) and consumers filter on that. `accounts` keeps its exact
+   * previous shape and meaning.
    *
    * Sourced from the Redis brute-force limiter (`lib/brute-force.ts`), NOT the
    * `EndUser.{lockedUntil,failedSignInAttempts}` columns, which are gone (they
@@ -1237,11 +1260,25 @@ export const adminMetricsService = {
       failedAttempts: number;
       lockedUntil: string;
     }>;
+    /** Count of locked OPERATOR accounts (`bf:lock:op:login:*`). */
+    operatorsTotal: number;
+    operators: Array<{
+      /** TenantUser id, or a synthetic `op:<email>` when the row is gone. */
+      id: string;
+      email: string;
+      /** Workspaces this operator belongs to — who else can still get in. */
+      workspaces: Array<{ tenantId: string; tenantName: string; role: string }>;
+      failedAttempts: number;
+      lockedUntil: string;
+    }>;
   }> {
     const limit = clampLimit(query.limit, 50);
     const now = new Date();
-    const { total, locks } = await scanActiveLoginLocks(limit);
-    if (locks.length === 0) return { total, accounts: [] };
+    const [{ total, locks }, operators] = await Promise.all([
+      scanActiveLoginLocks(limit),
+      this.lockedOperators(limit, now, query.order ?? 'desc'),
+    ]);
+    if (locks.length === 0) return { total, accounts: [], ...operators };
 
     // Resolve each (applicationId, email) to its EndUser for id + slug. The
     // lock survives a few ms longer than the row in the (rare) tombstone race,
@@ -1264,7 +1301,66 @@ export const adminMetricsService = {
     );
     // `failedAttempts` is uniform now, so only `lockedUntil` is a meaningful
     // sort key; default newest-lock (longest remaining TTL) first.
-    return { total, accounts: sortByField(accounts, 'lockedUntil', query.order ?? 'desc') };
+    return {
+      total,
+      accounts: sortByField(accounts, 'lockedUntil', query.order ?? 'desc'),
+      ...operators,
+    };
+  },
+
+  /**
+   * The operator half of `lockedAccounts`. Split out only to keep that method
+   * readable — it has no other caller.
+   *
+   * `workspaces` is the actionable part: it names the workspaces the locked
+   * operator belongs to, so the deployment administrator can tell at a glance
+   * whether anyone else can still administer them, or whether this lock has
+   * shut a workspace down entirely.
+   */
+  async lockedOperators(
+    limit: number,
+    now: Date,
+    order: 'asc' | 'desc',
+  ): Promise<{
+    operatorsTotal: number;
+    operators: Array<{
+      id: string;
+      email: string;
+      workspaces: Array<{ tenantId: string; tenantName: string; role: string }>;
+      failedAttempts: number;
+      lockedUntil: string;
+    }>;
+  }> {
+    const { total, locks } = await scanActiveOperatorLoginLocks(limit);
+    if (locks.length === 0) return { operatorsTotal: total, operators: [] };
+    const operators = await Promise.all(
+      locks.map(async (lock) => {
+        const user = await prisma.tenantUser.findUnique({
+          where: { email: lock.email },
+          select: {
+            id: true,
+            memberships: {
+              select: { tenantId: true, role: true, tenant: { select: { name: true } } },
+              orderBy: { createdAt: 'asc' },
+            },
+          },
+        });
+        return {
+          // Same tombstone tolerance as the end-user branch: the lock key
+          // outlives a deleted row by up to its TTL.
+          id: user?.id ?? `op:${lock.email}`,
+          email: lock.email,
+          workspaces: (user?.memberships ?? []).map((m) => ({
+            tenantId: m.tenantId,
+            tenantName: m.tenant.name,
+            role: m.role as string,
+          })),
+          failedAttempts: LOGIN_POLICY.threshold,
+          lockedUntil: new Date(now.getTime() + lock.ttlSec * 1000).toISOString(),
+        };
+      }),
+    );
+    return { operatorsTotal: total, operators: sortByField(operators, 'lockedUntil', order) };
   },
 
   /**

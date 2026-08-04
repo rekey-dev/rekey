@@ -30,27 +30,27 @@
 import * as React from 'react';
 import { Themed, useCx, type AppearanceProp } from './theme.js';
 import { PricingGrid, type PricingGridProps } from './pricing-shared.js';
-import type { BillingProvider } from '@rekey.dev/shared-types';
+import type { BillingProvider, BillingProviderInfoDto } from '@rekey.dev/shared-types';
 
 /**
- * One selectable provider. Mirrors `BillingProviderInfoDto` (the shape
- * `billing.getProviders()` returns), but only `provider` is required so callers
- * can pass a bare `[{ provider: 'stripe' }]` when they don't have routing data.
+ * One selectable provider — a genuine slice of `BillingProviderInfoDto` (the
+ * shape `billing.getProviders()` / `listBillingProviders()` return) rather than
+ * a look-alike interface, so field drift in shared-types is a compile error
+ * here. Only `provider` is required, so callers can pass a bare
+ * `[{ provider: 'stripe' }]` when they don't have routing data.
  */
-export interface ProviderOption {
-  /** Provider id — drives the value posted as `provider`. */
-  provider: BillingProvider;
+export type ProviderOption = Pick<BillingProviderInfoDto, 'provider'> & {
   /** The geo router's preference rank (lower = preferred). Display-only. */
-  priority?: number;
+  priority?: BillingProviderInfoDto['priority'] | undefined;
   /** ISO 3166-1 alpha-2 countries this provider is routed for. Display-only. */
-  countries?: string[];
+  countries?: BillingProviderInfoDto['countries'] | undefined;
   /**
    * Server-provided display name (P4 discovery). Preferred over the built-in
    * fallback map when present — so a provider added server-side renders its
    * proper label without an SDK update.
    */
-  label?: string;
-}
+  label?: BillingProviderInfoDto['label'] | undefined;
+};
 
 /**
  * Built-in fallback labels for the three bundled providers. The server's

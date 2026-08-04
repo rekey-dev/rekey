@@ -23,6 +23,8 @@ import { SubmitButton } from '@/components/SubmitButton';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { formatDate, formatDateTime } from '@/lib/date';
 import { Banner } from '@/components/Banner';
+import { cookieSecure } from '@/lib/cookie-secure';
+import type { Page } from '@/lib/paginate';
 
 interface OperatorTokenRow {
   id: string;
@@ -92,7 +94,7 @@ async function mintToken(formData: FormData): Promise<void> {
   jar.set(REVEAL_COOKIE, JSON.stringify({ rawToken: result.rawToken, prefix: result.apiToken.tokenPrefix }), {
     httpOnly: true,
     sameSite: 'strict',
-    secure: process.env.NODE_ENV === 'production',
+    secure: await cookieSecure(),
     path: '/account/api-tokens',
     maxAge: REVEAL_COOKIE_MAX_AGE,
   });
@@ -140,7 +142,7 @@ export default async function ApiTokensPage({
   const minted = sp.minted === '1';
   const revoked = sp.revoked === '1';
 
-  const tokens = await api<OperatorTokenRow[]>({
+  const { items: tokens } = await api<Page<OperatorTokenRow>>({
     method: 'GET',
     path: '/api/v1/tenant/auth/api-tokens',
   });

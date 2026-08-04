@@ -47,7 +47,6 @@ import {
   checkoutSessionMatchers,
   checkoutSessionWhere,
   couponForSession,
-  newestCheckoutSessionId,
 } from '../checkout-sessions.js';
 import { advanceBillingPeriod } from './period.js';
 import { enqueuePaymentEvent, enqueueSubscriptionEvent } from './billing-events.js';
@@ -79,6 +78,71 @@ export interface ApplyContext {
  */
 const MAX_PAYMENT_AMOUNT = 10_000_000_000; // 100,000,000.00
 
+/**
+ * Statuses a subscription never comes back from.
+ *
+ * CANCELED and EXPIRED are the end of the relationship: the buyer asked to
+ * stop, or the finite cycle count ran out. Re-subscribing is a NEW checkout,
+ * which walks its own row back through PENDING first — so nothing legitimate
+ * needs to write a live status straight onto a terminal one.
+ */
+const TERMINAL_STATUSES = new Set<Subscription['status']>(['CANCELED', 'EXPIRED']);
+
+/**
+ * Whether a provider event may move a local subscription from `from` to `to`.
+ *
+ * The status mirror used to write `ev.status` absolutely, with the transition
+ * test gating only the outbound announcement. So a single stale `ACTIVE` event
+ * — a provider re-delivery, or the pipeline's own documented re-attempt path
+ * for an event whose first dispatch failed — silently resurrected a CANCELED
+ * subscription, and `ACTIVE` is an entitling status, so everything the buyer
+ * had cancelled came back with it.
+ *
+ * The rule is the narrowest one that closes it: a terminal state is never
+ * reopened. Everything else still mirrors absolutely, because for a live
+ * subscription the provider genuinely is the authority on the order of its own
+ * events and we have no clock to order them by.
+ */
+function transitionAllowed(from: Subscription['status'], to: Subscription['status']): boolean {
+  if (!TERMINAL_STATUSES.has(from)) return true;
+  // CANCELED → EXPIRED and back is bookkeeping between two dead states; neither
+  // entitles anyone, so it costs nothing to mirror.
+  return TERMINAL_STATUSES.has(to);
+}
+
+/**
+ * The cancellation stamps a subscription sheds when it becomes live again.
+ *
+ * `Subscription` is unique on `(applicationId, endUserId, planId)`, so a buyer
+ * who cancels and then buys the same plan again does not get a new row — the
+ * checkout reuses the cancelled one, walking it back to PENDING and then to
+ * ACTIVE. Until now nothing on that journey ever cleared `cancelAt`, and the
+ * only code that cleared it at all was Stripe-specific (the status mirror,
+ * which writes whatever `ev.cancelAt` carries). PayPal and hand-provisioned
+ * subscriptions carried the old dates forward forever.
+ *
+ * A live subscription wearing a stale `cancelAt` is not a display bug. It is
+ * the state a buyer cannot get out of:
+ *
+ *   - the account panel calls it "Cancelling", shows "Ends <a date in the
+ *     past>", and in that branch renders Resubscribe INSTEAD of the Cancel
+ *     button;
+ *   - `cancelCurrentSubscription` short-circuits on
+ *     `if (atPeriodEnd && sub.cancelAt !== null) return sub` — so a direct
+ *     cancel call answers 200 having done nothing at all;
+ *   - meanwhile the provider is still charging, on schedule.
+ *
+ * `canceledAt` goes with it. It is the "this subscription is over" timestamp;
+ * leaving it set on a subscription that is demonstrably not over misreports
+ * the row to the panel, the admin surfaces, and anything reading history.
+ *
+ * Applied ONLY on a genuine transition into ACTIVE, never on a replay of an
+ * activation for a row already ACTIVE. Providers re-deliver webhooks routinely,
+ * and clearing unconditionally would let a re-delivery silently un-cancel a
+ * cancellation the buyer had scheduled — the same defect pointed the other way.
+ */
+const clearedOnReactivation = { cancelAt: null, canceledAt: null } as const;
+
 function safeAmount(
   raw: number | null | undefined,
   log: FastifyBaseLogger,
@@ -97,6 +161,78 @@ function safeAmount(
     return null;
   }
   return raw;
+}
+
+/**
+ * How far above the plan's own price a single charge may land before we treat
+ * it as a unit mismatch rather than a sale.
+ *
+ * 100× is the classic dollars-recorded-as-cents error, and it is the shape this
+ * is here to catch. Real charges do exceed `plan.amount` — tax, proration, a
+ * mid-period upgrade — but never by two orders of magnitude, and a charge that
+ * big is a number no revenue dashboard should be asked to sum.
+ */
+const MAX_PLAN_AMOUNT_MULTIPLE = 100;
+
+/**
+ * Cross-check the money on a webhook against the plan it claims to be paying
+ * for, and return the currency to record.
+ *
+ * The amount and currency arrive as provider payload fields and were written
+ * verbatim: `safeAmount` bounded the amount absolutely, and the currency was
+ * taken as given with a hardcoded `'usd'` when absent — so an INR plan whose
+ * event omitted the currency recorded USD rows, and every per-currency total an
+ * operator reads was a sum over a column nobody had checked. A charge in a
+ * currency the plan is not sold in is not a rounding difference; it means the
+ * event and the local row disagree about what was bought, so it is refused
+ * rather than recorded and averaged in later.
+ *
+ * Returns null when the charge must not be recorded. An event that matched no
+ * local subscription has nothing to check against and keeps the historical
+ * pass-through — the unlinked-payment posture is `requireLocalSubscription`'s
+ * to decide, not this function's.
+ */
+async function resolveChargeCurrency(
+  localSub: Pick<Subscription, 'id' | 'planId'> | null,
+  charge: { amount: number; currency: string | null | undefined },
+  log: FastifyBaseLogger,
+  context: { providerPaymentId: string },
+): Promise<string | null> {
+  if (!localSub) return (charge.currency ?? 'usd').toUpperCase();
+  const plan = await prisma.plan.findUnique({
+    where: { id: localSub.planId },
+    select: { currency: true, amount: true, kind: true, slug: true },
+  });
+  if (!plan) return (charge.currency ?? 'usd').toUpperCase();
+
+  const planCurrency = plan.currency.toUpperCase();
+  // An absent currency inherits the PLAN's, not USD — the old default silently
+  // mislabelled every non-USD provider that omits the field.
+  const currency = (charge.currency ?? planCurrency).toUpperCase();
+  if (currency !== planCurrency) {
+    log.error(
+      { ...context, subscriptionId: localSub.id, planSlug: plan.slug, currency, planCurrency },
+      'webhook currency does not match the plan currency — refusing to record',
+    );
+    return null;
+  }
+
+  // USAGE plans bill on consumption and a zero-amount plan has no price to
+  // compare against, so neither has a meaningful ceiling here.
+  if (plan.kind !== 'USAGE' && plan.amount > 0 && charge.amount > plan.amount * MAX_PLAN_AMOUNT_MULTIPLE) {
+    log.error(
+      {
+        ...context,
+        subscriptionId: localSub.id,
+        planSlug: plan.slug,
+        amount: charge.amount,
+        planAmount: plan.amount,
+      },
+      'webhook amount exceeds the plan price by more than MAX_PLAN_AMOUNT_MULTIPLE — refusing to record. Probable unit mismatch.',
+    );
+    return null;
+  }
+  return currency;
 }
 
 /**
@@ -132,6 +268,10 @@ async function redeemSessionCoupon(
     checkoutSessionId: args.checkoutSessionId,
     subscriptionId: args.subscription.id,
     discountAmount: coupon.discountAmount,
+    // Hand back the checkout's reservation against `maxRedemptions`. Absent
+    // for unlimited coupons and for sessions written before holds existed;
+    // `redeemForCheckout` treats it as optional and a stale one expires anyway.
+    ...(coupon.holdId !== undefined && { holdId: coupon.holdId }),
     ...(args.paymentId !== undefined && { paymentId: args.paymentId }),
   });
   if (outcome.recorded === false && outcome.reason === 'limit-reached') {
@@ -194,6 +334,22 @@ export async function applyCheckoutCompleted(
     where,
     select: { id: true, status: true },
   });
+  // Same terminal-state guard the status mirror applies, and for the same
+  // reason: a re-delivered completion for an old session must not resurrect a
+  // subscription the buyer cancelled. A genuine re-subscribe is not affected —
+  // its checkout walks the row back to PENDING before this event arrives.
+  if (before && !transitionAllowed(before.status, 'ACTIVE')) {
+    ctx.log.warn(
+      {
+        subscriptionId: before.id,
+        currentStatus: before.status,
+        sessionId: ev.checkoutSessionId,
+        providerEventId: ev.providerEventId,
+      },
+      'checkout completion would reopen a terminal subscription — refusing the write',
+    );
+    return;
+  }
 
   // Status flip + its outbox rows in ONE transaction, so a
   // `subscription.activated` announcement can never be lost by a crash between
@@ -207,8 +363,13 @@ export async function applyCheckoutCompleted(
         status: 'ACTIVE',
         ...(ev.providerSubscriptionId !== null && { providerSubId: ev.providerSubscriptionId }),
         // Activation payloads that carry the period anchor (Razorpay
-        // `current_end`) mirror it in the same write; undefined = untouched.
+        // `current_end`, PayPal `billing_info.next_billing_time`) mirror it in
+        // the same write; undefined = untouched.
         ...(ev.currentPeriodEnd !== undefined && { currentPeriodEnd: ev.currentPeriodEnd }),
+        // A subscription that just came (back) to life is not cancelled, and
+        // must not keep wearing the last cancellation's dates. See
+        // `clearedOnReactivation`.
+        ...(activatedFrom ? clearedOnReactivation : {}),
       },
     });
     // Only on the PENDING→ACTIVE transition (not on replays that found the row
@@ -294,6 +455,12 @@ async function recordCompletionPayment(
     field: 'amount_total',
   });
   if (amount === null) return undefined; // Refused (see safeAmount).
+  // Cross-checked against the plan this session bought — see
+  // resolveChargeCurrency.
+  const currency = await resolveChargeCurrency(sub, { amount, currency: charge.currency }, ctx.log, {
+    providerPaymentId: charge.providerPaymentId,
+  });
+  if (currency === null) return undefined;
 
   try {
     const { payment, deliveryIds } = await prisma.$transaction(async (tx) => {
@@ -303,7 +470,7 @@ async function recordCompletionPayment(
           endUserId: sub.endUserId,
           subscriptionId: sub.id,
           amount,
-          currency: (charge.currency ?? 'usd').toUpperCase(),
+          currency,
           status: 'SUCCEEDED',
           providerPaymentId: charge.providerPaymentId,
           description: charge.description,
@@ -357,6 +524,16 @@ export async function applyCheckoutApproved(
   });
   if (!sub) {
     ctx.log.warn({ orderId: ev.checkoutSessionId }, 'checkout.approved: no local row matches this order');
+    return;
+  }
+  // Refused BEFORE the capture, not after: a terminal row must not be
+  // reopened, and taking the buyer's money for one would be worse than the
+  // status write. See transitionAllowed.
+  if (!transitionAllowed(sub.status, 'ACTIVE')) {
+    ctx.log.warn(
+      { subscriptionId: sub.id, currentStatus: sub.status, orderId: ev.checkoutSessionId },
+      'checkout.approved would reopen a terminal subscription — refusing to capture',
+    );
     return;
   }
 
@@ -460,6 +637,12 @@ export async function applyPaymentSucceeded(
     );
     return;
   }
+  // Amount + currency cross-checked against the plan before either reaches a
+  // row — see resolveChargeCurrency.
+  const currency = await resolveChargeCurrency(localSub, { amount, currency: ev.currency }, ctx.log, {
+    providerPaymentId: ev.providerPaymentId,
+  });
+  if (currency === null) return;
 
   // Idempotent: (application_id, provider_payment_id) is unique; skip on
   // conflict.
@@ -483,7 +666,7 @@ export async function applyPaymentSucceeded(
           endUserId: localSub?.endUserId ?? null,
           subscriptionId: localSub?.id ?? null,
           amount,
-          currency: (ev.currency ?? 'usd').toUpperCase(),
+          currency,
           status: 'SUCCEEDED',
           providerPaymentId: ev.providerPaymentId,
           description: ev.description ?? null,
@@ -495,9 +678,26 @@ export async function applyPaymentSucceeded(
       // payment — a committed payment must never be left with a stale
       // status or stranded from its period change.
       if (localSub) {
+        // The payment is recorded either way — money that moved is a fact —
+        // but a charge arriving against a CANCELED/EXPIRED row does not bring
+        // it back to life. See transitionAllowed.
+        const mayActivate =
+          localSub.status !== 'ACTIVE' && transitionAllowed(localSub.status, 'ACTIVE');
         const subData = {
-          ...(localSub.status !== 'ACTIVE' && { status: 'ACTIVE' as const }),
+          ...(mayActivate && { status: 'ACTIVE' as const }),
           ...(ev.currentPeriodEnd !== undefined && { currentPeriodEnd: ev.currentPeriodEnd }),
+          // A PENDING row going live on its payment is a checkout completing,
+          // and a resubscribe reuses the cancelled row — so the old dates have
+          // to go (see `clearedOnReactivation`). This path matters because the
+          // two events are not ordered: when a provider's sale lands before its
+          // activation, the activation then finds the row already ACTIVE and
+          // clears nothing, so without this the stale `cancelAt` survives.
+          //
+          // Deliberately NOT extended to PAST_DUE → ACTIVE. That is dunning
+          // recovery, where a cancellation the buyer scheduled is still theirs;
+          // clearing it there would quietly restart a subscription they had
+          // stopped, which is the failure that costs them money.
+          ...(mayActivate && localSub.status === 'PENDING' ? clearedOnReactivation : {}),
         };
         if (Object.keys(subData).length > 0) {
           await tx.subscription.update({ where: { id: localSub.id }, data: subData });
@@ -507,8 +707,9 @@ export async function applyPaymentSucceeded(
       // row was committed, which by construction is every path that reaches
       // here (a replay throws P2002 above and rolls the whole thing back).
       const ids = await enqueuePaymentEvent(tx, 'payment.succeeded', payment.id);
-      if (localSub && localSub.status !== 'ACTIVE') {
-        // Recovery/activation via payment — a real status transition.
+      if (localSub && localSub.status !== 'ACTIVE' && transitionAllowed(localSub.status, 'ACTIVE')) {
+        // Recovery/activation via payment — a real status transition. Refused
+        // above for a terminal row, so nothing is announced for one either.
         ids.push(...(await enqueueSubscriptionEvent(tx, 'subscription.activated', localSub.id)));
       }
       return { payment, deliveryIds: ids };
@@ -534,24 +735,31 @@ export async function applyPaymentSucceeded(
   // (P2002 → deliveryIds stays empty) announces nothing.
   kickDeliveries(deliveryIds);
 
-  // Coupon redemption — post-commit, and keyed on the session that bought the
-  // discount, so a RENEWAL of a discounted subscription redeems nothing: the
-  // provider coupon is `duration: 'once'` and only ever cut the first invoice,
-  // yet every renewal used to record another redemption. The operator's stats
-  // then multiplied one discount by the number of periods, and once a per-user
-  // limit was reached the extra redemption failed the renewal outright.
-  if (localSub) {
-    const sessionId = newestCheckoutSessionId(localSub.metadata);
-    if (sessionId) {
-      await redeemSessionCoupon(
-        {
-          subscription: localSub,
-          checkoutSessionId: sessionId,
-          paymentId: createdPayment?.id,
-        },
-        ctx,
-      );
-    }
+  // Coupon redemption — post-commit, and keyed on the session the EVENT names,
+  // never on whichever session the row issued most recently.
+  //
+  // It was the newest, and that was a free drain on a coupon's global ceiling:
+  // the row's newest session is whatever checkout the buyer opened last, so
+  // opening a fresh discounted checkout and then letting the existing
+  // subscription renew redeemed the NEW session's coupon off a renewal invoice
+  // that the new coupon never touched — no payment for it, repeatable monthly.
+  //
+  // Every flow that reaches here carries its session or is already covered:
+  // Razorpay puts the subscription/payment-link id on the event, PayPal's
+  // capture carries the order id, and Stripe's one-time and recurring sales are
+  // both redeemed by `checkout.completed`, which knows exactly which session
+  // completed. A renewal names no session and redeems nothing, which is the
+  // correct answer — the provider coupon is `duration: 'once'` and only ever
+  // cut invoice #1.
+  if (localSub && ev.checkoutSessionId) {
+    await redeemSessionCoupon(
+      {
+        subscription: localSub,
+        checkoutSessionId: ev.checkoutSessionId,
+        paymentId: createdPayment?.id,
+      },
+      ctx,
+    );
   }
 
   // Money moved for this subscription — whatever the status-mirror ordering,
@@ -729,9 +937,68 @@ async function applySubscriptionStatusMirror(
   // nothing).
   const existing = await prisma.subscription.findFirst({
     where,
-    select: { id: true, status: true },
+    select: { id: true, status: true, cancelAt: true },
   });
   const transitioned = Boolean(existing && existing.status !== ev.status);
+  // A terminal subscription is not reopened by a later-arriving event. This
+  // gates the WRITE, not just the announcement: gating only the announcement is
+  // how a stale `ACTIVE` re-delivery used to resurrect a CANCELED subscription,
+  // entitlements and all, while the outbox stayed silent about it. See
+  // transitionAllowed.
+  if (existing && !transitionAllowed(existing.status, ev.status)) {
+    ctx.log.warn(
+      {
+        subscriptionId: existing.id,
+        currentStatus: existing.status,
+        eventStatus: ev.status,
+        providerEventId: ev.providerEventId,
+      },
+      'billing status event would reopen a terminal subscription — refusing the write',
+    );
+    return;
+  }
+  // A cancellation the buyer has already been promised the rest of the period
+  // for is NOT shortened by the provider's own cancellation event.
+  //
+  // This is what makes period-end cancellation possible on a provider that
+  // cannot schedule one. PayPal's Subscriptions v1 has a single, immediate
+  // cancel (see RealPaypalProvider.cancelSubscription), so asking to cancel at
+  // period end terminates the agreement now and PayPal reports it within
+  // seconds. Mirroring that report straight onto the local row took the
+  // remainder of the period away from the buyer — mid-period, with no refund,
+  // moments after the account page had told them "you keep everything you paid
+  // for until <date>".
+  //
+  // The agreement being gone at PayPal is exactly what we wanted: it is what
+  // stops the money. What it must not decide is when ENTITLEMENTS end. That
+  // date is `cancelAt`, we recorded it ourselves when the cancellation was
+  // accepted, and the row is left ACTIVE until `expireIfDue` reaches it.
+  //
+  // Narrow on purpose:
+  //   - only CANCELED. EXPIRED means the subscription ran out its own finite
+  //     cycle count — a real ending, not one we scheduled.
+  //   - only a `cancelAt` still in the FUTURE, so the provider's event at the
+  //     natural end of a scheduled cancellation (Stripe, whose cancellation
+  //     really is scheduled, arrives on the day) mirrors normally.
+  //   - only from ACTIVE, so it cannot hold a PAST_DUE row open.
+  const now = new Date();
+  if (
+    existing &&
+    ev.status === 'CANCELED' &&
+    existing.status === 'ACTIVE' &&
+    existing.cancelAt !== null &&
+    existing.cancelAt > now
+  ) {
+    ctx.log.info(
+      {
+        subscriptionId: existing.id,
+        cancelAt: existing.cancelAt,
+        providerEventId: ev.providerEventId,
+      },
+      'provider cancelled an agreement we had scheduled — holding the paid period open until cancelAt',
+    );
+    return;
+  }
   // Mirror + outbox row in ONE transaction: the announcement is written with
   // the transition it announces, so a crash between the two cannot leave a
   // CANCELED subscription that nobody was ever told about.

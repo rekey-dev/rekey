@@ -152,7 +152,10 @@ describe('Portal V2 API', () => {
       headers: { authorization: `Bearer ${publicKey}`, 'x-rekey-user-token': token },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json().data).toEqual([]);
+    expect(res.json().data).toEqual({
+      items: [],
+      page: { total: 0, limit: expect.any(Number), offset: 0, hasMore: false },
+    });
   });
 
   it('org billing: an OWNER reads + cancels the org subscription via publishable key + token; a non-member is 403', async () => {
@@ -174,7 +177,11 @@ describe('Portal V2 API', () => {
     // listOrganizations works with the publishable key + token, and reports OWNER.
     const list = await app.inject({ method: 'GET', url: '/api/v1/users/me/organizations/', headers: pubAuth(owner.accessToken) });
     expect(list.statusCode).toBe(200);
-    expect((list.json().data as Array<{ id: string; role: string }>).find((o) => o.id === orgId)?.role).toBe('OWNER');
+    expect(
+      (list.json().data as { items: Array<{ id: string; role: string }> }).items.find(
+        (o) => o.id === orgId,
+      )?.role,
+    ).toBe('OWNER');
 
     // An ACTIVE subscription whose beneficiary is the org.
     const plan = await app

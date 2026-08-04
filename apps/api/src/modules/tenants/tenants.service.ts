@@ -30,7 +30,7 @@ import {
   parseTenantLimits,
   resolveNewTenantLimits,
 } from '../../lib/tenant-limits.js';
-import type { Prisma, Tenant } from '@prisma/client';
+import type { Prisma, Tenant, TenantRole } from '@prisma/client';
 import type { TenantLimits } from '@rekey.dev/shared-types';
 
 export interface CreateTenantInput {
@@ -65,6 +65,11 @@ export const tenantsService = {
     });
   },
 
+  /** Total workspaces, ignoring take/skip — the `page.total` of `list`. */
+  async count(): Promise<number> {
+    return prisma.tenant.count();
+  },
+
   async get(id: string): Promise<Tenant> {
     const tenant = await prisma.tenant.findUnique({ where: { id } });
     if (!tenant) {
@@ -97,6 +102,73 @@ export const tenantsService = {
         activeEndUsers: await countActiveEndUsers(id),
         productionApps: await countProductionApps(id),
       },
+    };
+  },
+
+  /**
+   * Grant an EXISTING operator a membership in a workspace.
+   *
+   * Exists because `create()` above writes a Tenant and nothing else, and
+   * `ownerEmail` on that row is a denormalised label — access runs entirely
+   * through `TenantMembership`. Without this, an admin-created workspace is one
+   * nobody can open.
+   *
+   * Idempotent, and deliberately does NOT rewrite the role of a membership that
+   * already exists: provisioning automation retries, and a retry must not
+   * silently promote someone who was later demoted to MEMBER. Changing a role
+   * is a separate, explicit operation.
+   *
+   * Never creates the operator. An email with no operator behind it is a 404,
+   * not an invitation — creating one here would bypass `OPERATOR_SIGNUP_MODE`
+   * entirely, which is the gate the whole invite system rests on.
+   */
+  async addMember(input: {
+    tenantId: string;
+    email: string;
+    role: TenantRole;
+  }): Promise<{
+    membershipId: string;
+    tenantId: string;
+    tenantUserId: string;
+    role: TenantRole;
+    created: boolean;
+  }> {
+    await this.get(input.tenantId);
+    const email = input.email.toLowerCase();
+    const user = await prisma.tenantUser.findUnique({ where: { email } });
+    if (!user) {
+      throw new RekeyError({
+        statusCode: 404,
+        code: 'OPERATOR_NOT_FOUND',
+        message: 'No operator account exists with that email.',
+        fix:
+          'This route grants an EXISTING operator access to a workspace. Have them register ' +
+          'first (POST /api/v1/tenant/auth/sign-up, subject to OPERATOR_SIGNUP_MODE).',
+      });
+    }
+
+    const existing = await prisma.tenantMembership.findFirst({
+      where: { tenantId: input.tenantId, tenantUserId: user.id },
+    });
+    if (existing) {
+      return {
+        membershipId: existing.id,
+        tenantId: existing.tenantId,
+        tenantUserId: existing.tenantUserId,
+        role: existing.role,
+        created: false,
+      };
+    }
+
+    const created = await prisma.tenantMembership.create({
+      data: { tenantId: input.tenantId, tenantUserId: user.id, role: input.role },
+    });
+    return {
+      membershipId: created.id,
+      tenantId: created.tenantId,
+      tenantUserId: created.tenantUserId,
+      role: created.role,
+      created: true,
     };
   },
 

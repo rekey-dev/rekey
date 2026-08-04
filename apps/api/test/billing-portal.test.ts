@@ -110,7 +110,10 @@ describe('end-user billing portal surface', () => {
       headers: userHeaders(accessToken),
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json().data).toEqual([]);
+    expect(res.json().data).toEqual({
+      items: [],
+      page: { total: 0, limit: expect.any(Number), offset: 0, hasMore: false },
+    });
   });
 
   it("GET /billing/payments returns only the caller's own payments, newest first", async () => {
@@ -169,13 +172,19 @@ describe('end-user billing portal surface', () => {
       headers: userHeaders(alice.accessToken),
     });
     expect(res.statusCode).toBe(200);
-    const payments = res.json().data as Array<{
-      amount: number;
-      description: string | null;
-      planSlug: string | null;
-      receiptUrl: string | null;
-    }>;
+    const { items: payments, page } = res.json().data as {
+      items: Array<{
+        amount: number;
+        description: string | null;
+        planSlug: string | null;
+        receiptUrl: string | null;
+      }>;
+      page: { total: number };
+    };
     expect(payments).toHaveLength(2);
+    // Bob's payment is excluded from the count behind the window too, not just
+    // from the rows — otherwise Alice's pager would page into nothing.
+    expect(page.total).toBe(2);
     // Newest first.
     expect(payments[0]!.description).toBe('second month');
     expect(payments[1]!.description).toBe('first month');
@@ -216,15 +225,23 @@ describe('end-user billing portal surface', () => {
       headers: userHeaders(accessToken),
     });
     expect(limited.statusCode).toBe(200);
-    expect(limited.json().data).toHaveLength(1);
-    expect((limited.json().data as Array<{ amount: number }>)[0]!.amount).toBe(2);
+    const limitedPage = limited.json().data as {
+      items: Array<{ amount: number }>;
+      page: { total: number; hasMore: boolean };
+    };
+    expect(limitedPage.items).toHaveLength(1);
+    expect(limitedPage.items[0]!.amount).toBe(2);
+    // ?limit=1 truncates the window, and the response says so rather than
+    // leaving the caller to guess whether one row is the whole history.
+    expect(limitedPage.page.total).toBe(2);
+    expect(limitedPage.page.hasMore).toBe(true);
 
     const all = await app.inject({
       method: 'GET',
       url: '/api/v1/billing/payments',
       headers: userHeaders(accessToken),
     });
-    const rows = all.json().data as Array<{ receiptUrl: string | null }>;
+    const rows = (all.json().data as { items: Array<{ receiptUrl: string | null }> }).items;
     expect(rows).toHaveLength(2);
     // javascript: scheme never leaves the API.
     expect(rows[1]!.receiptUrl).toBeNull();
@@ -248,7 +265,7 @@ describe('end-user billing portal surface', () => {
       url: '/api/v1/billing/payments',
       headers: userHeaders(accessToken),
     });
-    const row = (res.json().data as Array<Record<string, unknown>>)[0]!;
+    const row = (res.json().data as { items: Array<Record<string, unknown>> }).items[0]!;
     expect(row.providerPaymentId).toBeUndefined();
     expect(row.metadata).toBeUndefined();
     expect(res.body).not.toContain('in_secret_correlation_id');
@@ -373,7 +390,16 @@ describe('end-user billing portal surface', () => {
     expect(sub.canceledAt).not.toBeNull();
   });
 
-  it('cancel falls back to a local immediate cancel when the sub has no provider-side record', async () => {
+  it('cancel SCHEDULES at period end when the sub has no provider-side record', async () => {
+    // This test used to assert the opposite — that a row with no
+    // `providerSubId` was cancelled immediately. That was the defect: being
+    // unable to call Stripe says something about who terminates the
+    // subscription, not about when the buyer's paid time should end. The
+    // caller here sends `{}`, i.e. the default, which means period-end; taking
+    // the rest of the period away from them was never what they asked for.
+    //
+    // Rekey Cloud sells with checkout disabled, so every subscription it has
+    // is exactly this shape and every cancellation hit this path.
     const planId = await createPlan('pro4');
     const { accessToken, id } = await signUpUser('localonly@example.com');
     await prisma.subscription.create({
@@ -395,7 +421,9 @@ describe('end-user billing portal surface', () => {
       payload: {},
     });
     expect(res.statusCode).toBe(200);
-    expect((res.json().data as { status: string }).status).toBe('CANCELED');
+    const data = res.json().data as { status: string; cancelAt: string | null };
+    expect(data.status).toBe('ACTIVE');
+    expect(data.cancelAt).toBe('2099-01-01T00:00:00.000Z');
   });
 
   it('cancel requires the billing:write scope', async () => {

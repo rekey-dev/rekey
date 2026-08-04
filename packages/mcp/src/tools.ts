@@ -19,8 +19,38 @@ export interface ToolDefinition<TArgs extends z.ZodRawShape> {
   execute: (client: AdminClient, args: z.infer<z.ZodObject<TArgs>>) => Promise<unknown>;
 }
 
+/**
+ * `limit` / `offset` — accepted by every list endpoint on the admin surface.
+ *
+ * Merged into each list tool's args so a model can page. Before 2.0.0-rc.3
+ * these endpoints returned a bare array with no `total`, so a tool result
+ * silently capped at the server default was indistinguishable from a complete
+ * one; a model reading "3 applications" had no way to know there were 90.
+ */
+const PagingArgs = {
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .optional()
+    .describe('Rows per page, 1-100. Default 50.'),
+  offset: z.number().int().min(0).optional().describe('Rows to skip (0-based). Default 0.'),
+};
+
+/** Build `?a=b&…`, dropping undefined values. Returns '' when empty. */
+function query(params: Record<string, string | number | boolean | undefined>): string {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined) p.set(k, String(v));
+  }
+  const s = p.toString();
+  return s ? `?${s}` : '';
+}
+
 const ListApplicationsArgs = z.object({
   tenantId: z.string().optional().describe('Optional Tenant id to filter by.'),
+  ...PagingArgs,
 });
 
 const GetApplicationArgs = z.object({
@@ -30,11 +60,13 @@ const GetApplicationArgs = z.object({
 const ListPlansArgs = z.object({
   applicationId: z.string().describe('Application id to list plans for.'),
   includeInactive: z.boolean().optional().describe('If true, include deactivated plans.'),
+  ...PagingArgs,
 });
 
 const ListCouponsArgs = z.object({
   applicationId: z.string().describe('Application id to list coupons for.'),
   includeInactive: z.boolean().optional(),
+  ...PagingArgs,
 });
 
 const ListApiKeysArgs = z.object({
@@ -54,7 +86,7 @@ const MintApiKeyArgs = z.object({
     .describe('Application-key scopes (e.g. ["auth:read"]). Omit for the default ["*"].'),
 });
 
-const ListTenantsArgs = z.object({});
+const ListTenantsArgs = z.object({ ...PagingArgs });
 
 const ListPaymentsArgs = z.object({
   applicationId: z.string().optional().describe('Filter to one Application id.'),
@@ -77,21 +109,18 @@ export const tools: Array<ToolDefinition<z.ZodRawShape>> = [
   {
     name: 'list_tenants',
     description:
-      'List all Tenants. Tenants are the outer multi-tenancy unit (one per Rekey customer). Use this when the user asks "what tenants exist" or to find a tenantId to drill into.',
+      'List Tenants. Tenants are the outer multi-tenancy unit (one per Rekey customer). Use this when the user asks "what tenants exist" or to find a tenantId to drill into. ' +
+      'Returns `{items, page}` — check `page.hasMore` / `page.total` before concluding you have seen them all, and pass `offset` for the next window.',
     inputSchema: ListTenantsArgs,
-    execute: (c) => c.request('GET', '/api/v1/admin/tenants'),
+    execute: (c, args) => c.request('GET', `/api/v1/admin/tenants${query(args)}`),
   },
   {
     name: 'list_applications',
     description:
-      'List Applications, optionally filtered by Tenant. An Application is one project under a Tenant; every domain row in Rekey carries an applicationId. Use this to find the applicationId for subsequent calls.',
+      'List Applications, optionally filtered by Tenant. An Application is one project under a Tenant; every domain row in Rekey carries an applicationId. Use this to find the applicationId for subsequent calls. ' +
+      'Returns `{items, page}` — check `page.hasMore` / `page.total` before concluding you have seen them all.',
     inputSchema: ListApplicationsArgs,
-    execute: (c, args) => {
-      const path = args.tenantId
-        ? `/api/v1/admin/applications?tenantId=${encodeURIComponent(args.tenantId)}`
-        : '/api/v1/admin/applications';
-      return c.request('GET', path);
-    },
+    execute: (c, args) => c.request('GET', `/api/v1/admin/applications${query(args)}`),
   },
   {
     name: 'get_application',
@@ -104,27 +133,33 @@ export const tools: Array<ToolDefinition<z.ZodRawShape>> = [
   {
     name: 'list_plans',
     description:
-      'List Plans for an Application. Amount is always in the smallest currency unit (cents/paise/sen) — never floats.',
+      'List Plans for an Application. Amount is always in the smallest currency unit (cents/paise/sen) — never floats. ' +
+      'Returns `{items, page}` — check `page.hasMore` / `page.total`.',
     inputSchema: ListPlansArgs,
     execute: (c, args) =>
       c.request(
         'GET',
-        `/api/v1/admin/applications/${encodeURIComponent(args.applicationId)}/plans${
-          args.includeInactive ? '?includeInactive=true' : ''
-        }`,
+        `/api/v1/admin/applications/${encodeURIComponent(args.applicationId)}/plans${query({
+          ...(args.includeInactive ? { includeInactive: true } : {}),
+          limit: args.limit,
+          offset: args.offset,
+        })}`,
       ),
   },
   {
     name: 'list_coupons',
     description:
-      'List discount coupons for an Application. PERCENT discounts use basis points (1500 = 15%); AMOUNT discounts use the smallest currency unit.',
+      'List discount coupons for an Application. PERCENT discounts use basis points (1500 = 15%); AMOUNT discounts use the smallest currency unit. ' +
+      'Returns `{items, page}` — check `page.hasMore` / `page.total`.',
     inputSchema: ListCouponsArgs,
     execute: (c, args) =>
       c.request(
         'GET',
-        `/api/v1/admin/applications/${encodeURIComponent(args.applicationId)}/coupons${
-          args.includeInactive ? '?includeInactive=true' : ''
-        }`,
+        `/api/v1/admin/applications/${encodeURIComponent(args.applicationId)}/coupons${query({
+          ...(args.includeInactive ? { includeInactive: true } : {}),
+          limit: args.limit,
+          offset: args.offset,
+        })}`,
       ),
   },
   {
@@ -154,14 +189,15 @@ export const tools: Array<ToolDefinition<z.ZodRawShape>> = [
       if (args.order !== undefined) p.set('order', args.order);
       if (args.limit !== undefined) p.set('limit', String(args.limit));
       const qs = p.toString();
-      // /admin/metrics/payments returns a paginated Page<T> envelope
-      // ({ items, total, limit, offset }). This tool's contract is a bare
-      // payments array (bounded by `limit`), so unwrap to `.items`.
-      const page = await c.request<{ items: unknown[] }>(
+      // /admin/metrics/payments returns the `{items, page}` envelope. This
+      // tool's contract is a bare payments array bounded by `limit`, so unwrap
+      // to `.items` — the pagination metadata lives under `page` since
+      // 2.0.0-rc.3 (it used to be flattened next to `items`).
+      const result = await c.request<{ items: unknown[] }>(
         'GET',
         `/api/v1/admin/metrics/payments${qs ? `?${qs}` : ''}`,
       );
-      return page.items;
+      return result.items;
     },
   },
   {

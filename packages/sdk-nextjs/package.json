@@ -1,31 +1,42 @@
 {
   "name": "@rekey.dev/nextjs",
-  "version": "2.0.0-rc.3",
+  "version": "2.0.0-rc.4",
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
   },
-  "description": "Rekey helpers for Next.js — middleware, server-side auth(), cookie session.",
+  "description": "Rekey helpers for Next.js \u2014 middleware, server-side auth(), cookie session.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./middleware": {
       "types": "./dist/middleware.d.ts",
-      "import": "./dist/middleware.js"
+      "import": "./dist/middleware.js",
+      "default": "./dist/middleware.js"
     },
     "./server": {
       "types": "./dist/server.d.ts",
-      "import": "./dist/server.js"
+      "import": "./dist/server.js",
+      "default": "./dist/server.js"
     },
     "./client": {
       "types": "./dist/client.d.ts",
-      "import": "./dist/client.js"
-    }
+      "import": "./dist/client.js",
+      "default": "./dist/client.js"
+    },
+    "./cookies": {
+      "types": "./dist/cookies.d.ts",
+      "import": "./dist/cookies.js",
+      "default": "./dist/cookies.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -36,7 +47,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo \"(eslint not yet wired)\"",
-    "test": "echo \"(nextjs SDK tests deferred to panel/demo e2e)\""
+    "test": "tsc -p tsconfig.json && vitest run"
   },
   "keywords": [
     "next.js",
@@ -49,9 +60,9 @@
     "react": "^18.0.0 || ^19.0.0"
   },
   "dependencies": {
-    "@rekey.dev/node": "workspace:*",
-    "@rekey.dev/react": "workspace:*",
-    "@rekey.dev/shared-types": "workspace:*"
+    "@rekey.dev/node": "workspace:^",
+    "@rekey.dev/react": "workspace:^",
+    "@rekey.dev/shared-types": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",

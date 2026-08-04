@@ -20,13 +20,25 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { applicationsService } from '../applications/applications.service.js';
-import { apiKeysService } from '../api-keys/api-keys.service.js';
+import { apiKeysService, MAX_KEYS_PER_APP } from '../api-keys/api-keys.service.js';
 import { RekeyError } from '../../lib/error.js';
 import {
   resolveOperatorToken,
   requireOperatorScope,
 } from '../../middleware/operator-token-auth.js';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
+import { ok, okPage, errs, ref } from '../../lib/openapi.js';
+import { stripApplicationSecrets } from '../../lib/app-access.js';
+import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
+
+/**
+ * The 401/403 pair `resolveOperatorToken` (middleware/operator-token-auth.ts) produces,
+ * shared by every route in this plugin.
+ */
+const OPERATOR_PAT_ERRORS = {
+  401: 'OPERATOR_TOKEN_INVALID — the PAT is missing, unknown, revoked, or expired.',
+  403: "TENANT_MEMBERSHIP_REVOKED — the PAT's operator no longer has a membership in its bound workspace.",
+} as const;
 
 /**
  * Make sure the named application belongs to the workspace the PAT is bound to.
@@ -70,10 +82,33 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
         tags: ['Tenant · Operator PAT'],
         security: [{ operatorPat: [] }],
         summary: 'List Applications in the PAT\'s workspace (requires `read` scope)',
+        querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(ref('Application'), "A page of Applications in the PAT's workspace."),
+          ...errs({
+            400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
+            401: OPERATOR_PAT_ERRORS[401],
+            403:
+              "TENANT_MEMBERSHIP_REVOKED — the PAT's operator no longer has a membership in " +
+              'its bound workspace; or OPERATOR_SCOPE_INSUFFICIENT — the PAT does not carry ' +
+              'the `read` scope.',
+          }),
+        },
       },
     },
     async (req) => {
-      return { success: true, data: await applicationsService.list(req.tenantId!) };
+      // This query used to be unbounded: `applicationsService.list(tenantId)`
+      // with no take, so a workspace with thousands of Applications returned
+      // all of them in one body. Bounded now, and the caller is told the total.
+      const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
+      const [items, total] = await Promise.all([
+        applicationsService.list(req.tenantId!, { take, skip }),
+        applicationsService.count(req.tenantId!),
+      ]);
+      return {
+        success: true,
+        data: paged(items.map(stripApplicationSecrets), total, take, skip),
+      };
     },
   );
 
@@ -88,12 +123,37 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
         security: [{ operatorPat: [] }],
         summary: 'List active API keys for an application (requires `read` scope)',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        response: {
+          // The two sibling routes over the same resource
+          // (`/tenant/applications/{id}/api-keys` and
+          // `/admin/applications/{id}/api-keys`) are bare arrays, allow-listed
+          // in test/openapi-contract.test.ts because active keys are hard-capped
+          // at MAX_KEYS_PER_APP (25) on the write path. This route is NOT on that
+          // list and the published document declares `{items, page}` for it, so
+          // it returns the envelope. `page.hasMore` is always false in practice —
+          // the cap sits below any page size — but the shape matches what the
+          // contract says, which is what a generated client compiles against.
+          200: okPage(ref('ApiKey'), 'A page of active (non-revoked) API keys for the application.'),
+          ...errs({
+            401: OPERATOR_PAT_ERRORS[401],
+            403:
+              "TENANT_MEMBERSHIP_REVOKED — the PAT's operator no longer has a membership in " +
+              'its bound workspace; or OPERATOR_SCOPE_INSUFFICIENT — the PAT does not carry ' +
+              'the `read` scope.',
+            404: "APPLICATION_NOT_FOUND — no application with that id in the PAT's workspace.",
+          }),
+        },
       },
     },
     async (req) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppInTenant(id, req.tenantId!);
-      return { success: true, data: await apiKeysService.listForApplication(id) };
+      const items = await apiKeysService.listForApplication(id);
+      // No take/skip: the write path caps active keys at MAX_KEYS_PER_APP, so
+      // the full set IS the page and `total` is exact rather than estimated.
+      // `limit` is reported as the cap, not `items.length`, so an empty
+      // Application does not claim it served a window of size 0.
+      return { success: true, data: paged(items, items.length, MAX_KEYS_PER_APP, 0) };
     },
   );
 
@@ -118,6 +178,31 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
             scopes: { type: 'array', items: { type: 'string' } },
             expiresAt: { type: 'string', format: 'date-time' },
           },
+        },
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: {
+                apiKey: ref('ApiKey'),
+                rawKey: { type: 'string', description: 'The raw secret key. Shown once.' },
+                warning: { type: 'string' },
+              },
+              required: ['apiKey', 'rawKey', 'warning'],
+            },
+            'The minted Application API key. `rawKey` is shown exactly once.',
+          ),
+          ...errs({
+            400:
+              'API_KEY_EXPIRY_IN_PAST — `expiresAt` is not in the future; or ' +
+              'API_KEY_LIMIT_REACHED — the application already has the maximum active keys.',
+            401: OPERATOR_PAT_ERRORS[401],
+            403:
+              "TENANT_MEMBERSHIP_REVOKED — the PAT's operator no longer has a membership in " +
+              'its bound workspace; or OPERATOR_SCOPE_INSUFFICIENT — the PAT does not carry ' +
+              'the `keys:mint` scope.',
+            404: "APPLICATION_NOT_FOUND — no application with that id in the PAT's workspace.",
+          }),
         },
       },
     },

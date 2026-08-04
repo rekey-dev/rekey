@@ -28,19 +28,29 @@ function roleAllows(role: TenantRole, minRole: TenantRole): boolean {
 }
 
 /**
- * Can this caller use this tool? Read tools are always available; write tools
- * require the token to carry write scope AND the operator's role to clear the
- * tool's `minRole` (default ADMIN). Single source of truth for both
- * `tools/list` (filter) and `tools/call` (gate) so the surfaced set and the
- * callable set can never drift apart.
+ * Can this caller use this tool? Single source of truth for both `tools/list`
+ * (filter) and `tools/call` (gate), so the surfaced set and the callable set
+ * can never drift apart.
+ *
+ *   - admin tools: admin scope AND role ≥ `minRole` (default ADMIN)
+ *   - write tools: write scope AND role ≥ `minRole` (default ADMIN)
+ *   - read tools:  role ≥ `minRole` when the tool declares one, else open
+ *
+ * That last line is the change. Read tools "are always available" was the rule,
+ * and it silently overrode `minRole` on the two read tools whose REST twins are
+ * OWNER/ADMIN — so a MEMBER could pull the workspace security log (every IP and
+ * user agent in it) and the pending-invitation list out of MCP while the same
+ * account got a 403 over HTTP. Per-Application grants are enforced inside the
+ * handlers, since they depend on a tool's arguments; see
+ * `accessibleApplicationIds` in operator-tools.ts.
  */
 function toolAllowed(ctx: OperatorToolContext, tool: OperatorTool): boolean {
   // Admin tools (destructive/financial/secret) need admin scope + role.
   if (tool.admin) return ctx.canAdmin && roleAllows(ctx.role, tool.minRole ?? 'ADMIN');
   // Write tools need write scope + role.
   if (tool.write) return ctx.canWrite && roleAllows(ctx.role, tool.minRole ?? 'ADMIN');
-  // Read tools are always available.
-  return true;
+  // Read tools: no scope requirement, but an explicit `minRole` is honoured.
+  return tool.minRole === undefined || roleAllows(ctx.role, tool.minRole);
 }
 
 export interface JsonRpcMessage {

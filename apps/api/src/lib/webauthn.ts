@@ -20,6 +20,27 @@
  * counter advancement, attestation parsing). We persist `counter` after
  * every successful authentication so cloned-authenticator detection
  * works across sessions.
+ *
+ * ## User verification is REQUIRED, on both ceremonies
+ *
+ * All four call sites used to ask for user verification as "preferred", and to
+ * verify with the requirement switched off. That reads as a UX kindness and is
+ * not one. Preferred is a *request*: an authenticator that declines it still
+ * returns a valid assertion, just with the UV bit clear, and a verifier that
+ * does not require UV accepts it. Since
+ * `passkeyAuthenticateComplete` calls `issuePair` directly — a passkey is
+ * treated as a complete sign-in and skips the MFA challenge — that assertion
+ * is a full session. So an account protected by password + TOTP could be
+ * entered by touching a key, with no PIN, no biometric, and nothing the user
+ * knows. The strong-factor claim the bypass rests on was never checked.
+ *
+ * `required` makes the claim true: the authenticator must verify the human
+ * (PIN, biometric) and set the UV bit, and we refuse the assertion if it
+ * didn't. That is a real behaviour change — a security key with no PIN
+ * configured, or a browser too old to prompt, is now refused rather than
+ * silently downgraded. It is the correct trade for a credential that replaces
+ * two factors, and the fix belongs at both ends: `required` in the options
+ * only asks, `requireUserVerification: true` in the verifiers is what enforces.
  */
 
 import type { Application, WebAuthnCredential } from '@prisma/client';
@@ -92,7 +113,7 @@ export async function buildRegistrationOptions(args: {
     })),
     authenticatorSelection: {
       residentKey: 'preferred',
-      userVerification: 'preferred',
+      userVerification: 'required',
     },
   };
   const options = await generateRegistrationOptions(opts);
@@ -110,7 +131,7 @@ export async function verifyRegistration(args: {
     expectedChallenge: args.expectedChallenge,
     expectedOrigin: rp.rpOrigins,
     expectedRPID: rp.rpId,
-    requireUserVerification: false,
+    requireUserVerification: true,
   });
 }
 
@@ -128,7 +149,7 @@ export async function buildAuthenticationOptions(args: {
   const rp = rpConfigForApplication(args.application);
   const opts: GenerateAuthenticationOptionsOpts = {
     rpID: rp.rpId,
-    userVerification: 'preferred',
+    userVerification: 'required',
     ...(args.allowCredentials !== null && {
       allowCredentials: args.allowCredentials.map((c) => ({
         id: c.credentialId,
@@ -158,6 +179,6 @@ export async function verifyAuthentication(args: {
       counter: Number(args.credential.counter),
       transports: args.credential.transports as AuthenticatorTransportFuture[],
     },
-    requireUserVerification: false,
+    requireUserVerification: true,
   });
 }

@@ -3,16 +3,18 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Hosted multi-app customer portal — end-users of any opted-in Application sign in (by /<slug>) and manage their subscription. Uses the publishable key + the user's own token; no per-app secret.",
+  "description": "Hosted multi-app customer portal \u2014 end-users of any opted-in Application sign in (by /<slug>) and manage their subscription. Uses the publishable key + the user's own token; no per-app secret.",
   "scripts": {
     "dev": "next dev -p 3050",
     "build": "next build",
     "start": "next start -p 3050",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "echo \"(eslint not yet wired)\""
+    "lint": "echo \"(eslint not yet wired)\"",
+    "test": "vitest run"
   },
   "dependencies": {
     "@rekey.dev/react": "workspace:*",
+    "@rekey.dev/shared-types": "workspace:*",
     "next": "^15.5.18",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
@@ -24,6 +26,7 @@
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
   }
 }

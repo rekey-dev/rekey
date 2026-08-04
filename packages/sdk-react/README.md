@@ -92,7 +92,7 @@ import { RekeyBrowserClient } from '@rekey.dev/react';
 
 const client = new RekeyBrowserClient({ apiUrl, publishableKey: 'rp_pub_…' });
 const out = await client.signIn({ email, password });   // → SignInOutcome (branch on mfaRequired)
-const plans = await client.getPlans();                   // public catalogue
+const { items: plans, page } = await client.getPlans();  // public catalogue → {items, page}
 const lic = await client.verifyLicense({ key, machineFingerprint });
 ```
 
@@ -239,7 +239,7 @@ Pick / switch / create the active team.
 
 ```tsx
 <OrganizationSwitcher
-  organizations={orgs}              // organizations.listMine() server-side
+  organizations={orgs}              // organizations.listMine().items, server-side
   activeOrganizationId={activeOrgId}
   switchAction={switchOrgAction}    // organizations.switch() + cookie rotation
   createAction={createOrgAction}
@@ -260,7 +260,7 @@ Members + pending invitations, with role-change / remove / revoke affordances fo
 ```tsx
 <OrganizationProfile
   organization={{ id: org.id, name: org.name }}
-  members={members}                 // organizations.listMembers() server-side
+  members={members}                 // organizations.listMembers().items, server-side
   invitations={pendingInvites}      // optional
   viewerRole={myRole}               // gates the manage affordances
   inviteAction={inviteMemberAction}
@@ -272,6 +272,8 @@ Members + pending invitations, with role-change / remove / revoke affordances fo
 
 > Form field contract: invite reads `email` + `role`; set-role/remove read `endUserId`; revoke reads `invitationId`. Add the org id with `hiddenFields`.
 
+> **`members` needs both ids.** `OrganizationMemberDto` carries `id` (the membership row) *and* `endUserId` (the user); the mutation endpoints address the latter. Pass `organizations.listMembers().items` straight through and you get both. If you build the array by hand, include `endUserId` — before 2.0.0-rc.3 the component posted `id` there, so role changes and removals silently did nothing.
+
 ---
 
 ## Billing widgets
@@ -280,9 +282,11 @@ Members + pending invitations, with role-change / remove / revoke affordances fo
 
 Renders your plans with upgrade buttons. Plans come from `billing.getPlans()` (public — no user token needed) fetched **server-side** and passed in; each upgrade posts to your checkout action.
 
+> **`getPlans()` returns `{ items, page }`, not an array** (2.0.0-rc.3 — every list method does). Pass `.items` to the component. `page.hasMore` is worth reading on a pricing page: it is how you learn the catalogue is longer than the window you were served.
+
 ```tsx
 <PricingTable
-  plans={plans}                       // billing.getPlans() server-side
+  plans={plans}                       // billing.getPlans().items, server-side
   currentPlanSlug={isPro ? 'pro_monthly' : 'free'}
   checkoutAction={checkoutAction}     // billing.createCheckout() + redirect
   hiddenFields={activeOrgId ? { orgId: activeOrgId } : undefined}
@@ -311,7 +315,7 @@ Like `<PricingTable plans>`, the provider list is a **prop**: the picker renders
 const { providers } = await rekey.billing.getProviders(country); // country optional (ISO-3166 alpha-2)
 
 <PricingTable
-  plans={plans}                       // billing.getPlans() server-side
+  plans={plans}                       // billing.getPlans().items, server-side
   providers={providers}               // billing.getProviders() server-side
   checkoutAction={checkoutAction}
 />
@@ -424,7 +428,7 @@ set — the reference is checked against the source instead.)
 
 ## Headless escape hatch
 
-Need full control? Skip the components and use `useUser()` + the control primitives, or talk to the API directly with `RekeyBrowserClient` (user-token-scoped reads only). The components are built on exactly these.
+Need full control? Skip the components and use `useUser()` + the control primitives, or talk to the API directly with `RekeyBrowserClient` — the same publishable-key client the components use, so it covers the bootstrap writes (`signUp`, `signIn`, `mfaVerify`, `createCheckout`, `cancelSubscription`) as well as reads. It is publishable-key-scoped, not read-only: anything acting on a specific user still needs that user's access token.
 
 ---
 

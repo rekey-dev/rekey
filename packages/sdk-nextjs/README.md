@@ -2,7 +2,7 @@
 
 > **ReliPay is now Rekey.** This package was previously published as the equivalent `@relipay/*` package, which is deprecated. Env vars renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read — set `REKEY_*`). relipay.dev (the old domain) will redirect to rekey.dev after the domain migration.
 
-[Rekey](https://rekey.dev) helpers for the **Next.js App Router** (14/15): route-gating middleware, server-side `auth()` / `signIn()` / `signUp()` / `signOut()`, and an httpOnly cookie session — built on top of [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node).
+[Rekey](https://rekey.dev) helpers for the **Next.js App Router** (14, 15 and 16): route-gating middleware, server-side `auth()` / `signIn()` / `signUp()` / `signOut()`, and an httpOnly cookie session — built on top of [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node).
 
 > **For AI coding agents:** start at [AGENTS.md](./AGENTS.md).
 
@@ -30,15 +30,21 @@ NEXT_PUBLIC_REKEY_PUBLIC_KEY=rp_pub_…   # Application publishable key
 > Component or middleware will fail to bundle (that's the safety net working).
 > Browser code uses the **publishable** key via `@rekey.dev/nextjs/client`.
 
-### Three entrypoints
+### Entrypoints
 
 | Import | Runtime | Credential | Use case |
 | --- | --- | --- | --- |
 | `@rekey.dev/nextjs/middleware` | **Edge** | none (cookie presence) | Gate routes in `middleware.ts` (cheap, no network). |
 | `@rekey.dev/nextjs/server` | **Node** | secret key | `auth()`, `signIn()`, `signUp()`, `createSession()` + your `@rekey.dev/node` API calls. |
 | `@rekey.dev/nextjs/client` | **Browser** | publishable key | `rekeyBrowser()` — sign-in/up, magic-link, passkey, license verify, plans from a Client Component, no backend round-trip. |
+| `@rekey.dev/nextjs/cookies` | **anywhere** | none | `ACCESS_COOKIE` / `REFRESH_COOKIE` / `*_OPTS` / `cookieSecureFrom()`. Zero dependencies — import cookie names from **here**, not from the root barrel. |
 
 The split keeps the Edge bundle small and the secret key out of the browser — the `/client` module only imports the publishable-key browser client.
+
+> **Import the cookie constants from `/cookies`, not from the root.** The root
+> barrel re-exports `./server`, which pulls `next/server` and reads
+> `REKEY_SECRET`; importing it from a Client Component is a build error. The
+> `/cookies` entry exists precisely so a client component never has to.
 
 ### Which login path?
 
@@ -172,7 +178,7 @@ export async function GET() {
 }
 ```
 
-After this, `middleware.ts` and `auth()` work identically to the server-action path — the only difference is *where the login call ran* (browser vs server). Plans + license verification can also run straight from the browser: `rekeyBrowser().getPlans()`, `rekeyBrowser().verifyLicense({ key, machineFingerprint })`.
+After this, `middleware.ts` and `auth()` work identically to the server-action path — the only difference is *where the login call ran* (browser vs server). Plans + license verification can also run straight from the browser: `rekeyBrowser().getPlans()` (which resolves to `{items, page}`, like every list method), `rekeyBrowser().verifyLicense({ key, machineFingerprint })`.
 
 ## Core API
 
@@ -203,7 +209,14 @@ After this, `middleware.ts` and `auth()` work identically to the server-action p
 | Export | Description |
 | --- | --- |
 | `mcpConnectionInfo({ apiUrl, appSlug })` | Build the MCP URL + `claude mcp add` command to render a "Connect to Claude" button (pure string-building). |
-| `ACCESS_COOKIE` / `REFRESH_COOKIE` / `ACCESS_COOKIE_OPTS` / `REFRESH_COOKIE_OPTS` | Cookie names + options, for actions that need to write the token pair directly (e.g. after `organizations.switch`). |
+| `ACCESS_COOKIE` / `REFRESH_COOKIE` / `ACCESS_COOKIE_OPTS` / `REFRESH_COOKIE_OPTS` | Re-exported here for convenience, but **import them from `@rekey.dev/nextjs/cookies`** — that entry is dependency-free and safe from a Client Component, while this barrel is a server entry. |
+
+### `@rekey.dev/nextjs/cookies` (dependency-free)
+| Export | Description |
+| --- | --- |
+| `ACCESS_COOKIE` / `REFRESH_COOKIE` | `"rekey_access"` / `"rekey_refresh"`. |
+| `ACCESS_COOKIE_OPTS` / `REFRESH_COOKIE_OPTS` | Cookie options, for actions that write the token pair directly (e.g. after `organizations.switch`). |
+| `cookieSecureFrom(headers)` | The per-request `Secure` decision — see [Cookie model](#cookie-model). |
 
 ## Cookie model
 
@@ -212,7 +225,25 @@ Two httpOnly cookies, set by `signIn` / `signUp`:
 - `rekey_access` — 15 min (matches access-token lifetime).
 - `rekey_refresh` — 30 days.
 
-Both are `sameSite=lax` and `secure` in production only (so local `http://localhost` dev still works).
+Both are `sameSite=lax`, `httpOnly`, and carry `Secure` **unless the request
+arrived as plain HTTP on a loopback host** — so local `http://localhost` dev
+still works, and a TLS deployment gets `Secure` whatever `NODE_ENV` happens to
+be. The decision is made per request, in this order:
+
+1. `REKEY_COOKIE_SECURE=true` / `=false`, if set — wins outright.
+2. `X-Forwarded-Proto` (first hop) — `https` ⇒ `Secure`.
+3. Otherwise the `Host`: `localhost` / `127.0.0.1` / `[::1]` / `*.localhost` ⇒
+   not `Secure`; anything else ⇒ `Secure`.
+
+Rule 3 is fail-secure. If you serve a **public hostname over plain HTTP**, the
+browser will refuse the cookie and sign-in will appear to do nothing — set
+`REKEY_COOKIE_SECURE=false` if that is genuinely what you want. This replaced a
+`process.env.NODE_ENV === 'production'` check, which answered a request-time
+question at build time and silently emitted cookies without `Secure` on any
+deployment where Next did not inline `NODE_ENV` as exactly `"production"`.
+
+`cookieSecureFrom(headers)` is exported from `@rekey.dev/nextjs/cookies` if you
+need the same decision for a cookie of your own.
 
 ## Gotchas
 

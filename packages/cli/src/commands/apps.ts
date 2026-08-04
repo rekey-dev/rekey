@@ -7,8 +7,9 @@
  */
 
 import type { Command } from 'commander';
+import type { Paged } from '@rekey.dev/node';
 import { ok, fail, readGlobalOpts } from '../lib/output.js';
-import { adminRequest } from '../lib/api.js';
+import { adminRequest, listQuery, readListOpts, withListOptions } from '../lib/api.js';
 
 interface ApplicationDto {
   id: string;
@@ -22,23 +23,37 @@ interface ApplicationDto {
 export function registerAppsCommand(program: Command): void {
   const apps = program.command('apps').description('Manage Applications');
 
-  apps
-    .command('list')
-    .description('List Applications (optionally filter by --tenant)')
-    .option('--tenant <id>', 'Restrict to one Tenant id')
-    .action(async function (this: Command, opts: { tenant?: string }) {
+  withListOptions(
+    apps
+      .command('list')
+      .description('List Applications (optionally filter by --tenant)')
+      .option('--tenant <id>', 'Restrict to one Tenant id'),
+  )
+    .action(async function (this: Command, opts: { tenant?: string; limit?: string; offset?: string }) {
       const ctx = readGlobalOpts(this);
-      const path = opts.tenant
-        ? `/api/v1/admin/applications?tenantId=${encodeURIComponent(opts.tenant)}`
-        : '/api/v1/admin/applications';
-      const data = await adminRequest<ApplicationDto[]>({ ctx, method: 'GET', path });
-      ok(ctx, { applications: data }, (d) => {
+      const qs = listQuery({
+        ...(opts.tenant ? { tenantId: opts.tenant } : {}),
+        ...readListOpts(opts),
+      });
+      const path = `/api/v1/admin/applications${qs}`;
+      // `{items, page}` since 2.0.0-rc.3. The page is reported rather than
+      // hidden: a CLI that prints 50 of 90 Applications and says nothing is
+      // the same defect as an API that returns 25 of 36 and says nothing.
+      const data = await adminRequest<Paged<ApplicationDto>>({ ctx, method: 'GET', path });
+      ok(ctx, { applications: data.items, page: data.page }, (d) => {
         if (d.applications.length === 0) {
           process.stdout.write('(no applications)\n');
           return;
         }
         for (const a of d.applications) {
           process.stdout.write(`${a.id}  ${a.slug.padEnd(20)}  ${a.name}\n`);
+        }
+        if (d.page.hasMore) {
+          process.stdout.write(
+            `\nShowing ${d.applications.length} of ${d.page.total}. Pass --offset ${
+              d.page.offset + d.page.limit
+            } for the next page.\n`,
+          );
         }
       });
     });

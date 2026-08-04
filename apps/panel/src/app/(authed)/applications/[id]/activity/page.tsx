@@ -10,6 +10,7 @@ import { EmptyState } from '@/components/EmptyState';
 import { SubmitButton } from '@/components/SubmitButton';
 import { ActorCell } from '@/components/ActorCell';
 import { Pager, readOffset, readPageSize } from '@/components/Pager';
+import type { Page } from '@/lib/paginate';
 import { humanizeEventType, resolveActorEmails } from '@/lib/security-events';
 
 /**
@@ -76,11 +77,11 @@ export default async function ActivityPage({
   let filterActorId: string | null = null;
   let emailNotFound = false;
   if (email !== '') {
-    const found = await api<EndUserRow[] | { endUsers: EndUserRow[] }>({
+    const found = await api<Page<EndUserRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users?search=${encodeURIComponent(email)}&limit=10`,
     }).catch(() => null);
-    const rows = found === null ? [] : Array.isArray(found) ? found : (found.endUsers ?? []);
+    const rows = found?.items ?? [];
     const exact = rows.find((u) => u.email.toLowerCase() === email.toLowerCase()) ?? rows[0];
     if (exact === undefined) emailNotFound = true;
     else filterActorId = exact.id;
@@ -89,18 +90,31 @@ export default async function ActivityPage({
   const qs = new URLSearchParams({
     applicationId: id,
     actorType: 'end_user',
-    // Filtering by person has to over-fetch and narrow in memory (see above).
+    // Filtering by person has to pull a wide window and narrow it in memory
+    // (see above) — this route declares its own `limit` ceiling of 200, not
+    // parsePagination's 100. Unfiltered, we ask for exactly the rows we render.
     limit: String(filterActorId !== null ? SCAN_LIMIT : PAGE_SIZE),
   });
   if (offset && filterActorId === null) qs.set('offset', String(offset));
 
-  const { events: fetched } = await api<{ events: SecurityEventRow[] }>({
+  const { items: fetched, page } = await api<Page<SecurityEventRow>>({
     method: 'GET',
     path: `/api/v1/tenant/security-events?${qs.toString()}`,
   });
 
   const matched = filterActorId === null ? fetched : fetched.filter((e) => e.actorId === filterActorId);
-  const events = filterActorId === null ? matched : matched.slice(offset, offset + PAGE_SIZE);
+  // Two ways to know there is more, one per branch. Unfiltered: the API says
+  // so. Filtered: the API's `hasMore` counts unfiltered rows, so it can't
+  // answer for this narrowed set — but we hold every match in memory, so a row
+  // past this page's window IS the proof.
+  const shown =
+    filterActorId === null
+      ? { rows: matched, hasMore: page.hasMore }
+      : {
+          rows: matched.slice(offset, offset + PAGE_SIZE),
+          hasMore: matched.length > offset + PAGE_SIZE,
+        };
+  const events = shown.rows;
   // The scan hit its ceiling, so "no more results" isn't provable.
   const scanTruncated = filterActorId !== null && fetched.length >= SCAN_LIMIT;
 
@@ -224,6 +238,9 @@ export default async function ActivityPage({
         offset={offset}
         pageSize={PAGE_SIZE}
         count={events.length}
+        // A truncated scan cannot prove there is nothing further, so keep
+        // offering Next in that one case.
+        hasMore={shown.hasMore || scanTruncated}
         extraParams={extraParams}
       />
     </div>

@@ -27,7 +27,11 @@ export async function signInAction(slug: string, formData: FormData): Promise<vo
     await setSession(slug, out.accessToken, out.refreshToken);
   } catch (err) {
     if (err instanceof RekeyError) {
-      redirect(`/${slug}/login?error=${encodeURIComponent(err.code)}`);
+      // Carry the email back so a mistyped password doesn't cost the customer
+      // both fields. Never the password.
+      redirect(
+        `/${slug}/login?error=${encodeURIComponent(err.code)}&email=${encodeURIComponent(email)}`,
+      );
     }
     throw err;
   }

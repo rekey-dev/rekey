@@ -304,12 +304,19 @@ describe('browser-reachable end-user self-service flows', () => {
     it('sessions, passkeys, send-verification and change-password work from a browser', async () => {
       const sessions = await asBrowser('GET', '/api/v1/auth/sessions');
       expect(sessions.statusCode).toBe(200);
-      expect(Array.isArray(sessions.json().data)).toBe(true);
+      // Reachable AND a real list: the `{items, page}` envelope, not an error
+      // body that happens to be 200.
+      const sessionPage = sessions.json().data as { items: unknown[]; page: { total: number } };
+      expect(Array.isArray(sessionPage.items)).toBe(true);
+      expect(sessionPage.page.total).toBeGreaterThan(0);
 
       // A browser could sign in WITH a passkey but never enroll one.
       const passkeys = await asBrowser('GET', '/api/v1/auth/passkeys');
       expect(passkeys.statusCode).toBe(200);
-      expect(passkeys.json().data).toEqual([]);
+      expect(passkeys.json().data).toEqual({
+        items: [],
+        page: { total: 0, limit: expect.any(Number), offset: 0, hasMore: false },
+      });
 
       // It could consume a verification token but never request one.
       const sendVerification = await asBrowser('POST', '/api/v1/auth/send-verification', {});
@@ -634,7 +641,9 @@ describe('operator PAT revocation privilege', () => {
       headers: { authorization: `Bearer ${session.accessToken}` },
     });
     expect(list.statusCode).toBe(200);
-    expect((list.json().data as Array<{ id: string }>).map((t) => t.id)).toContain(pat);
+    expect(
+      (list.json().data as { items: Array<{ id: string }> }).items.map((t) => t.id),
+    ).toContain(pat);
 
     // Previously 403 TENANT_ROLE_INSUFFICIENT — the operator could see a live
     // credential they had no way to kill. `revoke` is scoped to their own id,

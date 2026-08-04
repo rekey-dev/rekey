@@ -33,6 +33,8 @@ export const AnalyticsEvent = {
   PanelAccess: 'panel_access',
   // workspace
   WorkspaceCreated: 'workspace_created',
+  /** Emitted when the deployment refuses an additional workspace (WORKSPACE_CREATION=disabled). */
+  WorkspaceCreateRefused: 'workspace_create_refused',
   WorkspaceSwitched: 'workspace_switched',
   // product interactions
   ApplicationCreated: 'application_created',
@@ -67,9 +69,11 @@ export const FLAG_EVENTS: Record<
   login: { event: AnalyticsEvent.UserLoggedIn, params: { method: 'password' } },
   login_passkey: { event: AnalyticsEvent.UserLoggedIn, params: { method: 'passkey' } },
   login_oauth: { event: AnalyticsEvent.UserLoggedIn, params: { method: 'oauth' } },
+  login_cloud: { event: AnalyticsEvent.UserLoggedIn, params: { method: 'cloud' } },
   login_mfa: { event: AnalyticsEvent.UserLoggedIn, params: { method: 'mfa' } },
   logout: { event: AnalyticsEvent.UserLoggedOut },
   ws_created: { event: AnalyticsEvent.WorkspaceCreated },
+  ws_create_disabled: { event: AnalyticsEvent.WorkspaceCreateRefused },
   ws_switched: { event: AnalyticsEvent.WorkspaceSwitched },
   app_created: { event: AnalyticsEvent.ApplicationCreated },
   apikey_created: { event: AnalyticsEvent.ApiKeyCreated },

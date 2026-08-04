@@ -1,7 +1,8 @@
 /**
  * Panel API client — calls the operator surface (`/api/v1/tenant/*`).
  *
- * Two cookies, both httpOnly + SameSite=Strict + Secure-in-prod:
+ * Two cookies, both httpOnly + SameSite=Lax (see `setSessionCookies` for why
+ * not Strict) + Secure whenever the request wasn't plain-HTTP loopback:
  *   - rekey_access  — short-lived (15 min) operator JWT
  *   - rekey_refresh — long-lived (30 days) opaque token
  *
@@ -13,8 +14,10 @@
  * Server-only module — never import from a client component.
  */
 
+import { cache } from 'react';
 import { cookies, headers } from 'next/headers';
 import { forbidden, notFound, redirect } from 'next/navigation';
+import { cookieSecure } from './cookie-secure';
 
 export const ACCESS_COOKIE = 'rekey_access';
 export const REFRESH_COOKIE = 'rekey_refresh';
@@ -84,7 +87,7 @@ export async function setSessionCookies(args: {
   refreshToken: string;
 }): Promise<void> {
   const jar = await cookies();
-  const secure = process.env.NODE_ENV === 'production';
+  const secure = await cookieSecure();
   // `lax`, not `strict`: an operator can legitimately ARRIVE at the panel via a
   // top-level cross-site navigation — most importantly the MCP OAuth consent
   // flow, which enters /mcp-consent through a redirect that originated at the
@@ -293,6 +296,61 @@ export async function api<T>(args: RequestArgs): Promise<T> {
   return (json as { success: true; data: T }).data;
 }
 
+/**
+ * The one-argument GET that `React.cache` can actually memoise.
+ *
+ * `api()` takes an options OBJECT, and a fresh object literal on every call is
+ * a fresh cache key — so wrapping `api` itself in `cache()` would memoise
+ * nothing. Reduced to `(path, interruptOnAccessError)`, two identical GETs in
+ * one render hit the same entry.
+ */
+const cachedGet = cache(
+  async (path: string, interruptOnAccessError: boolean): Promise<unknown> =>
+    api<unknown>({ method: 'GET', path, interruptOnAccessError }),
+);
+
+/**
+ * A GET that is fetched ONCE per request, however many components ask for it.
+ *
+ * Server Components have no shared render context: a layout and each of its
+ * pages resolve independently, so every one of them that needs the same fact
+ * fetches it again. In the panel that was not an edge case, it was the shape of
+ * the whole app:
+ *
+ *   - `GET /tenant/applications/:id` is fetched by `applications/[id]/layout.tsx`
+ *     (for the header and the nav) and then AGAIN by the page rendering inside
+ *     it — 17 pages do this. Four of them (`plans`, `payments`, `dunning`,
+ *     `coupons`) also render `<BillingModeBanner>`, which fetches it a THIRD
+ *     time. Three identical round-trips to paint one screen.
+ *   - `GET /tenant/auth/me` is fetched by `(authed)/layout.tsx` on every authed
+ *     page, and again by `/applications`, `/team`, `/workspace` and
+ *     `/account/security`.
+ *
+ * `cache()` is per-request and per-render, so this is not a data cache and
+ * carries no staleness risk: two components in ONE render see one response;
+ * the next navigation fetches again. (`api()` itself still sends
+ * `cache: 'no-store'`.) Rejections memoise too, which is what we want — a 404
+ * that becomes `notFound()` replays as the same interrupt rather than issuing a
+ * second doomed request.
+ *
+ * Use this for any GET whose answer a page might ask for more than once. Use
+ * `api()` directly for mutations, and for GETs whose path is unique per call
+ * anyway (list pages with filters) where the memo is just overhead.
+ */
+export function apiGet<T>(path: string, opts?: { interruptOnAccessError?: boolean }): Promise<T> {
+  return cachedGet(path, opts?.interruptOnAccessError ?? true) as Promise<T>;
+}
+
+/** The application record behind `/applications/[id]/*`. Memoised per request. */
+export function getApplication(id: string): Promise<ApplicationRow> {
+  return apiGet<ApplicationRow>(`/api/v1/tenant/applications/${encodeURIComponent(id)}`);
+}
+
+/** The signed-in operator + their memberships. Memoised per request. */
+export function getMe(): Promise<MeDto> {
+  return apiGet<MeDto>('/api/v1/tenant/auth/me');
+}
+
 // ---------- DTOs ----------
 
 export interface MeDto {
@@ -435,6 +493,16 @@ export interface PlanRow {
   pricePerUnitCents: number | null;
   creditsAmount: number | null;
   active: boolean;
+  /**
+   * Whether this plan is registered with the payment provider.
+   *
+   * A plan is written un-purchasable FIRST and promoted only once the provider
+   * accepts it, so PENDING/FAILED means the row exists but nothing can be sold
+   * against it. FAILED carries the provider's own refusal in
+   * `registrationError` — usually a bad stored credential.
+   */
+  registrationStatus: 'NOT_REQUIRED' | 'PENDING' | 'REGISTERED' | 'FAILED';
+  registrationError: string | null;
   metadata: Record<string, unknown>;
   createdAt: string;
 }
@@ -662,11 +730,19 @@ export interface MemberRow {
   role: 'OWNER' | 'ADMIN' | 'MEMBER';
   joinedAt: string;
   /**
-   * Per-application grants. Only meaningful for MEMBER roles. Empty list =
-   * legacy mode (read-only on every application); ≥1 grant = the member only
-   * sees/uses the granted applications.
+   * Per-application grants. Only meaningful for MEMBER roles. ≥1 grant = the
+   * member only sees/uses the granted applications. An empty list means the
+   * member can access NO application — unless `legacyWorkspaceRead` is set.
    */
   grants: MemberGrantRow[];
+  /**
+   * True only for MEMBER memberships grandfathered by the 2.0.0-rc.3 backfill:
+   * they keep the pre-grants workspace-wide READ over every application.
+   * Setting any grant clears it permanently. Everything created since then is
+   * `false`, so a grant-less member sees nothing at all — including anyone who
+   * just accepted an invitation.
+   */
+  legacyWorkspaceRead?: boolean;
 }
 
 export interface InvitationRow {

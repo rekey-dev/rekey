@@ -52,7 +52,49 @@ interface PaypalEventPayload {
     // PAYMENT.CAPTURE.* (Orders v2) is the only place the originating order id
     // appears — the capture resource's own `id` is the CAPTURE, not the order.
     supplementary_data?: { related_ids?: { order_id?: string } };
+    // Subscription resources carry the schedule. `next_billing_time` is the
+    // one field that says when the period the buyer has paid for runs out.
+    billing_info?: { next_billing_time?: string };
   };
+}
+
+/**
+ * PayPal's own answer to "when does the period they have paid for end?".
+ *
+ * `billing_info.next_billing_time` is an ISO-8601 instant on the subscription
+ * resource — the moment PayPal will next take money. It is therefore exactly
+ * the anchor `cancelsAtPeriodEnd` needs, and better than the locally computed
+ * one: `advanceBillingPeriod` approximates the anniversary from our own plan
+ * interval and can drift against PayPal's real schedule.
+ *
+ * Reading it fixes a defect that made the whole period-end feature a no-op on
+ * PayPal's most common case. Nothing wrote `currentPeriodEnd` for a PayPal
+ * subscription until its SECOND charge — `subscription.period_advanced`
+ * refuses to advance while no prior succeeded payment exists, which is correct
+ * (the first sale pays for the period activation already granted) but left the
+ * column NULL for the whole of the first period. `cancelsAtPeriodEnd` requires
+ * it to be non-null, so every first-period cancellation was immediate: the
+ * buyer lost the time they had just paid for, which is the precise harm #336
+ * was opened to remove.
+ *
+ * Returns undefined for anything unparseable, which leaves the column
+ * untouched. That degrades to the old behaviour — an honest immediate
+ * cancellation, correctly described, rather than a period end invented from a
+ * bad string.
+ */
+function periodEndFromBillingInfo(
+  resource: PaypalEventPayload['resource'],
+  log: FastifyBaseLogger,
+  context: Record<string, unknown>,
+): Date | undefined {
+  const raw = resource?.billing_info?.next_billing_time;
+  if (typeof raw !== 'string') return undefined;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    log.warn({ ...context, nextBillingTime: raw }, 'paypal next_billing_time unparseable — leaving period end untouched');
+    return undefined;
+  }
+  return parsed;
 }
 
 /** Mirror of the shared applier cap — 100,000,000.00 in minor units. */
@@ -189,6 +231,9 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
         ctx.log.warn({ eventId: providerEventId }, 'subscription.activated: missing id or app mismatch');
         return [];
       }
+      const currentPeriodEnd = periodEndFromBillingInfo(resource, ctx.log, {
+        eventId: providerEventId,
+      });
       return [
         {
           type: 'checkout.completed',
@@ -197,6 +242,9 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           checkoutSessionId: subId,
           providerSubscriptionId: subId,
           firstPeriod: false,
+          // Present from the activation onwards, so a first-period
+          // cancellation can be scheduled instead of silently terminating.
+          ...(currentPeriodEnd && { currentPeriodEnd }),
           raw: payload,
         },
       ];

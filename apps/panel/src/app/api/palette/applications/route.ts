@@ -13,6 +13,7 @@
 
 import { NextResponse } from 'next/server';
 import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
+import type { Page } from '@/lib/paginate';
 
 export interface PaletteApplication {
   id: string;
@@ -23,7 +24,7 @@ export interface PaletteApplication {
 
 export async function GET(): Promise<Response> {
   try {
-    const apps = await api<ApplicationRow[]>({
+    const { items: apps } = await api<Page<ApplicationRow>>({
       method: 'GET',
       path: '/api/v1/tenant/applications/?limit=100&offset=0',
       redirectOn401: false,

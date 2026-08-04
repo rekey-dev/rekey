@@ -49,7 +49,7 @@ curl -X POST "$REKEY_URL/api/v1/tenant/applications/$APP_ID/api-keys" \
 
 Copy `data.rawKey` from the response **now** — it is shown exactly once. Put a date in the `name` so the key list tells you when each credential was last rotated.
 
-If your agent tooling mints keys, the [MCP server](mcp.md)'s `mint_api_key` tool does the same thing via a scoped operator PAT (`keys:mint`).
+If your agent tooling mints keys, the **stdio** MCP server (`@rekey.dev/mcp`, [packages/mcp](../packages/mcp/README.md)) has a `mint_api_key` tool that does the same thing, authenticating with `REKEY_OPERATOR_TOKEN` — a scoped operator PAT carrying `keys:mint`, not the admin key. Note this tool is **not** on the hosted operator MCP at `/api/v1/tenant/mcp` that [mcp.md](mcp.md) documents; key minting is deliberately absent there.
 
 ### 3. Deploy the new key
 

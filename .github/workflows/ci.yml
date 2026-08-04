@@ -4,17 +4,44 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual trigger for the provider-sandbox job below, which is the only job
+  # here that needs secrets and a third party to be up.
+  workflow_dispatch:
+    inputs:
+      run_provider_sandbox:
+        description: 'Run the payment-provider sandbox suite (needs repo secrets)'
+        type: boolean
+        default: true
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Three independent jobs instead of one serial one. Build (306s) and tests
+# Independent jobs instead of one serial one. Build (306s) and tests
 # (300s) used to run back to back in a single job, so wall-clock was their sum.
 # They share no state, so they now run in parallel and the slowest sets the
 # time. Typecheck is split out because it is the fastest signal by far — a type
 # error surfaces in about a minute instead of after a full Next build.
 jobs:
+  # Static config invariants. No install, no database — a checkout and node.
+  # Kept out of the typecheck job so it reports as its own red check: a
+  # deployment file that cannot express a setting is a different failure from a
+  # type error, and the two get fixed by different edits.
+  config:
+    name: Config guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # Same shape as the `prisma migrate diff --exit-code` step in the test
+      # job: two artifacts that are supposed to agree, compared mechanically.
+      # Here it is apps/api/src/config/env.ts against the `environment:` blocks
+      # of the compose files that run an API. A compose block is an ALLOWLIST,
+      # so a key missing from it can never be set — five separate incidents of
+      # that shape are recorded in this repo, each with a comment and no guard.
+      - name: Check compose files expose every env var the API reads
+        run: node .github/scripts/check-compose-env.mjs
+
   typecheck:
     name: Typecheck
     runs-on: ubuntu-latest
@@ -147,12 +174,17 @@ jobs:
             '
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Run package tests
+
+      # apps/api is not in this filter because the step above already ran it
+      # directly, for coverage. One run, not two.
+      - name: Run package + app tests
         env:
           TEST_DATABASE_URL: postgresql://rekey:rekey@localhost:5432/rekey_test?schema=public
           SUPER_ADMIN_KEY: test-admin-key-test-admin-key-test-admin-key
           JWT_SECRET: test-jwt-secret-test-jwt-secret-test-jwt-secret
-        run: pnpm exec turbo run test --concurrency=1 --filter="./packages/*"
+        run: >-
+          pnpm exec turbo run test --concurrency=1
+          --filter="./packages/*"
 
   build:
     name: Build
@@ -205,4 +237,70 @@ jobs:
         run: >-
           pnpm exec turbo run build
           --filter=@rekey.dev/api --filter=@rekey.dev/panel
-          --filter=@rekey.dev/portal --filter=@rekey.dev/admin
+          --filter=@rekey.dev/portal
+
+  # ---------------------------------------------------------------------------
+  # Payment-provider sandbox suite. NOT part of the pull-request pipeline.
+  #
+  # It talks to Stripe / PayPal / Razorpay over the network, so it can go red
+  # for reasons a contributor cannot fix — and a required check that does that
+  # is a check people learn to ignore. `workflow_dispatch` only, on purpose.
+  # Run it before a release, and after any change under
+  # apps/api/src/modules/billing/providers.
+  #
+  # Secrets it reads — see docs/provider-sandbox-testing.md for how to get each:
+  #   STRIPE_TEST_SECRET_KEY
+  #   PAYPAL_SANDBOX_CLIENT_ID / PAYPAL_SANDBOX_CLIENT_SECRET / PAYPAL_SANDBOX_WEBHOOK_ID
+  #   RAZORPAY_TEST_KEY_ID / RAZORPAY_TEST_KEY_SECRET
+  provider-sandbox:
+    name: Provider sandbox (manual)
+    if: github.event_name == 'workflow_dispatch' && inputs.run_provider_sandbox
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rekey
+          POSTGRES_PASSWORD: rekey
+          POSTGRES_DB: rekey
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U rekey"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9.12.0 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec prisma generate --schema prisma/schema.prisma
+      - uses: ./.github/actions/turbo-cache
+      - name: Build test dependencies
+        run: pnpm exec turbo run build --filter="./packages/*"
+
+      # Its own database, never rekey_test: the two suites truncate the same
+      # tables and would eat each other's fixtures.
+      - name: Create the sandbox database
+        run: PGPASSWORD=rekey psql -h localhost -U rekey -d rekey -c "CREATE DATABASE rekey_sandbox;"
+
+      - name: Run the provider sandbox suite
+        env:
+          SANDBOX_DATABASE_URL: postgresql://rekey:rekey@localhost:5432/rekey_sandbox?schema=public
+          SUPER_ADMIN_KEY: sandbox-admin-key-sandbox-admin-key-sandbox
+          JWT_SECRET: sandbox-jwt-secret-sandbox-jwt-secret-sandbox
+          # The whole point of a job that HAS the secrets: a rotated or deleted
+          # secret must fail it, not skip quietly and report green.
+          REKEY_SANDBOX_REQUIRE: all
+          STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
+          PAYPAL_SANDBOX_CLIENT_ID: ${{ secrets.PAYPAL_SANDBOX_CLIENT_ID }}
+          PAYPAL_SANDBOX_CLIENT_SECRET: ${{ secrets.PAYPAL_SANDBOX_CLIENT_SECRET }}
+          PAYPAL_SANDBOX_WEBHOOK_ID: ${{ secrets.PAYPAL_SANDBOX_WEBHOOK_ID }}
+          RAZORPAY_TEST_KEY_ID: ${{ secrets.RAZORPAY_TEST_KEY_ID }}
+          RAZORPAY_TEST_KEY_SECRET: ${{ secrets.RAZORPAY_TEST_KEY_SECRET }}
+        run: pnpm --filter @rekey.dev/api run test:providers

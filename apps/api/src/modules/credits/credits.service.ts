@@ -261,6 +261,18 @@ export const creditsService = {
       skip: Math.max(opts.offset ?? 0, 0),
     });
   },
+
+  /**
+   * Total ledger entries for a subject, ignoring limit/offset.
+   *
+   * The append-only ledger is the clearest case for reporting `total`: it only
+   * ever grows, so a caller reading the default 50-row window has no way to
+   * know whether it is looking at a complete history or the tip of one.
+   */
+  async countLedger(applicationId: string, subject: CreditSubjectInput): Promise<number> {
+    const { subjectKey } = resolveCreditSubject(subject);
+    return prisma.creditLedger.count({ where: { applicationId, subjectKey } });
+  },
 };
 
 // Re-exported for tests / callers that need the low-level primitive.

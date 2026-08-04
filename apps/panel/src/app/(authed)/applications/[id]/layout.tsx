@@ -1,6 +1,6 @@
 import * as React from 'react';
 import Link from 'next/link';
-import { api, type ApplicationRow } from '@/lib/api';
+import { getApplication } from '@/lib/api';
 import { AppNav } from '@/components/AppNav';
 import { CopyButton } from '@/components/CopyButton';
 import { EnvironmentBadge } from '@/components/EnvironmentBadge';
@@ -13,10 +13,7 @@ export default async function ApplicationDetailLayout({
   params: Promise<{ id: string }>;
 }): Promise<React.JSX.Element> {
   const { id } = await params;
-  const app = await api<ApplicationRow>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-  });
+  const app = await getApplication(id);
 
   return (
     <section className="mx-auto max-w-7xl space-y-5 px-6 py-8 lg:px-8">

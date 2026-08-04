@@ -17,6 +17,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { api, PanelApiError, type SecurityEventRow } from '@/lib/api';
+import type { Page } from '@/lib/paginate';
 import { humanizeEventType } from '@/lib/security-events';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { formatDate, formatDateTime } from '@/lib/date';
@@ -27,8 +28,11 @@ import { PageHeader } from '@/components/PageHeader';
 import { Card, SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
+import { StatusPill } from '@/components/StatusPill';
+import { formatMoney } from '@/lib/format';
 import { EmptyState } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
+import { cookieSecure } from '@/lib/cookie-secure';
 
 interface EndUserDetailDto {
   endUser: {
@@ -163,25 +167,6 @@ function eventDetail(metadata: Record<string, unknown> | null | undefined): stri
   return keys.length === 0 ? null : keys.slice(0, 3).join(', ');
 }
 
-function fmtMoney(amount: number, currency: string): string {
-  return `${(amount / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
-}
-
-const STATUS_TONE: Record<string, BadgeTone> = {
-  ACTIVE: 'success',
-  SUCCEEDED: 'success',
-  PENDING: 'warning',
-  PAST_DUE: 'warning',
-  CANCELED: 'neutral',
-  CANCELLED: 'neutral',
-  EXPIRED: 'neutral',
-  REVOKED: 'danger',
-  FAILED: 'danger',
-  SUSPENDED: 'danger',
-};
-function statusTone(s: string): BadgeTone {
-  return STATUS_TONE[s] ?? 'neutral';
-}
 
 const IMPERSONATE_COOKIE = 'rekey_impersonate_reveal';
 const IMPERSONATE_COOKIE_MAX_AGE = 60 * 6; // 6 min — slightly outlives the 5-min token so the page can re-render.
@@ -210,7 +195,7 @@ async function impersonate(
       {
         httpOnly: true,
         sameSite: 'strict',
-        secure: process.env.NODE_ENV === 'production',
+        secure: await cookieSecure(),
         path: `/applications/${applicationId}/end-users/${euid}`,
         maxAge: IMPERSONATE_COOKIE_MAX_AGE,
       },
@@ -326,11 +311,11 @@ export default async function EndUserDetailPage({
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users/${encodeURIComponent(euid)}/billing`,
     }).catch(() => ({ subscriptions: [], payments: [], licenses: [] }) as BillingDto),
     // "Why can't this user sign in?" — see the AUTH_EVENT_SCAN note.
-    api<{ events: SecurityEventRow[] }>({
+    api<Page<SecurityEventRow>>({
       method: 'GET',
       path: `/api/v1/tenant/security-events?applicationId=${encodeURIComponent(id)}&actorType=end_user&limit=${AUTH_EVENT_SCAN}`,
     })
-      .then((r) => r.events.filter((e) => e.actorId === euid).slice(0, AUTH_EVENTS_SHOWN))
+      .then((r) => r.items.filter((e) => e.actorId === euid).slice(0, AUTH_EVENTS_SHOWN))
       // OWNER/ADMIN-only endpoint: a MEMBER gets 403 here. Degrade to no panel
       // rather than 403-ing the whole end-user page.
       .catch(() => null),
@@ -583,11 +568,11 @@ export default async function EndUserDetailPage({
                         <Badge tone="info" className="ml-1.5">team</Badge>
                       )}
                       <div className="text-[11px] text-[var(--color-muted-fg)]">
-                        {fmtMoney(s.plan.amount, s.plan.currency)} / {s.plan.interval.toLowerCase()}
+                        {formatMoney(s.plan.amount, s.plan.currency)} / {s.plan.interval.toLowerCase()}
                       </div>
                     </TD>
                     <TD>
-                      <Badge tone={statusTone(s.status)} dot>{s.status.toLowerCase()}</Badge>
+                      <StatusPill status={s.status} />
                     </TD>
                     <TD muted className="text-xs">{s.provider ?? '—'}</TD>
                     <TD muted className="text-xs">
@@ -620,9 +605,9 @@ export default async function EndUserDetailPage({
                 {billing.payments.map((p) => (
                   <TR key={p.id} hover>
                     <TD muted className="text-xs">{formatDateTime(p.createdAt)}</TD>
-                    <TD align="right" mono className="tabular-nums">{fmtMoney(p.amount, p.currency)}</TD>
+                    <TD align="right" mono className="tabular-nums">{formatMoney(p.amount, p.currency)}</TD>
                     <TD>
-                      <Badge tone={statusTone(p.status)} dot>{p.status.toLowerCase()}</Badge>
+                      <StatusPill status={p.status} />
                     </TD>
                     <TD muted className="max-w-[12rem] truncate text-xs">{p.description ?? '—'}</TD>
                     <TD muted mono className="max-w-[12rem] truncate text-[11px]">{p.providerPaymentId ?? '—'}</TD>
@@ -657,7 +642,7 @@ export default async function EndUserDetailPage({
                     <TD muted className="text-xs">{l.plan?.name ?? '—'}</TD>
                     <TD muted className="text-xs">{l.kind.toLowerCase()}</TD>
                     <TD>
-                      <Badge tone={statusTone(l.status)} dot>{l.status.toLowerCase()}</Badge>
+                      <StatusPill status={l.status} />
                     </TD>
                     <TD align="right" muted className="text-xs tabular-nums">{l.seatsAllowed ?? '—'}</TD>
                     <TD muted className="text-xs">{l.expiresAt ? formatDate(l.expiresAt) : 'never'}</TD>

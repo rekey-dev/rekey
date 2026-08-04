@@ -1,19 +1,22 @@
 {
   "name": "@rekey.dev/react",
-  "version": "2.0.0-rc.3",
+  "version": "2.0.0-rc.4",
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
   },
-  "description": "Rekey React hooks + components — useUser, SignedIn/SignedOut, sign-in / sign-up forms.",
+  "description": "Rekey React hooks + components \u2014 useUser, SignedIn/SignedOut, sign-in / sign-up forms.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -24,7 +27,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo \"(eslint not yet wired)\"",
-    "test": "vitest run"
+    "test": "tsc -p tsconfig.json && vitest run"
   },
   "keywords": [
     "react",
@@ -37,7 +40,7 @@
     "react": "^18.0.0 || ^19.0.0"
   },
   "dependencies": {
-    "@rekey.dev/shared-types": "workspace:*"
+    "@rekey.dev/shared-types": "workspace:^"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
@@ -45,6 +48,7 @@
     "react-dom": "^19.0.0",
     "@testing-library/react": "^16.1.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "esbuild": "^0.27.7",
     "jsdom": "^25.0.1",
     "typescript": "^5.6.3",
     "vitest": "^2.1.5"

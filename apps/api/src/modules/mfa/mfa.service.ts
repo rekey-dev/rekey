@@ -39,6 +39,13 @@ export const mfaService = {
    * Initialise MFA. Stores secret + backup-code hashes (encrypted), but
    * does NOT mark `enrolledAt` until the user proves they have the secret
    * via /mfa/setup-confirm. Sign-in only enforces MFA when enrolled.
+   *
+   * **The `update` branch un-enrolls an enrolled user.** That is what makes
+   * this route a credential change rather than a setup step: calling it resets
+   * `enrolledAt: null`, so the user's real authenticator stops counting and a
+   * secret the caller chose takes its place — reaching the same end as
+   * `/mfa/disable` without passing its guard. The route demands a current
+   * factor from browser callers for exactly that reason; see `mfa.routes.ts`.
    */
   async setup(args: { endUser: EndUser; issuer: string }): Promise<SetupResult> {
     const secret = generateSecret(args.issuer, args.endUser.email);

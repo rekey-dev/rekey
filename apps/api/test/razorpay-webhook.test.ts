@@ -79,7 +79,11 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'pro_monthly', name: 'Pro', amount: 49900 },
+      // INR, like the payloads below and like any real Razorpay account. It
+      // used to default to USD while every fixture charged INR, which the
+      // appliers happily recorded — the mismatch the plan cross-check now
+      // refuses.
+      payload: { slug: 'pro_monthly', name: 'Pro', amount: 49900, currency: 'INR' },
     });
   }
 
@@ -159,7 +163,12 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
     expect(second.statusCode).toBe(200);
     expect(second.json()).toMatchObject({ received: true, processed: false, reason: 'duplicate' });
 
-    const rows = await prisma.webhookEvent.findMany({ where: { providerEventId: 'evt_idempo_1' } });
+    // Looked up by event TYPE, not by the header id: the idempotency key is
+    // derived from the signed body now, precisely so that re-sending one
+    // captured body under a fresh `x-razorpay-event-id` cannot mint a new slot.
+    const rows = await prisma.webhookEvent.findMany({
+      where: { provider: 'razorpay', eventType: 'subscription.activated' },
+    });
     expect(rows).toHaveLength(1);
     expect(rows[0]!.processedAt).not.toBeNull();
     void sub;
@@ -238,7 +247,7 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { slug: 'credit_pack', name: 'Credits', amount: 19900 },
+      payload: { slug: 'credit_pack', name: 'Credits', amount: 19900, currency: 'INR' },
     });
     const plan = await prisma.plan.findUniqueOrThrow({
       where: { applicationId_slug: { applicationId, slug: 'credit_pack' } },
@@ -380,7 +389,7 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
     const res = await app.inject({ method: 'POST', url: URL, headers, payload });
     expect(res.statusCode).toBe(200);
     const row = await prisma.webhookEvent.findFirstOrThrow({
-      where: { provider: 'razorpay', providerEventId: 'evt_unhandled' },
+      where: { provider: 'razorpay', eventType: 'payment.captured' },
     });
     expect(row.processedAt).not.toBeNull();
     expect(row.processingError).toBeNull();

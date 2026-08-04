@@ -61,19 +61,27 @@ Settings → MCP → Add Server. Same `command` / `args` / `env` shape.
 
 ### Claude Code
 
-`.claude/mcp.json` in your repo (same shape). Omit `REKEY_OPERATOR_TOKEN` if you only need read tools, or omit `SUPER_ADMIN_KEY` if the agent only needs the `mint_api_key` write tool.
+Run `claude mcp add` and follow the prompts, or commit a project-scoped
+`.mcp.json` at the repo root (same shape as the Claude Desktop config above).
+Omit `REKEY_OPERATOR_TOKEN` if you only need read tools, or omit
+`SUPER_ADMIN_KEY` if the agent only needs the `mint_api_key` write tool.
 
 ## Tools
 
 **Read tools** (authenticated with `SUPER_ADMIN_KEY`):
 
+> Tools marked **paged** take `limit` (1–100, default 50) and `offset`, and return
+> `{ items, page: { total, limit, offset, hasMore } }`. Read `page.hasMore` before
+> concluding you have seen everything — a list that stops at 50 of 90 used to look
+> identical to a complete one.
+
 | Tool | What it does |
 | --- | --- |
-| `list_tenants` | All Tenants in the deployment. |
-| `list_applications` | Applications, optionally filtered by `tenantId`. |
+| `list_tenants` | Tenants in the deployment. Paged — `limit`/`offset`, result is `{items, page}`. |
+| `list_applications` | Applications, optionally filtered by `tenantId`. Paged. |
 | `get_application` | One Application by id (with authConfig + billingConfig — no secrets). |
-| `list_plans` | Plans for an Application; `includeInactive` for archived ones. |
-| `list_coupons` | Coupons for an Application; `includeInactive` for deactivated ones. |
+| `list_plans` | Plans for an Application; `includeInactive` for archived ones. Paged. |
+| `list_coupons` | Coupons for an Application; `includeInactive` for deactivated ones. Paged. |
 | `list_api_keys` | Active API keys for an Application — metadata only; the hash is never returned. |
 | `list_payments` | Recent payments (newest first), filterable by `applicationId` / `status` (`PENDING`/`SUCCEEDED`/`FAILED`/`REFUNDED`), exact-match `q` (payment id / provider payment id / end-user id), `sort` (`createdAt`/`amount`), `order`, `limit` (≤200). Amounts are integers in the smallest currency unit. |
 | `get_payment_stats_by_app` | Per-application payment health over the last 30 days — succeeded/failed/pending/refunded counts, success rate, SUCCEEDED volume (`volumeCents`). The panel's richer per-app Billing Overview (`MRR`, 12-month series) lives at the **panel-session-only** endpoint `/api/v1/tenant/applications/:id/billing/stats` and is not reachable with this server's credentials. |

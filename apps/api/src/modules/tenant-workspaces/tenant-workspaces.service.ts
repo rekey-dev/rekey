@@ -99,9 +99,18 @@ export interface MemberRow {
   /**
    * Per-application grants (roadmap #8). Only meaningful for MEMBER roles —
    * OWNER/ADMIN have implicit access to every Application. A MEMBER with an
-   * empty list is in legacy mode: read-only on every Application.
+   * empty list can access no Application at all (unless `legacyWorkspaceRead`).
    */
   grants: MemberGrantRow[];
+  /**
+   * True only for MEMBER memberships grandfathered by the 2.0.0-rc.3 backfill:
+   * they keep the pre-grants workspace-wide READ over every Application.
+   *
+   * Reported so an owner can actually find them — the old behaviour was
+   * invisible in the API, indistinguishable from "a member with no access
+   * yet". Setting any grant on the membership clears it permanently.
+   */
+  legacyWorkspaceRead: boolean;
 }
 
 export interface InvitationRow {
@@ -148,7 +157,10 @@ function ensureCanManage(actor: TenantRole, target: TenantRole): void {
 }
 
 export const tenantWorkspacesService = {
-  async listMembers(tenantId: string): Promise<MemberRow[]> {
+  async listMembers(
+    tenantId: string,
+    opts: { take?: number; skip?: number } = {},
+  ): Promise<MemberRow[]> {
     const rows = await prisma.tenantMembership.findMany({
       where: { tenantId },
       include: {
@@ -159,6 +171,8 @@ export const tenantWorkspacesService = {
         },
       },
       orderBy: { createdAt: 'asc' },
+      ...(opts.take !== undefined && { take: opts.take }),
+      ...(opts.skip !== undefined && { skip: opts.skip }),
     });
     return rows.map((r) => ({
       membershipId: r.id,
@@ -167,6 +181,7 @@ export const tenantWorkspacesService = {
       name: r.tenantUser.name,
       role: r.role,
       joinedAt: r.createdAt,
+      legacyWorkspaceRead: r.legacyWorkspaceRead,
       grants: r.applicationGrants.map((g) => ({
         applicationId: g.application.id,
         applicationName: g.application.name,
@@ -175,6 +190,11 @@ export const tenantWorkspacesService = {
         createdAt: g.createdAt,
       })),
     }));
+  },
+
+  /** Total memberships in the workspace, ignoring take/skip. */
+  async countMembers(tenantId: string): Promise<number> {
+    return prisma.tenantMembership.count({ where: { tenantId } });
   },
 
   // ---------- Per-application grants (roadmap #8) ----------
@@ -202,20 +222,31 @@ export const tenantWorkspacesService = {
   async listMemberGrants(args: {
     tenantId: string;
     membershipId: string;
-  }): Promise<MemberGrantRow[]> {
+    take?: number;
+    skip?: number;
+  }): Promise<{ items: MemberGrantRow[]; total: number }> {
     await this.loadMembershipOrThrow(args.tenantId, args.membershipId);
-    const grants = await prisma.applicationGrant.findMany({
-      where: { tenantMembershipId: args.membershipId },
-      include: { application: { select: { id: true, name: true, slug: true } } },
-      orderBy: { createdAt: 'asc' },
-    });
-    return grants.map((g) => ({
-      applicationId: g.application.id,
-      applicationName: g.application.name,
-      applicationSlug: g.application.slug,
-      role: g.role,
-      createdAt: g.createdAt,
-    }));
+    const where = { tenantMembershipId: args.membershipId };
+    const [grants, total] = await Promise.all([
+      prisma.applicationGrant.findMany({
+        where,
+        include: { application: { select: { id: true, name: true, slug: true } } },
+        orderBy: { createdAt: 'asc' },
+        ...(args.take !== undefined && { take: args.take }),
+        ...(args.skip !== undefined && { skip: args.skip }),
+      }),
+      prisma.applicationGrant.count({ where }),
+    ]);
+    return {
+      items: grants.map((g) => ({
+        applicationId: g.application.id,
+        applicationName: g.application.name,
+        applicationSlug: g.application.slug,
+        role: g.role,
+        createdAt: g.createdAt,
+      })),
+      total,
+    };
   },
 
   /** Upsert one grant — (membership, application) is unique, so re-setting changes the role. */
@@ -246,20 +277,33 @@ export const tenantWorkspacesService = {
         fix: 'List applications via GET /api/v1/tenant/applications.',
       });
     }
-    const grant = await prisma.applicationGrant.upsert({
-      where: {
-        tenantMembershipId_applicationId: {
+    const [grant] = await prisma.$transaction([
+      prisma.applicationGrant.upsert({
+        where: {
+          tenantMembershipId_applicationId: {
+            tenantMembershipId: args.membershipId,
+            applicationId: args.applicationId,
+          },
+        },
+        create: {
           tenantMembershipId: args.membershipId,
           applicationId: args.applicationId,
+          role: args.role,
         },
-      },
-      create: {
-        tenantMembershipId: args.membershipId,
-        applicationId: args.applicationId,
-        role: args.role,
-      },
-      update: { role: args.role },
-    });
+        update: { role: args.role },
+      }),
+      // Setting a grant is the documented one-way door out of the
+      // grandfathered pre-grants blanket read. It used to be implicit
+      // ("grants.length > 0 wins"), which meant REMOVING the last grant put
+      // the member back on workspace-wide read — a de-scoping action that
+      // widened access. Now the flag is cleared for good on the way in, so
+      // removing the last grant leaves the member with nothing, which is what
+      // the operator was asking for.
+      prisma.tenantMembership.update({
+        where: { id: args.membershipId },
+        data: { legacyWorkspaceRead: false },
+      }),
+    ]);
     return {
       applicationId: app.id,
       applicationName: app.name,
@@ -288,12 +332,21 @@ export const tenantWorkspacesService = {
     }
   },
 
-  async listInvitations(tenantId: string): Promise<InvitationRow[]> {
-    const rows = await prisma.tenantInvitation.findMany({
-      where: { tenantId },
-      orderBy: { createdAt: 'desc' },
-    });
-    return rows.map(shapeInvitation);
+  async listInvitations(
+    tenantId: string,
+    opts: { take?: number; skip?: number } = {},
+  ): Promise<{ items: InvitationRow[]; total: number }> {
+    const where = { tenantId };
+    const [rows, total] = await Promise.all([
+      prisma.tenantInvitation.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        ...(opts.take !== undefined && { take: opts.take }),
+        ...(opts.skip !== undefined && { skip: opts.skip }),
+      }),
+      prisma.tenantInvitation.count({ where }),
+    ]);
+    return { items: rows.map(shapeInvitation), total };
   },
 
   /**
@@ -680,6 +733,7 @@ export const tenantWorkspacesService = {
       name: updated.tenantUser.name,
       role: updated.role,
       joinedAt: updated.createdAt,
+      legacyWorkspaceRead: updated.legacyWorkspaceRead,
       // Grants survive role changes but are only consulted while the role is
       // MEMBER — promoting to ADMIN leaves them inert, demoting re-arms them.
       grants: updated.applicationGrants.map((g) => ({

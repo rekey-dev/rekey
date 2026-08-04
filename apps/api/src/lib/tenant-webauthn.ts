@@ -5,6 +5,12 @@
  * so the RP config is read from env, not per-tenant. Mirrors the shape
  * of `lib/webauthn.ts` but parameterized by the tenant user rather than
  * an Application.
+ *
+ * **User verification is required**, matching `lib/webauthn.ts` — see the
+ * "User verification is REQUIRED" section there for the reasoning. It applies
+ * at least as strongly on this side: `tenantPasskeysService.authenticateComplete`
+ * mints an operator session outright, so an assertion with the UV bit clear
+ * would have replaced an operator's password AND their TOTP with a touch.
  */
 
 import type { TenantUser, TenantWebAuthnCredential } from '@prisma/client';
@@ -133,7 +139,7 @@ export async function buildTenantRegistrationOptions(args: {
     })),
     authenticatorSelection: {
       residentKey: 'preferred',
-      userVerification: 'preferred',
+      userVerification: 'required',
     },
   };
   const options = await generateRegistrationOptions(opts);
@@ -150,7 +156,7 @@ export async function verifyTenantRegistration(args: {
     expectedChallenge: args.expectedChallenge,
     expectedOrigin: rp.rpOrigins,
     expectedRPID: rp.rpId,
-    requireUserVerification: false,
+    requireUserVerification: true,
   });
 }
 
@@ -163,7 +169,7 @@ export async function buildTenantAuthenticationOptions(args: {
   const rp = panelRpConfig();
   const opts: GenerateAuthenticationOptionsOpts = {
     rpID: rp.rpId,
-    userVerification: 'preferred',
+    userVerification: 'required',
     ...(args.allowCredentials !== null && {
       allowCredentials: args.allowCredentials.map((c) => ({
         id: c.credentialId,
@@ -192,6 +198,6 @@ export async function verifyTenantAuthentication(args: {
       counter: Number(args.credential.counter),
       transports: args.credential.transports as AuthenticatorTransportFuture[],
     },
-    requireUserVerification: false,
+    requireUserVerification: true,
   });
 }

@@ -32,6 +32,11 @@
  * credential: the customer's backend is the trusted gate, it already decides
  * which of its users may do what, and requiring a factor there would break
  * published SDK signatures for no gain.
+ *
+ * `assertTenantStepUp` at the bottom of this file is the OPERATOR twin, for
+ * the panel's own credential-rebinding actions. It has no publishable/secret
+ * split — a panel session is always a browser session — so it is
+ * unconditional.
  */
 
 import type { EndUser } from '@prisma/client';
@@ -111,5 +116,87 @@ export async function assertStepUp(args: {
     fix: hasMfa
       ? 'Send `code` with a current 6-digit authenticator code or an unused backup code, or `password` with the account password.'
       : 'Send `password` with the account password.',
+  });
+}
+
+/** Verifies a TOTP or backup code for an OPERATOR. Injected to avoid a cycle with tenant-mfa.service. */
+export type TenantMfaCodeVerifier = (args: {
+  tenantUserId: string;
+  code: string;
+}) => Promise<boolean>;
+
+/**
+ * The operator twin of `assertStepUp`, for the panel's own privileged
+ * self-service actions.
+ *
+ * There is no publishable/secret distinction to key off here: a panel session
+ * is always a browser session, so the step-up is unconditional. Which is the
+ * whole reason it is needed — the operator surface had *no* second-factor
+ * demand on any of the actions that rebind an operator's own credentials, so a
+ * stolen panel access token could re-enroll MFA onto an attacker's
+ * authenticator, turn MFA off outright, or enroll a passkey, none of which the
+ * victim can undo by changing their password.
+ *
+ * `requireMfaWhenEnrolled` is the sharp part, and it is the same rule
+ * `mfaService.disable` applies for end-users: when the operator HAS an enrolled
+ * authenticator, only a current code counts. Accepting the password there would
+ * defeat the point — someone who has stolen a session and phished the password
+ * is exactly who the second factor exists to stop, and letting them strip it
+ * with those two things is no protection at all. It is set for the MFA routes
+ * and left off for passkey enrolment, which mirrors the end-user
+ * `assertStepUp` contract (password OR code).
+ */
+export async function assertTenantStepUp(args: {
+  tenantUserId: string;
+  proof: StepUpProof;
+  action: string;
+  verifyMfaCode: TenantMfaCodeVerifier;
+  /** When the operator has MFA enrolled, refuse the password and demand a code. */
+  requireMfaWhenEnrolled?: boolean;
+}): Promise<void> {
+  const { tenantUserId, proof, action, verifyMfaCode } = args;
+
+  const row = await prisma.tenantUser.findUnique({
+    where: { id: tenantUserId },
+    select: { passwordHash: true },
+  });
+  const enrolled = await prisma.tenantMfaCredential.findUnique({
+    where: { tenantUserId },
+    select: { enrolledAt: true },
+  });
+
+  const hasMfa = enrolled?.enrolledAt != null;
+  // An OAuth-only operator has no password. Same rule as the end-user version:
+  // if neither factor exists there is nothing to prove with, and waving the
+  // action through would be worse than having no step-up at all.
+  const hasPassword = typeof row?.passwordHash === 'string' && row.passwordHash.length > 0;
+  const mfaOnly = args.requireMfaWhenEnrolled === true && hasMfa;
+
+  if (!hasPassword && !hasMfa) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'STEP_UP_UNAVAILABLE',
+      message: `This operator account has no password and no authenticator, so there is no second factor to confirm before it can ${action}.`,
+      fix: 'Set a password (or enroll an authenticator) first, then retry.',
+    });
+  }
+
+  if (proof.code !== undefined && proof.code !== '' && hasMfa) {
+    if (await verifyMfaCode({ tenantUserId, code: proof.code })) return;
+  }
+
+  if (!mfaOnly && proof.password !== undefined && proof.password !== '' && hasPassword) {
+    if (await verifyPassword(row!.passwordHash, proof.password)) return;
+  }
+
+  throw new RekeyError({
+    statusCode: 401,
+    code: 'STEP_UP_REQUIRED',
+    message: `Confirm it is you before you ${action}.`,
+    fix: mfaOnly
+      ? 'Send `code` with a current 6-digit authenticator code or an unused backup code. The account password is deliberately not accepted for this action while an authenticator is enrolled.'
+      : hasMfa
+        ? 'Send `code` with a current 6-digit authenticator code or an unused backup code, or `password` with the account password.'
+        : 'Send `password` with the account password.',
   });
 }

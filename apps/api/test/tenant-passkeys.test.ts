@@ -8,6 +8,11 @@
  *   - register/start returns WEBAUTHN_NOT_CONFIGURED when env unset
  *   - register/start returns options when env configured
  *
+ * `register/start` requires a step-up proof (`password` or a current
+ * authenticator code) as of 2.0.0-rc.3 — these cases send the password so they
+ * keep testing the RP-config resolution they are about. The step-up itself is
+ * pinned in test/auth-hardening-operator.test.ts.
+ *
  * Full ceremonies (register/complete + authenticate/complete) need a real
  * authenticator simulator — out of scope for in-process tests. Those
  * paths are smoke-covered via the service unit shape on the panel side.
@@ -86,6 +91,10 @@ describe('Operator passkeys', () => {
       method: 'POST',
       url: '/api/v1/tenant/auth/passkeys/register/start',
       headers: { authorization: `Bearer ${session.accessToken}` },
+      // The route now demands a step-up before it will start a ceremony:
+      // an operator passkey signs its holder in with no password and no second
+      // factor, so a panel session alone must not be able to enroll one.
+      payload: { password: 'pw-one-two-three' },
     });
     expect(r.statusCode).toBe(400);
     expect(r.json().error.code).toBe('WEBAUTHN_NOT_CONFIGURED');
@@ -101,6 +110,10 @@ describe('Operator passkeys', () => {
       method: 'POST',
       url: '/api/v1/tenant/auth/passkeys/register/start',
       headers: { authorization: `Bearer ${session.accessToken}` },
+      // The route now demands a step-up before it will start a ceremony:
+      // an operator passkey signs its holder in with no password and no second
+      // factor, so a panel session alone must not be able to enroll one.
+      payload: { password: 'pw-one-two-three' },
     });
     expect(r.statusCode).toBe(200);
     const data = r.json().data;
@@ -119,6 +132,10 @@ describe('Operator passkeys', () => {
       method: 'POST',
       url: '/api/v1/tenant/auth/passkeys/register/start',
       headers: { authorization: `Bearer ${session.accessToken}` },
+      // The route now demands a step-up before it will start a ceremony:
+      // an operator passkey signs its holder in with no password and no second
+      // factor, so a panel session alone must not be able to enroll one.
+      payload: { password: 'pw-one-two-three' },
     });
     expect(r.statusCode).toBe(200);
     const data = r.json().data;

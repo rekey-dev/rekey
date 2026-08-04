@@ -19,6 +19,7 @@ import { cookies } from 'next/headers';
 import { NextResponse, type NextRequest } from 'next/server';
 import { ACCESS_COOKIE } from '@/lib/api';
 import { CONSENT_COOKIE } from './consent-cookie';
+import { cookieSecure } from '@/lib/cookie-secure';
 
 const PARAM_KEYS = [
   'response_type',
@@ -58,7 +59,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   res.cookies.set(CONSENT_COOKIE, JSON.stringify(params), {
     httpOnly: true,
     sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
+    secure: await cookieSecure(),
     path: '/',
     maxAge: 15 * 60,
   });

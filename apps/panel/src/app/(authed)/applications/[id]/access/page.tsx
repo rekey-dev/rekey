@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
+import { api, PanelApiError, getApplication } from '@/lib/api';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { SavedBanner } from '@/components/SavedBanner';
 import { StickyFormFooter } from '@/components/StickyFormFooter';
@@ -104,10 +104,7 @@ export default async function AccessPage({
   const saved = sp.saved === '1';
   const rotated = typeof sp.rotated === 'string' ? sp.rotated : undefined;
 
-  const app = await api<ApplicationRow>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-  });
+  const app = await getApplication(id);
   const ipAllowlist = (app.ipAllowlist ?? []).join('\n');
   const corsOrigins = (app.corsOrigins ?? []).join('\n');
 

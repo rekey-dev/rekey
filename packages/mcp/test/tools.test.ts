@@ -71,15 +71,21 @@ describe('@rekey.dev/mcp tool registry', () => {
 
   it('list_payments builds the admin-metrics query string from its filters', async () => {
     stub.reset();
-    // /admin/metrics/payments is paginated → Page<T> envelope; the tool unwraps `.items`.
+    // /admin/metrics/payments is paginated → `{items, page}`; the tool unwraps
+    // `.items`. The pagination fields moved under `page` in 2.0.0-rc.3 — they
+    // used to sit flat beside `items`, one level up from where the published
+    // OpenAPI document declared them.
     stub.set('GET /api/v1/admin/metrics/payments', 200, {
       success: true,
-      data: { items: ['all'], total: 1, limit: 50, offset: 0 },
+      data: { items: ['all'], page: { total: 1, limit: 50, offset: 0, hasMore: false } },
     });
     stub.set(
       'GET /api/v1/admin/metrics/payments?applicationId=app_1&status=SUCCEEDED&sort=amount&order=asc&limit=10',
       200,
-      { success: true, data: { items: ['filtered'], total: 1, limit: 10, offset: 0 } },
+      {
+        success: true,
+        data: { items: ['filtered'], page: { total: 1, limit: 10, offset: 0, hasMore: false } },
+      },
     );
     const tool = tools.find((t) => t.name === 'list_payments')!;
     expect(await tool.execute(client, {})).toEqual(['all']);

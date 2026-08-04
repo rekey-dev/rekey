@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type MeDto } from '@/lib/api';
+import { api, PanelApiError, getMe } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
 import { Banner } from '@/components/Banner';
@@ -87,7 +87,7 @@ export default async function WorkspaceSettingsPage({
 
   const [workspace, me] = await Promise.all([
     api<WorkspaceDto>({ method: 'GET', path: '/api/v1/tenant/workspace' }),
-    api<MeDto>({ method: 'GET', path: '/api/v1/tenant/auth/me' }),
+    getMe(),
   ]);
   const canEdit = me.activeRole === 'OWNER' || me.activeRole === 'ADMIN';
   const isOwner = me.activeRole === 'OWNER';

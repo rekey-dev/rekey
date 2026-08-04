@@ -25,7 +25,7 @@ There used to be a single-app V1 reference at `examples/portal` that took one Ap
 | Variable | Required | Meaning |
 |---|---|---|
 | `REKEY_URL` | yes | Base URL of the Rekey API (e.g. `https://api.your-deployment.com`) |
-| `PORTAL_BASE_URL` | no | Public URL of the portal itself; used for checkout success/cancel return URLs and magic-link targets. Defaults to `http://localhost:3050`. Set it in production. |
+| `PORTAL_BASE_URL` | **in production, yes** | Public URL of the portal itself; used for checkout success/cancel return URLs and magic-link targets. Outside production it defaults to `http://localhost:3050`; under `NODE_ENV=production` an unset value **throws at first use** rather than defaulting, because a localhost return URL strands customers after payment. |
 
 ```bash
 # local dev
@@ -65,7 +65,7 @@ deploy steps: `DEPLOY.md` → "Customer portal".
 - **Subscription** (`/subscription`) — current plan, status badge, period end, included entitlements (`billing.getEntitlements`: features, quantities, credit balance).
 - **Billing history** (`/billing`) — their own payments via `GET /api/v1/billing/payments` (strictly caller-scoped server-side; never another user's rows). Rows link to the provider receipt URL when present in the payment's metadata (`receiptUrl` / `receipt_url`, https-only) — "receipts-lite".
 - **Change plan / subscribe** (`/plans`) — the public plan catalogue with hosted checkout via the existing `billing.createCheckout` flow. Activation lands via the provider webhook, as always.
-- **Cancel** (`/subscription`) — `POST /api/v1/billing/subscription/cancel`. Provider-backed ACTIVE subscriptions are canceled **at period end** (the row stays ACTIVE with `cancelAt` set until the provider webhook terminates it); PENDING checkouts and subscriptions with no provider-side record flip to CANCELED locally right away. `{"atPeriodEnd": false}` forces immediate cancellation.
+- **Cancel** (`/subscription`) — `POST /api/v1/billing/subscription/cancel`. An **ACTIVE** subscription with a known `currentPeriodEnd` is canceled **at period end**: the row stays ACTIVE with `cancelAt` set, and is terminated on the day by the provider's webhook, or — when there is no provider — by the API expiring it on the next read. Having a payment provider is not required for this and has not been since 2.0.0-rc.3; it decides who ends the subscription, not when the paid time runs out. PAST_DUE subscriptions, PENDING checkouts and ACTIVE rows with no period end flip to CANCELED right away. `{"atPeriodEnd": false}` forces immediate cancellation. A UI that has to describe the outcome before making the call can ask `cancelsAtPeriodEnd` from `@rekey.dev/shared-types` — the same predicate the API decides from.
 - **Account** (`/account`) — email + verification state, password change (revokes all refresh tokens; the portal session signs out too), sign out.
 
 ## Notes for operators
@@ -79,5 +79,5 @@ deploy steps: `DEPLOY.md` → "Customer portal".
 
 Both endpoints live in the existing public billing module (`apps/api/src/modules/billing/billing.routes.ts`), take an Application **publishable or secret** key **and** the end-user JWT (`X-Rekey-User-Token`), and are covered by `apps/api/test/billing-portal.test.ts`:
 
-- `GET /api/v1/billing/payments?limit=` — the caller's own payments, newest first (default 50, max 100). Projection only: no provider correlation ids, no raw metadata; `receiptUrl` is extracted server-side and https-filtered.
+- `GET /api/v1/billing/payments?limit=&offset=` — the caller's own payments, newest first (default 50, max 100), as `{items, page}` where `page` is `{total, limit, offset, hasMore}`. Projection only: no provider correlation ids, no raw metadata; `receiptUrl` is extracted server-side and https-filtered.
 - `POST /api/v1/billing/subscription/cancel` — body `{ "atPeriodEnd"?: boolean }` (default true). Idempotent for an already-scheduled cancel; emits the `subscription.canceled` outbound webhook event on immediate/local cancellation (the at-period-end path emits when the provider webhook actually terminates the sub).

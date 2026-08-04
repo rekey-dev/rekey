@@ -41,13 +41,13 @@ Phase 2.0 scaffold. Everything below in "Implemented" is real and wired to the A
 
 ### Implemented
 
-All commands talk to the **admin surface** (`/api/v1/admin/*`) and need `REKEY_URL` + `SUPER_ADMIN_KEY` (except `version`).
+All commands talk to the **admin surface** (`/api/v1/admin/*`) and need `REKEY_URL` + `SUPER_ADMIN_KEY` — except `version`, which needs neither, and `doctor`, which needs only `REKEY_URL`: a missing `SUPER_ADMIN_KEY` is reported as a `warn` check and `doctor` still exits 0, since telling you the key is missing is the diagnosis.
 
 | Command | What it does |
 |---|---|
 | `rekey version` | Print the CLI version. No env needed. `rekey --version` / `-V` print the same thing; the subcommand is the one that honours `--json`. |
 | `rekey doctor` | Config + connectivity diagnosis (`/health` probe, env checks). Run this first. |
-| `rekey init` | One-shot bootstrap: create tenant → application → first API key. The `rawKey` is printed once at `data.apiKey.rawKey`. |
+| `rekey init` | One-shot bootstrap: create tenant → application → first API key. With `--json` the document is `{ tenant, application, apiKey }` at the top level — no `success`/`data` envelope on the success path — so the secret is at **`apiKey.rawKey`**, printed exactly once. (The `{ success: false, error }` envelope appears only on failure, on stderr.) |
 | `rekey apps list \| get <id> \| create` | Application CRUD. |
 | `rekey plans list \| create \| set-active` | Plan management (`--amount` is the smallest currency unit — integer). |
 

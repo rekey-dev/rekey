@@ -23,6 +23,8 @@
 import type {
   ApplicationDto,
   AuthResultDto,
+  ListPage,
+  Paged,
   JwkRsaPublic,
   JwksDto,
   ChangePasswordRequest,
@@ -59,8 +61,10 @@ import type {
 } from '@rekey.dev/shared-types';
 
 // The canonical error class lives in shared-types; import it for internal use
-// and re-export below so @rekey.dev/node's public surface is unchanged.
-import { RekeyError } from '@rekey.dev/shared-types';
+// and re-export below so @rekey.dev/node's public surface is unchanged. The
+// `/error` subpath is the zod-free module the class actually lives in — same
+// class object the barrel re-exports, so `instanceof` is identical.
+import { RekeyError } from '@rekey.dev/shared-types/error';
 
 export type {
   ApplicationDto,
@@ -115,6 +119,17 @@ export type {
   OAuthAuthServerMetadata,
 } from '@rekey.dev/shared-types';
 
+/**
+ * Default per-request deadline, in milliseconds. Matches the timeout the Rekey
+ * API itself uses when it POSTs your outbound webhooks.
+ *
+ * Without a deadline the effective timeout is undici's `headersTimeout` — five
+ * minutes — so a single unreachable Rekey deployment can pin one of your
+ * request handlers for that long. Ten seconds is long enough for any endpoint
+ * this SDK calls and short enough to fail a page instead of hanging it.
+ */
+export const DEFAULT_TIMEOUT_MS = 10_000;
+
 /** Configuration for a Rekey client instance. */
 export interface RekeyConfig {
   /** Base URL of the Rekey API. e.g. `https://rekey.example.com` */
@@ -123,6 +138,45 @@ export interface RekeyConfig {
   secretKey: string;
   /** Optional fetch override (test stubs, custom keep-alive agents, etc.). */
   fetch?: typeof fetch;
+  /**
+   * Deadline for every request this client makes, in milliseconds.
+   * Default {@link DEFAULT_TIMEOUT_MS} (10 000). Pass `0` to disable — only do
+   * that if something upstream of you already bounds the call.
+   *
+   * On expiry the promise rejects with a `RekeyError` whose code is
+   * `REQUEST_TIMEOUT`. Override per call with `timeoutMs` in the call options.
+   */
+  timeoutMs?: number | undefined;
+  /**
+   * Client-wide abort signal — aborting it cancels every in-flight request
+   * (server shutdown, request-scoped cancellation). Composed with, not
+   * replaced by, any per-call `signal`.
+   */
+  signal?: AbortSignal | undefined;
+}
+
+/**
+ * Per-call overrides. Deliberately an options object rather than positional
+ * parameters: this is the shape frozen at 2.0.0, and a new knob has to be
+ * addable without a new overload.
+ */
+export interface RekeyRequestOptions {
+  /** JSON request body. Omit for GET/DELETE — a present body sets `Content-Type`. */
+  body?: unknown;
+  /** Extra headers, merged over the SDK's own (`Authorization`, `Content-Type`). */
+  headers?: Record<string, string> | undefined;
+  /** Deadline for this one call, in ms. Overrides the client's. `0` disables. */
+  timeoutMs?: number | undefined;
+  /** Abort signal for this one call. Composed with the client's signal and the deadline. */
+  signal?: AbortSignal | undefined;
+}
+
+/** The subset of {@link RekeyRequestOptions} every wrapped method accepts. */
+export interface RekeyCallOptions {
+  /** Deadline for this one call, in ms. Overrides the client's. `0` disables. */
+  timeoutMs?: number | undefined;
+  /** Abort signal for this one call. Composed with the client's signal and the deadline. */
+  signal?: AbortSignal | undefined;
 }
 
 // RekeyError is the shared class (imported above) — re-exported so the public
@@ -149,6 +203,27 @@ export { WEBHOOK_EVENTS, KNOWN_WEBHOOK_EVENTS, isKnownWebhookEvent } from '@reke
 export type { WebhookEventType, WebhookEventEnvelope } from '@rekey.dev/shared-types';
 
 /**
+ * Would `cancelSubscription`'s default (`atPeriodEnd: true`) actually leave
+ * this subscriber the rest of the period they paid for?
+ *
+ * Exported because a cancel confirmation has to say which outcome the customer
+ * is about to get, and it has to say so BEFORE the call — there is no response
+ * to read it off. It is the same function the API decides from, not a
+ * description of it, so a UI built on it cannot promise a behaviour the server
+ * does not have. See its docblock for the cases that still end immediately.
+ *
+ * @example
+ * ```ts
+ * const sub = await rekey.billing.getSubscription(token);
+ * const message = sub && cancelsAtPeriodEnd(sub)
+ *   ? `You keep access until ${sub.currentPeriodEnd}.`
+ *   : 'Cancelling takes effect straight away.';
+ * ```
+ */
+export { cancelsAtPeriodEnd } from '@rekey.dev/shared-types';
+export type { CancellationTimingInput } from '@rekey.dev/shared-types';
+
+/**
  * Top-level Rekey client. Auth and billing live as namespaces
  * (`rekey.applications`, `rekey.auth`, `rekey.billing`) so an agent
  * reading `rekey.` in an editor sees a discoverable surface.
@@ -157,6 +232,9 @@ export class Rekey {
   private readonly apiUrl: string;
   private readonly secretKey: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
+  private readonly signal: AbortSignal | undefined;
+  private readonly config: RekeyConfig;
 
   /** Operations on the calling Application itself. */
   public readonly applications: ApplicationsClient;
@@ -191,9 +269,12 @@ export class Rekey {
       });
     }
 
+    this.config = config;
     this.apiUrl = config.apiUrl.replace(/\/$/, '');
     this.secretKey = config.secretKey;
     this.fetchImpl = config.fetch ?? fetch;
+    this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.signal = config.signal;
 
     this.applications = new ApplicationsClient(this);
     this.auth = new AuthClient(this);
@@ -205,24 +286,100 @@ export class Rekey {
     this.mcp = new McpClient(this);
   }
 
-  /** @internal */
-  async request<T>(
+  /**
+   * A clone of this client with different call options — the per-call knob for
+   * every wrapped method.
+   *
+   * Each namespace method (`billing.getPlans()`, `auth.signIn()`, …) has a
+   * fixed signature, so scoping one call is done by scoping the client rather
+   * than by threading an options argument through sixty-odd methods:
+   *
+   * @example Give one call a tighter deadline
+   * ```ts
+   * const plans = await rekey.with({ timeoutMs: 2_000 }).billing.getPlans();
+   * ```
+   *
+   * @example Tie every Rekey call to an inbound request's lifetime
+   * ```ts
+   * app.get('/me', async (req, res) => {
+   *   const scoped = rekey.with({ signal: AbortSignal.any([req.signal]) });
+   *   res.json(await scoped.auth.getCurrentUser(token));
+   * });
+   * ```
+   *
+   * Cheap — it rebuilds the namespace objects, holds no connections, and
+   * shares the same `fetch`.
+   */
+  with(options: RekeyCallOptions): Rekey {
+    const signal =
+      options.signal && this.signal
+        ? AbortSignal.any([this.signal, options.signal])
+        : (options.signal ?? this.signal);
+    return new Rekey({
+      ...this.config,
+      timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
+      ...(signal !== undefined && { signal }),
+    });
+  }
+
+  /**
+   * Call a Rekey endpoint this SDK does not wrap yet.
+   *
+   * This is a **supported** escape hatch, not an internal: when the API grows a
+   * route before the SDK does, use this instead of hand-rolling `fetch` — you
+   * keep the auth header, the `{ success, data }` unwrapping, the `RekeyError`
+   * mapping (including transport failures) and the deadline. It takes an
+   * options object precisely so a future knob does not need a new overload.
+   *
+   * Prefer a namespace method when one exists; those carry the endpoint's real
+   * types, this returns whatever `T` you claim.
+   *
+   * @example
+   * ```ts
+   * const seats = await rekey.request<{ used: number }>('GET', '/api/v1/seats');
+   *
+   * await rekey.request('POST', '/api/v1/seats', {
+   *   body: { count: 5 },
+   *   timeoutMs: 30_000,
+   * });
+   * ```
+   *
+   * @throws {RekeyError} the server's error envelope, or `REQUEST_TIMEOUT` /
+   * `REQUEST_ABORTED` / `NETWORK_ERROR` when the request never got an answer.
+   */
+  request<T>(method: string, path: string, options?: RekeyRequestOptions): Promise<T> {
+    return this.send<T>(method, path, options?.body, options?.headers, options);
+  }
+
+  /**
+   * @internal Positional workhorse behind {@link request}. Every wrapped method
+   * calls this; it stays positional because it is not part of the published
+   * surface (see `stripInternal` in tsconfig).
+   */
+  async send<T>(
     method: string,
     path: string,
     body?: unknown,
-    extraHeaders?: Record<string, string>,
+    extraHeaders?: Record<string, string> | undefined,
+    options?: RekeyCallOptions,
   ): Promise<T> {
-    const res = await this.fetchImpl(`${this.apiUrl}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${this.secretKey}`,
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-        ...extraHeaders,
+    const res = await this.fetchWithDeadline(
+      `${this.apiUrl}${path}`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.secretKey}`,
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          ...extraHeaders,
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    });
+      method,
+      path,
+      options,
+    );
 
-    const json = (await res.json().catch(() => ({}))) as
+    const json = (await this.readJson(res, method, path, options)) as
       | { success: true; data: T }
       | { success: false; error: RekeyErrorShape & { requestId?: string } };
 
@@ -259,16 +416,23 @@ export class Rekey {
     path: string,
     body?: unknown,
     auth = true,
+    options?: RekeyCallOptions,
   ): Promise<T> {
-    const res = await this.fetchImpl(`${this.apiUrl}${path}`, {
-      method,
-      headers: {
-        ...(auth ? { Authorization: `Bearer ${this.secretKey}` } : {}),
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    const res = await this.fetchWithDeadline(
+      `${this.apiUrl}${path}`,
+      {
+        method,
+        headers: {
+          ...(auth ? { Authorization: `Bearer ${this.secretKey}` } : {}),
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    });
-    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      method,
+      path,
+      options,
+    );
+    const json = (await this.readJson(res, method, path, options)) as Record<string, unknown>;
     if (!res.ok) {
       const code = typeof json.error === 'string' ? json.error : `HTTP_${res.status}`;
       const message =
@@ -279,6 +443,136 @@ export class Rekey {
     }
     return json as T;
   }
+
+  /**
+   * @internal The one place `fetch` is called. Applies the deadline, composes
+   * the caller's signals, and turns anything the transport throws into a
+   * `RekeyError` — without this, `ECONNREFUSED` escaped as a bare `TypeError`
+   * and slipped straight through the documented
+   * `catch (e) { if (e instanceof RekeyError) … }` pattern.
+   */
+  private async fetchWithDeadline(
+    url: string,
+    init: RequestInit,
+    method: string,
+    path: string,
+    options?: RekeyCallOptions,
+  ): Promise<Response> {
+    const deadline = createDeadline(
+      options?.timeoutMs ?? this.timeoutMs,
+      this.signal,
+      options?.signal,
+    );
+    try {
+      return await this.fetchImpl(url, {
+        ...init,
+        ...(deadline.signal ? { signal: deadline.signal } : {}),
+      });
+    } catch (cause) {
+      throw transportError(cause, deadline, method, path);
+    }
+  }
+
+  /**
+   * @internal Read the JSON body under the same deadline. A body that never
+   * finishes streaming is just as hanging as headers that never arrive, and a
+   * non-JSON body still degrades to `{}` the way it always did.
+   */
+  private async readJson(
+    res: Response,
+    method: string,
+    path: string,
+    options?: RekeyCallOptions,
+  ): Promise<unknown> {
+    try {
+      return await res.json();
+    } catch (cause) {
+      if (isAbortError(cause)) {
+        throw transportError(
+          cause,
+          createDeadline(options?.timeoutMs ?? this.timeoutMs, this.signal, options?.signal),
+          method,
+          path,
+        );
+      }
+      return {};
+    }
+  }
+}
+
+/**
+ * The composed abort signal for one request, plus the pieces needed to say
+ * *why* it aborted. `AbortSignal.any` collapses them into one signal but
+ * forgets which one fired, and "the request timed out" versus "you cancelled
+ * it" versus "the host is unreachable" are three different bugs.
+ */
+interface Deadline {
+  signal: AbortSignal | undefined;
+  timeoutMs: number;
+  /** The deadline's own signal — set only when a finite timeout applies. */
+  timer: AbortSignal | undefined;
+  /** Caller-supplied signals (client-wide and per-call). */
+  callerSignals: AbortSignal[];
+}
+
+function createDeadline(
+  timeoutMs: number,
+  clientSignal: AbortSignal | undefined,
+  callSignal: AbortSignal | undefined,
+): Deadline {
+  const callerSignals = [clientSignal, callSignal].filter((s): s is AbortSignal => s !== undefined);
+  const timer = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
+  const all = timer ? [timer, ...callerSignals] : callerSignals;
+  const signal = all.length === 0 ? undefined : all.length === 1 ? all[0] : AbortSignal.any(all);
+  return { signal, timeoutMs, timer, callerSignals };
+}
+
+function isAbortError(err: unknown): boolean {
+  return (
+    err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')
+  );
+}
+
+/**
+ * Map whatever `fetch` rejected with onto a `RekeyError`. Three codes, because
+ * three different things go wrong and they want different responses:
+ * `REQUEST_ABORTED` (you asked), `REQUEST_TIMEOUT` (retry / raise the limit),
+ * `NETWORK_ERROR` (check the URL, DNS, TLS).
+ */
+function transportError(
+  cause: unknown,
+  deadline: Deadline,
+  method: string,
+  path: string,
+): RekeyError {
+  const where = `${method} ${path}`;
+
+  if (deadline.callerSignals.some((s) => s.aborted)) {
+    return new RekeyError({
+      code: 'REQUEST_ABORTED',
+      message: `${where} was aborted by the caller's AbortSignal.`,
+      fix: 'This is your own cancellation — swallow it, or check the signal you passed to `signal` / `Rekey.with({ signal })`.',
+      cause,
+    });
+  }
+
+  if (deadline.timer?.aborted || (isAbortError(cause) && deadline.timer !== undefined)) {
+    return new RekeyError({
+      code: 'REQUEST_TIMEOUT',
+      message: `${where} exceeded the ${deadline.timeoutMs}ms request deadline.`,
+      fix: 'Retry, or raise `timeoutMs` on the client / this call if the endpoint is legitimately slow. If it never responds, check `apiUrl` points at a reachable Rekey deployment.',
+      cause,
+    });
+  }
+
+  return new RekeyError({
+    code: 'NETWORK_ERROR',
+    message: `${where} failed before the server answered: ${
+      cause instanceof Error ? cause.message : String(cause)
+    }`,
+    fix: 'Check `apiUrl`, DNS, and that the Rekey deployment is reachable from this host. The underlying error is on `error.cause`.',
+    cause,
+  });
 }
 
 /**
@@ -293,7 +587,7 @@ class McpClient {
 
   private async slug(): Promise<string> {
     if (this.slugCache) return this.slugCache;
-    const app = await this.client.request<ApplicationDto>('GET', '/api/v1/me/');
+    const app = await this.client.send<ApplicationDto>('GET', '/api/v1/me/');
     this.slugCache = app.slug;
     return app.slug;
   }
@@ -350,7 +644,7 @@ class ApplicationsClient {
    * @throws {RekeyError} with `code: "API_KEY_INVALID"` if the key is wrong/revoked/expired.
    */
   me(): Promise<ApplicationDto> {
-    return this.client.request('GET', '/api/v1/me/');
+    return this.client.send('GET', '/api/v1/me/');
   }
 }
 
@@ -380,7 +674,7 @@ class AuthClient {
    * @throws {RekeyError} `AUTH_METHOD_DISABLED` (400) if the Application doesn't have `"password"` enabled.
    */
   signUp(input: SignUpRequest): Promise<AuthResultDto> {
-    return this.client.request('POST', '/api/v1/auth/sign-up', input);
+    return this.client.send('POST', '/api/v1/auth/sign-up', input);
   }
 
   /**
@@ -403,7 +697,7 @@ class AuthClient {
    *   `sendVerificationEmail`), not for the password again.
    */
   signIn(input: SignInRequest): Promise<SignInOutcomeDto> {
-    return this.client.request('POST', '/api/v1/auth/sign-in', input);
+    return this.client.send('POST', '/api/v1/auth/sign-in', input);
   }
 
   /**
@@ -418,7 +712,7 @@ class AuthClient {
    *   verify against the user's TOTP secret or remaining backup codes.
    */
   mfaVerify(input: MfaVerifyRequest): Promise<AuthResultDto> {
-    return this.client.request('POST', '/api/v1/auth/mfa-verify', input);
+    return this.client.send('POST', '/api/v1/auth/mfa-verify', input);
   }
 
   /**
@@ -435,7 +729,7 @@ class AuthClient {
     emailSent: boolean;
     magicLinkToken: string | null;
   }> {
-    return this.client.request('POST', '/api/v1/auth/magic-link/request', input);
+    return this.client.send('POST', '/api/v1/auth/magic-link/request', input);
   }
 
   /**
@@ -445,7 +739,7 @@ class AuthClient {
    * `mfaVerify(...)`.
    */
   verifyMagicLink(input: { token: string }): Promise<SignInOutcomeDto> {
-    return this.client.request('POST', '/api/v1/auth/magic-link/verify', input);
+    return this.client.send('POST', '/api/v1/auth/magic-link/verify', input);
   }
 
   /**
@@ -458,7 +752,7 @@ class AuthClient {
     options: unknown;
     expectedChallenge: string;
   }> {
-    return this.client.request('POST', '/api/v1/auth/passkey/authenticate/start', input ?? {});
+    return this.client.send('POST', '/api/v1/auth/passkey/authenticate/start', input ?? {});
   }
 
   /**
@@ -470,7 +764,7 @@ class AuthClient {
     response: unknown;
     expectedChallenge: string;
   }): Promise<SignInOutcomeDto> {
-    return this.client.request('POST', '/api/v1/auth/passkey/authenticate/complete', input);
+    return this.client.send('POST', '/api/v1/auth/passkey/authenticate/complete', input);
   }
 
   /**
@@ -483,7 +777,7 @@ class AuthClient {
     options: unknown;
     expectedChallenge: string;
   }> {
-    return this.client.request('POST', '/api/v1/auth/passkey/register/start', undefined, {
+    return this.client.send('POST', '/api/v1/auth/passkey/register/start', undefined, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -496,14 +790,22 @@ class AuthClient {
       deviceName?: string;
     },
   ): Promise<{ credentialId: string; deviceName: string | null }> {
-    return this.client.request('POST', '/api/v1/auth/passkey/register/complete', input, {
+    return this.client.send('POST', '/api/v1/auth/passkey/register/complete', input, {
       'X-Rekey-User-Token': accessToken,
     });
   }
 
-  /** List the user's registered passkeys. */
-  listPasskeys(accessToken: string): Promise<
-    Array<{
+  /**
+   * List the user's registered passkeys, newest first.
+   *
+   * Returns `{items, page}` — `page.total` is the number of passkeys the user
+   * has, independent of the window served.
+   */
+  listPasskeys(
+    accessToken: string,
+    page?: ListPage,
+  ): Promise<
+    Paged<{
       id: string;
       credentialId: string;
       deviceName: string | null;
@@ -511,14 +813,14 @@ class AuthClient {
       createdAt: string;
     }>
   > {
-    return this.client.request('GET', '/api/v1/auth/passkeys', undefined, {
+    return this.client.send('GET', `/api/v1/auth/passkeys${listQuery(page)}`, undefined, {
       'X-Rekey-User-Token': accessToken,
     });
   }
 
   /** Remove a passkey. Returns `{deleted: false}` if the row doesn't belong to this user. */
   deletePasskey(accessToken: string, credentialRowId: string): Promise<{ deleted: boolean }> {
-    return this.client.request(
+    return this.client.send(
       'DELETE',
       `/api/v1/auth/passkeys/${encodeURIComponent(credentialRowId)}`,
       undefined,
@@ -540,7 +842,7 @@ class AuthClient {
    *   by a different Application than the calling secret key represents.
    */
   getCurrentUser(accessToken: string): Promise<EndUserDto & { activeOrganizationId: string | null }> {
-    return this.client.request('GET', '/api/v1/users/me/', undefined, {
+    return this.client.send('GET', '/api/v1/users/me/', undefined, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -576,7 +878,7 @@ class AuthClient {
     accessToken: string,
     input: { metadata?: Record<string, unknown> | null },
   ): Promise<EndUserDto & { activeOrganizationId: string | null }> {
-    return this.client.request('PATCH', '/api/v1/users/me/', input, {
+    return this.client.send('PATCH', '/api/v1/users/me/', input, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -594,7 +896,7 @@ class AuthClient {
     // /auth/refresh returns the same shape as /auth/mfa-verify — always a
     // full session (refresh requires a prior MFA-verified session by
     // definition).
-    return this.client.request('POST', '/api/v1/auth/refresh', { refreshToken });
+    return this.client.send('POST', '/api/v1/auth/refresh', { refreshToken });
   }
 
   /**
@@ -604,7 +906,7 @@ class AuthClient {
    * the access token from your client.
    */
   signOut(refreshToken: string): Promise<{ signedOut: true }> {
-    return this.client.request('POST', '/api/v1/auth/sign-out', { refreshToken });
+    return this.client.send('POST', '/api/v1/auth/sign-out', { refreshToken });
   }
 
   /**
@@ -627,7 +929,7 @@ class AuthClient {
    * ```
    */
   requestPasswordReset(input: ForgotPasswordRequest): Promise<ForgotPasswordResultDto> {
-    return this.client.request('POST', '/api/v1/auth/forgot-password', input);
+    return this.client.send('POST', '/api/v1/auth/forgot-password', input);
   }
 
   /**
@@ -638,7 +940,7 @@ class AuthClient {
    * @throws {RekeyError} `PASSWORD_TOO_SHORT` if below the Application's `passwordMinLength`
    */
   resetPassword(input: ResetPasswordRequest): Promise<{ ok: true }> {
-    return this.client.request('POST', '/api/v1/auth/reset-password', input);
+    return this.client.send('POST', '/api/v1/auth/reset-password', input);
   }
 
   /**
@@ -647,7 +949,7 @@ class AuthClient {
    * are signed out.
    */
   changePassword(accessToken: string, input: ChangePasswordRequest): Promise<{ ok: true }> {
-    return this.client.request('POST', '/api/v1/auth/change-password', input, {
+    return this.client.send('POST', '/api/v1/auth/change-password', input, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -658,7 +960,7 @@ class AuthClient {
    * — clear it client-side for full logout.
    */
   signOutEverywhere(accessToken: string): Promise<{ revokedCount: number }> {
-    return this.client.request(
+    return this.client.send(
       'POST',
       '/api/v1/auth/sign-out-everywhere',
       undefined,
@@ -679,7 +981,7 @@ class AuthClient {
     accessToken: string,
     input?: { verifyUrl?: string },
   ): Promise<{ emailSent: boolean; verificationToken: string | null }> {
-    return this.client.request('POST', '/api/v1/auth/send-verification', input ?? {}, {
+    return this.client.send('POST', '/api/v1/auth/send-verification', input ?? {}, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -721,7 +1023,7 @@ class AuthClient {
     email: string;
     verifyUrl?: string;
   }): Promise<{ emailSent: boolean; verificationToken: string | null }> {
-    return this.client.request('POST', '/api/v1/auth/resend-verification', input);
+    return this.client.send('POST', '/api/v1/auth/resend-verification', input);
   }
 
   /**
@@ -730,7 +1032,7 @@ class AuthClient {
    * tokens are refused with `EMAIL_VERIFICATION_TOKEN_WRONG_APPLICATION`.
    */
   verifyEmail(input: { token: string }): Promise<{ verified: true; endUser: EndUserDto }> {
-    return this.client.request('POST', '/api/v1/auth/verify-email', input);
+    return this.client.send('POST', '/api/v1/auth/verify-email', input);
   }
 
   // ---------- Active sessions ----------
@@ -740,8 +1042,11 @@ class AuthClient {
    * first. Each carries the User-Agent + IP captured at issue time and an
    * `id` you can pass to `revokeSession(...)`.
    */
-  listSessions(accessToken: string): Promise<
-    Array<{
+  listSessions(
+    accessToken: string,
+    page?: ListPage,
+  ): Promise<
+    Paged<{
       id: string;
       createdAt: string;
       expiresAt: string;
@@ -749,14 +1054,14 @@ class AuthClient {
       ip: string | null;
     }>
   > {
-    return this.client.request('GET', '/api/v1/auth/sessions', undefined, {
+    return this.client.send('GET', `/api/v1/auth/sessions${listQuery(page)}`, undefined, {
       'X-Rekey-User-Token': accessToken,
     });
   }
 
   /** Revoke one session by id. Idempotent — `{ revoked: false }` if it isn't this user's. */
   revokeSession(accessToken: string, sessionId: string): Promise<{ revoked: boolean }> {
-    return this.client.request(
+    return this.client.send(
       'DELETE',
       `/api/v1/auth/sessions/${encodeURIComponent(sessionId)}`,
       undefined,
@@ -777,7 +1082,7 @@ class AuthClient {
     remainingBackupCodes: number | null;
     policy: 'off' | 'optional' | 'required';
   }> {
-    return this.client.request('GET', '/api/v1/auth/mfa/status', undefined, {
+    return this.client.send('GET', '/api/v1/auth/mfa/status', undefined, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -792,14 +1097,14 @@ class AuthClient {
     backupCodes: string[];
     warning: string;
   }> {
-    return this.client.request('POST', '/api/v1/auth/mfa/setup', undefined, {
+    return this.client.send('POST', '/api/v1/auth/mfa/setup', undefined, {
       'X-Rekey-User-Token': accessToken,
     });
   }
 
   /** Confirm enrollment by submitting the current 6-digit TOTP code. */
   confirmMfaSetup(accessToken: string, code: string): Promise<{ ok: true }> {
-    return this.client.request('POST', '/api/v1/auth/mfa/setup-confirm', { code }, {
+    return this.client.send('POST', '/api/v1/auth/mfa/setup-confirm', { code }, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -809,14 +1114,14 @@ class AuthClient {
    * Backup codes are single-use — consumed on success. Returns `{ ok }`.
    */
   mfaChallenge(accessToken: string, code: string): Promise<{ ok: boolean }> {
-    return this.client.request('POST', '/api/v1/auth/mfa/challenge', { code }, {
+    return this.client.send('POST', '/api/v1/auth/mfa/challenge', { code }, {
       'X-Rekey-User-Token': accessToken,
     });
   }
 
   /** Disable MFA for the current user. */
   disableMfa(accessToken: string): Promise<{ disabled: true }> {
-    return this.client.request('POST', '/api/v1/auth/mfa/disable', undefined, {
+    return this.client.send('POST', '/api/v1/auth/mfa/disable', undefined, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -832,7 +1137,7 @@ class AuthClient {
    * unguessable `state` and verify it on return before calling `completeOAuth`.
    */
   startOAuth(provider: string, state: string): Promise<{ authorizationUrl: string }> {
-    return this.client.request(
+    return this.client.send(
       'POST',
       `/api/v1/auth/oauth/${encodeURIComponent(provider)}/start`,
       { state },
@@ -845,7 +1150,7 @@ class AuthClient {
    * Verify the `state` CSRF value yourself before calling.
    */
   completeOAuth(provider: string, code: string): Promise<SignInOutcomeDto> {
-    return this.client.request(
+    return this.client.send(
       'POST',
       `/api/v1/auth/oauth/${encodeURIComponent(provider)}/callback`,
       { code },
@@ -861,7 +1166,7 @@ class AuthClient {
       createdAt: string;
     }>
   > {
-    return this.client.request('GET', '/api/v1/auth/oauth/identities', undefined, {
+    return this.client.send('GET', '/api/v1/auth/oauth/identities', undefined, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -872,7 +1177,7 @@ class AuthClient {
     provider: string,
     state: string,
   ): Promise<{ authorizationUrl: string }> {
-    return this.client.request(
+    return this.client.send(
       'POST',
       `/api/v1/auth/oauth/${encodeURIComponent(provider)}/link/start`,
       { state },
@@ -890,7 +1195,7 @@ class AuthClient {
     provider: string,
     code: string,
   ): Promise<{ provider: string; providerAccountId: string; alreadyLinked: boolean }> {
-    return this.client.request(
+    return this.client.send(
       'POST',
       `/api/v1/auth/oauth/${encodeURIComponent(provider)}/link/complete`,
       { code },
@@ -903,7 +1208,7 @@ class AuthClient {
    * if it would leave the account with no way to sign in.
    */
   unlinkOAuth(accessToken: string, provider: string): Promise<{ unlinked: boolean }> {
-    return this.client.request(
+    return this.client.send(
       'DELETE',
       `/api/v1/auth/oauth/${encodeURIComponent(provider)}`,
       undefined,
@@ -912,12 +1217,17 @@ class AuthClient {
   }
 }
 
-/** Optional offset pagination for list endpoints. The API caps these lists
- *  (default 50, max 100); pass `offset` to page beyond the first window. */
-export interface ListPage {
-  limit?: number;
-  offset?: number;
-}
+/**
+ * Optional offset pagination for list endpoints. The API caps these lists
+ * (default 50, max 100); pass `offset` to page beyond the first window.
+ *
+ * Re-exported from `@rekey.dev/shared-types` so the SDK, the API and the panel
+ * all name one shape. Every list method returns {@link Paged}, whose `page`
+ * tells you whether there is another window — you no longer have to infer it
+ * by asking for one row more than you need.
+ */
+export type { ListPage, PageMeta, Paged } from '@rekey.dev/shared-types';
+
 function listQuery(page?: ListPage): string {
   if (!page) return '';
   const p = new URLSearchParams();
@@ -935,22 +1245,26 @@ class OrganizationsClient {
     accessToken: string,
     input: { name: string; slug: string; metadata?: Record<string, unknown> },
   ): Promise<{ organization: OrganizationDto; membership: { id: string; role: 'OWNER' } }> {
-    return this.client.request('POST', '/api/v1/users/me/organizations/', input, {
+    return this.client.send('POST', '/api/v1/users/me/organizations/', input, {
       'X-Rekey-User-Token': accessToken,
     });
   }
 
-  /** List organizations the calling user belongs to, with their role. The
-   *  result is paginated (default 50, max 100); pass `page.offset` for more. */
-  listMine(accessToken: string, page?: ListPage): Promise<OrganizationWithRoleDto[]> {
-    return this.client.request('GET', `/api/v1/users/me/organizations/${listQuery(page)}`, undefined, {
+  /**
+   * List organizations the calling user belongs to, with their role.
+   *
+   * Paginated (default 50, max 100). Read `page.hasMore` / `page.total` from
+   * the result rather than guessing from `items.length`.
+   */
+  listMine(accessToken: string, page?: ListPage): Promise<Paged<OrganizationWithRoleDto>> {
+    return this.client.send('GET', `/api/v1/users/me/organizations/${listQuery(page)}`, undefined, {
       'X-Rekey-User-Token': accessToken,
     });
   }
 
   /** Fetch one organization the caller belongs to. */
   get(accessToken: string, organizationId: string): Promise<OrganizationWithRoleDto> {
-    return this.client.request(
+    return this.client.send(
       'GET',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}`,
       undefined,
@@ -964,7 +1278,7 @@ class OrganizationsClient {
     organizationId: string,
     input: { name?: string; metadata?: Record<string, unknown> },
   ): Promise<OrganizationDto> {
-    return this.client.request(
+    return this.client.send(
       'PATCH',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}`,
       input,
@@ -972,14 +1286,18 @@ class OrganizationsClient {
     );
   }
 
-  /** List members of an organization the caller belongs to. Paginated
-   *  (default 50, max 100); pass `page.offset` to page beyond the first window. */
+  /**
+   * List members of an organization the caller belongs to.
+   *
+   * Paginated (default 50, max 100). `page.total` is the org's member count,
+   * so you do not need a second call to render "3 of 40".
+   */
   listMembers(
     accessToken: string,
     organizationId: string,
     page?: ListPage,
-  ): Promise<OrganizationMemberDto[]> {
-    return this.client.request(
+  ): Promise<Paged<OrganizationMemberDto>> {
+    return this.client.send(
       'GET',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/members${listQuery(page)}`,
       undefined,
@@ -996,7 +1314,7 @@ class OrganizationsClient {
     organizationId: string,
     input: { email: string; role: 'OWNER' | 'ADMIN' | 'MEMBER' },
   ): Promise<{ invitation: OrganizationInvitationDto; token: string }> {
-    return this.client.request(
+    return this.client.send(
       'POST',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/invitations`,
       input,
@@ -1010,7 +1328,7 @@ class OrganizationsClient {
     organizationId: string,
     invitationId: string,
   ): Promise<{ revoked: boolean }> {
-    return this.client.request(
+    return this.client.send(
       'POST',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/invitations/${encodeURIComponent(invitationId)}/revoke`,
       undefined,
@@ -1033,7 +1351,7 @@ class OrganizationsClient {
     endUserId: string;
     role: 'OWNER' | 'ADMIN' | 'MEMBER';
   }> {
-    return this.client.request(
+    return this.client.send(
       'PATCH',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(targetEndUserId)}`,
       input,
@@ -1053,7 +1371,7 @@ class OrganizationsClient {
     organizationId: string,
     targetEndUserId: string,
   ): Promise<{ removed: boolean }> {
-    return this.client.request(
+    return this.client.send(
       'DELETE',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(targetEndUserId)}`,
       undefined,
@@ -1067,7 +1385,7 @@ class OrganizationsClient {
    * first, or demote yourself to ADMIN if there is another OWNER.
    */
   leave(accessToken: string, organizationId: string): Promise<{ removed: boolean }> {
-    return this.client.request(
+    return this.client.send(
       'POST',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/leave`,
       undefined,
@@ -1089,7 +1407,7 @@ class OrganizationsClient {
       role: 'OWNER' | 'ADMIN' | 'MEMBER';
     };
   }> {
-    return this.client.request(
+    return this.client.send(
       'POST',
       '/api/v1/auth/organizations/accept-invitation',
       input,
@@ -1106,7 +1424,7 @@ class OrganizationsClient {
    * you switch again, clear it, or leave the org.
    */
   switch(accessToken: string, organizationId: string): Promise<AuthResultDto> {
-    return this.client.request(
+    return this.client.send(
       'POST',
       `/api/v1/users/me/organizations/${encodeURIComponent(organizationId)}/switch`,
       undefined,
@@ -1119,7 +1437,7 @@ class OrganizationsClient {
    * Returns a fresh token pair (no active org); **store both**.
    */
   clearActive(accessToken: string): Promise<AuthResultDto> {
-    return this.client.request(
+    return this.client.send(
       'POST',
       '/api/v1/users/me/organizations/clear-active-organization',
       undefined,
@@ -1156,7 +1474,7 @@ class LicensesClient {
     machineFingerprint: string;
     label?: string;
   }): Promise<LicenseVerifyResultDto> {
-    return this.client.request('POST', '/api/v1/licenses/verify', input);
+    return this.client.send('POST', '/api/v1/licenses/verify', input);
   }
 }
 
@@ -1178,7 +1496,7 @@ class UsageClient {
     occurredAt?: string;
     metadata?: Record<string, unknown>;
   }): Promise<UsageRecordDto> {
-    return this.client.request('POST', '/api/v1/usage/record', input);
+    return this.client.send('POST', '/api/v1/usage/record', input);
   }
 
   /**
@@ -1199,7 +1517,7 @@ class UsageClient {
     if (input.to) params.set('to', input.to);
     if (input.endUserId) params.set('endUserId', input.endUserId);
     if (input.organizationId) params.set('organizationId', input.organizationId);
-    return this.client.request('GET', `/api/v1/usage/aggregate?${params.toString()}`);
+    return this.client.send('GET', `/api/v1/usage/aggregate?${params.toString()}`);
   }
 }
 
@@ -1229,7 +1547,7 @@ class CreditsClient {
 
   /** Current spendable balance for a subject (end-user or org); 0 if none. */
   getBalance(subject: CreditSubject): Promise<CreditBalanceDto> {
-    return this.client.request('GET', `/api/v1/credits/balance?${creditSubjectQuery(subject)}`);
+    return this.client.send('GET', `/api/v1/credits/balance?${creditSubjectQuery(subject)}`);
   }
 
   /**
@@ -1240,7 +1558,7 @@ class CreditsClient {
    * double-charges — a repeat returns the original result with `applied: false`.
    */
   consume(input: ConsumeCreditsRequest & CreditSubject): Promise<ConsumeCreditsResultDto> {
-    return this.client.request('POST', '/api/v1/credits/consume', input);
+    return this.client.send('POST', '/api/v1/credits/consume', input);
   }
 
   /**
@@ -1252,11 +1570,11 @@ class CreditsClient {
     subject: CreditSubject,
     limit?: number,
     offset?: number,
-  ): Promise<CreditLedgerEntryDto[]> {
+  ): Promise<Paged<CreditLedgerEntryDto>> {
     const params = new URLSearchParams(creditSubjectQuery(subject));
     if (limit !== undefined) params.set('limit', String(limit));
     if (offset !== undefined) params.set('offset', String(offset));
-    return this.client.request('GET', `/api/v1/credits/ledger?${params.toString()}`);
+    return this.client.send('GET', `/api/v1/credits/ledger?${params.toString()}`);
   }
 }
 
@@ -1398,6 +1716,28 @@ export interface VerifiedAccessTokenClaims {
 
 export interface VerifyAccessTokenOptions {
   /**
+   * The Application this token must belong to. **Required.**
+   *
+   * This helper verifies RS256 tokens against the deployment's JWKS, and the
+   * RS256 keypair is deployment-wide — `SigningKey` has no `applicationId`
+   * column, and `eu_access` tokens carry no `iss`/`aud`. So a token minted for
+   * ANY Application on the same deployment is cryptographically valid here.
+   * Without this, a multi-app self-host accepts another Application's end-user
+   * as its own.
+   *
+   * (The HS256 default path is not affected: that key is derived per
+   * Application as `HMAC-SHA256(JWT_SECRET, applicationId:tokenGeneration)`, so
+   * a foreign token fails the signature. This is the RS256 opt-in only — which
+   * is exactly the path this function exists for.)
+   *
+   * Required rather than optional-with-a-warning: a security check nobody is
+   * forced to make is one most callers will not make, and the docblock used to
+   * tell them to compare `claims.applicationId` afterwards — which made the
+   * shortest correct path the insecure one. 2.0.0 is not out yet, so this
+   * breaks rc callers rather than a stable contract.
+   */
+  applicationId: string;
+  /**
    * URL of the deployment's JWKS — `https://<your-rekey>/.well-known/jwks.json`.
    * Fetched lazily and cached in-process for `cacheTtlMs` (default 5 minutes);
    * an unknown `kid` triggers one immediate refetch so freshly rotated keys
@@ -1410,6 +1750,16 @@ export interface VerifyAccessTokenOptions {
   fetch?: typeof fetch;
   /** JWKS cache lifetime in ms when using `jwksUrl`. Default 300 000 (5 min). */
   cacheTtlMs?: number;
+  /**
+   * Deadline for the JWKS fetch, in ms. Default {@link DEFAULT_TIMEOUT_MS}
+   * (10 000); `0` disables. This one matters more than most: token
+   * verification usually sits in a hot request path, and an unreachable JWKS
+   * host would otherwise stall it for undici's five-minute header timeout.
+   * Pass a pre-fetched `jwks` to skip the network entirely.
+   */
+  timeoutMs?: number | undefined;
+  /** Abort signal for the JWKS fetch. Composed with the deadline. */
+  signal?: AbortSignal | undefined;
   /** Clock override for tests. Returns ms since epoch. */
   now?: () => number;
 }
@@ -1443,7 +1793,13 @@ async function loadJwks(
   if (cached && !forceRefetch && Date.now() - cached.fetchedAt <= ttl) return cached.jwks;
 
   const fetchImpl = options.fetch ?? fetch;
-  const res = await fetchImpl(url);
+  const deadline = createDeadline(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, undefined, options.signal);
+  let res: Response;
+  try {
+    res = await fetchImpl(url, deadline.signal ? { signal: deadline.signal } : {});
+  } catch (cause) {
+    throw transportError(cause, deadline, 'GET', url);
+  }
   if (!res.ok) {
     throw new RekeyError({
       code: 'JWKS_FETCH_FAILED',
@@ -1452,7 +1808,18 @@ async function loadJwks(
       statusCode: res.status,
     });
   }
-  const jwks = (await res.json()) as JwksDto;
+  let jwks: JwksDto;
+  try {
+    jwks = (await res.json()) as JwksDto;
+  } catch (cause) {
+    if (isAbortError(cause)) throw transportError(cause, deadline, 'GET', url);
+    throw new RekeyError({
+      code: 'JWKS_FETCH_FAILED',
+      message: `The JWKS endpoint at ${url} did not return JSON.`,
+      fix: 'Check the URL points at /.well-known/jwks.json, not an HTML error page.',
+      cause,
+    });
+  }
   if (!jwks || !Array.isArray(jwks.keys)) {
     throw new RekeyError({
       code: 'JWKS_FETCH_FAILED',
@@ -1490,11 +1857,19 @@ async function loadJwks(
  * import { verifyAccessToken } from '@rekey.dev/node';
  *
  * const claims = await verifyAccessToken(req.headers['x-rekey-user-token'], {
+ *   applicationId: MY_APP_ID,
  *   jwksUrl: 'https://rekey.example.com/.well-known/jwks.json',
  * });
- * if (claims.applicationId !== MY_APP_ID) throw new Error('wrong app');
  * req.userId = claims.sub;
  * ```
+ *
+ * `applicationId` is required and checked inside this function. The RS256
+ * keypair is deployment-wide and `eu_access` tokens carry no `iss`/`aud`, so
+ * without it a token minted for any other Application on the same deployment
+ * verifies here with a perfectly valid signature. This example used to show
+ * the comparison being done by the caller afterwards, which is precisely why
+ * it moved inside: the shortest correct path should not be the one nobody
+ * takes.
  *
  * @throws {RekeyError} `TOKEN_ALG_NOT_RS256` — token is HS256 (app hasn't opted in) or another alg.
  * @throws {RekeyError} `TOKEN_KID_UNKNOWN` — `kid` not in the JWKS (forged, or key deleted).
@@ -1583,6 +1958,18 @@ export async function verifyAccessToken(
   if (typeof payload.sub !== 'string' || typeof payload.applicationId !== 'string') {
     throw invalid('Token is missing the sub/applicationId claims.');
   }
+
+  // Bind the token to ONE Application. The signing key is deployment-wide and
+  // `eu_access` carries no `iss`/`aud`, so a token minted for a different
+  // Application on the same deployment is cryptographically valid here — on a
+  // multi-app self-host that means accepting someone else's end-user as your
+  // own. The API does compare this server-side; the SDK left it to the caller
+  // and documented it as a follow-up step, which made the shortest correct
+  // path the one nobody takes.
+  if (payload.applicationId !== options.applicationId) {
+    throw invalid('Token was issued for a different Application.');
+  }
+
   const nowSec = Math.floor((options.now ? options.now() : Date.now()) / 1000);
   if (typeof payload.exp !== 'number' || payload.exp <= nowSec) {
     throw new RekeyError({
@@ -1607,8 +1994,8 @@ class BillingClient {
    * `amount` is in the smallest currency unit (cents/paise/sen) — never
    * a float. Format on display: `${amount / 100} ${currency}`.
    */
-  getPlans(): Promise<PlanDto[]> {
-    return this.client.request('GET', '/api/v1/billing/plans');
+  getPlans(page?: ListPage): Promise<Paged<PlanDto>> {
+    return this.client.send('GET', `/api/v1/billing/plans${listQuery(page)}`);
   }
 
   /**
@@ -1616,9 +2003,28 @@ class BillingClient {
    * have none. Returns the most recent ACTIVE / PENDING / PAST_DUE row.
    *
    * Pass the user's access token (the SDK puts it in `X-Rekey-User-Token`).
+   *
+   * `opts.includeEnded` falls back to the most recent CANCELED/EXPIRED
+   * subscription **only when the answer would otherwise be null** — for a
+   * billing page that has to tell a former subscriber what they were on and
+   * when it ended, rather than showing them the same blank state as somebody
+   * who never subscribed. It can never replace a live subscription, so it is
+   * safe to add to an existing call; it is off by default all the same,
+   * because an entitlement check wants the strict question.
+   *
+   * `opts.organizationId` reads an organization's subscription instead of the
+   * user's own on an org-billed app. The caller must be a member.
    */
-  getSubscription(accessToken: string): Promise<SubscriptionDto | null> {
-    return this.client.request('GET', '/api/v1/billing/subscription', undefined, {
+  getSubscription(
+    accessToken: string,
+    opts?: { organizationId?: string; includeEnded?: boolean },
+  ): Promise<SubscriptionDto | null> {
+    const qs = new URLSearchParams();
+    if (opts?.organizationId) qs.set('organizationId', opts.organizationId);
+    if (opts?.includeEnded) qs.set('includeEnded', 'true');
+    const query = qs.toString();
+    const suffix = query ? `?${query}` : '';
+    return this.client.send('GET', `/api/v1/billing/subscription${suffix}`, undefined, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -1651,7 +2057,7 @@ class BillingClient {
     accessToken: string,
     input: CreateCheckoutRequest & { couponCode?: string },
   ): Promise<CheckoutResultDto> {
-    return this.client.request('POST', '/api/v1/billing/checkout', input, {
+    return this.client.send('POST', '/api/v1/billing/checkout', input, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -1669,7 +2075,7 @@ class BillingClient {
     accessToken: string,
     input: ValidateCouponRequest,
   ): Promise<ValidateCouponResultDto> {
-    return this.client.request('POST', '/api/v1/billing/coupons/validate', input, {
+    return this.client.send('POST', '/api/v1/billing/coupons/validate', input, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -1687,7 +2093,7 @@ class BillingClient {
   getProviders(country?: string): Promise<ProvidersListDto> {
     const headers: Record<string, string> = {};
     if (country) headers['x-country'] = country.toUpperCase();
-    return this.client.request('GET', '/api/v1/billing/providers', undefined, headers);
+    return this.client.send('GET', '/api/v1/billing/providers', undefined, headers);
   }
 
   /**
@@ -1707,7 +2113,7 @@ class BillingClient {
     const qs = opts?.organizationId
       ? `?organizationId=${encodeURIComponent(opts.organizationId)}`
       : '';
-    return this.client.request('GET', `/api/v1/billing/entitlements${qs}`, undefined, {
+    return this.client.send('GET', `/api/v1/billing/entitlements${qs}`, undefined, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -1740,7 +2146,7 @@ class BillingClient {
     accessToken: string,
     input?: { atPeriodEnd?: boolean; organizationId?: string },
   ): Promise<SubscriptionDto> {
-    return this.client.request(
+    return this.client.send(
       'POST',
       '/api/v1/billing/subscription/cancel',
       {

@@ -9,7 +9,12 @@ A coupon is never both. If you want to model "10% off OR $5 off, whichever is gr
 
 ## Creating
 
-Admin-only — `POST /api/v1/admin/applications/:id/coupons`:
+Two equivalent routes, both live:
+
+- `POST /api/v1/tenant/applications/:id/coupons` — **operator session** (or an operator PAT), subject to the caller's per-application grants. This is the one the panel uses and the one you want.
+- `POST /api/v1/admin/applications/:id/coupons` — the super-admin twin, gated by `SUPER_ADMIN_KEY`, for bootstrap and scripting.
+
+Body (identical for both):
 
 ```json
 {
@@ -46,7 +51,7 @@ try {
 }
 ```
 
-`POST /api/v1/billing/coupons/validate` requires both an Application secret key and the user JWT (so per-user limits can be enforced).
+`POST /api/v1/billing/coupons/validate` takes an Application key — **publishable or secret** — plus the user JWT (the JWT is what lets per-user limits be enforced). It accepts the publishable key for exactly the same reason `POST /billing/checkout` does: a pricing page applying a coupon runs in the browser.
 
 ## Applying at checkout
 

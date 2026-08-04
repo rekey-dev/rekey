@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import { api, PanelApiError, type ApiKeyRow, type ApplicationRow } from '@/lib/api';
+import { api, PanelApiError, type ApiKeyRow, getApplication } from '@/lib/api';
 
 // One-time reveal of a freshly minted secret key. Carried in a short-lived,
 // httpOnly, path-scoped cookie instead of the URL query — a raw key in the URL
@@ -16,6 +16,7 @@ import { EmptyState } from '@/components/EmptyState';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate, formatDateTime } from '@/lib/date';
 import { keyPrefixFor } from '@/components/EnvironmentBadge';
+import { cookieSecure } from '@/lib/cookie-secure';
 
 /**
  * Scopes an API key can carry, mirroring `SCOPE_IMPLICATIONS` in the API's
@@ -146,7 +147,7 @@ async function createKey(applicationId: string, formData: FormData): Promise<voi
     jar.set(REVEAL_COOKIE, result.rawKey, {
       httpOnly: true,
       sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
+      secure: await cookieSecure(),
       path: `/applications/${applicationId}/api-keys`,
       maxAge: 120,
     });
@@ -194,10 +195,7 @@ export default async function ApiKeysPage({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/api-keys`,
     }),
-    api<ApplicationRow>({
-      method: 'GET',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-    }),
+    getApplication(id),
   ]);
   const graceUntil =
     app.previousPublicKeyValidUntil && new Date(app.previousPublicKeyValidUntil) > new Date()

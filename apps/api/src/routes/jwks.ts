@@ -18,6 +18,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { getJwks } from '../lib/signing-keys.js';
+import { errs } from '../lib/openapi.js';
 
 export async function jwksRoutes(app: FastifyInstance): Promise<void> {
   app.get(
@@ -55,6 +56,7 @@ export async function jwksRoutes(app: FastifyInstance): Promise<void> {
             },
             required: ['keys'],
           },
+          ...errs({ 429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.' }),
         },
       },
     },

@@ -190,6 +190,8 @@ Replay-chain revocation and sign-out-everywhere both shipped — see the refresh
 
 Operators manage end-users from the panel (or the `/api/v1/tenant/applications/:id/end-users*` routes): seed users manually, edit role/metadata/verified flag, grant credits, impersonate (audited, 5-minute token), and delete.
 
+Impersonation is bounded twice over. It is **revocable** — `POST /api/v1/tenant/applications/:id/end-users/:euid/impersonate/end` stamps `endedAt` on every open audit row for that user and invalidates the tokens they issued on the spot (`IMPERSONATION_SESSION_ENDED`), for any operator, not just the one who started it. And it **cannot change credentials**: password change, MFA setup/disable and passkey enrolment/removal answer 403 `IMPERSONATION_ACTION_FORBIDDEN` for an impersonated session, because those survive the five-minute token permanently and the user cannot tell who made them. Everything else the user can do — reads, billing, organizations, profile edits — is unchanged.
+
 ### Data export (DSAR)
 
 ```
@@ -216,14 +218,28 @@ Each Application has an `authConfig`:
 
 ```ts
 {
-  methods: ('password' | 'google' | 'github' | 'magic_link')[],
-  passwordMinLength: number,
+  // Open-ended strings, not a closed union — 'passkey' is valid too, and a
+  // provider added later needs no schema change.
+  methods: string[],                       // 'password' | 'google' | 'github' | 'magic_link' | 'passkey' | …
+  passwordMinLength: number,               // default 8
+  passwordBreachCheckEnabled: boolean,     // default true
   redirectUrls: string[],
-  organizationsEnabled: boolean,
+  appUrl?: string,                         // base URL emails link back to
+  signupMode?: 'public' | 'secret_only' | 'invite_only',
+  organizationsEnabled: boolean,           // default false
   sendVerificationEmailOnSignUp: boolean,  // default true
   requireEmailVerification: boolean,       // default false
+  mfa: 'off' | 'optional' | 'required',    // default 'optional'
+  tokenAlg: 'HS256' | 'RS256',             // default 'HS256' — see jwks.md
+  oidcEnabled: boolean,                    // default false — see oidc-provider.md
+  mcpEnabled: boolean,                     // default false — see mcp.md
+  dynamicClientRegistration: boolean,      // default true — per-Application MCP/OIDC, see mcp.md
+  webauthn?: { … },                        // passkey relying-party config
 }
 ```
+
+Abbreviated — `AuthConfigSchema` in `@rekey.dev/shared-types` is the authority,
+and `GET /api/v1/me/` returns the live value for the calling Application.
 
 The auth module enforces:
 - **`methods`** — sign-up/sign-in refuse with `AUTH_METHOD_DISABLED` if `"password"` isn't enabled.

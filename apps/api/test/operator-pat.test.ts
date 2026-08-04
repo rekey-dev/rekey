@@ -121,8 +121,8 @@ describe('Operator personal-access-tokens (PATs)', () => {
       headers: { authorization: `Bearer ${rawToken}` },
     });
     expect(res.statusCode).toBe(200);
-    const apps = res.json().data as Array<{ slug: string }>;
-    expect(apps.map((a) => a.slug)).toContain('read-app');
+    const apps = res.json().data as { items: Array<{ slug: string }> };
+    expect(apps.items.map((a) => a.slug)).toContain('read-app');
   });
 
   it('scope enforcement: a read-only PAT cannot mint API keys → 403', async () => {
@@ -291,13 +291,17 @@ describe('Operator personal-access-tokens (PATs)', () => {
       headers: { authorization: `Bearer ${op.accessToken}` },
     });
     expect(res.statusCode).toBe(200);
-    const tokens = res.json().data as Array<Record<string, unknown>>;
-    expect(tokens).toHaveLength(1);
-    const t = tokens[0]!;
+    const tokens = res.json().data as {
+      items: Array<Record<string, unknown>>;
+      page: { total: number };
+    };
+    expect(tokens.items).toHaveLength(1);
+    expect(tokens.page.total).toBe(1);
+    const t = tokens.items[0]!;
 
     // Redaction: no hash, no raw token anywhere in the response.
     expect(t).not.toHaveProperty('tokenHash');
-    const serialized = JSON.stringify(tokens);
+    const serialized = res.body;
     expect(serialized).not.toContain(rawToken);
     // Prefix is shown for identification; it is NOT the full raw token.
     expect(typeof t.tokenPrefix).toBe('string');

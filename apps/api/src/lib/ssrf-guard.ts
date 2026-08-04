@@ -210,7 +210,23 @@ export async function assertSafeHost(host: string, options: SafeUrlOptions = {})
   }
 }
 
-export async function assertSafeUrl(rawUrl: string, options: SafeUrlOptions = {}): Promise<void> {
+/**
+ * Validate a URL and return the addresses it resolved to.
+ *
+ * The addresses are the point. Checking a hostname and then handing the raw
+ * URL to `fetch` lets the runtime re-resolve independently, so a record with a
+ * short TTL that alternates public and private wins the race — the classic
+ * DNS-rebinding TOCTOU. The caller is expected to pin the connection to one of
+ * these, which `webhook.service.ts` does via an undici dispatcher.
+ *
+ * Exploitability here was above average: each event allows up to 5 delivery
+ * attempts, each resolving again, and a tenant can emit unlimited events by
+ * hitting their own application's signup endpoint.
+ */
+export async function assertSafeUrlResolved(
+  rawUrl: string,
+  options: SafeUrlOptions = {},
+): Promise<string[]> {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -221,7 +237,7 @@ export async function assertSafeUrl(rawUrl: string, options: SafeUrlOptions = {}
     throw blocked(`scheme "${parsed.protocol}" is not allowed; use http(s).`);
   }
   const allowPrivate = options.allowPrivate ?? env.WEBHOOK_ALLOW_PRIVATE_TARGETS;
-  if (allowPrivate) return;
+  if (allowPrivate) return [];
 
   const rawHost = parsed.hostname.toLowerCase();
   const host =
@@ -251,4 +267,13 @@ export async function assertSafeUrl(rawUrl: string, options: SafeUrlOptions = {}
       throw blocked(`"${host}" resolves to a private/loopback address.`);
     }
   }
+  return results.map((r) => r.address);
+}
+
+/** Back-compat wrapper for callers that do not pin the connection. */
+export async function assertSafeUrl(
+  rawUrl: string,
+  options: SafeUrlOptions = {},
+): Promise<void> {
+  await assertSafeUrlResolved(rawUrl, options);
 }

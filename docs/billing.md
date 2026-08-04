@@ -51,10 +51,28 @@ All gated by `SUPER_ADMIN_KEY`. Owned by the `plans` module.
 ```
 GET    /api/v1/admin/applications/:id/plans?includeInactive=true
 POST   /api/v1/admin/applications/:id/plans
-PATCH  /api/v1/admin/applications/:id/plans/:slug         { active: boolean }
+PATCH  /api/v1/admin/applications/:id/plans/:slug         { active?, name?, amount?, currency?, interval?, metadata? }
+POST   /api/v1/admin/applications/:id/plans/:slug/register
 ```
 
 Creating a plan calls `ensurePlanRegistered()` **only when the Application already has Stripe credentials stored**; the returned price id is persisted into `Plan.metadata.stripe`. PayPal and Razorpay register the plan lazily at first checkout. Making the call unconditional used to be fine when a stub always answered — once the stubs were deleted it meant a PayPal-only or Razorpay-only operator could not create a plan at all, and the error named Stripe, a provider they had never configured.
+
+### A plan is never on sale before the provider can charge for it
+
+`Plan.registrationStatus` is written **before** the provider round-trip and settled after it:
+
+| Status | Meaning | On the public catalogue? |
+|---|---|---|
+| `NOT_REQUIRED` | No eager registration owed — PayPal/Razorpay-only apps, or no billing configured. Registers lazily at first checkout. | yes |
+| `PENDING` | Inserted, provider call in flight (or the process died during it). | no |
+| `REGISTERED` | Provider acknowledged it; `metadata.<provider>` holds the price id. | yes |
+| `FAILED` | Provider refused. Forced `active: false`, with the refusal in `registrationError`. | no |
+
+A plan awaiting registration is inserted `active: false` and only promoted once the provider answers. The provider call is a network call, so it cannot sit inside a database transaction — the ordering is what makes it safe, not a transaction. Before this, a refused registration left the plan committed **and active**: it stayed on the pricing page, indistinguishable from a working plan, and every buyer who clicked it got a 500 out of checkout.
+
+Repairing one does not need a new slug. `PATCH` accepts `name`/`metadata` always, and `amount`/`currency`/`interval` while the plan is unregistered (there is no immutable provider price to contradict yet — a registered plan answers `PLAN_PRICE_IMMUTABLE`). `POST .../plans/:slug/register` then retries registration and puts the plan back on sale. Activating a plan with no provider price is refused outright with `PLAN_NOT_REGISTERED_WITH_PROVIDER`.
+
+Coupons have no equivalent hazard: nothing is registered with a provider at coupon-create time. The provider-side discount is minted per checkout and discarded if the session fails (`stripe-real.ts` `createDiscount`/`discardDiscount`).
 
 There is **no delete endpoint by design**. Plans referenced by historical Subscriptions need to live forever for accounting. Use `setActive(false)` to retire — that's the only way out.
 
@@ -68,16 +86,24 @@ GET   /api/v1/billing/subscription                           — Application key
 POST  /api/v1/billing/checkout    { planSlug, successUrl, cancelUrl }
 ```
 
-`POST /checkout` upserts a `PENDING` Subscription locally (so we can correlate the eventual webhook), then asks the provider to create a hosted-checkout session. Returns the URL to redirect to and the local Subscription row. **Subscription activation happens via the provider's webhook — not synchronously here.**
+`POST /checkout` asks the **provider first**: it creates the hosted-checkout session, and only once the provider has answered does it upsert the local `PENDING` Subscription (so the row can correlate the eventual webhook). Nothing local is written for a checkout the provider refused. Returns the URL to redirect to and the local Subscription row. **Subscription activation happens via the provider's webhook — not synchronously here.**
 
-If the user already started checkout for the same plan and bailed, repeated calls **reuse the existing PENDING row** rather than creating parallel ones. The unique constraint is `(applicationId, endUserId, planId)`.
+A provider refusal answers **`502 BILLING_PROVIDER_ERROR`**. This is the public surface, so the caller is the operator's *customer*: the message says only that the provider refused and who to contact, never the provider's own text or any fragment of the operator's credential. The provider's message goes to the server log against the response's `requestId`. See [errors.md](errors.md).
+
+If the user already started checkout for the same plan and bailed, repeated calls **reuse the existing PENDING row** rather than creating parallel ones. The unique constraint is `(applicationId, endUserId, planId)`. An already-entitled row (`ACTIVE`/`PAST_DUE`) is **not** reset to `PENDING` — opening a checkout is not an event that removes entitlement.
 
 ## SDK usage
 
 ```ts
 // Pricing page (server-side render)
-const plans = await rekey.billing.getPlans();
-// → [{ slug: "pro_monthly", amount: 999, currency: "USD", interval: "MONTH", ... }]
+const { items: plans, page } = await rekey.billing.getPlans();
+// → {
+//     items: [{ slug: "pro_monthly", amount: 999, currency: "USD", interval: "MONTH", ... }],
+//     page:  { total: 4, limit: 50, offset: 0, hasMore: false }
+//   }
+// Every list endpoint returns this envelope. `page.hasMore` is how you learn
+// the response was a window rather than the whole catalogue — pass
+// `{ offset: page.offset + page.limit }` for the next one.
 
 // User clicks "Subscribe"
 const { url } = await rekey.billing.createCheckout(userAccessToken, {
@@ -87,12 +113,23 @@ const { url } = await rekey.billing.createCheckout(userAccessToken, {
 });
 res.redirect(url);
 
-// Account page
-const sub = await rekey.billing.getSubscription(userAccessToken);
+// Account page.
+//
+// `includeEnded` because a billing page has to answer "what happened to my
+// subscription", not only "am I entitled". Without it this returns null the
+// moment a subscription reaches CANCELED, and a customer who cancelled last
+// month sees the same page as one who never subscribed. The flag can only turn
+// a null into a row — a live subscription is still the one returned — so it is
+// safe to add to a call you already make. Leave it OFF where you are deciding
+// access.
+const sub = await rekey.billing.getSubscription(userAccessToken, { includeEnded: true });
 if (sub === null) {
   // user hasn't subscribed — show upsell
 } else if (sub.status === 'ACTIVE') {
-  // gate features on sub.planId
+  // gate features on sub.planId (cancelAt set = cancelling, still entitled)
+} else {
+  // CANCELED / EXPIRED — say what they were on and when it ended, and offer
+  // a way back. Do NOT treat this as entitled.
 }
 ```
 

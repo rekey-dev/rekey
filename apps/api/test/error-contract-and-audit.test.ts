@@ -350,6 +350,11 @@ describe('Error contract, audit trail, and withheld operator data', () => {
         responseBody: string | null;
       }
 
+      interface DeliveryPage {
+        items: DeliveryRow[];
+        page: { total: number; limit: number; offset: number; hasMore: boolean };
+      }
+
       it('serves the payload and the response body it always selected', async () => {
         const endpointId = await seedEndpointWithDeliveries();
         const res = await app.inject({
@@ -358,8 +363,9 @@ describe('Error contract, audit trail, and withheld operator data', () => {
           headers: { authorization: `Bearer ${operatorToken}` },
         });
         expect(res.statusCode).toBe(200);
-        const rows = (res.json() as { data: DeliveryRow[] }).data;
+        const { items: rows, page } = (res.json() as { data: DeliveryPage }).data;
         expect(rows).toHaveLength(2);
+        expect(page).toMatchObject({ total: 2, hasMore: false });
         const failed = rows.find((r) => r.status === 'FAILED')!;
         // The two fields the route read out of the database and dropped.
         expect(failed.responseBody).toBe('upstream exploded');
@@ -373,8 +379,10 @@ describe('Error contract, audit trail, and withheld operator data', () => {
           url: `/api/v1/tenant/applications/${applicationId}/webhooks/${endpointId}/deliveries?status=FAILED`,
           headers: { authorization: `Bearer ${operatorToken}` },
         });
-        const rows = (res.json() as { data: DeliveryRow[] }).data;
+        const { items: rows, page } = (res.json() as { data: DeliveryPage }).data;
         expect(rows).toHaveLength(1);
+        // The count respects ?status= too — the unfiltered 2 must not leak into it.
+        expect(page.total).toBe(1);
         expect(rows[0]!.status).toBe('FAILED');
       });
 

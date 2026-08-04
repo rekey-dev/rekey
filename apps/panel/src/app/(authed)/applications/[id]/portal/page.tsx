@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
+import { api, PanelApiError, getApplication } from '@/lib/api';
 import { CopyButton } from '@/components/CopyButton';
 import { SectionHeader } from '@/components/Card';
 import { SubmitButton } from '@/components/SubmitButton';
@@ -95,10 +95,7 @@ export default async function PortalPage({
   const { id } = await params;
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
-  const app = await api<ApplicationRow>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-  });
+  const app = await getApplication(id);
   const enabled = Boolean(app.hostedPortalEnabled);
   const portalUrl = `${PORTAL_BASE}/${app.slug}`;
   const b = (app.portalBranding ?? {}) as {

@@ -80,6 +80,17 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
           'Returns 200 as soon as the process can serve HTTP. Touches no dependencies, so ' +
           'it stays green through a database or Redis outage. Unauthenticated and exempt ' +
           'from rate limiting so an orchestrator can always reach it.',
+        response: {
+          200: {
+            description: 'The process is up. No `{success, data}` envelope — this route predates it.',
+            type: 'object',
+            properties: {
+              status: { type: 'string', enum: ['ok'] },
+              service: { type: 'string', enum: ['rekey-api'] },
+            },
+            required: ['status', 'service'],
+          },
+        },
       },
     },
     async () => {
@@ -98,6 +109,30 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
         description:
           '503 `not_ready` when Postgres is unreachable or a configured Redis is down, 200 ' +
           '`ready` otherwise. Unauthenticated and exempt from rate limiting.',
+        response: {
+          200: {
+            description: 'Ready to serve traffic. No `{success, data}` envelope — this route predates it.',
+            type: 'object',
+            properties: {
+              status: { type: 'string', enum: ['ready'] },
+              db: { type: 'string', enum: ['ok', 'unreachable'] },
+              redis: { type: 'string', enum: ['ok', 'unreachable', 'not_configured'] },
+            },
+            required: ['status', 'db', 'redis'],
+          },
+          503: {
+            description:
+              'Not ready: Postgres is unreachable, or a configured Redis is down. No ' +
+              '`{success, error}` envelope — this route answers directly, not through rekeyErrorHandler.',
+            type: 'object',
+            properties: {
+              status: { type: 'string', enum: ['not_ready'] },
+              db: { type: 'string', enum: ['ok', 'unreachable'] },
+              redis: { type: 'string', enum: ['ok', 'unreachable', 'not_configured'] },
+            },
+            required: ['status', 'db', 'redis'],
+          },
+        },
       },
     },
     async (_req, reply) => {
@@ -122,6 +157,32 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
         description:
           '200 `ok` or 503 `degraded`, plus `db` and `redis` fields so an operator can see ' +
           'which half is sick. Unauthenticated and exempt from rate limiting.',
+        response: {
+          200: {
+            description: 'Healthy. No `{success, data}` envelope — this route predates it.',
+            type: 'object',
+            properties: {
+              status: { type: 'string', enum: ['ok'] },
+              service: { type: 'string', enum: ['rekey-api'] },
+              db: { type: 'string', enum: ['ok', 'unreachable'] },
+              redis: { type: 'string', enum: ['ok', 'unreachable', 'not_configured'] },
+            },
+            required: ['status', 'service', 'db', 'redis'],
+          },
+          503: {
+            description:
+              'Degraded: Postgres is unreachable, or a configured Redis is down. No ' +
+              '`{success, error}` envelope — this route answers directly, not through rekeyErrorHandler.',
+            type: 'object',
+            properties: {
+              status: { type: 'string', enum: ['degraded'] },
+              service: { type: 'string', enum: ['rekey-api'] },
+              db: { type: 'string', enum: ['ok', 'unreachable'] },
+              redis: { type: 'string', enum: ['ok', 'unreachable', 'not_configured'] },
+            },
+            required: ['status', 'service', 'db', 'redis'],
+          },
+        },
       },
     },
     async (_req, reply) => {

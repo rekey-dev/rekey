@@ -66,6 +66,11 @@ export const SECURITY_EVENT_LABEL = {
   'app.coupon_created': 'Coupon created',
   'app.coupon_updated': 'Coupon updated',
   'app.subscription_canceled': 'Subscription canceled by operator',
+  // A subscription activated with no payment provider behind it — an invoice,
+  // a bank transfer, a comped account. It is the one billing write that
+  // CREATES entitlement on somebody's say-so rather than following money the
+  // deployment can see, which is exactly why it is in the trail.
+  'app.subscription_granted': 'Subscription granted without a payment provider',
   'app.webhook_endpoint_created': 'Webhook endpoint created',
   'app.webhook_endpoint_updated': 'Webhook endpoint updated',
 
@@ -83,6 +88,15 @@ export const SECURITY_EVENT_LABEL = {
   'user.passkey_added': 'End-user added a passkey',
   'user.passkey_removed': 'End-user removed a passkey',
   'user.sessions_revoked': 'End-user revoked their sessions',
+  // App-authorised session handoff — the Application's own server exchanged a
+  // live end-user session for an OIDC authorization code (see
+  // POST /api/v1/mcp/:slug/oauth/authorize/grant). The end-user is the actor
+  // because it is their session being handed on; the Application that did it
+  // is named in `applicationId`, and the client it was handed to is in
+  // `metadata.clientId`. This is the audit trail that makes a stolen secret
+  // key investigable rather than invisible — without it, the handoff would be
+  // indistinguishable from an ordinary interactive sign-in.
+  'user.session_handoff_granted': 'End-user session handed off by the application server',
 
   // ── Operator actions ON an end-user ──
   'end_user.erased': 'End-user erased (GDPR)',
@@ -97,6 +111,11 @@ export const SECURITY_EVENT_LABEL = {
   'workspace.member_removed': 'Teammate removed',
   'member.app_grant_set': 'Application access granted to member',
   'member.app_grant_removed': 'Application access removed from member',
+  // A membership written by deployment automation through the super-admin
+  // surface rather than by an invitation someone accepted. Distinct from
+  // `workspace.member_invited` on purpose: a member appearing with no
+  // invitation behind them should be explicable from the log alone.
+  'workspace.member_added_by_admin': 'Teammate added by deployment automation',
 
   // ── Deployment administration ──
   'admin.operator_invite.minted': 'Operator invite minted',

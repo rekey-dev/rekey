@@ -143,6 +143,39 @@ describe('WORKSPACE_CREATION', () => {
 
   // ---------- misconfiguration ----------
 
+  // ---------- the UX hint the panel renders from ----------
+
+  it('advertises the mode so the panel can hide an affordance that would refuse', async () => {
+    const { accessToken } = await signUp('mode@example.com', 'Mode Co');
+    const auth = { authorization: `Bearer ${accessToken}` };
+
+    const open = await app.inject({
+      method: 'GET',
+      url: '/api/v1/tenant/workspace/creation-mode',
+      headers: auth,
+    });
+    expect(open.statusCode).toBe(200);
+    expect((open.json().data as { mode: string }).mode).toBe('open');
+
+    process.env.WORKSPACE_CREATION = 'disabled';
+    const disabled = await app.inject({
+      method: 'GET',
+      url: '/api/v1/tenant/workspace/creation-mode',
+      headers: auth,
+    });
+    expect((disabled.json().data as { mode: string }).mode).toBe('disabled');
+
+    // The hint and the enforcement must agree — a panel that hides the button
+    // while the server still permits it (or the reverse) is the bug this pair
+    // exists to prevent.
+    expect((await createWorkspace(accessToken, 'Refused')).statusCode).toBe(403);
+  });
+
+  it('requires a session to read the mode — it is a hint for operators, not the world', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/tenant/workspace/creation-mode' });
+    expect(res.statusCode).toBe(401);
+  });
+
   it('an unrecognised runtime value falls back to the boot value, not to open-by-accident', async () => {
     const { accessToken } = await signUp('typo@example.com', 'Typo Co');
     // Boot value here is the default 'open', so a typo must behave like 'open'

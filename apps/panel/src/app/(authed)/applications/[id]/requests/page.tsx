@@ -1,6 +1,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { api, type ApiRequestLogRow } from '@/lib/api';
+import type { Page } from '@/lib/paginate';
 import { RequestLogTable } from '@/components/RequestLogTable';
 import { EmptyState } from '@/components/EmptyState';
 import { Pager, readPageSize } from '@/components/Pager';
@@ -27,7 +28,11 @@ export default async function RequestsPage({
   const qs = new URLSearchParams({ limit: String(PAGE_SIZE) });
   if (offset) qs.set('offset', String(offset));
 
-  const { requests } = await api<{ requests: ApiRequestLogRow[] }>({
+  // `page.total` counts what the pruner has left for this Application, not
+  // every request it has ever served — the route is a capped convenience tail.
+  // It is still the real answer to "is there another page", which the old
+  // `{requests: […]}` wrapper could not give at all.
+  const { items: requests, page } = await api<Page<ApiRequestLogRow>>({
     method: 'GET',
     path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/requests?${qs.toString()}`,
   });
@@ -67,7 +72,13 @@ export default async function RequestsPage({
         <RequestLogTable rows={requests} />
       )}
 
-      <Pager basePath={`/applications/${id}/requests`} offset={offset} pageSize={PAGE_SIZE} count={requests.length} />
+      <Pager
+        basePath={`/applications/${id}/requests`}
+        offset={offset}
+        pageSize={PAGE_SIZE}
+        count={requests.length}
+        hasMore={page.hasMore}
+      />
     </div>
   );
 }

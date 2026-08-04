@@ -4,7 +4,45 @@ import { TenantLimitsSchema, type TenantLimits } from '@rekey.dev/shared-types';
 import { tenantsService } from './tenants.service.js';
 import { requireSuperAdmin } from '../../middleware/admin-auth.js';
 import { RekeyError } from '../../lib/error.js';
-import { PaginationQuery, parsePagination, paginationJsonSchema } from '../../lib/pagination.js';
+import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
+import { ok, okPage, errs, ref, type JsonSchema } from '../../lib/openapi.js';
+import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
+
+/**
+ * The 401/403/429 trio every `/api/v1/admin/*` route shares — `requireSuperAdmin`
+ * runs as an `onRequest` hook, so these precede any route-specific failure.
+ */
+const SUPER_ADMIN_ERRORS = {
+  401:
+    'ADMIN_AUTH_MISSING — no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID — the ' +
+    'value does not match `SUPER_ADMIN_KEY`.',
+  403: 'ADMIN_IP_NOT_ALLOWED — the caller IP is outside `ADMIN_IP_ALLOWLIST`.',
+  429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+} as const;
+
+/** `TenantLimitsView` — the ceilings plus what's currently counted against them. */
+const TenantLimitsView: JsonSchema = {
+  type: 'object',
+  description: "A workspace's resource ceilings plus what is currently counted against them.",
+  properties: {
+    limits: ref('TenantLimits'),
+    usage: {
+      type: 'object',
+      properties: {
+        activeEndUsers: {
+          type: 'integer',
+          description: 'Non-erased end-users across every Application in the workspace.',
+        },
+        productionApps: {
+          type: 'integer',
+          description: 'Applications in the workspace whose `environment` is `PRODUCTION`.',
+        },
+      },
+      required: ['activeEndUsers', 'productionApps'],
+    },
+  },
+  required: ['limits', 'usage'],
+};
 
 const CreateTenantBody = z.object({
   name: z.string().min(1).max(120),
@@ -20,6 +58,11 @@ const CreateTenantBody = z.object({
 const SetLimitsBody = TenantLimitsSchema.strict();
 
 const TenantParams = z.object({ id: z.string().min(1) });
+
+const AddMemberBody = z.object({
+  email: z.string().email(),
+  role: z.enum(['OWNER', 'ADMIN', 'MEMBER']).optional(),
+});
 
 /**
  * Validate a limits object from a request body, or throw the 400 both writers
@@ -58,11 +101,22 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
         summary: 'List all tenants',
         description: 'Returns Tenants newest-first (paginated). Bootstrap-admin only.',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(ref('Tenant'), 'A page of workspaces.'),
+          ...errs({
+            400: 'BAD_REQUEST — `limit` or `offset` is outside the declared range.',
+            ...SUPER_ADMIN_ERRORS,
+          }),
+        },
       },
     },
     async (req) => {
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
-      return { success: true, data: await tenantsService.list({ take, skip }) };
+      const [items, total] = await Promise.all([
+        tenantsService.list({ take, skip }),
+        tenantsService.count(),
+      ]);
+      return { success: true, data: paged(items, total, take, skip) };
     },
   );
 
@@ -74,6 +128,13 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
         security: [{ superAdminKey: [] }],
         summary: 'Get a tenant by id',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        response: {
+          200: ok(ref('Tenant'), 'The tenant.'),
+          ...errs({
+            ...SUPER_ADMIN_ERRORS,
+            404: 'TENANT_NOT_FOUND — no tenant with that id.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -107,6 +168,15 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
             limits: { type: 'object' },
           },
         },
+        response: {
+          201: ok(ref('Tenant'), 'The created tenant.'),
+          ...errs({
+            400:
+              'BAD_REQUEST — `name` or `ownerEmail` failed schema validation; or ' +
+              'INVALID_TENANT_LIMITS — `limits` has an unknown key or an invalid value.',
+            ...SUPER_ADMIN_ERRORS,
+          }),
+        },
       },
     },
     async (req, reply) => {
@@ -121,6 +191,94 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
         ...(raw !== undefined && { limits: parseLimitsOrThrow(raw) }),
       });
       return reply.status(201).send({ success: true, data: tenant });
+    },
+  );
+
+  // ---------- Workspace membership ----------
+  //
+  // The gap this closes: `POST /` creates a bare Tenant, and `ownerEmail` on
+  // it is a LABEL, not an access grant — every path that actually reaches a
+  // workspace runs through `TenantMembership`. So an admin-created Tenant was
+  // a workspace nobody could open, holding whatever ceiling it was given.
+  //
+  // Every other way to write a membership requires either a brand-new operator
+  // (`signUpAndCreateWorkspace`, `findOrCreateOAuthOperator`) or a live
+  // operator session (`createWorkspaceForUser`). A deployment's own
+  // provisioning automation has neither: it is acting FOR an operator who
+  // already exists, from a service with no session. That is this route.
+  //
+  // Deliberately admin-only and deliberately not a way to escalate: it grants
+  // access to a workspace, and the operator it names must already exist. It is
+  // audited for the same reason `admin.operator_invite.minted` is — a
+  // membership appearing without an invitation should be explicable.
+  app.post(
+    '/:id/members',
+    {
+      schema: {
+        tags: ['Admin · Tenants'],
+        security: [{ superAdminKey: [] }],
+        summary: 'Add an existing operator to a workspace',
+        description:
+          'Grants an existing operator (by email) a membership in this workspace. Idempotent: ' +
+          'if they are already a member the existing membership is returned unchanged, and the ' +
+          'role is NOT rewritten — use the workspace role endpoint to change a role.\n\n' +
+          'For deployment automation that provisions workspaces on behalf of operators. ' +
+          'A workspace created by POST /api/v1/admin/tenants has no members and cannot be ' +
+          'opened by anyone until this is called.',
+        params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+        body: {
+          type: 'object',
+          required: ['email'],
+          properties: {
+            email: { type: 'string', format: 'email' },
+            role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+          },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                membershipId: { type: 'string' },
+                tenantId: { type: 'string' },
+                tenantUserId: { type: 'string' },
+                role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                created: { type: 'boolean' },
+              },
+              required: ['membershipId', 'tenantId', 'tenantUserId', 'role', 'created'],
+            },
+            'The membership. `created` is false when it already existed.',
+          ),
+          ...errs({
+            400: 'BAD_REQUEST — `email` or `role` failed schema validation.',
+            404:
+              'TENANT_NOT_FOUND — no such workspace; or OPERATOR_NOT_FOUND — no operator with ' +
+              'that email. This route grants access to an existing operator; it never creates one.',
+            ...SUPER_ADMIN_ERRORS,
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = TenantParams.parse(req.params);
+      const body = AddMemberBody.parse(req.body);
+      const result = await tenantsService.addMember({
+        tenantId: id,
+        email: body.email,
+        role: body.role ?? 'OWNER',
+      });
+      if (result.created) {
+        const { ip, userAgent } = requestContext(req);
+        void recordSecurityEvent({
+          type: 'workspace.member_added_by_admin',
+          actorType: 'system',
+          tenantId: id,
+          ip,
+          userAgent,
+          metadata: { tenantUserId: result.tenantUserId, role: result.role },
+        });
+      }
+      return { success: true, data: result };
     },
   );
 
@@ -146,6 +304,13 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
           '`usage.productionApps` counts Applications whose `environment` is `PRODUCTION`; ' +
           'staging and development Applications are never counted.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        response: {
+          200: ok(TenantLimitsView, "The workspace's ceilings plus current usage."),
+          ...errs({
+            ...SUPER_ADMIN_ERRORS,
+            404: 'TENANT_NOT_FOUND — no tenant with that id.',
+          }),
+        },
       },
     },
     async (req) => {
@@ -176,14 +341,24 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
           type: 'object',
           properties: {
             maxActiveEndUsers: {
-              type: ['integer', 'null'],
+              // `nullable: true`, not `type: ['integer', 'null']`. The draft-07
+              // type-array form is not valid OpenAPI 3.0 (which is what this
+              // document declares), so it made the published openapi.json fail
+              // every real validator — nobody could generate a client from it.
+              // Fastify's ajv treats the two identically at runtime (verified:
+              // null accepted, integer accepted, string 400s either way), so
+              // this is a spelling change, not a contract change.
+              type: 'integer',
+              nullable: true,
               minimum: 0,
               description:
                 'Max non-erased EndUsers across every Application in this workspace. ' +
                 'Null or omitted = unlimited.',
             },
             maxProductionApps: {
-              type: ['integer', 'null'],
+              // See the note on `maxActiveEndUsers` above.
+              type: 'integer',
+              nullable: true,
               minimum: 0,
               description:
                 'Max Applications in this workspace with `environment: PRODUCTION`. ' +
@@ -191,6 +366,16 @@ export async function tenantsRoutes(app: FastifyInstance): Promise<void> {
                 'Null or omitted = unlimited.',
             },
           },
+        },
+        response: {
+          200: ok(TenantLimitsView, "The workspace's ceilings plus current usage, after the update."),
+          ...errs({
+            400:
+              'BAD_REQUEST — `maxActiveEndUsers` or `maxProductionApps` failed schema ' +
+              'validation; or INVALID_TENANT_LIMITS — the body has an unknown key.',
+            ...SUPER_ADMIN_ERRORS,
+            404: 'TENANT_NOT_FOUND — no tenant with that id.',
+          }),
         },
       },
     },

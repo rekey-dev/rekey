@@ -5,10 +5,57 @@ import { requireSuperAdmin } from '../../middleware/admin-auth.js';
 import {
   PaginationQuery,
   parsePagination,
-  pageMeta,
+  paged,
   paginationJsonSchema,
 } from '../../lib/pagination.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
+import { ok, okPage, errs, type JsonSchema } from '../../lib/openapi.js';
+
+/**
+ * The 401/403/429 trio every `/api/v1/admin/*` route shares — `requireSuperAdmin`
+ * runs as an `onRequest` hook, so these precede any route-specific failure.
+ */
+const SUPER_ADMIN_ERRORS = {
+  401:
+    'ADMIN_AUTH_MISSING — no `Authorization: Bearer` header; or ADMIN_AUTH_INVALID — the ' +
+    'value does not match `SUPER_ADMIN_KEY`.',
+  403: 'ADMIN_IP_NOT_ALLOWED — the caller IP is outside `ADMIN_IP_ALLOWLIST`.',
+  429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+} as const;
+
+/**
+ * `PublicOperatorInvite` — metadata only, never `tokenHash`, and never the raw
+ * token except in the mint response.
+ */
+const OperatorInvite: JsonSchema = {
+  type: 'object',
+  properties: {
+    id: { type: 'string' },
+    tokenPrefix: { type: 'string', description: 'First characters of the token, for display.' },
+    note: { type: 'string', nullable: true },
+    status: {
+      type: 'string',
+      enum: ['active', 'used', 'revoked', 'expired'],
+      description: 'Derived from the timestamps below, in that priority order.',
+    },
+    expiresAt: { type: 'string', format: 'date-time', nullable: true },
+    usedAt: { type: 'string', format: 'date-time', nullable: true },
+    usedByTenantUserId: { type: 'string', nullable: true },
+    revokedAt: { type: 'string', format: 'date-time', nullable: true },
+    createdAt: { type: 'string', format: 'date-time' },
+  },
+  required: [
+    'id',
+    'tokenPrefix',
+    'note',
+    'status',
+    'expiresAt',
+    'usedAt',
+    'usedByTenantUserId',
+    'revokedAt',
+    'createdAt',
+  ],
+};
 
 const MintBody = z.object({
   note: z.string().min(1).max(200).optional(),
@@ -57,6 +104,31 @@ export async function operatorInvitesRoutes(app: FastifyInstance): Promise<void>
             },
           },
         },
+        response: {
+          201: ok(
+            {
+              type: 'object',
+              properties: {
+                invite: OperatorInvite,
+                rawToken: {
+                  type: 'string',
+                  description:
+                    'The raw invite token. Returned exactly once, at mint time — no endpoint can ' +
+                    'ever return it again. Only its SHA-256 hash is stored.',
+                },
+                warning: { type: 'string' },
+              },
+              required: ['invite', 'rawToken', 'warning'],
+            },
+            'The newly minted invite key. Store `rawToken` now — it is shown exactly once.',
+          ),
+          ...errs({
+            400:
+              'BAD_REQUEST — the body failed schema validation; or ' +
+              'OPERATOR_INVITE_EXPIRY_IN_PAST — `expiresAt` is not in the future.',
+            ...SUPER_ADMIN_ERRORS,
+          }),
+        },
       },
     },
     async (req, reply) => {
@@ -91,12 +163,19 @@ export async function operatorInvitesRoutes(app: FastifyInstance): Promise<void>
         security: [{ superAdminKey: [] }],
         summary: 'List operator-invite keys (newest first, paginated; never returns the hash)',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(OperatorInvite, 'A page of operator-invite keys.'),
+          ...errs({
+            400: 'BAD_REQUEST — `limit` or `offset` is outside the declared range.',
+            ...SUPER_ADMIN_ERRORS,
+          }),
+        },
       },
     },
     async (req) => {
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
       const { items, total } = await operatorInvitesService.list({ take, skip });
-      return { success: true, data: { items, ...pageMeta(total, take, skip) } };
+      return { success: true, data: paged(items, total, take, skip) };
     },
   );
 
@@ -111,6 +190,14 @@ export async function operatorInvitesRoutes(app: FastifyInstance): Promise<void>
           type: 'object',
           required: ['id'],
           properties: { id: { type: 'string', minLength: 1, maxLength: 64 } },
+        },
+        response: {
+          200: ok(OperatorInvite, 'The revoked key (or, if already revoked, the unchanged key).'),
+          ...errs({
+            ...SUPER_ADMIN_ERRORS,
+            404: 'OPERATOR_INVITE_NOT_FOUND — no invite key with that id.',
+            409: 'OPERATOR_INVITE_ALREADY_USED — the key already minted an operator and cannot be revoked.',
+          }),
         },
       },
     },

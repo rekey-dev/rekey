@@ -160,9 +160,13 @@ describe('Audit-5 end-user organizations', () => {
         'x-rekey-user-token': b.ownerAccess,
       },
     });
-    const rows = list.json().data as Array<{ slug: string; role: string }>;
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ slug: 'acme', role: 'OWNER' });
+    const rows = list.json().data as {
+      items: Array<{ slug: string; role: string }>;
+      page: { total: number };
+    };
+    expect(rows.items).toHaveLength(1);
+    expect(rows.page.total).toBe(1);
+    expect(rows.items[0]).toMatchObject({ slug: 'acme', role: 'OWNER' });
   });
 
   it('slug must be lowercase URL-safe; collisions return ORGANIZATION_SLUG_TAKEN', async () => {

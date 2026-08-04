@@ -11,6 +11,7 @@
  */
 
 import { cookies } from 'next/headers';
+import { cookieSecure } from '@/lib/cookie-secure';
 
 const COOKIE = 'rekey_flash';
 const MAX_AGE = 30; // 30s — long enough to survive the redirect, short enough to expire across tabs.
@@ -27,7 +28,7 @@ export async function setFlash(message: string, tone: FlashTone = 'success'): Pr
   jar.set(COOKIE, JSON.stringify({ message, tone }), {
     httpOnly: true,
     sameSite: 'strict',
-    secure: process.env.NODE_ENV === 'production',
+    secure: await cookieSecure(),
     path: '/',
     maxAge: MAX_AGE,
   });

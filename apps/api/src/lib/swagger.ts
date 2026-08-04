@@ -24,12 +24,51 @@
  * route's `description`.
  */
 
+import { createRequire } from 'node:module';
 import type { FastifyInstance } from 'fastify';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
+import { registerOpenApiComponents } from './openapi.js';
+
+/**
+ * The version the published document announces itself as.
+ *
+ * Derived, not hardcoded. It was a string literal until 2.0.0-rc.3 and had gone
+ * three minor versions stale — the document served at `/docs/json` said `1.1.1`
+ * while we were cutting 2.0.0, which every client generator, registry, and
+ * integrator diffing against the previous release would have believed.
+ *
+ * `@rekey.dev/shared-types` is the right source: the CHANGELOG states the
+ * packages share one version and release together with the API, panel, and
+ * portal, so its `package.json` IS the release version. (`apps/api`'s own
+ * package.json is `0.0.0` — it is private and never published.) `createRequire`
+ * rather than an import attribute so this resolves identically from `src/` under
+ * tsx and from `dist/` under node, without depending on the build layout.
+ *
+ * `test/openapi-contract.test.ts` asserts this matches both the package version
+ * and the top CHANGELOG heading, so the three cannot drift apart again.
+ */
+const { version: RELEASE_VERSION } = createRequire(import.meta.url)(
+  '@rekey.dev/shared-types/package.json',
+) as { version: string };
 
 export async function registerSwagger(app: FastifyInstance): Promise<void> {
+  // Shared response components (`components.schemas`) + the pass-through
+  // serializer that keeps those schemas documentation rather than a filter.
+  // Must run on the root instance before any route plugin registers — see
+  // lib/openapi.ts for the full reasoning.
+  registerOpenApiComponents(app);
+
   await app.register(swagger, {
+    // Name `components.schemas` entries after the schema's own `$id`.
+    // @fastify/swagger's default numbers them `def-0`, `def-1`, … which makes
+    // every generated client type anonymous and reshuffles on every route
+    // change — a diffable, stable document needs real names.
+    refResolver: {
+      buildLocalReference(json, _baseUri, _fragment, i) {
+        return typeof json.$id === 'string' ? json.$id : `def-${i}`;
+      },
+    },
     openapi: {
       info: {
         title: 'Rekey API',
@@ -61,7 +100,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
           'self-host bootstrap credential, for `/api/v1/admin/*` only.\n\n' +
           'Provider webhook ingress routes take **no** credential at all — the ' +
           'provider signature is the authentication.',
-        version: '1.1.1',
+        version: RELEASE_VERSION,
       },
       servers: [
         { url: 'https://api.rekey.dev', description: 'Production' },

@@ -16,6 +16,7 @@ import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
 import { ZodError } from 'zod';
 import {
   classifyDependencyOutage,
+  isProviderSdkError,
   shouldRecordOutageEvent,
   OUTAGE_SUBSYSTEM_LABEL,
   type OutageSubsystem,
@@ -59,8 +60,11 @@ export class RekeyError extends Error {
   public readonly docs: string | undefined;
   public readonly retryAfterSeconds: number | undefined;
 
-  constructor(args: RekeyErrorPayload & { statusCode?: number }) {
-    super(args.message);
+  constructor(args: RekeyErrorPayload & { statusCode?: number; cause?: unknown }) {
+    // `cause` keeps the original exception attached without putting any of it
+    // in the response. 5xx RekeyErrors are logged with it below, so a mapped
+    // upstream failure still leaves a full backtrace in the server log.
+    super(args.message, args.cause !== undefined ? { cause: args.cause } : undefined);
     this.name = 'RekeyError';
     this.statusCode = args.statusCode ?? 400;
     this.code = args.code;
@@ -224,6 +228,13 @@ export function rekeyErrorHandler(
     if (err.retryAfterSeconds !== undefined) {
       reply.header('Retry-After', String(err.retryAfterSeconds));
     }
+    // A 5xx is a failure even when we chose its shape deliberately. Without
+    // this, mapping an upstream provider exception onto a clean 502 traded the
+    // caller's bad error message for a server log that no longer mentioned the
+    // failure at all. 4xx stays unlogged — a rejected request is normal traffic.
+    if (err.statusCode >= 500) {
+      req.log.error({ err, requestId, code: err.code }, 'upstream or server failure');
+    }
     return reply.status(err.statusCode).send({
       success: false,
       error: {
@@ -255,6 +266,28 @@ export function rekeyErrorHandler(
         message: payload.message,
         fix: payload.fix,
         issues: payload.issues,
+        requestId,
+      },
+    });
+  }
+
+  // Backstop for finding #3. A `StripeError` carries `.statusCode` and
+  // `.message`, which is all the branch below needs to mistake it for a
+  // framework 4xx: the provider's status passed through, its absent `.code`
+  // collapsed to `BAD_REQUEST`, and the caller was told to check their request
+  // shape — for a wrong key on the OPERATOR's provider account, with a
+  // fragment of that key echoed back in `message`. Every known provider call
+  // site now maps its own failures (see `lib/provider-errors.ts`); this
+  // catches the one somebody adds later and forgets to wrap. Checked before
+  // the duck-type, because the duck-type is exactly what goes wrong.
+  if (isProviderSdkError(err)) {
+    req.log.error({ err, requestId }, 'unmapped payment-provider error');
+    return reply.status(502).send({
+      success: false,
+      error: {
+        code: 'BILLING_PROVIDER_ERROR',
+        message: 'The payment provider for this application rejected the request.',
+        fix: `The provider's own message is in the server log against request id ${requestId}; it is withheld here because it can carry credential fragments. Re-check this Application's billing credentials and mode.`,
         requestId,
       },
     });

@@ -1,41 +1,51 @@
 # Deploying Rekey (Dokploy)
 
-Deploys **api.rekey.dev** (API) + **panel.rekey.dev** (operator panel) +
-**portal.rekey.dev** (customer self-service
-billing portal) from `docker-compose.prod.yml`. Postgres + Redis
+Deploys the API + operator panel + customer self-service billing portal from
+`docker-compose.prod.yml`, each on a hostname **you** supply. Postgres + Redis
 are bundled in the compose.
+
+The examples below use `api.example.com` / `panel.example.com` /
+`portal.example.com`. Substitute your own throughout — nothing in the compose
+file has a default hostname, and it will refuse to run until you set all three.
 
 ## 0. Prerequisites (you)
 - **DNS** — A records → the Dokploy host IP, before deploying (Let's Encrypt needs them):
-  - `api.rekey.dev`, `panel.rekey.dev`, `rekey.dev`, `portal.rekey.dev`.
-- **Git source** — connect `EtherLabZ/Rekey` to Dokploy (GitHub App or deploy key) if private.
-- **Secrets** — generate values for `.env.production` (see `.env.production.example`):
+  - `api.example.com`, `panel.example.com`, `portal.example.com`.
+- **Git source** — connect the repo to Dokploy (GitHub App or deploy key) if private.
+- **Hostnames + secrets** — fill in `.env.production` (see `.env.production.example`):
   ```sh
+  echo "API_HOST=api.example.com"
+  echo "PANEL_HOST=panel.example.com"
+  echo "PORTAL_HOST=portal.example.com"
   echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)"
   echo "REDIS_PASSWORD=$(openssl rand -hex 24)"
   echo "JWT_SECRET=$(openssl rand -hex 32)"
   echo "ENCRYPTION_KEY=$(openssl rand -hex 32)"
   echo "SUPER_ADMIN_KEY=$(openssl rand -hex 32)"
   ```
+  `API_HOST` is not cosmetic: it is the origin Rekey registers with
+  Stripe/PayPal as the destination for **your** payment webhooks, and the issuer
+  it advertises for operator-MCP OAuth. Set it to a host you control.
 
 ## 1. Create the Dokploy project + compose service
 - Project: **Rekey** (production environment).
 - Add a **Compose** service:
-  - Source: the `EtherLabZ/Rekey` repo, branch `main`.
+  - Source: your fork/clone of the repo, branch `main`.
   - Compose path: `docker-compose.prod.yml`.
-- Paste the generated secrets into the service **Environment**.
+- Paste the hostnames and generated secrets into the service **Environment**.
 
 ## 2. Domains
 On the Compose service, add domains (Dokploy wires Traefik):
 | Host | Service | Port |
 |---|---|---|
-| `api.rekey.dev` | `api` | 3030 |
-| `panel.rekey.dev` | `panel` | 3031 |
-| `portal.rekey.dev` | `portal` | 3050 |
+| `api.example.com` | `api` | 3030 |
+| `panel.example.com` | `panel` | 3031 |
+| `portal.example.com` | `portal` | 3050 |
 HTTPS on, Let's Encrypt. (The compose also carries Traefik labels as a fallback.)
 
 The `portal` service needs no per-app secret — it's the hosted multi-app portal
-(see "Customer portal" below).
+(see "Customer portal" below). If you don't want one, delete the service and its
+three `PORTAL_HOST` references, as the note on it in the compose file explains.
 
 ## 3. Deploy + migrate
 - **Deploy.** Migrations run automatically — the `api` container runs
@@ -49,17 +59,48 @@ The `portal` service needs no per-app secret — it's the hosted multi-app porta
 - Bootstrap the first tenant via `/api/v1/admin/*` using `SUPER_ADMIN_KEY`, or sign up at the panel.
 
 ## 4. Verify
-- `https://api.rekey.dev/docs` → Swagger.
-- `https://panel.rekey.dev` → panel login.
-- `https://portal.rekey.dev/<slug>` → customer portal for an opted-in
+- `https://api.example.com/docs` → Swagger.
+- `https://panel.example.com` → panel login.
+- `https://portal.example.com/<slug>` → customer portal for an opted-in
   Application (see "Customer portal" below).
-- Provider webhooks auto-register at `https://api.rekey.dev/api/v1/billing/webhook/<provider>/<appSlug>` (PUBLIC_WEBHOOK_BASE_URL is already set to the prod API origin).
+- Provider webhooks auto-register at
+  `https://api.example.com/api/v1/billing/webhook/<provider>/<appSlug>`
+  (`PUBLIC_WEBHOOK_BASE_URL` derives from `API_HOST`). Check this before you
+  connect a live Stripe account — it is the URL your payment notifications go
+  to, and it is the one setting where a wrong value is silently wrong.
+
+## 5. Close the doors first boot had to leave open
+
+Two settings default to open because first boot needs them to, and stop being
+correct the moment the deployment is reachable by anyone who isn't you. Neither
+is changed for you.
+
+**`OPERATOR_SIGNUP_MODE`** (default `open`) — anyone who can reach the API can
+create an operator account and a workspace on it. Somebody has to make the first
+account, and the documented path is self-serve sign-up at the panel; once yours
+exists, set `invite` (a super-admin mints single-use keys at
+`POST /api/v1/admin/operator-invites`) or `closed`, and redeploy. The API prints
+a `[SECURITY]` warning at boot for as long as `open` and `NODE_ENV=production`
+are both true — grep your logs for `[SECURITY]` after the first deploy.
+
+**`OPERATOR_MCP_DYNAMIC_REGISTRATION`** (default `open`) — RFC 7591 registration
+on the operator MCP authorization server. It has to stay open while you connect
+clients by discovery (`claude mcp add --transport http`, Claude Desktop, Cursor),
+because that is how they obtain a `client_id` at all. Registration hands out no
+data and no token — an operator still has to approve at the panel — but it does
+allowlist a **`redirect_uri` of the registrant's choosing**, which is the one
+ingredient a consent-phishing link is otherwise missing. Set `disabled` once your
+clients are connected: they keep working (they already hold a `client_id`), new
+registrations answer `403 CLIENT_REGISTRATION_DISABLED`, and
+`registration_endpoint` disappears from the RFC 8414 metadata rather than being
+advertised and refused. See [docs/mcp.md](docs/mcp.md).
+
+Also worth setting here: `ADMIN_IP_ALLOWLIST`, which gates `/api/v1/admin/*` by
+source address *before* the key is examined, so a leaked `SUPER_ADMIN_KEY` alone
+is not enough. Behind Traefik that needs `TRUSTED_PROXIES` too, or every request
+looks like it came from the proxy.
 
 ## Super-admin dashboard (local-only, not deployed)
-- The super-admin UI (`apps/admin`) is deliberately not part of the deployed
-  stack. Run it locally against the production API when needed:
-  `REKEY_URL=https://api.rekey.dev SUPER_ADMIN_KEY=<key> pnpm --filter @rekey.dev/admin dev`
-  (decision logged in decisions.md, 2026-07-28).
 - Read-only — surfaces tenants, applications, end-users, orgs, subscriptions,
   payments, MRR, webhook health, services, audit log, request log.
 - Auth: paste `SUPER_ADMIN_KEY` on the login form. The container compares
@@ -80,20 +121,61 @@ The `portal` service needs no per-app secret — it's the hosted multi-app porta
   broken* is the wrong trade. If you ever run more than one admin replica this
   becomes a real problem: sessions are not shared, so requests would bounce
   between replicas and appear to sign you out at random. Run one replica.
-- **The session cookie is `Secure` whenever `NODE_ENV=production`.** If you build
-  with `NODE_ENV=production` but serve the admin app over plain HTTP, the browser
-  will refuse to send the cookie and login will appear to silently do nothing.
-  That failure is visible rather than dangerous, but it is confusing if you have
-  not seen it before. Serve the admin app over HTTPS.
+- **The session cookie is `Secure` unless the request is loopback.** See
+  "Session cookies and `Secure`" below — this is decided per request, not from
+  `NODE_ENV`. Serve the admin app over HTTPS, or run it on `localhost`.
 
-## Customer portal (portal.rekey.dev)
+## Session cookies and `Secure`
+
+**Applies to every web app in this repo** — panel, portal, admin, marketing, and
+`@rekey.dev/nextjs` in your own app. (`apps/api` sets no cookies; it is
+bearer-token only, so nothing here applies to it.)
+
+As of 2.0.0-rc.3, `Secure` is decided **per request**, not from `NODE_ENV`:
+
+1. `REKEY_COOKIE_SECURE=true` or `=false` wins outright, if set.
+2. Otherwise the first hop of `X-Forwarded-Proto` decides — `https` ⇒ `Secure`.
+3. With no forwarded proto, the `Host` decides: loopback (`localhost`,
+   `127.0.0.1`, `::1`, `*.localhost`) ⇒ not `Secure`; **anything else ⇒
+   `Secure`**.
+
+It replaces a build-time answer to a request-time question. `NODE_ENV` unset, or
+`staging`, or anything Next did not inline as exactly `"production"`, used to
+emit session cookies with no `Secure` flag while the deployment looked entirely
+healthy.
+
+**Rule 3 is fail-secure, and that is a real trade you should know about before
+you deploy.** A public hostname served over **plain HTTP** now gets its session
+cookies marked `Secure`, which means the browser will not send them back and
+sign-in silently does nothing. That is the intended failure: it is loud,
+immediate, and one environment variable to fix, as against a cleartext session
+credential that fails silently and permanently. A wrong guess should cost a
+login, not a session.
+
+The Traefik + Let's Encrypt setup on this page needs nothing — Traefik sets
+`X-Forwarded-Proto: https` and rule 2 answers. Set `REKEY_COOKIE_SECURE`
+explicitly only in two cases:
+
+- `=true` — you terminate TLS somewhere that does not set `X-Forwarded-Proto`
+  and the apps therefore cannot observe it. (Rule 3 already gets this right for
+  any non-loopback host, so this is belt-and-braces.)
+- `=false` — you deliberately serve over plain HTTP on a non-loopback host and
+  accept that session cookies travel in the clear. There is no other way to get
+  an insecure session cookie on a real hostname, which is the point.
+
+`docker-compose.prod.yml` passes `REKEY_COOKIE_SECURE` through to the `panel`
+and `portal` services. If you add an `admin` or `marketing` service to a compose
+file of your own, add the variable to its `environment:` block — those blocks
+are allowlists, and a variable that is not listed is silently not passed.
+
+## Customer portal (portal.example.com)
 Lives at `apps/portal` — the **hosted, multi-app** customer billing portal where
 the end-users of **any opted-in** Application sign in to manage their
 subscription. Builds via the `portal-runtime` Dockerfile target and ships in
 `docker-compose.prod.yml` as the `portal` service (port 3050).
 
 **One deployment, every Application.** The portal holds **no per-app secret
-key**. Each app is reached at `portal.rekey.dev/<slug>`; the portal fetches
+key**. Each app is reached at `portal.example.com/<slug>`; the portal fetches
 that app's public config (`GET /api/v1/portal/config/:slug` → publishable key +
 branding) and authorizes each customer with their own session token. Its only
 env is `REKEY_URL` (private API URL) + `PORTAL_BASE_URL`.
@@ -101,7 +183,7 @@ env is `REKEY_URL` (private API URL) + `PORTAL_BASE_URL`.
 Operators turn it on per-Application in **Panel → Application → Billing →
 Portal** — no deploy, no key wiring. Nothing to set in Dokploy for a new app.
 
-> The API needs `PUBLIC_PORTAL_URL=https://portal.rekey.dev` (set in the `api`
+> The API needs `PUBLIC_PORTAL_URL` (derived from `PORTAL_HOST` in the `api`
 > service env) so publishable-key calls from the portal origin are allowed.
 
 Operators who want to **self-host** their own single-app portal should follow
@@ -117,6 +199,14 @@ record — so a backup plan is a Postgres backup plan.
 The mechanics are below. How often you run them, how long you keep them, and
 how fast you need to be back are yours to decide; this page does not pretend to
 have decided them for you.
+
+Every command in this section assumes the **bundled** `postgres` service from
+`docker-compose.prod.yml`. If you pointed `DATABASE_URL` at a managed database
+instead (Neon, RDS, Cloud SQL), there is no container to `exec` into: drop the
+`docker compose … exec -T postgres` prefix and run `pg_dump "$DATABASE_URL"`
+from a host with a matching client version, or use the provider's own snapshots.
+The rest — what is in the dump, why `ENCRYPTION_KEY` has to be backed up
+separately, how to restore — is unchanged.
 
 ### Dump
 

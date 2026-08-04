@@ -142,16 +142,20 @@ describe('rekey CLI', () => {
     stub.reset();
     stub.setResponse('GET /api/v1/admin/applications', 200, {
       success: true,
-      data: [
-        {
-          id: 'app_1',
-          tenantId: 'tn_1',
-          name: 'A',
-          slug: 'a',
-          publicKey: 'rp_pub_a_xxx',
-          createdAt: '2026-01-01T00:00:00.000Z',
-        },
-      ],
+      // `{items, page}` — the list envelope every admin list endpoint returns.
+      data: {
+        items: [
+          {
+            id: 'app_1',
+            tenantId: 'tn_1',
+            name: 'A',
+            slug: 'a',
+            publicKey: 'rp_pub_a_xxx',
+            createdAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+        page: { total: 1, limit: 50, offset: 0, hasMore: false },
+      },
     });
     const r = await runCli(['apps', 'list', '--json'], {
       REKEY_URL: stub.url,
@@ -211,5 +215,54 @@ describe('rekey CLI', () => {
     const parsed = JSON.parse(r.stderr) as { error: { code: string; fix: string } };
     expect(parsed.error.code).toBe('CLI_PLANS_AMOUNT_INVALID');
     expect(parsed.error.fix).toContain('integer');
+  });
+});
+
+/**
+ * The CLI also declares `main` / `types` / `exports`, so it is importable — and
+ * it used to `program.parseAsync(process.argv)` at module scope. An importing
+ * program had its OWN argv parsed by commander, which then printed help and
+ * exited. Running is now gated on being the process entry point.
+ */
+describe('importing the package is inert', () => {
+  function importInChild(source: string): Promise<RunResult> {
+    return new Promise((resolve) => {
+      const proc = spawn(process.execPath, ['--input-type=module', '-e', source], {
+        // A hostile argv: `--version` is a flag commander would have acted on.
+        env: { ...process.env, REKEY_URL: '', SUPER_ADMIN_KEY: '' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      proc.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
+      proc.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
+      proc.on('close', (code) => resolve({ code: code ?? 0, stdout, stderr }));
+    });
+  }
+
+  it('does not parse argv or exit when merely imported', async () => {
+    const r = await importInChild(`
+      const m = await import(${JSON.stringify(cliEntry)});
+      console.log(typeof m.buildProgram === 'function' ? 'INERT' : 'MISSING_EXPORT');
+    `);
+    expect(r.stdout).toContain('INERT');
+    expect(r.stdout).not.toContain('Usage: rekey');
+    expect(r.code).toBe(0);
+  });
+
+  it('still exposes the assembled command tree to an importer', async () => {
+    const r = await importInChild(`
+      const { buildProgram } = await import(${JSON.stringify(cliEntry)});
+      const names = buildProgram().commands.map((c) => c.name()).sort().join(',');
+      console.log(names);
+    `);
+    expect(r.stdout.trim()).toContain('apps');
+    expect(r.stdout.trim()).toContain('plans');
+  });
+
+  it('still runs normally when invoked as the binary', async () => {
+    const r = await runCli(['--version']);
+    expect(r.code).toBe(0);
+    expect(r.stdout.trim()).toBe(PKG_VERSION);
   });
 });

@@ -1,7 +1,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type ApplicationRow } from '@/lib/api';
+import { api, PanelApiError, getApplication } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, SectionHeader } from '@/components/Card';
 import { SavedBanner } from '@/components/SavedBanner';
@@ -92,10 +92,7 @@ export default async function AuthMethodsPage({
   const error = typeof sp.error === 'string' ? sp.error : undefined;
   const saved = sp.saved === '1';
 
-  const app = await api<ApplicationRow>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-  });
+  const app = await getApplication(id);
   const enabled = new Set(app.authConfig.methods ?? []);
   const oauthCount = Object.keys(app.oauthConfig ?? {}).length;
   // Prefer the 3-way signupMode; fall back to the legacy boolean for apps

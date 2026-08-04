@@ -193,6 +193,13 @@ export const organizationsService = {
     return rows.map((r) => ({ ...shape(r.organization), role: r.role }));
   },
 
+  /** Total organizations `listMine` would return, ignoring take/skip. */
+  async countMine(args: { application: { id: string }; endUserId: string }): Promise<number> {
+    return prisma.organizationMembership.count({
+      where: { endUserId: args.endUserId, organization: { applicationId: args.application.id } },
+    });
+  },
+
   /** Fetch one organization the caller is a member of, or 403 if not a member. */
   async get(args: {
     application: { id: string };
@@ -258,6 +265,25 @@ export const organizationsService = {
   },
 
   /**
+   * Total members of an org, ignoring take/skip.
+   *
+   * Runs the same `requireMembership` gate as `listMembers` rather than
+   * trusting the caller to have run it — the two are invoked concurrently
+   * from the route, so a count that skipped the check would leak a member
+   * tally for an org the caller does not belong to.
+   */
+  async countMembers(args: {
+    application: { id: string };
+    actorEndUserId: string;
+    organizationId: string;
+  }): Promise<number> {
+    await this.requireMembership(args);
+    return prisma.organizationMembership.count({
+      where: { organizationId: args.organizationId },
+    });
+  },
+
+  /**
    * Create an invitation. Hash-only storage; raw shown once.
    * Caller's role must `canManage` the target role.
    */
@@ -305,11 +331,28 @@ export const organizationsService = {
   },
 
   /**
-   * Accept an invitation. Caller must be authenticated (we use their EndUser
-   * id for the membership row); the invitation's email is captured for
-   * record but we do NOT enforce email-match here — the customer's app can
-   * decide whether to gate accept on email match. (Most apps do — at the
-   * UI layer.)
+   * Accept an invitation. Caller must be authenticated — we use their EndUser
+   * id for the membership row — and their email must MATCH the address the
+   * invitation was issued to.
+   *
+   * That binding used to be absent, on the reasoning that "the customer's app
+   * can decide whether to gate accept on email match. (Most apps do — at the
+   * UI layer.)" Both halves were wrong. A UI-layer check is not a check: the
+   * token travels by email, Slack, or text and the accept endpoint is reachable
+   * with any authenticated session, so anyone who obtains a forwarded or leaked
+   * invite link joins the organization at the invited role — up to OWNER, which
+   * is organization takeover. And it is not the customer's decision to make,
+   * because there is no field they can send to turn it on.
+   *
+   * The operator twin (`tenantWorkspacesService.acceptInvitation`) has enforced
+   * this all along and names the same attack in its own comment. This is that
+   * check, ported: same 403, same reasoning, one surface behind.
+   *
+   * **User-visible contract change.** An accept by a session whose email
+   * differs from the invited address now answers 403
+   * ORGANIZATION_INVITATION_EMAIL_MISMATCH instead of silently succeeding.
+   * Integrations that invite `a@x.com` and accept as `b@x.com` will break, and
+   * that is the point — they were relying on the hole.
    */
   async acceptInvitation(args: {
     application: { id: string };
@@ -345,6 +388,21 @@ export const organizationsService = {
           code: 'ORGANIZATION_INVITATION_WRONG_APPLICATION',
           message: 'This invitation belongs to a different application.',
           fix: 'Use the secret key for the Application this invitation was created under.',
+        });
+      }
+      // Bind the invitation to the address it was issued to. Checked AFTER the
+      // Application scope so a token from another App still reports the
+      // cross-Application error rather than leaking whose address it names.
+      const accepting = await tx.endUser.findUniqueOrThrow({
+        where: { id: args.actorEndUserId },
+        select: { email: true },
+      });
+      if (accepting.email.toLowerCase() !== inv.email.toLowerCase()) {
+        throw new RekeyError({
+          statusCode: 403,
+          code: 'ORGANIZATION_INVITATION_EMAIL_MISMATCH',
+          message: 'This invitation was issued to a different email address.',
+          fix: 'Sign in as the invited address, then accept — or ask an OWNER / ADMIN to re-invite the address you are signed in as.',
         });
       }
       // Idempotent member-already-joined check (concurrent accept retry).
@@ -672,6 +730,11 @@ export const organizationsService = {
       memberCount: r._count.memberships,
       pendingInvitationCount: r._count.invitations,
     }));
+  },
+
+  /** Total organizations in an Application, ignoring take/skip. */
+  async adminCount(args: { applicationId: string }): Promise<number> {
+    return prisma.organization.count({ where: { applicationId: args.applicationId } });
   },
 
   /** Full operator view of one org: members (with email) + pending invitations. */

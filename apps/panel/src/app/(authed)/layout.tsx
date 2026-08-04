@@ -1,16 +1,7 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import {
-  ACCESS_COOKIE,
-  REFRESH_COOKIE,
-  api,
-  clearSessionCookies,
-  setSessionCookies,
-  publicPost,
-  type MeDto,
-  type AuthResponse,
-} from '@/lib/api';
+import { ACCESS_COOKIE, REFRESH_COOKIE, api, clearSessionCookies, setSessionCookies, publicPost, PanelApiError, type AuthResponse, getMe } from '@/lib/api';
 import { Sidebar } from '@/components/Sidebar';
 import { MobileSidebar } from '@/components/MobileSidebar';
 import { CommandPalette } from '@/components/CommandPalette';
@@ -47,8 +38,7 @@ import { AnalyticsEvent } from '@/lib/analytics';
 // So: in this app, `revalidatePath` + `redirect` in the same action is all
 // cost and no benefit. If you need an action to refresh data *without*
 // navigating, keep revalidatePath and return a result instead of redirecting
-// — see `apps/admin/src/app/(authed)/operator-invites/actions.ts` for that
-// shape.
+// — the super-admin dashboard's operator-invites actions use that shape.
 
 async function signOut(): Promise<void> {
   'use server';
@@ -78,11 +68,26 @@ async function createWorkspace(formData: FormData): Promise<void> {
   'use server';
   const name = String(formData.get('name') ?? '').trim();
   if (!name) return;
-  const created = await api<{ id: string; name: string }>({
-    method: 'POST',
-    path: '/api/v1/tenant/workspace/',
-    body: { name },
-  });
+  let created: { id: string; name: string };
+  try {
+    created = await api<{ id: string; name: string }>({
+      method: 'POST',
+      path: '/api/v1/tenant/workspace/',
+      body: { name },
+    });
+  } catch (err) {
+    // A POST does not trigger the `forbidden()` interrupt (that is GET-only),
+    // so an uncaught refusal here renders the segment error boundary — a
+    // generic "something went wrong" with a Try again button that can never
+    // succeed. The deployment switch is a legitimate, permanent answer, so it
+    // has to read as one. The affordance is normally hidden (see
+    // `canCreateWorkspace` below); this catches the race where it was
+    // rendered from a stale probe, or turned off mid-session.
+    if (err instanceof PanelApiError && err.code === 'WORKSPACE_CREATION_DISABLED') {
+      redirect('/applications?e=ws_create_disabled');
+    }
+    throw err;
+  }
   // Switch into the new workspace immediately so the operator lands inside it.
   const switched = await api<AuthResponse>({
     method: 'POST',
@@ -108,8 +113,25 @@ export default async function AuthedLayout({
   // how they signed in. /mcp-consent reads the params back out of the cookie.
   if (jar.get('mcp_consent_pending')?.value) redirect('/mcp-consent/review');
 
-  const me = await api<MeDto>({ method: 'GET', path: '/api/v1/tenant/auth/me' });
+  const me = await getMe();
   const active = me.memberships.find((m) => m.tenantId === me.activeTenantId);
+
+  // Don't offer a door that will not open. A deployment can switch additional
+  // workspace creation off (`WORKSPACE_CREATION=disabled`) — Rekey Cloud does,
+  // because there provisioning is brokered by billing against the plan's paid
+  // allowance rather than being self-serve.
+  //
+  // Fails OPEN, matching `fetchSignupMode` on the sign-up page and
+  // `canManageApps` on the applications page: if the probe itself fails we
+  // still render the affordance and let the server refuse, because hiding a
+  // capability the operator actually has is the worse error. The refusal is
+  // handled properly in `createWorkspace` above either way.
+  const canCreateWorkspace = await api<{ mode: 'open' | 'disabled' }>({
+    method: 'GET',
+    path: '/api/v1/tenant/workspace/creation-mode',
+  })
+    .then((d) => d.mode !== 'disabled')
+    .catch(() => true);
 
   return (
     <div className="min-h-screen flex flex-col md:flex-row bg-neutral-50 dark:bg-neutral-950">
@@ -130,7 +152,7 @@ export default async function AuthedLayout({
             activeRole={active?.role ?? 'MEMBER'}
             userEmail={me.user.email}
             switchAction={switchWorkspace}
-            createWorkspaceAction={createWorkspace}
+            {...(canCreateWorkspace && { createWorkspaceAction: createWorkspace })}
             signOutAction={signOut}
           />
         }

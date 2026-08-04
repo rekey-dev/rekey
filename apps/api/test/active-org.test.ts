@@ -188,6 +188,56 @@ describe('Active organization (oid claim)', () => {
     expect(row.activeOrganizationId).toBeNull();
   });
 
+  it('the EXISTING token stops reporting the org the moment membership ends', async () => {
+    // The test above covers refresh. This covers the window before it: an
+    // external audit removed a member and found `GET /users/me` still
+    // returning the removed org as `activeOrganizationId` for the remaining
+    // life of the access token, because the `oid` claim was echoed without
+    // being checked. Authorization was never affected — org endpoints 403'd
+    // correctly — but a UI driving "current team" off /users/me showed the
+    // wrong team and then failed every call inside it.
+    const owner = await signUpUser(`sv-own-${Math.random().toString(36).slice(2, 7)}@example.com`);
+    const member = await signUpUser(`sv-mem-${Math.random().toString(36).slice(2, 7)}@example.com`);
+    const orgId = await makeOrg(owner.endUser.id, 'zeta');
+    await app.inject({
+      method: 'POST',
+      url: `/api/v1/tenant/applications/${appId}/organizations/${orgId}/members`,
+      headers: auth(),
+      payload: { endUserId: member.endUser.id, role: 'MEMBER' },
+    });
+    await creditsService.grant({ applicationId: appId, organizationId: orgId, amount: 500, reason: 'GRANT' });
+
+    const switched = await switchTo(member.accessToken, orgId).then((r) => r.json().data as Session);
+    const meBefore = await app
+      .inject({
+        method: 'GET',
+        url: '/api/v1/users/me/',
+        headers: { ...key(), 'x-rekey-user-token': switched.accessToken },
+      })
+      .then((r) => r.json().data as { activeOrganizationId: string | null });
+    expect(meBefore.activeOrganizationId).toBe(orgId);
+
+    // Removed — but deliberately NOT refreshed. The same access token is
+    // reused below, which is the situation the audit was in.
+    await prisma.organizationMembership.deleteMany({
+      where: { organizationId: orgId, endUserId: member.endUser.id },
+    });
+
+    const meAfter = await app
+      .inject({
+        method: 'GET',
+        url: '/api/v1/users/me/',
+        headers: { ...key(), 'x-rekey-user-token': switched.accessToken },
+      })
+      .then((r) => r.json().data as { activeOrganizationId: string | null });
+    expect(meAfter.activeOrganizationId).toBeNull();
+
+    // The token itself stays valid — removal from an organization is not a
+    // reason to end a session — and the org's shared pool is no longer visible
+    // through it, which is what the claim was defaulting the subject to.
+    expect((await entitlements(switched.accessToken)).creditBalance).toBe(0);
+  });
+
   it('a non-member cannot switch to the org (403)', async () => {
     const owner = await signUpUser(`x-own-${Math.random().toString(36).slice(2, 7)}@example.com`);
     const outsider = await signUpUser(`x-out-${Math.random().toString(36).slice(2, 7)}@example.com`);

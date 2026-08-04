@@ -5,7 +5,38 @@
  * (Application secret keys), not the admin surface.
  */
 
+import type { Command } from 'commander';
 import { fail, type OutputContext } from './output.js';
+
+/**
+ * Add `--limit` / `--offset` to a list command.
+ *
+ * Every `/api/v1/admin/*` list endpoint takes the same two params and answers
+ * with `{items, page}`. Before 2.0.0-rc.3 they answered with a bare array and
+ * the CLI could neither page nor tell the operator that it had been handed a
+ * window rather than the set — `rekey apps list` printed 50 of 90 and said
+ * nothing.
+ */
+export function withListOptions(command: Command): Command {
+  return command
+    .option('--limit <n>', 'Rows per page (default 50, max 100)')
+    .option('--offset <n>', 'Rows to skip (0-based)');
+}
+
+/** Pull the `--limit` / `--offset` values off a parsed options object. */
+export function readListOpts(opts: { limit?: string; offset?: string }): Record<string, string> {
+  return {
+    ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+    ...(opts.offset !== undefined ? { offset: opts.offset } : {}),
+  };
+}
+
+/** Build a `?a=b&c=d` string, or `''` when there is nothing to send. */
+export function listQuery(params: Record<string, string>): string {
+  const p = new URLSearchParams(params);
+  const s = p.toString();
+  return s ? `?${s}` : '';
+}
 
 export interface RequestArgs {
   ctx: OutputContext;

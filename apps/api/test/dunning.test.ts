@@ -766,12 +766,19 @@ describe('Dunning', () => {
         url: `/api/v1/tenant/applications/${applicationId}/dunning`,
         headers: { authorization: `Bearer ${tenantAccess}` },
       })
-      .then((r) => r.json().data as Array<Record<string, unknown>>);
-    expect(all).toHaveLength(2);
-    expect(all[0]!.status).toBe('OPEN'); // opened 2d ago > 10d ago
-    expect(all[0]!.endUserEmail).toBe('dun-list-eu@example.com');
-    expect(all[0]!.planSlug).toBe('pro');
-    expect(all[0]!.failedAttempts).toBe(2);
+      .then(
+        (r) =>
+          r.json().data as {
+            items: Array<Record<string, unknown>>;
+            page: { total: number; hasMore: boolean };
+          },
+      );
+    expect(all.items).toHaveLength(2);
+    expect(all.page).toMatchObject({ total: 2, hasMore: false });
+    expect(all.items[0]!.status).toBe('OPEN'); // opened 2d ago > 10d ago
+    expect(all.items[0]!.endUserEmail).toBe('dun-list-eu@example.com');
+    expect(all.items[0]!.planSlug).toBe('pro');
+    expect(all.items[0]!.failedAttempts).toBe(2);
 
     // Status filter.
     const open = await app
@@ -780,20 +787,35 @@ describe('Dunning', () => {
         url: `/api/v1/tenant/applications/${applicationId}/dunning?status=OPEN`,
         headers: { authorization: `Bearer ${tenantAccess}` },
       })
-      .then((r) => r.json().data as Array<Record<string, unknown>>);
-    expect(open).toHaveLength(1);
-    expect(open[0]!.subscriptionId).toBe(sub1.id);
+      .then(
+        (r) =>
+          r.json().data as {
+            items: Array<Record<string, unknown>>;
+            page: { total: number };
+          },
+      );
+    expect(open.items).toHaveLength(1);
+    // The count follows the filter, so a filtered pager sees 1, not 2.
+    expect(open.page.total).toBe(1);
+    expect(open.items[0]!.subscriptionId).toBe(sub1.id);
 
     // Pagination caps + offset behave like the payments endpoint.
-    const paged = await app
+    const pagedCases = await app
       .inject({
         method: 'GET',
         url: `/api/v1/tenant/applications/${applicationId}/dunning?limit=1&offset=1`,
         headers: { authorization: `Bearer ${tenantAccess}` },
       })
-      .then((r) => r.json().data as Array<Record<string, unknown>>);
-    expect(paged).toHaveLength(1);
-    expect(paged[0]!.status).toBe('RECOVERED');
+      .then(
+        (r) =>
+          r.json().data as {
+            items: Array<Record<string, unknown>>;
+            page: { total: number; limit: number; offset: number; hasMore: boolean };
+          },
+      );
+    expect(pagedCases.items).toHaveLength(1);
+    expect(pagedCases.page).toEqual({ total: 2, limit: 1, offset: 1, hasMore: false });
+    expect(pagedCases.items[0]!.status).toBe('RECOVERED');
 
     // Workspace scoping: another tenant gets 404 (no existence oracle).
     const otherAccess = await app

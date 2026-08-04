@@ -43,7 +43,7 @@ import { apiKeysRoutes } from './modules/api-keys/index.js';
 import { authRoutes, authenticatedAuthRoutes, userTokenMeRoutes } from './modules/auth/index.js';
 import { plansRoutes } from './modules/plans/index.js';
 import { couponsAdminRoutes, couponsPublicRoutes } from './modules/coupons/index.js';
-import { billingRoutes } from './modules/billing/index.js';
+import { billingRoutes, billingAdminRoutes } from './modules/billing/index.js';
 import {
   stripeWebhookRoutes,
   paypalWebhookRoutes,
@@ -333,6 +333,33 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   });
 
+  // The same NUL guard, for the JSON body.
+  //
+  // The query-string hook above was added first and the body was left alone,
+  // which an external audit then walked straight through: a NUL inside any
+  // JSON string reached Prisma and Postgres answered `22021 invalid byte
+  // sequence`, surfacing as a 500 on 19 routes — including operator sign-up
+  // and MCP dynamic client registration, both UNAUTHENTICATED. A caller could
+  // produce a 500 on demand.
+  //
+  // preValidation, so it runs after the body is parsed and before any schema:
+  // this is about a byte Postgres cannot store, not about any one route's
+  // shape, and putting it here means the next route to accept a string is
+  // covered without anyone remembering to think about it.
+  app.addHook('preValidation', async (req, reply) => {
+    if (req.body !== undefined && req.body !== null && containsNulByte(req.body)) {
+      return reply.code(400).send({
+        success: false,
+        error: {
+          code: 'INVALID_BODY',
+          message: 'Request body contains a NUL byte.',
+          fix: 'Remove the \\u0000 character from the request body.',
+          requestId: req.id,
+        },
+      });
+    }
+  });
+
   app.addHook('onRequest', rejectUnsupportedMediaType);
 
   // Coarse ceiling for auth endpoints, deliberately at `onRequest`.
@@ -598,11 +625,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(apiKeysRoutes, { prefix: '/api/v1/admin/applications' });
   await app.register(plansRoutes, { prefix: '/api/v1/admin/applications' });
   await app.register(couponsAdminRoutes, { prefix: '/api/v1/admin/applications' });
+  // Granting a subscription with no payment provider behind it. Held at
+  // SUPER_ADMIN_KEY rather than an operator role floor — see the route file.
+  await app.register(billingAdminRoutes, { prefix: '/api/v1/admin/applications' });
   // Operator-invite key management (mint/list/revoke). Gates new-operator
   // registration when OPERATOR_SIGNUP_MODE='invite'. Gated by SUPER_ADMIN_KEY.
   await app.register(operatorInvitesRoutes, { prefix: '/api/v1/admin/operator-invites' });
   // Read-only deployment-wide rollups for the super-admin dashboard
-  // (apps/admin → admin.rekey.dev). GET-only; gated by SUPER_ADMIN_KEY.
+  // (the super-admin dashboard). GET-only; gated by SUPER_ADMIN_KEY.
   await app.register(adminMetricsRoutes, { prefix: '/api/v1/admin/metrics' });
 
   app.setNotFoundHandler((req, reply) => {
@@ -622,4 +652,24 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   return app;
+}
+
+/**
+ * Does any string anywhere in a parsed JSON body contain a NUL?
+ *
+ * Depth-bounded: a body deep enough to matter is already refused by the size
+ * limit, and an unbounded walk on attacker-shaped input is its own denial
+ * vector. Keys are checked as well as values — a NUL in a metadata key reaches
+ * the same column.
+ */
+function containsNulByte(value: unknown, depth = 0): boolean {
+  if (depth > 12) return false;
+  if (typeof value === 'string') return value.includes('\u0000');
+  if (Array.isArray(value)) return value.some((v) => containsNulByte(v, depth + 1));
+  if (value !== null && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) {
+      if (k.includes('\u0000') || containsNulByte(v, depth + 1)) return true;
+    }
+  }
+  return false;
 }

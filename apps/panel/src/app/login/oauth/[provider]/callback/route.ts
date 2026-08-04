@@ -11,6 +11,7 @@
 import { cookies } from 'next/headers';
 import { type NextRequest, NextResponse } from 'next/server';
 import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE } from '@/lib/api';
+import { cookieSecure } from '@/lib/cookie-secure';
 
 type CallbackResult =
   | { mfaRequired: true; mfaChallengeToken: string }
@@ -98,7 +99,7 @@ export async function GET(
     );
   }
 
-  const secure = process.env.NODE_ENV === 'production';
+  const secure = await cookieSecure();
   const res = seeOther(
     next ? `${next}${next.includes('?') ? '&' : '?'}e=login_oauth` : '/applications?e=login_oauth',
   );

@@ -1,13 +1,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import {
-  api,
-  PanelApiError,
-  type ApplicationRow,
-  type OrganizationRow,
-  type EndUserRow,
-} from '@/lib/api';
+import { api, PanelApiError, type OrganizationRow, type EndUserRow, getApplication } from '@/lib/api';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
@@ -15,6 +9,7 @@ import { Field } from '@/components/Field';
 import { formatDate } from '@/lib/date';
 import { Modal } from '@/components/Modal';
 import { Pager, readPageSize } from '@/components/Pager';
+import type { Page } from '@/lib/paginate';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
@@ -90,20 +85,20 @@ export default async function OrganizationsPage({
   const PAGE_SIZE = readPageSize(sp);
   const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
 
-  const [app, orgs, endUsers] = await Promise.all([
-    api<ApplicationRow>({
-      method: 'GET',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-    }),
-    api<OrganizationRow[]>({
+  const [app, orgPage, endUserPage] = await Promise.all([
+    getApplication(id),
+    api<Page<OrganizationRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/organizations?limit=${PAGE_SIZE}&offset=${offset}`,
     }),
-    api<EndUserRow[]>({
+    // Owner picker for the create-org modal — one window, never paged.
+    api<Page<EndUserRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users?limit=100`,
     }),
   ]);
+  const { items: orgs, page } = orgPage;
+  const endUsers = endUserPage.items;
 
   const enabled = app.authConfig.organizationsEnabled === true;
 
@@ -204,7 +199,13 @@ export default async function OrganizationsPage({
           </Table>
         )}
 
-        <Pager basePath={`/applications/${id}/organizations`} offset={offset} pageSize={PAGE_SIZE} count={orgs.length} />
+        <Pager
+          basePath={`/applications/${id}/organizations`}
+          offset={offset}
+          pageSize={PAGE_SIZE}
+          count={orgs.length}
+          hasMore={page.hasMore}
+        />
       </section>
     </div>
   );

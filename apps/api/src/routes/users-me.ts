@@ -35,6 +35,77 @@ import { requirePublishableOrSecretKey, requireScope } from '../middleware/api-k
 import { requireUserSession } from '../middleware/user-session.js';
 import { RekeyError } from '../lib/error.js';
 import { authService } from '../modules/auth/auth.service.js';
+import { ok, errs, ref } from '../lib/openapi.js';
+
+// ---------------------------------------------------------------------------
+// Shared error fragments — every route here sits behind
+// requirePublishableOrSecretKey + requireScope('auth:read') + requireUserSession
+// (see middleware/api-key-auth.ts, middleware/user-session.ts).
+// ---------------------------------------------------------------------------
+
+const USERS_ME_401 =
+  'API_KEY_MISSING — no `Authorization: Bearer` header; or API_KEY_INVALID — the secret key is ' +
+  'unknown, revoked, or expired; or PUBLISHABLE_KEY_INVALID — the publishable key is unknown or ' +
+  'has rotated out of its grace window; or USER_TOKEN_MISSING — no `X-Rekey-User-Token` header; ' +
+  'or USER_TOKEN_INVALID — the user token is invalid, expired, or signed with a different ' +
+  'secret; or USER_TOKEN_WRONG_APPLICATION — the token was issued by a different Application; ' +
+  'or IMPERSONATION_SESSION_ENDED — the impersonation session backing this token has ended.';
+
+const USERS_ME_ERRORS = {
+  401: USERS_ME_401,
+  403:
+    "IP_NOT_ALLOWED — a secret-key caller's IP is outside the Application's `ipAllowlist`; or " +
+    "ORIGIN_NOT_ALLOWED — a publishable-key caller's `Origin` is outside `corsOrigins`; or " +
+    'API_KEY_SCOPE_INSUFFICIENT — the secret key lacks the required scope (`auth:read` for GET, ' +
+    '`auth:read` + `auth:write` for PATCH).',
+  404: 'END_USER_NOT_FOUND — the end-user behind this session no longer exists in this Application.',
+  410: 'END_USER_ERASED — this end-user was erased (GDPR) and can no longer authenticate.',
+  429: 'RATE_LIMITED — too many requests for this window. Honour the `Retry-After` header.',
+} as const;
+
+/**
+ * `{...EndUser, activeOrganizationId, …}` — the shape both GET and PATCH return.
+ *
+ * This `allOf` was **unsatisfiable** until 2.0.0-rc.3. The `EndUser` component
+ * is generated from `EndUserDtoSchema`, a `.strict()` zod object, and the
+ * generator stamped `additionalProperties: false` on it. That made
+ * `activeOrganizationId` simultaneously required by the second branch and
+ * forbidden by the first: no JSON object could ever validate against this
+ * declaration. `fromZod` (lib/openapi.ts) now strips the closed flag — those
+ * components describe a floor, not a ceiling, which is what their own docblock
+ * always claimed.
+ *
+ * The second branch also names the four fields the handler returns straight off
+ * the Prisma row that `EndUserDto` does not model. They were undeclared before,
+ * which under a closed schema was the same violation a second time.
+ */
+const END_USER_SELF_SCHEMA = {
+  allOf: [
+    ref('EndUser'),
+    {
+      type: 'object',
+      properties: {
+        activeOrganizationId: {
+          type: 'string',
+          nullable: true,
+          description:
+            "The organization this session is acting for, from the token's `oid` claim. " +
+            'Null when the session has no active organization.',
+        },
+        role: { type: 'string', description: "The end-user's role within this Application." },
+        updatedAt: { type: 'string', format: 'date-time' },
+        erasedAt: {
+          type: 'string',
+          format: 'date-time',
+          nullable: true,
+          description: 'Set when the record was erased under GDPR. Null for a live user.',
+        },
+        erasedBy: { type: 'string', nullable: true },
+      },
+      required: ['activeOrganizationId', 'role', 'updatedAt'],
+    },
+  ],
+};
 
 /**
  * Self-service write surface — a **closed** allowlist.
@@ -82,6 +153,10 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
           { publishableKey: [], userToken: [] },
           { apiKey: [], userToken: [] },
         ],
+        response: {
+          200: ok(END_USER_SELF_SCHEMA, "The current end-user's own record."),
+          ...errs({ ...USERS_ME_ERRORS }),
+        },
       },
     },
     async (req) => {
@@ -137,6 +212,16 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
                 'Capped at 16KB serialized after the merge.',
             },
           },
+        },
+        response: {
+          200: ok(END_USER_SELF_SCHEMA, "The current end-user's own record, after the update."),
+          ...errs({
+            ...USERS_ME_ERRORS,
+            400:
+              'END_USER_UPDATE_INVALID — the body failed the closed `metadata`-only schema; or ' +
+              'METADATA_KEY_RESERVED — `metadata.oidc` is reserved for the operator; or ' +
+              'METADATA_TOO_LARGE — `metadata` exceeds 16KB serialized after the merge.',
+          }),
         },
       },
     },

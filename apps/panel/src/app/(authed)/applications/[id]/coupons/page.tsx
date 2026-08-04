@@ -1,7 +1,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type ApplicationRow, type CouponRow } from '@/lib/api';
+import { api, PanelApiError, type CouponRow, getApplication } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
@@ -10,6 +10,7 @@ import { formatDate } from '@/lib/date';
 import { Modal } from '@/components/Modal';
 import { CouponAmountPreview } from '@/components/CouponAmountPreview';
 import { Pager, readPageSize } from '@/components/Pager';
+import type { Page } from '@/lib/paginate';
 import { formatMoney } from '@/lib/format';
 import { BillingModeBanner } from '@/components/BillingModeBanner';
 import { SectionHeader } from '@/components/Card';
@@ -120,10 +121,7 @@ export default async function CouponsPage({
   const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
 
   // Billing master switch off → point at the switch instead of an empty table.
-  const app = await api<ApplicationRow>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(id)}`,
-  });
+  const app = await getApplication(id);
   if (!app.billingConfig.enabled) {
     return (
       <div className="space-y-5">
@@ -136,7 +134,7 @@ export default async function CouponsPage({
     );
   }
 
-  const coupons = await api<CouponRow[]>({
+  const { items: coupons, page } = await api<Page<CouponRow>>({
     method: 'GET',
     path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/coupons?limit=${PAGE_SIZE}&offset=${offset}`,
   });
@@ -224,7 +222,13 @@ export default async function CouponsPage({
         <CouponsTable rows={[...active, ...inactive]} applicationId={id} />
       )}
 
-      <Pager basePath={`/applications/${id}/coupons`} offset={offset} pageSize={PAGE_SIZE} count={coupons.length} />
+      <Pager
+        basePath={`/applications/${id}/coupons`}
+        offset={offset}
+        pageSize={PAGE_SIZE}
+        count={coupons.length}
+        hasMore={page.hasMore}
+      />
     </div>
   );
 }

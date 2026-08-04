@@ -20,8 +20,23 @@ import { RekeyError } from '../../lib/error.js';
 import { verifyUserAccessTokenAnyAlg, peekTokenApplicationId } from '../../lib/jwt.js';
 import { prisma } from '../../lib/prisma.js';
 import { authService } from './auth.service.js';
+import { ok, errs, ref } from '../../lib/openapi.js';
 
 const TOKEN_HEADER = 'x-rekey-user-token';
+
+/**
+ * This route reads only `X-Rekey-User-Token` — no Application key, no IP or
+ * origin gate — so its error surface is just the token checks plus whatever
+ * `authService.getById` (invoked at the bottom of the handler) can throw.
+ */
+const AUTH_ME_ERRORS = {
+  401:
+    'USER_TOKEN_MISSING — no X-Rekey-User-Token header; or USER_TOKEN_INVALID — the token is ' +
+    'missing, expired, malformed, or the Application it names no longer exists.',
+  404: 'END_USER_NOT_FOUND — the end-user behind this token no longer exists in this Application.',
+  410: 'END_USER_ERASED — this end-user was erased (GDPR) and can no longer authenticate.',
+  429: 'RATE_LIMITED — too many requests for this window. Honour the `Retry-After` header.',
+} as const;
 
 export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
   app.get(
@@ -35,6 +50,47 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
           'Resolves the end-user from the X-Rekey-User-Token JWT only — no Application secret ' +
           'key required. Intended for browser/client SDKs that hold only the user access token. ' +
           'Returns 401 USER_TOKEN_INVALID when the token is missing, expired, or malformed.',
+        response: {
+          // Same shape as GET /api/v1/users/me — see END_USER_SELF_SCHEMA in
+          // routes/users-me.ts for why this `allOf` was unsatisfiable before
+          // 2.0.0-rc.3 (closed `EndUser` component + a required field the
+          // second branch added) and what the extra properties are.
+          200: ok(
+            {
+              allOf: [
+                ref('EndUser'),
+                {
+                  type: 'object',
+                  properties: {
+                    activeOrganizationId: {
+                      type: 'string',
+                      nullable: true,
+                      description:
+                        "The organization this session is acting for, from the token's `oid` " +
+                        'claim. Null when the session has no active organization.',
+                    },
+                    role: {
+                      type: 'string',
+                      description: "The end-user's role within this Application.",
+                    },
+                    updatedAt: { type: 'string', format: 'date-time' },
+                    erasedAt: {
+                      type: 'string',
+                      format: 'date-time',
+                      nullable: true,
+                      description:
+                        'Set when the record was erased under GDPR. Null for a live user.',
+                    },
+                    erasedBy: { type: 'string', nullable: true },
+                  },
+                  required: ['activeOrganizationId', 'role', 'updatedAt'],
+                },
+              ],
+            },
+            "The current end-user, plus the session's active organization (if any).",
+          ),
+          ...errs({ ...AUTH_ME_ERRORS }),
+        },
       },
     },
     async (req) => {

@@ -1,13 +1,40 @@
 import * as React from 'react';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { ACCESS_COOKIE, api, PanelApiError, type MeDto } from '@/lib/api';
+import { ACCESS_COOKIE, api, PanelApiError, getMe } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
 import { CONSENT_COOKIE } from '../consent-cookie';
 
 const WRITE_SCOPE = 'mcp:operator:write';
 const ADMIN_SCOPE = 'mcp:operator:admin';
+
+/**
+ * Where the authorization code will actually be delivered.
+ *
+ * This screen used to name the scope tier and the workspace but never the
+ * destination, and that asymmetry is what made anonymous RFC 7591 registration
+ * dangerous. Registration is open by default (it is how Claude Desktop / Code /
+ * Cursor connect), so anyone can register `https://evil.example/cb` under any
+ * `client_name` they like and send an operator an authorize link on the
+ * operator's OWN deployment. Everything the operator saw at that point was
+ * genuine — their panel, their session, their workspaces — and one Allow click
+ * handed a workspace-admin grant to a host they were never shown. PKCE does not
+ * help: the attacker generated the challenge.
+ *
+ * Origin only, not the full URI: the path is attacker-chosen text and a long
+ * one pushes the host off the end of the line, which is the oldest trick for
+ * hiding a destination in plain sight.
+ */
+function redirectOrigin(uri: string): string {
+  try {
+    const u = new URL(uri);
+    // Custom-scheme callbacks (`cursor://…`) have no host — show the scheme.
+    return u.host ? `${u.protocol}//${u.host}` : u.protocol.replace(/:$/, '');
+  } catch {
+    return uri.slice(0, 80);
+  }
+}
 
 interface ConsentParams {
   client_id: string;
@@ -51,7 +78,7 @@ export default async function McpConsentReviewPage({
   const params = readParams(jar.get(CONSENT_COOKIE)?.value);
   if (!params) redirect('/applications');
 
-  const me = await api<MeDto>({ method: 'GET', path: '/api/v1/tenant/auth/me' });
+  const me = await getMe();
   const scopeList = (params.scope ?? '').split(/\s+/);
   const wantsAdmin = scopeList.includes(ADMIN_SCOPE);
   const wantsWrite = wantsAdmin || scopeList.includes(WRITE_SCOPE);
@@ -137,6 +164,20 @@ export default async function McpConsentReviewPage({
             Signed in as {me.user.email}. An MCP client is requesting access to one of your
             workspaces.
           </p>
+        </div>
+
+        {/* The destination, stated plainly. If this is not the client you just
+            started a connection from, Deny — an approval here sends a
+            workspace credential to that host. */}
+        <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-2 text-sm">
+          <div className="text-[var(--color-muted-fg)]">Access will be sent to</div>
+          <div className="font-mono break-all text-[var(--color-fg)]">
+            {redirectOrigin(params.redirect_uri)}
+          </div>
+          <div className="mt-1 text-xs text-[var(--color-muted-fg)]">
+            Anyone can register a client on this deployment, so this host is not vouched for by
+            Rekey. If you don&apos;t recognise it, deny.
+          </div>
         </div>
 
         {errored && (

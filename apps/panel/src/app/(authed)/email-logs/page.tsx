@@ -3,6 +3,7 @@ import { api, type EmailLogWithApp } from '@/lib/api';
 import { EmailLogsTable, EmailLogStatusFilter } from '@/components/EmailLogsTable';
 import { PageHeader } from '@/components/PageHeader';
 import { Pager, readPageSize, readOffset } from '@/components/Pager';
+import type { Page } from '@/lib/paginate';
 
 const STATUSES = new Set(['sent', 'error', 'no_transport']);
 
@@ -20,7 +21,7 @@ export default async function WorkspaceEmailLogsPage({
   if (offset) qs.set('offset', String(offset));
   if (status) qs.set('status', status);
 
-  const rows = await api<EmailLogWithApp[]>({
+  const { items: rows, page } = await api<Page<EmailLogWithApp>>({
     method: 'GET',
     path: `/api/v1/tenant/workspace/email-logs?${qs.toString()}`,
   });
@@ -46,6 +47,7 @@ export default async function WorkspaceEmailLogsPage({
         offset={offset}
         pageSize={PAGE_SIZE}
         count={rows.length}
+        hasMore={page.hasMore}
         extraParams={status ? { status } : undefined}
       />
     </section>

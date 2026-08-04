@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { api, type EmailLogRow, type EmailLogWithApp } from '@/lib/api';
 import { EmailLogsTable, EmailLogStatusFilter } from '@/components/EmailLogsTable';
 import { Pager, readPageSize, readOffset } from '@/components/Pager';
+import type { Page } from '@/lib/paginate';
 
 const STATUSES = new Set(['sent', 'error', 'no_transport']);
 
@@ -23,7 +24,7 @@ export default async function ApplicationEmailLogsPage({
   if (offset) qs.set('offset', String(offset));
   if (status) qs.set('status', status);
 
-  const rows = await api<EmailLogRow[]>({
+  const { items: rows, page } = await api<Page<EmailLogRow>>({
     method: 'GET',
     path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/email-logs?${qs.toString()}`,
   });
@@ -62,6 +63,7 @@ export default async function ApplicationEmailLogsPage({
         offset={offset}
         pageSize={PAGE_SIZE}
         count={rows.length}
+        hasMore={page.hasMore}
         extraParams={status ? { status } : undefined}
       />
     </div>

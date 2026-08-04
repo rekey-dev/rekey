@@ -54,6 +54,20 @@ const CONNECTION_ERROR_CODES = new Set([
 /** Errors from a payment/OAuth provider SDK are never a local dependency. */
 const PROVIDER_ERROR_NAME = /^(Stripe|Razorpay|PayPal)/i;
 
+/**
+ * Does this look like a raw exception from a payment-provider SDK?
+ *
+ * Lives here (rather than next to the provider-error mapper in
+ * `provider-errors.ts`) because `lib/error.ts` needs it as a last-resort
+ * guard and already imports this module — importing the mapper instead would
+ * be a cycle, since the mapper imports `RekeyError` from `error.ts`.
+ */
+export function isProviderSdkError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const name = (err as { name?: unknown }).name;
+  return typeof name === 'string' && PROVIDER_ERROR_NAME.test(name);
+}
+
 interface ErrorLike {
   name?: unknown;
   code?: unknown;

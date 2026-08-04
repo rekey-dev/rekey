@@ -20,9 +20,26 @@
 import { env } from '../../config/env.js';
 import { panelBaseUrl } from '../../lib/panel-url.js';
 import { RekeyError } from '../../lib/error.js';
+import { verifyOperatorAssertionIdToken } from '../../lib/jwt.js';
+import { claimAssertionOnce } from '../../lib/assertion-replay.js';
 import { getOAuthProvider, buildAuthUrl as buildAuthUrlVia } from '../oauth/providers/index.js';
 import type { OAuthProviderConfig } from '../oauth/providers/index.js';
 import { tenantAuthService, type TenantSignInOutcome, type TenantDeviceContext } from '../tenant-auth/tenant-auth.service.js';
+
+/**
+ * The issuer + audience this deployment trusts for ID Token assertions, or
+ * null when it accepts none.
+ *
+ * Read live from `process.env` rather than the boot-parsed `env`, matching
+ * `operatorSignupMode()` next door: both are deployment switches an operator
+ * may want to flip without a restart, and reading live is also what lets the
+ * tests point the pair at a fixture Application they only just created.
+ */
+function assertionConfig(): { issuer: string; audience: string } | null {
+  const issuer = process.env.OPERATOR_OIDC_ISSUER ?? env.OPERATOR_OIDC_ISSUER;
+  const audience = process.env.OPERATOR_OIDC_CLIENT_ID ?? env.OPERATOR_OIDC_CLIENT_ID;
+  return issuer && audience ? { issuer, audience } : null;
+}
 
 /** Providers we support for operator login. Subset of the registry. */
 const OPERATOR_PROVIDERS = ['google', 'github'] as const;
@@ -149,6 +166,67 @@ export const tenantOAuthService = {
       email: identity.email,
       emailVerified: identity.emailVerified,
       ...(args.inviteKey !== undefined && { inviteKey: args.inviteKey }),
+      ...(args.device !== undefined && { device: args.device }),
+    });
+    return tenantAuthService.completeSignIn(user, args.device);
+  },
+
+  /** Is this deployment configured to accept ID Token assertions? */
+  assertionConfigured(): boolean {
+    return assertionConfig() !== null;
+  },
+
+  /**
+   * Sign an operator in from an ID Token this deployment issued.
+   *
+   * The identity model: the upstream Application's end-user is AUTHORITATIVE,
+   * and the operator is a projection of it linked by verified email. That is
+   * why this lands on the same `findOrCreateOAuthOperator` the social buttons
+   * use rather than a path of its own — an operator who already exists keeps
+   * their workspaces, their MFA and their passkeys, and a first-time assertion
+   * is gated by `OPERATOR_SIGNUP_MODE` like any other new operator. Nothing
+   * about federation is allowed to become a way around either.
+   *
+   * One refusal for every failure mode (`OIDC_ASSERTION_INVALID`). Which of
+   * "wrong issuer", "wrong audience", "expired", "unverified email" and
+   * "already redeemed" applies is not something an unauthenticated caller
+   * should be able to probe for.
+   */
+  async handleIdTokenAssertion(args: {
+    idToken: string;
+    device?: TenantDeviceContext;
+  }): Promise<TenantSignInOutcome> {
+    const configured = assertionConfig();
+    if (!configured) {
+      throw new RekeyError({
+        statusCode: 404,
+        code: 'OIDC_ASSERTION_NOT_CONFIGURED',
+        message: 'This deployment does not accept ID Token assertions.',
+        fix: 'Set OPERATOR_OIDC_ISSUER and OPERATOR_OIDC_CLIENT_ID to opt in.',
+      });
+    }
+
+    const invalid = (): never => {
+      throw new RekeyError({
+        statusCode: 401,
+        code: 'OIDC_ASSERTION_INVALID',
+        message: 'That sign-in link is not valid.',
+        fix: 'Start the sign-in again from the site that sent you here — these links are single-use and short-lived.',
+      });
+    };
+
+    const claims = await verifyOperatorAssertionIdToken(args.idToken, configured);
+    if (!claims) invalid();
+
+    // Single-use, claimed BEFORE the operator is resolved so a replay cannot
+    // race a slow first redemption. Fails closed: an unreachable store throws
+    // out of here rather than waving the token through.
+    if (!(await claimAssertionOnce(args.idToken, claims!.exp))) invalid();
+
+    const user = await tenantAuthService.findOrCreateOAuthOperator({
+      email: claims!.email,
+      // Guaranteed true by the verifier — an unverified email never returns.
+      emailVerified: true,
       ...(args.device !== undefined && { device: args.device }),
     });
     return tenantAuthService.completeSignIn(user, args.device);

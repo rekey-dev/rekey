@@ -124,12 +124,21 @@ export const operatorTokensService = {
   },
 
   /** List the operator's active PATs, redacted (prefix only — hash never leaks). */
-  async list(tenantUserId: string): Promise<PublicOperatorToken[]> {
-    const tokens = await prisma.tenantApiToken.findMany({
-      where: { tenantUserId, revokedAt: null },
-      orderBy: { createdAt: 'desc' },
-    });
-    return tokens.map(redact);
+  async list(
+    tenantUserId: string,
+    opts: { take?: number; skip?: number } = {},
+  ): Promise<{ items: PublicOperatorToken[]; total: number }> {
+    const where = { tenantUserId, revokedAt: null };
+    const [tokens, total] = await Promise.all([
+      prisma.tenantApiToken.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        ...(opts.take !== undefined && { take: opts.take }),
+        ...(opts.skip !== undefined && { skip: opts.skip }),
+      }),
+      prisma.tenantApiToken.count({ where }),
+    ]);
+    return { items: tokens.map(redact), total };
   },
 
   /**

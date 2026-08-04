@@ -141,10 +141,27 @@ model TenantMembership {
   tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
   tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  // Grandfather flag for the pre-grants permission model, and ONLY that.
+  //
+  // Before per-application grants existed, a workspace MEMBER could read every
+  // Application in the workspace. When grants landed, that behaviour was kept
+  // for any MEMBER holding zero grants so nobody lost access on upgrade — but
+  // zero grants is also the state a freshly accepted invitation produces, so
+  // "invite a contractor as MEMBER" meant "hand them every Application's
+  // end-user PII, API-key metadata, payments and email logs". The
+  // accommodation was the default.
+  //
+  // It is now an explicit, per-row, migration-only fact. `false` (the default,
+  // so every membership created from 2.0.0-rc.3 onward) means grant-scoped:
+  // no grant on an Application, no access to it. The 2.0.0-rc.3 migration
+  // backfills `true` for MEMBER rows that already existed, and setting any
+  // grant on a membership clears it — the documented "first grant switches
+  // you to grant-scoped" transition, now one-way.
+  legacyWorkspaceRead Boolean @default(false) @map("legacy_workspace_read")
+
   // Per-application access grants. Only consulted when role = MEMBER —
   // OWNER/ADMIN keep implicit full access to every Application. See
-  // ApplicationGrant for the exact semantics (including the zero-grants
-  // legacy read-only mode).
+  // ApplicationGrant for the exact semantics.
   applicationGrants ApplicationGrant[]
 
   // One membership per (user, tenant). Updating role re-uses the same row.
@@ -165,12 +182,14 @@ enum ApplicationRole {
 // Semantics (enforced in apps/api/src/lib/app-access.ts):
 //   - Workspace OWNER/ADMIN never consult this table — they keep implicit
 //     full access to every Application in the workspace (unchanged).
-//   - A MEMBER with ZERO grants keeps the legacy behavior: read-only
-//     access to every Application in the workspace (back-compat for
-//     memberships created before grants existed).
-//   - The moment a MEMBER holds ≥1 grant, grants become authoritative:
-//     Applications without a grant return 404 APPLICATION_NOT_FOUND, and
-//     the granted role caps what they can do on granted ones.
+//   - For a MEMBER, grants are authoritative: Applications without a grant
+//     return 404 APPLICATION_NOT_FOUND, and the granted role caps what they
+//     can do on granted ones. This INCLUDES holding zero grants, which since
+//     2.0.0-rc.3 means access to no Application at all — grant-scoped is the
+//     default, not a mode the first grant opts you into.
+//   - The one exception is TenantMembership.legacyWorkspaceRead, set only by
+//     the 2.0.0-rc.3 backfill for memberships that predate that default;
+//     those keep the old workspace-wide read until any grant is set.
 model ApplicationGrant {
   id                 String          @id @default(cuid())
   tenantMembershipId String          @map("tenant_membership_id")
@@ -1012,7 +1031,17 @@ model OAuthIdentity {
   application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   endUser     EndUser     @relation(fields: [endUserId], references: [id], onDelete: Cascade)
 
-  @@unique([provider, providerAccountId])
+  /// Scoped by Application, deliberately. Globally unique meant that once ANY
+  /// Application linked a Google account, the same Google user signing in to a
+  /// DIFFERENT Application on the same deployment hit a hard 401 — and the
+  /// handler comment called that case "should never happen via normal flows",
+  /// which is false for every multi-app deployment, Rekey Cloud included. It
+  /// was also a cross-tenant squatting primitive: link an account you control
+  /// in your own Application and nobody else on the deployment can ever use it.
+  ///
+  /// Widening a unique constraint cannot fail on existing data — the new key is
+  /// strictly less restrictive than the old one.
+  @@unique([applicationId, provider, providerAccountId])
   @@index([applicationId])
   @@index([endUserId])
   @@map("oauth_identities")
@@ -1351,6 +1380,13 @@ enum CouponDiscountType {
   AMOUNT   // amountOff is in smallest currency unit (cents/paise/sen)
 }
 
+// Lifecycle of one CouponRedemption row. Both states hold a slot against the
+// coupon's ceilings; only CONFIRMED means money moved. See CouponRedemption.
+enum CouponRedemptionStatus {
+  RESERVED   // discount minted at the provider, payment not settled yet
+  CONFIRMED  // the purchase this discount cut has been paid
+}
+
 // What the customer is buying when they check out against this plan.
 //   SUBSCRIPTION: classic recurring access — Subscription row stays ACTIVE
 //                 while the provider keeps charging.
@@ -1369,6 +1405,25 @@ enum PlanKind {
   LICENSE
   USAGE
   CREDIT
+}
+
+// Where a Plan stands with the payment processor that has to be able to charge
+// for it. Written AHEAD of the provider call, never after — see
+// `plans.service.ts`. A plan is only purchasable in NOT_REQUIRED (the provider
+// registers lazily at first checkout) or REGISTERED.
+enum PlanRegistrationStatus {
+  // No eager registration is owed. PayPal- and Razorpay-only Applications, and
+  // Applications with no billing configured at all, register at first checkout.
+  NOT_REQUIRED
+  // Written before the provider round-trip. A row left here is a create that
+  // died mid-flight — un-purchasable by construction, which is the safe way to
+  // crash.
+  PENDING
+  // The provider acknowledged it and `metadata.<provider>` holds the price id.
+  REGISTERED
+  // The provider refused. The plan is forced inactive and stays off the public
+  // catalogue until it is repaired (PATCH the price, or POST .../register).
+  FAILED
 }
 
 model Plan {
@@ -1407,6 +1462,13 @@ model Plan {
   creditsAmount      Int?        @map("credits_amount")
   // Provider-specific ids, e.g. { stripe: { priceId: "price_..." } }.
   metadata      Json         @default("{}")
+  // ── Provider registration ───────────────────────────────────────
+  // Whether the processor can actually charge for this plan. Set BEFORE the
+  // provider call and settled after it, so a plan is never on sale without a
+  // price behind it. `registrationError` carries the provider's own refusal so
+  // the operator can see why without reading server logs.
+  registrationStatus PlanRegistrationStatus @default(NOT_REQUIRED) @map("registration_status")
+  registrationError  String?                @map("registration_error")
   createdAt     DateTime     @default(now()) @map("created_at")
   updatedAt     DateTime     @updatedAt @map("updated_at")
 
@@ -1718,10 +1780,18 @@ model CreditLedger {
 // Two discount kinds: PERCENT (basis-points, 1500 = 15.00%) and AMOUNT
 // (smallest currency unit). One per coupon — never both.
 //
-// `maxRedemptions` and `maxRedemptionsPerUser` are enforced when computing
-// validity; redemption is recorded as a CouponRedemption row, with optional
-// link to the Subscription / Payment that consumed it (filled when the
-// downstream webhook lands).
+// `maxRedemptions` and `maxRedemptionsPerUser` are enforced against
+// CouponRedemption rows — but a row that only appears once the provider has
+// settled the payment cannot bound anything the buyer already holds. A
+// checkout session stays completable for about a day, and its discount is
+// minted at the provider the moment it is created, so between "checkout
+// created" and "payment settled" the ceiling was enforced against rows that
+// did not exist yet: five checkouts on a `maxRedemptions: 1` coupon charged
+// five discounts and left one redemption row.
+//
+// So a redemption now exists from the moment the discount is minted:
+// RESERVED at checkout-create, CONFIRMED when the money lands. See the
+// `status` / `expiresAt` columns below and coupons.service.ts.
 // ============================================================================
 
 model Coupon {
@@ -1762,9 +1832,27 @@ model CouponRedemption {
   paymentId      String?  @map("payment_id")
   /// The provider checkout session the coupon was applied to. THE identity of
   /// "one purchase" for redemption purposes — see the unique index below.
-  /// Nullable for redemptions recorded before this column existed and for any
-  /// future caller that has no session in hand.
+  /// Nullable for redemptions recorded before this column existed, for the
+  /// window between a reservation being taken and the provider handing back a
+  /// session id, and for any future caller that has no session in hand.
   checkoutSessionId String? @map("checkout_session_id")
+  /// RESERVED = a checkout minted this discount at the provider but no money
+  /// has landed. CONFIRMED = the purchase settled. Both consume the coupon's
+  /// ceiling; only CONFIRMED counts as revenue, and only CONFIRMED is what the
+  /// operator's redemption stats report.
+  ///
+  /// Existing rows backfill to CONFIRMED: every row written before this column
+  /// existed was written by a payment applier, after settlement.
+  status         CouponRedemptionStatus @default(CONFIRMED)
+  /// When a RESERVED row stops holding its slot. Null on CONFIRMED rows — a
+  /// settled redemption never expires.
+  ///
+  /// A reservation with no expiry would be a denial-of-discount primitive: open
+  /// a checkout, never pay, and the coupon is consumed forever. It is set to
+  /// the provider checkout session's own lifetime, because that is exactly how
+  /// long the minted discount stays payable — anything shorter reopens the gap
+  /// the reservation exists to close.
+  expiresAt      DateTime? @map("expires_at")
   /// What the discount was worth, in the smallest currency unit, at the moment
   /// it was redeemed. Denormalised on purpose: it used to be read back off
   /// `Subscription.metadata.discountAmount`, which a later checkout on the same

@@ -12,18 +12,31 @@
  *   Workspace role  | Effect
  *   ----------------|---------------------------------------------------------
  *   OWNER / ADMIN   | Implicit full access to every Application (unchanged).
- *   MEMBER, 0 grant | LEGACY mode: read-only on every Application (this was
- *                   | the pre-grants behavior; preserved so existing members
- *                   | don't lose access on upgrade). Writes stay 403 with the
- *                   | same TENANT_ROLE_INSUFFICIENT code requireTenantRole
- *                   | used to emit.
- *   MEMBER, ≥1 grant| Grants are authoritative. No grant on an Application →
- *                   | 404 APPLICATION_NOT_FOUND (even for reads). With a grant:
+ *   MEMBER          | Grants are authoritative, INCLUDING when there are none.
+ *                   | No grant on an Application → 404 APPLICATION_NOT_FOUND
+ *                   | (even for reads). With a grant:
  *                   |   APP_VIEWER  → read only
  *                   |   APP_BILLING → read + billing-write (plans, coupons,
  *                   |                 entitlements, credit grants)
  *                   |   APP_ADMIN   → read + billing-write + write
  *                   | Insufficient grant role → 403 APP_ACCESS_DENIED.
+ *   MEMBER, with    | LEGACY mode: read-only on every Application, writes 403
+ *   legacyWorkspace | TENANT_ROLE_INSUFFICIENT. Set ONLY by the 2.0.0-rc.3
+ *   Read = true     | backfill, for memberships that existed before grant-
+ *                   | scoped access became the default. Cleared for good the
+ *                   | moment any grant is set on the membership.
+ *
+ * CHANGED IN 2.0.0-rc.3 (behaviour change, see CHANGELOG). "MEMBER with zero
+ * grants" used to mean "read every Application in the workspace", on the
+ * grounds that members who predated grants must not lose access. But zero
+ * grants is also what a freshly accepted MEMBER invitation produces, so the
+ * migration accommodation was in fact the live default: inviting a contractor
+ * as MEMBER handed them every Application's end-user roster (with emails),
+ * API-key metadata, billing-credential status, payments, webhooks, coupons,
+ * licences, organizations and email logs — 31 read endpoints on an Application
+ * nobody had granted them. The accommodation is now an explicit per-membership
+ * flag (`TenantMembership.legacyWorkspaceRead`) that only the backfill sets,
+ * and the DEFAULT for every new membership is closed.
  *
  * Route classification ("need"):
  *   'read'          — GET surfaces (lists, stats, configs, logs).
@@ -50,7 +63,7 @@ export interface AppAccess {
   /**
    * How the access was satisfied:
    *  - 'workspace-admin' — caller is OWNER/ADMIN (implicit full access)
-   *  - 'legacy-member'   — MEMBER with zero grants anywhere (read-only)
+   *  - 'legacy-member'   — grandfathered pre-grants membership (read-only)
    *  - ApplicationRole   — MEMBER via an explicit grant on this Application
    */
   level: 'workspace-admin' | 'legacy-member' | ApplicationRole;
@@ -129,19 +142,39 @@ export async function ensureAppAccess(
       fix: 'Register requireTenantSession before the route handler.',
     });
   }
-  const grants = await prisma.applicationGrant.findMany({
-    where: { tenantMembershipId: membershipId },
-    select: { applicationId: true, role: true },
-  });
-
-  if (grants.length === 0) {
-    // Legacy member: workspace-wide read access, no writes (pre-grants behavior).
-    if (need === 'read') return { level: 'legacy-member' };
-    throw legacyWriteDenied(req.tenantRole ?? 'MEMBER');
-  }
+  const [grants, membership] = await Promise.all([
+    prisma.applicationGrant.findMany({
+      where: { tenantMembershipId: membershipId },
+      select: { applicationId: true, role: true },
+    }),
+    prisma.tenantMembership.findUnique({
+      where: { id: membershipId },
+      select: { legacyWorkspaceRead: true },
+    }),
+  ]);
 
   const grant = grants.find((g) => g.applicationId === applicationId);
-  if (!grant) throw notFound(applicationId);
+  if (!grant) {
+    // Grandfathered pre-grants membership: workspace-wide read, no writes.
+    // The ONLY path that still reaches the old behaviour, and it is now
+    // predicated on an explicit column rather than on "this member happens to
+    // have no grants" — which is what every new member looks like.
+    //
+    // `grants.length === 0` as well as the flag, deliberately. Setting a grant
+    // clears the flag and the migration clears it for any row that already had
+    // one, so "grandfathered AND granted" is unreachable — but if it ever did
+    // occur, grants must win, exactly as they did before. This condition is
+    // duplicated verbatim in `appAccessScope` below and in
+    // `tenant-mcp/operator-tools.ts`; all three have to agree.
+    if (grants.length === 0 && membership?.legacyWorkspaceRead === true) {
+      if (need === 'read') return { level: 'legacy-member' };
+      throw legacyWriteDenied(req.tenantRole ?? 'MEMBER');
+    }
+    // Default since 2.0.0-rc.3: closed. Same 404 an ungranted Application
+    // already returned for a member who held grants elsewhere, so a denied
+    // Application stays indistinguishable from an absent one.
+    throw notFound(applicationId);
+  }
 
   if (need === 'read') return { level: grant.role };
   if (need === 'billing-write') {
@@ -154,7 +187,7 @@ export async function ensureAppAccess(
 }
 
 export interface AppAccessScope {
-  /** false → caller sees every Application in the workspace (OWNER/ADMIN or legacy member). */
+  /** false → caller sees every Application in the workspace (OWNER/ADMIN or grandfathered member). */
   restricted: boolean;
   /** Granted application ids (only meaningful when restricted). */
   applicationIds: string[];
@@ -170,12 +203,20 @@ export async function appAccessScope(req: FastifyRequest): Promise<AppAccessScop
   if (req.tenantRole === 'OWNER' || req.tenantRole === 'ADMIN' || !req.tenantMembershipId) {
     return { restricted: false, applicationIds: [], roleByApplicationId: new Map() };
   }
-  const grants = await prisma.applicationGrant.findMany({
-    where: { tenantMembershipId: req.tenantMembershipId },
-    select: { applicationId: true, role: true },
-  });
-  if (grants.length === 0) {
-    // Legacy member — workspace-wide read.
+  const [grants, membership] = await Promise.all([
+    prisma.applicationGrant.findMany({
+      where: { tenantMembershipId: req.tenantMembershipId },
+      select: { applicationId: true, role: true },
+    }),
+    prisma.tenantMembership.findUnique({
+      where: { id: req.tenantMembershipId },
+      select: { legacyWorkspaceRead: true },
+    }),
+  ]);
+  // Grandfathered pre-grants membership — workspace-wide read. Zero grants on
+  // its own no longer widens the scope: since 2.0.0-rc.3 it narrows it to
+  // nothing, which is what a new MEMBER invitation is supposed to produce.
+  if (grants.length === 0 && membership?.legacyWorkspaceRead === true) {
     return { restricted: false, applicationIds: [], roleByApplicationId: new Map() };
   }
   return {
@@ -194,4 +235,39 @@ export function redactApplicationForBilling<
   T extends { authConfig?: unknown; oauthConfig?: unknown },
 >(application: T): T {
   return { ...application, authConfig: {}, oauthConfig: {} };
+}
+
+/**
+ * Remove the encrypted-credential blobs from an Application payload.
+ *
+ * `Application` carries `oauthCredentialsCiphertext` (OAuth client secrets),
+ * `emailCredentialsCiphertext` (SMTP password) and
+ * `billingCredentialsCiphertext` (the payment-provider API key and webhook
+ * secret) as columns on the row. Routes that returned the row served all of them — an
+ * external audit found the two credential blobs reaching a read-only
+ * APP_VIEWER, which is a grant-scoped audience that only became reachable in
+ * 2.0.0-rc.3.
+ *
+ * The plaintext is not exposed, so this is not a live credential leak. It is
+ * still wrong on two counts: the dedicated endpoints deliberately redact these
+ * (`email-config` returns a `hasCustomCredentials` boolean and nothing else),
+ * so the app-detail route contradicted its own module's discipline; and
+ * ciphertext in a browser is an offline attack surface that becomes a real
+ * leak the day `ENCRYPTION_KEY` does. Nothing outside the API can use these
+ * values for anything, so there is no reason to send them.
+ *
+ * Applied to every audience, not just the restricted ones — an OWNER has no
+ * more use for a ciphertext blob than a viewer does.
+ */
+export function stripApplicationSecrets<T extends Record<string, unknown>>(application: T): T {
+  const {
+    oauthCredentialsCiphertext: _oauth,
+    emailCredentialsCiphertext: _email,
+    // The audit only caught the two above; this one is the same column class
+    // and the most sensitive of the three — the payment-provider API key and
+    // webhook secret.
+    billingCredentialsCiphertext: _billing,
+    ...safe
+  } = application as Record<string, unknown>;
+  return safe as T;
 }

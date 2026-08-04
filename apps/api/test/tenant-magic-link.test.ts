@@ -74,11 +74,16 @@ describe('Operator magic-link sign-in', () => {
     expect(logs[0]!.applicationId).toBeNull(); // operator/system mail, not app-scoped
   });
 
-  it('is enumeration-safe: unknown email returns the same shape with no token', async () => {
+  it('is enumeration-safe: unknown email returns the same body, not just the same shape', async () => {
+    // This assertion used to read `delivered: false`, under this same name —
+    // pinning the oracle it claimed to rule out. A known address answered
+    // `true` and an unknown one `false`, so one request per address enumerated
+    // the deployment's operators. `delivered` is now constant; see
+    // `CONSTANT_MAGIC_LINK_RESPONSE` in tenant-auth.service.ts.
     const res = await request('nobody-here@example.com');
     expect(res.statusCode).toBe(200);
     const data = res.json().data as { delivered: boolean; token: string | null };
-    expect(data.delivered).toBe(false);
+    expect(data.delivered).toBe(true);
     expect(data.token).toBeNull();
   });
 

@@ -357,9 +357,13 @@ reachable Redis. Everything else is optional or has a default.
 | `SUPER_ADMIN_KEY` | bootstrap admin path (≥32 chars) | **required** |
 | `REDIS_URL` | outbound-webhook delivery queue + rate-limit/lockout state | **required infra** — the API refuses to boot if Redis is unreachable; the URL itself defaults to `localhost` |
 | `ENCRYPTION_KEY` | AES-256-GCM for secrets at rest (64 hex chars) | **required in production** (boot fails without it) |
-| `CORS_ALLOWED_ORIGINS` | allowlist for browser callers | **required in production** (dev permits localhost) |
+| `CORS_ALLOWED_ORIGINS` | allowlist for browser callers | schema-optional, so the API boots without it — but an empty value in production denies **every** cross-origin caller (dev permits localhost) |
 | `RESEND_DEFAULT_API_KEY` + `RESEND_DEFAULT_FROM` | shared Resend pool; without it the API returns raw tokens to the caller | optional |
 | `WEBHOOK_ALLOW_PRIVATE_TARGETS` | opt out of the outbound-webhook SSRF guard for intra-VPC URLs | optional (self-host) |
+| `OPERATOR_SIGNUP_MODE` | `open` \| `invite` \| `closed` — who may create a new operator account | defaults `open`; the API logs a `[SECURITY]` warning while `open` + `NODE_ENV=production` |
+| `OPERATOR_MCP_DYNAMIC_REGISTRATION` | `open` \| `disabled` — RFC 7591 registration on the operator MCP authorization server | defaults `open`; close it once your MCP clients hold a `client_id` |
+| `TRUSTED_PROXIES` | hop count or IP/CIDR allowlist deciding whether `X-Forwarded-For` is believed | required behind a reverse proxy — `request.ip`, rate-limit buckets and IP allowlists key off it |
+| `REKEY_COOKIE_SECURE` | forces the `Secure` cookie attribute on/off in the **web apps** (panel/portal/admin + `@rekey.dev/nextjs`); the API sets no cookies | optional — `Secure` is otherwise decided per request from `X-Forwarded-Proto`, falling back to the host |
 
 See [.env.example](.env.example) for the complete, commented list.
 

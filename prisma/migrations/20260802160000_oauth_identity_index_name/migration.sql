@@ -1,0 +1,22 @@
+-- Rename the OAuthIdentity unique index to the name Prisma derives for it.
+--
+-- The previous migration wrote the index name out in full:
+--
+--   oauth_identities_application_id_provider_provider_account_id_key
+--
+-- which is 64 characters. Postgres silently truncates identifiers at 63, so
+-- what actually exists in every database is `..._account_id_ke` — the last
+-- character dropped. Prisma truncates differently: it shortens the middle to
+-- preserve the trailing `_key`, giving `..._account_i_key`. Neither is wrong;
+-- they simply disagree, and `prisma migrate diff --exit-code` compares the
+-- schema against the migrations and fails on the mismatch. That check is a
+-- required CI job, so main has been red since the index landed.
+--
+-- `IF EXISTS` because the name being renamed is itself the truncated form: a
+-- database created before this point has it, and a database created fresh gets
+-- it from the previous migration and is renamed here in the same run. Both
+-- converge on the name Prisma expects.
+--
+-- No data, constraint, or uniqueness change — this is the index's name only.
+ALTER INDEX IF EXISTS "oauth_identities_application_id_provider_provider_account_id_ke"
+  RENAME TO "oauth_identities_application_id_provider_provider_account_i_key";

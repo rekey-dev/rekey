@@ -410,11 +410,18 @@ describe('coupon redemption is recorded once per purchase', () => {
     });
 
     it('a redemption that genuinely cannot be recorded never rolls back the money', async () => {
-      // Same class of failure reached from the other side: the coupon is
-      // exhausted between checkout (where `validate` passed) and the webhook
-      // that would record it. The purchase still has to be recorded in full —
-      // an operator's coupon books being one row short is not a reason to
-      // discard a charge the provider has already taken.
+      // Same class of failure reached from the other side: the webhook that
+      // would record the redemption finds the coupon exhausted. The purchase
+      // still has to be recorded in full — an operator's coupon books being one
+      // row short is not a reason to discard a charge the provider has already
+      // taken.
+      //
+      // Reaching it takes a bit of setup now, and that is the point: a checkout
+      // RESERVES its slot, so the ordinary "somebody else consumed the last
+      // redemption while this buyer was paying" cannot happen any more. What is
+      // still reachable is a sale with no reservation to confirm — one whose
+      // reservation aged out, or a provider flow that never came through our
+      // checkout — so the reservation is dropped here to model exactly that.
       await createCoupon({
         code: 'racey',
         discountType: 'PERCENT',
@@ -423,13 +430,15 @@ describe('coupon redemption is recorded once per purchase', () => {
       });
       const sessionId = await checkoutSessionId({ planSlug: 'pro', couponCode: 'racey', provider: 'stripe' });
       const coupon = await prisma.coupon.findFirstOrThrow({ where: { applicationId, code: 'racey' } });
-      // Somebody else's purchase consumed the last redemption in the meantime.
+      await prisma.couponRedemption.deleteMany({ where: { couponId: coupon.id, status: 'RESERVED' } });
+      // ...and somebody else's purchase took the only redemption there was.
       await prisma.couponRedemption.create({
         data: {
           couponId: coupon.id,
           applicationId,
           endUserId,
           checkoutSessionId: 'cs_someone_else',
+          status: 'CONFIRMED',
         },
       });
 
@@ -494,12 +503,14 @@ describe('coupon redemption is recorded once per purchase', () => {
       headers: { authorization: `Bearer ${operatorAccess}` },
     });
     const row = (
-      stats.json().data as Array<{
-        code: string;
-        totalDiscountIssued: number;
-        redemptionCount: number;
-      }>
-    ).find((c) => c.code === 'stamped');
+      stats.json().data as {
+        items: Array<{
+          code: string;
+          totalDiscountIssued: number;
+          redemptionCount: number;
+        }>;
+      }
+    ).items.find((c) => c.code === 'stamped');
     expect(row).toMatchObject({ redemptionCount: 1, totalDiscountIssued: 2000 });
   });
 });

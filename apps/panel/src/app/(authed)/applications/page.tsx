@@ -1,21 +1,12 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import {
-  api,
-  PanelApiError,
-  type ApplicationRow,
-  type MeDto,
-  type MemberRow,
-  type InvitationRow,
-  type PlanRow,
-  type ApiKeyRow,
-  type BillingCredentialRow,
-} from '@/lib/api';
+import { api, PanelApiError, type ApplicationRow, type MemberRow, type InvitationRow, type PlanRow, type ApiKeyRow, type BillingCredentialRow, getMe } from '@/lib/api';
 import { Modal } from '@/components/Modal';
 import { SlugAvailabilityField } from '@/components/SlugAvailabilityField';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Pager, readPageSize } from '@/components/Pager';
+import { emptyPage, type Page } from '@/lib/paginate';
 import { PageHeader } from '@/components/PageHeader';
 import { EmptyState } from '@/components/EmptyState';
 import { OnboardingChecklist, type OnboardingStep } from '@/components/OnboardingChecklist';
@@ -81,14 +72,18 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
   allDone: boolean;
 }> {
   const firstApp = apps[0];
-  const [me, members, invitations, firstAppKeys] = await Promise.all([
-    api<MeDto>({ method: 'GET', path: '/api/v1/tenant/auth/me' }).catch(() => null),
-    api<MemberRow[]>({ method: 'GET', path: '/api/v1/tenant/workspace/members' }).catch(() => null),
-    api<InvitationRow[]>({ method: 'GET', path: '/api/v1/tenant/workspace/invitations' }).catch(
+  const [me, memberPage, invitationPage, firstAppKeys] = await Promise.all([
+    getMe().catch(() => null),
+    api<Page<MemberRow>>({ method: 'GET', path: '/api/v1/tenant/workspace/members' }).catch(
       () => null,
     ),
+    api<Page<InvitationRow>>({
+      method: 'GET',
+      path: '/api/v1/tenant/workspace/invitations',
+    }).catch(() => null),
     // API keys of the first app — drives the "mint your first key" step.
-    // (One cheap read; omitted-on-failure like the other derived steps.)
+    // (One cheap read; omitted-on-failure like the other derived steps. Not a
+    // paginated endpoint: this one still answers with a bare array.)
     firstApp
       ? api<ApiKeyRow[]>({
           method: 'GET',
@@ -96,6 +91,10 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
         }).catch(() => null)
       : Promise.resolve([] as ApiKeyRow[]),
   ]);
+  // null is load-bearing below: "the read failed, omit the step" is a different
+  // answer from "the list is empty, the step is not done".
+  const members = memberPage === null ? null : memberPage.items;
+  const invitations = invitationPage === null ? null : invitationPage.items;
 
   const billingApp = apps.find((a) => a.billingConfig.enabled);
   // Two extra reads, only when an app actually has billing enabled — the list
@@ -107,18 +106,20 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
   // with BILLING_CREDENTIALS_NOT_CONFIGURED — the checklist was reporting
   // production-ready on a state that cannot take a payment. The step says "and
   // add a provider", so it needs both halves.
-  const [plans, billingCredentials] = billingApp
+  const [planPage, billingCredentials] = billingApp
     ? await Promise.all([
-        api<PlanRow[]>({
+        api<Page<PlanRow>>({
           method: 'GET',
           path: `/api/v1/tenant/applications/${encodeURIComponent(billingApp.id)}/plans`,
         }).catch(() => null),
+        // Not paginated — one row per configured provider, still a bare array.
         api<BillingCredentialRow[]>({
           method: 'GET',
           path: `/api/v1/tenant/applications/${encodeURIComponent(billingApp.id)}/billing-credentials`,
         }).catch(() => null),
       ])
-    : [[] as PlanRow[], [] as BillingCredentialRow[]];
+    : [emptyPage<PlanRow>(), [] as BillingCredentialRow[]];
+  const plans = planPage === null ? null : planPage.items;
   // The endpoint returns one row per CONFIGURED provider, so a non-empty list
   // is the signal. Null means the read failed — fall back to the old
   // enabled-only answer rather than claiming the step is incomplete.
@@ -225,16 +226,26 @@ export default async function ApplicationsPage({
 }): Promise<React.JSX.Element> {
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // Only owners and admins may create an Application — the API answers
+  // TENANT_ROLE_INSUFFICIENT for a MEMBER. Since #326 a MEMBER also starts with
+  // access to NO Application, which is exactly the state accepting an
+  // invitation produces. So the default view for an invited teammate was the
+  // owner's first-run page: a "Create your first application" button that can
+  // only 403, and a six-step "get this workspace production-ready" checklist
+  // where five steps are owner-only. Branch on the role instead.
+  const me = await getMe().catch(() => null);
+  const canManageApps = me === null || me.activeRole === 'OWNER' || me.activeRole === 'ADMIN';
   const PAGE_SIZE = readPageSize(sp);
   const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
-  const apps = await api<ApplicationRow[]>({
+  const { items: apps, page } = await api<Page<ApplicationRow>>({
     method: 'GET',
     path: `/api/v1/tenant/applications/?limit=${PAGE_SIZE}&offset=${offset}`,
   });
 
   // Onboarding state only matters on the first page — paginating past page
   // one means this is not a new workspace, so skip the extra reads entirely.
-  const onboarding = offset === 0 ? await buildOnboardingSteps(apps) : null;
+  // Members can act on none of the steps, so they skip it too.
+  const onboarding = offset === 0 && canManageApps ? await buildOnboardingSteps(apps) : null;
 
   return (
     <section className="mx-auto max-w-7xl space-y-6 px-6 py-8 lg:px-8">
@@ -244,7 +255,9 @@ export default async function ApplicationsPage({
         /* Hide the header trigger on the empty state — the prominent CTA in
            the empty state is the right entry point, and rendering both
            here used to collide on modalKey="newApp" (HIGH #7 fix). */
-        action={apps.length > 0 ? <NewAppModal error={error} modalKey="newApp" /> : undefined}
+        action={
+          apps.length > 0 && canManageApps ? <NewAppModal error={error} modalKey="newApp" /> : undefined
+        }
       />
 
       {onboarding && !onboarding.allDone && (
@@ -279,7 +292,22 @@ export default async function ApplicationsPage({
         />
       )}
 
-      {apps.length === 0 ? (
+      {apps.length === 0 && !canManageApps ? (
+        // A member sees an empty list because nothing has been shared with
+        // them, NOT because the workspace is empty — telling them "no
+        // applications yet" and offering a create button they cannot use sent
+        // every invited teammate to a 403. Name the real cause and the fix.
+        <EmptyState
+          title="No applications shared with you yet"
+          description={
+            <>
+              You&apos;re a <strong>member</strong> of this workspace. Members only see the
+              applications they have been granted access to, and you don&apos;t have any yet. Ask an
+              owner or admin to grant you access under <strong>Team → Application access</strong>.
+            </>
+          }
+        />
+      ) : apps.length === 0 ? (
         <EmptyState
           title="No applications yet"
           description={
@@ -333,7 +361,13 @@ export default async function ApplicationsPage({
         </ul>
       )}
 
-      <Pager basePath="/applications" offset={offset} pageSize={PAGE_SIZE} count={apps.length} />
+      <Pager
+        basePath="/applications"
+        offset={offset}
+        pageSize={PAGE_SIZE}
+        count={apps.length}
+        hasMore={page.hasMore}
+      />
     </section>
   );
 }

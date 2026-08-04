@@ -19,9 +19,15 @@
 import type { Tenant, TenantRole, TenantUser } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
-import { hashPassword, verifyPassword } from '../../lib/passwords.js';
+import { hashPassword, verifyPassword, verifyPasswordOrDecoy } from '../../lib/passwords.js';
 import { resolveNewTenantLimits } from '../../lib/tenant-limits.js';
-import { assertNotLocked, registerFailure, clearFailures, LOGIN_POLICY } from '../../lib/brute-force.js';
+import {
+  assertNotLocked,
+  registerFailure,
+  clearFailures,
+  operatorLoginLockScope,
+  LOGIN_POLICY,
+} from '../../lib/brute-force.js';
 import {
   issueTenantAccessToken,
   issueTenantMfaChallengeToken,
@@ -117,6 +123,31 @@ async function assertOperatorPasswordAcceptable(password: string): Promise<void>
   }
 }
 
+/**
+ * The ONE body `/tenant/auth/forgot-password` returns.
+ *
+ * Both operator credential-send endpoints used to report what actually
+ * happened — `delivered: false` for an address with no operator account,
+ * `delivered: true` for one that has — which is a complete account-existence
+ * oracle on an unauthenticated endpoint, for the accounts that reach every
+ * workspace and every decrypted billing credential in the deployment.
+ *
+ * The end-user surface solved this first and this is the same shape as its
+ * `PUBLISHABLE_SEND_RESPONSE`: unknown address, real send, and broken transport
+ * are byte-identical to the caller, and the real outcome is recorded in the
+ * security log instead. There is no secret-key tier here to exempt — the panel
+ * is first-party, so every caller of these two routes is a browser.
+ *
+ * The only path that still varies is the dev token echo
+ * (`echoAuthTokensInDev`), which exists so a self-hoster with no mail transport
+ * can complete the flow; `config/env.ts` refuses to boot with it set in
+ * production.
+ */
+const CONSTANT_RESET_RESPONSE = { delivered: true, resetToken: null } as const;
+
+/** The magic-link twin of `CONSTANT_RESET_RESPONSE`. Same reasoning. */
+const CONSTANT_MAGIC_LINK_RESPONSE = { delivered: true, token: null } as const;
+
 export type PublicTenantUser = Omit<TenantUser, 'passwordHash'>;
 
 function redact(user: TenantUser): PublicTenantUser {
@@ -126,13 +157,30 @@ function redact(user: TenantUser): PublicTenantUser {
 }
 
 /**
- * Operator login lockout scope for the Redis brute-force limiter
- * (lib/brute-force.ts) — mirrors the end-user one. 10 failures / 15 min →
- * 15-min lock. Operators are the highest-privilege accounts, so they get the
- * same protection. Keyed by email; no per-attempt DB writes.
+ * The workspace a failed sign-in is attributed to.
+ *
+ * An operator sign-in happens BEFORE a workspace is chosen, so there is no
+ * `tenantId` on the request — and every reader of `security_events` is
+ * tenant-scoped (`listSecurityEvents` takes a required `tenantId`, the operator
+ * MCP tool filters on one, the panel page is inside a workspace). A row written
+ * with `tenantId: null` is therefore a row nobody can ever see, which is the
+ * same as not writing it.
+ *
+ * So we resolve the workspace the way sign-in itself would have: the OLDEST
+ * membership, which is what `loadMemberships()[0]` selects as the active one.
+ * The failure lands in the log of the workspace the operator was trying to
+ * reach.
+ *
+ * Returns null only for an operator with no memberships at all — nothing can
+ * be attributed, and sign-in would have refused them anyway.
  */
-function operatorLockScope(email: string): string {
-  return `op:login:${email.toLowerCase()}`;
+async function primaryTenantId(tenantUserId: string): Promise<string | null> {
+  const membership = await prisma.tenantMembership.findFirst({
+    where: { tenantUserId },
+    orderBy: { createdAt: 'asc' },
+    select: { tenantId: true },
+  });
+  return membership?.tenantId ?? null;
 }
 
 /** Starter workspace name for an OAuth operator (no workspace-name input). */
@@ -223,8 +271,11 @@ export const tenantAuthService = {
    * If the email already exists, returns EMAIL_ALREADY_EXISTS — sign-in
    * is the right action there.
    */
-  async listSessions(tenantUserId: string): Promise<TenantSessionSummary[]> {
-    return listActiveTenantSessions(tenantUserId);
+  async listSessions(
+    tenantUserId: string,
+    opts: { take?: number; skip?: number } = {},
+  ): Promise<{ items: TenantSessionSummary[]; total: number }> {
+    return listActiveTenantSessions(tenantUserId, opts);
   },
 
   async revokeSession(args: {
@@ -405,8 +456,9 @@ export const tenantAuthService = {
   // ---- magic-link (passwordless email sign-in) ----
 
   /**
-   * Request a magic-link token. **Enumeration-safe**: always returns the same
-   * shape, never revealing whether the email maps to an operator.
+   * Request a magic-link token. **Enumeration-safe**: returns one constant
+   * body (`CONSTANT_MAGIC_LINK_RESPONSE`) whatever happened, so the response
+   * never reveals whether the email maps to an operator.
    *
    * We email the link ourselves via the deployment-wide transport and return
    * `token: null`. The raw token is echoed back only under the dev flag
@@ -416,10 +468,11 @@ export const tenantAuthService = {
   async requestMagicLink(input: { email: string }): Promise<{ delivered: boolean; token: string | null }> {
     const user = await prisma.tenantUser.findUnique({ where: { email: input.email.toLowerCase() } });
     if (!user) {
-      // Constant-ish delay — same shape as requestPasswordReset, so timing
-      // doesn't leak existence.
+      // Constant-ish delay to flatten the timing side channel, then the same
+      // body a real send produces. `delivered: false` here used to be the
+      // whole oracle: one request per address told you which operators exist.
       await new Promise((r) => setTimeout(r, 50));
-      return { delivered: false, token: null };
+      return { ...CONSTANT_MAGIC_LINK_RESPONSE };
     }
     const issued = await issueTenantMagicLinkToken(user.id);
     // Deliver via the default transport (RESEND_DEFAULT) + log it. The send is
@@ -443,7 +496,7 @@ export const tenantAuthService = {
         },
         tenantId: membership?.tenantId ?? null,
       });
-      if (outcome.kind === 'sent') return { delivered: true, token: null };
+      if (outcome.kind === 'sent') return { ...CONSTANT_MAGIC_LINK_RESPONSE };
       if (outcome.kind === 'error') {
         void recordAuthEmailDeliveryFailure({
           applicationId: null,
@@ -455,7 +508,7 @@ export const tenantAuthService = {
     }
     // Same reasoning as requestPasswordReset above, and worse: this token IS a
     // session — verifying it signs the holder in as the operator outright.
-    if (!echoAuthTokensInDev()) return { delivered: true, token: null };
+    if (!echoAuthTokensInDev()) return { ...CONSTANT_MAGIC_LINK_RESPONSE };
     return { delivered: true, token: issued.raw };
   },
 
@@ -514,12 +567,71 @@ export const tenantAuthService = {
 
     // Account lockout via the Redis brute-force limiter — surface 429 during
     // the lock window rather than running argon2 / leaking timing.
-    const lockScope = operatorLockScope(input.email);
+    const lockScope = operatorLoginLockScope(input.email);
     await assertNotLocked(lockScope);
 
-    const ok = user !== null && (await verifyPassword(user.passwordHash, input.password));
+    // `verifyPasswordOrDecoy`, not `verifyPassword`: the latter returns
+    // instantly for a null hash, so an unknown email answered in ~3 ms against
+    // ~9 ms for a real one — a clean, separable account-existence oracle on an
+    // unauthenticated endpoint. The decoy costs the same argon2 work.
+    const ok = await verifyPasswordOrDecoy(user?.passwordHash ?? null, input.password);
     if (!ok || user === null) {
-      if (user) await registerFailure(lockScope, LOGIN_POLICY);
+      // Counted for an unknown email too, and that is the deliberate
+      // difference from the end-user path.
+      //
+      // The end-user limiter records failures only for accounts that exist, so
+      // an attacker cannot lock out an address before its owner registers it.
+      // That reasoning does not transfer here: operator sign-up is not a public
+      // funnel (it is invite-gated on any deployment that has been configured),
+      // and skipping the count made the 429-vs-401 divergence after 10 attempts
+      // a *louder* existence oracle than the timing one above — no measurement
+      // required, just a loop and a status code.
+      const failure = await registerFailure(lockScope, LOGIN_POLICY);
+
+      // Durable audit trail. A locked-out operator used to leave no trace in
+      // any operator- or admin-facing surface at all: the lockout was a Redis
+      // key with a TTL and nothing wrote a row, so "why can't the workspace
+      // owner sign in?" had no answer anywhere. Attributed to the operator's
+      // primary workspace — see `primaryTenantId` for why null would be
+      // invisible. Fire-and-forget, like every other audit write.
+      //
+      // Emitted only when the account EXISTS. Recording attempts against
+      // unknown addresses would let anyone write attacker-chosen strings into
+      // a workspace's audit log, and there is no workspace to attribute them
+      // to in any case.
+      if (user) {
+        void (async (): Promise<void> => {
+          const tenantId = await primaryTenantId(user.id);
+          if (tenantId === null) return;
+          await recordSecurityEvent({
+            type: 'operator.sign_in_failed',
+            actorType: 'operator',
+            actorId: user.id,
+            tenantId,
+            ip: input.device?.ip ?? null,
+            userAgent: input.device?.userAgent ?? null,
+            metadata: { via: 'password', failuresInWindow: failure.failures },
+          });
+          if (failure.locked) {
+            // Once per lockout — on the attempt that tripped it, not on every
+            // attempt refused during the window.
+            await recordSecurityEvent({
+              type: 'operator.locked_out',
+              actorType: 'operator',
+              actorId: user.id,
+              tenantId,
+              ip: input.device?.ip ?? null,
+              userAgent: input.device?.userAgent ?? null,
+              metadata: {
+                via: 'password',
+                failuresInWindow: failure.failures,
+                lockedForSec: failure.lockedForSec,
+              },
+            });
+          }
+        })().catch(() => undefined);
+      }
+
       throw new RekeyError({
         statusCode: 401,
         code: 'INVALID_CREDENTIALS',
@@ -756,6 +868,10 @@ export const tenantAuthService = {
 
   // ---- password reset (mirrors end-user shape) ----
 
+  /**
+   * Request a password-reset token. **Enumeration-safe**: returns one constant
+   * body (`CONSTANT_RESET_RESPONSE`) whatever happened.
+   */
   async requestPasswordReset(input: {
     email: string;
   }): Promise<{ delivered: boolean; resetToken: string | null }> {
@@ -763,9 +879,11 @@ export const tenantAuthService = {
       where: { email: input.email.toLowerCase() },
     });
     if (!user) {
-      // Constant-ish sleep — same shape as end-user requestPasswordReset.
+      // Constant-ish sleep — same shape as end-user requestPasswordReset —
+      // then the same body a real send produces. `delivered: false` here used
+      // to answer "does this operator exist?" for anyone who asked.
       await new Promise((r) => setTimeout(r, 50));
-      return { delivered: false, resetToken: null };
+      return { ...CONSTANT_RESET_RESPONSE };
     }
     const issued = await issueTenantResetToken(user.id);
     // Deliver via the default transport (RESEND_DEFAULT) + log it; fall back to
@@ -787,7 +905,7 @@ export const tenantAuthService = {
         },
         tenantId: membership?.tenantId ?? null,
       });
-      if (outcome.kind === 'sent') return { delivered: true, resetToken: null };
+      if (outcome.kind === 'sent') return { ...CONSTANT_RESET_RESPONSE };
       if (outcome.kind === 'error') {
         // Token behaviour is already correct here (the dev flag withholds it in
         // production), but an operator whose mail transport just broke gets no
@@ -814,7 +932,7 @@ export const tenantAuthService = {
     // NODE_ENV defaults to 'development', so a self-hoster running the API
     // outside our Docker image (which does set it) would otherwise have leaked
     // silently. env.ts refuses to boot if this flag is set in production.
-    if (!echoAuthTokensInDev()) return { delivered: true, resetToken: null };
+    if (!echoAuthTokensInDev()) return { ...CONSTANT_RESET_RESPONSE };
     return { delivered: true, resetToken: issued.raw };
   },
 

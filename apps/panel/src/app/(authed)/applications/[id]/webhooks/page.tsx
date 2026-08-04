@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { api, PanelApiError } from '@/lib/api';
+import type { Page } from '@/lib/paginate';
 import { Modal } from '@/components/Modal';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
@@ -13,6 +14,7 @@ import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
+import { cookieSecure } from '@/lib/cookie-secure';
 
 interface EndpointRow {
   id: string;
@@ -75,29 +77,31 @@ interface EndpointHealth {
   failed: number;
   pending: number;
   total: number;
-  /** True when the 50-row page couldn't cover the whole 24h window. */
+  /** True when the fetched page couldn't cover the whole 24h window. */
   truncated: boolean;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-/** The route hardwires the service's page size; mirrored so `truncated` is right. */
-const DELIVERY_PAGE_SIZE = 50;
 
 async function endpointHealth(
   applicationId: string,
   endpointId: string,
 ): Promise<EndpointHealth | null> {
-  const rows = await api<DeliveryRow[]>({
+  const delivered = await api<Page<DeliveryRow>>({
     method: 'GET',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/webhooks/${encodeURIComponent(endpointId)}/deliveries`,
   }).catch(() => null);
-  if (rows === null) return null;
+  if (delivered === null) return null;
+  const rows = delivered.items;
 
   const cutoff = Date.now() - DAY_MS;
   const recent = rows.filter((r) => new Date(r.createdAt).getTime() >= cutoff);
   const oldest = rows[rows.length - 1];
+  // Rows we did not fetch, and the oldest one we did is still inside the
+  // window — so the 24h counts below are a floor, not a total. `page.hasMore`
+  // is the API's answer; this used to mirror the route's page size by hand.
   const truncated =
-    rows.length >= DELIVERY_PAGE_SIZE &&
+    delivered.page.hasMore &&
     oldest !== undefined &&
     new Date(oldest.createdAt).getTime() >= cutoff;
 
@@ -173,8 +177,11 @@ async function createEndpoint(applicationId: string, formData: FormData): Promis
   const events = formData.getAll('events').map(String).filter(Boolean);
   const wildcard = String(formData.get('wildcard') ?? '');
   const selected = wildcard ? ['*'] : events.length > 0 ? events : [];
+  // Round-trip the URL so a rejected submit doesn't blank what was typed —
+  // the operator can fix a typo instead of re-pasting the whole endpoint.
+  const keep = url ? `&url=${encodeURIComponent(url)}` : '';
   if (!url || selected.length === 0) {
-    redirect(`/applications/${applicationId}/webhooks?error=missing&newWebhook=1`);
+    redirect(`/applications/${applicationId}/webhooks?error=missing&newWebhook=1${keep}`);
   }
   let secret = '';
   try {
@@ -186,7 +193,7 @@ async function createEndpoint(applicationId: string, formData: FormData): Promis
     secret = result.secret;
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/webhooks?error=${encodeURIComponent(err.code)}&newWebhook=1`);
+      redirect(`/applications/${applicationId}/webhooks?error=${encodeURIComponent(err.code)}&newWebhook=1${keep}`);
     }
     throw err;
   }
@@ -195,7 +202,7 @@ async function createEndpoint(applicationId: string, formData: FormData): Promis
   jar.set('rekey_reveal_whsec', secret, {
     httpOnly: true,
     sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
+    secure: await cookieSecure(),
     path: `/applications/${applicationId}/webhooks`,
     maxAge: 120,
   });
@@ -237,7 +244,13 @@ export default async function WebhooksPage({
   const removed = typeof sp.removed === 'string';
   const toggled = typeof sp.toggled === 'string';
   const error = typeof sp.error === 'string' ? sp.error : undefined;
-  const endpoints = await api<EndpointRow[]>({
+  // `createEndpoint` fails back with `?error=…&newWebhook=1`, and that flag
+  // reopens the Add-endpoint modal on top of the page. A page-level banner is
+  // then behind the backdrop and the operator sees a blank form with no reason
+  // — so route the error to whichever surface is actually visible.
+  const addModalOpen = sp.newWebhook === '1';
+  const lastUrl = typeof sp.url === 'string' ? sp.url : undefined;
+  const { items: endpoints } = await api<Page<EndpointRow>>({
     method: 'GET',
     path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/webhooks`,
   });
@@ -268,12 +281,16 @@ export default async function WebhooksPage({
           modalKey="newWebhook"
         >
           <form action={createBound} className="space-y-3">
+            {error && addModalOpen && (
+              <Banner tone="error">{ERR[error] ?? 'Something went wrong. Please try again.'}</Banner>
+            )}
             <label className="block space-y-1.5">
               <span className="text-sm font-medium">URL</span>
               <input
                 type="url"
                 name="url"
                 required
+                defaultValue={lastUrl}
                 placeholder="https://your-app.example.com/api/rekey/webhook"
                 className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
               />
@@ -345,7 +362,7 @@ export default async function WebhooksPage({
           message={removed ? 'Endpoint removed.' : 'Endpoint updated.'}
         />
       )}
-      {error && (
+      {error && !addModalOpen && (
         <Banner tone="error">
           {ERR[error] ?? 'Something went wrong. Please try again.'}
         </Banner>

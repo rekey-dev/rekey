@@ -19,7 +19,7 @@
  * Pure server module — never bundled to the browser.
  */
 
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { Rekey, RekeyError } from '@rekey.dev/node';
 import type { EndUserDto } from '@rekey.dev/shared-types';
@@ -28,7 +28,20 @@ import {
   REFRESH_COOKIE,
   ACCESS_COOKIE_OPTS,
   REFRESH_COOKIE_OPTS,
+  cookieSecureFrom,
 } from './cookies.js';
+
+/**
+ * The cookie options to actually write with, `secure` resolved against THIS
+ * request rather than against the build's NODE_ENV. See `cookieSecureFrom`.
+ */
+async function accessOpts(): Promise<typeof ACCESS_COOKIE_OPTS> {
+  return { ...ACCESS_COOKIE_OPTS, secure: cookieSecureFrom(await headers()) };
+}
+
+async function refreshOpts(): Promise<typeof REFRESH_COOKIE_OPTS> {
+  return { ...REFRESH_COOKIE_OPTS, secure: cookieSecureFrom(await headers()) };
+}
 
 let _client: Rekey | null = null;
 function client(): Rekey {
@@ -77,8 +90,8 @@ export async function auth(): Promise<Session | null> {
   if (!refresh) return null;
   try {
     const fresh = await client().auth.refresh(refresh);
-    jar.set(ACCESS_COOKIE, fresh.accessToken, ACCESS_COOKIE_OPTS);
-    jar.set(REFRESH_COOKIE, fresh.refreshToken, REFRESH_COOKIE_OPTS);
+    jar.set(ACCESS_COOKIE, fresh.accessToken, await accessOpts());
+    jar.set(REFRESH_COOKIE, fresh.refreshToken, await refreshOpts());
     const user = await client().auth.getCurrentUser(fresh.accessToken);
     return { user, accessToken: fresh.accessToken };
   } catch {
@@ -107,8 +120,8 @@ export type SignInOutcome =
 
 async function setSessionCookies(accessToken: string, refreshToken: string): Promise<void> {
   const jar = await cookies();
-  jar.set(ACCESS_COOKIE, accessToken, ACCESS_COOKIE_OPTS);
-  jar.set(REFRESH_COOKIE, refreshToken, REFRESH_COOKIE_OPTS);
+  jar.set(ACCESS_COOKIE, accessToken, await accessOpts());
+  jar.set(REFRESH_COOKIE, refreshToken, await refreshOpts());
 }
 
 /**

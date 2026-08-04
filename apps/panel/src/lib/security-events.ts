@@ -20,7 +20,8 @@ export {
   type SecurityEventType,
 } from '@rekey.dev/shared-types';
 
-import { api, type EndUserRow, type MemberRow } from '@/lib/api';
+import { apiGet, type EndUserRow, type MemberRow } from '@/lib/api';
+import type { Page } from '@/lib/paginate';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Actor resolution
@@ -63,30 +64,33 @@ export async function resolveActorEmails(
     endUserKeys.set(e.actorId, { appId: e.applicationId, euid: e.actorId });
   }
 
-  const [members] = await Promise.all([
+  const lookups = [...endUserKeys.values()].slice(0, MAX_END_USER_LOOKUPS);
+
+  // ONE wave, not two. The members read used to sit in its own `Promise.all`
+  // — a `Promise.all` over a single element, which buys nothing but does cost
+  // a whole serial round-trip: the end-user fan-out could not start until it
+  // resolved. Neither depends on the other, so they go together and the audit
+  // log loses a full API latency from every render.
+  const [memberPage, resolved] = await Promise.all([
     operatorIds.size > 0
-      ? api<MemberRow[]>({ method: 'GET', path: '/api/v1/tenant/workspace/members' }).catch(
-          () => null,
-        )
+      ? apiGet<Page<MemberRow>>('/api/v1/tenant/workspace/members').catch(() => null)
       : Promise.resolve(null),
+    Promise.all(
+      lookups.map(async ({ appId, euid }) => {
+        const detail = await apiGet<{ endUser: EndUserRow }>(
+          `/api/v1/tenant/applications/${encodeURIComponent(appId)}/end-users/${encodeURIComponent(euid)}`,
+          // A deleted end-user still has events; a 404 here must not 404 the
+          // whole audit-log page.
+          { interruptOnAccessError: false },
+        ).catch(() => null);
+        return detail === null ? null : ([euid, detail.endUser.email] as const);
+      }),
+    ),
   ]);
-  for (const m of members ?? []) {
+
+  for (const m of memberPage?.items ?? []) {
     if (operatorIds.has(m.tenantUserId)) out.set(m.tenantUserId, m.email);
   }
-
-  const lookups = [...endUserKeys.values()].slice(0, MAX_END_USER_LOOKUPS);
-  const resolved = await Promise.all(
-    lookups.map(async ({ appId, euid }) => {
-      const detail = await api<{ endUser: EndUserRow }>({
-        method: 'GET',
-        path: `/api/v1/tenant/applications/${encodeURIComponent(appId)}/end-users/${encodeURIComponent(euid)}`,
-        // A deleted end-user still has events; a 404 here must not 404 the
-        // whole audit-log page.
-        interruptOnAccessError: false,
-      }).catch(() => null);
-      return detail === null ? null : ([euid, detail.endUser.email] as const);
-    }),
-  );
   for (const r of resolved) if (r !== null) out.set(r[0], r[1]);
 
   return out;

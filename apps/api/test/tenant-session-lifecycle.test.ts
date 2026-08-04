@@ -192,8 +192,13 @@ describe('operator session lifecycle', () => {
       headers: { authorization: `Bearer ${b.accessToken}` },
     });
     expect(list.statusCode).toBe(200);
-    const sessions = list.json().data as Array<{ id: string; createdAt: string }>;
+    const listed = list.json().data as {
+      items: Array<{ id: string; createdAt: string }>;
+      page: { total: number; hasMore: boolean };
+    };
+    const sessions = listed.items;
     expect(sessions).toHaveLength(2);
+    expect(listed.page).toMatchObject({ total: 2, hasMore: false });
 
     // Revoke the oldest (the sign-up session), keep the newest.
     const oldest = sessions[sessions.length - 1]!;
@@ -210,9 +215,11 @@ describe('operator session lifecycle', () => {
         url: '/api/v1/tenant/auth/sessions',
         headers: { authorization: `Bearer ${b.accessToken}` },
       })
-    ).json().data as Array<{ id: string }>;
-    expect(remaining).toHaveLength(1);
-    expect(remaining[0]!.id).not.toBe(oldest.id);
+    ).json().data as { items: Array<{ id: string }>; page: { total: number } };
+    expect(remaining.items).toHaveLength(1);
+    // The revoked row is gone from the count too, not just from the window.
+    expect(remaining.page.total).toBe(1);
+    expect(remaining.items[0]!.id).not.toBe(oldest.id);
 
     // The kept session still refreshes...
     expect((await refresh(b.refreshToken)).statusCode).toBe(200);
@@ -234,8 +241,8 @@ describe('operator session lifecycle', () => {
         url: '/api/v1/tenant/auth/sessions',
         headers: { authorization: `Bearer ${keptDevice.accessToken}` },
       })
-    ).json().data as Array<{ id: string }>;
-    const oldest = sessions[sessions.length - 1]!;
+    ).json().data as { items: Array<{ id: string }> };
+    const oldest = sessions.items[sessions.items.length - 1]!;
     await app.inject({
       method: 'DELETE',
       url: `/api/v1/tenant/auth/sessions/${oldest.id}`,
@@ -294,11 +301,11 @@ describe('operator session lifecycle', () => {
         url: '/api/v1/tenant/auth/sessions',
         headers: { authorization: `Bearer ${victim.accessToken}` },
       })
-    ).json().data as Array<{ id: string }>;
+    ).json().data as { items: Array<{ id: string }> };
 
     const res = await app.inject({
       method: 'DELETE',
-      url: `/api/v1/tenant/auth/sessions/${victimSessions[0]!.id}`,
+      url: `/api/v1/tenant/auth/sessions/${victimSessions.items[0]!.id}`,
       headers: { authorization: `Bearer ${attacker.accessToken}` },
     });
     // Whatever the shape of the refusal, the victim's session must survive it.
@@ -372,8 +379,15 @@ describe('operator session lifecycle', () => {
       payload: { email: uniqueEmail('nobody') },
     });
     // No enumeration oracle: 200 either way, and nothing that reveals the miss.
+    //
+    // `delivered` is asserted because it is the field that *did* reveal it —
+    // this test checked only `resetToken` while the body next to it answered
+    // `false` for a miss and `true` for a hit. See
+    // test/auth-hardening-operator.test.ts for the both-sides comparison.
     expect(res.statusCode).toBe(200);
-    expect((res.json().data as { resetToken: string | null }).resetToken).toBeNull();
+    const data = res.json().data as { delivered: boolean; resetToken: string | null };
+    expect(data.resetToken).toBeNull();
+    expect(data.delivered).toBe(true);
   });
 
   it('change-password requires the current one and revokes the other sessions', async () => {

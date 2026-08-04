@@ -14,25 +14,28 @@
 import * as React from 'react';
 import { useCx } from './theme.js';
 import type { FormAction } from './auth-components.js';
+import type { PlanDto } from '@rekey.dev/shared-types';
 
-/** Minimal plan shape `<PricingTable>` renders — a subset of `PlanDto`. */
-export interface PricingPlan {
-  id: string;
-  slug: string;
-  name: string;
-  /** Amount in the smallest currency unit (cents/paise). */
-  amount: number;
-  currency: string;
+/**
+ * The plan fields `<PricingTable>` renders — a genuine slice of `PlanDto`
+ * rather than a look-alike interface, so a rename in shared-types breaks the
+ * build here instead of quietly rendering `undefined` (the same class of bug
+ * that made `<OrganizationProfile>` post the wrong id).
+ *
+ * `interval` / `kind` / `creditsAmount` stay optional and nullable so a caller
+ * can hand-build a plan for a marketing page without inventing billing state.
+ */
+export type PricingPlan = Pick<PlanDto, 'id' | 'slug' | 'name' | 'amount' | 'currency'> & {
   /** Billing interval for SUBSCRIPTION plans. */
-  interval?: string;
+  interval?: PlanDto['interval'] | undefined;
   /** Plan kind — SUBSCRIPTION / CREDIT / LICENSE / USAGE. */
-  kind?: string;
+  kind?: PlanDto['kind'] | undefined;
   /** Credits granted (CREDIT-kind plans). */
-  creditsAmount?: number | null;
+  creditsAmount?: number | null | undefined;
   /** Optional marketing description / feature bullets. */
-  description?: string;
-  features?: string[];
-}
+  description?: string | undefined;
+  features?: string[] | undefined;
+};
 
 /** Format a plan price from minor units. */
 export function formatPrice(plan: PricingPlan): { main: string; sub?: string } {

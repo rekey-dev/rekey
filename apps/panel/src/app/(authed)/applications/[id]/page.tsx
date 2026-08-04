@@ -1,13 +1,7 @@
 import * as React from 'react';
 import Link from 'next/link';
-import {
-  api,
-  type ApplicationRow,
-  type ApiKeyRow,
-  type ApplicationStatsRow,
-  type BillingCredentialRow,
-  type PlanRow,
-} from '@/lib/api';
+import { api, type ApiKeyRow, type ApplicationStatsRow, type BillingCredentialRow, type PlanRow, getApplication } from '@/lib/api';
+import { emptyPage, type Page } from '@/lib/paginate';
 import { SavedBanner } from '@/components/SavedBanner';
 import { keyPrefixFor } from '@/components/EnvironmentBadge';
 
@@ -30,13 +24,14 @@ export default async function ApplicationOverviewPage({
 
   // Fetch in parallel; empty arrays / nulls on failure so the page stays
   // useful even when one provider's call fails.
-  const [app, keys, providers, plans, stats] = await Promise.all([
-    api<ApplicationRow>({ method: 'GET', path: basePath }),
+  const [app, keys, providers, planPage, stats] = await Promise.all([
+    getApplication(id),
     api<ApiKeyRow[]>({ method: 'GET', path: `${basePath}/api-keys` }).catch(() => []),
     api<BillingCredentialRow[]>({ method: 'GET', path: `${basePath}/billing-credentials` }).catch(() => []),
-    api<PlanRow[]>({ method: 'GET', path: `${basePath}/plans` }).catch(() => []),
+    api<Page<PlanRow>>({ method: 'GET', path: `${basePath}/plans` }).catch(() => emptyPage<PlanRow>()),
     api<ApplicationStatsRow>({ method: 'GET', path: `${basePath}/stats` }).catch(() => null),
   ]);
+  const plans = planPage.items;
 
   const oauthConfigured = Object.keys(app.oauthConfig ?? {});
   const authMethods = app.authConfig.methods ?? ['password'];

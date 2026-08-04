@@ -1,11 +1,30 @@
-# Rekey — production stack for Dokploy (Traefik-routed).
+# Rekey — SELF-HOST production stack (Traefik-routed, e.g. Dokploy).
 #
-# Deploys: postgres + redis (PRIVATE network) + api (api.rekey.dev) + panel
-# (panel.rekey.dev) + portal (portal.rekey.dev)
+# Deploys: postgres + redis (PRIVATE network) + api + panel + portal, each on a
+# hostname YOU supply. This is the file DEPLOY.md documents and the one that
+# ships to the public mirror.
 #
-# Dokploy notes:
-#   - Set this as the Compose file of a Dokploy "Compose" service.
-#   - All env values below come from the Dokploy environment (.env.production).
+# NOT the file Rekey Cloud runs. Our own hosted deployment is one independent
+# compose per unit against managed Postgres — see the header of
+# the per-unit composes Rekey runs. Those exist so each unit deploys and rolls back on its
+# own; this one exists so a self-hoster gets the whole product from a single
+# `up`. Keeping them separate is what stops
+# our hostnames, our analytics ids and our mail sender leaking into a self-host
+# deployment, which is exactly what happened while this file carried them as
+# literals: `PUBLIC_WEBHOOK_BASE_URL: https://api.rekey.dev` meant a self-hoster
+# configured their own Stripe account to POST payment webhooks at OUR server.
+#
+# EVERY deployment-specific value below is `${VAR}` with no Rekey default. Three
+# of them have no default at all and fail the `docker compose` command when
+# unset — API_HOST, PANEL_HOST, PORTAL_HOST — because there is no value we could
+# pick for them that is not either wrong or ours.
+#
+# Notes:
+#   - Set this as the Compose file of a Dokploy "Compose" service (or run it
+#     with `docker compose -f docker-compose.prod.yml up -d` behind your own
+#     Traefik).
+#   - All values come from the deployment environment (.env.production /
+#     the Dokploy service Environment). See `.env.production.example`.
 #   - Service names (api/panel/portal) MUST match the Dokploy domain
 #     attachments — don't rename them.
 #   - NETWORK ISOLATION (important): Postgres + Redis live on a PRIVATE
@@ -14,10 +33,17 @@
 #     `redis` there collides with other Dokploy apps' DBs (it once shadowed a
 #     sibling app's `postgres`, failing its auth). Keeping the DB/cache private
 #     prevents that; only the web services join `dokploy-network` for Traefik.
-#   - DNS: point A records for the domains at the Dokploy host BEFORE deploying
+#   - DNS: point A records for the domains at the host BEFORE deploying
 #     (Let's Encrypt needs them resolvable).
 #   - Migrations run automatically: the api container executes
 #     `prisma migrate deploy` on start (idempotent) before booting.
+#   - The api `environment:` block below is an ALLOWLIST and is deliberately
+#     COMPLETE: every variable `apps/api/src/config/env.ts` reads is named here,
+#     even the ones that are empty by default. A variable missing from the block
+#     never reaches the container, so setting it in Dokploy silently does
+#     nothing — five separate incidents of exactly that shape are recorded in
+#     this repo's history. `.github/scripts/check-compose-env.mjs` now fails CI
+#     when a new key is added to env.ts without landing here.
 
 services:
   postgres:
@@ -60,12 +86,10 @@ services:
       # redis-cli reads this, so the healthcheck doesn't put the password in an
       # argv element visible via `docker inspect`.
       #
-      # Plain ${VAR} rather than ${VAR:?err}: the fail-fast form belongs in the
-      # self-host compose, where a human is filling in a .env. Here the variable
-      # is set in the Dokploy compose environment (same mechanism as
-      # POSTGRES_PASSWORD below, which is proven in production), and this file is
-      # parsed by whatever compose version Dokploy ships — not worth depending on
-      # a syntax that isn't already exercised in this file.
+      # Plain ${VAR} rather than ${VAR:?err}: the fail-fast form is reserved for
+      # the three hostnames, where a wrong value is silently wrong rather than
+      # loudly broken. A missing password fails the container start with a clear
+      # Postgres/Redis error of its own.
       #
       # NOTE: the password lands in REDIS_URL unencoded, so keep it URL-safe.
       # `openssl rand -hex 24` is; a password containing @ : / or # would not be.
@@ -102,40 +126,124 @@ services:
       start_period: 40s
     environment:
       NODE_ENV: production
+      # PORT and HOST are deliberately NOT settable here: the healthcheck above
+      # and the Traefik port label below both hardcode 3030, so a changed port
+      # would route traffic nowhere while every probe still passed.
       DATABASE_URL: postgresql://rekey:${POSTGRES_PASSWORD}@postgres:5432/rekey?schema=public
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+
+      # ── Secrets ──────────────────────────────────────────────────────────
       JWT_SECRET: ${JWT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       SUPER_ADMIN_KEY: ${SUPER_ADMIN_KEY}
+      # Optional RS256 signing key for end-user access tokens. Unset = a keypair
+      # is generated on first use and stored (private half encrypted).
+      JWT_RS256_PRIVATE_KEY: ${JWT_RS256_PRIVATE_KEY:-}
       # Network gate on the super-admin surface, checked BEFORE the key
       # comparison (middleware/admin-auth.ts). Comma-separated IPs/CIDRs; unset
-      # means no network restriction, which is how it shipped — the variable
-      # existed and was documented but was in no compose file, so setting it in
-      # Dokploy did nothing and the gate was inert on every deployment. Compose
-      # `environment:` blocks are allowlists; a variable absent here never
-      # reaches the container.
+      # means no network restriction, which is how it shipped.
       ADMIN_IP_ALLOWLIST: ${ADMIN_IP_ALLOWLIST:-}
-      API_URL: https://api.rekey.dev
-      # Public base used to auto-register provider webhooks (Stripe/PayPal).
-      PUBLIC_WEBHOOK_BASE_URL: https://api.rekey.dev
+
+      # ── Public origins ───────────────────────────────────────────────────
+      # Derived from the three hostnames so there is one place to change a
+      # domain. Override any of them individually if your public origin differs
+      # from what Traefik routes (a path prefix, a CDN, a different scheme).
+      API_URL: ${API_URL:-https://${API_HOST}}
+      # The origin Rekey auto-registers with Stripe/PayPal as the destination
+      # for YOUR payment webhooks. It must be internet-reachable and it must be
+      # yours — see the header.
+      PUBLIC_WEBHOOK_BASE_URL: ${PUBLIC_WEBHOOK_BASE_URL:-https://${API_HOST}}
       # Hosted customer portal origin — auto-allowed for publishable-key calls
       # from portal-enabled apps (CORS + per-app origin check).
-      PUBLIC_PORTAL_URL: https://portal.rekey.dev
-      CORS_ALLOWED_ORIGINS: https://panel.rekey.dev,https://rekey.dev,https://portal.rekey.dev
-      # Default transactional email via Resend. Only the API key is a secret
-      # (set in the Dokploy environment); sender is fixed.
-      RESEND_DEFAULT_API_KEY: ${RESEND_DEFAULT_API_KEY}
-      RESEND_DEFAULT_FROM: support@rekey.dev
-      RESEND_DEFAULT_FROM_NAME: Rekey
+      PUBLIC_PORTAL_URL: ${PUBLIC_PORTAL_URL:-https://${PORTAL_HOST}}
+      # Operator-facing links: the MCP OAuth consent redirect and emailed
+      # workspace invites are built from this.
+      PANEL_URL: ${PANEL_URL:-https://${PANEL_HOST}}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://${PANEL_HOST},https://${PORTAL_HOST}}
+      # Base origin for the operator OAuth redirect URI
+      # `<base>/login/oauth/<provider>/callback`. Falls back to the first CORS
+      # entry (preferring a `panel.` host) when unset.
+      PANEL_OAUTH_REDIRECT_BASE: ${PANEL_OAUTH_REDIRECT_BASE:-}
       # Last-resort base URL for links in transactional emails, after the SDK
       # call, the per-Application setting, and the app's first redirect URL.
       # Empty = unset, and unset means emails omit the button rather than link
-      # somewhere broken. Named here because a compose `environment:` block is
-      # an allowlist — a variable missing from it never reaches the container.
+      # somewhere broken.
       DEFAULT_APP_URL: ${DEFAULT_APP_URL:-}
+      # Behind a reverse proxy: a hop count or an IP/CIDR allowlist. Unset means
+      # X-Forwarded-For is not trusted, so rate limits and lockout key on the
+      # proxy's IP rather than the real client.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+
+      # ── Transactional email (Resend) ─────────────────────────────────────
+      # Unset = Rekey sends no mail and returns raw tokens to the caller
+      # instead. The from-address must be on a domain YOU verified in Resend.
+      RESEND_DEFAULT_API_KEY: ${RESEND_DEFAULT_API_KEY:-}
+      RESEND_DEFAULT_FROM: ${RESEND_DEFAULT_FROM:-}
+      RESEND_DEFAULT_FROM_NAME: ${RESEND_DEFAULT_FROM_NAME:-}
+
+      # ── Registration + tenancy policy ────────────────────────────────────
+      # Who may create an OPERATOR account: open | invite | closed. Empty =
+      # open, which is self-serve sign-up for anyone who can reach the panel.
+      # A private deployment wants `invite` or `closed`; there was previously no
+      # way to set either, because this variable was missing from this block.
+      OPERATOR_SIGNUP_MODE: ${OPERATOR_SIGNUP_MODE:-}
+      # Whether a signed-in operator may create ADDITIONAL workspaces:
+      # open (default) | disabled. Pairs with DEFAULT_TENANT_LIMITS — a ceiling
+      # per workspace means little if anyone can mint a fresh one.
+      WORKSPACE_CREATION: ${WORKSPACE_CREATION:-}
+      # Starting ceilings for every workspace this deployment creates (JSON,
+      # TenantLimitsSchema — e.g. {"maxProductionApps":1}). Empty = unlimited.
+      DEFAULT_TENANT_LIMITS: ${DEFAULT_TENANT_LIMITS:-}
+
+      # ── Operator panel auth (WebAuthn + social login) ────────────────────
+      # One relying party across all tenants. `rpId` is the panel hostname (no
+      # scheme, no port); unset means operator passkeys refuse with
+      # WEBAUTHN_NOT_CONFIGURED rather than binding to a guessable id.
+      PANEL_WEBAUTHN_RP_ID: ${PANEL_WEBAUTHN_RP_ID:-}
+      PANEL_WEBAUTHN_RP_ORIGINS: ${PANEL_WEBAUTHN_RP_ORIGINS:-}
+      PANEL_WEBAUTHN_RP_NAME: ${PANEL_WEBAUTHN_RP_NAME:-}
+      # A provider activates only when BOTH its id and secret are set.
+      PANEL_OAUTH_GOOGLE_CLIENT_ID: ${PANEL_OAUTH_GOOGLE_CLIENT_ID:-}
+      PANEL_OAUTH_GOOGLE_CLIENT_SECRET: ${PANEL_OAUTH_GOOGLE_CLIENT_SECRET:-}
+      PANEL_OAUTH_GITHUB_CLIENT_ID: ${PANEL_OAUTH_GITHUB_CLIENT_ID:-}
+      PANEL_OAUTH_GITHUB_CLIENT_SECRET: ${PANEL_OAUTH_GITHUB_CLIENT_SECRET:-}
+
+      # ── Feature switches + limits ────────────────────────────────────────
+      # Operator/tenant MCP HTTP surface. Empty = enabled; only the literal
+      # "false" turns it off (it exposes the mint_api_key write tool).
+      OPERATOR_MCP_ENABLED: ${OPERATOR_MCP_ENABLED:-}
+      # RFC 7591 dynamic client registration on the operator MCP authorization
+      # server: empty/`open` = anyone may register a client (how Claude Desktop
+      # / Code / Cursor connect); `disabled` closes it. Worth closing once your
+      # clients are connected — a registration allowlists a redirect_uri of the
+      # registrant's choosing, which is what a consent-phishing link needs.
+      OPERATOR_MCP_DYNAMIC_REGISTRATION: ${OPERATOR_MCP_DYNAMIC_REGISTRATION:-}
+      # Operator sign-in by OIDC ID Token assertion
+      # (POST /api/v1/tenant/auth/oidc/assert). BOTH must be set or the
+      # endpoint 404s — a deployment that has not opted in has no assertion
+      # surface at all. This is how Rekey Cloud signs a buyer into the panel
+      # with the account they already have on the marketing site.
+      OPERATOR_OIDC_ISSUER: ${OPERATOR_OIDC_ISSUER:-}
+      OPERATOR_OIDC_CLIENT_ID: ${OPERATOR_OIDC_CLIENT_ID:-}
+      # Kill-switch for the HIBP Pwned Passwords lookup — "true" for offline or
+      # restricted-egress deployments.
+      HIBP_BREACH_CHECK_DISABLED: ${HIBP_BREACH_CHECK_DISABLED:-}
+      # "true" lets outbound webhooks target private/internal addresses. Leave
+      # empty on an internet-facing deployment: it is the SSRF guard.
+      WEBHOOK_ALLOW_PRIVATE_TARGETS: ${WEBHOOK_ALLOW_PRIVATE_TARGETS:-}
+      # Global rate limit, and the higher per-key cap for usage ingestion.
+      # Empty = 100 req / 60s, and 1000 for POST /api/v1/usage/record.
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-}
+      RATE_LIMIT_USAGE_MAX: ${RATE_LIMIT_USAGE_MAX:-}
+      # Prisma connection-pool sizing. Empty = 20 connections / 10s timeout;
+      # read the docblock in apps/api/src/lib/prisma.ts before lowering it, as
+      # the webhook worker runs at concurrency 10 against the same client.
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-}
+      DATABASE_POOL_TIMEOUT_SECONDS: ${DATABASE_POOL_TIMEOUT_SECONDS:-}
     labels:
       - traefik.enable=true
-      - traefik.http.routers.rekey-api.rule=Host(`api.rekey.dev`)
+      - traefik.http.routers.rekey-api.rule=Host(`${API_HOST:?set API_HOST in .env, e.g. api.example.com}`)
       - traefik.http.routers.rekey-api.entrypoints=websecure
       - traefik.http.routers.rekey-api.tls.certresolver=letsencrypt
       - traefik.http.services.rekey-api.loadbalancer.server.port=3030
@@ -149,9 +257,11 @@ services:
       args:
         # Compiled into the client bundle — the runtime `environment:` below
         # cannot change these after the build.
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.rekey.dev}
-        NEXT_PUBLIC_APP_URL: ${PANEL_URL:-https://panel.rekey.dev}
-        NEXT_PUBLIC_PORTAL_URL: ${NEXT_PUBLIC_PORTAL_URL:-}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://${API_HOST}}
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://${PANEL_HOST}}
+        NEXT_PUBLIC_PORTAL_URL: ${NEXT_PUBLIC_PORTAL_URL:-https://${PORTAL_HOST}}
+        # Your analytics property, not ours. No default: a default here would
+        # report a self-hoster's operators to Rekey's GA4.
         NEXT_PUBLIC_GA_MEASUREMENT_ID: ${NEXT_PUBLIC_GA_MEASUREMENT_ID:-}
     image: rekey-panel:prod
     restart: unless-stopped
@@ -164,21 +274,33 @@ services:
       NODE_ENV: production
       # Server-side panel → API calls stay on the private network.
       REKEY_URL: http://api:3030
-      PANEL_URL: https://panel.rekey.dev
+      PANEL_URL: ${PANEL_URL:-https://${PANEL_HOST}}
+      # Leave empty. Session cookies get `Secure` from the request — Traefik
+      # terminates TLS and sets X-Forwarded-Proto: https, which is what the
+      # panel reads. Only set this (to "false") if you front this stack with
+      # something that serves plain HTTP and sets no forwarded proto, and you
+      # accept session cookies travelling in the clear.
+      REKEY_COOKIE_SECURE: ${REKEY_COOKIE_SECURE:-}
     labels:
       - traefik.enable=true
-      - traefik.http.routers.rekey-panel.rule=Host(`panel.rekey.dev`)
+      - traefik.http.routers.rekey-panel.rule=Host(`${PANEL_HOST:?set PANEL_HOST in .env, e.g. panel.example.com}`)
       - traefik.http.routers.rekey-panel.entrypoints=websecure
       - traefik.http.routers.rekey-panel.tls.certresolver=letsencrypt
       - traefik.http.services.rekey-panel.loadbalancer.server.port=3031
     networks: [rekey-internal, dokploy-network]
 
-  # Hosted multi-app customer portal (Portal V2) at portal.rekey.dev/<slug>.
+  # Hosted multi-app customer portal (Portal V2) at <PORTAL_HOST>/<slug>.
   # ONE deployment serves every opted-in Application — no per-app deploy, no
   # secret key. Operators enable it per Application in Panel → Application →
   # Billing → Portal. The portal identifies each app by its publishable key
   # (fetched via /api/v1/portal/config/:slug) and authorizes users with their
   # own token. See docs/portal.md.
+  #
+  # Not running a customer portal? Delete this service AND the three PORTAL_HOST
+  # references above — the api's `PUBLIC_PORTAL_URL`, its `CORS_ALLOWED_ORIGINS`
+  # entry, and the panel's `NEXT_PUBLIC_PORTAL_URL` build arg. Leaving them with
+  # PORTAL_HOST unset would hand the API the string `https://`, which is not a
+  # URL and fails the boot.
   portal:
     build:
       context: .
@@ -195,18 +317,16 @@ services:
       # Server-side portal → API calls stay on the private network.
       REKEY_URL: http://api:3030
       # Public URL of this portal — checkout success/cancel return links.
-      PORTAL_BASE_URL: https://portal.rekey.dev
+      PORTAL_BASE_URL: ${PORTAL_BASE_URL:-https://${PORTAL_HOST}}
+      # Leave empty — see the panel service above.
+      REKEY_COOKIE_SECURE: ${REKEY_COOKIE_SECURE:-}
     labels:
       - traefik.enable=true
-      - traefik.http.routers.rekey-portal.rule=Host(`portal.rekey.dev`)
+      - traefik.http.routers.rekey-portal.rule=Host(`${PORTAL_HOST:?set PORTAL_HOST in .env, e.g. portal.example.com}`)
       - traefik.http.routers.rekey-portal.entrypoints=websecure
       - traefik.http.routers.rekey-portal.tls.certresolver=letsencrypt
       - traefik.http.services.rekey-portal.loadbalancer.server.port=3050
     networks: [rekey-internal, dokploy-network]
-
-  # NOTE: the super-admin UI (apps/admin) is deliberately NOT deployed.
-  # It runs as a local app against the production API when needed
-  # (see apps/admin/README.md). Decision logged in decisions.md 2026-07-28.
 
 
 volumes:

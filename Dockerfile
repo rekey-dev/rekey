@@ -18,7 +18,6 @@
 #    would be a Rekey URL nobody could override at runtime. Marketing REQUIRES
 #    both and its build fails without them, deliberately.)
 #   docker build -t rekey-portal --target=portal-runtime .
-#   docker build -t rekey-admin --target=admin-runtime .
 #
 # Or use docker-compose.yml which builds each with shared build cache.
 #
@@ -42,7 +41,6 @@ COPY prisma ./prisma
 COPY apps/api/package.json apps/api/
 COPY apps/panel/package.json apps/panel/
 COPY apps/portal/package.json apps/portal/
-COPY apps/admin/package.json apps/admin/
 COPY packages/shared-types/package.json packages/shared-types/
 COPY packages/sdk-node/package.json packages/sdk-node/
 COPY packages/sdk-react/package.json packages/sdk-react/
@@ -59,7 +57,7 @@ RUN pnpm --filter @rekey.dev/api exec prisma generate --schema ../../prisma/sche
 RUN pnpm --filter @rekey.dev/shared-types build
 # SDK packages must be built before the apps that import them from dist: the
 # hosted portal imports @rekey.dev/react; @rekey.dev/nextjs (examples) depends on
-# node + react. panel/admin use raw fetch, so they need none of these.
+# node + react. panel and portal use raw fetch, so they need none of these.
 # Order matters: nextjs depends on node + react.
 RUN pnpm --filter @rekey.dev/node build
 RUN pnpm --filter @rekey.dev/react build
@@ -93,7 +91,6 @@ RUN NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_AP
     NEXT_PUBLIC_PORTAL_URL=$NEXT_PUBLIC_PORTAL_URL \
     pnpm --filter @rekey.dev/panel build
 RUN pnpm --filter @rekey.dev/portal build
-RUN pnpm --filter @rekey.dev/admin build
 
 
 # ─── api-runtime ──────────────────────────────────────────────────────
@@ -203,22 +200,5 @@ EXPOSE 3050
 USER node
 CMD ["node", "apps/portal/server.js"]
 
-# ─── admin-runtime ────────────────────────────────────────────────────
-# Super-admin read-only dashboard at admin.rekey.dev. Same Next standalone
-# pattern as panel-runtime — copies the traced bundle in, no pnpm install.
-# Auth = SUPER_ADMIN_KEY at the env layer; cookie carries an opaque session id.
-FROM base AS admin-runtime
-ENV NODE_ENV=production
-ENV HOSTNAME=0.0.0.0
-ENV PORT=3034
-WORKDIR /app
-
-COPY --from=build --chown=node:node /app/apps/admin/.next/standalone ./
-COPY --from=build --chown=node:node /app/apps/admin/.next/static apps/admin/.next/static
-COPY --from=build --chown=node:node /app/apps/admin/public apps/admin/public
-
-EXPOSE 3034
-USER node
-CMD ["node", "apps/admin/server.js"]
 
 

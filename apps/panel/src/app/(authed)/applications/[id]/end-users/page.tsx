@@ -1,14 +1,9 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
+import type { Page } from '@/lib/paginate';
 import { redirect } from 'next/navigation';
-import {
-  api,
-  PanelApiError,
-  type EndUserRow,
-  type EndUserRoleRow,
-  type OrganizationRow,
-} from '@/lib/api';
+import { api, PanelApiError, type EndUserRow, type EndUserRoleRow, type OrganizationRow } from '@/lib/api';
 import { Modal } from '@/components/Modal';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
@@ -267,20 +262,24 @@ export default async function EndUsersPage({
       },
     });
 
-  const [users, roles, organizations] = await Promise.all([
-    api<EndUserRow[]>({
+  const [usersPage, roles, orgsPage] = await Promise.all([
+    api<Page<EndUserRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users?${qs.toString()}`,
     }),
+    // Role catalog: still a bare array — this endpoint is not paginated.
     api<EndUserRoleRow[]>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-user-roles`,
     }),
-    api<OrganizationRow[]>({
+    // Organization picker for the new-user modal — first page only, never paged.
+    api<Page<OrganizationRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/organizations`,
     }),
   ]);
+  const { items: users, page } = usersPage;
+  const organizations = orgsPage.items;
 
   return (
     <div className="space-y-8">
@@ -507,6 +506,7 @@ export default async function EndUsersPage({
           offset={offset}
           pageSize={PAGE_SIZE}
           count={users.length}
+          hasMore={page.hasMore}
           extraParams={
             filtered || sorted
               ? {
@@ -552,7 +552,8 @@ function DeleteRoleControl({
   const defaultTarget = others.find((r) => r.isDefault) ?? others[0];
   return (
     <Modal
-      modalKey={`deleteRole_${role.name}`}
+      modalKey="deleteRole"
+      modalValue={role.name}
       title={`Delete "${role.name}"?`}
       description={`${holders} end-user${holders === 1 ? '' : 's'} currently hold this role. Pick a role to move them to — the reassign + delete happens in one transaction.`}
       trigger="Delete"
@@ -739,7 +740,8 @@ function EditUserModal({
   const metadataDefault = user.metadata ? JSON.stringify(user.metadata, null, 2) : '';
   return (
     <Modal
-      modalKey={`editUser_${user.id}`}
+      modalKey="editUser"
+      modalValue={user.id}
       title={`Edit ${user.email}`}
       description="Email is immutable — it's the natural key per-Application. Use password-reset to change a password. Metadata replaces wholesale (no deep merge)."
       trigger="Edit"

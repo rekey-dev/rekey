@@ -2,7 +2,9 @@
  * Per-application team permissions (roadmap #8) — `ApplicationGrant`.
  *
  * Covers:
- *   - legacy MEMBER (zero grants) keeps workspace-wide READ access + 403 on writes
+ *   - a MEMBER with zero grants reaches NO Application (the 2.0.0-rc.3 default)
+ *   - a grandfathered membership (legacyWorkspaceRead) keeps the old
+ *     workspace-wide READ access + 403 on writes
  *   - a granted MEMBER sees ONLY granted apps in the list / 404 elsewhere
  *   - APP_VIEWER: read-only (writes → 403 APP_ACCESS_DENIED)
  *   - APP_BILLING: can create coupons/plans, cannot mint API keys, cannot
@@ -15,6 +17,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { prisma } from '../src/lib/prisma.js';
 
 interface Session {
   accessToken: string;
@@ -99,7 +102,9 @@ describe('per-application grants (ApplicationGrant)', () => {
       url: '/api/v1/tenant/workspace/members',
       headers: { authorization: `Bearer ${owner.accessToken}` },
     });
-    const rows = members.json().data as Array<{ membershipId: string; email: string }>;
+    const rows = (
+      members.json().data as { items: Array<{ membershipId: string; email: string }> }
+    ).items;
     const membershipId = rows.find((m) => m.email === `member-${tag}@example.com`)!.membershipId;
 
     return { ownerToken: owner.accessToken, memberToken, membershipId, appA, appB };
@@ -121,36 +126,85 @@ describe('per-application grants (ApplicationGrant)', () => {
 
   const auth = (token: string) => ({ authorization: `Bearer ${token}` });
 
-  // ---------- legacy mode (zero grants) ----------
+  // ---------- the default for a new membership: no grants, no access ----------
 
-  it('legacy MEMBER (no grants) keeps read access everywhere, writes stay 403', async () => {
+  it('a MEMBER with no grants reaches no Application at all', async () => {
     const { memberToken, appA, appB } = await bootstrap();
 
-    // Reads: list shows both apps, detail works.
+    // Changed in 2.0.0-rc.3. This used to assert workspace-wide READ, on the
+    // grounds that members predating grants must not lose access — but zero
+    // grants is also what accepting an invitation produces, so it made
+    // "invite a contractor as MEMBER" mean "give them every Application".
+    // The grandfather path is now an explicit column, asserted below.
     const list = await inject({
       method: 'GET',
       url: '/api/v1/tenant/applications',
       headers: auth(memberToken),
     });
     expect(list.statusCode).toBe(200);
-    const ids = (list.json().data as Array<{ id: string }>).map((a) => a.id).sort();
-    expect(ids).toEqual([appA, appB].sort());
-
-    const detail = await inject({
-      method: 'GET',
-      url: `/api/v1/tenant/applications/${appA}`,
-      headers: auth(memberToken),
+    // Empty AND counted as empty: a pager must not be told there are rows to
+    // page to that the grant check will then withhold.
+    expect(list.json().data).toEqual({
+      items: [],
+      page: { total: 0, limit: expect.any(Number), offset: 0, hasMore: false },
     });
-    expect(detail.statusCode).toBe(200);
+
+    for (const appId of [appA, appB]) {
+      const detail = await inject({
+        method: 'GET',
+        url: `/api/v1/tenant/applications/${appId}`,
+        headers: auth(memberToken),
+      });
+      expect(detail.statusCode).toBe(404);
+      expect(detail.json().error.code).toBe('APPLICATION_NOT_FOUND');
+    }
 
     const plans = await inject({
       method: 'GET',
       url: `/api/v1/tenant/applications/${appB}/plans`,
       headers: auth(memberToken),
     });
-    expect(plans.statusCode).toBe(200);
+    expect(plans.statusCode).toBe(404);
 
-    // Writes: same 403 + code as before grants existed.
+    // Writes are 404 too — you cannot be told "insufficient role" about an
+    // Application you are not allowed to know exists.
+    const key = await inject({
+      method: 'POST',
+      url: `/api/v1/tenant/applications/${appA}/api-keys`,
+      headers: auth(memberToken),
+      payload: { name: 'k' },
+    });
+    expect(key.statusCode).toBe(404);
+  });
+
+  it('a GRANDFATHERED membership (legacyWorkspaceRead) keeps the old read-everywhere behaviour', async () => {
+    const { memberToken, membershipId, appA, appB } = await bootstrap();
+    // What the 2.0.0-rc.3 backfill produces for a pre-existing MEMBER.
+    await prisma.tenantMembership.update({
+      where: { id: membershipId },
+      data: { legacyWorkspaceRead: true },
+    });
+
+    const list = await inject({
+      method: 'GET',
+      url: '/api/v1/tenant/applications',
+      headers: auth(memberToken),
+    });
+    expect(
+      (list.json().data as { items: Array<{ id: string }> }).items.map((a) => a.id).sort(),
+    ).toEqual([appA, appB].sort());
+
+    expect(
+      (
+        await inject({
+          method: 'GET',
+          url: `/api/v1/tenant/applications/${appB}/plans`,
+          headers: auth(memberToken),
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    // Reads only — writes keep the exact 403 + code they had before grants.
     const coupon = await inject({
       method: 'POST',
       url: `/api/v1/tenant/applications/${appA}/coupons`,
@@ -181,8 +235,14 @@ describe('per-application grants (ApplicationGrant)', () => {
       url: '/api/v1/tenant/applications',
       headers: auth(memberToken),
     });
-    const ids = (list.json().data as Array<{ id: string }>).map((a) => a.id);
-    expect(ids).toEqual([appA]);
+    const granted = list.json().data as {
+      items: Array<{ id: string }>;
+      page: { total: number };
+    };
+    expect(granted.items.map((a) => a.id)).toEqual([appA]);
+    // The ungranted app is not counted either — `total` is filtered by the same
+    // grant check as the rows.
+    expect(granted.page.total).toBe(1);
 
     // Direct access to the ungranted app: 404, not 403 (non-disclosure).
     const other = await inject({
@@ -285,7 +345,9 @@ describe('per-application grants (ApplicationGrant)', () => {
       url: '/api/v1/tenant/applications',
       headers: auth(memberToken),
     });
-    expect((list.json().data as Array<{ authConfig: unknown }>)[0]!.authConfig).toEqual({});
+    expect(
+      (list.json().data as { items: Array<{ authConfig: unknown }> }).items[0]!.authConfig,
+    ).toEqual({});
 
     const patchAuth = await inject({
       method: 'PATCH',
@@ -387,7 +449,9 @@ describe('per-application grants (ApplicationGrant)', () => {
       url: '/api/v1/tenant/applications',
       headers: auth(memberToken),
     });
-    expect((list.json().data as unknown[]).length).toBe(2);
+    const adminList = list.json().data as { items: unknown[]; page: { total: number } };
+    expect(adminList.items).toHaveLength(2);
+    expect(adminList.page.total).toBe(2);
 
     for (const id of [appA, appB]) {
       const key = await inject({
@@ -441,7 +505,9 @@ describe('per-application grants (ApplicationGrant)', () => {
       headers: auth(ownerToken),
     });
     expect(grants.statusCode).toBe(200);
-    const rows = grants.json().data as Array<{ applicationId: string; role: string }>;
+    const rows = (
+      grants.json().data as { items: Array<{ applicationId: string; role: string }> }
+    ).items;
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ applicationId: appA, role: 'APP_BILLING' });
 
@@ -451,10 +517,14 @@ describe('per-application grants (ApplicationGrant)', () => {
       url: '/api/v1/tenant/workspace/members',
       headers: auth(memberToken),
     });
-    const memberRows = members.json().data as Array<{
-      membershipId: string;
-      grants: Array<{ applicationId: string; role: string }>;
-    }>;
+    const memberRows = (
+      members.json().data as {
+        items: Array<{
+          membershipId: string;
+          grants: Array<{ applicationId: string; role: string }>;
+        }>;
+      }
+    ).items;
     const mine = memberRows.find((m) => m.membershipId === membershipId)!;
     expect(mine.grants).toHaveLength(1);
     expect(mine.grants[0]).toMatchObject({ applicationId: appA, role: 'APP_BILLING' });
@@ -489,7 +559,9 @@ describe('per-application grants (ApplicationGrant)', () => {
     expect(crossTenant.statusCode).toBe(404);
     expect(crossTenant.json().error.code).toBe('APPLICATION_NOT_FOUND');
 
-    // Delete the last grant → member returns to legacy read-everything mode.
+    // Delete the last grant → the member is left with nothing. Before
+    // 2.0.0-rc.3 this returned them to workspace-wide read, i.e. removing a
+    // grant WIDENED their access.
     const del = await inject({
       method: 'DELETE',
       url: `/api/v1/tenant/workspace/members/${membershipId}/grants/${appA}`,
@@ -510,6 +582,8 @@ describe('per-application grants (ApplicationGrant)', () => {
       url: '/api/v1/tenant/applications',
       headers: auth(memberToken),
     });
-    expect((listAfter.json().data as unknown[]).length).toBe(2);
+    const afterPage = listAfter.json().data as { items: unknown[]; page: { total: number } };
+    expect(afterPage.items).toHaveLength(0);
+    expect(afterPage.page.total).toBe(0);
   });
 });

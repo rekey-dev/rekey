@@ -39,8 +39,16 @@ import type {
   CheckoutResultDto,
   OrganizationWithRoleDto,
   ProvidersListDto,
+  ListPage,
+  Paged,
 } from '@rekey.dev/shared-types';
-import { RekeyError } from '@rekey.dev/shared-types';
+// NOTE the subpath. `RekeyError` is the ONLY value this package imports from
+// shared-types — everything above is a type and erases. Importing it from the
+// barrel made every bundle that touches this module keep zod plus ~60
+// module-scope `z.object(...)` calls alive: `useUser` alone measured 74,556
+// bytes minified. `@rekey.dev/shared-types/error` has zero imports, and the
+// same import measured 902 bytes. Same class, same `instanceof`. Keep it.
+import { RekeyError } from '@rekey.dev/shared-types/error';
 
 /** Resolved entitlements for the signed-in user (mirrors @rekey.dev/node). */
 export interface EntitlementsDto {
@@ -84,6 +92,21 @@ export interface RekeyBrowserConfig {
 // RekeyError is the shared class (imported above) — re-exported so the public
 // name is preserved and `instanceof` matches @rekey.dev/node.
 export { RekeyError };
+
+/**
+ * Build the `?limit=&offset=` query for a list method.
+ *
+ * Every list endpoint in the API takes the same two params and answers with
+ * `{items, page}`; this keeps the SDK from spelling that out five times.
+ */
+function listQuery(page?: ListPage): string {
+  if (!page) return '';
+  const p = new URLSearchParams();
+  if (page.limit !== undefined) p.set('limit', String(page.limit));
+  if (page.offset !== undefined) p.set('offset', String(page.offset));
+  const s = p.toString();
+  return s ? `?${s}` : '';
+}
 
 interface RawResp<T> {
   data: T;
@@ -201,9 +224,16 @@ export class RekeyBrowserClient {
     return this.bootstrap<SignInOutcomeDto>('POST', '/api/v1/auth/passkey/authenticate/complete', input);
   }
 
-  /** List the Application's active plans (public catalogue — for pricing pages). */
-  getPlans(): Promise<PlanDto[]> {
-    return this.bootstrap<PlanDto[]>('GET', '/api/v1/billing/plans', undefined);
+  /**
+   * List the Application's active plans (public catalogue — for pricing pages).
+   *
+   * Returns the `{items, page}` envelope, not a bare array: a pricing page that
+   * quietly renders the first 50 of 80 plans is a pricing page that is wrong,
+   * and only `page.total` can tell you that happened. Pass `page.offset` for
+   * the next window.
+   */
+  getPlans(page?: ListPage): Promise<Paged<PlanDto>> {
+    return this.bootstrap<Paged<PlanDto>>('GET', `/api/v1/billing/plans${listQuery(page)}`, undefined);
   }
 
   /**
@@ -242,15 +272,33 @@ export class RekeyBrowserClient {
    * The current subscription — the user's own by default, or an organization's
    * when `opts.organizationId` is passed (org-billed apps; caller must be a
    * member). Returns null when there's no active/pending/past-due subscription.
+   *
+   * `opts.includeEnded` falls back to the most recent CANCELED/EXPIRED
+   * subscription **only when the answer would otherwise be null** — so a
+   * billing page can say what a former subscriber was on and when it ended
+   * instead of rendering the never-subscribed empty state at them. It never
+   * replaces a live subscription; leave it off for entitlement checks.
    */
-  getSubscription(accessToken: string, opts?: { organizationId?: string }): Promise<SubscriptionDto | null> {
-    const qs = opts?.organizationId ? `?organizationId=${encodeURIComponent(opts.organizationId)}` : '';
+  getSubscription(
+    accessToken: string,
+    opts?: { organizationId?: string; includeEnded?: boolean },
+  ): Promise<SubscriptionDto | null> {
+    const params = new URLSearchParams();
+    if (opts?.organizationId) params.set('organizationId', opts.organizationId);
+    if (opts?.includeEnded) params.set('includeEnded', 'true');
+    const query = params.toString();
+    const qs = query ? `?${query}` : '';
     return this.selfService<SubscriptionDto | null>('GET', `/api/v1/billing/subscription${qs}`, undefined, accessToken);
   }
 
   /** Organizations the signed-in user belongs to, each with their role. */
-  listOrganizations(accessToken: string): Promise<OrganizationWithRoleDto[]> {
-    return this.selfService<OrganizationWithRoleDto[]>('GET', '/api/v1/users/me/organizations/', undefined, accessToken);
+  listOrganizations(accessToken: string, page?: ListPage): Promise<Paged<OrganizationWithRoleDto>> {
+    return this.selfService<Paged<OrganizationWithRoleDto>>(
+      'GET',
+      `/api/v1/users/me/organizations/${listQuery(page)}`,
+      undefined,
+      accessToken,
+    );
   }
 
   /** The signed-in user's entitlements (features, limits, credit balance). */
@@ -259,10 +307,23 @@ export class RekeyBrowserClient {
     return this.selfService<EntitlementsDto>('GET', `/api/v1/billing/entitlements${qs}`, undefined, accessToken);
   }
 
-  /** The signed-in user's own payment history, newest first. */
-  listPayments(accessToken: string, limit?: number): Promise<PortalPaymentDto[]> {
-    const qs = limit !== undefined ? `?limit=${limit}` : '';
-    return this.selfService<PortalPaymentDto[]>('GET', `/api/v1/billing/payments${qs}`, undefined, accessToken);
+  /**
+   * The signed-in user's own payment history, newest first.
+   *
+   * `page.total` is the user's lifetime payment count, so a portal can render
+   * "12 of 137" without a second request.
+   */
+  listPayments(accessToken: string, limit?: number, offset?: number): Promise<Paged<PortalPaymentDto>> {
+    const qs = listQuery({
+      ...(limit !== undefined && { limit }),
+      ...(offset !== undefined && { offset }),
+    });
+    return this.selfService<Paged<PortalPaymentDto>>(
+      'GET',
+      `/api/v1/billing/payments${qs}`,
+      undefined,
+      accessToken,
+    );
   }
 
   /**
@@ -365,4 +426,10 @@ export type {
   BillingProviderInfoDto,
   BillingProviderCapabilities,
   BillingProvider,
+  // The list envelope every `list*` / `getPlans` method resolves to, and the
+  // `{limit, offset}` request shape they accept. Re-exported so a consumer can
+  // name the page without also depending on @rekey.dev/shared-types.
+  ListPage,
+  PageMeta,
+  Paged,
 } from '@rekey.dev/shared-types';

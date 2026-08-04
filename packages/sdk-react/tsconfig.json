@@ -7,7 +7,8 @@
     "jsx": "react-jsx",
     "module": "esnext",
     "moduleResolution": "bundler",
-    "noUncheckedIndexedAccess": false
+    "noUncheckedIndexedAccess": false,
+    "stripInternal": true
   },
   "include": ["src/**/*"],
   "exclude": ["dist", "node_modules", "test"]

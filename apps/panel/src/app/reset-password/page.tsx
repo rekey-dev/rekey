@@ -7,6 +7,7 @@ import { SubmitButton } from '@/components/SubmitButton';
 import { AuthCard } from '@/components/AuthCard';
 import { Banner } from '@/components/Banner';
 import { PasswordConfirmFields } from '@/components/PasswordConfirmFields';
+import { normalizeErrorCode } from '@/lib/error-code';
 
 export const metadata: Metadata = { title: 'Set a new password · Rekey' };
 
@@ -25,7 +26,8 @@ async function reset(formData: FormData): Promise<void> {
     await publicPost<{ ok: true }>('/api/v1/tenant/auth/reset-password', { token, newPassword });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/reset-password?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.code)}`);
+      const code = normalizeErrorCode(err.code, ERR);
+      redirect(`/reset-password?token=${encodeURIComponent(token)}&error=${encodeURIComponent(code)}`);
     }
     throw err;
   }
@@ -41,6 +43,12 @@ const ERR: Record<string, string> = {
   PASSWORD_TOO_SHORT: 'Password must be at least 8 characters.',
   RATE_LIMITED: 'Too many attempts. Please wait a minute and try again.',
   INTERNAL_ERROR: 'Something went wrong saving your password. Please try again.',
+  BAD_REQUEST: 'Password must be at least 8 characters.',
+  VALIDATION_ERROR: 'Password must be at least 8 characters.',
+  // Catch-all the action maps unrecognised API codes to, so a failed reset is
+  // never silent. An unrecognised `?error=` in a hand-edited URL still renders
+  // nothing, because that value is not a key here.
+  unknown: 'Could not save your new password. Request a fresh link and try again.',
 };
 
 const INPUT_BASE =

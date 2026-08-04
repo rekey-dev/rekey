@@ -1,6 +1,6 @@
 {
   "name": "@rekey.dev/shared-types",
-  "version": "2.0.0-rc.3",
+  "version": "2.0.0-rc.4",
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
@@ -8,11 +8,19 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./error": {
+      "types": "./dist/error.d.ts",
+      "import": "./dist/error.js",
+      "default": "./dist/error.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -21,13 +29,15 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "echo \"(eslint not yet wired)\""
+    "lint": "echo \"(eslint not yet wired)\"",
+    "test": "vitest run"
   },
   "dependencies": {
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
   },
   "publishConfig": {
     "access": "public"

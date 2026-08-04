@@ -496,7 +496,11 @@ describe('Phase-1 security hardening', () => {
       },
     });
     expect(list.statusCode).toBe(200);
-    const rows = list.json().data as Array<{ id: string; userAgent: string | null; ip: string | null }>;
+    const rows = (
+      list.json().data as {
+        items: Array<{ id: string; userAgent: string | null; ip: string | null }>;
+      }
+    ).items;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.userAgent).toBe(ua);
     expect(rows[0]!.id).toBeTruthy();
@@ -529,7 +533,10 @@ describe('Phase-1 security hardening', () => {
           'x-rekey-user-token': secondSession.accessToken,
         },
       })
-      .then((r) => r.json().data as Array<{ id: string; userAgent: string | null }>);
+      .then(
+        (r) =>
+          (r.json().data as { items: Array<{ id: string; userAgent: string | null }> }).items,
+      );
     expect(list).toHaveLength(2);
     const deviceA = list.find((r) => r.userAgent === 'DeviceA')!;
     expect(deviceA).toBeTruthy();
@@ -586,7 +593,7 @@ describe('Phase-1 security hardening', () => {
           'x-rekey-user-token': userB.accessToken,
         },
       })
-      .then((r) => (r.json().data as Array<{ id: string }>)[0]!);
+      .then((r) => (r.json().data as { items: Array<{ id: string }> }).items[0]!);
 
     // User A tries to revoke User B's session by id.
     const res = await app.inject({

@@ -18,7 +18,24 @@ import {
   requireTenantSession,
   requireTenantRole,
 } from '../../middleware/tenant-session.js';
-import { listSecurityEvents } from '../../lib/security-events.js';
+import { listSecurityEvents, countSecurityEvents } from '../../lib/security-events.js';
+import { okPage, errs, ref } from '../../lib/openapi.js';
+import { paged } from '../../lib/pagination.js';
+
+/**
+ * The 401/403 pair every `/api/v1/tenant/security-events` route shares —
+ * `requireTenantSession` (401) runs as an `onRequest` hook, and
+ * `requireTenantRole(['OWNER', 'ADMIN'])` (403) as the route `preHandler`,
+ * both preceding the handler.
+ */
+const SECURITY_EVENTS_ERRORS = {
+  401:
+    'TENANT_SESSION_MISSING — no `Authorization: Bearer` header; or ' +
+    'TENANT_SESSION_INVALID — the access token is invalid, expired, or the operator account no longer exists.',
+  403:
+    'TENANT_MEMBERSHIP_REVOKED — the operator is no longer a member of the active workspace; or ' +
+    "TENANT_ROLE_INSUFFICIENT — the operator's live role is below OWNER/ADMIN.",
+} as const;
 
 const CSV_MAX_ROWS = 5000;
 
@@ -71,8 +88,30 @@ export async function securityEventsRoutes(app: FastifyInstance): Promise<void> 
             order: { type: 'string', enum: ['asc', 'desc'] },
             format: { type: 'string', enum: ['json', 'csv'] },
             limit: { type: 'integer', minimum: 1, maximum: 200 },
-            offset: { type: 'integer', minimum: 0 },
+            offset: { type: 'integer', minimum: 0, maximum: 2147483647 },
           },
+        },
+        response: {
+          200: {
+            description:
+              'Security events for the workspace. JSON by default; `?format=csv` returns a ' +
+              'downloadable CSV file instead (same OWNER/ADMIN gate, capped at ' +
+              `${CSV_MAX_ROWS} rows newest-first, and ignores \`limit\`/\`offset\`).`,
+            content: {
+              'application/json': {
+                schema: okPage(ref('SecurityEvent'), 'Security events matching the filters.'),
+              },
+              'text/csv': {
+                schema: {
+                  type: 'string',
+                  description:
+                    'Header row `id,type,actorType,actorId,applicationId,ip,userAgent,metadata,createdAt` ' +
+                    'followed by one row per event.',
+                },
+              },
+            },
+          },
+          ...errs(SECURITY_EVENTS_ERRORS),
         },
       },
     },
@@ -112,19 +151,23 @@ export async function securityEventsRoutes(app: FastifyInstance): Promise<void> 
           .send([header, ...lines].join('\n') + '\n');
       }
 
-      const events = await listSecurityEvents({
+      const filters = {
         tenantId: req.tenantId!,
         applicationId: q.applicationId,
         type: q.type,
         actorType: q.actorType,
         from: q.from,
         to: q.to,
-        sort: q.sort,
-        order: q.order,
-        limit: q.limit,
-        offset: q.offset,
-      });
-      return { success: true, data: { events } };
+      };
+      // `listSecurityEvents` clamps `limit` to `cap` (200 here) and defaults it
+      // to 50 — mirror both so `page` describes the window that was served.
+      const limit = Math.min(q.limit ?? 50, 200);
+      const offset = q.offset ?? 0;
+      const [items, total] = await Promise.all([
+        listSecurityEvents({ ...filters, sort: q.sort, order: q.order, limit, offset }),
+        countSecurityEvents(filters),
+      ]);
+      return { success: true, data: paged(items, total, limit, offset) };
     },
   );
 }

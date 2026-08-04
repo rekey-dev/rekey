@@ -114,6 +114,19 @@ export interface EndUserClaims<TType extends EndUserTokenType = EndUserTokenType
    */
   imp?: string;
   /**
+   * The `impersonation_audits` row this token belongs to. Present exactly when
+   * `imp` is.
+   *
+   * This is what makes an impersonation session **revocable**. Without it the
+   * token was a bearer credential with no server-side handle at all: the audit
+   * row recorded that impersonation had started and nothing — no endpoint, no
+   * code path — could stop it, so `endedAt` was documented in the schema and
+   * never written by anything. `requireUserSession` now resolves this id and
+   * refuses the token once the row is ended, which turns the end-impersonation
+   * endpoint into a real kill switch rather than a bookkeeping entry.
+   */
+  impid?: string;
+  /**
    * Token-generation counter, present on RS256-signed tokens only. RS256 keys
    * are deployment-wide (not derived from `Application.tokenGeneration`), so
    * the per-app session kill-switch is preserved by embedding the generation
@@ -430,6 +443,82 @@ export function issueIdToken(args: IssueIdTokenArgs): { token: string; expiresAt
   return { token, expiresAt: new Date(Date.now() + lifetime * 1000) };
 }
 
+/** The claims an operator assertion is allowed to rest on. */
+export interface AssertedIdTokenClaims {
+  sub: string;
+  email: string;
+  emailVerified: boolean;
+  /** Seconds since the epoch — when the ID Token stops being acceptable. */
+  exp: number;
+}
+
+/**
+ * Verify an ID Token presented as proof of identity for an OPERATOR sign-in.
+ *
+ * Only ever accepts tokens THIS deployment minted: the signature is checked
+ * against the local JWKS by `kid`, so there is no remote key fetch and no
+ * discovery document to poison. `issuer` and `audience` are supplied by
+ * deployment config, never by the caller — a token that is valid for a
+ * different Application, or for a different client of the same Application,
+ * must not become an operator session.
+ *
+ * Returns null on every failure rather than throwing, so the caller emits one
+ * indistinguishable refusal. Telling a caller *why* an assertion was rejected
+ * is a probing oracle over which issuers and audiences a deployment trusts.
+ *
+ * `email_verified` is required to be literally true. The whole federation
+ * rests on the email: `findOrCreateOAuthOperator` matches an existing operator
+ * by it, so an unverified address would let anyone who can register it under
+ * the upstream Application take over that operator account.
+ */
+export async function verifyOperatorAssertionIdToken(
+  token: string,
+  expected: { issuer: string; audience: string },
+): Promise<AssertedIdTokenClaims | null> {
+  let header;
+  try {
+    header = jwt.decode(token, { complete: true })?.header;
+  } catch {
+    return null;
+  }
+  // RS256 only, and only with a kid we can resolve. Never fall back to
+  // guessing a key, and never honour `alg: none` or an HS256 token signed with
+  // something the caller could know.
+  if (!header || header.alg !== 'RS256') return null;
+  if (typeof header.kid !== 'string' || header.kid.length === 0) return null;
+  const publicPem = await getPublicKeyByKid(header.kid);
+  if (!publicPem) return null;
+
+  let decoded: unknown;
+  try {
+    decoded = jwt.verify(token, publicPem, {
+      algorithms: ['RS256'],
+      issuer: expected.issuer,
+      audience: expected.audience,
+    });
+  } catch {
+    return null;
+  }
+  if (typeof decoded !== 'object' || decoded === null) return null;
+  const claims = decoded as Record<string, unknown>;
+
+  // An ACCESS token and an ID Token are both RS256 under the same key. Refuse
+  // anything carrying the access-token marker so one can never be substituted
+  // for the other (the reverse substitution is already covered by `aud`).
+  if (claims.typ !== undefined) return null;
+  if (typeof claims.sub !== 'string' || claims.sub.length === 0) return null;
+  if (typeof claims.email !== 'string' || claims.email.length === 0) return null;
+  if (claims.email_verified !== true) return null;
+  if (typeof claims.exp !== 'number') return null;
+
+  return {
+    sub: claims.sub,
+    email: claims.email,
+    emailVerified: true,
+    exp: claims.exp,
+  };
+}
+
 /**
  * `at_hash` (OIDC Core §3.1.3.6): base64url of the left-most half of the
  * SHA-256 digest of the ASCII access token. SHA-256 because the ID Token is
@@ -445,19 +534,26 @@ const DEFAULT_IMPERSONATION_LIFETIME_SECONDS = 5 * 60;
 /**
  * Mint an impersonation access token. Carries the same `eu_access` typ
  * as a real session token but with an extra `imp` claim recording the
- * operator user id. Lifetime is bounded to 5 minutes; no refresh token
- * is issued alongside (operators re-mint via /impersonate on demand).
+ * operator user id, and `impid` naming the audit row. Lifetime is bounded to
+ * 5 minutes; no refresh token is issued alongside (operators re-mint via
+ * /impersonate on demand).
+ *
+ * `auditId` is required, not optional: the audit row has to exist before the
+ * token does, because that row is the token's revocation handle. A token
+ * without one could not be ended, which is the state this parameter was added
+ * to make unrepresentable.
  */
 export function issueImpersonationToken(
   endUserId: string,
   applicationId: string,
   operatorUserId: string,
   tokenGeneration: number,
+  auditId: string,
   options: IssueOptions = {},
 ): { token: string; expiresAt: Date } {
   const lifetime = options.lifetimeSeconds ?? DEFAULT_IMPERSONATION_LIFETIME_SECONDS;
   const token = jwt.sign(
-    { typ: 'eu_access' as const, sub: endUserId, applicationId, imp: operatorUserId },
+    { typ: 'eu_access' as const, sub: endUserId, applicationId, imp: operatorUserId, impid: auditId },
     appSigningKey(applicationId, tokenGeneration),
     { expiresIn: lifetime, algorithm: 'HS256' },
   );

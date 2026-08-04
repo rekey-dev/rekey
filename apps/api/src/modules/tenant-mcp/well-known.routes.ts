@@ -23,6 +23,34 @@
 
 import type { FastifyInstance } from 'fastify';
 import { operatorAuthServerMetadata, operatorProtectedResourceMetadata } from './oauth.service.js';
+import { errs, ref, type JsonSchema } from '../../lib/openapi.js';
+
+// This whole plugin only mounts when OPERATOR_MCP_ENABLED is on (see app.ts),
+// so there is no per-request feature-toggle 404 to document — unlike the
+// per-Application mirror (mcp.well-known.routes.ts), neither route here has a
+// gate of its own INSIDE the handler. There is still a real 404, though: a
+// deployment that turns the flag off unregisters this whole plugin, so both
+// paths below fall through to `app.ts`'s generic `ROUTE_NOT_FOUND` handler —
+// see `OPERATOR_MCP_DISABLED_404` in `oauth.routes.ts` (same reasoning,
+// mirrored here rather than imported to keep this plugin dependency-free of
+// that one). Bodies are RFC-shaped, not the Rekey envelope.
+const OPERATOR_MCP_DISABLED_404 = {
+  404:
+    'ROUTE_NOT_FOUND — this deployment has `OPERATOR_MCP_ENABLED=false`, so the whole operator ' +
+    'MCP surface (including this discovery document) does not exist.',
+};
+
+/** RFC 9728 protected-resource metadata. No registered component covers this shape. */
+const ProtectedResourceMetadata: JsonSchema = {
+  type: 'object',
+  properties: {
+    resource: { type: 'string', format: 'uri' },
+    authorization_servers: { type: 'array', items: { type: 'string', format: 'uri' } },
+    scopes_supported: { type: 'array', items: { type: 'string' } },
+    bearer_methods_supported: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['resource', 'authorization_servers'],
+};
 
 export async function operatorMcpWellKnownRoutes(app: FastifyInstance): Promise<void> {
   // RFC 8414 — authorization-server metadata, path-insertion form. This is the
@@ -35,6 +63,13 @@ export async function operatorMcpWellKnownRoutes(app: FastifyInstance): Promise<
         tags: ['MCP · Operator · OAuth'],
         security: [],
         summary: 'Authorization-server metadata (RFC 8414, path-insertion form)',
+        response: {
+          200: { description: 'Authorization-server metadata.', ...ref('OAuthAuthServerMetadata') },
+          ...errs({
+            ...OPERATOR_MCP_DISABLED_404,
+            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+          }),
+        },
       },
     },
     async () => operatorAuthServerMetadata(),
@@ -50,6 +85,13 @@ export async function operatorMcpWellKnownRoutes(app: FastifyInstance): Promise<
         tags: ['MCP · Operator · OAuth'],
         security: [],
         summary: 'Protected-resource metadata (RFC 9728, path-insertion form)',
+        response: {
+          200: { description: 'Protected-resource metadata.', ...ProtectedResourceMetadata },
+          ...errs({
+            ...OPERATOR_MCP_DISABLED_404,
+            429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
+          }),
+        },
       },
     },
     async () => operatorProtectedResourceMetadata(),

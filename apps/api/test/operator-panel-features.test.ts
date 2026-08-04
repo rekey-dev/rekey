@@ -129,29 +129,38 @@ describe('operator panel features', () => {
       headers: { authorization: `Bearer ${b.tenantAccess}` },
     });
     expect(all.statusCode).toBe(200);
-    const rows = all.json().data as Array<{
-      providerPaymentId: string;
-      status: string;
-      endUserEmail: string | null;
-      amount: number;
-    }>;
+    const unfiltered = all.json().data as {
+      items: Array<{
+        providerPaymentId: string;
+        status: string;
+        endUserEmail: string | null;
+        amount: number;
+      }>;
+      page: { total: number; hasMore: boolean };
+    };
+    const rows = unfiltered.items;
     expect(rows.map((r) => r.providerPaymentId)).toEqual([
       'opf-pay-new',
       'opf-pay-failed',
       'opf-pay-old',
     ]);
+    expect(unfiltered.page).toMatchObject({ total: 3, hasMore: false });
     expect(rows[0]!.endUserEmail).toBe('payer-opf@example.com');
     expect(rows[1]!.endUserEmail).toBeNull();
 
-    // Status filter.
+    // Status filter — the count narrows with the rows.
     const failed = await app.inject({
       method: 'GET',
       url: `/api/v1/tenant/applications/${b.applicationId}/payments?status=FAILED`,
       headers: { authorization: `Bearer ${b.tenantAccess}` },
     });
-    const failedRows = failed.json().data as Array<{ providerPaymentId: string }>;
-    expect(failedRows).toHaveLength(1);
-    expect(failedRows[0]!.providerPaymentId).toBe('opf-pay-failed');
+    const failedPage = failed.json().data as {
+      items: Array<{ providerPaymentId: string }>;
+      page: { total: number };
+    };
+    expect(failedPage.items).toHaveLength(1);
+    expect(failedPage.page.total).toBe(1);
+    expect(failedPage.items[0]!.providerPaymentId).toBe('opf-pay-failed');
 
     // Date window catches only the middle payment.
     const windowed = await app.inject({
@@ -161,17 +170,25 @@ describe('operator panel features', () => {
         `?from=${encodeURIComponent('2026-02-01T00:00:00Z')}&to=${encodeURIComponent('2026-04-01T00:00:00Z')}`,
       headers: { authorization: `Bearer ${b.tenantAccess}` },
     });
-    const windowedRows = windowed.json().data as Array<{ providerPaymentId: string }>;
-    expect(windowedRows.map((r) => r.providerPaymentId)).toEqual(['opf-pay-failed']);
+    const windowedPage = windowed.json().data as {
+      items: Array<{ providerPaymentId: string }>;
+      page: { total: number };
+    };
+    expect(windowedPage.items.map((r) => r.providerPaymentId)).toEqual(['opf-pay-failed']);
+    expect(windowedPage.page.total).toBe(1);
 
-    // Pagination.
+    // Pagination: the middle row of three, with the other two still counted.
     const page2 = await app.inject({
       method: 'GET',
       url: `/api/v1/tenant/applications/${b.applicationId}/payments?limit=1&offset=1`,
       headers: { authorization: `Bearer ${b.tenantAccess}` },
     });
-    const page2Rows = page2.json().data as Array<{ providerPaymentId: string }>;
-    expect(page2Rows.map((r) => r.providerPaymentId)).toEqual(['opf-pay-failed']);
+    const secondPage = page2.json().data as {
+      items: Array<{ providerPaymentId: string }>;
+      page: { total: number; limit: number; offset: number; hasMore: boolean };
+    };
+    expect(secondPage.items.map((r) => r.providerPaymentId)).toEqual(['opf-pay-failed']);
+    expect(secondPage.page).toEqual({ total: 3, limit: 1, offset: 1, hasMore: true });
   });
 
   it('payments: ?sort/?order re-order rows; sort values outside the allowlist are rejected', async () => {
@@ -200,7 +217,7 @@ describe('operator panel features', () => {
         headers: { authorization: `Bearer ${b.tenantAccess}` },
       });
       expect(res.statusCode).toBe(200);
-      return res.json().data as Array<{ providerPaymentId: string }>;
+      return (res.json().data as { items: Array<{ providerPaymentId: string }> }).items;
     };
 
     // amount ascending / descending.
@@ -262,11 +279,9 @@ describe('operator panel features', () => {
       headers: { authorization: `Bearer ${b.tenantAccess}` },
     });
     expect(asc.statusCode).toBe(200);
-    expect((asc.json().data as Array<{ email: string }>).map((u) => u.email)).toEqual([
-      'alice@example.com',
-      'bob@example.com',
-      'charlie@example.com',
-    ]);
+    expect(
+      (asc.json().data as { items: Array<{ email: string }> }).items.map((u) => u.email),
+    ).toEqual(['alice@example.com', 'bob@example.com', 'charlie@example.com']);
     const badSort = await app.inject({
       method: 'GET',
       url: `/api/v1/tenant/applications/${b.applicationId}/end-users?sort=role`,
@@ -297,7 +312,9 @@ describe('operator panel features', () => {
       headers: { authorization: `Bearer ${b.tenantAccess}` },
     });
     expect(byType.statusCode).toBe(200);
-    const types = (byType.json().data as { events: Array<{ type: string }> }).events.map((e) => e.type);
+    const types = (byType.json().data as { items: Array<{ type: string }> }).items.map(
+      (e) => e.type,
+    );
     expect(types[0]).toBe('aaa.test_event');
     expect(types[types.length - 1]).toBe('zzz.test_event');
     const badEventSort = await app.inject({
@@ -375,7 +392,9 @@ describe('operator panel features', () => {
         headers: { authorization: `Bearer ${b.tenantAccess}` },
       });
       expect(res.statusCode).toBe(200);
-      return (res.json().data as Array<{ email: string }>).map((u) => u.email).sort();
+      return (res.json().data as { items: Array<{ email: string }> }).items
+        .map((u) => u.email)
+        .sort();
     };
 
     expect(await list('?emailVerified=false')).toEqual(['unverified@example.com']);
@@ -455,12 +474,16 @@ describe('operator panel features', () => {
       headers: { authorization: `Bearer ${b.tenantAccess}` },
     });
     expect(res.statusCode).toBe(200);
-    const coupons = res.json().data as Array<{
-      code: string;
-      redemptionCount: number;
-      totalDiscountIssued: number;
-    }>;
-    const byCode = new Map(coupons.map((c) => [c.code, c]));
+    const coupons = res.json().data as {
+      items: Array<{
+        code: string;
+        redemptionCount: number;
+        totalDiscountIssued: number;
+      }>;
+      page: { total: number };
+    };
+    expect(coupons.page.total).toBe(3);
+    const byCode = new Map(coupons.items.map((c) => [c.code, c]));
     expect(byCode.get('pct15')).toMatchObject({ redemptionCount: 1, totalDiscountIssued: 149 });
     expect(byCode.get('flat5')).toMatchObject({ redemptionCount: 2, totalDiscountIssued: 1000 });
     expect(byCode.get('unused')).toMatchObject({ redemptionCount: 0, totalDiscountIssued: 0 });
@@ -508,7 +531,7 @@ describe('operator panel features', () => {
         headers: { authorization: `Bearer ${b.tenantAccess}` },
       });
       expect(res.statusCode).toBe(200);
-      return (res.json().data as { events: Array<{ type: string }> }).events.map((e) => e.type);
+      return (res.json().data as { items: Array<{ type: string }> }).items.map((e) => e.type);
     };
 
     // Date window catches only the middle event (inclusive bounds).

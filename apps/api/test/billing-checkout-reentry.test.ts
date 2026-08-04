@@ -194,7 +194,12 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
         currency: 'usd',
       });
 
-      const rows = await prisma.couponRedemption.findMany({ where: { applicationId } });
+      // CONFIRMED only. Checkout now also writes RESERVED rows to hold the
+      // slot, so an unfiltered count no longer means "how many redemptions
+      // happened" — which is what this assertion is about.
+      const rows = await prisma.couponRedemption.findMany({
+        where: { applicationId, status: 'CONFIRMED' },
+      });
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({
         couponId: oldCoupon.id,
@@ -220,7 +225,11 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
         currency: 'usd',
       });
 
-      expect(await prisma.couponRedemption.count({ where: { applicationId } })).toBe(0);
+      expect(
+        await prisma.couponRedemption.count({
+          where: { applicationId, status: 'CONFIRMED' },
+        }),
+      ).toBe(0);
     });
 
     it('completing both sessions grants once and pays twice — one purchase per charge', async () => {

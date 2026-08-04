@@ -1,6 +1,8 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
+import { cancelCopy } from '@/lib/cancel-copy';
 import { getPortalConfig, supportLink } from '@/lib/config';
+import { formatMoney, formatPlanPrice } from '@/lib/format';
 import { getPortalUser, portalClientFor } from '@/lib/session';
 import { cancelSubscriptionAction, checkoutAction } from '@/lib/actions';
 import { Banner } from '@/components/banner';
@@ -34,35 +36,6 @@ const CHECKOUT_ERR: Record<string, string> = {
   SUBSCRIPTION_NOT_FOUND: 'We couldn’t find that subscription — it may already be canceled.',
 };
 
-function money(amount: number, currency: string): string {
-  try {
-    return new Intl.NumberFormat('en', { style: 'currency', currency }).format(amount / 100);
-  } catch {
-    return `${(amount / 100).toFixed(2)} ${currency}`;
-  }
-}
-
-/**
- * Price plus its billing cadence — and only where a cadence is real.
- *
- * `Plan.interval` defaults to MONTH server-side whatever the plan `kind` is, so
- * appending it unconditionally advertised a one-off licence as "$499.00/month",
- * in the plan list AND in the checkout confirmation. A customer was told they
- * were starting a subscription that does not exist.
- *
- * Same rule as `formatPrice` in `@rekey.dev/react` (`pricing-shared.tsx`),
- * which already got this right — kept as a local helper rather than an import
- * because that module is client-only and this page is a server component.
- */
-function planPrice(plan: { amount: number; currency: string; kind?: string; interval?: string | null }): string {
-  const amount = money(plan.amount, plan.currency);
-  if (plan.kind === 'SUBSCRIPTION' && plan.interval) {
-    return `${amount}/${plan.interval.toLowerCase()}`;
-  }
-  if (plan.kind === 'USAGE') return `${amount} per unit`;
-  return `${amount} one-time`;
-}
-
 export default async function DashboardPage({
   params,
   searchParams,
@@ -86,7 +59,13 @@ export default async function DashboardPage({
   // but only an owner/admin can change the plan).
   let billingOrg: { id: string; name: string } | null = null;
   if (isOrgBilled) {
-    const orgs = await client!.listOrganizations(session.accessToken).catch(() => []);
+    // `?limit=100` deliberately: this picks the first team the user can manage,
+    // and the default 50-row window could exclude it for someone in many teams.
+    // `page.total` says whether even 100 was short.
+    const orgs = await client!
+      .listOrganizations(session.accessToken, { limit: 100 })
+      .then((r) => r.items)
+      .catch(() => []);
     const managed = orgs.find((o) => o.role === 'OWNER' || o.role === 'ADMIN');
     if (managed) billingOrg = { id: managed.id, name: managed.name };
   }
@@ -94,7 +73,7 @@ export default async function DashboardPage({
 
   const [subscription, plans, providers, payments] = await Promise.all([
     client!.getSubscription(session.accessToken, orgId ? { organizationId: orgId } : undefined),
-    config!.billingEnabled ? client!.getPlans() : Promise.resolve([]),
+    config!.billingEnabled ? client!.getPlans().then((r) => r.items) : Promise.resolve([]),
     // Powers the "Pay with…" picker. Public (publishable key, no token). A hiccup
     // here must never break the dashboard — fall back to the auto-routed flow.
     config!.billingEnabled
@@ -102,11 +81,23 @@ export default async function DashboardPage({
       : Promise.resolve([]),
     // Billing history. Non-critical — never let it break the dashboard.
     config!.billingEnabled
-      ? client!.listPayments(session.accessToken, 12).catch(() => [])
+      ? client!
+          .listPayments(session.accessToken, 12)
+          .then((r) => r.items)
+          .catch(() => [])
       : Promise.resolve([]),
   ]);
   const currentPlan = subscription ? plans.find((p) => p.id === subscription.planId) : undefined;
   const canceling = Boolean(subscription?.cancelAt);
+  /** Which of the two cancellations this customer is actually about to get. */
+  const cancelText = cancelCopy(subscription ?? { status: 'NONE', currentPeriodEnd: null });
+  /**
+   * When access actually stops. `cancelAt` first, because the two diverge on
+   * exactly the path this page used to get wrong: on an immediate cancellation
+   * `currentPeriodEnd` is the date the customer had been paid up to, while
+   * `cancelAt` is the day they really lose access.
+   */
+  const endsOn = subscription?.cancelAt ?? subscription?.currentPeriodEnd ?? null;
   // Individual apps: always self-checkout. Org apps: only when we resolved a
   // team the user can manage. Members of org-billed apps get a read-only view.
   const canCheckout = !isOrgBilled || billingOrg !== null;
@@ -123,7 +114,16 @@ export default async function DashboardPage({
     <div className="space-y-6">
       {checkout === 'success' && <Banner tone="success">Checkout complete — your subscription will activate shortly.</Banner>}
       {checkout === 'canceled' && <Banner tone="info">Checkout canceled.</Banner>}
-      {notice === 'canceled' && <Banner tone="info">Your subscription will end at the close of the current period.</Banner>}
+      {/* Reports what happened, rather than assuming the request was granted:
+          the same redirect lands here after an immediate cancellation, where
+          "will end at the close of the current period" was simply untrue. */}
+      {notice === 'canceled' && (
+        <Banner tone="info">
+          {canceling && endsOn
+            ? `Your subscription will end on ${new Date(endsOn).toLocaleDateString()}.`
+            : 'Your subscription has been cancelled.'}
+        </Banner>
+      )}
       {error && (
         <Banner tone="error">
           {CHECKOUT_ERR[error] ?? 'Something went wrong. Please try again.'}
@@ -156,20 +156,20 @@ export default async function DashboardPage({
               <span className="font-medium text-[var(--color-fg)]">{currentPlan?.name ?? subscription.planId}</span>
               <StatusBadge status={subscription.status} />
             </div>
-            {subscription.currentPeriodEnd && (
+            {endsOn && (
               <p className="text-[var(--color-muted-fg)]">
-                {canceling ? 'Ends' : 'Renews'} on{' '}
-                {new Date(subscription.currentPeriodEnd).toLocaleDateString()}
+                {canceling ? 'Ends' : 'Renews'} on {new Date(endsOn).toLocaleDateString()}
               </p>
             )}
             {subscription.status === 'ACTIVE' && !canceling && canCheckout && (
               <form action={cancelSubscriptionAction.bind(null, slug, orgId)} className="pt-2">
                 <ConfirmSubmit
                   variant="neutral"
-                  label="Cancel at period end"
+                  label={cancelText.label}
                   title="Cancel subscription?"
-                  message="Your plan stays active until the end of the current period, then won't renew. You can resubscribe any time."
-                  confirmLabel="Cancel at period end"
+                  message={cancelText.message}
+                  confirmLabel={cancelText.confirmLabel}
+                  pendingLabel="Cancelling…"
                 />
               </form>
             )}
@@ -205,7 +205,7 @@ export default async function DashboardPage({
                   <div className="text-sm">
                     <span className="font-medium text-[var(--color-fg)]">{plan.name}</span>{' '}
                     <span className="text-[var(--color-muted-fg)]">
-                      {planPrice(plan)}
+                      {formatPlanPrice(plan)}
                     </span>
                   </div>
                   {current ? (
@@ -217,8 +217,9 @@ export default async function DashboardPage({
                         size="sm"
                         label={subscription ? 'Switch' : 'Subscribe'}
                         title={subscription ? `Switch to ${plan.name}?` : `Subscribe to ${plan.name}?`}
-                        message={`This takes you to checkout for ${plan.name} at ${planPrice(plan)}.`}
+                        message={`This takes you to checkout for ${plan.name} at ${formatPlanPrice(plan)}.`}
                         confirmLabel="Continue to checkout"
+                        pendingLabel="Opening checkout…"
                       >
                         {showProviderPicker && <ProviderRadios providers={providers} />}
                       </ConfirmSubmit>
@@ -247,7 +248,7 @@ export default async function DashboardPage({
                 </div>
                 <div className="flex shrink-0 items-center gap-3">
                   <span className="font-medium text-[var(--color-fg)]">
-                    {money(p.amount, p.currency)}
+                    {formatMoney(p.amount, p.currency)}
                   </span>
                   <StatusBadge status={p.status} />
                   {p.receiptUrl && (
