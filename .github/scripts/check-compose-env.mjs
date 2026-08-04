@@ -69,17 +69,11 @@ const EXEMPT = {
     PORT: 'container-internal — the healthcheck and the Traefik port label both hardcode 3030',
     HOST: 'container-internal — the container binds 0.0.0.0 and Traefik reaches it by service name',
   },
-  'docker-compose.api.yml': {
-    NODE_ENV: 'fixed to production by the file itself',
-    PORT: 'container-internal — the healthcheck and the Traefik port label both hardcode 3030',
-    HOST: 'container-internal — the container binds 0.0.0.0 and Traefik reaches it by service name',
-  },
 };
 
 /** Compose files that run a production API, and the service that does it. */
 const TARGETS = [
   { file: 'docker-compose.prod.yml', service: 'api' },
-  { file: 'docker-compose.api.yml', service: 'api' },
 ];
 
 /**
