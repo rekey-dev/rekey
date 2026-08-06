@@ -538,6 +538,8 @@ export interface PlanEntitlementRow {
   valueType: 'BOOL' | 'INT' | 'STRING' | null;
   value: string | null;
   quantity: number | null;
+  /** USAGE only — credits charged per unit past `quantity`. Null = hard cap. */
+  creditsPerUnit?: number | null;
   licenseKind: 'PERPETUAL' | 'TIMED' | 'SEATS' | null;
   rollover: boolean;
   createdAt: string;
@@ -941,13 +943,87 @@ export async function getReadyReport(): Promise<ReadyReport | null> {
  * explains itself in the panel today — which is also why it suits a
  * self-hosted deployment whose limits are its own.
  *
- * The message is the API's, not user input, and React escapes it on render.
- * Capped because it travels in a URL.
+ * ## Why the prose is not in the query string
+ *
+ * The obvious implementation puts `detail` and `fix` in the URL beside the
+ * code. It was implemented that way first, and it is wrong: a query parameter
+ * is written by whoever composes the link. That hands anyone who can get a
+ * signed-in operator to click a URL the ability to render arbitrary text
+ * inside the panel's own authenticated error banner — "Your workspace was
+ * flagged, call this number to restore access" — with the real hostname in the
+ * address bar. It also drops the API's prose into browser history and the
+ * `Referer` of the next outbound link, including on the signed-out pages.
+ *
+ * So the code stays in the URL, because the page legitimately branches on it
+ * and it is not prose, and the message travels in a short-lived httpOnly
+ * cookie instead. A cross-site link cannot set one. The cookie is bound to the
+ * code it arrived with, so a stale one cannot attach itself to a later,
+ * unrelated failure, and it expires on its own because a Server Component may
+ * read cookies but not clear them.
  */
-export function errorQuery(err: PanelApiError, extra?: Record<string, string>): string {
+const ERROR_FLASH_COOKIE = 'rk_err';
+/** Long enough to survive the redirect, short enough to be gone by the next mistake. */
+const ERROR_FLASH_MAX_AGE = 30;
+
+/**
+ * Stash the API's message for the page we are about to redirect to, and return
+ * the query string that page should be given.
+ *
+ * Server actions and route handlers may write cookies; this must not be called
+ * from a render.
+ */
+export async function errorQuery(
+  err: PanelApiError,
+  extra?: Record<string, string>,
+): Promise<string> {
+  const jar = await cookies();
+  jar.set(
+    ERROR_FLASH_COOKIE,
+    JSON.stringify({
+      code: err.code,
+      // Capped: a cookie is a header, and a hostile API is still a bound worth
+      // having on something rendered to an operator.
+      message: err.message ? err.message.slice(0, 300) : undefined,
+      fix: err.fix ? err.fix.slice(0, 300) : undefined,
+    }),
+    {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: await cookieSecure(),
+      path: '/',
+      maxAge: ERROR_FLASH_MAX_AGE,
+    },
+  );
+
   const params = new URLSearchParams({ error: err.code });
-  if (err.message) params.set('detail', err.message.slice(0, 300));
-  if (err.fix) params.set('fix', err.fix.slice(0, 300));
   for (const [k, v] of Object.entries(extra ?? {})) params.set(k, v);
   return params.toString();
+}
+
+/**
+ * The API's own message and fix for `code`, if this request is the one that
+ * followed the failure.
+ *
+ * Returns nothing when the cookie is absent, unparseable, or was written for a
+ * different code — a page shows the API's words about the failure it is
+ * displaying, or none.
+ */
+export async function readErrorFlash(
+  code: string | undefined,
+): Promise<{ detail?: string; fix?: string }> {
+  if (!code) return {};
+  const raw = (await cookies()).get(ERROR_FLASH_COOKIE)?.value;
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return {};
+    const { code: c, message, fix } = parsed as Record<string, unknown>;
+    if (c !== code) return {};
+    return {
+      ...(typeof message === 'string' ? { detail: message } : {}),
+      ...(typeof fix === 'string' ? { fix } : {}),
+    };
+  } catch {
+    return {};
+  }
 }

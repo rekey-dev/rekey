@@ -1,4 +1,4 @@
-import { cancelsAtPeriodEnd } from '@rekey.dev/shared-types';
+import { cancelEffect } from '@rekey.dev/shared-types';
 
 /**
  * The two sentences a cancel confirmation is allowed to say, and which one this
@@ -48,7 +48,7 @@ export function cancelCopy(
   subscription: CancelCopyInput,
   formatDate: (d: Date) => string = (d) => d.toLocaleDateString(),
 ): CancelCopy {
-  const schedules = cancelsAtPeriodEnd(subscription);
+  const schedules = cancelEffect(subscription) === 'period-end';
   if (!schedules) {
     return {
       schedules,

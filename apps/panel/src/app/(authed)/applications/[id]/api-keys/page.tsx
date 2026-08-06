@@ -1,13 +1,14 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import { api, PanelApiError, type ApiKeyRow, getApplication } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, type ApiKeyRow, getApplication } from '@/lib/api';
 
 // One-time reveal of a freshly minted secret key. Carried in a short-lived,
 // httpOnly, path-scoped cookie instead of the URL query — a raw key in the URL
 // leaks into browser history, the referer header, and server access logs.
 const REVEAL_COOKIE = 'rekey_reveal_key';
 import { CopyButton } from '@/components/CopyButton';
+import { ApiErrorText } from '@/components/api-error';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { Modal } from '@/components/Modal';
 import { SectionHeader } from '@/components/Card';
@@ -94,7 +95,7 @@ async function rotatePublicKey(applicationId: string, force: boolean): Promise<v
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/api-keys?error=${encodeURIComponent(err.code)}`);
+      redirect(`/applications/${applicationId}/api-keys?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -154,7 +155,7 @@ async function createKey(applicationId: string, formData: FormData): Promise<voi
     redirect(`/applications/${applicationId}/api-keys?e=apikey_created`);
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/api-keys?error=${encodeURIComponent(err.code)}&newKey=1`);
+      redirect(`/applications/${applicationId}/api-keys?${await errorQuery(err, { newKey: '1' })}`);
     }
     throw err;
   }
@@ -182,6 +183,11 @@ export default async function ApiKeysPage({
   // ~2 min later, so a refresh stops showing it without us mutating cookies here).
   const reveal = (await cookies()).get(REVEAL_COOKIE)?.value;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   // The mint modal reopens itself only when the redirect carries `newKey=1`
   // (createKey failures). Errors without it — e.g. rotatePublicKey — would
   // otherwise render invisibly inside the closed modal, so show those at page
@@ -207,7 +213,7 @@ export default async function ApiKeysPage({
     <div className="space-y-6">
       {error && !mintModalOpen && (
         <p role="alert" className="rounded-lg border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-          {ERR[error] ?? 'Something went wrong. Please try again.'}
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
         </p>
       )}
       <SectionHeader
@@ -294,7 +300,7 @@ export default async function ApiKeysPage({
             <form action={createKey.bind(null, id)} className="space-y-3">
               {error && mintModalOpen && (
                 <p role="alert" className="rounded-lg border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-                  {ERR[error] ?? 'Something went wrong. Please try again.'}
+                  <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
                 </p>
               )}
               <label className="block space-y-1">

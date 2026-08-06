@@ -1300,6 +1300,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                 valueType: { type: 'string', enum: ['BOOL', 'INT', 'STRING'], nullable: true },
                 value: { type: 'string', nullable: true },
                 quantity: { type: 'integer', nullable: true },
+                creditsPerUnit: { type: 'integer', nullable: true },
                 licenseKind: { type: 'string', enum: ['PERPETUAL', 'TIMED', 'SEATS'], nullable: true },
                 rollover: { type: 'boolean' },
                 createdAt: { type: 'string', format: 'date-time' },
@@ -1329,6 +1330,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           valueType: e.valueType,
           value: e.value,
           quantity: e.quantity,
+          // Hand-written projection: a field omitted here is invisible to the
+          // panel however correct the response schema and the service are.
+          // creditsPerUnit was, so a priced usage allowance rendered as though
+          // it were a hard cap.
+          creditsPerUnit: e.creditsPerUnit,
           licenseKind: e.licenseKind,
           rollover: e.rollover,
           createdAt: e.createdAt.toISOString(),
@@ -1360,7 +1366,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             key: { type: 'string', maxLength: 80 },
             valueType: { type: 'string', enum: ['BOOL', 'INT', 'STRING'] },
             value: { type: 'string', maxLength: 200 },
-            quantity: { type: 'integer', maximum: 2147483647 },
+            quantity: { type: 'integer', minimum: 0, maximum: 2147483647 },
+            // USAGE only: credits charged per unit past `quantity`. Omitted
+            // leaves the quota a hard cap, which is the prior behaviour.
+            creditsPerUnit: { type: 'integer', minimum: 0, maximum: 2147483647 },
             licenseKind: { type: 'string', enum: ['PERPETUAL', 'TIMED', 'SEATS'] },
             rollover: { type: 'boolean' },
           },
@@ -1396,7 +1405,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           key: z.string().max(80).optional(),
           valueType: z.enum(['BOOL', 'INT', 'STRING']).optional(),
           value: z.string().max(200).optional(),
-          quantity: positiveBoundedInt().optional(),
+          // Zero, not positive: a USAGE entitlement priced per unit may include
+          // no free units at all. The service refuses a zero that carries no
+          // price, since that grants nothing and costs nothing.
+          quantity: z.number().int().min(0).max(2_147_483_647).optional(),
+          // Zero is meaningful: "no free units, charge from the first one".
+          creditsPerUnit: z.number().int().min(0).max(2_147_483_647).optional(),
           licenseKind: z.enum(['PERPETUAL', 'TIMED', 'SEATS']).optional(),
           rollover: z.boolean().optional(),
         })
@@ -1408,6 +1422,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...(body.valueType !== undefined && { valueType: body.valueType }),
         ...(body.value !== undefined && { value: body.value }),
         ...(body.quantity !== undefined && { quantity: body.quantity }),
+        ...(body.creditsPerUnit !== undefined && { creditsPerUnit: body.creditsPerUnit }),
         ...(body.licenseKind !== undefined && { licenseKind: body.licenseKind }),
         ...(body.rollover !== undefined && { rollover: body.rollover }),
       });
@@ -5170,6 +5185,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             slug: { type: 'string', minLength: 1, maxLength: 40 },
             name: { type: 'string', minLength: 1, maxLength: 120 },
             unit: { type: 'string', minLength: 1, maxLength: 40 },
+            creditsPerUnit: { type: 'integer', minimum: 0, maximum: 2147483647 },
           },
         },
         response: {
@@ -5190,6 +5206,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           slug: z.string().min(1).max(40),
           name: z.string().min(1).max(120),
           unit: z.string().min(1).max(40),
+          // Declared in the JSON schema; without it here zod strips the field
+          // and the create reports success having stored nothing.
+          creditsPerUnit: z.number().int().min(0).max(2_147_483_647).optional(),
         })
         .parse(req.body);
       const meter = await usageService.createMeter({ applicationId: id, ...body });
@@ -5216,11 +5235,17 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         // branch had found the same omission independently.)
         body: {
           type: 'object',
-          required: ['active'],
-          properties: { active: { type: 'boolean' } },
+          // Neither is required alone; the handler refuses a body that sets
+          // neither. `required: ['active']` here rejected a price-only PATCH
+          // before the handler was reached.
+          properties: {
+            active: { type: 'boolean' },
+            // null clears the price, returning the meter to counting only.
+            creditsPerUnit: { type: 'integer', nullable: true, minimum: 0, maximum: 2147483647 },
+          },
         },
         response: {
-          200: ok(ref('UsageMeter'), 'The meter, with `active` updated.'),
+          200: ok(ref('UsageMeter'), 'The meter, with `active` and/or `creditsPerUnit` updated.'),
           ...errs({
             ...APP_WRITE_ERRORS,
             404: 'USAGE_METER_NOT_FOUND — no meter with that slug on this Application.',
@@ -5245,8 +5270,28 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // record ALREADY WRITTEN was measured in — retitling a meter silently
       // relabels history. That is a product decision, not something to smuggle
       // into an endpoint whose summary is "toggle"; see decisions.md.
-      const body = z.object({ active: z.boolean() }).strict().parse(req.body ?? {});
-      return { success: true, data: await usageService.setActive(id, slug, body.active) };
+      // Still `.strict()`: an unknown key is a caller bug, not something to
+      // ignore. Both fields optional, at least one required — a PATCH that
+      // says nothing is a mistake worth naming.
+      const body = z
+        .object({
+          active: z.boolean().optional(),
+          creditsPerUnit: z.number().int().min(0).nullable().optional(),
+        })
+        .strict()
+        .refine((b) => b.active !== undefined || b.creditsPerUnit !== undefined, {
+          message: 'Provide `active`, `creditsPerUnit`, or both.',
+        })
+        .parse(req.body ?? {});
+
+      let meter;
+      if (body.creditsPerUnit !== undefined) {
+        meter = await usageService.setPrice(id, slug, body.creditsPerUnit);
+      }
+      if (body.active !== undefined) {
+        meter = await usageService.setActive(id, slug, body.active);
+      }
+      return { success: true, data: meter };
     },
   );
 

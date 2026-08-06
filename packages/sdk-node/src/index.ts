@@ -215,12 +215,12 @@ export type { WebhookEventType, WebhookEventEnvelope } from '@rekey.dev/shared-t
  * @example
  * ```ts
  * const sub = await rekey.billing.getSubscription(token);
- * const message = sub && cancelsAtPeriodEnd(sub)
+ * const message = sub && cancelEffect(sub) === 'period-end'
  *   ? `You keep access until ${sub.currentPeriodEnd}.`
  *   : 'Cancelling takes effect straight away.';
  * ```
  */
-export { cancelsAtPeriodEnd } from '@rekey.dev/shared-types';
+export { cancelEffect, isCancelScheduled } from '@rekey.dev/shared-types';
 export type { CancellationTimingInput } from '@rekey.dev/shared-types';
 
 /**

@@ -13,6 +13,11 @@ export default defineConfig({
     include: ['test/**/*.test.ts'],
     css: false,
   },
+  // The app builds with the automatic JSX runtime (no `import React` in
+  // components). esbuild defaults to the classic transform, which would need
+  // React in scope — so a component imported by a test throws
+  // "React is not defined" from its first JSX line.
+  esbuild: { jsx: 'automatic' },
   css: { postcss: { plugins: [] } },
   resolve: {
     alias: {

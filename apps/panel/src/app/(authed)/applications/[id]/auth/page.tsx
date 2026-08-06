@@ -1,8 +1,9 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, getApplication } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, getApplication } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
+import { ApiErrorText } from '@/components/api-error';
 import { Card, SectionHeader } from '@/components/Card';
 import { SavedBanner } from '@/components/SavedBanner';
 import { StickyFormFooter } from '@/components/StickyFormFooter';
@@ -74,7 +75,7 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/auth?error=${encodeURIComponent(err.code)}`);
+      redirect(`/applications/${applicationId}/auth?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -95,6 +96,11 @@ export default async function AuthMethodsPage({
   const { id } = await params;
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const saved = sp.saved === '1';
 
   const app = await getApplication(id);
@@ -159,7 +165,7 @@ export default async function AuthMethodsPage({
           role="alert"
           className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300"
         >
-          {ERR[error] ?? error}
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
         </p>
       )}
 

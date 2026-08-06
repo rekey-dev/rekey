@@ -1,9 +1,10 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
+import { ApiErrorText } from '@/components/api-error';
 import type { Page } from '@/lib/paginate';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type EndUserRow, type EndUserRoleRow, type OrganizationRow } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, type EndUserRow, type EndUserRoleRow, type OrganizationRow } from '@/lib/api';
 import { Modal } from '@/components/Modal';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
@@ -57,7 +58,7 @@ async function createUser(applicationId: string, formData: FormData): Promise<vo
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/end-users?error=${encodeURIComponent(err.code)}&newUser=1`);
+      redirect(`/applications/${applicationId}/end-users?${await errorQuery(err, { newUser: '1' })}`);
     }
     throw err;
   }
@@ -112,7 +113,7 @@ async function updateUser(applicationId: string, euid: string, formData: FormDat
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/end-users?error=${encodeURIComponent(err.code)}&editUser=${euid}`);
+      redirect(`/applications/${applicationId}/end-users?${await errorQuery(err, { editUser: euid })}`);
     }
     throw err;
   }
@@ -144,7 +145,7 @@ async function createRole(applicationId: string, formData: FormData): Promise<vo
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/end-users?error=${encodeURIComponent(err.code)}&newRole=1`);
+      redirect(`/applications/${applicationId}/end-users?${await errorQuery(err, { newRole: '1' })}`);
     }
     throw err;
   }
@@ -172,7 +173,7 @@ async function deleteRole(applicationId: string, name: string, formData: FormDat
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/end-users?error=${encodeURIComponent(err.code)}&deleteRole=${encodeURIComponent(name)}`);
+      redirect(`/applications/${applicationId}/end-users?${await errorQuery(err, { deleteRole: name })}`);
     }
     throw err;
   }
@@ -213,6 +214,11 @@ export default async function EndUsersPage({
   const sp = await searchParams;
   const search = typeof sp.search === 'string' ? sp.search.trim() : '';
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const newUserError = sp.newUser === '1' ? error : undefined;
   const newRoleError = sp.newRole === '1' ? error : undefined;
   const editUser = typeof sp.editUser === 'string' ? sp.editUser : undefined;
@@ -303,7 +309,7 @@ export default async function EndUsersPage({
               End-users can&apos;t change their own role — only operators can, via the panel.
             </>
           }
-          action={<NewRoleModal applicationId={id} error={newRoleError} />}
+          action={<NewRoleModal applicationId={id} error={newRoleError} errorDetail={errorDetail} errorFix={errorFix} />}
         />
 
         <Table minWidth="min-w-[40rem]">
@@ -348,6 +354,8 @@ export default async function EndUsersPage({
                         holders={holders}
                         allRoles={roles}
                         error={deleteRoleName === r.name ? error : undefined}
+                        errorDetail={errorDetail}
+                        errorFix={errorFix}
                       />
                     )}
                   </TD>
@@ -371,7 +379,7 @@ export default async function EndUsersPage({
             </>
           }
           action={
-            <NewUserModal applicationId={id} roles={roles} organizations={organizations} error={newUserError} />
+            <NewUserModal applicationId={id} roles={roles} organizations={organizations} error={newUserError} errorDetail={errorDetail} errorFix={errorFix} />
           }
         />
 
@@ -483,6 +491,8 @@ export default async function EndUsersPage({
                         user={u}
                         roles={roles}
                         error={editUser === u.id ? error : undefined}
+                        errorDetail={errorDetail}
+                        errorFix={errorFix}
                       />
                       <form action={deleteUser.bind(null, id, u.id)} className="inline">
                         <TypedConfirmButton
@@ -533,13 +543,15 @@ function DeleteRoleControl({
   role,
   holders,
   allRoles,
-  error,
+  error, errorDetail, errorFix,
 }: {
   applicationId: string;
   role: EndUserRoleRow;
   holders: number;
   allRoles: EndUserRoleRow[];
   error?: string;
+  errorDetail?: string;
+  errorFix?: string;
 }): React.JSX.Element {
   if (holders === 0) {
     return (
@@ -562,7 +574,7 @@ function DeleteRoleControl({
       <form action={deleteRole.bind(null, applicationId, role.name)} className="space-y-3">
         {error && (
           <Banner tone="error">
-            {ERR[error] ?? error}
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
           </Banner>
         )}
         <Field
@@ -591,10 +603,12 @@ function DeleteRoleControl({
 
 function NewRoleModal({
   applicationId,
-  error,
+  error, errorDetail, errorFix,
 }: {
   applicationId: string;
   error?: string;
+  errorDetail?: string;
+  errorFix?: string;
 }): React.JSX.Element {
   return (
     <Modal
@@ -607,7 +621,7 @@ function NewRoleModal({
       <form action={createRole.bind(null, applicationId)} className="space-y-3">
         {error && (
           <Banner tone="error">
-            {ERR[error] ?? error}
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
           </Banner>
         )}
         <Field label="Name" required hint="Lowercase letters, digits, hyphens, underscores (2–40).">
@@ -644,12 +658,14 @@ function NewUserModal({
   applicationId,
   roles,
   organizations,
-  error,
+  error, errorDetail, errorFix,
 }: {
   applicationId: string;
   roles: EndUserRoleRow[];
   organizations: OrganizationRow[];
   error?: string;
+  errorDetail?: string;
+  errorFix?: string;
 }): React.JSX.Element {
   const defaultRoleName = roles.find((r) => r.isDefault)?.name ?? roles[0]?.name ?? 'user';
   return (
@@ -662,7 +678,7 @@ function NewUserModal({
       <form action={createUser.bind(null, applicationId)} className="space-y-3">
         {error && (
           <Banner tone="error">
-            {ERR[error] ?? error}
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
           </Banner>
         )}
         <Field label="Email" required>
@@ -730,12 +746,14 @@ function EditUserModal({
   applicationId,
   user,
   roles,
-  error,
+  error, errorDetail, errorFix,
 }: {
   applicationId: string;
   user: EndUserRow;
   roles: EndUserRoleRow[];
   error?: string;
+  errorDetail?: string;
+  errorFix?: string;
 }): React.JSX.Element {
   const metadataDefault = user.metadata ? JSON.stringify(user.metadata, null, 2) : '';
   return (
@@ -750,7 +768,7 @@ function EditUserModal({
       <form action={updateUser.bind(null, applicationId, user.id)} className="space-y-3">
         {error && (
           <Banner tone="error">
-            {ERR[error] ?? error}
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
           </Banner>
         )}
         <Field

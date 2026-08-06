@@ -102,15 +102,36 @@ export function EntitlementForm({
           </label>
           <label className="block space-y-1">
             <span className="text-xs font-medium">Included units / period</span>
-            <input type="number" name="quantity" required min={1} placeholder="10000" className={`${inputCls} font-mono`} />
+            <input type="number" name="quantity" required min={0} placeholder="10000" className={`${inputCls} font-mono`} />
+            <span className="block text-xs text-[var(--color-muted-fg)]">
+              0 with a price below = charge from the first unit. A price of 0
+              meters without charging.
+            </span>
+          </label>
+          <label className="block space-y-1">
+            <span className="text-xs font-medium">Credits per unit past the allowance</span>
+            <input
+              type="number"
+              name="creditsPerUnit"
+              min={0}
+              placeholder="Leave empty for a hard cap"
+              className={`${inputCls} font-mono`}
+            />
+            <span className="block text-xs text-[var(--color-muted-fg)]">
+              Empty = usage past the allowance is refused. Set it and the excess
+              is drawn from the subscriber&apos;s credit balance instead.
+            </span>
           </label>
         </div>
       )}
 
       <SubmitButton pendingLabel="Saving entitlement…">Save entitlement</SubmitButton>
       <p className="text-xs text-[var(--color-muted-fg)]">
-        Upserts by (kind, key). USAGE add-ons enforce a hard cap — usage past the included units
-        per calendar month is rejected (402 USAGE_QUOTA_EXCEEDED).
+        Upserts by (kind, key). A USAGE allowance with no price is a hard cap:
+        usage past the included units per calendar month is refused (402
+        USAGE_QUOTA_EXCEEDED). Priced, the excess is charged to the
+        subscriber&apos;s credit balance, and a balance too low is refused the
+        same way — never billed into the negative.
       </p>
     </form>
   );

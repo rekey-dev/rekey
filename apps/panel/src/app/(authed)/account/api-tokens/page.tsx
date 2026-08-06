@@ -14,8 +14,9 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import { api, PanelApiError } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
+import { ApiErrorText } from '@/components/api-error';
 import { Badge } from '@/components/Badge';
 import { CopyButton } from '@/components/CopyButton';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -85,7 +86,7 @@ async function mintToken(formData: FormData): Promise<void> {
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/account/api-tokens?error=${encodeURIComponent(err.code)}`);
+      redirect(`/account/api-tokens?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -108,7 +109,7 @@ async function revokeToken(formData: FormData): Promise<void> {
     await api({ method: 'DELETE', path: `/api/v1/tenant/auth/api-tokens/${encodeURIComponent(id)}` });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/account/api-tokens?error=${encodeURIComponent(err.code)}`);
+      redirect(`/account/api-tokens?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -139,6 +140,11 @@ export default async function ApiTokensPage({
 }): Promise<React.JSX.Element> {
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const minted = sp.minted === '1';
   const revoked = sp.revoked === '1';
 
@@ -168,7 +174,7 @@ export default async function ApiTokensPage({
 
       {error && (
         <Banner tone="error">
-          {ERR[error] ?? 'Something went wrong. Please try again.'}
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
         </Banner>
       )}
       {revoked && (

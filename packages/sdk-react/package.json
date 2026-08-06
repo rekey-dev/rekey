@@ -16,7 +16,8 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./styles.css": "./dist/styles.css"
   },
   "files": [
     "dist",
@@ -24,7 +25,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/emit-css.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo \"(eslint not yet wired)\"",
     "test": "tsc -p tsconfig.json && vitest run"

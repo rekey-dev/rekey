@@ -14,9 +14,10 @@ import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import { api, PanelApiError, type OperatorSessionRow, getMe } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, type OperatorSessionRow, getMe } from '@/lib/api';
 import { describeUserAgent } from '@/lib/format';
 import { QrCode } from '@/components/QrCode';
+import { ApiErrorText } from '@/components/api-error';
 import { CopyButton } from '@/components/CopyButton';
 import { DownloadButton } from '@/components/DownloadButton';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -87,7 +88,7 @@ async function confirmMfa(formData: FormData): Promise<void> {
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/account/security?error=${encodeURIComponent(err.code)}`);
+      redirect(`/account/security?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -155,6 +156,11 @@ export default async function SecurityPage({
 }): Promise<React.JSX.Element> {
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const pwerror = typeof sp.pwerror === 'string' ? sp.pwerror : undefined;
   // The MFA setup payload lives in a one-time-reveal cookie (set by
   // `setupMfa`, deleted by `confirmMfa`/`disableMfa`). Reading from a
@@ -302,7 +308,7 @@ export default async function SecurityPage({
               <form action={confirmMfa} className="mt-3 space-y-2">
                 {error && (
                   <Banner tone="error">
-                    {ERR[error] ?? 'Something went wrong. Please try again.'}
+                    <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
                   </Banner>
                 )}
                 <div className="flex items-end gap-2">

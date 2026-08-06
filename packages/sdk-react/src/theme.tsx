@@ -105,7 +105,7 @@ const STYLE_ELEMENT_ID = 'rekey-react-styles';
  * `@media (prefers-color-scheme: dark)` guarded by `:not([data-rekey-theme])`
  * (so an explicit light pin wins over the OS preference).
  */
-const STYLES = `
+export const STYLES = `
 .rekey-root {
   --rekey-color-primary: #0d9488;
   --rekey-color-primary-text: #ffffff;
@@ -321,16 +321,69 @@ const STYLES = `
 .rekey-stack { display: flex; flex-direction: column; gap: var(--rekey-spacing); }
 `;
 
-/** Inject the stylesheet once per document. No-op on the server. */
-function useInjectStyles(): void {
-  React.useEffect(() => {
-    if (typeof document === 'undefined') return;
-    if (document.getElementById(STYLE_ELEMENT_ID)) return;
-    const el = document.createElement('style');
-    el.id = STYLE_ELEMENT_ID;
-    el.textContent = STYLES;
-    document.head.appendChild(el);
-  }, []);
+/**
+ * Marks that an ancestor `<Themed>` has already rendered the stylesheet, so a
+ * page with several components does not repeat it.
+ */
+const StylesRenderedCtx = React.createContext(false);
+
+/**
+ * The stylesheet, rendered into the tree rather than injected by an effect.
+ *
+ * It used to be appended to `document.head` from a `useEffect`. That works in
+ * Next, where these components hydrate anyway, and fails everywhere the
+ * components are rendered server-only: Astro without a client directive gets
+ * correct markup with no styling at all, because the effect never runs. The
+ * workaround — adding a client directive — ships React to a page that needs
+ * none, purely to get a stylesheet, which made the whole component set
+ * effectively Next-only.
+ *
+ * Rendering it in the tree covers both: the server pass emits it, and a
+ * client-only mount emits it too. `<style>` in the body is valid HTML and
+ * scoped rules are unaffected by where the element sits. The id is kept so an
+ * app that injected it by other means can still find it.
+ *
+ * For consumers who would rather link a real file — a global stylesheet, a
+ * CDN, a strict CSP that forbids inline styles — `@rekey.dev/react/styles.css`
+ * is the same content, generated from this constant at build time.
+ */
+function StyleSheet(): React.JSX.Element {
+  // A data attribute rather than an id. Nesting is deduplicated by
+  // StylesRenderedCtx, but two Rekey components as *siblings* each render
+  // their own copy, and duplicate ids are invalid HTML. Duplicate rules are
+  // merely redundant, and `<RekeyStyles />` or the stylesheet file avoid even
+  // that for anyone who cares about the bytes.
+  //
+  // Deliberately does not consult StylesRenderedCtx itself: it renders inside
+  // the provider that sets the flag, so checking here would make it suppress
+  // itself. `Themed` decides, before entering the provider.
+  return <style data-rekey-styles="" dangerouslySetInnerHTML={{ __html: STYLES }} />;
+}
+
+/**
+ * Render the component stylesheet once, yourself.
+ *
+ * Optional. Every Rekey component brings its own copy, so things look right
+ * without this. Put it in your layout — inside `<head>` if your framework
+ * allows — when you would rather have one copy than one per component, and
+ * wrap the rest of the tree so they know to skip theirs:
+ *
+ * ```tsx
+ * <RekeyStyles>
+ *   <App />
+ * </RekeyStyles>
+ * ```
+ *
+ * `@rekey.dev/react/styles.css` is the same content as a real file, for a
+ * global stylesheet or a CSP that forbids inline `<style>`.
+ */
+export function RekeyStyles({ children }: { children?: React.ReactNode }): React.JSX.Element {
+  return (
+    <StylesRenderedCtx.Provider value={true}>
+      <StyleSheet />
+      {children}
+    </StylesRenderedCtx.Provider>
+  );
 }
 
 /** Map appearance variables → inline CSS custom properties. */
@@ -395,19 +448,22 @@ export function Themed({
   style?: React.CSSProperties | undefined;
   children: React.ReactNode;
 }): React.JSX.Element {
-  useInjectStyles();
+  const stylesAlreadyRendered = React.useContext(StylesRenderedCtx);
   const resolved = normalizeAppearance(appearance);
   const rootClass = ['rekey-root', resolved.elements?.root, className].filter(Boolean).join(' ');
   const mergedStyle: React.CSSProperties = { ...variablesToStyle(resolved.variables), ...style };
   return (
     <AppearanceCtx.Provider value={resolved}>
-      <div
-        className={rootClass}
-        style={mergedStyle}
-        {...(resolved.baseTheme ? { 'data-rekey-theme': resolved.baseTheme } : {})}
-      >
-        {children}
-      </div>
+      <StylesRenderedCtx.Provider value={true}>
+        <div
+          className={rootClass}
+          style={mergedStyle}
+          {...(resolved.baseTheme ? { 'data-rekey-theme': resolved.baseTheme } : {})}
+        >
+          {stylesAlreadyRendered ? null : <StyleSheet />}
+          {children}
+        </div>
+      </StylesRenderedCtx.Provider>
     </AppearanceCtx.Provider>
   );
 }

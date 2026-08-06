@@ -31,6 +31,7 @@ import type {
   Prisma,
   Subscription,
   SubscriptionStatus,
+  PlanKind,
 } from '@prisma/client';
 import type { FastifyBaseLogger } from 'fastify';
 import { prisma } from '../../lib/prisma.js';
@@ -129,6 +130,8 @@ export interface ResolvedEntitlement {
   valueType: EntitlementValueType | null;
   value: string | null;
   quantity: number | null;
+  /** USAGE only — credits per unit past `quantity`. Null = hard cap. */
+  creditsPerUnit: number | null;
   licenseKind: LicenseKind | null;
   rollover: boolean;
 }
@@ -152,6 +155,21 @@ export function parseFeatureValue(
   }
 }
 
+/**
+ * Does this subject hold a subscription that should suppress the free tier?
+ *
+ * Only a recurring plan does. A one-off purchase — a credit pack, a licence —
+ * creates a `Subscription` row too, because that is where provisioning hangs,
+ * but buying credits is not "being on a plan". Keying the free-tier fallback
+ * on `subs.length === 0` therefore deleted the free tier the moment somebody
+ * topped up: a user with 1,000 included calls bought credits to prepare for
+ * overage and lost the 1,000, which is the exact user who was trying to do the
+ * right thing.
+ */
+function suppressesFreeTier(subs: Array<{ plan: { kind: PlanKind } }>): boolean {
+  return subs.some((s) => s.plan.kind === 'SUBSCRIPTION' || s.plan.kind === 'USAGE');
+}
+
 function shape(e: PlanEntitlement): ResolvedEntitlement {
   return {
     kind: e.kind,
@@ -159,6 +177,7 @@ function shape(e: PlanEntitlement): ResolvedEntitlement {
     valueType: e.valueType,
     value: e.value,
     quantity: e.quantity,
+    creditsPerUnit: e.creditsPerUnit,
     licenseKind: e.licenseKind,
     rollover: e.rollover,
   };
@@ -229,6 +248,8 @@ export const entitlementsService = {
     valueType?: EntitlementValueType | null;
     value?: string | null;
     quantity?: number | null;
+    /** USAGE only — credits per unit past `quantity`. Null/absent = hard cap. */
+    creditsPerUnit?: number | null;
     licenseKind?: LicenseKind | null;
     rollover?: boolean;
     metadata?: Record<string, unknown>;
@@ -244,6 +265,7 @@ export const entitlementsService = {
         valueType: args.valueType ?? null,
         value: args.value ?? null,
         quantity: args.quantity ?? null,
+        creditsPerUnit: args.creditsPerUnit ?? null,
         licenseKind: args.licenseKind ?? null,
         rollover: args.rollover ?? false,
         ...(args.metadata !== undefined && { metadata: args.metadata as never }),
@@ -252,6 +274,7 @@ export const entitlementsService = {
         valueType: args.valueType ?? null,
         value: args.value ?? null,
         quantity: args.quantity ?? null,
+        creditsPerUnit: args.creditsPerUnit ?? null,
         licenseKind: args.licenseKind ?? null,
         rollover: args.rollover ?? false,
         ...(args.metadata !== undefined && { metadata: args.metadata as never }),
@@ -280,6 +303,7 @@ export const entitlementsService = {
     valueType?: EntitlementValueType | null;
     value?: string | null;
     quantity?: number | null;
+    creditsPerUnit?: number | null;
     licenseKind?: LicenseKind | null;
   }): void {
     const bad = (message: string, fix: string): never => {
@@ -305,8 +329,18 @@ export const entitlementsService = {
         break;
       case 'USAGE':
         if (!args.key) bad('USAGE entitlement needs a meter `key`.', 'The meter slug, e.g. "api_calls".');
-        if (!args.quantity || args.quantity <= 0)
-          bad('USAGE entitlement needs a positive `quantity` (included units).', 'Set the included quota.');
+        // A quota of zero is meaningful once the entitlement carries a price:
+        // it says "no free units, charge from the first one". Without a price
+        // it says nothing at all — an entitlement granting no units and
+        // costing nothing is indistinguishable from not having one, so it is
+        // still refused.
+        if (args.quantity == null || args.quantity < 0)
+          bad('USAGE entitlement needs `quantity` (included units), 0 or more.', 'Set the included quota.');
+        if (args.quantity === 0 && args.creditsPerUnit == null)
+          bad(
+            'A USAGE entitlement with no included units must set `creditsPerUnit`.',
+            'Either include some units, or price the meter so usage past zero can be paid for.',
+          );
         break;
     }
   },
@@ -542,7 +576,7 @@ export const entitlementsService = {
     // Application's default plan's FEATURE entitlements (feature gating without a
     // $0 checkout). FEATURE only — CREDIT/LICENSE are stateful and need a real
     // sub. The org view never falls back to a per-user free tier.
-    if (subs.length === 0 && !opts?.organizationId) {
+    if (!suppressesFreeTier(subs) && !opts?.organizationId) {
       const def = await loadDefaultPlan(applicationId);
       if (def) {
         all.push(...(await this.resolveForPlan(def)).filter((e) => e.kind === 'FEATURE'));
@@ -590,7 +624,7 @@ export const entitlementsService = {
     applicationId: string,
     subject: { endUserId?: string | undefined; organizationId?: string | undefined },
     meterSlug: string,
-  ): Promise<number | null> {
+  ): Promise<{ included: number; creditsPerUnit: number | null } | null> {
     // Same ENTITLING_STATUSES as resolveForEndUser, and for the same reason
     // read the other way round: dropping a dunning customer's subscription
     // here does not cap them harder, it makes them UNMETERED (no USAGE
@@ -601,7 +635,12 @@ export const entitlementsService = {
       ? {
           applicationId,
           beneficiaryOrgId: subject.organizationId,
-          status: { in: ENTITLING_STATUSES },
+          // `stillEntitling`, not a bare status filter. The personal branch
+          // below has always excluded a lapsed subscription; the org branch
+          // did not, so an organization whose subscription ended kept its
+          // included quota indefinitely. Harmless while a quota only capped;
+          // once usage past it is charged, it is free consumption.
+          ...stillEntitling(new Date()),
         }
       : {
           applicationId,
@@ -615,30 +654,39 @@ export const entitlementsService = {
     const byPlan = await this.resolveForPlans(subs.map((s) => s.plan));
     let total = 0;
     let capped = false;
+    // The cheapest rate across the plans that price this meter. Lowest, not
+    // first or highest: quota is additive, so a subscriber holding two plans
+    // already gets the benefit of both, and charging them the dearer rate
+    // while summing the allowances would be inconsistent. Written down here
+    // because the code cannot decide it and two engineers would not agree.
+    let rate: number | null = null;
+    const consider = (e: { kind: string; key: string; quantity: number | null; creditsPerUnit?: number | null }): void => {
+      if (e.kind !== 'USAGE' || e.key !== meterSlug) return;
+      if (e.quantity != null && e.quantity > 0) {
+        total += e.quantity;
+        capped = true;
+      }
+      // A priced entitlement caps too, even at quantity 0 — that is how an
+      // operator says "no free units, charge from the first one".
+      if (e.creditsPerUnit != null) {
+        capped = true;
+        rate = rate === null ? e.creditsPerUnit : Math.min(rate, e.creditsPerUnit);
+      }
+    };
     for (const s of subs) {
       const ents = applyOverrides(byPlan.get(s.planId) ?? [], s.entitlementOverrides);
-      for (const e of ents) {
-        if (e.kind === 'USAGE' && e.key === meterSlug && e.quantity != null && e.quantity > 0) {
-          total += e.quantity;
-          capped = true;
-        }
-      }
+      for (const e of ents) consider(e);
     }
     // Free-tier fallback (#36): a personal subject with no active sub honours the
     // default plan's included USAGE quota for this meter, so a free tier can cap
     // consumption without a $0 subscription. Org subjects don't fall back.
-    if (subs.length === 0 && !subject.organizationId) {
+    if (!suppressesFreeTier(subs) && !subject.organizationId) {
       const def = await loadDefaultPlan(applicationId);
       if (def) {
-        for (const e of await this.resolveForPlan(def)) {
-          if (e.kind === 'USAGE' && e.key === meterSlug && e.quantity != null && e.quantity > 0) {
-            total += e.quantity;
-            capped = true;
-          }
-        }
+        for (const e of await this.resolveForPlan(def)) consider(e);
       }
     }
-    return capped ? total : null;
+    return capped ? { included: total, creditsPerUnit: rate } : null;
   },
 };
 
@@ -647,15 +695,15 @@ function synthesizeLegacy(plan: Plan): ResolvedEntitlement[] {
   switch (plan.kind) {
     case 'CREDIT':
       return plan.creditsAmount && plan.creditsAmount > 0
-        ? [{ kind: 'CREDIT', key: '', valueType: null, value: null, quantity: plan.creditsAmount, licenseKind: null, rollover: false }]
+        ? [{ kind: 'CREDIT', key: '', valueType: null, value: null, quantity: plan.creditsAmount, creditsPerUnit: null, licenseKind: null, rollover: false }]
         : [];
     case 'LICENSE':
       return plan.licenseKind
-        ? [{ kind: 'LICENSE', key: '', valueType: null, value: null, quantity: plan.licenseSeatsAllowed ?? null, licenseKind: plan.licenseKind, rollover: false }]
+        ? [{ kind: 'LICENSE', key: '', valueType: null, value: null, quantity: plan.licenseSeatsAllowed ?? null, creditsPerUnit: null, licenseKind: plan.licenseKind, rollover: false }]
         : [];
     case 'USAGE':
       return plan.meterSlug
-        ? [{ kind: 'USAGE', key: plan.meterSlug, valueType: null, value: null, quantity: null, licenseKind: null, rollover: false }]
+        ? [{ kind: 'USAGE', key: plan.meterSlug, valueType: null, value: null, quantity: null, creditsPerUnit: null, licenseKind: null, rollover: false }]
         : [];
     case 'SUBSCRIPTION':
     default:
@@ -728,6 +776,7 @@ function applyOverrides(
       valueType: inferFeatureValueType(asString),
       value: asString,
       quantity: null,
+      creditsPerUnit: null,
       licenseKind: null,
       rollover: false,
     });

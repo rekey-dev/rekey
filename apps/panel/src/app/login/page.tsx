@@ -214,6 +214,19 @@ const ERROR_MESSAGES: Record<string, string> = {
   PASSKEY_AUTHENTICATION_FAILED: 'Passkey sign-in did not verify. Try again.',
   PASSKEY_RESPONSE_INVALID: 'The browser returned an invalid passkey response. Retry.',
   WEBAUTHN_NOT_CONFIGURED: 'Passkey sign-in is not enabled on this deployment.',
+  // The one an operator hits after a *successful* authentication: the account
+  // is real, the password was right, and this deployment simply has not let
+  // them in. Reported externally as rekey-dev/rekey#19, where it rendered
+  // nothing at all — the code was not in this map, and an unmapped code paints
+  // no banner. Silence on the screen where trust is decided.
+  //
+  // The wording differs by deployment and must: a self-hoster's operators get
+  // an invite key from whoever runs the box, while Rekey Cloud creates the
+  // workspace when a plan is bought. `PANEL_INVITE_HELP_URL` decides which
+  // sentence and whether there is a link, exactly as PANEL_SIGNUP_HELP_URL
+  // already does on the sign-up page.
+  OPERATOR_INVITE_REQUIRED: 'This deployment is invite-only, and this account has not been invited yet.',
+  OPERATOR_SIGNUP_CLOSED: 'This deployment is not accepting new operators.',
   OAUTH_PROVIDER_NOT_CONFIGURED: 'That sign-in provider is not enabled on this deployment.',
   OAUTH_PROVIDER_UNKNOWN: 'Unknown sign-in provider.',
   OAUTH_EMAIL_NOT_VERIFIED: 'Your provider account email is not verified — verify it at the provider, then retry.',
@@ -274,6 +287,26 @@ export default async function LoginPage({
     !passwordRequested &&
     (magicLinkPrimary || (PASSWORD_SECONDARY && oauthProviders.length > 0));
 
+  /**
+   * Where this deployment sends someone who authenticated fine but is not an
+   * operator here. Unset means the banner states the fact and stops, which is
+   * right for a self-host that hands out invite keys by its own means.
+   *
+   * Rekey Cloud sets it to the pricing page, because on Cloud the workspace is
+   * created by the purchase: "subscribe and you are in" is the literal truth
+   * there and a lie anywhere else, which is why it is not the default.
+   */
+  const inviteHelpUrl = process.env.PANEL_INVITE_HELP_URL?.trim() || null;
+  // The wording is the deployment's too, not just the destination. The default
+  // is neutral because this panel ships in the open-source product and has no
+  // idea how a given operator grants access — hardcoding "subscribe at
+  // rekey.dev" here would put our commercial funnel in everybody's self-host,
+  // which is the same reason the sign-up page says only "Find out how to get
+  // one". Rekey Cloud sets the text to name the plan, because there the
+  // workspace genuinely is created by the purchase.
+  const inviteHelpText = process.env.PANEL_INVITE_HELP_TEXT?.trim() || 'Find out how to get access';
+  const inviteHelp = inviteHelpUrl ? { href: inviteHelpUrl, linkText: inviteHelpText } : null;
+
   const inputCls =
     'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
@@ -295,7 +328,24 @@ export default async function LoginPage({
             bookmark, crafted link) used to paint an unexplained failure on the
             page where trust is decided — render nothing instead. */}
         {error && ERROR_MESSAGES[error] && (
-          <Banner tone="error">{ERROR_MESSAGES[error]}</Banner>
+          <Banner tone="error">
+            {ERROR_MESSAGES[error]}
+            {/* The invite/plan cases are the only ones where the operator can
+                do something about it themselves, so they are the only ones
+                that get a destination. */}
+            {inviteHelp && error === 'OPERATOR_INVITE_REQUIRED' ? (
+              <span className="mt-1 block text-sm">
+                <a
+                  href={inviteHelp.href}
+                  className="underline underline-offset-2"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {inviteHelp.linkText}
+                </a>
+              </span>
+            ) : null}
+          </Banner>
         )}
 
         {oauthProviders.length > 0 && (

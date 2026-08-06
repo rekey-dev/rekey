@@ -1,8 +1,9 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError } from '@/lib/api';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { ApiErrorText } from '@/components/api-error';
 import { SavedBanner } from '@/components/SavedBanner';
 import { Table, TBody, TR, TD } from '@/components/Table';
 import { EmailCredentialsForm } from './EmailCredentialsForm';
@@ -73,7 +74,7 @@ async function saveCreds(applicationId: string, formData: FormData): Promise<voi
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/email?error=${encodeURIComponent(err.code)}`);
+      redirect(`/applications/${applicationId}/email?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -121,6 +122,11 @@ export default async function EmailPage({
   const { id } = await params;
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const saved = typeof sp.saved === 'string';
   const removed = typeof sp.removed === 'string';
 
@@ -148,7 +154,7 @@ export default async function EmailPage({
       )}
       {error && (
         <Banner tone="error">
-          {ERR[error] ?? error}
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
         </Banner>
       )}
 

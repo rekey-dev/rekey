@@ -132,7 +132,7 @@ function isOneTime(plan: { kind: string; licenseKind: string | null }): boolean 
  * calendar-aware helper the provider period mirror uses (`advanceBillingPeriod`
  * — anniversary billing, not 30-day arithmetic), and a one-off gets null.
  *
- * Null is not a shortcut here. It is what `cancelsAtPeriodEnd` reads to decide
+ * Null is not a shortcut here. It is what `cancelEffect` reads to decide
  * whether "cancel at the end of the period" is even a meaningful request, and
  * what `entitlementsService.provision` falls back to as the `'initial'` grant
  * anchor for a purchase that happens exactly once.

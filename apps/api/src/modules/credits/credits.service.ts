@@ -58,6 +58,21 @@ interface ApplyDeltaInput extends CreditSubjectInput {
   idempotencyKey?: string | undefined;
   description?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /**
+   * Join a transaction the caller already has open, instead of opening one.
+   *
+   * Needed because Prisma has no nested interactive transactions: a caller
+   * that must succeed or fail *together* with the debit — usage recording
+   * against a priced meter, where a recorded unit that was not paid for is
+   * exactly the bug — cannot call this from inside its own `$transaction`
+   * without it hanging or committing separately.
+   *
+   * The caller owns the rollback. Note the idempotency fallback below is
+   * skipped in this mode: recovering from a unique violation requires a
+   * *fresh* connection, and the caller's transaction is already poisoned by
+   * the time we would look.
+   */
+  tx?: Prisma.TransactionClient | undefined;
 }
 
 export interface ApplyDeltaResult {
@@ -139,6 +154,11 @@ async function applyDelta(input: ApplyDeltaInput): Promise<ApplyDeltaResult> {
     return { balance: balanceAfter, entryId: entry.id, applied: true };
   };
 
+  // Caller-owned transaction: run inline and let their rollback cover us. The
+  // P2002 recovery below deliberately does not apply — a failed statement has
+  // already aborted their transaction, so a read inside it would fail too.
+  if (input.tx) return run(input.tx);
+
   try {
     return await prisma.$transaction(run);
   } catch (e) {
@@ -174,6 +194,12 @@ export const creditsService = {
     idempotencyKey?: string | undefined;
     description?: string | undefined;
     metadata?: Record<string, unknown> | undefined;
+    /**
+     * Join a transaction the caller already has open, so the debit commits
+     * with their work. Used by usage recording against a priced meter, where
+     * a unit recorded but not paid for is precisely the bug.
+     */
+    tx?: Prisma.TransactionClient | undefined;
   }): Promise<ApplyDeltaResult> {
     if (!Number.isInteger(input.amount) || input.amount <= 0) {
       throw new RekeyError({
@@ -192,6 +218,7 @@ export const creditsService = {
       idempotencyKey: input.idempotencyKey,
       description: input.description,
       metadata: input.metadata,
+      ...(input.tx ? { tx: input.tx } : {}),
     });
   },
 

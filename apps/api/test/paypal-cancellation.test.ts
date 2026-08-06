@@ -16,7 +16,7 @@
  *     paid period has to be honoured on our side or not at all.
  *   - PayPal's `BILLING.SUBSCRIPTION.ACTIVATED` carries no period anchor that
  *     we used to read, so `currentPeriodEnd` stayed NULL for the whole first
- *     period — and `cancelsAtPeriodEnd` requires it to be non-null. The first
+ *     period — and `cancelEffect` requires it to be non-null. The first
  *     cancellation, the most common one there is, was therefore always
  *     immediate.
  *
@@ -27,7 +27,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
-import { cancelsAtPeriodEnd } from '@rekey.dev/shared-types';
+import { cancelEffect } from '@rekey.dev/shared-types';
 import type { Subscription } from '@prisma/client';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
@@ -273,7 +273,7 @@ describe('PayPal cancellation', () => {
       },
     });
 
-    expect(cancelsAtPeriodEnd(sub)).toBe(true);
+    expect(cancelEffect(sub)).toBe('period-end');
     expect((await cancel(f)).statusCode).toBeLessThan(300);
 
     const scheduled = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
@@ -291,7 +291,7 @@ describe('PayPal cancellation', () => {
   });
 
   it('gives the first PayPal period an end date, so the first cancel can be scheduled', async () => {
-    // `cancelsAtPeriodEnd` needs `currentPeriodEnd`. PayPal's activation was
+    // `cancelEffect` needs `currentPeriodEnd`. PayPal's activation was
     // translated without one and nothing else wrote it until the SECOND charge
     // (`subscription.period_advanced` refuses to advance while no prior
     // succeeded payment exists), so for the whole of month one the answer was
@@ -316,7 +316,7 @@ describe('PayPal cancellation', () => {
     });
     expect(row.status).toBe('ACTIVE');
     expect(row.currentPeriodEnd).not.toBeNull();
-    expect(cancelsAtPeriodEnd(row)).toBe(true);
+    expect(cancelEffect(row)).toBe('period-end');
   });
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -348,7 +348,7 @@ describe('PayPal cancellation', () => {
         currentPeriodEnd: null,
       },
     });
-    expect(cancelsAtPeriodEnd(first)).toBe(false);
+    expect(cancelEffect(first)).toBe('immediate');
     expect((await cancel(f)).statusCode).toBeLessThan(300);
 
     const cancelled = await prisma.subscription.findUniqueOrThrow({ where: { id: first.id } });

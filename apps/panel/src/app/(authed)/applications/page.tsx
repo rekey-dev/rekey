@@ -1,8 +1,9 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { api, errorQuery, PanelApiError, type ApplicationRow, type MemberRow, type InvitationRow, type PlanRow, type ApiKeyRow, type BillingCredentialRow, getMe } from '@/lib/api';
+import { api, errorQuery, readErrorFlash, PanelApiError, type ApplicationRow, type MemberRow, type InvitationRow, type PlanRow, type ApiKeyRow, type BillingCredentialRow, getMe } from '@/lib/api';
 import { Modal } from '@/components/Modal';
+import { ApiErrorText } from '@/components/api-error';
 import { SlugAvailabilityField } from '@/components/SlugAvailabilityField';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Pager, readPageSize } from '@/components/Pager';
@@ -42,7 +43,7 @@ async function createApp(formData: FormData): Promise<void> {
     redirect(`/applications/${app.id}?saved=created&e=app_created`);
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications?${errorQuery(err, { newApp: '1' })}`);
+      redirect(`/applications?${await errorQuery(err, { newApp: '1' })}`);
     }
     throw err;
   }
@@ -226,10 +227,11 @@ export default async function ApplicationsPage({
 }): Promise<React.JSX.Element> {
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
-  // The API's own message and fix, carried through the redirect by
-  // `errorQuery`. Shown when this page has no better words for the code.
-  const errorDetail = typeof sp.detail === 'string' ? sp.detail : undefined;
-  const errorFix = typeof sp.fix === 'string' ? sp.fix : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   // Only owners and admins may create an Application — the API answers
   // TENANT_ROLE_INSUFFICIENT for a MEMBER. Since #326 a MEMBER also starts with
   // access to NO Application, which is exactly the state accepting an
@@ -413,10 +415,7 @@ function NewAppModal({
                 API. Then the API's own message, which for a quota refusal
                 names the limit and the current count. "Something went wrong"
                 only when there is genuinely nothing to say. */}
-            {ERR[error] ?? errorDetail ?? 'Something went wrong. Please try again.'}
-            {ERR[error] === undefined && errorFix ? (
-              <span className="mt-1 block text-xs opacity-80">{errorFix}</span>
-            ) : null}
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
           </Banner>
         )}
         <label className="block space-y-1">

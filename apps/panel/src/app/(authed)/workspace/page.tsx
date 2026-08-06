@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, getMe } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, getMe } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
+import { ApiErrorText } from '@/components/api-error';
 import { SavedBanner } from '@/components/SavedBanner';
 import { Banner } from '@/components/Banner';
 import { PageHeader } from '@/components/PageHeader';
@@ -30,7 +31,7 @@ async function renameWorkspace(formData: FormData): Promise<void> {
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/workspace?error=${encodeURIComponent(err.code)}`);
+      redirect(`/workspace?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -82,6 +83,11 @@ export default async function WorkspaceSettingsPage({
 }): Promise<React.JSX.Element> {
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const renamed = typeof sp.renamed === 'string';
   const deletionRequested = typeof sp.deletionRequested === 'string';
 
@@ -125,7 +131,7 @@ export default async function WorkspaceSettingsPage({
         <form action={renameWorkspace} className="space-y-4">
           {error && (
             <Banner tone="error">
-              {ERR[error] ?? 'Something went wrong. Please try again.'}
+              <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
             </Banner>
           )}
           <Field

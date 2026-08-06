@@ -46,7 +46,7 @@ export type { McpConnectionInfo } from './mcp.js';
 
 // ── Drop-in UI components (Clerk-style) ──
 // Theming primitives.
-export { Themed, useAppearance } from './theme.js';
+export { Themed, RekeyStyles, useAppearance } from './theme.js';
 export type {
   Appearance,
   AppearanceProp,

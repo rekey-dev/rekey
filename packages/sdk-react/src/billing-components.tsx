@@ -49,7 +49,12 @@ export interface CheckoutButtonProps {
   /** The plan slug to check out. Posted as `planSlug` in FormData. */
   planSlug: string;
   /** Server Action that starts checkout (reads `planSlug`) and redirects. */
-  action: FormAction;
+  action?: FormAction | undefined;
+  /**
+   * Or the URL a plain form POSTs to, for frameworks without Server Actions.
+   * Supply one or the other.
+   */
+  actionUrl?: string | undefined;
   /** Extra hidden fields appended to the form (e.g. an org id, coupon). */
   hiddenFields?: Record<string, string>;
   children?: React.ReactNode;
@@ -76,12 +81,12 @@ export interface CheckoutButtonProps {
  * ```
  */
 export function CheckoutButton(props: CheckoutButtonProps): React.JSX.Element {
-  const { appearance, className, block, planSlug, action, hiddenFields, variant, disabled, children } = props;
+  const { appearance, className, block, planSlug, action, actionUrl, hiddenFields, variant, disabled, children } = props;
   return (
     <Themed appearance={appearance} className={className} style={block ? undefined : { display: 'inline-block' }}>
       <CheckoutFormBody
         planSlug={planSlug}
-        action={action}
+        action={action} actionUrl={actionUrl}
         {...(hiddenFields ? { hiddenFields } : {})}
         {...(variant ? { variant } : {})}
         {...(block ? { block } : {})}
@@ -101,7 +106,12 @@ export interface PricingTableProps {
   /** Plans to render — fetch via `billing.getPlans()` server-side and pass here. */
   plans: PricingPlan[];
   /** Server Action that starts checkout for a plan (reads `planSlug`) and redirects. */
-  checkoutAction: FormAction;
+  checkoutAction?: FormAction | undefined;
+  /**
+   * Or the URL a plain form POSTs to, for frameworks without Server Actions.
+   * Supply one or the other.
+   */
+  checkoutUrl?: string | undefined;
   /** The slug of the user's current plan — marks it "Current" and disables its button. */
   currentPlanSlug?: string | null;
   /** Extra hidden fields appended to each checkout form (e.g. the active org id). */
@@ -147,7 +157,7 @@ export interface PricingTableProps {
  *   plans={plans}                       // billing.getPlans() server-side
  *   providers={providers}               // billing.getProviders() server-side (optional)
  *   currentPlanSlug={isPro ? "pro_monthly" : "free"}
- *   checkoutAction={checkoutAction}     // billing.createCheckout server-side
+ *   checkoutAction={checkoutAction} checkoutUrl={checkoutUrl}     // billing.createCheckout server-side
  *   hiddenFields={activeOrgId ? { orgId: activeOrgId } : undefined}
  *   orgGateBlocking={billingSubject === "org" && !activeOrgId}
  * />
@@ -156,7 +166,7 @@ export interface PricingTableProps {
 export function PricingTable(props: PricingTableProps): React.JSX.Element {
   const {
     providers, appearance, className,
-    plans, checkoutAction, currentPlanSlug, hiddenFields,
+    plans, checkoutAction, checkoutUrl, currentPlanSlug, hiddenFields,
     orgGateBlocking, orgGate, hideFreeCta, ctaLabel,
   } = props;
 
@@ -167,7 +177,7 @@ export function PricingTable(props: PricingTableProps): React.JSX.Element {
       <PricingTableInteractive
         providers={providers}
         plans={plans}
-        checkoutAction={checkoutAction}
+        checkoutAction={checkoutAction} checkoutUrl={checkoutUrl}
         {...(currentPlanSlug !== undefined ? { currentPlanSlug } : {})}
         {...(hiddenFields ? { hiddenFields } : {})}
         {...(orgGateBlocking ? { orgGateBlocking } : {})}
@@ -185,7 +195,7 @@ export function PricingTable(props: PricingTableProps): React.JSX.Element {
     <Themed appearance={appearance} className={className}>
       <PricingGrid
         plans={plans}
-        checkoutAction={checkoutAction}
+        checkoutAction={checkoutAction} checkoutUrl={checkoutUrl}
         {...(currentPlanSlug !== undefined ? { currentPlanSlug } : {})}
         {...(hiddenFields ? { hiddenFields } : {})}
         {...(orgGateBlocking ? { orgGateBlocking } : {})}

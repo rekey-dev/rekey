@@ -287,6 +287,15 @@ services:
       # something that serves plain HTTP and sets no forwarded proto, and you
       # accept session cookies travelling in the clear.
       REKEY_COOKIE_SECURE: ${REKEY_COOKIE_SECURE:-}
+      # Where THIS deployment points an operator who authenticated fine but has
+      # not been granted access here, and what the link says. Both optional:
+      # unset, the panel states the fact and offers no destination, which is
+      # right when you hand out invite keys by your own means. This block is an
+      # allowlist — a variable set in .env but missing here never reaches the
+      # container, which is silent and has bitten this file before.
+      PANEL_SIGNUP_HELP_URL: ${PANEL_SIGNUP_HELP_URL:-}
+      PANEL_INVITE_HELP_URL: ${PANEL_INVITE_HELP_URL:-}
+      PANEL_INVITE_HELP_TEXT: ${PANEL_INVITE_HELP_TEXT:-}
     labels:
       - traefik.enable=true
       - traefik.http.routers.rekey-panel.rule=Host(`${PANEL_HOST:?set PANEL_HOST in .env, e.g. panel.example.com}`)

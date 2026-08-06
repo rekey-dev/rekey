@@ -2,7 +2,7 @@ import * as React from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { publicPost, PanelApiError } from '@/lib/api';
+import { errorQuery, publicPost, PanelApiError } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
 import { AuthCard } from '@/components/AuthCard';
 import { Banner } from '@/components/Banner';
@@ -24,7 +24,7 @@ async function request(formData: FormData): Promise<void> {
     );
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/magic-link?error=${encodeURIComponent(err.code)}`);
+      redirect(`/magic-link?${await errorQuery(err)}`);
     }
     throw err;
   }

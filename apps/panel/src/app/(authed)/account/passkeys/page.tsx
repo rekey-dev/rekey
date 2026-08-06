@@ -9,7 +9,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError } from '@/lib/api';
+import { errorQuery, api, PanelApiError } from '@/lib/api';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { FlashBanner } from '@/components/FlashBanner';
 import { Banner } from '@/components/Banner';
@@ -76,7 +76,7 @@ async function completeRegistration(formData: FormData): Promise<void> {
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/account/passkeys?error=${encodeURIComponent(err.code)}`);
+      redirect(`/account/passkeys?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -93,7 +93,7 @@ async function deletePasskey(id: string): Promise<void> {
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/account/passkeys?error=${encodeURIComponent(err.code)}`);
+      redirect(`/account/passkeys?${await errorQuery(err)}`);
     }
     throw err;
   }

@@ -239,7 +239,13 @@ describe('Plan entitlements + provisioner', () => {
     // Read the other way round, the same gap made a dunning customer UNMETERED
     // rather than under-entitled: no USAGE entitlement found resolves to
     // "uncapped".
-    expect(await entitlementsService.includedQuotaFor(appId, { endUserId: euId }, 'api_calls')).toBe(1000);
+    // Returns the quota AND the overage rate now, so a priced meter can read
+    // both in one query on the record hot path. Null still means "no USAGE
+    // entitlement configured", i.e. uncapped and never charged.
+    expect(await entitlementsService.includedQuotaFor(appId, { endUserId: euId }, 'api_calls')).toEqual({
+      included: 1000,
+      creditsPerUnit: null,
+    });
   });
 
   it('a CANCELED subscriber does not', async () => {

@@ -2,9 +2,10 @@ import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import { api, PanelApiError } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError } from '@/lib/api';
 import type { Page } from '@/lib/paginate';
 import { Modal } from '@/components/Modal';
+import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
@@ -193,7 +194,9 @@ async function createEndpoint(applicationId: string, formData: FormData): Promis
     secret = result.secret;
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/webhooks?error=${encodeURIComponent(err.code)}&newWebhook=1${keep}`);
+      redirect(
+        `/applications/${applicationId}/webhooks?${await errorQuery(err, { newWebhook: '1' })}${keep}`,
+      );
     }
     throw err;
   }
@@ -244,6 +247,11 @@ export default async function WebhooksPage({
   const removed = typeof sp.removed === 'string';
   const toggled = typeof sp.toggled === 'string';
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   // `createEndpoint` fails back with `?error=…&newWebhook=1`, and that flag
   // reopens the Add-endpoint modal on top of the page. A page-level banner is
   // then behind the backdrop and the operator sees a blank form with no reason
@@ -282,7 +290,7 @@ export default async function WebhooksPage({
         >
           <form action={createBound} className="space-y-3">
             {error && addModalOpen && (
-              <Banner tone="error">{ERR[error] ?? 'Something went wrong. Please try again.'}</Banner>
+              <Banner tone="error"><ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." /></Banner>
             )}
             <label className="block space-y-1.5">
               <span className="text-sm font-medium">URL</span>
@@ -364,7 +372,7 @@ export default async function WebhooksPage({
       )}
       {error && !addModalOpen && (
         <Banner tone="error">
-          {ERR[error] ?? 'Something went wrong. Please try again.'}
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
         </Banner>
       )}
 

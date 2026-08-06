@@ -1,8 +1,9 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type ApplicationRow, type MemberRow, type InvitationRow, getMe } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, type ApplicationRow, type MemberRow, type InvitationRow, getMe } from '@/lib/api';
 import { emptyPage, type Page } from '@/lib/paginate';
 import { CopyButton } from '@/components/CopyButton';
+import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
@@ -39,7 +40,7 @@ async function invite(formData: FormData): Promise<void> {
     );
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/team?error=${encodeURIComponent(err.code)}`);
+      redirect(`/team?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -86,7 +87,7 @@ async function setGrant(membershipId: string, formData: FormData): Promise<void>
       body: { applicationId, role },
     });
   } catch (err) {
-    if (err instanceof PanelApiError) redirect(`/team?error=${encodeURIComponent(err.code)}`);
+    if (err instanceof PanelApiError) redirect(`/team?${await errorQuery(err)}`);
     throw err;
   }
   redirect('/team');
@@ -123,6 +124,11 @@ export default async function TeamPage({
 }): Promise<React.JSX.Element> {
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const inviteToken = typeof sp.inviteToken === 'string' ? sp.inviteToken : undefined;
   const inviteEmailSent = sp.emailSent === '1';
 
@@ -252,7 +258,7 @@ export default async function TeamPage({
         </p>
         {error && (error === 'grant-missing' || error === 'APP_GRANT_MEMBER_ONLY') && (
           <p role="alert" className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
-            {ERR[error] ?? 'Something went wrong. Please try again.'}
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
           </p>
         )}
         {memberRows.length === 0 ? (
@@ -432,7 +438,7 @@ export default async function TeamPage({
           >
             {error && error !== 'INVITE_TARGET_ALREADY_MEMBER' && (
               <p role="alert" className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
-                {ERR[error] ?? 'Something went wrong. Please try again.'}
+                <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
               </p>
             )}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

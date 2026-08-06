@@ -66,12 +66,36 @@ function currencySymbol(code: string): string {
   }
 }
 
+/**
+ * Prefer the Server Action; otherwise POST to the URL. Same shape the auth
+ * components have always used, lifted here so billing behaves identically.
+ */
+function checkoutFormProps(
+  action?: FormAction,
+  url?: string,
+): { action: FormAction } | { action: string; method: 'post' } | Record<string, never> {
+  if (action) return { action };
+  if (url) return { action: url, method: 'post' };
+  return {};
+}
+
 /** Props the single-plan checkout `<form>` body needs. */
 export interface CheckoutFormBodyProps {
   /** The plan slug to check out. Posted as `planSlug` in FormData. */
   planSlug: string;
   /** Server Action that starts checkout (reads `planSlug`) and redirects. */
-  action: FormAction;
+  action?: FormAction | undefined;
+  /**
+   * Or the URL a plain form POSTs to.
+   *
+   * A Server Action is Next-only. Everywhere else — Astro, Remix, SvelteKit,
+   * an Express app rendering React — a form posts to a route, which is what
+   * `<SignIn>` has always accepted via `actionUrl`. The billing components
+   * required the action, so they simply could not be used outside Next.
+   *
+   * Supply one or the other.
+   */
+  actionUrl?: string | undefined;
   /** Extra hidden fields appended to the form (e.g. an org id, coupon, provider). */
   hiddenFields?: Record<string, string>;
   children?: React.ReactNode;
@@ -88,7 +112,7 @@ export interface CheckoutFormBodyProps {
  * by `<CheckoutButton>` and every plan card in the pricing grid.
  */
 export function CheckoutFormBody({
-  planSlug, action, hiddenFields, children, variant = 'primary', block = false, disabled = false,
+  planSlug, action, actionUrl, hiddenFields, children, variant = 'primary', block = false, disabled = false,
 }: CheckoutFormBodyProps): React.JSX.Element {
   const cx = useCx();
   const slot = variant === 'primary' ? 'buttonPrimary' : 'buttonSecondary';
@@ -97,7 +121,7 @@ export function CheckoutFormBody({
     slot,
   );
   return (
-    <form action={action} style={block ? { width: '100%' } : undefined}>
+    <form {...checkoutFormProps(action, actionUrl)} style={block ? { width: '100%' } : undefined}>
       <input type="hidden" name="planSlug" value={planSlug} />
       {hiddenFields &&
         Object.entries(hiddenFields).map(([k, v]) => <input key={k} type="hidden" name={k} value={v} />)}
@@ -121,7 +145,10 @@ export function DefaultOrgGate(): React.JSX.Element {
 /** The pieces of `<PricingTable>` the grid renderer reads. */
 export interface PricingGridProps {
   plans: PricingPlan[];
-  checkoutAction: FormAction;
+  /** Server Action that starts checkout. Supply this or `checkoutUrl`. */
+  checkoutAction?: FormAction | undefined;
+  /** Or the URL a plain form POSTs to, for frameworks without Server Actions. */
+  checkoutUrl?: string | undefined;
   currentPlanSlug?: string | null;
   hiddenFields?: Record<string, string>;
   orgGateBlocking?: boolean;
@@ -137,7 +164,7 @@ export interface PricingGridProps {
  * the interactive variant threads the chosen `provider` through here.
  */
 export function PricingGrid({
-  plans, checkoutAction, currentPlanSlug = null, hiddenFields,
+  plans, checkoutAction, checkoutUrl, currentPlanSlug = null, hiddenFields,
   orgGateBlocking = false, orgGate, hideFreeCta = true, ctaLabel = 'Choose',
 }: PricingGridProps): React.JSX.Element {
   const cx = useCx();
@@ -181,7 +208,8 @@ export function PricingGrid({
               ) : (
                 <CheckoutFormBody
                   planSlug={plan.slug}
-                  action={checkoutAction}
+                  {...(checkoutAction ? { action: checkoutAction } : {})}
+                  {...(checkoutUrl ? { actionUrl: checkoutUrl } : {})}
                   {...(hiddenFields ? { hiddenFields } : {})}
                   block
                 >

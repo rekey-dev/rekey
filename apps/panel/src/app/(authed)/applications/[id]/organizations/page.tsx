@@ -1,8 +1,9 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type OrganizationRow, type EndUserRow, getApplication } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, type OrganizationRow, type EndUserRow, getApplication } from '@/lib/api';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { ApiErrorText } from '@/components/api-error';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
 import { Field } from '@/components/Field';
@@ -34,7 +35,7 @@ async function createOrg(applicationId: string, formData: FormData): Promise<voi
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/organizations?error=${encodeURIComponent(err.code)}&newOrg=1`);
+      redirect(`/applications/${applicationId}/organizations?${await errorQuery(err, { newOrg: '1' })}`);
     }
     throw err;
   }
@@ -50,7 +51,7 @@ async function deleteOrg(applicationId: string, orgId: string): Promise<void> {
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/organizations?error=${encodeURIComponent(err.code)}`);
+      redirect(`/applications/${applicationId}/organizations?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -80,6 +81,11 @@ export default async function OrganizationsPage({
   const { id } = await params;
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const newOrgError = sp.newOrg === '1' ? error : undefined;
   const created = typeof sp.created === 'string' ? sp.created : undefined;
   const PAGE_SIZE = readPageSize(sp);
@@ -117,7 +123,7 @@ export default async function OrganizationsPage({
               provision and curate them here.
             </>
           }
-          action={<NewOrgModal applicationId={id} endUsers={endUsers} error={newOrgError} />}
+          action={<NewOrgModal applicationId={id} endUsers={endUsers} error={newOrgError} errorDetail={errorDetail} errorFix={errorFix} />}
         />
 
         {!enabled && (
@@ -135,7 +141,7 @@ export default async function OrganizationsPage({
         {created && <SavedBanner params={['created']} message={`Organization ${created} created.`} />}
         {error && !newOrgError && (
           <Banner tone="error">
-            {ERR[error] ?? error}
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
           </Banner>
         )}
 
@@ -219,11 +225,13 @@ const inputCls =
 function NewOrgModal({
   applicationId,
   endUsers,
-  error,
+  error, errorDetail, errorFix,
 }: {
   applicationId: string;
   endUsers: EndUserRow[];
   error?: string;
+  errorDetail?: string;
+  errorFix?: string;
 }): React.JSX.Element {
   const slugError =
     error === 'ORGANIZATION_SLUG_TAKEN' || error === 'ORGANIZATION_SLUG_INVALID'
@@ -239,7 +247,7 @@ function NewOrgModal({
       <form action={createOrg.bind(null, applicationId)} className="space-y-3">
         {error && !slugError && (
           <Banner tone="error">
-            {ERR[error] ?? error}
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
           </Banner>
         )}
         <label className="block space-y-1">

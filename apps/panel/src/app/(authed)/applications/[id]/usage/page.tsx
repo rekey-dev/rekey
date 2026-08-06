@@ -1,8 +1,9 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, getApplication } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, getApplication } from '@/lib/api';
 import type { Page } from '@/lib/paginate';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
+import { ApiErrorText } from '@/components/api-error';
 import { Modal } from '@/components/Modal';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
@@ -39,7 +40,7 @@ async function createMeter(applicationId: string, formData: FormData): Promise<v
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/usage?error=${encodeURIComponent(err.code)}&newMeter=1`);
+      redirect(`/applications/${applicationId}/usage?${await errorQuery(err, { newMeter: '1' })}`);
     }
     throw err;
   }
@@ -85,6 +86,11 @@ export default async function UsagePage({
   const { id } = await params;
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const created = typeof sp.created === 'string' ? sp.created : undefined;
 
   // Billing master switch off → point at the switch instead of an empty table.
@@ -130,7 +136,7 @@ export default async function UsagePage({
             <form action={createMeter.bind(null, id)} className="space-y-3">
               {error && (
                 <Banner tone="error">
-                  {ERR[error] ?? error}
+                  <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
                 </Banner>
               )}
               <Field label="Slug" hint="URL-safe identifier — what your SDK calls report against.">

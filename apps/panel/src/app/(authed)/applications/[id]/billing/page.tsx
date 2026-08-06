@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type BillingCredentialRow, type BillingProviderDescriptor, type BillingProviderName, getApplication } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, type BillingCredentialRow, type BillingProviderDescriptor, type BillingProviderName, getApplication } from '@/lib/api';
 import { CopyButton } from '@/components/CopyButton';
+import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
@@ -67,7 +68,7 @@ async function saveProviderCredentials(
   } catch (err) {
     if (err instanceof PanelApiError) {
       redirect(
-        `/applications/${applicationId}/billing?error=${encodeURIComponent(err.code)}&edit=${encodeURIComponent(provider)}`,
+        `/applications/${applicationId}/billing?${await errorQuery(err, { edit: provider })}`,
       );
     }
     throw err;
@@ -104,7 +105,7 @@ async function setBillingEnabled(applicationId: string, enabled: boolean): Promi
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/billing?error=${encodeURIComponent(err.code)}`);
+      redirect(`/applications/${applicationId}/billing?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -127,7 +128,7 @@ async function setDunningEnabled(applicationId: string, dunningEnabled: boolean)
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/billing?error=${encodeURIComponent(err.code)}`);
+      redirect(`/applications/${applicationId}/billing?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -144,7 +145,7 @@ async function setBillingSubject(applicationId: string, billingSubject: 'user' |
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/billing?error=${encodeURIComponent(err.code)}`);
+      redirect(`/applications/${applicationId}/billing?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -175,7 +176,7 @@ async function registerWebhook(
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/billing?error=${encodeURIComponent(err.code)}`);
+      redirect(`/applications/${applicationId}/billing?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -242,6 +243,11 @@ export default async function BillingPage({
   const { id } = await params;
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const saved = typeof sp.saved === 'string' ? sp.saved : undefined;
   const edit = typeof sp.edit === 'string' ? sp.edit : undefined;
   const webhook = typeof sp.webhook === 'string' ? sp.webhook : undefined;
@@ -316,7 +322,7 @@ export default async function BillingPage({
           same thing twice, once behind the backdrop. */}
       {error && !edit && (
         <p role="alert" className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-          {ERR[error] ?? error}
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
         </p>
       )}
 
@@ -514,6 +520,8 @@ export default async function BillingPage({
                       applicationId={id}
                       webhookUrl={webhookUrlFor(p)}
                       error={edit === p ? error : undefined}
+                      errorDetail={errorDetail}
+                      errorFix={errorFix}
                     />
                     {row && (
                       <>
@@ -822,12 +830,14 @@ function ProviderEditModal({
   descriptor,
   applicationId,
   webhookUrl,
-  error,
+  error, errorDetail, errorFix,
 }: {
   descriptor: BillingProviderDescriptor;
   applicationId: string;
   webhookUrl: string | null;
   error: string | undefined;
+  errorDetail?: string | undefined;
+  errorFix?: string | undefined;
 }): React.JSX.Element {
   const { name: provider, label, credentialFields } = descriptor;
   const existing = descriptor.status;
@@ -855,7 +865,7 @@ function ProviderEditModal({
       <form action={action} className="space-y-3">
         {error && (
           <p role="alert" className="rounded-md border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-            {ERR[error] ?? error}
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
           </p>
         )}
 

@@ -32,7 +32,7 @@ import { resolveCheckoutDiscount } from './checkout-discount.js';
 import { buildCheckoutSessionMetadata } from './checkout-sessions.js';
 import { getProviderForApplication, pickProvider } from './providers/index.js';
 import type { BillingProviderName } from './credentials.service.js';
-import { BillingConfigSchema, cancelsAtPeriodEnd } from '@rekey.dev/shared-types';
+import { BillingConfigSchema, cancelEffect } from '@rekey.dev/shared-types';
 import { enqueueSubscriptionEvent } from './webhooks/billing-events.js';
 import { kickDeliveries } from '../webhooks/webhook.service.js';
 
@@ -576,7 +576,7 @@ export const billingService = {
    *     to cancel when a provider-side subscription exists. Emits
    *     `subscription.canceled`.
    *
-   * Which of the two a given subscription gets is `cancelsAtPeriodEnd` in
+   * Which of the two a given subscription gets is `cancelEffect` in
    * `@rekey.dev/shared-types` — exported so a confirmation dialog can say it
    * before the call rather than guessing.
    *
@@ -620,12 +620,12 @@ export const billingService = {
     // below. Both end up CANCELED at `currentPeriodEnd`; only the mechanism
     // differs.
     //
-    // The predicate itself is `cancelsAtPeriodEnd` in `@rekey.dev/shared-types`
+    // The predicate itself is `cancelEffect` in `@rekey.dev/shared-types`
     // rather than three lines here, because a UI has to describe this outcome
     // BEFORE the call and therefore cannot read it off the response. Written
     // out twice it drifted within a day (see that function's docblock). This
     // is the only site that decides it; everyone else asks.
-    const atPeriodEnd = opts?.atPeriodEnd !== false && cancelsAtPeriodEnd(sub);
+    const atPeriodEnd = opts?.atPeriodEnd !== false && cancelEffect(sub) === 'period-end';
 
     // Already scheduled to cancel at period end → idempotent no-op.
     if (atPeriodEnd && sub.cancelAt !== null) return sub;
@@ -703,7 +703,7 @@ export const billingService = {
     if (sub.status === 'CANCELED' || sub.status === 'EXPIRED') return sub;
 
     const providerBacked = Boolean(sub.provider && sub.providerSubId);
-    // NOT `cancelsAtPeriodEnd` — this path deliberately still requires a
+    // NOT `cancelEffect` — this path deliberately still requires a
     // provider, and the difference is not an oversight. The self-service cancel
     // above can schedule a provider-less row because `expireIfDue` ends it the
     // next time `getCurrentSubscription` reads it, and the buyer's own portal

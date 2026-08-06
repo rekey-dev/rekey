@@ -1,5 +1,5 @@
 /**
- * The cancellation-timing contract: what `cancelsAtPeriodEnd` PREDICTS must be
+ * The cancellation-timing contract: what `cancelEffect` PREDICTS must be
  * what `POST /billing/subscription/cancel` DOES.
  *
  * ## Why a test instead of a comment
@@ -30,7 +30,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { SubscriptionStatus } from '@prisma/client';
-import { cancelsAtPeriodEnd } from '@rekey.dev/shared-types';
+import { cancelEffect } from '@rekey.dev/shared-types';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 
@@ -142,7 +142,7 @@ describe('cancellation timing: the predicate and the server agree', () => {
   ): Promise<{ predicted: boolean; scheduled: boolean; row: { status: string } }> {
     const { liveKey, accessToken, subscription } = await fixture(slug, sub);
 
-    const predicted = cancelsAtPeriodEnd(subscription);
+    const predicted = cancelEffect(subscription) === 'period-end';
 
     const res = await app.inject({
       method: 'POST',

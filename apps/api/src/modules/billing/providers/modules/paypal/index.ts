@@ -63,7 +63,7 @@ interface PaypalEventPayload {
  *
  * `billing_info.next_billing_time` is an ISO-8601 instant on the subscription
  * resource — the moment PayPal will next take money. It is therefore exactly
- * the anchor `cancelsAtPeriodEnd` needs, and better than the locally computed
+ * the anchor `cancelEffect` needs, and better than the locally computed
  * one: `advanceBillingPeriod` approximates the anniversary from our own plan
  * interval and can drift against PayPal's real schedule.
  *
@@ -72,7 +72,7 @@ interface PaypalEventPayload {
  * subscription until its SECOND charge — `subscription.period_advanced`
  * refuses to advance while no prior succeeded payment exists, which is correct
  * (the first sale pays for the period activation already granted) but left the
- * column NULL for the whole of the first period. `cancelsAtPeriodEnd` requires
+ * column NULL for the whole of the first period. `cancelEffect` requires
  * it to be non-null, so every first-period cancellation was immediate: the
  * buyer lost the time they had just paid for, which is the precise harm #336
  * was opened to remove.

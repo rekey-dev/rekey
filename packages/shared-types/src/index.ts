@@ -905,6 +905,21 @@ export interface CancellationTimingInput {
 }
 
 /**
+ * What would cancelling this subscription RIGHT NOW do — leave them the rest
+ * of the period they paid for, or stop access on the spot?
+ *
+ * A prediction about an action not yet taken. It does not say whether the
+ * subscription is already ending; that is {@link isCancelScheduled}, which
+ * reads `cancelAt`.
+ *
+ * This was called `cancelsAtPeriodEnd`, and that name got read as the state
+ * question by everyone who met it, including three of our own starter kits and
+ * two guides. Since it returns true for every healthy ACTIVE subscriber, the
+ * misreading hides the cancel button from exactly the people who could use it,
+ * and shows a `PAST_DUE` subscriber a button labelled "cancel at period end"
+ * that ends their access immediately. Returning a value you cannot mistake for
+ * a state is the point of the rename.
+ *
  * Would `POST /billing/subscription/cancel` with the default
  * `atPeriodEnd: true` actually leave this subscriber the rest of the period
  * they have already paid for?
@@ -946,8 +961,23 @@ export interface CancellationTimingInput {
  * `expireIfDue` only runs from `getCurrentSubscription`, which an operator
  * action does not go through. That needs the expiry seam widened first.
  */
-export function cancelsAtPeriodEnd(sub: CancellationTimingInput): boolean {
-  return sub.status === 'ACTIVE' && sub.currentPeriodEnd !== null;
+export function cancelEffect(sub: CancellationTimingInput): 'period-end' | 'immediate' {
+  return sub.status === 'ACTIVE' && sub.currentPeriodEnd !== null ? 'period-end' : 'immediate';
+}
+
+/**
+ * Is this subscription ALREADY scheduled to end?
+ *
+ * The other question, and the one people usually mean. It reads `cancelAt`,
+ * which the API sets when a cancellation has been accepted for the end of the
+ * period — so it is true only after somebody has cancelled.
+ *
+ * Use this to decide what to display ("Access until 3 September" rather than
+ * "Renews on 3 September") and whether to offer a cancel control at all.
+ * Use {@link cancelEffect} to word that control before it is pressed.
+ */
+export function isCancelScheduled(sub: { cancelAt: Date | string | null }): boolean {
+  return sub.cancelAt !== null;
 }
 
 export const CreateCheckoutRequestSchema = z.object({

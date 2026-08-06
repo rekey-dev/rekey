@@ -2,9 +2,10 @@ import * as React from 'react';
 import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import { api, PanelApiError, type OrganizationDetail, type EndUserRow, type OrgBillingDto } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, type OrganizationDetail, type EndUserRow, type OrgBillingDto } from '@/lib/api';
 import type { Page } from '@/lib/paginate';
 import { Modal } from '@/components/Modal';
+import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { CopyButton } from '@/components/CopyButton';
 import { Card, SectionHeader } from '@/components/Card';
@@ -64,7 +65,7 @@ async function addMember(applicationId: string, orgId: string, formData: FormDat
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`${pageUrl(applicationId, orgId)}?error=${encodeURIComponent(err.code)}&addMember=1`);
+      redirect(`${pageUrl(applicationId, orgId)}?${await errorQuery(err, { addMember: '1' })}`);
     }
     throw err;
   }
@@ -83,7 +84,7 @@ async function setMemberRole(
     await api({ method: 'PATCH', path: `${orgBase(applicationId, orgId)}/members/${encodeURIComponent(euid)}`, body: { role } });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`${pageUrl(applicationId, orgId)}?error=${encodeURIComponent(err.code)}`);
+      redirect(`${pageUrl(applicationId, orgId)}?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -120,7 +121,7 @@ async function updateOrg(applicationId: string, orgId: string, formData: FormDat
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`${pageUrl(applicationId, orgId)}?error=${encodeURIComponent(err.code)}&editOrg=1`);
+      redirect(`${pageUrl(applicationId, orgId)}?${await errorQuery(err, { editOrg: '1' })}`);
     }
     throw err;
   }
@@ -158,7 +159,7 @@ async function revealOrgLicenseKey(
     redirect(`${pageUrl(applicationId, orgId)}?revealed=1&reset=${result.activationsReset}`);
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`${pageUrl(applicationId, orgId)}?error=${encodeURIComponent(err.code)}`);
+      redirect(`${pageUrl(applicationId, orgId)}?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -176,6 +177,11 @@ export default async function OrganizationDetailPage({
   const { id, orgId } = await params;
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const addMemberError = sp.addMember === '1' ? error : undefined;
   const editOrgError = sp.editOrg === '1' ? error : undefined;
   const reveal = (await cookies()).get('rekey_reveal_org_license')?.value;
@@ -218,14 +224,14 @@ export default async function OrganizationDetailPage({
           <span className="text-xs text-[var(--color-muted-fg)]">
             created {formatDate(org.createdAt)}
           </span>
-          <EditOrgModal applicationId={id} orgId={orgId} name={org.name} metadata={metadataPretty} error={editOrgError} />
+          <EditOrgModal applicationId={id} orgId={orgId} name={org.name} metadata={metadataPretty} error={editOrgError} errorDetail={errorDetail} errorFix={errorFix} />
         </div>
         <p className="font-mono text-xs text-[var(--color-muted-fg)]">{org.id}</p>
       </header>
 
       {error && !addMemberError && !editOrgError && (
         <Banner tone="error">
-          {ERR[error] ?? error}
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
         </Banner>
       )}
 
@@ -255,7 +261,7 @@ export default async function OrganizationDetailPage({
         <SectionHeader
           title="Members"
           count={`(${members.length})`}
-          action={<AddMemberModal applicationId={id} orgId={orgId} candidates={candidates} error={addMemberError} />}
+          action={<AddMemberModal applicationId={id} orgId={orgId} candidates={candidates} error={addMemberError} errorDetail={errorDetail} errorFix={errorFix} />}
         />
         {members.length === 0 ? (
           <EmptyState
@@ -480,12 +486,14 @@ function AddMemberModal({
   applicationId,
   orgId,
   candidates,
-  error,
+  error, errorDetail, errorFix,
 }: {
   applicationId: string;
   orgId: string;
   candidates: EndUserRow[];
   error?: string;
+  errorDetail?: string;
+  errorFix?: string;
 }): React.JSX.Element {
   return (
     <Modal
@@ -498,7 +506,7 @@ function AddMemberModal({
       <form action={addMember.bind(null, applicationId, orgId)} className="space-y-3">
         {error && (
           <Banner tone="error">
-            {ERR[error] ?? error}
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
           </Banner>
         )}
         {candidates.length === 0 ? (
@@ -539,13 +547,15 @@ function EditOrgModal({
   orgId,
   name,
   metadata,
-  error,
+  error, errorDetail, errorFix,
 }: {
   applicationId: string;
   orgId: string;
   name: string;
   metadata: string | null;
   error?: string;
+  errorDetail?: string;
+  errorFix?: string;
 }): React.JSX.Element {
   return (
     <Modal
@@ -558,7 +568,7 @@ function EditOrgModal({
       <form action={updateOrg.bind(null, applicationId, orgId)} className="space-y-3">
         {error && (
           <Banner tone="error">
-            {ERR[error] ?? error}
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
           </Banner>
         )}
         <label className="block space-y-1">

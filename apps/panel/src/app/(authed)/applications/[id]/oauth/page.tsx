@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, getApplication } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, getApplication } from '@/lib/api';
 import { Modal } from '@/components/Modal';
+import { ApiErrorText } from '@/components/api-error';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
@@ -99,7 +100,7 @@ async function setOauth(applicationId: string, formData: FormData): Promise<void
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/oauth?error=${encodeURIComponent(err.code)}&newOauth_${provider}=1`);
+      redirect(`/applications/${applicationId}/oauth?${await errorQuery(err, { [`newOauth_${provider}`]: '1' })}`);
     }
     throw err;
   }
@@ -133,6 +134,11 @@ export default async function OAuthPage({
   const { id } = await params;
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const saved = typeof sp.saved === 'string' ? sp.saved : undefined;
 
   const app = await getApplication(id);
@@ -195,6 +201,8 @@ export default async function OAuthPage({
                     provider={p}
                     existing={cfg ?? null}
                     error={reopenError}
+                    errorDetail={errorDetail}
+                    errorFix={errorFix}
                   />
                 </Modal>
                 {p.consoleUrl && (
@@ -231,12 +239,14 @@ function ConfigForm({
   applicationId,
   provider,
   existing,
-  error,
+  error, errorDetail, errorFix,
 }: {
   applicationId: string;
   provider: ProviderInfo;
   existing: { clientId: string; redirectUri: string; issuerUrl?: string } | null;
   error?: string;
+  errorDetail?: string;
+  errorFix?: string;
 }): React.JSX.Element {
   return (
     <form action={setOauth.bind(null, applicationId)} className="space-y-3">
@@ -244,7 +254,7 @@ function ConfigForm({
 
       {error && (
         <p role="alert" className="rounded-md border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-xs text-red-700 dark:text-red-300">
-          {ERR[error] ?? 'Something went wrong. Please try again.'}
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
         </p>
       )}
 

@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type PlanRow, type UsageMeterRow, type PlanEntitlementRow, getApplication } from '@/lib/api';
+import { errorQuery, api, PanelApiError, type PlanRow, type UsageMeterRow, type PlanEntitlementRow, getApplication } from '@/lib/api';
 import { emptyPage, type Page } from '@/lib/paginate';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { formatMoney } from '@/lib/format';
@@ -56,7 +56,7 @@ async function createPlan(applicationId: string, formData: FormData): Promise<vo
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/plans?error=${encodeURIComponent(err.code)}&newPlan=1`);
+      redirect(`/applications/${applicationId}/plans?${await errorQuery(err, { newPlan: '1' })}`);
     }
     throw err;
   }
@@ -133,6 +133,11 @@ async function addEntitlement(applicationId: string, slug: string, formData: For
   } else if (kind === 'USAGE') {
     if (key) body.key = key;
     body.quantity = quantity;
+    // Empty means "hard cap", which is not the same as zero — zero is a real
+    // price meaning "charge nothing per unit". Read the raw field so the two
+    // stay distinguishable.
+    const rawRate = String(formData.get('creditsPerUnit') ?? '').trim();
+    if (rawRate !== '') body.creditsPerUnit = Number(rawRate);
   }
 
   try {
@@ -169,7 +174,13 @@ function entitlementLabel(e: PlanEntitlementRow): string {
     case 'LICENSE':
       return e.licenseKind === 'SEATS' ? `${e.quantity ?? 0} seats` : `license (${e.licenseKind?.toLowerCase()})`;
     case 'USAGE':
-      return `${e.key} ≤ ${e.quantity}`;
+      // Deliberately does NOT claim "hard cap" when the entitlement carries no
+      // price: the meter itself may price the overage as a fallback, and this
+      // view cannot see the meter. Saying "hard cap" over a meter that is
+      // charging is the worse of the two wrong answers, so say less.
+      return e.creditsPerUnit == null
+        ? `${e.key} ≤ ${e.quantity}`
+        : `${e.key}: ${e.quantity} included, then ${e.creditsPerUnit}cr/unit`;
     default:
       return e.kind;
   }

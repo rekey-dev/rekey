@@ -1,8 +1,9 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import { api, PanelApiError, getApplication } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, getApplication } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
+import { ApiErrorText } from '@/components/api-error';
 import { Modal } from '@/components/Modal';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
@@ -94,7 +95,7 @@ async function issueLicense(applicationId: string, formData: FormData): Promise<
     redirect(`/applications/${applicationId}/licenses?e=license_issued`);
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/licenses?error=${encodeURIComponent(err.code)}&newLicense=1`);
+      redirect(`/applications/${applicationId}/licenses?${await errorQuery(err, { newLicense: '1' })}`);
     }
     throw err;
   }
@@ -127,6 +128,11 @@ export default async function LicensesPage({
   const { id } = await params;
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const reveal = (await cookies()).get('rekey_reveal_license')?.value;
   const PAGE_SIZE = readPageSize(sp);
   const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
@@ -200,7 +206,7 @@ export default async function LicensesPage({
               <form action={issueLicense.bind(null, id)} className="space-y-3">
                 {error && (
                   <Banner tone="error">
-                    {ERR[error] ?? error}
+                    <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
                   </Banner>
                 )}
               <Field

@@ -1,8 +1,9 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError } from '@/lib/api';
 import { EmailEditorClient } from '@/components/EmailEditorClient';
+import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
@@ -60,7 +61,7 @@ async function saveTemplate(applicationId: string, eventKey: string, formData: F
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/email/${encodeURIComponent(eventKey)}?error=${encodeURIComponent(err.code)}`);
+      redirect(`/applications/${applicationId}/email/${encodeURIComponent(eventKey)}?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -90,7 +91,7 @@ async function testSend(applicationId: string, eventKey: string, formData: FormD
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/email/${encodeURIComponent(eventKey)}?error=${encodeURIComponent(err.code)}`);
+      redirect(`/applications/${applicationId}/email/${encodeURIComponent(eventKey)}?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -110,6 +111,11 @@ export default async function TemplateEditorPage({
   const reverted = typeof sp.reverted === 'string';
   const testSent = sp.test === 'sent';
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
 
   const [template, preview, events] = await Promise.all([
     api<TemplateRow | null>({
@@ -182,7 +188,7 @@ export default async function TemplateEditorPage({
       )}
       {error && (
         <Banner tone="error">
-          {ERR[error] ?? 'Something went wrong. Please try again.'}
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
         </Banner>
       )}
 

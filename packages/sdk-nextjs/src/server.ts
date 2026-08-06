@@ -64,12 +64,56 @@ export interface Session {
 }
 
 /**
- * Resolve the current session from cookies. Tries access first; on
- * USER_TOKEN_INVALID, attempts refresh-and-retry once. Returns null when
- * signed out (or when refresh fails).
+ * Codes that mean the token itself is finished, as opposed to the request
+ * having failed. Only these justify throwing the session away: a timeout or a
+ * DNS blip must not delete the refresh cookie, because that is the one
+ * credential that can recover the session and deleting it turns a two-second
+ * outage into everybody signing in again.
+ */
+const TOKEN_IS_DEAD = new Set(['REFRESH_TOKEN_EXPIRED', 'REFRESH_TOKEN_REUSED', 'USER_TOKEN_INVALID']);
+
+/**
+ * Can this context write cookies?
  *
- * Use from any server component. Cookie writes work in server actions and
- * route handlers (Next.js limitation: not in pure server-component reads).
+ * Next seals the cookie jar outside an action or route handler; `set` and
+ * `delete` both throw there. The probe deletes a cookie nobody sets, which is
+ * a no-op when it succeeds and tells us where we are when it does not.
+ *
+ * This has to be asked BEFORE refreshing, not after. The API rotates the
+ * refresh token on every use and treats a replay of a rotated token as a
+ * compromise signal — `revokeAllForEndUser`, every session gone. So refreshing
+ * in a context that cannot persist the new token is not merely wasteful: the
+ * browser keeps presenting the old one, and the next request destroys the
+ * user's sessions everywhere. Silently, and harder than the 500 this function
+ * used to throw.
+ */
+async function canWriteCookies(jar: Awaited<ReturnType<typeof cookies>>): Promise<boolean> {
+  try {
+    jar.delete(PROBE_COOKIE);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Deleting a cookie nothing ever sets. Never reaches the browser. */
+const PROBE_COOKIE = '__rekey_probe';
+
+/**
+ * Resolve the current session from cookies. Tries the access token first; on
+ * `USER_TOKEN_INVALID` refreshes once. Returns null when signed out.
+ *
+ * **Never throws because of where it was called, and never spends a refresh
+ * token it cannot store.** A server component may not write cookies, so from
+ * one it reports no session rather than refreshing: the API rotates on every
+ * refresh and treats a replay of the rotated token as a compromise, revoking
+ * every session the user has. `rekeyMiddleware` repairs a stale session before
+ * the render by routing through {@link refreshSession} in a route handler,
+ * which is allowed to persist.
+ *
+ * It does still throw on a genuine API failure, which is deliberate: an
+ * unreachable API is not the same as a signed-out user, and reporting it as
+ * one is how a blip becomes a mass logout.
  */
 export async function auth(): Promise<Session | null> {
   const jar = await cookies();
@@ -85,19 +129,69 @@ export async function auth(): Promise<Session | null> {
     }
   }
 
-  // Try refresh.
   const refresh = jar.get(REFRESH_COOKIE)?.value;
   if (!refresh) return null;
+
+  // Refreshing consumes the token. If the result cannot be stored, the browser
+  // keeps presenting the old one and the API reads that replay as a leak,
+  // revoking every session the user has. So a render reports "no session" and
+  // leaves the token alone — recoverable, and the middleware repairs it on the
+  // next request by routing through `refreshSession()` in a route handler.
+  if (!(await canWriteCookies(jar))) return null;
+
+  let fresh;
+  try {
+    fresh = await client().auth.refresh(refresh);
+  } catch (err) {
+    // Only a verdict about the token clears it. Anything else — a timeout, a
+    // 500 from the API — leaves the cookies alone so the next request can try
+    // again, and is reported rather than disguised as a signed-out user.
+    if (err instanceof RekeyError && TOKEN_IS_DEAD.has(err.code)) {
+      jar.delete(ACCESS_COOKIE);
+      jar.delete(REFRESH_COOKIE);
+      return null;
+    }
+    throw err;
+  }
+
+  const [aOpts, rOpts] = await Promise.all([accessOpts(), refreshOpts()]);
+  jar.set(ACCESS_COOKIE, fresh.accessToken, aOpts);
+  jar.set(REFRESH_COOKIE, fresh.refreshToken, rOpts);
+
+  const user = await client().auth.getCurrentUser(fresh.accessToken);
+  return { user, accessToken: fresh.accessToken };
+}
+
+/**
+ * Rotate the session and persist it. For a route handler or middleware, where
+ * cookie writes are allowed.
+ *
+ * `auth()` refreshes too, but cannot always persist the result. Calling this
+ * from a place that can — a `/api/session/refresh` route the middleware sends
+ * stale sessions through — means the rotation is written once instead of
+ * being redone on every render.
+ *
+ * Returns null when there is nothing to refresh or the token is spent, having
+ * cleared the cookies in the latter case.
+ */
+export async function refreshSession(): Promise<Session | null> {
+  const jar = await cookies();
+  const refresh = jar.get(REFRESH_COOKIE)?.value;
+  if (!refresh) return null;
+
   try {
     const fresh = await client().auth.refresh(refresh);
     jar.set(ACCESS_COOKIE, fresh.accessToken, await accessOpts());
     jar.set(REFRESH_COOKIE, fresh.refreshToken, await refreshOpts());
     const user = await client().auth.getCurrentUser(fresh.accessToken);
     return { user, accessToken: fresh.accessToken };
-  } catch {
-    jar.delete(ACCESS_COOKIE);
-    jar.delete(REFRESH_COOKIE);
-    return null;
+  } catch (err) {
+    if (err instanceof RekeyError && TOKEN_IS_DEAD.has(err.code)) {
+      jar.delete(ACCESS_COOKIE);
+      jar.delete(REFRESH_COOKIE);
+      return null;
+    }
+    throw err;
   }
 }
 

@@ -1,8 +1,9 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, type CouponRow, getApplication } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, type CouponRow, getApplication } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
+import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
@@ -71,7 +72,7 @@ async function createCoupon(applicationId: string, formData: FormData): Promise<
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/coupons?error=${encodeURIComponent(err.code)}&newCoupon=1`);
+      redirect(`/applications/${applicationId}/coupons?${await errorQuery(err, { newCoupon: '1' })}`);
     }
     throw err;
   }
@@ -116,6 +117,11 @@ export default async function CouponsPage({
   const { id } = await params;
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const created = typeof sp.created === 'string' ? sp.created : undefined;
   const PAGE_SIZE = readPageSize(sp);
   const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
@@ -162,7 +168,7 @@ export default async function CouponsPage({
             <form action={action} className="space-y-3">
               {error && (
                 <Banner tone="error">
-                  {ERR[error] ?? error}
+                  <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
                 </Banner>
               )}
               <div className="grid gap-3 sm:grid-cols-2">

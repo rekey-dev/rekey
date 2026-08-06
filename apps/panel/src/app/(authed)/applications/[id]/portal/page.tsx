@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, PanelApiError, getApplication } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, getApplication } from '@/lib/api';
 import { CopyButton } from '@/components/CopyButton';
+import { ApiErrorText } from '@/components/api-error';
 import { SectionHeader } from '@/components/Card';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
@@ -68,7 +69,7 @@ async function saveDomain(applicationId: string, formData: FormData): Promise<vo
     await patchPortal(applicationId, { portalDomain }, portalDomain ? 'domain_saved' : 'domain_cleared');
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/portal?error=${encodeURIComponent(err.code)}`);
+      redirect(`/applications/${applicationId}/portal?${await errorQuery(err)}`);
     }
     throw err;
   }
@@ -95,6 +96,11 @@ export default async function PortalPage({
   const { id } = await params;
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The API's own message and fix for this failure, left by `errorQuery`
+  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
+  // written by whoever composes the link, and this text renders inside the
+  // panel's own error banner.
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const app = await getApplication(id);
   const enabled = Boolean(app.hostedPortalEnabled);
   const portalUrl = `${PORTAL_BASE}/${app.slug}`;
@@ -127,7 +133,7 @@ export default async function PortalPage({
 
       {error && (
         <Banner tone="error">
-          {ERR[error] ?? 'Something went wrong. Please try again.'}
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
         </Banner>
       )}
 

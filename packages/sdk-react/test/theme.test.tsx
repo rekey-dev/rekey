@@ -125,16 +125,35 @@ describe('light / dark pinning', () => {
   });
 });
 
-describe('stylesheet injection', () => {
-  it('injects the kit stylesheet exactly once per document', () => {
-    render(
-      <>
-        <Themed><Probe /></Themed>
-        <Themed><Probe /></Themed>
-      </>,
+describe('stylesheet', () => {
+  /**
+   * This used to assert one `#rekey-react-styles` in `document.head`, put
+   * there by an effect. The effect never runs when the components are
+   * rendered server-only — Astro without a client directive got correct
+   * markup and no styling — so the sheet is rendered into the tree instead.
+   * The contract that changed is where it lives, not whether it is there.
+   */
+  it('renders the rules with the component, not from an effect', () => {
+    const { container } = render(
+      <Themed>
+        <Probe />
+      </Themed>,
     );
-    const styles = document.querySelectorAll('#rekey-react-styles');
+    const styles = container.querySelectorAll('style[data-rekey-styles]');
     expect(styles.length).toBe(1);
     expect(styles[0]!.textContent).toContain('--rekey-color-primary');
+    // Nothing is appended to the document any more.
+    expect(document.head.querySelector('#rekey-react-styles')).toBeNull();
+  });
+
+  it('emits one copy per top-level Themed, and none for a nested one', () => {
+    const { container } = render(
+      <Themed>
+        <Themed>
+          <Probe />
+        </Themed>
+      </Themed>,
+    );
+    expect(container.querySelectorAll('style[data-rekey-styles]').length).toBe(1);
   });
 });

@@ -1199,6 +1199,19 @@ model UsageMeter {
   name          String
   unit          String
   active        Boolean  @default(true)
+  /// Fallback price per unit, in credits, for a subject whose plan does not
+  /// price this meter. Null = no fallback, and such a subject is not charged.
+  ///
+  /// The plan entitlement's `creditsPerUnit` wins where both are set: the plan
+  /// is what the customer bought.
+  ///
+  /// Priced in CREDITS rather than currency on purpose: a credit balance is
+  /// already atomic, idempotent and unable to go negative, it is one number to
+  /// show and one number to top up, and it needs no stored mandate — which is
+  /// gated per provider (PayPal approval, RBI limits on Razorpay). Currency
+  /// pricing would open a second money path that must agree with the first
+  /// about rounding, refunds and conversion. See docs/billing-architecture.md.
+  creditsPerUnit Int?    @map("credits_per_unit")
   metadata      Json     @default("{}")
   createdAt     DateTime @default(now()) @map("created_at")
 
@@ -1217,8 +1230,27 @@ model UsageRecord {
   // neither (app-level usage). Org pooling = owner+beneficiary (ORG_BILLING.md).
   endUserId String?  @map("end_user_id")
   organizationId String? @map("organization_id")
+  /// Always-non-null subject identity: "u:<id>" | "o:<id>" | "app" for
+  /// app-level usage with no billing subject.
+  ///
+  /// The same device CreditBalance uses, and for the same reason: Postgres
+  /// treats NULLs as distinct, so a compound unique over the nullable subject
+  /// columns would silently stop deduplicating app-level records.
+  ///
+  /// It exists because idempotency keys were scoped `(meter, key)` with no
+  /// subject, so one subject's key returned another subject's record — and on
+  /// a priced meter that is consumption nobody paid for.
+  subjectKey     String   @default("app") @map("subject_key")
   // Increment or decrement (negative for refunds / corrections).
   quantity  Int
+  /// Credits actually debited for this record, at the price in force when it
+  /// was recorded. Denormalised deliberately: an operator changing
+  /// `creditsPerUnit` must not restate what past usage cost — the same reason
+  /// CouponRedemption.discountAmount is denormalised. Null on unpriced meters.
+  creditsCharged Int?     @map("credits_charged")
+  /// The rate that produced `creditsCharged`. Stamped so a dispute has an
+  /// answer that does not depend on the plan still saying what it said.
+  creditsPerUnitApplied Int? @map("credits_per_unit_applied")
   // Reported timestamp from the caller. Defaults to now if omitted.
   occurredAt DateTime @default(now()) @map("occurred_at")
   // OPTIONAL caller-supplied idempotency key. When set, a retried record with
@@ -1232,7 +1264,7 @@ model UsageRecord {
   meter        UsageMeter    @relation(fields: [meterId], references: [id], onDelete: Cascade)
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
-  @@unique([meterId, idempotencyKey])
+  @@unique([meterId, subjectKey, idempotencyKey])
   @@index([meterId, occurredAt])
   @@index([endUserId])
   @@index([organizationId])
@@ -1523,6 +1555,15 @@ model PlanEntitlement {
   value       String?
   /** CREDIT: amount/period · LICENSE: seats · USAGE: included units. */
   quantity    Int?
+  /// USAGE only — credits charged per unit BEYOND `quantity`. Null = the
+  /// quota is a hard cap and consumption past it is refused, which is what
+  /// every USAGE plan did before this column existed.
+  ///
+  /// On the entitlement rather than the meter, for three reasons: two plans
+  /// may price one meter differently (an enterprise rate), a meter has no
+  /// edit surface and deleting one cascades its usage history, and every
+  /// other price in the system lives on a plan.
+  creditsPerUnit Int?             @map("credits_per_unit")
   /** LICENSE only. */
   licenseKind LicenseKind?        @map("license_kind")
   /** CREDIT only — carry unused balance into the next period. */
