@@ -4,6 +4,79 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.0.0-rc.6
+
+Metered billing, which is the half of "auth and billing" that was previously
+only metering. Plus the SDK defects three starter kits found by being used.
+
+Still a release candidate. Every fix below was found by running the product or
+by an adversarial review, not by the test suite — six of them were in code that
+typechecked, built and passed its own tests. That ratio is the reason this is
+not the stable tag yet.
+
+### Added
+
+- **Usage past an included quota is charged against a prepaid credit balance.**
+  A `USAGE` plan entitlement can carry `creditsPerUnit`; consumption beyond the
+  included units draws down the subscriber's credits inside the same
+  transaction that writes the usage record, so a unit recorded but not paid for
+  cannot exist. A balance too low is refused with `402`, never billed into the
+  negative. No payment provider is involved — the credit pack that funds the
+  balance is an ordinary one-off charge.
+- **`refreshSession()`** in `@rekey.dev/nextjs`, for route handlers and
+  middleware that may persist a rotated session.
+- **`<RekeyStyles>`** and a generated `@rekey.dev/react/styles.css`, for
+  rendering the component stylesheet once or linking it as a file.
+- **`isCancelScheduled(sub)`** in `@rekey.dev/shared-types`, for the question
+  `cancelsAtPeriodEnd` was being misread as.
+- **`docs/billing-architecture.md`** — the billing model, the decisions behind
+  it and what they cost, and how postpaid billing and discount durations extend
+  it without unpicking what is there.
+
+### Fixed
+
+- **`auth()` threw out of a render when the access token had expired.** It
+  refreshes by writing cookies, which Next forbids during a render, so it did
+  not return null — it threw. The access cookie lasts fifteen minutes and the
+  refresh cookie thirty days, so every signed-in user hit this a quarter of an
+  hour after signing in: a 500 on every route, including the sign-in page they
+  would have used to recover. It now returns the refreshed session and persists
+  it where it can.
+- **A transient API failure signed users out.** The same function cleared both
+  cookies on any refresh error, so a timeout destroyed the one credential that
+  could have recovered the session. Only a verdict about the token itself
+  clears it now.
+- **`rekeyMiddleware` could protect the page it redirects to.** Supplying
+  `publicRoutes` replaces the default list, so a caller who omitted their
+  sign-in path — or named a custom `signInUrl` — got a redirect loop with
+  nothing in the logs. `signInUrl` is exempt from the gate whatever the caller
+  passes.
+- **The React components had no styling when rendered server-only.** The
+  stylesheet was injected from a client effect, so anywhere the components
+  render without hydrating — Astro without a client directive — produced
+  correct markup and no styling at all. It renders in the tree now.
+- **`PricingTable` and `CheckoutButton` required a Next Server Action**, which
+  made the billing components unusable in every other framework. They accept a
+  URL as well.
+- **Three ways entitlement resolution gave away paid quota.** Buying a credit
+  pack deleted the free tier, because the fallback fired only at zero
+  subscriptions and a one-off purchase creates one. A lapsed organization kept
+  its included quota indefinitely. And `occurredAt` was unbounded, so usage
+  could be backdated into a month whose quota was unspent.
+- **Usage idempotency keys were not scoped to the subject**, so one subject's
+  key returned another's record — on a priced meter, consumption nobody paid
+  for.
+
+### Changed
+
+- **`cancelsAtPeriodEnd` is now `cancelEffect`**, returning `'period-end' |
+  'immediate'`. It predicts what cancelling *now* would do; it never described
+  a subscription already ending. Everyone who met it read it as the latter,
+  including three of our own starter kits, which hid the cancel control from
+  every healthy subscriber and mislabelled it for `PAST_DUE` ones. A
+  discriminant cannot be mistaken for a state. Use `isCancelScheduled` for the
+  state question.
+
 ## 2.0.0-rc.5
 
 Everything here came out of running the product rather than from the test
