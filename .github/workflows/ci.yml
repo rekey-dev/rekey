@@ -46,6 +46,12 @@ jobs:
     name: OSS strip
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Private repo only. This file is mirrored to the public repo, but the
+    # script it runs is not: the strip deletes itself as part of stripping, so
+    # on rekey-dev/rekey the job would fail on a missing file, every run,
+    # forever. The mirror image of the guard on release.yml, which publishes to
+    # npm and must run ONLY on the public side.
+    if: github.repository == 'EtherLabZ/Rekey'
     steps:
       - uses: actions/checkout@v4
 
