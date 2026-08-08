@@ -70,7 +70,41 @@ export interface Session {
  * credential that can recover the session and deleting it turns a two-second
  * outage into everybody signing in again.
  */
-const TOKEN_IS_DEAD = new Set(['REFRESH_TOKEN_EXPIRED', 'REFRESH_TOKEN_REUSED', 'USER_TOKEN_INVALID']);
+/**
+ * Does this code mean the token itself is finished, as opposed to the request
+ * having failed? Only a verdict justifies throwing the session away.
+ *
+ * Matched by prefix rather than a literal list. `/auth/refresh` throws six
+ * `REFRESH_TOKEN_*` codes — EXPIRED, INVALID, REUSED, REVOKED, RACE and
+ * WRONG_APPLICATION — and every one is a 401 saying this token will never work
+ * again. The list here held three of them, so REVOKED ("sign out my other
+ * devices") and INVALID (any stale cookie) fell through to "the API failed":
+ * the dead cookie was never cleared, and the browser re-presented it on every
+ * request for the next thirty days while the user saw a signed-out page.
+ */
+function isTokenVerdict(code: string): boolean {
+  return (
+    code.startsWith('REFRESH_TOKEN_') ||
+    code === 'USER_TOKEN_INVALID' ||
+    code === 'USER_TOKEN_MISSING' ||
+    code === 'USER_TOKEN_WRONG_APPLICATION'
+  );
+}
+
+/**
+ * Access-token failures that should fall through to a refresh attempt.
+ *
+ * `WRONG_APPLICATION` happens when the secret is repointed at another
+ * Application, or a second Rekey app writes `rekey_access` on a shared parent
+ * domain. Rethrowing left a cookie that could never be cleared.
+ */
+function isAccessTokenSpent(code: string): boolean {
+  return (
+    code === 'USER_TOKEN_INVALID' ||
+    code === 'USER_TOKEN_MISSING' ||
+    code === 'USER_TOKEN_WRONG_APPLICATION'
+  );
+}
 
 /**
  * Can this context write cookies?
@@ -123,7 +157,7 @@ export async function auth(): Promise<Session | null> {
       const user = await client().auth.getCurrentUser(access);
       return { user, accessToken: access };
     } catch (err) {
-      if (!(err instanceof RekeyError) || err.code !== 'USER_TOKEN_INVALID') {
+      if (!(err instanceof RekeyError) || !isAccessTokenSpent(err.code)) {
         throw err;
       }
     }
@@ -146,7 +180,7 @@ export async function auth(): Promise<Session | null> {
     // Only a verdict about the token clears it. Anything else — a timeout, a
     // 500 from the API — leaves the cookies alone so the next request can try
     // again, and is reported rather than disguised as a signed-out user.
-    if (err instanceof RekeyError && TOKEN_IS_DEAD.has(err.code)) {
+    if (err instanceof RekeyError && isTokenVerdict(err.code)) {
       jar.delete(ACCESS_COOKIE);
       jar.delete(REFRESH_COOKIE);
       return null;
@@ -186,7 +220,7 @@ export async function refreshSession(): Promise<Session | null> {
     const user = await client().auth.getCurrentUser(fresh.accessToken);
     return { user, accessToken: fresh.accessToken };
   } catch (err) {
-    if (err instanceof RekeyError && TOKEN_IS_DEAD.has(err.code)) {
+    if (err instanceof RekeyError && isTokenVerdict(err.code)) {
       jar.delete(ACCESS_COOKIE);
       jar.delete(REFRESH_COOKIE);
       return null;

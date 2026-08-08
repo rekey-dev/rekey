@@ -144,8 +144,10 @@ async function createKey(applicationId: string, formData: FormData): Promise<voi
     });
     // Hand the raw key to the next render via a short-lived httpOnly cookie,
     // never the URL. Path-scoped so it's only sent to this route; ~2 min TTL.
+    // The key's id rides along so the banner can tell whether the credential it
+    // is holding is still live — see the render below.
     const jar = await cookies();
-    jar.set(REVEAL_COOKIE, result.rawKey, {
+    jar.set(REVEAL_COOKIE, `${result.apiKey.id}:${result.rawKey}`, {
       httpOnly: true,
       sameSite: 'lax',
       secure: await cookieSecure(),
@@ -181,7 +183,21 @@ export default async function ApiKeysPage({
   const sp = await searchParams;
   // Read the one-time key from the httpOnly cookie set by createKey (auto-expires
   // ~2 min later, so a refresh stops showing it without us mutating cookies here).
-  const reveal = (await cookies()).get(REVEAL_COOKIE)?.value;
+  // Stored as `<keyId>:<rawKey>`. Splitting on the first colon is safe because
+  // neither half can contain one: ids are cuids and the key body is base64url
+  // (apps/api `lib/keys.ts`, `prisma/schema.prisma`). Those live in a different
+  // deployable, so a future key-format change is worth checking against this.
+  const revealCookie = (await cookies()).get(REVEAL_COOKIE)?.value;
+  const sep = revealCookie?.indexOf(':') ?? -1;
+  // A cookie with no colon was written by the previous deploy, which stored the
+  // raw key alone. During a rolling deploy the POST can be served by an old pod
+  // and the redirected GET by a new one, and treating that as unreadable would
+  // hide the secret entirely — the operator is billed a key against the cap and
+  // has to revoke and re-mint. Showing it, at the cost of the stale-banner bug
+  // for the remaining two minutes, is the better end of that trade.
+  const legacyReveal = revealCookie !== undefined && sep === -1;
+  const revealedId = sep > 0 ? revealCookie!.slice(0, sep) : undefined;
+  const revealedKey = legacyReveal ? revealCookie : sep > 0 ? revealCookie!.slice(sep + 1) : undefined;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
   // The API's own message and fix for this failure, left by `errorQuery`
   // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
@@ -264,16 +280,24 @@ export default async function ApiKeysPage({
         )}
       </div>
 
-      {reveal && (
+      {/*
+        Show the freshly minted key only while it is still a working credential.
+        The cookie outlives a revocation by up to two minutes, and without this
+        check the banner kept offering "Copy key" for a key that had just been
+        deleted — above a table reading "No API keys yet". Checking against the
+        list the server just returned also covers revocation from another tab
+        or another operator, which no amount of cookie-clearing here would.
+      */}
+      {revealedKey && (legacyReveal || keys.some((k) => k.id === revealedId)) && (
         <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-500/60 dark:bg-amber-950/60 space-y-2">
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
               New API key (shown once — copy now)
             </p>
-            <CopyButton value={reveal} label="Copy key" />
+            <CopyButton value={revealedKey} label="Copy key" />
           </div>
           <code className="block break-all rounded-md bg-[var(--color-surface)] px-3 py-2 text-xs font-mono">
-            {reveal}
+            {revealedKey}
           </code>
           <p className="text-xs text-amber-800 dark:text-amber-300">
             Pass as <code>Authorization: Bearer &lt;key&gt;</code> from your server-side code via <code>@rekey.dev/node</code>.

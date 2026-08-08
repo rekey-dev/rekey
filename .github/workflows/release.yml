@@ -49,7 +49,7 @@ jobs:
         run: pnpm --filter "./packages/*" build
 
       # Publish ONLY packages whose version isn't already on npm. Walk in
-      # dependency order (shared-types → node → react/mcp → nextjs/cli) so a new
+      # dependency order (shared-types → node → react/mcp → nextjs/astro/cli) so a new
       # dependency lands before its dependents. pnpm ignores publishConfig.tag,
       # so derive --tag per package.
       #
@@ -65,7 +65,7 @@ jobs:
       - name: Publish changed packages to npm
         run: |
           set -e
-          for dir in shared-types sdk-node sdk-react mcp sdk-nextjs cli; do
+          for dir in shared-types sdk-node sdk-react mcp sdk-nextjs sdk-astro cli; do
             name=$(node -p "require('./packages/$dir/package.json').name")
             ver=$(node -p "require('./packages/$dir/package.json').version")
             if npm view "$name@$ver" version >/dev/null 2>&1; then

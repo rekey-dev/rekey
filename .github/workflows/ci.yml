@@ -42,6 +42,51 @@ jobs:
       - name: Check compose files expose every env var the API reads
         run: node .github/scripts/check-compose-env.mjs
 
+  oss-strip:
+    name: OSS strip
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # `clean-for-public.sh` runs exactly once per release, at the moment a tag
+      # is pushed, which is the worst possible time to discover it is broken. It
+      # exited 1 on main for a full day in August 2026 — the mirror publish and
+      # therefore the npm release could not run, and nobody noticed, because
+      # nothing else ever executes it. Found by hand, by accident.
+      #
+      # Two things this job has to get right, both learned the hard way:
+      #
+      #   - Run it on a tree with NO node_modules. pnpm writes every workspace
+      #     member into .modules.yaml, including the two the strip deletes, so
+      #     the script's own leak check trips on an installed tree. This job
+      #     therefore does not install anything, and must stay before any step
+      #     that would.
+      #   - The script is destructive and deletes itself as part of the strip,
+      #     so it only ever runs against a throwaway. A fresh CI checkout is
+      #     exactly that; nothing here is pushed anywhere.
+      - name: Strip runs clean against a fresh checkout
+        run: bash .github/scripts/clean-for-public.sh
+
+      # The strip's own tripwire greps the public tree for references to what
+      # it removed, and fails the release if any survive. This asserts the
+      # other direction: a strip that exits 0 having quietly stopped removing
+      # things. It is written as an ALLOWLIST of what should remain, both
+      # because that also catches a newly added private app nobody remembered
+      # to strip, and because listing the removed names here would put them
+      # back into the public tree and trip the tripwire — which is exactly what
+      # the first draft of this job did.
+      - name: Public tree contains only what it should
+        run: |
+          expected="api panel portal"
+          actual=$(ls apps/ | sort | tr '\n' ' ' | sed 's/ $//')
+          if [ "$actual" != "$(echo $expected | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')" ]; then
+            echo "::error::apps/ after strip is '$actual', expected '$expected'"
+            exit 1
+          fi
+          test -f AGENTS.md || { echo "::error::public AGENTS.md missing"; exit 1; }
+          test ! -e docs/specs || { echo "::error::internal specs survived"; exit 1; }
+
   typecheck:
     name: Typecheck
     runs-on: ubuntu-latest

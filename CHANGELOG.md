@@ -4,6 +4,52 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.0.0-rc.7
+
+A new package for Astro, and the session bug shipping it exposed in the Next.js
+one.
+
+Still a release candidate, and the reason is unchanged: everything below was
+found by an adversarial review or by running the product, not by the test
+suite. The `@rekey.dev/nextjs` fix in particular had been live since rc.6 and
+passed every test that package has.
+
+### Added
+
+- **`@rekey.dev/astro`** — session handling for Astro 4 through 7: middleware
+  that puts the session on `Astro.locals`, cookie helpers, sign-in and
+  sign-out. The astro-starter kit carried ninety lines of this, and every other
+  Astro app was going to write its own. Cookie names and lifetimes match
+  `@rekey.dev/nextjs`, so moving an app between the two frameworks does not
+  sign everybody out.
+
+### Fixed
+
+- **`@rekey.dev/nextjs` cleared the session for three of the six ways a refresh
+  token can be dead.** `/auth/refresh` throws six terminal codes; the set held
+  `EXPIRED`, `REUSED` and `USER_TOKEN_INVALID`. The two most common were
+  missing: `REVOKED`, which is what "sign out my other devices" and an operator
+  revoking a session produce, and `INVALID`, which is any stale cookie, a
+  restored database or an app rebuilt from scratch. An unlisted code fell
+  through to the "the API failed, keep the cookies" branch — correct for an
+  outage, wrong for a token that is finished. The cookie was never cleared, so
+  the browser re-presented a dead credential on every request for the next
+  thirty days, each one a doomed round-trip, while the user looked at a
+  signed-out page with no way to fix it. Both packages now match by prefix, so
+  a seventh code added API-side cannot silently reopen it.
+- **`USER_TOKEN_WRONG_APPLICATION` never reached the refresh path.** It is what
+  a secret repointed at a different Application produces, or a second Rekey app
+  writing `rekey_access` on a shared parent domain. Rethrowing left a cookie
+  that could not be cleared.
+
+### Changed
+
+- **`clean-for-public.sh` runs on every pull request.** It used to run once per
+  release, when a tag was pushed, which is the worst moment to learn it is
+  broken — and in August it was, exiting 1 on `main` for a full day with the
+  mirror publish and the npm release blocked behind it. Nobody noticed, because
+  nothing else executed it.
+
 ## 2.0.0-rc.6
 
 Metered billing, which is the half of "auth and billing" that was previously
