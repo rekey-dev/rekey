@@ -48,15 +48,43 @@ const OPERATOR_PAT_ERRORS = {
  * per-Application grants; this local helper only checks tenant ownership,
  * because a PAT's authority comes from its scopes, not from a membership row.
  */
-async function ensureAppInTenant(applicationId: string, tenantId: string): Promise<void> {
-  const app = await applicationsService.get(applicationId);
-  if (app.tenantId !== tenantId) {
+async function ensureAppInTenant(
+  applicationId: string,
+  tenantId: string,
+  role?: string,
+): Promise<void> {
+  // A PAT's authority was taken entirely from its scopes, and the live role the
+  // middleware resolves was read by nothing. So a token minted by an ADMIN kept
+  // full workspace power after that person was demoted to MEMBER — including
+  // minting Application secret keys, which are durable credentials that outlive
+  // the token. Membership EXISTENCE was re-checked; the role was not.
+  //
+  // Scopes bound what a token may do. They cannot stand in for whether its
+  // holder is still allowed to do it.
+  if (role !== undefined && role !== 'OWNER' && role !== 'ADMIN') {
     throw new RekeyError({
-      statusCode: 404,
-      code: 'APPLICATION_NOT_FOUND',
-      message: `Application "${applicationId}" not found in this workspace.`,
-      fix: 'List applications via GET /api/v1/tenant/operator/applications.',
+      statusCode: 403,
+      code: 'TENANT_ROLE_INSUFFICIENT',
+      message: 'This token was minted by a member who no longer has admin rights in this workspace.',
+      fix: 'Have an owner or admin mint a new token, or restore the role.',
     });
+  }
+  try {
+    // Scoped fetch: the tenant filter lives in the query itself, so a
+    // cross-tenant id and a missing id are indistinguishable at the DB.
+    await applicationsService.get(applicationId, { tenantId });
+  } catch (e) {
+    if (e instanceof RekeyError && e.code === 'APPLICATION_NOT_FOUND') {
+      // Re-throw with the PAT surface's own wording (the service's `fix`
+      // points at the admin list endpoint, which a PAT cannot call).
+      throw new RekeyError({
+        statusCode: 404,
+        code: 'APPLICATION_NOT_FOUND',
+        message: `Application "${applicationId}" not found in this workspace.`,
+        fix: 'List applications via GET /api/v1/tenant/operator/applications.',
+      });
+    }
+    throw e;
   }
 }
 
@@ -147,7 +175,7 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const { id } = AppParam.parse(req.params);
-      await ensureAppInTenant(id, req.tenantId!);
+      await ensureAppInTenant(id, req.tenantId!, req.tenantRole);
       const items = await apiKeysService.listForApplication(id);
       // No take/skip: the write path caps active keys at MAX_KEYS_PER_APP, so
       // the full set IS the page and `total` is exact rather than estimated.
@@ -208,7 +236,7 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       const { id } = AppParam.parse(req.params);
-      await ensureAppInTenant(id, req.tenantId!);
+      await ensureAppInTenant(id, req.tenantId!, req.tenantRole);
       const body = MintKeyBody.parse(req.body);
       const result = await apiKeysService.create({
         applicationId: id,

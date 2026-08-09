@@ -36,7 +36,7 @@ import type {
 import type { FastifyBaseLogger } from 'fastify';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
-import { BillingConfigSchema } from '@rekey.dev/shared-types';
+import { BillingConfigSchema, ENTITLING_SUBSCRIPTION_STATUSES } from '@rekey.dev/shared-types';
 import { creditsService } from '../credits/credits.service.js';
 import { licensesService } from '../licenses/licenses.service.js';
 
@@ -75,7 +75,12 @@ async function loadDefaultPlan(applicationId: string): Promise<Plan | null> {
  * CANCELED and EXPIRED are terminal and are correctly excluded; PENDING is a
  * checkout that never completed and never entitled anyone.
  */
-const ENTITLING_STATUSES: SubscriptionStatus[] = ['ACTIVE', 'PAST_DUE'];
+// TRIALING entitles. A trial the subscriber cannot use is not a trial, and it
+// has to be added here in the same change that starts EMITTING the status:
+// `mapStripeSubStatus` folded Stripe's `trialing` into ACTIVE, so trials
+// configured in the Stripe dashboard already entitle today. Emitting TRIALING
+// without entitling it would lock out every one of them.
+const ENTITLING_STATUSES: SubscriptionStatus[] = [...ENTITLING_SUBSCRIPTION_STATUSES];
 
 /**
  * The `where` fragment that defines "currently entitling".
@@ -120,7 +125,36 @@ const ENTITLING_STATUSES: SubscriptionStatus[] = ['ACTIVE', 'PAST_DUE'];
 function stillEntitling(now: Date) {
   return {
     status: { in: ENTITLING_STATUSES },
-    OR: [{ cancelAt: null }, { cancelAt: { gt: now } }],
+    AND: [
+      { OR: [{ cancelAt: null }, { cancelAt: { gt: now } }] },
+      // A term that has elapsed stops entitling — but only where the term is
+      // the last word on the matter.
+      //
+      // `grantSubscription` writes `provider: null, providerSubId: null` and a
+      // `currentPeriodEnd`, and nothing will ever renew that row. Resolution
+      // read status alone, so "grant them fourteen days" was a permanent
+      // grant: full access forever, the only trace a `currentPeriodEnd` in the
+      // past that nothing looked at. Every comped, invoice-provisioned and
+      // trial subscription had the same shape, which is why nothing
+      // time-boxed could be sold or comped safely.
+      //
+      // Provider-backed rows are deliberately exempt. There `currentPeriodEnd`
+      // is a RENEWAL date, moved forward by a webhook that can arrive late; a
+      // renewal that has happened but not yet been delivered would otherwise
+      // de-entitle a customer who has just paid. Over-entitling for the length
+      // of a webhook delay is the cheaper mistake, and the provider remains
+      // the authority on its own subscriptions.
+      //
+      // A null `currentPeriodEnd` is an open-ended grant and keeps entitling,
+      // which is what "comp this account indefinitely" has always meant.
+      {
+        OR: [
+          { providerSubId: { not: null } },
+          { currentPeriodEnd: null },
+          { currentPeriodEnd: { gt: now } },
+        ],
+      },
+    ],
   };
 }
 
@@ -412,14 +446,51 @@ export const entitlementsService = {
       ? { organizationId: sub.beneficiaryOrgId }
       : { endUserId: endUser.id };
 
+    // A plan may carry more than one CREDIT entitlement — the unique key is
+    // (planId, kind, key), so `CREDIT:base = 500` plus `CREDIT:bonus = 200` is
+    // legal, and the tenant API and MCP both accept it. The anchor below used
+    // to omit `e.key`, so both grants shared one idempotency key and the second
+    // was silently swallowed as a duplicate: the buyer paid for 700 credits and
+    // received 500.
+    //
+    // Keying it fixes that going forward and creates one transitional hazard:
+    // a subscription already provisioned in its CURRENT period under the old
+    // key would see a new key, treat the period as ungranted, and grant again.
+    // `legacyRef` is the old row. The first CREDIT entitlement whose amount
+    // matches it is treated as already granted and skipped, consuming the guard
+    // so it can match at most once.
+    //
+    // Matched on AMOUNT, not position: `resolveForPlan` orders by (kind, key),
+    // so adding a row with an alphabetically earlier key changes which
+    // entitlement comes first, and a position-based guard would then skip the
+    // wrong one and re-grant the other.
+    //
+    // Remove after 2027-09, by which point every annual subscription has
+    // renewed at least once and no row can still be on a pre-change period.
+    let legacyCredit = await prisma.creditLedger
+      .findUnique({
+        where: {
+          applicationId_idempotencyKey: {
+            applicationId: application.id,
+            idempotencyKey: `purchase:ent:${sub.id}:CREDIT:${period}`,
+          },
+        },
+        select: { delta: true },
+      })
+      .catch(() => null);
+
     for (const e of entitlements) {
       if (e.kind === 'CREDIT' && e.quantity && e.quantity > 0) {
+        if (legacyCredit !== null && legacyCredit.delta === e.quantity) {
+          legacyCredit = null;
+          continue;
+        }
         await creditsService.grantFromPurchase({
           applicationId: application.id,
           ...beneficiary,
           amount: e.quantity,
-          // Idempotency anchor: one grant per (subscription, period).
-          paymentRef: `ent:${sub.id}:CREDIT:${period}`,
+          // Idempotency anchor: one grant per (subscription, entitlement, period).
+          paymentRef: `ent:${sub.id}:CREDIT:${e.key}:${period}`,
           metadata: { source: 'entitlement', planId: plan.id, subscriptionId: sub.id },
         });
       } else if (e.kind === 'LICENSE' && e.licenseKind) {
@@ -545,8 +616,8 @@ export const entitlementsService = {
       subs = await prisma.subscription.findMany({
         where: {
           applicationId,
-          // `stillEntitling` owns the top-level OR, so the subject match goes
-          // under AND rather than colliding with it.
+          // `stillEntitling` returns its own AND, so the subject match goes
+          // under a sibling AND rather than colliding with it.
           AND: [
             stillEntitling(new Date()),
             {

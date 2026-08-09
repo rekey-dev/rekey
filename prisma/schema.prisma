@@ -361,9 +361,9 @@ model TenantApiToken {
   tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
   tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  // tokenHash lookups ride the @unique's index (see ApiKey.keyHash note).
   @@index([tenantUserId])
   @@index([tenantId])
-  @@index([tokenHash])
   @@map("tenant_api_tokens")
 }
 
@@ -935,8 +935,9 @@ model ApiKey {
 
   application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
 
+  // keyHash lookups ride the @unique's index — a separate @@index([keyHash])
+  // was a duplicate, pure write amplification on a hot-insert table.
   @@index([applicationId])
-  @@index([keyHash])
   @@map("api_keys")
 }
 
@@ -1153,10 +1154,10 @@ model License {
   plan         Plan?             @relation(fields: [planId], references: [id], onDelete: SetNull)
   activations  LicenseActivation[]
 
+  // keyHash lookups ride the @unique's index (see ApiKey.keyHash note).
   @@index([applicationId])
   @@index([endUserId])
   @@index([organizationId])
-  @@index([keyHash])
   // App-scoped newest-first license list (licenses.service.list).
   @@index([applicationId, createdAt])
   @@map("licenses")
@@ -1268,6 +1269,16 @@ model UsageRecord {
   @@index([meterId, occurredAt])
   @@index([endUserId])
   @@index([organizationId])
+  // The quota/price SUM in usage.service.record filters (meterId, subject id,
+  // occurredAt month window) on every record against a priced or quota meter.
+  // Without a subject-leading compound, that scan reads the whole meter's
+  // month across ALL subjects via [meterId, occurredAt] and filters, while
+  // holding the meter lock: cost grew linearly through the month. Two indexes
+  // because the filter uses the id columns, deliberately NOT subjectKey: a
+  // record can carry both ids, and switching the filter to subjectKey would
+  // change which rows count toward a quota (see issue #418).
+  @@index([meterId, endUserId, occurredAt])
+  @@index([meterId, organizationId, occurredAt])
   @@map("usage_records")
 }
 
@@ -1395,6 +1406,10 @@ enum PlanInterval {
 enum SubscriptionStatus {
   PENDING
   ACTIVE
+  // In a trial: entitled, but nobody has paid yet. Distinct from ACTIVE so the
+  // difference is reportable — "trial ends in 4 days", conversion rate — which
+  // a trial folded into ACTIVE cannot express.
+  TRIALING
   PAST_DUE
   CANCELED
   EXPIRED
@@ -1473,6 +1488,19 @@ model Plan {
   currency      String       @default("USD")
   interval      PlanInterval @default(MONTH)
   active        Boolean      @default(true)
+
+  // Free trial length in days. Null or 0 = no trial.
+  //
+  // SUBSCRIPTION plans only: a trial on a one-off purchase or a perpetual
+  // licence has nothing to convert into. Enforced at the route, not here,
+  // because the schema cannot express "only when kind is SUBSCRIPTION".
+  //
+  // A provider must declare it can express a trial before a plan carrying one
+  // can be checked out through it — absent means cannot, the same fail-closed
+  // rule `capabilities.discounts` uses. Otherwise the buyer is charged today
+  // for a trial the panel promised was free.
+  trialDays     Int?         @map("trial_days")
+
   // ── LICENSE-kind config ─────────────────────────────────────────
   // Set when kind = LICENSE. Mirrors LicenseKind on `licenses` — webhook
   // handler reads these to construct the auto-issued License on payment.
@@ -1591,6 +1619,11 @@ model Subscription {
   status        SubscriptionStatus @default(PENDING)
   // When the current period ends. Null until the provider tells us.
   currentPeriodEnd DateTime?       @map("current_period_end")
+  // When the trial ends, for a subscription that started in one. Kept even
+  // after the trial converts, so "did this customer come from a trial, and
+  // when did it end" stays answerable — conversion reporting needs the date,
+  // not just the status it used to have.
+  trialEndsAt      DateTime?       @map("trial_ends_at")
   cancelAt         DateTime?       @map("cancel_at")
   canceledAt       DateTime?       @map("canceled_at")
   // Provider's id for this subscription (sub_..., I-...., etc.). Scoped by
@@ -1677,6 +1710,12 @@ model Payment {
   // (`recent_payments`, the per-end-user payment tab). `(application_id)` alone
   // makes Postgres sort the whole app's payment history to answer them.
   @@index([applicationId, createdAt])
+  // `expireIfDue` (every portal read of a subscription with a past cancelAt)
+  // and the webhook renewal applier both look up payments by subscriptionId;
+  // Postgres does not auto-index FK columns, and the best plan without this
+  // was the low-selectivity [status] index. Single-column is enough: a
+  // subscription has few payments.
+  @@index([subscriptionId])
   @@map("payments")
 }
 

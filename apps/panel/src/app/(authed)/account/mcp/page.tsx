@@ -348,7 +348,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
             OAuth consent screen, never carried by a PAT.
           </li>
           <li>
-            <code>lastUsedAt</code> on the PAT advances on every successful call — visible on{' '}
+            <code>lastUsedAt</code> on the PAT advances at most once a minute per API process — visible on{' '}
             <Link href="/account/api-tokens" className="underline">
               Account → API tokens
             </Link>{' '}

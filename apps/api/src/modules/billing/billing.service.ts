@@ -29,10 +29,11 @@ import { providerError, withProviderErrors } from '../../lib/provider-errors.js'
 import { plansService } from '../plans/plans.service.js';
 import { couponsService } from '../coupons/coupons.service.js';
 import { resolveCheckoutDiscount } from './checkout-discount.js';
+import { resolveCheckoutTrial } from './checkout-trial.js';
 import { buildCheckoutSessionMetadata } from './checkout-sessions.js';
 import { getProviderForApplication, pickProvider } from './providers/index.js';
 import type { BillingProviderName } from './credentials.service.js';
-import { BillingConfigSchema, cancelEffect } from '@rekey.dev/shared-types';
+import { BillingConfigSchema, cancelEffect, isEntitlingStatus } from '@rekey.dev/shared-types';
 import { enqueueSubscriptionEvent } from './webhooks/billing-events.js';
 import { kickDeliveries } from '../webhooks/webhook.service.js';
 
@@ -64,7 +65,7 @@ export interface EndUserPaymentDto {
  * as entitled too. Only these are protected from being reset by a new checkout.
  */
 function isEntitled(status: Subscription['status'] | undefined): boolean {
-  return status === 'ACTIVE' || status === 'PAST_DUE';
+  return isEntitlingStatus(status);
 }
 
 /** Pull a usable https receipt link out of a payment's metadata, if any. */
@@ -121,8 +122,50 @@ function receiptUrlFromMetadata(metadata: unknown): string | null {
  * enqueues.
  */
 async function expireIfDue(sub: Subscription): Promise<Subscription> {
-  const dueLocally = sub.status === 'ACTIVE' && sub.cancelAt !== null && sub.cancelAt <= new Date();
-  if (!dueLocally) return sub;
+  const now = new Date();
+
+  const dueLocally = sub.status === 'ACTIVE' && sub.cancelAt !== null && sub.cancelAt <= now;
+  if (!dueLocally) {
+    // A granted term that has run out. Same lazy seam, different fact.
+    //
+    // `grantSubscription` writes no provider and a `currentPeriodEnd`, and
+    // nothing will ever renew that row, so an elapsed term is final. Entitlement
+    // resolution already stops honouring it (see `stillEntitling`), but the row
+    // itself stayed ACTIVE — leaving the panel and the portal reporting an
+    // active subscription to someone who has no access, which reads as a bug in
+    // the entitlement check rather than a term that ended.
+    //
+    // Provider-backed rows are exempt for the same reason as in resolution:
+    // there `currentPeriodEnd` is a renewal date that a late webhook moves
+    // forward, and expiring on it would end a subscription the buyer has just
+    // paid for.
+    //
+    // Checked AFTER `cancelAt`, deliberately. A subscription whose scheduled
+    // cancellation has come due is CANCELED — somebody cancelled it — and a
+    // grant carries a `currentPeriodEnd` too, so testing the term first
+    // relabelled every cancelled grant as EXPIRED. The more specific fact wins.
+    //
+    // No event is emitted. `subscription.expired` does not exist in the webhook
+    // catalogue, and inventing one here would add a public surface from inside a
+    // lazy read; the licence service sets EXPIRED the same way. Announcing it is
+    // a separate, deliberate change.
+    const termElapsed =
+      sub.status === 'ACTIVE' &&
+      sub.providerSubId === null &&
+      sub.currentPeriodEnd !== null &&
+      sub.currentPeriodEnd <= now;
+    if (termElapsed) {
+      const { count } = await prisma.subscription.updateMany({
+        where: { id: sub.id, status: 'ACTIVE' },
+        data: { status: 'EXPIRED' },
+      });
+      const row = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+      if (count > 0) return row;
+      // Someone else got there first; return whatever they wrote.
+      return row;
+    }
+    return sub;
+  }
 
   // Money that arrived AFTER the cancellation date means this subscription was
   // restarted, not left to lapse — do not expire it, clear the stale date.
@@ -153,7 +196,6 @@ async function expireIfDue(sub: Subscription): Promise<Subscription> {
     });
   }
 
-  const now = new Date();
   const { updated, deliveryIds } = await prisma.$transaction(async (tx) => {
     const { count } = await tx.subscription.updateMany({
       where: { id: sub.id, status: 'ACTIVE' },
@@ -229,7 +271,9 @@ export const billingService = {
     const sub = await prisma.subscription.findFirst({
       where: {
         applicationId: application.id,
-        status: { in: ['ACTIVE', 'PAST_DUE', 'PENDING'] },
+        // TRIALING is live: omitting it would show a trialist no subscription
+        // at all, on the page whose whole job is to say what they are on.
+        status: { in: ['ACTIVE', 'TRIALING', 'PAST_DUE', 'PENDING'] },
         ...subject,
       },
       orderBy: { createdAt: 'desc' },
@@ -350,6 +394,11 @@ export const billingService = {
       ? resolveCheckoutDiscount({ plan, provider: providerName, isOneTime, coupon: couponContext })
       : null;
 
+    // Same shape, same reason: refuse a trial this checkout cannot honour
+    // while refusing is still free. Charging today for a plan the pricing page
+    // advertised as a free trial is not a failure mode worth having.
+    const trial = resolveCheckoutTrial({ plan, provider: providerName, isOneTime });
+
     // Guard: if the user already has an ACTIVE/PAST_DUE sub on this plan
     // bound to a different provider, refuse the switch — they need to
     // cancel first. Subscription.provider is immutable once active.
@@ -366,7 +415,7 @@ export const billingService = {
       existing &&
       existing.provider &&
       existing.provider !== providerName &&
-      (existing.status === 'ACTIVE' || existing.status === 'PAST_DUE')
+      isEntitlingStatus(existing.status)
     ) {
       throw new RekeyError({
         statusCode: 409,
@@ -406,6 +455,10 @@ export const billingService = {
       // charged the buyer full price while we recorded a discount and
       // redeemed the code.
       ...(discount !== null && { discount }),
+      // Same seam, same lesson: the trial has to reach the PROCESSOR. It is
+      // the provider that runs the clock and converts the trial into a
+      // charge, so a trial that stops at our own rows charges the buyer today.
+      ...(trial !== null && { trial }),
     };
     let session;
     try {
@@ -601,6 +654,14 @@ export const billingService = {
       });
     }
 
+    // Terminal already. `getCurrentSubscription` can hand this a row that
+    // `expireIfDue` just wrote EXPIRED, and `cancelEffect('EXPIRED')` is
+    // 'immediate' — so without this the unconditional update rewrote a
+    // terminal row to CANCELED and announced a cancellation that did not
+    // happen. `cancelSubscriptionById` has always had this guard.
+    if (sub.status === 'CANCELED' || sub.status === 'EXPIRED') return sub;
+
+
     const providerBacked = Boolean(sub.provider && sub.providerSubId);
     // Scheduling a cancellation for the end of the period does NOT require a
     // payment provider. It used to: `providerBacked` was part of this
@@ -704,20 +765,27 @@ export const billingService = {
 
     const providerBacked = Boolean(sub.provider && sub.providerSubId);
     // NOT `cancelEffect` — this path deliberately still requires a
-    // provider, and the difference is not an oversight. The self-service cancel
-    // above can schedule a provider-less row because `expireIfDue` ends it the
-    // next time `getCurrentSubscription` reads it, and the buyer's own portal
-    // is what reads it. An operator cancelling by id has no such guarantee:
-    // entitlement resolution queries subscriptions directly, so a provider-less
-    // row scheduled from here could sit ACTIVE and entitling indefinitely if
-    // nobody ever loads that user's portal. Relaxing it needs the expiry seam
-    // widened past `getCurrentSubscription` first; until then, cancelling
-    // outright is the failure that does not give away what was not bought.
-    const atPeriodEnd =
-      opts?.atPeriodEnd !== false &&
-      providerBacked &&
-      sub.status === 'ACTIVE' &&
-      sub.currentPeriodEnd !== null;
+    // provider. It used to also require `providerBacked`, on the stated ground
+    // that a provider-less row scheduled from here could sit ACTIVE and
+    // entitling indefinitely if nobody ever loaded that user's portal, because
+    // only `getCurrentSubscription` reaped it — and that "relaxing it needs the
+    // expiry seam widened past getCurrentSubscription first".
+    //
+    // That seam has since been widened. `stillEntitling` filters
+    // `cancelAt` in the entitlement query itself, so a scheduled cancellation
+    // stops entitling on the date whether or not anybody reads the row.
+    //
+    // Keeping the old gate is no longer cautious, it is just wrong, and it is
+    // wrong against the buyer: on a deployment where subscriptions are granted
+    // rather than checked out, `providerBacked` is false for every one of them,
+    // so an operator pressing cancel ended the subscription immediately,
+    // mid-period, with no refund and entitlements gone the same second — while
+    // the self-service path on the identical row cancelled at period end. Two
+    // operator-visible cancels disagreeing about the same subscription.
+    //
+    // `cancelEffect` is the shared answer to "what would cancelling now do",
+    // and the self-service path already uses it.
+    const atPeriodEnd = opts?.atPeriodEnd !== false && cancelEffect(sub) === 'period-end';
 
     // Idempotent: already scheduled to cancel at period end.
     if (atPeriodEnd && sub.cancelAt !== null) return sub;
@@ -790,7 +858,9 @@ export const billingService = {
       where: {
         applicationId: args.application.id,
         endUserId: args.endUserId,
-        status: { in: ['ACTIVE', 'PAST_DUE'] },
+        // TRIALING too: a trial converts into a charge, so leaving one
+        // running at the provider bills a user we have just erased.
+        status: { in: ['ACTIVE', 'TRIALING', 'PAST_DUE'] },
         provider: { not: null },
         providerSubId: { not: null },
       },

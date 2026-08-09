@@ -31,7 +31,11 @@ import {
 } from './lib/rate-limit.js';
 import { rejectUnsupportedMediaType } from './middleware/media-type.js';
 import { recordApiRequest, flushApiRequestLogs, pruneApiRequestLogs } from './lib/request-log.js';
-import { pruneExpiredAuthTokens, pruneExpiredIdempotencyKeys } from './lib/token-prune.js';
+import {
+  pruneExpiredAuthTokens,
+  pruneExpiredIdempotencyKeys,
+  pruneExpiredSessionTokens,
+} from './lib/token-prune.js';
 import { idempotencyPreHandler, idempotencyOnSend } from './middleware/idempotency.js';
 import { pruneExpiredChallenges } from './lib/webauthn-challenge.js';
 import { processDueWebhookDeliveries } from './modules/webhooks/webhook.service.js';
@@ -385,7 +389,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const authCeiling = app.createRateLimit(
     authCeilingOptions(env.RATE_LIMIT_MAX, env.RATE_LIMIT_WINDOW_MS),
   );
-  app.addHook('onRequest', async (req) => {
+  // preValidation, not onRequest. The key needs the resolved Application, and
+  // `requireApiKey` runs as an onRequest hook on a CHILD instance — parent
+  // hooks always run first, so at onRequest time there is nothing to key on
+  // but the IP, which is exactly what made this ceiling per-IP in practice.
+  app.addHook('preValidation', async (req) => {
     if (!wantsAuthCeiling(req.routeOptions?.config?.rateLimit)) return;
     const result = await authCeiling(req);
     // `isAllowed` is the union discriminant, not redundant with `isExceeded`:
@@ -462,6 +470,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
           if (deleted > 0) app.log.debug({ deleted }, 'pruned expired auth tokens');
         })
         .catch((err) => app.log.warn({ err }, 'auth-token prune failed'));
+      // Refresh, reset and verification tokens. Nothing pruned these, and
+      // refresh_tokens gains a row on every sign-in and every rotation.
+      void pruneExpiredSessionTokens()
+        .then((deleted) => {
+          if (deleted > 0) app.log.debug({ deleted }, 'pruned expired session tokens');
+        })
+        .catch((err) => app.log.warn({ err }, 'session-token prune failed'));
       void pruneExpiredChallenges()
         .then((deleted) => {
           if (deleted > 0) app.log.debug({ deleted }, 'pruned expired webauthn challenges');

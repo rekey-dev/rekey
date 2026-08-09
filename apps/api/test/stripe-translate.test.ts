@@ -81,7 +81,14 @@ describe('stripe module translate', () => {
         ctx(),
       );
     expect(fire('active')?.[0]).toMatchObject({ type: 'subscription.activated', status: 'ACTIVE' });
-    expect(fire('trialing')?.[0]).toMatchObject({ type: 'subscription.activated', status: 'ACTIVE' });
+    // `trialing` used to fold into ACTIVE, which entitled correctly and made a
+    // trial indistinguishable from a paid subscription. It carries its own
+    // status now; the event type stays `activated` because a trial starting IS
+    // the subscriber gaining access, which is what consumers provision on.
+    expect(fire('trialing')?.[0]).toMatchObject({
+      type: 'subscription.activated',
+      status: 'TRIALING',
+    });
     expect(fire('past_due')?.[0]).toMatchObject({ type: 'subscription.past_due', status: 'PAST_DUE' });
     expect(fire('unpaid')?.[0]).toMatchObject({ type: 'subscription.past_due', status: 'PAST_DUE' });
     expect(fire('canceled')?.[0]).toMatchObject({ type: 'subscription.canceled', status: 'CANCELED' });

@@ -57,8 +57,13 @@ function extractApplicationId(obj: ApplicationScopedObject | undefined | null): 
 export function mapStripeSubStatus(s: Stripe.Subscription.Status): LocalSubscriptionStatus {
   switch (s) {
     case 'active':
-    case 'trialing':
       return 'ACTIVE';
+    // Was folded into ACTIVE, which entitled correctly but made a trial
+    // indistinguishable from a paid subscription — no "trial ends in 4 days",
+    // no conversion reporting. TRIALING is in ENTITLING_STATUSES, so this
+    // changes what we can SEE, not who has access.
+    case 'trialing':
+      return 'TRIALING';
     case 'past_due':
     case 'unpaid':
       return 'PAST_DUE';
@@ -84,6 +89,11 @@ export function mapStripeSubStatus(s: Stripe.Subscription.Status): LocalSubscrip
 function statusEventType(status: LocalSubscriptionStatus): SubscriptionStatusEvent['type'] {
   switch (status) {
     case 'ACTIVE':
+    // A trial starting IS the subscriber gaining access, which is what this
+    // event announces — consumers provision on it. There is no
+    // `subscription.trial_started` in the catalogue, and minting one is a
+    // public-surface decision, not a side effect of adding a status.
+    case 'TRIALING':
       return 'subscription.activated';
     case 'CANCELED':
     case 'EXPIRED':
@@ -242,6 +252,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           status,
           // Absolute mirror — null clears, matching the pre-module handler.
           currentPeriodEnd: sub.current_period_end ? new Date(sub.current_period_end * 1000) : null,
+          trialEndsAt: sub.trial_end ? new Date(sub.trial_end * 1000) : null,
           cancelAt: sub.cancel_at ? new Date(sub.cancel_at * 1000) : null,
           canceledAt: sub.canceled_at ? new Date(sub.canceled_at * 1000) : null,
           raw: payload,
@@ -342,6 +353,9 @@ export const stripeModule: ProviderModule = {
     autoWebhookRegister: true,
     periodRotationEvents: true,
     onlineVerify: false,
+    // `subscription_data.trial_period_days` on the Checkout Session. Stripe
+    // runs the trial, charges when it ends, and reports `trialing` until then.
+    trials: true,
     // Both hosted flows take `discounts: [{ coupon }]` on the Checkout
     // Session, so an ad-hoc Coupon minted per checkout covers each. On a
     // subscription the coupon is created `duration: 'once'`, which is what a

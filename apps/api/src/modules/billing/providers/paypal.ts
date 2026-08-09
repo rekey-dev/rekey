@@ -25,6 +25,7 @@ import type {
 import { discountUnsupported } from './discount.js';
 import type { PaypalCredentials, BillingMode } from '../credentials.service.js';
 import { RekeyError } from '../../../lib/error.js';
+import { paypalMajorString } from './paypal-money.js';
 
 const SANDBOX_BASE = 'https://api-m.sandbox.paypal.com';
 const LIVE_BASE = 'https://api-m.paypal.com';
@@ -188,7 +189,7 @@ export class RealPaypalProvider implements BillingProvider {
 
     const requestId = `REKEY-PLAN-${plan.id}`;
     const interval = plan.interval === 'YEAR' ? 'YEAR' : 'MONTH';
-    const valueMajor = (plan.amount / 100).toFixed(2);
+    const valueMajor = paypalMajorString(plan.amount, plan.currency);
     const planRes = await paypalFetch(`${this.base}/v1/billing/plans`, {
       method: 'POST',
       headers: {
@@ -310,11 +311,13 @@ export class RealPaypalProvider implements BillingProvider {
     const requestId = `REKEY-ORDER-${randomUUID()}`;
     const currency = input.plan.currency;
     const discountMinor = input.discount?.amount ?? 0;
-    // Same two-decimal assumption the rest of this class makes (plans and
-    // subscriptions both do `amount / 100`).
-    const grossMajor = (input.plan.amount / 100).toFixed(2);
-    const discountMajor = (discountMinor / 100).toFixed(2);
-    const valueMajor = ((input.plan.amount - discountMinor) / 100).toFixed(2);
+    // Scaled by what PayPal accepts for THIS currency. These three used to
+    // hardcode `/ 100` and `.toFixed(2)`, so a plan in a currency PayPal takes
+    // no decimals on was both priced at a hundredth of its value and rejected
+    // outright for carrying a decimal point.
+    const grossMajor = paypalMajorString(input.plan.amount, input.plan.currency);
+    const discountMajor = paypalMajorString(discountMinor, input.plan.currency);
+    const valueMajor = paypalMajorString(input.plan.amount - discountMinor, input.plan.currency);
     // PayPal has no free-form metadata on a purchase unit, so the code goes
     // where the buyer and the operator will both see it.
     const description = (
@@ -413,6 +416,11 @@ export class RealPaypalProvider implements BillingProvider {
       'PAYMENT.SALE.DENIED',
       'PAYMENT.SALE.REVERSED',
       'PAYMENT.CAPTURE.COMPLETED',
+      // Reversals on the Orders v2 side. Existing tenants keep their current
+      // subscription until their credential is next saved — `registerWebhook`
+      // deletes and recreates, so this only takes effect on the next save.
+      'PAYMENT.CAPTURE.REVERSED',
+      'PAYMENT.CAPTURE.REFUNDED',
     ].map((name) => ({ name }));
 
     const res = await paypalFetch(`${this.base}/v1/notifications/webhooks`, {

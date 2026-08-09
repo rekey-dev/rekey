@@ -4,6 +4,90 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.0.0-rc.8
+
+The release that a security audit, an architecture review and three senior
+review passes were spent on. Every fix below was found by reading the code
+adversarially or by running it — none by the test suite, which was green
+throughout.
+
+Still a release candidate for one reason: nothing here has been exercised
+against a live deployment by a real signed-in user. The starter kits shipped
+green and were still broken; that lesson has not been paid for twice.
+
+### Security
+
+- **A publishable key could have us email a live login token to any domain.**
+  The reset, magic-link and verification routes took a `{token}` URL template
+  from the caller and rendered it into a link in a message we send — our
+  branding, our SPF/DKIM — validated only for being parseable. The publishable
+  key is public by design and served unauthenticated. So anyone could have us
+  mail a victim a genuine, correctly-branded, deliverable email whose button
+  carried a live single-use session token to a domain they controlled. One
+  click was account takeover, and every signal a careful user checks said the
+  mail was legitimate, because it was. `authConfig.redirectUrls` already
+  existed for exactly this and was enforced nowhere; it is an origin allowlist
+  now, failing closed.
+- **Live auth tokens were being sent to Google Analytics.** The panel mounted
+  analytics in the root layout with no `page_location` override, so GA4
+  received the full URL — including `reset-password?token=`, `accept-invite`
+  and `mfa-verify?challenge=`. The compose file also defaulted the measurement
+  id to Rekey's own property on a self-hosted console.
+- **An operator PAT ignored role demotion.** A token minted by an admin kept
+  full workspace power after that person became a member, including minting
+  Application secret keys — durable credentials outliving the token. Scopes
+  bound what a token may do; they cannot say whether its holder is still
+  allowed to do it.
+- **The per-Application auth ceiling was per-IP, always.** It keyed on a field
+  a parent hook could never see, so no aggregate per-Application cap existed:
+  one password sprayed across many accounts from rotating IPs was bounded only
+  per IP.
+
+### Billing
+
+- **A granted term never ended.** Entitlement resolution read status alone and
+  nothing swept an elapsed period, so "comp this account for fourteen days" was
+  a permanent grant. Shipped with a backfill, because making that column
+  load-bearing retroactively would have expired every hand-provisioned
+  subscription on deploy.
+- **One webhook could rewrite every subscription in an application.** A payload
+  with no subscription id collapsed the `where` clause; a single
+  `subscription.deleted` cancelled the lot.
+- **A chargeback opened a dunning case**, emailing the customer about the
+  charge they were disputing.
+- **A plan with two CREDIT entitlements granted one.** The buyer paid for 700
+  credits and received 500.
+- **PayPal money was wrong in both directions** for currencies with no minor
+  unit: sales recorded at 100x, and plans registered at a hundredth of their
+  price with a decimal point PayPal rejects outright.
+- **Operator cancellation ended every provider-less subscription immediately**,
+  mid-period, no refund — while the self-service path on the same row cancelled
+  at period end.
+
+### Added
+
+- **Trials.** `Plan.trialDays`, `Subscription.trialEndsAt`, and `TRIALING`.
+  Fail-closed per provider: a module must declare `capabilities.trials` before
+  a plan carrying one can be checked out through it, because silently dropping
+  a trial charges the buyer today for something the pricing page called free.
+
+### Fixed
+
+- Refresh, reset and verification tokens are pruned, with a thirty-day window
+  so replay detection keeps working — deleting a revoked token immediately
+  turns "this was rotated" into "unknown token".
+- The panel no longer loses the whole console to one 403, and a decorative
+  health probe can no longer hold it for five minutes.
+- The OSS strip runs on every pull request. It had been broken on `main`,
+  silently blocking every release.
+
+### Performance
+
+Email sends are bounded end to end, including the tenant-supplied SMTP path
+where the per-phase timeouts allowed a 42-second stall. API-key auth is one
+query, `lastUsedAt` writes are throttled, and the tenant filter moved into the
+query itself rather than depending on every caller to remember it.
+
 ## 2.0.0-rc.7
 
 A new package for Astro, and the session bug shipping it exposed in the Next.js

@@ -14,7 +14,7 @@ const fontAkkurat = localFont({
   display: 'swap',
   src: [
     { path: '../../public/fonts/Akkurat.ttf', weight: '400', style: 'normal' },
-    { path: '../../public/fonts/FontsFree-Net-Akkurat-Bold.ttf', weight: '700', style: 'normal' },
+    { path: '../../public/fonts/Akkurat-Bold.ttf', weight: '700', style: 'normal' },
   ],
   fallback: ['ui-sans-serif', 'system-ui', '-apple-system', 'sans-serif'],
 });

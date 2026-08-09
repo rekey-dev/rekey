@@ -224,6 +224,10 @@ export class RealStripeProvider implements BillingProvider {
           planId: input.plan.id,
         },
         subscription_data: {
+          // Stripe runs the clock and charges when it ends, reporting
+          // `trialing` until then — which `mapStripeSubStatus` now surfaces as
+          // TRIALING instead of folding into ACTIVE.
+          ...(input.trial && { trial_period_days: input.trial.days }),
           metadata: {
             applicationId: input.application.id,
             endUserId: input.endUser.id,

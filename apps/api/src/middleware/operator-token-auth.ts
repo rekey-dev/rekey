@@ -31,6 +31,7 @@ import type { TenantRole } from '@prisma/client';
 import { RekeyError } from '../lib/error.js';
 import { prisma } from '../lib/prisma.js';
 import { hashOperatorToken, type OperatorTokenScope } from '../lib/operator-token.js';
+import { shouldWriteLastUsed } from '../lib/last-used-throttle.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -103,13 +104,16 @@ export async function resolveOperatorToken(
   request.tenantMembershipId = membership.id;
   request.operatorTokenScopes = token.scopes;
 
-  // Best-effort lastUsedAt bump. Fire-and-forget: a failed write here must
+  // Best-effort lastUsedAt bump, at most once per token per minute (see
+  // lib/last-used-throttle.ts). Fire-and-forget: a failed write here must
   // never reject the request. Not awaited.
-  void prisma.tenantApiToken
-    .update({ where: { id: token.id }, data: { lastUsedAt: new Date() } })
-    .catch(() => {
-      /* ignore — telemetry only */
-    });
+  if (shouldWriteLastUsed(`pat:${token.id}`)) {
+    void prisma.tenantApiToken
+      .update({ where: { id: token.id }, data: { lastUsedAt: new Date() } })
+      .catch(() => {
+        /* ignore — telemetry only */
+      });
+  }
 }
 
 /**

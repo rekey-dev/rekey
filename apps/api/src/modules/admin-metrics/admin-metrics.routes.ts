@@ -466,7 +466,10 @@ const AdminSubscriptionSummaryItem: JsonSchema = {
     endUserId: { type: 'string' },
     planSlug: { type: 'string' },
     planName: { type: 'string' },
-    status: { type: 'string', enum: ['PENDING', 'ACTIVE', 'PAST_DUE', 'CANCELED', 'EXPIRED'] },
+    status: {
+      type: 'string',
+      enum: ['PENDING', 'ACTIVE', 'TRIALING', 'PAST_DUE', 'CANCELED', 'EXPIRED'],
+    },
     currency: { type: 'string' },
     amount: { type: 'integer' },
     interval: { type: 'string' },
@@ -797,7 +800,7 @@ const SubscriptionsQuery = z.object({
   offset: Offset,
   q: Q,
   order: Order,
-  status: z.enum(['PENDING', 'ACTIVE', 'PAST_DUE', 'CANCELED', 'EXPIRED']).optional(),
+  status: z.enum(['PENDING', 'ACTIVE', 'TRIALING', 'PAST_DUE', 'CANCELED', 'EXPIRED']).optional(),
   applicationId: z.string().min(1).optional(),
 });
 

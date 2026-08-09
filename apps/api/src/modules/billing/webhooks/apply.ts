@@ -219,7 +219,11 @@ async function resolveChargeCurrency(
 
   // USAGE plans bill on consumption and a zero-amount plan has no price to
   // compare against, so neither has a meaningful ceiling here.
-  if (plan.kind !== 'USAGE' && plan.amount > 0 && charge.amount > plan.amount * MAX_PLAN_AMOUNT_MULTIPLE) {
+  // `>=`, not `>`. The classic failure this catches is a major-units amount
+  // recorded as minor units, which is a clean 100× — and with a multiple of
+  // 100 that lands exactly ON the boundary, so a strict `>` let through the
+  // single most likely instance of the bug the guard exists for.
+  if (plan.kind !== 'USAGE' && plan.amount > 0 && charge.amount >= plan.amount * MAX_PLAN_AMOUNT_MULTIPLE) {
     log.error(
       {
         ...context,
@@ -326,6 +330,19 @@ export async function applyCheckoutCompleted(
   ev: CheckoutCompletedEvent,
   ctx: ApplyContext,
 ): Promise<void> {
+  // Same hazard the status mirror carried: an empty identifier does not match
+  // nothing, it matches the wrong rows. `checkoutSessionWhere` builds a JSON
+  // path filter, and Prisma strips an `undefined` operator — leaving a filter
+  // that can match every subscription in the application, which the
+  // `updateMany` below would then mark ACTIVE. The type says `string`; only
+  // PayPal's translator enforces it.
+  if (!ev.checkoutSessionId) {
+    ctx.log.warn(
+      { applicationId: ev.applicationId, type: ev.type },
+      'checkout event carries no session id — ignored',
+    );
+    return;
+  }
   const where = checkoutSessionWhere(ev.applicationId, ev.checkoutSessionId);
   // Pre-transition snapshot so the outbound `subscription.activated` event
   // fires only on a REAL state change — a replayed event whose row is
@@ -518,6 +535,19 @@ export async function applyCheckoutApproved(
   ev: CheckoutApprovedEvent,
   ctx: ApplyContext,
 ): Promise<void> {
+  // Same hazard the status mirror carried: an empty identifier does not match
+  // nothing, it matches the wrong rows. `checkoutSessionWhere` builds a JSON
+  // path filter, and Prisma strips an `undefined` operator — leaving a filter
+  // that can match every subscription in the application, which the
+  // `updateMany` below would then mark ACTIVE. The type says `string`; only
+  // PayPal's translator enforces it.
+  if (!ev.checkoutSessionId) {
+    ctx.log.warn(
+      { applicationId: ev.applicationId, type: ev.type },
+      'checkout event carries no session id — ignored',
+    );
+    return;
+  }
   const sub = await prisma.subscription.findFirst({
     where: checkoutSessionWhere(ev.applicationId, ev.checkoutSessionId),
     include: { plan: true },
@@ -601,6 +631,9 @@ function localSubscriptionWhere(
   | { applicationId: string; providerSubId: string }
   | { applicationId: string; OR: object[] }
   | null {
+  // Truthiness is the whole contract here: an empty string, null or undefined
+  // must all yield `null` from this function, because each one turns into a
+  // filter that matches the wrong rows rather than no rows.
   if (providerSubscriptionId && !checkoutSessionId) {
     // Exactly the historical query — no OR clause for Stripe/PayPal.
     return { applicationId, providerSubId: providerSubscriptionId };
@@ -887,9 +920,34 @@ export async function applyPaymentRefunded(
   ev: PaymentRefundedEvent,
   ctx: ApplyContext,
 ): Promise<void> {
+  // Records the reversal on the books. It does NOT revoke what the payment
+  // bought — clawing back credits, licences and subscriptions is #413, and
+  // needs a dispute policy, a negative-balance primitive and a restore path
+  // for a dispute the operator wins. Until then the operator reverses credits
+  // with `credits.grant({ reason: 'ADJUST', amount: -n })`, which is audited.
+  //
+  // Writing the status is still worth doing on its own: without it the
+  // operator's payment list and revenue figures disagree with the provider,
+  // and `PaymentStatus.REFUNDED` was a value three routes could filter on and
+  // nothing ever wrote.
+  const { count } = await prisma.payment.updateMany({
+    where: {
+      applicationId: ev.applicationId,
+      providerPaymentId: ev.providerPaymentId,
+      status: 'SUCCEEDED',
+    },
+    data: { status: 'REFUNDED' },
+  });
+
   ctx.log.info(
-    { providerPaymentId: ev.providerPaymentId, applicationId: ev.applicationId },
-    'payment.refunded received — refunds are not yet modeled; event recorded, no domain change',
+    {
+      providerPaymentId: ev.providerPaymentId,
+      applicationId: ev.applicationId,
+      marked: count,
+    },
+    count > 0
+      ? 'payment.refunded — payment marked REFUNDED; entitlements NOT revoked (see #413)'
+      : 'payment.refunded — no matching succeeded payment; recorded only',
   );
 }
 
@@ -929,9 +987,37 @@ async function applySubscriptionStatusMirror(
   ev: SubscriptionStatusEvent,
   ctx: ApplyContext,
 ): Promise<void> {
-  const where =
-    localSubscriptionWhere(ev.applicationId, ev.providerSubscriptionId, ev.checkoutSessionId) ??
-    { applicationId: ev.applicationId, providerSubId: ev.providerSubscriptionId };
+  // No identifier, no write. `localSubscriptionWhere` returns null only when
+  // the event carries neither a provider subscription id nor a checkout
+  // session id — nothing that names a row.
+  //
+  // This used to fall back to `{ applicationId, providerSubId: <the id we just
+  // established is missing> }`. Prisma drops an `undefined` filter entirely, so
+  // that collapsed to `{ applicationId }` and the `updateMany` below mirrored
+  // the payload's status onto EVERY subscription in the application; a `null`
+  // was worse in a different way, matching every row with no provider — which
+  // on a deployment where subscriptions are granted rather than checked out is
+  // all of them. One `customer.subscription.deleted` missing its `id` cancels
+  // the whole application; one `updated` with `status: active` entitles every
+  // abandoned checkout in it. `transitionAllowed` does not save it, because it
+  // is evaluated against a single sampled row and then applied to all of them.
+  //
+  // The type says `providerSubscriptionId: string`, which is why the fallback
+  // looked unreachable. Only PayPal's translator actually enforces it; Stripe
+  // and Razorpay pass the provider's field through unchecked, so a malformed
+  // delivery reaches here with it empty.
+  const where = localSubscriptionWhere(
+    ev.applicationId,
+    ev.providerSubscriptionId,
+    ev.checkoutSessionId,
+  );
+  if (where === null) {
+    ctx.log?.warn(
+      { applicationId: ev.applicationId, type: ev.type },
+      'subscription status event names no subscription — ignored',
+    );
+    return;
+  }
   // Snapshot the pre-state so the outbound lifecycle event fires only when
   // the LOCAL status actually changes (replays / period-only updates emit
   // nothing).
@@ -1008,6 +1094,7 @@ async function applySubscriptionStatusMirror(
       data: {
         status: ev.status,
         ...(ev.currentPeriodEnd !== undefined && { currentPeriodEnd: ev.currentPeriodEnd }),
+        ...(ev.trialEndsAt !== undefined && { trialEndsAt: ev.trialEndsAt }),
         ...(ev.cancelAt !== undefined && { cancelAt: ev.cancelAt }),
         ...(ev.canceledAt !== undefined && { canceledAt: ev.canceledAt }),
       },
@@ -1056,6 +1143,16 @@ export async function applySubscriptionPeriodAdvanced(
   ev: SubscriptionPeriodAdvancedEvent,
   ctx: ApplyContext,
 ): Promise<void> {
+  // An empty id here would match an arbitrary row rather than none: Prisma
+  // drops an `undefined` filter, and `null` matches every provider-less
+  // subscription. Same hazard as the status mirror above; refuse it first.
+  if (!ev.providerSubscriptionId) {
+    ctx.log.warn(
+      { applicationId: ev.applicationId },
+      'subscription.period_advanced without a provider subscription id — ignoring',
+    );
+    return;
+  }
   const localSub = await prisma.subscription.findFirst({
     where: { applicationId: ev.applicationId, providerSubId: ev.providerSubscriptionId },
   });

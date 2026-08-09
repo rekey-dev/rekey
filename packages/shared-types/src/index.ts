@@ -766,7 +766,14 @@ export type PlanKindType = Open<KnownPlanKind>;
 export const LicenseKindSchema = z.enum(['PERPETUAL', 'TIMED', 'SEATS']);
 export type LicenseKindType = z.infer<typeof LicenseKindSchema>;
 
-export const SubscriptionStatusSchema = z.enum(['PENDING', 'ACTIVE', 'PAST_DUE', 'CANCELED', 'EXPIRED']);
+export const SubscriptionStatusSchema = z.enum([
+  'PENDING',
+  'ACTIVE',
+  'TRIALING',
+  'PAST_DUE',
+  'CANCELED',
+  'EXPIRED',
+]);
 /** The statuses this SDK version knows about. Closed — use it for registries. */
 export type KnownSubscriptionStatus = z.infer<typeof SubscriptionStatusSchema>;
 /** {@link Open}. `TRIALING` is the obvious next one; handle the default branch. */
@@ -962,7 +969,38 @@ export interface CancellationTimingInput {
  * action does not go through. That needs the expiry seam widened first.
  */
 export function cancelEffect(sub: CancellationTimingInput): 'period-end' | 'immediate' {
-  return sub.status === 'ACTIVE' && sub.currentPeriodEnd !== null ? 'period-end' : 'immediate';
+  // ACTIVE or TRIALING — deliberately NOT the full entitling set. PAST_DUE
+  // entitles (a card not yet retried to exhaustion should not cut access) but
+  // must still cancel IMMEDIATELY: there is no paid period left to run out, so
+  // scheduling one would hand out time nobody paid for. Using
+  // `isEntitlingStatus` here conflated the two questions and the suite caught
+  // it.
+  const inPaidPeriod = sub.status === 'ACTIVE' || sub.status === 'TRIALING';
+  return inPaidPeriod && sub.currentPeriodEnd !== null ? 'period-end' : 'immediate';
+}
+
+/**
+ * The statuses that mean "this subscriber currently has what they paid for".
+ *
+ * ONE definition, exported, because this concept was previously a bare
+ * `['ACTIVE', 'PAST_DUE']` literal written out in eleven places across four
+ * deployables — the API, the marketing site, the billing worker and the
+ * portal. Adding TRIALING to nine of them and missing the rest produced
+ * trialists who were entitled by the API, shown the purchase page by
+ * marketing, and given no workspace by the provisioning worker.
+ *
+ * Import this. A miss is then a compile error rather than something a reviewer
+ * has to find eleven times.
+ *
+ * PAST_DUE entitles deliberately: a card that has not yet been retried to
+ * exhaustion is a dunning problem, not a reason to cut off a paying customer.
+ * TRIALING entitles because a trial the subscriber cannot use is not a trial.
+ */
+export const ENTITLING_SUBSCRIPTION_STATUSES = ['ACTIVE', 'TRIALING', 'PAST_DUE'] as const;
+
+/** Does this status entitle? Accepts anything, so an unknown value is false. */
+export function isEntitlingStatus(status: string | null | undefined): boolean {
+  return status != null && (ENTITLING_SUBSCRIPTION_STATUSES as readonly string[]).includes(status);
 }
 
 /**

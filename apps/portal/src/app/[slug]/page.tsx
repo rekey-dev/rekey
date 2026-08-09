@@ -1,3 +1,4 @@
+import { isEntitlingStatus } from '@rekey.dev/shared-types';
 import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { cancelCopy } from '@/lib/cancel-copy';
@@ -161,7 +162,7 @@ export default async function DashboardPage({
                 {canceling ? 'Ends' : 'Renews'} on {new Date(endsOn).toLocaleDateString()}
               </p>
             )}
-            {subscription.status === 'ACTIVE' && !canceling && canCheckout && (
+            {isEntitlingStatus(subscription.status) && !canceling && canCheckout && (
               <form action={cancelSubscriptionAction.bind(null, slug, orgId)} className="pt-2">
                 <ConfirmSubmit
                   variant="neutral"

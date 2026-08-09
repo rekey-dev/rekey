@@ -85,7 +85,13 @@ export type AppRef = { applicationId: string } | { slug: string };
  * here so modules/appliers don't depend on the generated client's enum
  * export shape.
  */
-export type LocalSubscriptionStatus = 'ACTIVE' | 'PAST_DUE' | 'CANCELED' | 'EXPIRED' | 'PENDING';
+export type LocalSubscriptionStatus =
+  | 'ACTIVE'
+  | 'TRIALING'
+  | 'PAST_DUE'
+  | 'CANCELED'
+  | 'EXPIRED'
+  | 'PENDING';
 
 interface DomainEventBase {
   /** Provider's event id — the idempotency key stored in `webhook_events`. */
@@ -241,6 +247,13 @@ export interface SubscriptionStatusEvent extends DomainEventBase {
   checkoutSessionId?: string;
   status: LocalSubscriptionStatus;
   currentPeriodEnd?: Date | null;
+  /**
+   * When the trial ends, for a subscription the provider is running a trial
+   * on. Mirrored so the panel can say "trial ends in 4 days" and so a
+   * converted trial stays reportable — the status moves to ACTIVE, and
+   * without the date nothing records that the customer arrived via a trial.
+   */
+  trialEndsAt?: Date | null;
   cancelAt?: Date | null;
   canceledAt?: Date | null;
 }
@@ -355,6 +368,20 @@ export interface ProviderModule {
      * bill full price for. Fail-closed here costs a refused checkout;
      * fail-open costs the buyer money.
      */
+    /**
+     * Whether the provider can start a subscription in a free trial that it
+     * converts to a charge on its own.
+     *
+     * OPTIONAL, and absent means **cannot**, for the same reason as
+     * `discounts`: a module that says nothing must not be handed a trial it
+     * will silently drop. Dropping one charges the buyer today for something
+     * the pricing page told them was free for fourteen days — a chargeback and
+     * a support ticket, not a rendering bug.
+     *
+     * Not split by flow: a trial only makes sense on a recurring subscription.
+     * There is nothing for a one-off charge to convert into.
+     */
+    trials?: boolean;
     discounts?: {
       /** One-off charges — CREDIT packs and perpetual LICENSE purchases. */
       oneTime: boolean;

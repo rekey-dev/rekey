@@ -495,9 +495,13 @@ describe('email-verification configuration', () => {
       expect(await prisma.emailVerificationToken.count({ where: { applicationId } })).toBe(0);
     });
 
-    it('a caller-supplied verifyUrl satisfies that on its own', async () => {
+    it('a caller-supplied verifyUrl satisfies that — once its origin is registered', async () => {
+      // This used to pass with NOTHING registered, which was the hole: the
+      // route accepts a publishable key, so anyone could have us mail a live
+      // token to a domain they chose. The URL must now be on an origin the
+      // Application declared.
       await signUp();
-      await setAuthConfig({ appUrl: null, redirectUrls: [] });
+      await setAuthConfig({ appUrl: null, redirectUrls: ['https://elsewhere.example.com/cb'] });
       await prisma.emailVerificationToken.deleteMany({ where: { applicationId } });
 
       const res = await resend(euEmail, liveKey, {

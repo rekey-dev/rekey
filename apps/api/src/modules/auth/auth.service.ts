@@ -82,7 +82,7 @@ import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { endUserRolesService } from '../end-user-roles/end-user-roles.service.js';
 import { mfaService } from '../mfa/mfa.service.js';
 import { emailService } from '../email/email.service.js';
-import { resolveAppUrl, buildTokenUrl } from '../../lib/app-url.js';
+import { resolveAppUrl, buildTokenUrl , assertAllowedTokenUrl } from '../../lib/app-url.js';
 import { recordAuthEmailDeliveryFailure } from '../../lib/email-transport.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 import { emitDetached } from '../webhooks/webhook.service.js';
@@ -467,6 +467,9 @@ export async function deliverVerificationEmail(args: {
 }): Promise<{ emailSent: boolean; verificationToken: string | null }> {
   // Resolved BEFORE the token is minted: a send we are about to refuse should
   // not leave a live token in the table either.
+  // Refuse a destination this Application has not declared — see
+  // assertAllowedTokenUrl. This link carries a live token in an email we send.
+  assertAllowedTokenUrl(args.application, args.verifyUrl, 'verifyUrl');
   const base = args.verifyUrl === undefined ? resolveAppUrl(args.application, args.appUrl) : null;
   if (args.requireResolvableUrl === true && args.verifyUrl === undefined && base === null) {
     // The only trace this leaves — nothing reaches the transport, so there is
@@ -1054,6 +1057,7 @@ export const authService = {
       if (input.authKind === 'publishable') return PUBLISHABLE_SEND_RESPONSE;
       return { delivered: false, emailSent: false, resetToken: null };
     }
+    assertAllowedTokenUrl(input.application, input.resetUrl, 'resetUrl');
     const issued = await issueResetToken(input.application.id, endUser.id);
 
     const outcome = await emailService.dispatch({
@@ -1348,6 +1352,7 @@ export const authService = {
       return { delivered: false, emailSent: false, magicLinkToken: null };
     }
 
+    assertAllowedTokenUrl(input.application, input.signInUrl, 'signInUrl');
     const issued = await issueMagicLinkToken({
       applicationId: input.application.id,
       endUserId: endUser?.id ?? null,

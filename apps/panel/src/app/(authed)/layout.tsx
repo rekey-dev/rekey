@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { Suspense } from 'react';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { ACCESS_COOKIE, REFRESH_COOKIE, api, clearSessionCookies, setSessionCookies, publicPost, PanelApiError, type AuthResponse, getMe } from '@/lib/api';
@@ -166,8 +167,16 @@ export default async function AuthedLayout({
           page" behaviour without creating that box, so the sticky save footer
           on Auth methods / Access actually sticks. */}
       <main id="main" tabIndex={-1} className="flex-1 min-w-0 overflow-x-clip outline-none">
-        {/* Renders nothing unless a backing service is actually unreachable. */}
-        <DependencyBanner />
+        {/* Renders nothing unless a backing service is actually unreachable.
+            Suspended on its own: it is an async component rendered directly in
+            the layout, so without a boundary the layout cannot flush until the
+            probe resolves — and `loading.tsx` only wraps {children}, so a slow
+            probe meant a blank page instead of the skeleton on every Data Cache
+            miss. Losing the banner is an acceptable failure; holding every
+            authed page behind it is not. */}
+        <Suspense fallback={null}>
+          <DependencyBanner />
+        </Suspense>
         {children}
       </main>
       {/* Cmd+K palette — a client island; available on every authed page. */}

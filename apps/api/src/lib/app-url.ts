@@ -33,6 +33,7 @@
 
 import type { Application } from '@prisma/client';
 import { env } from '../config/env.js';
+import { RekeyError } from './error.js';
 
 /**
  * Parse a candidate as an absolute http(s) URL and normalise it to an origin
@@ -110,4 +111,91 @@ export function resolveAppUrl(
 export function buildTokenUrl(base: string | null, path: string, token: string): string {
   if (base === null) return '';
   return `${base}${path}?token=${encodeURIComponent(token)}`;
+}
+
+/**
+ * Refuse a caller-supplied email link that points somewhere this Application
+ * has not declared.
+ *
+ * The reset, magic-link and verification routes accept a `{token}` template
+ * from the caller and render it into an `<a href>` in an email we send, with
+ * our branding and our SPF/DKIM. The URL was validated only for being
+ * parseable — no scheme check, no origin check — and all three routes accept
+ * the PUBLISHABLE key, which is public by design and served unauthenticated by
+ * the portal config endpoint.
+ *
+ * So anyone could ask us to mail a victim a genuine, correctly-branded,
+ * deliverable message whose button carried a live single-use session token to
+ * a domain they controlled. One click was a full account takeover, and every
+ * signal a careful user checks — sender, branding, authentication headers —
+ * said the mail was legitimate, because it was.
+ *
+ * `authConfig.redirectUrls` already existed for exactly this and was enforced
+ * nowhere: its only reader treated it as a source of defaults.
+ *
+ * The allowlist is the Application's own `appUrl` plus its `redirectUrls`,
+ * compared by ORIGIN, so an operator can keep using per-environment paths
+ * without registering each one. An Application that has declared neither has
+ * nothing to compare against, so a caller-supplied URL is refused outright —
+ * fail closed, because the alternative is the hole above.
+ */
+export function assertAllowedTokenUrl(
+  application: { authConfig?: unknown },
+  url: string | undefined,
+  field: string,
+): void {
+  if (url === undefined) return;
+
+  let candidate: URL;
+  try {
+    candidate = new URL(url);
+  } catch {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'AUTH_URL_INVALID',
+      message: `\`${field}\` is not a valid URL.`,
+      fix: 'Pass an absolute URL on an origin this Application has registered.',
+    });
+  }
+
+  // http(s) only. A `javascript:` or `data:` href in an email is inert in most
+  // clients and live in some, and neither is ever a legitimate answer here.
+  if (candidate.protocol !== 'https:' && candidate.protocol !== 'http:') {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'AUTH_URL_NOT_ALLOWED',
+      message: `\`${field}\` must be an http(s) URL.`,
+      fix: 'Pass an absolute http(s) URL on a registered origin.',
+    });
+  }
+
+  const authConfig = (application.authConfig ?? {}) as {
+    appUrl?: unknown;
+    redirectUrls?: unknown;
+  };
+  const declared = [
+    typeof authConfig.appUrl === 'string' ? authConfig.appUrl : null,
+    ...(Array.isArray(authConfig.redirectUrls) ? authConfig.redirectUrls : []),
+  ].filter((v): v is string => typeof v === 'string' && v.length > 0);
+
+  const allowed = new Set<string>();
+  for (const d of declared) {
+    try {
+      allowed.add(new URL(d).origin);
+    } catch {
+      // A malformed stored value allows nothing rather than everything.
+    }
+  }
+
+  if (!allowed.has(candidate.origin)) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'AUTH_URL_NOT_ALLOWED',
+      message: `\`${field}\` points at ${candidate.origin}, which this Application has not registered.`,
+      fix:
+        'Add the origin to the Application\'s redirect URLs (Panel → Application → Auth methods), ' +
+        'or set its App URL. This link is emailed to your users carrying a login token, so it is ' +
+        'refused rather than sent somewhere unrecognised.',
+    });
+  }
 }
