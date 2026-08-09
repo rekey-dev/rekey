@@ -24,6 +24,7 @@
  */
 
 import { RekeyError } from '../../../../../lib/error.js';
+import { paypalScale } from '../../paypal-money.js';
 import { verifyPaypalWebhook } from '../../paypal.js';
 import type { PaypalCredentials } from '../../../credentials.service.js';
 import type {
@@ -109,6 +110,7 @@ const MAX_PAYMENT_AMOUNT = 10_000_000_000;
  */
 function paypalAmountToMinor(
   value: string | undefined,
+  currency: string | undefined,
   log: FastifyBaseLogger,
   context: Record<string, unknown>,
 ): number | null {
@@ -118,7 +120,7 @@ function paypalAmountToMinor(
     log.warn({ ...context, value }, 'paypal amount non-finite/negative — dropping');
     return null;
   }
-  const minor = Math.round(major * 100);
+  const minor = Math.round(major * paypalScale(currency));
   if (minor > MAX_PAYMENT_AMOUNT) {
     log.error({ ...context, value, max: MAX_PAYMENT_AMOUNT }, 'paypal amount exceeds max — refusing');
     return null;
@@ -312,6 +314,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
     case 'PAYMENT.SALE.COMPLETED': {
       const amount = paypalAmountToMinor(
         resource?.amount?.total ?? resource?.amount?.value,
+        resource?.amount?.currency_code ?? resource?.amount?.currency,
         ctx.log,
         { eventId: providerEventId },
       );
@@ -370,6 +373,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
     case 'PAYMENT.CAPTURE.COMPLETED': {
       const amount = paypalAmountToMinor(
         resource?.amount?.value ?? resource?.amount?.total,
+        resource?.amount?.currency_code ?? resource?.amount?.currency,
         ctx.log,
         { eventId: providerEventId },
       );
@@ -408,9 +412,12 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
     case 'PAYMENT.SALE.DENIED':
     case 'PAYMENT.SALE.REVERSED': {
       const amount =
-        paypalAmountToMinor(resource?.amount?.total ?? resource?.amount?.value, ctx.log, {
-          eventId: providerEventId,
-        }) ?? 0;
+        paypalAmountToMinor(
+          resource?.amount?.total ?? resource?.amount?.value,
+          resource?.amount?.currency_code ?? resource?.amount?.currency,
+          ctx.log,
+          { eventId: providerEventId },
+        ) ?? 0;
       const currency = (
         resource?.amount?.currency_code ??
         resource?.amount?.currency ??

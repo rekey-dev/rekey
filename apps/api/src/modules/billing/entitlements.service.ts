@@ -120,7 +120,36 @@ const ENTITLING_STATUSES: SubscriptionStatus[] = ['ACTIVE', 'PAST_DUE'];
 function stillEntitling(now: Date) {
   return {
     status: { in: ENTITLING_STATUSES },
-    OR: [{ cancelAt: null }, { cancelAt: { gt: now } }],
+    AND: [
+      { OR: [{ cancelAt: null }, { cancelAt: { gt: now } }] },
+      // A term that has elapsed stops entitling — but only where the term is
+      // the last word on the matter.
+      //
+      // `grantSubscription` writes `provider: null, providerSubId: null` and a
+      // `currentPeriodEnd`, and nothing will ever renew that row. Resolution
+      // read status alone, so "grant them fourteen days" was a permanent
+      // grant: full access forever, the only trace a `currentPeriodEnd` in the
+      // past that nothing looked at. Every comped, invoice-provisioned and
+      // trial subscription had the same shape, which is why nothing
+      // time-boxed could be sold or comped safely.
+      //
+      // Provider-backed rows are deliberately exempt. There `currentPeriodEnd`
+      // is a RENEWAL date, moved forward by a webhook that can arrive late; a
+      // renewal that has happened but not yet been delivered would otherwise
+      // de-entitle a customer who has just paid. Over-entitling for the length
+      // of a webhook delay is the cheaper mistake, and the provider remains
+      // the authority on its own subscriptions.
+      //
+      // A null `currentPeriodEnd` is an open-ended grant and keeps entitling,
+      // which is what "comp this account indefinitely" has always meant.
+      {
+        OR: [
+          { providerSubId: { not: null } },
+          { currentPeriodEnd: null },
+          { currentPeriodEnd: { gt: now } },
+        ],
+      },
+    ],
   };
 }
 
@@ -545,8 +574,8 @@ export const entitlementsService = {
       subs = await prisma.subscription.findMany({
         where: {
           applicationId,
-          // `stillEntitling` owns the top-level OR, so the subject match goes
-          // under AND rather than colliding with it.
+          // `stillEntitling` returns its own AND, so the subject match goes
+          // under a sibling AND rather than colliding with it.
           AND: [
             stillEntitling(new Date()),
             {

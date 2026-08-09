@@ -18,6 +18,7 @@ import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { ApiKey, Application } from '@prisma/client';
 import { apiKeysService } from '../modules/api-keys/api-keys.service.js';
 import { prisma } from '../lib/prisma.js';
+import { shouldWriteLastUsed } from '../lib/last-used-throttle.js';
 import { RekeyError } from '../lib/error.js';
 import { ipMatchesAllowlist } from '../lib/ip-allowlist.js';
 import { portalOriginsForApp } from '../lib/portal-origins.js';
@@ -83,12 +84,12 @@ export async function requireApiKey(
     });
   }
 
-  const application = await prisma.application.findUnique({
-    where: { id: verified.applicationId },
-  });
+  // The Application arrives on the same query as the key (include in
+  // `verify`) — this used to be a second sequential round trip. The null
+  // check stays as defence in depth: FK CASCADE makes it unreachable, and if
+  // that ever breaks, 401 not 500 — the credential's referent is gone.
+  const application = verified.application;
   if (!application) {
-    // Should never happen — FK CASCADE removes the key when the app dies.
-    // Treat as 401 not 500: the credential's referent is gone.
     throw new RekeyError({
       statusCode: 401,
       code: 'API_KEY_INVALID',
@@ -125,13 +126,16 @@ export async function requireApiKey(
   request.apiKey = verified.apiKey;
   request.authKind = 'secret';
 
-  // Fire-and-forget lastUsedAt update. Never block the request on this — at
-  // worst we record one less timestamp under load.
-  void prisma.apiKey
-    .update({ where: { id: verified.apiKey.id }, data: { lastUsedAt: new Date() } })
-    .catch((err: unknown) => {
-      request.log.warn({ err }, 'lastUsedAt update failed');
-    });
+  // Fire-and-forget lastUsedAt update, at most once per key per minute (see
+  // lib/last-used-throttle.ts for why per-request writes were a problem).
+  // Never block the request on this.
+  if (shouldWriteLastUsed(`ak:${verified.apiKey.id}`)) {
+    void prisma.apiKey
+      .update({ where: { id: verified.apiKey.id }, data: { lastUsedAt: new Date() } })
+      .catch((err: unknown) => {
+        request.log.warn({ err }, 'lastUsedAt update failed');
+      });
+  }
 }
 
 /**

@@ -361,9 +361,9 @@ model TenantApiToken {
   tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
   tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  // tokenHash lookups ride the @unique's index (see ApiKey.keyHash note).
   @@index([tenantUserId])
   @@index([tenantId])
-  @@index([tokenHash])
   @@map("tenant_api_tokens")
 }
 
@@ -935,8 +935,9 @@ model ApiKey {
 
   application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
 
+  // keyHash lookups ride the @unique's index — a separate @@index([keyHash])
+  // was a duplicate, pure write amplification on a hot-insert table.
   @@index([applicationId])
-  @@index([keyHash])
   @@map("api_keys")
 }
 
@@ -1153,10 +1154,10 @@ model License {
   plan         Plan?             @relation(fields: [planId], references: [id], onDelete: SetNull)
   activations  LicenseActivation[]
 
+  // keyHash lookups ride the @unique's index (see ApiKey.keyHash note).
   @@index([applicationId])
   @@index([endUserId])
   @@index([organizationId])
-  @@index([keyHash])
   // App-scoped newest-first license list (licenses.service.list).
   @@index([applicationId, createdAt])
   @@map("licenses")
@@ -1268,6 +1269,16 @@ model UsageRecord {
   @@index([meterId, occurredAt])
   @@index([endUserId])
   @@index([organizationId])
+  // The quota/price SUM in usage.service.record filters (meterId, subject id,
+  // occurredAt month window) on every record against a priced or quota meter.
+  // Without a subject-leading compound, that scan reads the whole meter's
+  // month across ALL subjects via [meterId, occurredAt] and filters, while
+  // holding the meter lock: cost grew linearly through the month. Two indexes
+  // because the filter uses the id columns, deliberately NOT subjectKey: a
+  // record can carry both ids, and switching the filter to subjectKey would
+  // change which rows count toward a quota (see issue #418).
+  @@index([meterId, endUserId, occurredAt])
+  @@index([meterId, organizationId, occurredAt])
   @@map("usage_records")
 }
 
@@ -1677,6 +1688,12 @@ model Payment {
   // (`recent_payments`, the per-end-user payment tab). `(application_id)` alone
   // makes Postgres sort the whole app's payment history to answer them.
   @@index([applicationId, createdAt])
+  // `expireIfDue` (every portal read of a subscription with a past cancelAt)
+  // and the webhook renewal applier both look up payments by subscriptionId;
+  // Postgres does not auto-index FK columns, and the best plan without this
+  // was the low-selectivity [status] index. Single-column is enough: a
+  // subscription has few payments.
+  @@index([subscriptionId])
   @@map("payments")
 }
 

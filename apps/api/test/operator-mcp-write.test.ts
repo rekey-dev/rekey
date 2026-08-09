@@ -16,6 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 import { handleOperatorMcpMessage } from '../src/modules/tenant-mcp/tenant-mcp-server.js';
 
 interface OperatorSession {
@@ -160,11 +161,8 @@ describe('Operator MCP write tools', () => {
     expect(hook.isError).toBe(false);
     expect(typeof (hook.data as { secret: string }).secret).toBe('string');
 
-    // A security event was logged for the create.
-    const events = await prisma.securityEvent.findMany({
-      where: { tenantId: op.tenantId, type: 'app.created' },
-    });
-    expect(events.length).toBeGreaterThanOrEqual(1);
+    // A security event was logged for the create. Fire-and-forget, so wait.
+    const events = await waitForSecurityEvents({ tenantId: op.tenantId, type: 'app.created' });
     expect((events[0]!.metadata as { via?: string }).via).toBe('operator_mcp');
   });
 

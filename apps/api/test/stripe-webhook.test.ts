@@ -138,6 +138,50 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
 
   // ---------- idempotency ----------
 
+  it('a subscription event with no id touches nothing — it used to rewrite the whole application', async () => {
+    // `localSubscriptionWhere` returns null when the payload names no
+    // subscription. The mirror used to fall back to
+    // `{ applicationId, providerSubId: <the id we just established is
+    // missing> }`. Prisma drops an `undefined` filter and `null` matches every
+    // provider-less row, so the fallback mirrored the payload's status onto
+    // every subscription in the application — one `deleted` cancelled the lot.
+    //
+    // Signed with the application's own secret, because that is the
+    // precondition: this is what a malformed provider delivery looks like
+    // after it has verified.
+    const planId = await prisma.plan
+      .findFirstOrThrow({ where: { applicationId } })
+      .then((r) => r.id);
+    const eu = await prisma.endUser.create({
+      data: { applicationId, email: `blast-${Date.now()}@example.com`, passwordHash: 'x' },
+    });
+    const untouched = await prisma.subscription.create({
+      data: { applicationId, endUserId: eu.id, planId, status: 'ACTIVE', provider: null },
+    });
+
+    const evt = {
+      id: `evt_noid_${Date.now()}`,
+      object: 'event',
+      type: 'customer.subscription.deleted',
+      // No `id` on the subscription object.
+      data: { object: { object: 'subscription', status: 'canceled', metadata: { applicationId } } },
+    };
+    const { payload, headers } = signedRequest(evt);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/billing/webhook/stripe/${SLUG}`,
+      headers,
+      payload,
+    });
+    expect(res.statusCode).toBe(200);
+
+    // The unrelated subscription is exactly as it was.
+    const after = await prisma.subscription.findUniqueOrThrow({ where: { id: untouched.id } });
+    expect(after.status).toBe('ACTIVE');
+    expect(after.canceledAt).toBeNull();
+  });
+
   it('processes an event once, marks duplicate replays as already-seen', async () => {
     const evt = {
       id: 'evt_idempo_1',

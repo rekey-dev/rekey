@@ -413,7 +413,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     async (req) => {
       const { id } = AppParam.parse(req.params);
       const access = await ensureAppAccess(req, id, 'read');
-      const application = await applicationsService.get(id);
+      const application = await applicationsService.get(id, { tenantId: req.tenantId! });
       // Surface the PUBLIC MCP URL (derived from PUBLIC_WEBHOOK_BASE_URL/API_URL
       // on the API side) so the panel shows the externally-reachable host, not
       // its own in-cluster REKEY_URL (e.g. http://api:3030).
@@ -2137,7 +2137,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         .object({ id: z.string(), provider: providerNameSchema })
         .parse(req.params);
       await ensureAppAccess(req, params.id, 'write');
-      const application = await applicationsService.get(params.id);
+      const application = await applicationsService.get(params.id, {
+        tenantId: req.tenantId!,
+      });
       const result = await registerProviderWebhook(
         params.id,
         params.provider as BillingProviderName,
@@ -5081,7 +5083,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           fix: 'Verify the user id and that they signed up under this Application.',
         });
       }
-      const application = await applicationsService.get(id);
+      const application = await applicationsService.get(id, { tenantId: req.tenantId! });
       const result = await licensesService.issue({
         application,
         endUser,

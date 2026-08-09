@@ -133,8 +133,23 @@ export const applicationsService = {
     return prisma.application.count({ where: listWhere(tenantId, opts?.ids) });
   },
 
-  async get(id: string): Promise<Application> {
-    const app = await prisma.application.findUnique({ where: { id } });
+  /**
+   * Fetch one Application by id.
+   *
+   * Pass `scope.tenantId` on every tenant-surface call: it folds the
+   * ownership check into the query, so an id belonging to another tenant
+   * 404s identically to a missing id (no cross-tenant existence oracle) even
+   * if the caller forgot its `ensureAppAccess`. The bare form exists for the
+   * super-admin surface and system-internal callers (webhook pipeline, plan
+   * registration) that operate on system-derived ids. This parameter exists
+   * because an unscoped `get` on the tenant surface already caused one real
+   * cross-tenant bug: the guard should live in the query, not in caller
+   * discipline.
+   */
+  async get(id: string, scope?: { tenantId?: string }): Promise<Application> {
+    const app = scope?.tenantId
+      ? await prisma.application.findFirst({ where: { id, tenantId: scope.tenantId } })
+      : await prisma.application.findUnique({ where: { id } });
     if (!app) {
       throw new RekeyError({
         statusCode: 404,

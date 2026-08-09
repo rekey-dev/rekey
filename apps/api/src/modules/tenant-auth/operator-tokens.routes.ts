@@ -49,14 +49,22 @@ const OPERATOR_PAT_ERRORS = {
  * because a PAT's authority comes from its scopes, not from a membership row.
  */
 async function ensureAppInTenant(applicationId: string, tenantId: string): Promise<void> {
-  const app = await applicationsService.get(applicationId);
-  if (app.tenantId !== tenantId) {
-    throw new RekeyError({
-      statusCode: 404,
-      code: 'APPLICATION_NOT_FOUND',
-      message: `Application "${applicationId}" not found in this workspace.`,
-      fix: 'List applications via GET /api/v1/tenant/operator/applications.',
-    });
+  try {
+    // Scoped fetch: the tenant filter lives in the query itself, so a
+    // cross-tenant id and a missing id are indistinguishable at the DB.
+    await applicationsService.get(applicationId, { tenantId });
+  } catch (e) {
+    if (e instanceof RekeyError && e.code === 'APPLICATION_NOT_FOUND') {
+      // Re-throw with the PAT surface's own wording (the service's `fix`
+      // points at the admin list endpoint, which a PAT cannot call).
+      throw new RekeyError({
+        statusCode: 404,
+        code: 'APPLICATION_NOT_FOUND',
+        message: `Application "${applicationId}" not found in this workspace.`,
+        fix: 'List applications via GET /api/v1/tenant/operator/applications.',
+      });
+    }
+    throw e;
   }
 }
 

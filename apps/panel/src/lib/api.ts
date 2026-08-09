@@ -917,6 +917,13 @@ export async function getReadyReport(): Promise<ReadyReport | null> {
       // Short cache: enough that a burst of navigations shares one probe, short
       // enough that a resolved outage clears the banner promptly.
       next: { revalidate: 15 },
+      // Bounded, because this runs in the authed layout. An API host that
+      // accepts the connection and then hangs would otherwise hold the whole
+      // console on undici's default 300-second headers timeout — no sidebar, no
+      // skeleton, nothing — for a decorative banner. Two seconds is longer than
+      // a healthy probe and shorter than a user's patience; a timeout lands in
+      // the catch below and reports "no opinion", which renders nothing.
+      signal: AbortSignal.timeout(2000),
     });
     const json = (await res.json().catch(() => null)) as ReadyReport | null;
     if (json === null || typeof json !== 'object') return null;
