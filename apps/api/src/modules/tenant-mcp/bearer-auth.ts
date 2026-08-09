@@ -29,6 +29,7 @@ import type { TenantRole } from '@prisma/client';
 import { RekeyError } from '../../lib/error.js';
 import { prisma } from '../../lib/prisma.js';
 import { hashOperatorToken, isOperatorToken } from '../../lib/operator-token.js';
+import { shouldWriteLastUsed } from '../../lib/last-used-throttle.js';
 import {
   verifyOperatorMcpAccessToken,
   type OperatorMcpAccessClaims,
@@ -119,10 +120,15 @@ async function resolveByPat(request: FastifyRequest, raw: string): Promise<void>
   request.tenantMembershipId = membership.id;
   request.operatorTokenScopes = token.scopes;
 
-  // Best-effort lastUsedAt bump — never blocks the request.
-  void prisma.tenantApiToken
-    .update({ where: { id: token.id }, data: { lastUsedAt: new Date() } })
-    .catch(() => undefined);
+  // Best-effort lastUsedAt bump, at most once per token per minute (see
+  // lib/last-used-throttle.ts) — never blocks the request. Same "pat:"
+  // namespace as operator-token-auth.ts: both bump the same TenantApiToken
+  // row, so sharing the throttle slot is correct.
+  if (shouldWriteLastUsed(`pat:${token.id}`)) {
+    void prisma.tenantApiToken
+      .update({ where: { id: token.id }, data: { lastUsedAt: new Date() } })
+      .catch(() => undefined);
+  }
 }
 
 async function resolveByOAuthJwt(request: FastifyRequest, token: string): Promise<void> {

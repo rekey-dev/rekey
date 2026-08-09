@@ -111,7 +111,20 @@ export function authRateLimitKey(req: FastifyRequest): string {
 
 /** Bucket key for the per-Application ceiling across all auth endpoints. */
 export function authCeilingKey(req: FastifyRequest): string {
-  return `authceil:${req.apiKey?.id ?? req.ip}`;
+  // `req.application` first, then the key, then the IP.
+  //
+  // This read `req.apiKey?.id ?? req.ip` while the hook was registered on the
+  // ROOT instance and `requireApiKey` runs on child instances — parent hooks
+  // always run first, so `req.apiKey` was undefined on every request and the
+  // ceiling was per-IP, 100% of the time. `authRateLimitKey` also contains
+  // `req.ip`, so no aggregate per-Application cap existed anywhere: one
+  // password sprayed across many accounts from a rotating IP pool was bounded
+  // only per-IP.
+  //
+  // The existing test passed because it injects from 127.0.0.1 with no key —
+  // asserting per-IP behaviour while naming it per-Application.
+  const principal = req.application?.id ?? req.apiKey?.id;
+  return `authceil:${principal ?? req.ip}`;
 }
 
 /**

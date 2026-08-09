@@ -1021,7 +1021,7 @@ export const adminMetricsService = {
 
   async subscriptions(
     query: ListQuery<'createdAt'> & {
-      status?: 'PENDING' | 'ACTIVE' | 'PAST_DUE' | 'CANCELED' | 'EXPIRED' | undefined;
+      status?: 'PENDING' | 'ACTIVE' | 'TRIALING' | 'PAST_DUE' | 'CANCELED' | 'EXPIRED' | undefined;
       applicationId?: string | undefined;
     } = {},
   ): Promise<

@@ -34,7 +34,16 @@ export function Analytics() {
           window.dataLayer = window.dataLayer || [];
           function gtag(){dataLayer.push(arguments);}
           gtag('js', new Date());
-          gtag('config', '${GA_ID}');
+          // page_location is pinned to the PATH, never location.href.
+          // GA4 otherwise reports the full URL including the query string, and
+          // this console has token-bearing routes under the root layout:
+          // reset-password?token=, accept-invite, mfa-verify?challenge=.
+          // Those were being transmitted to a third party, where anyone with
+          // property read access could filter for them and replay an
+          // unconsumed operator-reset or invite token.
+          gtag('config', '${GA_ID}', {
+            page_location: window.location.origin + window.location.pathname,
+          });
         `}
       </Script>
       <Script

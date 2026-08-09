@@ -48,7 +48,7 @@ export const accountTools: AccountTool[] = [
         where: {
           applicationId: ctx.applicationId,
           endUserId: ctx.endUserId,
-          status: { in: ['ACTIVE', 'PAST_DUE'] },
+          status: { in: ['ACTIVE', 'TRIALING', 'PAST_DUE'] },
         },
         orderBy: { createdAt: 'desc' },
         include: { plan: { select: { slug: true, name: true, interval: true, amount: true, currency: true } } },

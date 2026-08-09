@@ -20,6 +20,10 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 
+// A caller-supplied verify link must sit on an origin the Application declared —
+// the route takes a publishable key, so an unregistered destination is refused.
+const VERIFY_ORIGIN = 'https://example.com';
+
 describe('verifyEmail refuses an erased end-user', () => {
   let app: FastifyInstance;
 
@@ -55,6 +59,23 @@ describe('verifyEmail refuses an erased end-user', () => {
       })
       .then((r) => (r.json().data as { id: string }).id);
 
+    // Register the origin the verify link points at. MERGED into the existing
+    // authConfig — replacing it wholesale drops the enabled sign-in methods and
+    // the fixture's own sign-up then fails.
+    const existing = await prisma.application.findUniqueOrThrow({
+      where: { id: applicationId },
+      select: { authConfig: true },
+    });
+    await prisma.application.update({
+      where: { id: applicationId },
+      data: {
+        authConfig: {
+          ...((existing.authConfig as Record<string, unknown>) ?? {}),
+          appUrl: VERIFY_ORIGIN,
+        },
+      },
+    });
+
     const liveKey = await app
       .inject({
         method: 'POST',
@@ -82,7 +103,7 @@ describe('verifyEmail refuses an erased end-user', () => {
         headers: { authorization: `Bearer ${liveKey}` },
         payload: {
           email: `eu-${slug}@example.com`,
-          verifyUrl: 'https://example.com/verify?token={token}',
+          verifyUrl: `${VERIFY_ORIGIN}/verify?token={token}`,
         },
       })
       .then((r) => (r.json().data as { verificationToken: string | null }).verificationToken);

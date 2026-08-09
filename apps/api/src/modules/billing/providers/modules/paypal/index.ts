@@ -24,6 +24,7 @@
  */
 
 import { RekeyError } from '../../../../../lib/error.js';
+import { paypalScale } from '../../paypal-money.js';
 import { verifyPaypalWebhook } from '../../paypal.js';
 import type { PaypalCredentials } from '../../../credentials.service.js';
 import type {
@@ -109,6 +110,7 @@ const MAX_PAYMENT_AMOUNT = 10_000_000_000;
  */
 function paypalAmountToMinor(
   value: string | undefined,
+  currency: string | undefined,
   log: FastifyBaseLogger,
   context: Record<string, unknown>,
 ): number | null {
@@ -118,7 +120,7 @@ function paypalAmountToMinor(
     log.warn({ ...context, value }, 'paypal amount non-finite/negative — dropping');
     return null;
   }
-  const minor = Math.round(major * 100);
+  const minor = Math.round(major * paypalScale(currency));
   if (minor > MAX_PAYMENT_AMOUNT) {
     log.error({ ...context, value, max: MAX_PAYMENT_AMOUNT }, 'paypal amount exceeds max — refusing');
     return null;
@@ -312,6 +314,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
     case 'PAYMENT.SALE.COMPLETED': {
       const amount = paypalAmountToMinor(
         resource?.amount?.total ?? resource?.amount?.value,
+        resource?.amount?.currency_code ?? resource?.amount?.currency,
         ctx.log,
         { eventId: providerEventId },
       );
@@ -370,6 +373,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
     case 'PAYMENT.CAPTURE.COMPLETED': {
       const amount = paypalAmountToMinor(
         resource?.amount?.value ?? resource?.amount?.total,
+        resource?.amount?.currency_code ?? resource?.amount?.currency,
         ctx.log,
         { eventId: providerEventId },
       );
@@ -405,12 +409,48 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
         },
       ];
     }
-    case 'PAYMENT.SALE.DENIED':
-    case 'PAYMENT.SALE.REVERSED': {
+    // DENIED is a payment that did not go through — dunning's job.
+    // REVERSED is money that DID go through and was taken back: a refund or a
+    // chargeback. Both used to translate to `payment.failed`, so a customer
+    // who disputed a charge had a dunning case opened against them and started
+    // receiving payment-failure emails about the charge they were disputing.
+    case 'PAYMENT.SALE.REVERSED':
+    case 'PAYMENT.CAPTURE.REVERSED':
+    case 'PAYMENT.CAPTURE.REFUNDED': {
+      const currency = (
+        resource?.amount?.currency_code ??
+        resource?.amount?.currency ??
+        'USD'
+      ).toUpperCase();
       const amount =
-        paypalAmountToMinor(resource?.amount?.total ?? resource?.amount?.value, ctx.log, {
-          eventId: providerEventId,
-        }) ?? 0;
+        paypalAmountToMinor(
+          resource?.amount?.total ?? resource?.amount?.value,
+          currency,
+          ctx.log,
+          { eventId: providerEventId },
+        ) ?? 0;
+      return [
+        {
+          type: 'payment.refunded',
+          providerEventId,
+          applicationId,
+          providerPaymentId: resource?.id ?? providerEventId,
+          providerSubscriptionId: resource?.billing_agreement_id ?? null,
+          amount,
+          currency,
+          description: null,
+          raw: payload,
+        },
+      ];
+    }
+    case 'PAYMENT.SALE.DENIED': {
+      const amount =
+        paypalAmountToMinor(
+          resource?.amount?.total ?? resource?.amount?.value,
+          resource?.amount?.currency_code ?? resource?.amount?.currency,
+          ctx.log,
+          { eventId: providerEventId },
+        ) ?? 0;
       const currency = (
         resource?.amount?.currency_code ??
         resource?.amount?.currency ??
@@ -447,6 +487,11 @@ export const paypalModule: ProviderModule = {
     priority: 110,
   },
   capabilities: {
+    // Subscriptions v1 expresses a trial only as an intro cycle minted onto
+    // the plan itself, which is a different feature from a per-checkout trial.
+    // Declared false rather than omitted so the discovery contract every
+    // provider exposes stays the same shape.
+    trials: false,
     oneTime: true,
     // Orders v2 doesn't auto-capture — CHECKOUT.ORDER.APPROVED →
     // checkout.approved → applier captures via captureOneTime.

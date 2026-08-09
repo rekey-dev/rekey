@@ -168,8 +168,34 @@ describe('paypal module translate', () => {
     ).toEqual([]);
   });
 
-  it('SALE.DENIED / SALE.REVERSED → payment.failed, amount falling back to 0', () => {
-    for (const type of ['PAYMENT.SALE.DENIED', 'PAYMENT.SALE.REVERSED']) {
+  it('SALE.DENIED → payment.failed; a REVERSAL is a refund, not a failure', () => {
+    // These used to share an arm. A reversal is money that went through and was
+    // taken back, so translating it to payment.failed opened a dunning case and
+    // emailed the customer about the charge they were disputing.
+    const reversed = translate(
+      {
+        id: 'WH-11R',
+        event_type: 'PAYMENT.SALE.REVERSED',
+        resource: { id: 'SALE-R', billing_agreement_id: 'I-AGR', amount: { total: '9.99', currency: 'USD' } },
+      },
+      ctx(),
+    );
+    expect(reversed?.[0]).toMatchObject({ type: 'payment.refunded', amount: 999 });
+
+    // The Orders v2 spellings translate the same way.
+    for (const t of ['PAYMENT.CAPTURE.REVERSED', 'PAYMENT.CAPTURE.REFUNDED']) {
+      const ev = translate(
+        {
+          id: `WH-${t}`,
+          event_type: t,
+          resource: { id: 'CAP-R', amount: { total: '9.99', currency: 'USD' } },
+        },
+        ctx(),
+      );
+      expect(ev?.[0]).toMatchObject({ type: 'payment.refunded' });
+    }
+
+    for (const type of ['PAYMENT.SALE.DENIED']) {
       const events = translate(
         {
           id: 'WH-11',

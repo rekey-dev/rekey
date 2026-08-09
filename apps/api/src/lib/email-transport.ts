@@ -62,6 +62,43 @@ export type EmailCredentials =
 
 export type SentVia = 'byo_resend' | 'byo_smtp' | 'default_resend';
 
+/**
+ * Outbound budget per send attempt, matching the billing providers'
+ * PAYPAL_TIMEOUT_MS / RAZORPAY_TIMEOUT_MS convention and rationale: these
+ * sends are awaited inline on auth request paths (the outcome decides whether
+ * the raw token is returned), and the SMTP host is a tenant-supplied address.
+ * Without a budget, nodemailer's defaults are 2 min connect / 10 min socket,
+ * so one slow or tarpit SMTP server holds every sign-up, password-reset and
+ * magic-link request for that Application open for minutes each. A timeout
+ * surfaces as `{kind:'error'}`, which every auth caller already handles
+ * safely (token withheld, delivery-failure security event recorded,
+ * enumeration-safe response shape preserved).
+ */
+const EMAIL_TIMEOUT_MS = 10_000;
+
+/**
+ * Race a send against the budget. The Resend SDK (v6) exposes no per-request
+ * abort option on `emails.send`, so the race is the available mechanism; the
+ * losing HTTP call is abandoned to settle in the background. The timeout
+ * message is deliberately fixed text: it is persisted to EmailLog.error and
+ * returned by the test-send route, both tenant-readable, so it must not
+ * describe the network (same rule as classifySmtpError below).
+ */
+async function withEmailDeadline<T>(work: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error('Email send timed out.')),
+      EMAIL_TIMEOUT_MS,
+    );
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export type SendOutcome =
   | { kind: 'sent'; messageId: string | null; via: SentVia }
   | { kind: 'no_transport' }
@@ -211,14 +248,16 @@ async function sendVia(
   if (creds.provider === 'resend') {
     try {
       const client = new Resend(creds.apiKey);
-      const res = await client.emails.send({
-        from: fromHeader(from.address, from.name),
-        to: input.to,
-        subject: input.subject,
-        html: input.html,
-        ...(input.text !== undefined && { text: input.text }),
-        ...(from.replyTo !== undefined && { replyTo: from.replyTo }),
-      });
+      const res = await withEmailDeadline(
+        client.emails.send({
+          from: fromHeader(from.address, from.name),
+          to: input.to,
+          subject: input.subject,
+          html: input.html,
+          ...(input.text !== undefined && { text: input.text }),
+          ...(from.replyTo !== undefined && { replyTo: from.replyTo }),
+        }),
+      );
       if (res.error) return { kind: 'error', message: res.error.message };
       return { kind: 'sent', messageId: res.data?.id ?? null, via: 'byo_resend' };
     } catch (e) {
@@ -253,15 +292,39 @@ async function sendVia(
       port: creds.port,
       secure: creds.secure,
       auth: { user: creds.user, pass: creds.pass },
+      // Tenant-chosen host: without these, nodemailer waits 2 min to connect
+      // and 10 min on a silent socket. Timeouts surface as ETIMEDOUT/ESOCKET,
+      // which classifySmtpError already maps to tenant-safe text.
+      connectionTimeout: EMAIL_TIMEOUT_MS,
+      greetingTimeout: EMAIL_TIMEOUT_MS,
+      socketTimeout: EMAIL_TIMEOUT_MS,
     });
-    const info = await transport.sendMail({
-      from: fromHeader(from.address, from.name),
-      to: input.to,
-      subject: input.subject,
-      html: input.html,
-      ...(input.text !== undefined && { text: input.text }),
-      ...(from.replyTo !== undefined && { replyTo: from.replyTo }),
-    });
+    // The nodemailer timeouts above are PER-PHASE, not a total budget:
+    // `socketTimeout` is an inactivity timer. An SMTP conversation is about
+    // seven round trips, so a host that answers every command just under the
+    // timer stalls the request indefinitely — measured at 42s against a server
+    // that never idled more than 6s. That is precisely the tarpit this module
+    // exists to bound, and it is the tenant-supplied host, the one we control
+    // least. The total deadline has to wrap the send itself.
+    let info;
+    try {
+      info = await withEmailDeadline(
+        transport.sendMail({
+          from: fromHeader(from.address, from.name),
+          to: input.to,
+          subject: input.subject,
+          html: input.html,
+          ...(input.text !== undefined && { text: input.text }),
+          ...(from.replyTo !== undefined && { replyTo: from.replyTo }),
+        }),
+      );
+    } catch (e) {
+      // Abandoning the promise leaves the socket open against a host that is
+      // already misbehaving; close it rather than holding a connection per
+      // stalled request.
+      transport.close();
+      throw e;
+    }
     return { kind: 'sent', messageId: info.messageId ?? null, via: 'byo_smtp' };
   } catch (e) {
     // Classified, not verbatim. This string is returned by the test-send route
@@ -336,13 +399,17 @@ async function sendDefaultResend(
   }
   try {
     const client = new Resend(env.RESEND_DEFAULT_API_KEY);
-    const res = await client.emails.send({
-      from: fromHeader(env.RESEND_DEFAULT_FROM, fromName),
-      to: input.to,
-      subject: input.subject,
-      html: input.html,
-      ...(input.text !== undefined && { text: input.text }),
-    });
+    // Same budget as the BYO path: operator flows (workspace invites, operator
+    // password reset) await this inline on unauthenticated endpoints too.
+    const res = await withEmailDeadline(
+      client.emails.send({
+        from: fromHeader(env.RESEND_DEFAULT_FROM, fromName),
+        to: input.to,
+        subject: input.subject,
+        html: input.html,
+        ...(input.text !== undefined && { text: input.text }),
+      }),
+    );
     if (res.error) return { kind: 'error', message: res.error.message };
     return { kind: 'sent', messageId: res.data?.id ?? null, via: 'default_resend' };
   } catch (e) {

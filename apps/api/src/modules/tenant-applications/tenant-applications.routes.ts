@@ -213,8 +213,19 @@ const CreatePlanBody = z.object({
   meterSlug: z.string().min(1).max(40).optional(),
   pricePerUnitCents: moneyAmount().optional(),
   creditsAmount: positiveBoundedInt().optional(),
+  // Free trial length. Bounded at a year: a "trial" longer than that is a free
+  // plan wearing a trial's name, and the bound stops a typo (365000) becoming
+  // a subscription nobody ever gets charged for.
+  trialDays: z.number().int().min(1).max(365).optional(),
   metadata: z.record(z.unknown()).optional(),
-});
+})
+  .refine((b) => b.trialDays === undefined || (b.kind ?? 'SUBSCRIPTION') === 'SUBSCRIPTION', {
+    // A trial converts into a recurring charge. A credit pack or a perpetual
+    // licence has nothing to convert into, so a trial on one is not a
+    // restriction worth explaining after the fact — it is a mistake.
+    message: 'trialDays applies to SUBSCRIPTION plans only.',
+    path: ['trialDays'],
+  });
 /**
  * Plan edit. Every field optional, at least one required — this used to accept
  * `{ active }` and nothing else, which left a plan the provider had refused
@@ -232,6 +243,9 @@ const UpdatePlanBody = z
     amount: z.number().int().min(0).optional(),
     currency: z.string().length(3).optional(),
     interval: z.enum(['MONTH', 'YEAR']).optional(),
+    // 0 removes the trial; null would need a different encoding through the
+    // JSON schema, and "no trial" and "zero days of trial" are the same thing.
+    trialDays: z.number().int().min(0).max(365).optional(),
     metadata: z.record(z.unknown()).optional(),
   })
   .refine((b) => Object.values(b).some((v) => v !== undefined), {
@@ -413,7 +427,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     async (req) => {
       const { id } = AppParam.parse(req.params);
       const access = await ensureAppAccess(req, id, 'read');
-      const application = await applicationsService.get(id);
+      const application = await applicationsService.get(id, { tenantId: req.tenantId! });
       // Surface the PUBLIC MCP URL (derived from PUBLIC_WEBHOOK_BASE_URL/API_URL
       // on the API side) so the panel shows the externally-reachable host, not
       // its own in-cluster REKEY_URL (e.g. http://api:3030).
@@ -1113,6 +1127,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...(body.meterSlug !== undefined && { meterSlug: body.meterSlug }),
         ...(body.pricePerUnitCents !== undefined && { pricePerUnitCents: body.pricePerUnitCents }),
         ...(body.creditsAmount !== undefined && { creditsAmount: body.creditsAmount }),
+        ...(body.trialDays !== undefined && { trialDays: body.trialDays }),
         ...(body.metadata !== undefined && { metadata: body.metadata }),
       });
       // Pricing is money. A plan/coupon change with no trail means nobody can
@@ -2137,7 +2152,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         .object({ id: z.string(), provider: providerNameSchema })
         .parse(req.params);
       await ensureAppAccess(req, params.id, 'write');
-      const application = await applicationsService.get(params.id);
+      const application = await applicationsService.get(params.id, {
+        tenantId: req.tenantId!,
+      });
       const result = await registerProviderWebhook(
         params.id,
         params.provider as BillingProviderName,
@@ -5081,7 +5098,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           fix: 'Verify the user id and that they signed up under this Application.',
         });
       }
-      const application = await applicationsService.get(id);
+      const application = await applicationsService.get(id, { tenantId: req.tenantId! });
       const result = await licensesService.issue({
         application,
         endUser,

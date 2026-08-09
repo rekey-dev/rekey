@@ -80,7 +80,9 @@ import { BillingConfigSchema } from '@rekey.dev/shared-types';
  * Same pair `billingService.isEntitled` uses, and for the same reason: PAST_DUE
  * is inside the dunning window, not outside the sale.
  */
-const ENTITLED = new Set<Subscription['status']>(['ACTIVE', 'PAST_DUE']);
+// TRIALING counts as already entitled, so a grant over a running trial is
+// the same no-op a grant over an active subscription is.
+const ENTITLED = new Set<Subscription['status']>(['ACTIVE', 'TRIALING', 'PAST_DUE']);
 
 export interface GrantSubscriptionInput {
   application: Application;
@@ -144,7 +146,19 @@ function resolvePeriodEnd(
 ): Date | null {
   if (explicit !== undefined) return explicit;
   if (isOneTime(plan)) return null;
-  return advanceBillingPeriod(now, plan.interval);
+  // Open-ended unless the operator asks for a term.
+  //
+  // This used to default to one interval from now, which was harmless while
+  // nothing read the column for a provider-less row and became a landmine the
+  // moment the term fix made it load-bearing: "comp this account" quietly
+  // meant "comp this account for one month", and nothing renews a grant —
+  // `advanceBillingPeriod` is only ever called from here and from the provider
+  // period-advance applier, which a grant never reaches.
+  //
+  // So the default now matches what the operator asked for. A grant with a
+  // term is one somebody deliberately time-boxed, and that is exactly the case
+  // the term fix exists to honour.
+  return null;
 }
 
 /**

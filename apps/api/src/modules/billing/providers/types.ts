@@ -61,6 +61,12 @@ export interface CheckoutSessionInput {
   cancelUrl: string;
   /** Coupon discount to apply to this checkout. Absent = charge full price. */
   discount?: CheckoutDiscount;
+  /**
+   * Free trial to start this subscription in. Absent = charge immediately.
+   * Only ever set for a provider whose module declares `capabilities.trials`
+   * — see checkout-trial.ts.
+   */
+  trial?: { days: number };
 }
 
 export interface CheckoutSessionResult {

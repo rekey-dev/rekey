@@ -318,6 +318,9 @@ export const razorpayModule: ProviderModule = {
     priority: 100,
   },
   capabilities: {
+    // No per-checkout trial on Subscriptions; the plan would need its own
+    // intro cycle. Declared false so the discovery contract stays uniform.
+    trials: false,
     oneTime: true,
     captureStep: false,
     // No webhook-registration API surface on the provider class — the panel

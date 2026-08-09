@@ -277,6 +277,7 @@ describe('discovery projection (P4)', () => {
         'oneTime',
         'onlineVerify',
         'periodRotationEvents',
+        'trials',
       ]);
     }
   });

@@ -16,7 +16,7 @@
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { generateSecretKey, hashKey } from '../../lib/keys.js';
-import type { ApiKey } from '@prisma/client';
+import type { ApiKey, Application } from '@prisma/client';
 
 /**
  * Public-safe shape of an API key — `keyHash` stripped. The hash isn't
@@ -149,14 +149,22 @@ export const apiKeysService = {
    * Resolve a presented raw key to its Application. Returns null if the key
    * is unknown, revoked, or expired. Constant-time-friendly because we look
    * up by hash (the hash *is* the index key).
+   *
+   * The Application row rides along via `include`: the auth middleware needs
+   * it on every request, and fetching it here turns the hot path's two
+   * sequential round trips into one query.
    */
-  async verify(rawKey: string): Promise<{ apiKey: ApiKey; applicationId: string } | null> {
-    const apiKey = await prisma.apiKey.findUnique({
+  async verify(
+    rawKey: string,
+  ): Promise<{ apiKey: ApiKey; applicationId: string; application: Application } | null> {
+    const withApp = await prisma.apiKey.findUnique({
       where: { keyHash: hashKey(rawKey) },
+      include: { application: true },
     });
-    if (!apiKey) return null;
-    if (apiKey.revokedAt !== null) return null;
-    if (apiKey.expiresAt !== null && apiKey.expiresAt <= new Date()) return null;
-    return { apiKey, applicationId: apiKey.applicationId };
+    if (!withApp) return null;
+    if (withApp.revokedAt !== null) return null;
+    if (withApp.expiresAt !== null && withApp.expiresAt <= new Date()) return null;
+    const { application, ...apiKey } = withApp;
+    return { apiKey, applicationId: apiKey.applicationId, application };
   },
 };

@@ -18,6 +18,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 
 function pkce(): { verifier: string; challenge: string } {
   const verifier = randomBytes(32).toString('base64url');
@@ -139,11 +140,12 @@ describe('Operator MCP admin tools + get_end_user', () => {
     // Secret is encrypted at rest — the raw key must not appear in ciphertext.
     expect(row!.ciphertext).not.toContain(secret);
 
-    // The security audit logged the configuration WITHOUT the secret.
-    const events = await prisma.securityEvent.findMany({
-      where: { tenantId: op.tenantId, type: 'app.billing_credentials_configured' },
+    // The security audit logged the configuration WITHOUT the secret. The write
+    // is fire-and-forget, so wait for it rather than assuming it has landed.
+    const events = await waitForSecurityEvents({
+      tenantId: op.tenantId,
+      type: 'app.billing_credentials_configured',
     });
-    expect(events.length).toBeGreaterThanOrEqual(1);
     expect(JSON.stringify(events[0]!.metadata)).not.toContain(secret);
   });
 

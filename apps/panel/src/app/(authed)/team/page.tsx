@@ -135,10 +135,19 @@ export default async function TeamPage({
   const [me, memberPage, invitationPage] = await Promise.all([
     getMe(),
     api<Page<MemberRow>>({ method: 'GET', path: '/api/v1/tenant/workspace/members' }),
-    api<Page<InvitationRow>>({ method: 'GET', path: '/api/v1/tenant/workspace/invitations' }),
+    // OWNER/ADMIN-only, unlike the member list beside it. A GET 403 becomes
+    // Next's `forbidden()` and replaces the whole page, so an uncaught one here
+    // meant a MEMBER opening Team — which the sidebar offers them, with no role
+    // floor — lost the roster they ARE allowed to see, and got a bare 403
+    // instead. Omitted-on-failure, the same shape `applications/page.tsx` uses
+    // for this exact endpoint.
+    api<Page<InvitationRow>>({
+      method: 'GET',
+      path: '/api/v1/tenant/workspace/invitations',
+    }).catch(() => null),
   ]);
   const members = memberPage.items;
-  const invitations = invitationPage.items;
+  const invitations = invitationPage?.items ?? null;
 
   const canManage = me.activeRole === 'OWNER' || me.activeRole === 'ADMIN';
   // Application list for the grants picker. Members may only see a subset
@@ -373,7 +382,8 @@ export default async function TeamPage({
         )}
       </div>
 
-      {/* Invitations */}
+      {/* Invitations — admin-only data, so absent for a MEMBER rather than empty. */}
+      {invitations !== null && (
       <div className="space-y-3">
         <SectionHeader title="Invitations" count={`(${invitations.length})`} />
         {invitations.length === 0 ? (
@@ -427,6 +437,7 @@ export default async function TeamPage({
           </Table>
         )}
       </div>
+      )}
 
       {/* Invite form */}
       {canManage && (

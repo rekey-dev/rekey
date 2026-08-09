@@ -384,7 +384,7 @@ export const operatorTools: OperatorTool[] = [
         limit: { type: 'integer', minimum: 1, maximum: 200, default: 25 },
         status: {
           type: 'string',
-          enum: ['PENDING', 'ACTIVE', 'PAST_DUE', 'CANCELED', 'EXPIRED'],
+          enum: ['PENDING', 'ACTIVE', 'TRIALING', 'PAST_DUE', 'CANCELED', 'EXPIRED'],
         },
       },
       additionalProperties: false,
@@ -657,7 +657,11 @@ export const operatorTools: OperatorTool[] = [
       if (!user) return { found: false };
 
       const subscription = await prisma.subscription.findFirst({
-        where: { applicationId: app.id, endUserId: user.id, status: { in: ['ACTIVE', 'PAST_DUE'] } },
+        where: {
+          applicationId: app.id,
+          endUserId: user.id,
+          status: { in: ['ACTIVE', 'TRIALING', 'PAST_DUE'] },
+        },
         orderBy: { createdAt: 'desc' },
         include: { plan: { select: { slug: true, name: true } } },
       });

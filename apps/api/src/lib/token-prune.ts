@@ -25,6 +25,56 @@ export async function pruneExpiredAuthTokens(): Promise<number> {
 }
 
 /**
+ * Long-lived auth tokens whose window has fully closed.
+ *
+ * Nothing pruned these. `refresh_tokens` gains a row on every sign-in AND every
+ * rotation — rotation deliberately keeps the revoked predecessor so a replay is
+ * detectable — so the table grew without bound on the hottest-written path in
+ * the product, and `revokeAllForEndUser`'s updateMany scanned all of it.
+ *
+ * The retention window is the point. A refresh token is not disposable the
+ * moment it expires or is revoked: replay detection reads the dead row to tell
+ * "this token was rotated" from "this token never existed", and that answer is
+ * what turns a stolen-token replay into a family revocation. Deleting on expiry
+ * would silently downgrade that to "unknown token".
+ *
+ * So rows are kept for a grace period past the point they stop being usable —
+ * long enough that any replay worth detecting has already happened, short
+ * enough that the table stays bounded. Reset and verification tokens have no
+ * such forensic role and only need to outlive their own expiry.
+ *
+ * Both auth pillars, because they have the same shape and the operator one was
+ * just as unbounded.
+ */
+const REPLAY_FORENSICS_GRACE_DAYS = 30;
+
+export async function pruneExpiredSessionTokens(): Promise<number> {
+  const now = new Date();
+  const graceCutoff = new Date(now.getTime() - REPLAY_FORENSICS_GRACE_DAYS * 86_400_000);
+
+  const [refresh, tenantRefresh, resets, verifications] = await Promise.all([
+    // Expired or revoked, AND past the forensics window.
+    prisma.refreshToken.deleteMany({
+      where: {
+        createdAt: { lt: graceCutoff },
+        OR: [{ expiresAt: { lt: now } }, { revokedAt: { not: null } }],
+      },
+    }),
+    prisma.tenantRefreshToken.deleteMany({
+      where: {
+        createdAt: { lt: graceCutoff },
+        OR: [{ expiresAt: { lt: now } }, { revokedAt: { not: null } }],
+      },
+    }),
+    // No forensic role — a consumed or expired reset link is inert.
+    prisma.passwordResetToken.deleteMany({ where: { expiresAt: { lt: now } } }),
+    prisma.emailVerificationToken.deleteMany({ where: { expiresAt: { lt: now } } }),
+  ]);
+
+  return refresh.count + tenantRefresh.count + resets.count + verifications.count;
+}
+
+/**
  * Expired generic Idempotency-Key rows (middleware/idempotency.ts, 24 h TTL).
  * Past `expiresAt` the middleware re-executes instead of replaying, so expired
  * rows are inert — this sweep just stops them accumulating. It also clears

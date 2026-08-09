@@ -153,7 +153,12 @@ describe('Granting a subscription without a payment provider', () => {
     expect(res.statusCode).toBe(201);
     const body = res.json().data as {
       activated: boolean;
-      subscription: { id: string; status: string; provider: string | null; currentPeriodEnd: string };
+      subscription: {
+        id: string;
+        status: string;
+        provider: string | null;
+        currentPeriodEnd: string | null;
+      };
     };
     expect(body.activated).toBe(true);
     expect(body.subscription.status).toBe('ACTIVE');
@@ -162,16 +167,45 @@ describe('Granting a subscription without a payment provider', () => {
     // that ends this subscription.
     expect(body.subscription.provider).toBeNull();
 
-    // Default period: one plan interval (MONTH) from now, not 30 days.
-    const end = new Date(body.subscription.currentPeriodEnd).getTime();
-    expect(end).toBeGreaterThan(before + 27 * 86_400_000);
-    expect(end).toBeLessThan(before + 32 * 86_400_000);
+    // Open-ended by default. It used to default to one plan interval, which
+    // was invisible while nothing read the column for a provider-less row and
+    // became a landmine once an elapsed term started expiring the row: every
+    // comp silently became a one-month comp, and nothing renews a grant.
+    // "Comp this account" now means what it says; a term is opt-in.
+    expect(body.subscription.currentPeriodEnd).toBeNull();
 
     // The consequence that matters: what the buyer now holds.
     expect(await creditsService.getBalance(appId, { endUserId: euId })).toBe(500);
     const row = await prisma.subscription.findUniqueOrThrow({ where: { id: body.subscription.id } });
     expect(row.providerSubId).toBeNull();
     expect((row.metadata as { grant?: { note?: string } }).grant?.note).toBe('wire transfer #4471');
+  });
+
+  it('grants EVERY credit entitlement on the plan, not just the first', async () => {
+    // The unique key is (planId, kind, key), so two CREDIT rows on one plan are
+    // legal and the API accepts them. Both grants used to share one idempotency
+    // anchor, so the second was swallowed as a duplicate: the buyer paid for
+    // 700 credits and received 500, with no error anywhere.
+    await makePlan('pro');
+    await putEntitlement('pro', { kind: 'CREDIT', key: 'base', quantity: 500 });
+    await putEntitlement('pro', { kind: 'CREDIT', key: 'bonus', quantity: 200 });
+    const euId = await makeEndUser('buyer@example.com');
+
+    await grant({ planSlug: 'pro', endUserId: euId });
+
+    expect(await creditsService.getBalance(appId, { endUserId: euId })).toBe(700);
+  });
+
+  it('a second grant still grants nothing twice', async () => {
+    await makePlan('pro');
+    await putEntitlement('pro', { kind: 'CREDIT', key: 'base', quantity: 500 });
+    await putEntitlement('pro', { kind: 'CREDIT', key: 'bonus', quantity: 200 });
+    const euId = await makeEndUser('buyer@example.com');
+
+    await grant({ planSlug: 'pro', endUserId: euId });
+    await grant({ planSlug: 'pro', endUserId: euId });
+
+    expect(await creditsService.getBalance(appId, { endUserId: euId })).toBe(700);
   });
 
   it('emits subscription.activated through the same outbox a real activation uses', async () => {
@@ -214,7 +248,7 @@ describe('Granting a subscription without a payment provider', () => {
     expect(s.status).toBe('ACTIVE');
     expect(s.provider).toBeNull();
     expect(s.planSlug).toBe('pro');
-    expect(s.currentPeriodEnd).not.toBeNull();
+    expect(s.currentPeriodEnd).toBeNull();
     expect(s.entitlements).toEqual([expect.objectContaining({ kind: 'CREDIT', quantity: 500 })]);
   });
 
@@ -406,7 +440,140 @@ describe('Granting a subscription without a payment provider', () => {
     expect(held.entitlements).toEqual([]);
   });
 
-  it('an operator cancelling a granted subscription by id ends it immediately, not at period end', async () => {
+  // ------------------------------------------- the term actually ending
+
+  it('an explicit term is honoured, and is the only way to get one', async () => {
+    await makePlan('pro');
+    const euId = await makeEndUser('timeboxed@example.com');
+    const ends = new Date(Date.now() + 14 * 86_400_000).toISOString();
+
+    const withTerm = await grant({ planSlug: 'pro', endUserId: euId, currentPeriodEnd: ends });
+    expect(
+      (withTerm.json().data as { subscription: { currentPeriodEnd: string } }).subscription
+        .currentPeriodEnd,
+    ).toBe(ends);
+
+    const other = await makeEndUser('openended@example.com');
+    const without = await grant({ planSlug: 'pro', endUserId: other });
+    expect(
+      (without.json().data as { subscription: { currentPeriodEnd: string | null } }).subscription
+        .currentPeriodEnd,
+    ).toBeNull();
+  });
+
+  it('a granted term that has elapsed stops entitling — a 14-day grant is not forever', async () => {
+    // The defect this covers: resolution read `status` alone, and nothing ever
+    // moved an elapsed grant off ACTIVE. "Grant them fourteen days" therefore
+    // bought permanent access, with a `currentPeriodEnd` in the past as the
+    // only trace and nothing reading it.
+    await makePlan('pro');
+    await putEntitlement('pro', { kind: 'FEATURE', key: 'reports', valueType: 'BOOL', value: 'true' });
+    const euId = await makeEndUser('trialist@example.com');
+
+    const res = await grant({ planSlug: 'pro', endUserId: euId });
+    const subId = (res.json().data as { subscription: { id: string } }).subscription.id;
+
+    const { entitlementsService } = await import('../src/modules/billing/entitlements.service.js');
+    expect((await entitlementsService.resolveForEndUser(appId, euId)).entitlements).toHaveLength(1);
+
+    // Fourteen days pass.
+    await prisma.subscription.update({
+      where: { id: subId },
+      data: { currentPeriodEnd: new Date(Date.now() - 1000) },
+    });
+
+    expect((await entitlementsService.resolveForEndUser(appId, euId)).entitlements).toEqual([]);
+  });
+
+  it('an open-ended grant keeps entitling — no period means comped indefinitely', async () => {
+    await makePlan('pro');
+    await putEntitlement('pro', { kind: 'FEATURE', key: 'reports', valueType: 'BOOL', value: 'true' });
+    const euId = await makeEndUser('comped@example.com');
+    const res = await grant({ planSlug: 'pro', endUserId: euId });
+    const subId = (res.json().data as { subscription: { id: string } }).subscription.id;
+
+    await prisma.subscription.update({ where: { id: subId }, data: { currentPeriodEnd: null } });
+
+    const { entitlementsService } = await import('../src/modules/billing/entitlements.service.js');
+    expect((await entitlementsService.resolveForEndUser(appId, euId)).entitlements).toHaveLength(1);
+  });
+
+  it('a provider-backed subscription past its period still entitles — a late renewal webhook must not lock out a payer', async () => {
+    // `currentPeriodEnd` means two different things depending on who owns the
+    // row. On a grant it is the end. On a provider subscription it is the
+    // RENEWAL date, moved forward by a webhook that can arrive late, so
+    // expiring on it would cut off someone who has just paid.
+    await makePlan('pro');
+    await putEntitlement('pro', { kind: 'FEATURE', key: 'reports', valueType: 'BOOL', value: 'true' });
+    const euId = await makeEndUser('payer@example.com');
+    const res = await grant({ planSlug: 'pro', endUserId: euId });
+    const subId = (res.json().data as { subscription: { id: string } }).subscription.id;
+
+    await prisma.subscription.update({
+      where: { id: subId },
+      data: {
+        provider: 'stripe',
+        providerSubId: 'sub_live_renewal_pending',
+        currentPeriodEnd: new Date(Date.now() - 1000),
+      },
+    });
+
+    const { entitlementsService } = await import('../src/modules/billing/entitlements.service.js');
+    expect((await entitlementsService.resolveForEndUser(appId, euId)).entitlements).toHaveLength(1);
+  });
+
+  it('a cancelled grant reads as CANCELED, not EXPIRED — cancellation is the more specific fact', async () => {
+    // Both dates are in the past on a cancelled grant, so whichever check runs
+    // first wins. Somebody cancelled this one; reporting it as a term that
+    // quietly lapsed loses that.
+    await makePlan('pro');
+    const euId = await makeEndUser('quitter@example.com');
+    const res = await grant({ planSlug: 'pro', endUserId: euId });
+    const subId = (res.json().data as { subscription: { id: string } }).subscription.id;
+    await prisma.subscription.update({
+      where: { id: subId },
+      data: { cancelAt: new Date(Date.now() - 2000), currentPeriodEnd: new Date(Date.now() - 1000) },
+    });
+
+    const { billingService } = await import('../src/modules/billing/billing.service.js');
+    const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
+    const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: euId } });
+
+    expect((await billingService.getCurrentSubscription(application, endUser))?.status).toBe(
+      'CANCELED',
+    );
+  });
+
+  it('an elapsed grant reads as EXPIRED, so the panel does not report access nobody has', async () => {
+    await makePlan('pro');
+    const euId = await makeEndUser('trialist@example.com');
+    const res = await grant({ planSlug: 'pro', endUserId: euId });
+    const subId = (res.json().data as { subscription: { id: string } }).subscription.id;
+
+    await prisma.subscription.update({
+      where: { id: subId },
+      data: { currentPeriodEnd: new Date(Date.now() - 1000) },
+    });
+
+    const { billingService } = await import('../src/modules/billing/billing.service.js');
+    const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
+    const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: euId } });
+    const seen = await billingService.getCurrentSubscription(application, endUser);
+
+    expect(seen?.status).toBe('EXPIRED');
+    expect((await prisma.subscription.findUniqueOrThrow({ where: { id: subId } })).status).toBe(
+      'EXPIRED',
+    );
+  });
+
+  it('an operator cancelling a granted subscription by id ends it at PERIOD END', async () => {
+    // This asserted the opposite, and the comment restated a justification that
+    // has since stopped being true: the gate required `providerBacked` because
+    // a scheduled provider-less row could sit ACTIVE and entitling if nobody
+    // loaded the portal. `stillEntitling` filters `cancelAt` in the entitlement
+    // query now, so that cannot happen — and on a deployment where every
+    // subscription is granted, the old rule ended every operator cancel
+    // immediately, mid-period, with no refund.
     await makePlan('pro');
     const euId = await makeEndUser('buyer@example.com');
     await grant({
@@ -416,19 +583,34 @@ describe('Granting a subscription without a payment provider', () => {
     });
     const sub = await prisma.subscription.findFirstOrThrow({ where: { applicationId: appId, endUserId: euId } });
 
-    // Pinning documented behaviour, not asking for it to change.
-    // `cancelSubscriptionById` (the operator MCP path) still requires a
-    // provider to SCHEDULE a cancellation, because only `getCurrentSubscription`
-    // runs the local expiry and an operator has no guarantee the buyer's portal
-    // will ever be loaded to trigger it. So a provider-less row cancels on the
-    // spot instead of sitting ACTIVE and entitling forever. Failing closed is
-    // the right side to err on, and the difference is worth being explicit
-    // about now that every hand-granted subscription is in this class.
     const { billingService } = await import('../src/modules/billing/billing.service.js');
     const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
-    const canceled = await billingService.cancelSubscriptionById(application, sub.id, { atPeriodEnd: true });
-    expect(canceled.status).toBe('CANCELED');
-    expect(canceled.canceledAt).not.toBeNull();
+    const canceled = await billingService.cancelSubscriptionById(application, sub.id, {
+      atPeriodEnd: true,
+    });
+
+    // Scheduled, not ended: the buyer keeps the period they paid for, and
+    // `stillEntitling` stops honouring the row on the date without anyone
+    // having to load a portal.
+    expect(canceled.status).toBe('ACTIVE');
+    expect(canceled.cancelAt).not.toBeNull();
+
+    // The explicit opt-out still ends it on the spot — that is what an operator
+    // cancelling for abuse needs, and it now takes saying so.
+    const other = await makeEndUser('abuser@example.com');
+    await grant({
+      planSlug: 'pro',
+      endUserId: other,
+      currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+    });
+    const sub2 = await prisma.subscription.findFirstOrThrow({
+      where: { applicationId: appId, endUserId: other },
+    });
+    const killed = await billingService.cancelSubscriptionById(application, sub2.id, {
+      atPeriodEnd: false,
+    });
+    expect(killed.status).toBe('CANCELED');
+    expect(killed.canceledAt).not.toBeNull();
   });
 
   it('an abandoned checkout session cannot later claim the granted subscription', async () => {
