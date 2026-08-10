@@ -37,6 +37,13 @@ export const SECURITY_EVENT_LABEL = {
   'operator.session_revoked': 'Operator session revoked',
   'operator.sign_out_everywhere': 'Operator signed out everywhere',
   'operator.api_token.created': 'Operator API token created',
+  // Every MCP tool invocation, recorded at the dispatch layer rather than by
+  // each tool. Tools that change something ALSO emit their own specific event;
+  // this one exists so the record does not depend on an author remembering,
+  // and so read tools — which change nothing but can read a lot — leave a
+  // trail too. An agent acting on an operator's behalf should be as auditable
+  // as the operator.
+  'operator.mcp_tool_called': 'MCP tool called',
   'operator.api_token.revoked': 'Operator API token revoked',
   'operator.invite_redeemed': 'Operator invite redeemed',
 

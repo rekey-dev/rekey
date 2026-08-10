@@ -109,6 +109,72 @@ describe('Operator MCP write tools', () => {
     expect(found).toBeNull();
   });
 
+  it('an agent can build a plan that actually grants something, and read it back', async () => {
+    // The gap this closes: create_plan could only make a priced plan, and the
+    // tool named update_plan patches Plan columns rather than the entitlement
+    // table. So an agent could produce a plan, be told it succeeded, and have
+    // it gate nothing — discovered only when a real user hit a locked feature.
+    const op = await makeOperator('ent');
+    const token = await mintPat(op, ['read', 'applications:write']);
+
+    const app = readToolResult(
+      (await rpc(token, 'tools/call', {
+        name: 'create_application',
+        arguments: { name: 'Ent App', slug: `ent-${Date.now()}` },
+      })).body,
+    );
+    const applicationId = (app.data as { id: string }).id;
+
+    await rpc(token, 'tools/call', {
+      name: 'create_plan',
+      arguments: { applicationId, slug: 'pro', name: 'Pro', amount: 2900 },
+    });
+
+    const put = readToolResult(
+      (await rpc(token, 'tools/call', {
+        name: 'put_plan_entitlement',
+        arguments: {
+          applicationId,
+          planSlug: 'pro',
+          kind: 'FEATURE',
+          key: 'advanced_reporting',
+          valueType: 'BOOL',
+          value: 'true',
+        },
+      })).body,
+    );
+    expect(put.isError).toBe(false);
+
+    const listed = readToolResult(
+      (await rpc(token, 'tools/call', {
+        name: 'list_plan_entitlements',
+        arguments: { applicationId, planSlug: 'pro' },
+      })).body,
+    );
+    expect(listed.isError).toBe(false);
+    expect((listed.data as { entitlements: unknown[] }).entitlements).toHaveLength(1);
+  });
+
+  it('mint_api_key is admin-tier, so a write-only PAT cannot mint a live credential', async () => {
+    // The REST twin requires the `keys:mint` scope. MCP write access derives
+    // from `applications:write` alone, so without the admin gate this token
+    // would mint over MCP what it is refused over REST.
+    const op = await makeOperator('mint');
+    const token = await mintPat(op, ['read', 'applications:write']);
+
+    const list = await rpc(token, 'tools/list');
+    const names = (list.json().result.tools as Array<{ name: string }>).map((t) => t.name);
+    expect(names).not.toContain('mint_api_key');
+
+    const res = readToolResult(
+      (await rpc(token, 'tools/call', {
+        name: 'mint_api_key',
+        arguments: { applicationId: 'anything', name: 'nope' },
+      })).body,
+    );
+    expect(res.isError).toBe(true);
+  });
+
   it('a write PAT held by an OWNER can create + configure an application', async () => {
     const op = await makeOperator('rw');
     const token = await mintPat(op, ['read', 'applications:write']);

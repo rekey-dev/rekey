@@ -29,6 +29,9 @@ import { env } from '../../config/env.js';
 import { RekeyError } from '../../lib/error.js';
 import type { SecurityEventType } from '@rekey.dev/shared-types';
 import { recordSecurityEvent } from '../../lib/security-events.js';
+import { apiKeysService } from '../api-keys/api-keys.service.js';
+import { entitlementsService } from '../billing/entitlements.service.js';
+import { usageService } from '../usage/usage.service.js';
 import { applicationsService } from '../applications/applications.service.js';
 import { plansService } from '../plans/plans.service.js';
 import { webhookService } from '../webhooks/webhook.service.js';
@@ -101,6 +104,261 @@ function audit(
 }
 
 export const operatorWriteTools: OperatorTool[] = [
+  {
+    name: 'create_usage_meter',
+    description:
+      'Create a usage meter — what an agent product actually bills on. `slug` is what your ' +
+      'server records against (`usage.record`), `unit` is the thing counted (tokens, calls, ' +
+      'seconds). A meter only COUNTS until a plan gives it a USAGE entitlement: set that ' +
+      'with put_plan_entitlement, using the meter slug as `key`, `quantity` for the included ' +
+      'allowance, and `creditsPerUnit` to charge for overage instead of capping.',
+    write: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        applicationId: { type: 'string', minLength: 1 },
+        slug: { type: 'string', minLength: 1, maxLength: 40 },
+        name: { type: 'string', minLength: 1, maxLength: 120 },
+        unit: { type: 'string', minLength: 1, maxLength: 40 },
+      },
+      required: ['applicationId', 'slug', 'name', 'unit'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const meter = await usageService.createMeter({
+        applicationId: app.id,
+        slug: String(args.slug),
+        name: String(args.name),
+        unit: String(args.unit),
+      });
+      return { meter };
+    },
+  },
+  {
+    name: 'list_usage_meters',
+    description:
+      'Meters on an application. Use a slug here as the `key` of a USAGE entitlement to give ' +
+      'a plan an allowance on it.',
+    write: false,
+    inputSchema: {
+      type: 'object',
+      properties: { applicationId: { type: 'string', minLength: 1 } },
+      required: ['applicationId'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      return { meters: await usageService.listMeters(app.id) };
+    },
+  },
+  {
+    name: 'put_plan_entitlement',
+    description:
+      'Create or replace ONE entitlement on a plan. This is what actually gates access — ' +
+      'a plan with no entitlements grants nothing, whatever it costs. `kind` is FEATURE ' +
+      '(a flag or limit, needs `key` and usually `valueType`+`value`), CREDIT (a credit ' +
+      'grant per period, needs `quantity`), USAGE (an included quota for a meter, `key` is ' +
+      'the meter slug and `quantity` the included units; `creditsPerUnit` prices overage ' +
+      'instead of capping), or LICENSE (needs `licenseKind`). Upserts on (plan, kind, key).',
+    write: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        applicationId: { type: 'string', minLength: 1 },
+        planSlug: { type: 'string', minLength: 1 },
+        kind: { type: 'string', enum: ['FEATURE', 'CREDIT', 'USAGE', 'LICENSE'] },
+        key: { type: 'string', maxLength: 60 },
+        valueType: { type: 'string', enum: ['BOOL', 'INT', 'STRING'] },
+        value: { type: 'string', maxLength: 200 },
+        quantity: { type: 'integer', minimum: 0 },
+        creditsPerUnit: { type: 'integer', minimum: 0 },
+        licenseKind: { type: 'string', enum: ['PERPETUAL', 'TIMED', 'SEATS'] },
+        rollover: { type: 'boolean' },
+      },
+      required: ['applicationId', 'planSlug', 'kind'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const plan = await plansService.getBySlug(app.id, String(args.planSlug));
+      const ent = await entitlementsService.upsert({
+        planId: plan.id,
+        kind: args.kind as never,
+        ...(args.key !== undefined && { key: String(args.key) }),
+        ...(args.valueType !== undefined && { valueType: args.valueType as never }),
+        ...(args.value !== undefined && { value: String(args.value) }),
+        ...(args.quantity !== undefined && { quantity: Number(args.quantity) }),
+        ...(args.creditsPerUnit !== undefined && { creditsPerUnit: Number(args.creditsPerUnit) }),
+        ...(args.licenseKind !== undefined && { licenseKind: args.licenseKind as never }),
+        ...(args.rollover !== undefined && { rollover: args.rollover === true }),
+      });
+      audit(ctx, 'app.plan_entitlement_updated', app.id, {
+        planSlug: plan.slug,
+        kind: ent.kind,
+        key: ent.key,
+      });
+      return { planSlug: plan.slug, entitlement: ent };
+    },
+  },
+  {
+    name: 'list_plan_entitlements',
+    description:
+      'What a plan actually grants. Read this back after put_plan_entitlement — a priced ' +
+      'plan with an empty list gates nothing.',
+    write: false,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        applicationId: { type: 'string', minLength: 1 },
+        planSlug: { type: 'string', minLength: 1 },
+      },
+      required: ['applicationId', 'planSlug'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const plan = await plansService.getBySlug(app.id, String(args.planSlug));
+      return { planSlug: plan.slug, entitlements: await entitlementsService.listForPlan(plan.id) };
+    },
+  },
+  {
+    name: 'list_plans',
+    description: 'Plans on an application, including inactive ones. Slugs for the other tools.',
+    write: false,
+    inputSchema: {
+      type: 'object',
+      properties: { applicationId: { type: 'string', minLength: 1 } },
+      required: ['applicationId'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const plans = await plansService.listForApplication(app.id, true);
+      return { plans };
+    },
+  },
+  {
+    name: 'list_api_keys',
+    description:
+      'API keys on an application — id, name, prefix, scopes, last use. Never the key ' +
+      'itself; it is hashed at rest.',
+    write: false,
+    inputSchema: {
+      type: 'object',
+      properties: { applicationId: { type: 'string', minLength: 1 } },
+      required: ['applicationId'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      return { apiKeys: await apiKeysService.listForApplication(app.id) };
+    },
+  },
+  {
+    name: 'revoke_api_key',
+    description:
+      'Revoke an API key immediately. Ships with mint_api_key deliberately: an agent that ' +
+      'retries a mint has no other way to clean up its own orphans, and the per-application ' +
+      'key cap counts active keys.',
+    write: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        applicationId: { type: 'string', minLength: 1 },
+        apiKeyId: { type: 'string', minLength: 1 },
+      },
+      required: ['applicationId', 'apiKeyId'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      await apiKeysService.revoke(app.id, String(args.apiKeyId));
+      audit(ctx, 'app.api_key.revoked', app.id, { apiKeyId: String(args.apiKeyId) });
+      return { revoked: true, apiKeyId: String(args.apiKeyId) };
+    },
+  },
+  {
+    name: 'mint_api_key',
+    description:
+      'Mint a server-side API key (rp_live_… / rp_test_…) for an Application. Returns the ' +
+      'raw key EXACTLY ONCE — it is hashed at rest and cannot be retrieved again. Scopes ' +
+      'default to full access; pass a narrower list to restrict the key. Optional ' +
+      '`expiresAt` is an ISO-8601 datetime in the future.',
+    write: true,
+    // Admin tier, for the same reason `configure_billing_provider` is: a secret
+    // crosses the MCP client. Here it crosses outward — the raw key is
+    // serialised into the tool result and lands in the agent transcript and the
+    // model provider's logs.
+    //
+    // It also closes an escalation. The REST twin requires the `keys:mint` PAT
+    // scope ("the highest-privilege scope"), but MCP write access is derived
+    // from `applications:write` alone, so a PAT holding only
+    // ['read','applications:write'] could mint over MCP what the same token is
+    // refused over REST. `canAdmin` is false for every PAT, so admin tier makes
+    // this OAuth-consent-only and the two surfaces agree again.
+    admin: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        applicationId: { type: 'string', minLength: 1 },
+        name: { type: 'string', minLength: 1, maxLength: 80 },
+        scopes: { type: 'array', items: { type: 'string' } },
+        expiresAt: { type: 'string', format: 'date-time' },
+      },
+      required: ['applicationId', 'name'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+
+      // Empty scopes mean full access in the service, which is the same default
+      // the panel's mint form applies. Passing a list narrows the key.
+      const scopes = Array.isArray(args.scopes) ? args.scopes.map(String) : [];
+
+      let expiresAt: Date | undefined;
+      if (typeof args.expiresAt === 'string' && args.expiresAt !== '') {
+        const parsed = new Date(args.expiresAt);
+        if (Number.isNaN(parsed.getTime())) {
+          throw new RekeyError({
+            statusCode: 400,
+            code: 'VALIDATION_ERROR',
+            message: `expiresAt "${args.expiresAt}" is not a valid ISO-8601 datetime.`,
+            fix: 'Pass an ISO-8601 datetime in the future, or omit it for a non-expiring key.',
+          });
+        }
+        expiresAt = parsed;
+      }
+
+      const result = await apiKeysService.create({
+        applicationId: app.id,
+        name: String(args.name),
+        scopes,
+        ...(expiresAt !== undefined && { expiresAt }),
+      });
+
+      // The key itself is never audited — only that one was minted, by whom,
+      // and for which application. Same rule the panel's route follows.
+      audit(ctx, 'app.api_key.created', app.id, {
+        apiKeyId: result.apiKey.id,
+        name: result.apiKey.name,
+        scopes: result.apiKey.scopes,
+      });
+
+      return {
+        applicationId: app.id,
+        applicationSlug: app.slug,
+        id: result.apiKey.id,
+        name: result.apiKey.name,
+        keyPrefix: result.apiKey.keyPrefix,
+        scopes: result.apiKey.scopes,
+        expiresAt: result.apiKey.expiresAt,
+        // Shown once. There is no endpoint that can return it again.
+        rawKey: result.rawKey,
+        warning: 'Store this now — the raw key is hashed at rest and cannot be retrieved again.',
+      };
+    },
+  },
   {
     name: 'create_application',
     description:

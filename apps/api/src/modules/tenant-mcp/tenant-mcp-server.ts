@@ -8,6 +8,7 @@
  */
 
 import type { TenantRole } from '@prisma/client';
+import { recordSecurityEvent } from '../../lib/security-events.js';
 import { operatorTools, type OperatorTool, type OperatorToolContext } from './operator-tools.js';
 import { operatorWriteTools } from './operator-write-tools.js';
 
@@ -134,6 +135,28 @@ export async function handleOperatorMcpMessage(
       }
       const args =
         (msg.params?.arguments as Record<string, unknown> | undefined) ?? {};
+      // Log the call before running it, and log it whether it succeeds or not.
+      // A refused or failed call is exactly what an operator reviewing an
+      // agent's behaviour wants to see.
+      //
+      // Arguments are recorded by KEY only. They routinely carry credentials —
+      // configure_billing_provider takes a provider secret — and an audit trail
+      // that quietly becomes a second copy of every secret is worse than no
+      // trail. Names and shape are enough to answer "what did this agent do".
+      void recordSecurityEvent({
+        type: 'operator.mcp_tool_called',
+        actorType: 'operator',
+        actorId: ctx.tenantUserId,
+        tenantId: ctx.tenantId,
+        applicationId: typeof args.applicationId === 'string' ? args.applicationId : null,
+        metadata: {
+          tool: tool.name,
+          write: tool.write === true,
+          admin: tool.admin === true,
+          argKeys: Object.keys(args).sort(),
+        },
+      });
+
       try {
         const data = await tool.handler(ctx, args);
         return result(id, { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
