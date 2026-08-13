@@ -292,17 +292,30 @@ export const plansService = {
         // Name the repair for the state the existing row is actually in.
         const existing = await prisma.plan.findUnique({
           where: { applicationId_slug: { applicationId: input.applicationId, slug: input.slug } },
-          select: { registrationStatus: true },
+          select: { registrationStatus: true, active: true },
         });
         const broken =
           existing?.registrationStatus === 'FAILED' || existing?.registrationStatus === 'PENDING';
+        // An ARCHIVED plan still holds its slug, and saying only "already
+        // exists" sends the operator looking for a plan they believe they
+        // removed. Archiving sets `active: false`; the row and its slug stay,
+        // because the slug is the identifier integrator code passes to
+        // checkout and reads back off a subscription. Releasing it would let a
+        // NEW plan inherit an OLD one's public identity, silently changing what
+        // `pro` means for every existing caller — a worse failure than this
+        // refusal. Reported as #30.
+        const archived = existing?.active === false;
         throw new RekeyError({
           statusCode: 409,
           code: 'PLAN_SLUG_TAKEN',
-          message: `A plan with slug "${input.slug}" already exists in this application.`,
+          message: archived
+            ? `An ARCHIVED plan with slug "${input.slug}" already exists in this application. Archiving a plan does not release its slug.`
+            : `A plan with slug "${input.slug}" already exists in this application.`,
           fix: broken
             ? `That plan exists but is not registered with the payment provider, so it is off the public catalogue. Fix the provider credentials if they were the problem, then repair it in place: PATCH /api/v1/tenant/applications/${input.applicationId}/plans/${input.slug} to correct name/price, and POST .../plans/${input.slug}/register to retry registration. You do not need a new slug.`
-            : 'Pick a different slug, or edit the existing plan with PATCH /api/v1/tenant/applications/:id/plans/:slug.',
+            : archived
+              ? `The slug is a public identifier your integration passes to checkout and reads back off a subscription, so it stays reserved after archiving — otherwise a new plan would inherit the old one's meaning for every caller still using it. Either reactivate that plan and edit it in place (Panel → Plans → Reactivate, then Edit), or pick a different slug for the new one.`
+              : 'Pick a different slug, or edit the existing plan with PATCH /api/v1/tenant/applications/:id/plans/:slug.',
         });
       }
       throw e;

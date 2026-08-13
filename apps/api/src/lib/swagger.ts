@@ -28,6 +28,7 @@ import { createRequire } from 'node:module';
 import type { FastifyInstance } from 'fastify';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
+import { env } from '../config/env.js';
 import { registerOpenApiComponents } from './openapi.js';
 
 /**
@@ -102,10 +103,19 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
           'provider signature is the authentication.',
         version: RELEASE_VERSION,
       },
-      servers: [
-        { url: 'https://api.rekey.dev', description: 'Production' },
-        { url: 'http://localhost:3030', description: 'Local development' },
-      ],
+      // THIS deployment's own origin, not ours.
+      //
+      // These were hard-coded to `https://api.rekey.dev` and
+      // `http://localhost:3030`, which every self-hosted deployment then served
+      // from its own `/docs`. Swagger UI's "Try it out" posts to the selected
+      // server, so an operator pasting their own key into their own docs page
+      // sent that credential to a host they had never chosen — the same shape
+      // as the `@rekey.dev/astro` fallback removed in this release, on a
+      // surface where the credential is typed in by hand.
+      //
+      // `API_URL` is this deployment's origin and always has a value, so the
+      // list is correct everywhere without a fallback to anybody's brand.
+      servers: [{ url: env.API_URL, description: 'This deployment' }],
       components: {
         securitySchemes: {
           superAdminKey: {

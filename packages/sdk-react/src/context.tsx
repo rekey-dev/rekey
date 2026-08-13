@@ -18,6 +18,7 @@
 
 import * as React from 'react';
 import type { EndUserDto } from '@rekey.dev/shared-types';
+import { RekeyError } from '@rekey.dev/shared-types/error';
 import { RekeyBrowserClient } from './client.js';
 
 export interface RekeyContextValue {
@@ -83,9 +84,26 @@ export function RekeyProvider({
     try {
       const u = await client.getCurrentUser(accessToken, meEndpoint);
       setUser(u);
-    } catch {
-      // Network or unknown error → treat as signed-out for UI purposes.
-      setUser(null);
+    } catch (err) {
+      // ONLY the API saying this token is no good clears the user. Anything
+      // else keeps whatever we already had, which on a server-rendered page is
+      // the `initialUser` the server resolved from an httpOnly cookie.
+      //
+      // This used to clear on every failure, and the failure it hit in practice
+      // was not an expired token. A host origin missing from the Application's
+      // allowlist makes this browser fetch fail CORS on every mount, so a page
+      // that rendered signed-in on the server flipped to signed-out the instant
+      // it hydrated. `<SignedIn>` vanished, `<SignedOut>` appeared, and the
+      // operator saw a sign-in prompt on a page they were signed into. A dropped
+      // request is not a verdict about a session, and treating it as one turns
+      // any transient outage into a fleet-wide sign-out.
+      //
+      // Keeping a stale user costs nothing dangerous: this state drives what the
+      // UI shows, never what the API grants. Every request still carries the
+      // token and the API is still the one that decides.
+      if (err instanceof RekeyError && (err.statusCode === 401 || err.statusCode === 403)) {
+        setUser(null);
+      }
     } finally {
       setLoading(false);
     }

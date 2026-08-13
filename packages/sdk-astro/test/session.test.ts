@@ -38,7 +38,12 @@ const { getSession, setSession, signOut, safePath, rekeyMiddleware, rekey, Rekey
   await import('../src/index.js');
 
 const req = (headers: Record<string, string> = {}) => new Request('https://x/', { headers });
-const cfg = { secretKey: 'rp_test_x' };
+// `apiUrl` is stated rather than left to the environment. It used to default to
+// `https://api.rekey.dev`, and these tests silently depended on that — which is
+// exactly how the default survived: nothing here had to name a host, so nothing
+// here noticed that a self-hosted deployment which forgot `REKEY_URL` was
+// shipping its secret key to Rekey Cloud. The refusal is asserted below.
+const cfg = { secretKey: 'rp_test_x', apiUrl: 'https://api.example.test' };
 const USER = { id: 'u1', email: 'a@b.c' };
 
 beforeEach(() => {
@@ -249,8 +254,49 @@ describe('a misconfigured deploy stays loud', () => {
   });
 
   it("does not hand a second Application the first one's client", () => {
-    const a = rekey({ secretKey: 'rp_test_a' });
-    const b = rekey({ secretKey: 'rp_test_b' });
+    const a = rekey({ secretKey: 'rp_test_a', apiUrl: 'https://api.example.test' });
+    const b = rekey({ secretKey: 'rp_test_b', apiUrl: 'https://api.example.test' });
     expect(a).not.toBe(b);
+  });
+
+  it('keys the client cache on the URL too, not only the secret', () => {
+    // The cache key is `secretKey + apiUrl` and the apiUrl half is
+    // load-bearing: one app serving two deployments with the same key would
+    // otherwise get whichever client was built first, silently sending the
+    // second deployment's traffic to the first. Varying only `secretKey` (as
+    // the test above does) never exercises that half.
+    const a = rekey({ secretKey: 'rp_test_same', apiUrl: 'https://one.example.test' });
+    const b = rekey({ secretKey: 'rp_test_same', apiUrl: 'https://two.example.test' });
+    expect(a).not.toBe(b);
+  });
+
+  it('refuses a missing REKEY_URL instead of falling back to Rekey Cloud', async () => {
+    // The fallback this replaces did not fail — it sent `REKEY_SECRET` to
+    // `api.rekey.dev`, a host the operator of a self-hosted deployment never
+    // chose. The request dies there (the key is unknown), so the only symptom
+    // was a confusing 401, and by then the credential had left.
+    const saved = process.env.REKEY_URL;
+    delete process.env.REKEY_URL;
+    try {
+      expect(() => rekey({ secretKey: 'rp_test_nourl' })).toThrow(RekeyAstroConfigError);
+      // The message has to carry both answers: a Cloud customer and a
+      // self-hoster read the same line and need different values from it.
+      expect(() => rekey({ secretKey: 'rp_test_nourl' })).toThrow(/api\.rekey\.dev/);
+      expect(() => rekey({ secretKey: 'rp_test_nourl' })).toThrow(/self-hosted/i);
+    } finally {
+      if (saved === undefined) delete process.env.REKEY_URL;
+      else process.env.REKEY_URL = saved;
+    }
+  });
+
+  it('still reads REKEY_URL from the environment when no apiUrl is passed', async () => {
+    const saved = process.env.REKEY_URL;
+    process.env.REKEY_URL = 'https://self.hosted.test';
+    try {
+      expect(rekey({ secretKey: 'rp_test_envurl' })).toBeDefined();
+    } finally {
+      if (saved === undefined) delete process.env.REKEY_URL;
+      else process.env.REKEY_URL = saved;
+    }
   });
 });

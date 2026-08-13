@@ -191,6 +191,12 @@ async function exchangeRefreshToken(refresh: string): Promise<string | null> {
       headers: { 'Content-Type': 'application/json', ...(await forwardedClientHeaders()) },
       body: JSON.stringify({ refreshToken: refresh }),
       cache: 'no-store',
+      // Every 401 in the panel waits on this one exchange, so a hung refresh
+      // stalls the whole page rather than one request. Failing it returns null,
+      // which the caller already treats as "could not refresh" and turns into a
+      // sign-in bounce: a worse outcome than a working session, and a far
+      // better one than a page that never renders.
+      signal: AbortSignal.timeout(10_000),
     });
     const json = (await res.json().catch(() => ({}))) as
       | { success: true; data: { accessToken: string; refreshToken: string } }
@@ -228,22 +234,66 @@ export interface RequestArgs {
   interruptOnAccessError?: boolean;
 }
 
+/**
+ * How long a panel request may hang before it is a failure rather than a wait.
+ *
+ * Nothing here had a deadline, so a request that never got its headers back sat
+ * on undici's default of FIVE MINUTES. That is what an operator experienced as
+ * "saving goes blank and works if I refresh": while a server action's redirect
+ * is in flight Next renders `null` for the page subtree, not loading.tsx, so a
+ * hung fetch on the other side of that redirect is an empty page held open for
+ * as long as the socket stays quiet. The record was written. Only the render
+ * never arrived, and refreshing worked because it opened a new connection.
+ *
+ * Writes get longer because some of them are honestly slow: saving provider
+ * credentials can register a webhook with Stripe, and registering a plan is a
+ * round-trip to the provider. Reads have no such excuse.
+ *
+ * The point is not the exact number. It is that the failure becomes an error
+ * boundary an operator can see and retry, instead of a blank page.
+ */
+const READ_TIMEOUT_MS = 15_000;
+const WRITE_TIMEOUT_MS = 30_000;
+
 async function callOnce(
   method: string,
   path: string,
   body: unknown,
   accessToken: string | null,
 ): Promise<Response> {
-  return fetch(`${apiUrl()}${path}`, {
-    method,
-    headers: {
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      ...(await forwardedClientHeaders()),
-    },
-    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    cache: 'no-store',
-  });
+  try {
+    return await fetch(`${apiUrl()}${path}`, {
+      method,
+      headers: {
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        ...(await forwardedClientHeaders()),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      cache: 'no-store',
+      signal: AbortSignal.timeout(method === 'GET' ? READ_TIMEOUT_MS : WRITE_TIMEOUT_MS),
+    });
+  } catch (err) {
+    // A timed-out WRITE is genuinely ambiguous and the message says so rather
+    // than guessing. The request may well have been applied; we stopped
+    // listening, which is not the same as it not happening. Telling an operator
+    // "that failed" when it succeeded is how a provider gets configured twice.
+    if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      throw new PanelApiError({
+        code: 'PANEL_UPSTREAM_TIMEOUT',
+        message:
+          method === 'GET'
+            ? 'The Rekey API did not respond in time.'
+            : 'The Rekey API did not respond in time. This change may or may not have been applied.',
+        fix:
+          method === 'GET'
+            ? 'Retry. If it keeps happening, check the API deployment and its database and Redis dependencies.'
+            : 'Reload this page and check whether the change is there before trying again.',
+        statusCode: 504,
+      });
+    }
+    throw err;
+  }
 }
 
 export async function api<T>(args: RequestArgs): Promise<T> {
@@ -503,6 +553,31 @@ export interface PlanRow {
    */
   registrationStatus: 'NOT_REQUIRED' | 'PENDING' | 'REGISTERED' | 'FAILED';
   registrationError: string | null;
+  /**
+   * Whether a buyer sent to checkout for this plan would actually get one.
+   *
+   * Distinct from `registrationStatus`, which only reports how the CREATE went.
+   * `NOT_REQUIRED` covers two different plans: one on a provider that registers
+   * lazily at first checkout (PayPal, Razorpay — fine), and one created before
+   * this Application had any credentials, which was never registered and never
+   * will be, because connecting a provider afterwards does not reach back and
+   * repair plans that already exist. The second is the dangerous one and it is
+   * invisible anywhere else: it lists, it is `active`, the pricing page renders
+   * a Buy button, and the first thing that disagrees is a buyer clicking it.
+   *
+   * Optional because an older API predates the field. Treat absent as ready
+   * rather than inventing a warning we cannot substantiate.
+   */
+  checkout?: {
+    ready: boolean;
+    blockers: Array<{
+      /** null when the blocker belongs to no one provider (none configured). */
+      provider: string | null;
+      code: string;
+      message: string;
+      fix: string;
+    }>;
+  };
   metadata: Record<string, unknown>;
   createdAt: string;
 }

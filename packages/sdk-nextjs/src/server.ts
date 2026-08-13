@@ -50,7 +50,10 @@ function client(): Rekey {
   const secretKey = process.env.REKEY_SECRET;
   if (!apiUrl || !secretKey) {
     throw new Error(
-      '@rekey.dev/nextjs: REKEY_URL and REKEY_SECRET must be set on the server.',
+      '@rekey.dev/nextjs: REKEY_URL and REKEY_SECRET must be set on the server. ' +
+        'REKEY_URL on Rekey Cloud is https://api.rekey.dev; self-hosted, it is your own ' +
+        "deployment's public origin (locally, http://localhost:3030). REKEY_SECRET is the " +
+        'secret key (rp_…) from Panel → Application → API Keys.',
     );
   }
   _client = new Rekey({ apiUrl, secretKey });

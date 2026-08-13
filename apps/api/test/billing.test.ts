@@ -121,6 +121,38 @@ describe('billing scaffold', () => {
     expect(dup.json().error.code).toBe('PLAN_SLUG_TAKEN');
   });
 
+  it('says an ARCHIVED plan is what holds the slug, instead of "already exists"', async () => {
+    // Reported as #30: archive a plan, try to create a new one with the same
+    // name, get a duplicate-slug refusal for a plan you believe you removed.
+    // Archiving flips `active` and keeps the row, because the slug is the
+    // public identifier integrator code passes to checkout — releasing it would
+    // let a new plan inherit an old one's meaning. The refusal is right; saying
+    // only "already exists" is what made it unactionable.
+    await createPlan(applicationId, { slug: 'retired', name: 'Retired', amount: 500 });
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/admin/applications/${applicationId}/plans/retired`,
+      headers: { authorization: `Bearer ${ADMIN_KEY}` },
+      payload: { active: false },
+    });
+
+    const again = await app.inject({
+      method: 'POST',
+      url: `/api/v1/admin/applications/${applicationId}/plans`,
+      headers: { authorization: `Bearer ${ADMIN_KEY}` },
+      payload: { slug: 'retired', name: 'Retired v2', amount: 900 },
+    });
+
+    expect(again.statusCode).toBe(409);
+    const err = again.json().error as { code: string; message: string; fix: string };
+    expect(err.code).toBe('PLAN_SLUG_TAKEN');
+    // The word that turns a dead end into a next step.
+    expect(err.message).toMatch(/archived/i);
+    // And the fix names both ways out rather than only "pick another slug".
+    expect(err.fix).toMatch(/reactivate/i);
+    expect(err.fix).toMatch(/different slug/i);
+  });
+
   it('lists active plans only by default; includes inactive when asked', async () => {
     await createPlan(applicationId, { slug: 'a', name: 'A', amount: 100 });
     await createPlan(applicationId, { slug: 'b', name: 'B', amount: 200 });

@@ -12,7 +12,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { render } from '@testing-library/react';
-import { Themed, useCx } from '../src/theme.js';
+import { Themed, useCx, variablesToStyle } from '../src/theme.js';
 
 /** Probe component: renders a node whose className is driven by `useCx`. */
 function Probe(): React.JSX.Element {
@@ -155,5 +155,27 @@ describe('stylesheet', () => {
       </Themed>,
     );
     expect(container.querySelectorAll('style[data-rekey-styles]').length).toBe(1);
+  });
+});
+
+describe('the radius token split does not regress an existing integrator', () => {
+  // Controls used to derive their radius from the surface radius by
+  // subtraction. Splitting them into two tokens is what stops a 2px surface
+  // radius producing `calc(2px - 4px)`, but it also means an integrator who
+  // set the one documented knob would have got 12px cards with 2px inputs
+  // after an upgrade they did not ask for.
+  it('borderRadius alone drives both surfaces and controls', () => {
+    const style = variablesToStyle({ borderRadius: '12px' }) as Record<string, string>;
+    expect(style['--rekey-radius']).toBe('12px');
+    expect(style['--rekey-radius-control']).toBe('12px');
+  });
+
+  it('borderRadiusControl still wins when the two should differ', () => {
+    const style = variablesToStyle({
+      borderRadius: '12px',
+      borderRadiusControl: '4px',
+    }) as Record<string, string>;
+    expect(style['--rekey-radius']).toBe('12px');
+    expect(style['--rekey-radius-control']).toBe('4px');
   });
 });

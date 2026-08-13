@@ -779,6 +779,34 @@ export type KnownSubscriptionStatus = z.infer<typeof SubscriptionStatusSchema>;
 /** {@link Open}. `TRIALING` is the obvious next one; handle the default branch. */
 export type SubscriptionStatusType = Open<KnownSubscriptionStatus>;
 
+/**
+ * One provider's reason for refusing a plan, shaped like an error because it
+ * is one: the same code, message and fix the buyer's checkout would raise,
+ * delivered to the operator before any buyer sees it.
+ *
+ * `provider` is null when the blocker belongs to no single provider, which
+ * today means the Application has no billing provider configured at all.
+ */
+export const PlanCheckoutBlockerSchema = z.object({
+  provider: z.string().nullable(),
+  code: z.string(),
+  message: z.string(),
+  fix: z.string(),
+});
+export type PlanCheckoutBlockerDto = z.infer<typeof PlanCheckoutBlockerSchema>;
+
+/**
+ * Per provider, because the failure is per provider. Checkout geo-routes, so a
+ * plan can be buyable through PayPal and dead through Stripe, and only the
+ * buyers the router sends to Stripe lose. One boolean would report that plan
+ * as working to whoever happened to test from the lucky country.
+ */
+export const PlanCheckoutReadinessSchema = z.object({
+  ready: z.boolean(),
+  blockers: z.array(PlanCheckoutBlockerSchema),
+});
+export type PlanCheckoutReadinessDto = z.infer<typeof PlanCheckoutReadinessSchema>;
+
 export const PlanDtoSchema = z.object({
   id: z.string(),
   applicationId: z.string(),
@@ -807,6 +835,22 @@ export const PlanDtoSchema = z.object({
   metadata: z.record(z.unknown()),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
+  /**
+   * Whether a buyer sent to checkout for this plan would actually get a
+   * checkout, and if not, which provider refuses and how to repair it.
+   *
+   * OPERATOR-FACING, and present only on operator routes. `active` says what
+   * the operator INTENDED; this says what the providers will honour, and the
+   * two disagree in one common case: a plan created before the Application had
+   * provider credentials was never registered, has no price behind it, and
+   * stays that way because configuring a provider does not reach back and fix
+   * plans that already exist. Such a plan is indistinguishable from a working
+   * one until a buyer clicks Buy.
+   *
+   * Absent on the public catalogue on purpose. A buyer has no repair to
+   * perform and `blockers` names internal state.
+   */
+  checkout: PlanCheckoutReadinessSchema.optional(),
 });
 export type PlanDto = Omit<z.infer<typeof PlanDtoSchema>, 'kind'> & {
   /** {@link Open} — always give your `switch` a default branch. */
@@ -891,6 +935,29 @@ export const SubscriptionDtoSchema = z.object({
   currentPeriodEnd: z.string().datetime().nullable(),
   cancelAt: z.string().datetime().nullable(),
   canceledAt: z.string().datetime().nullable(),
+  /**
+   * Which payment processor holds this subscription, or null for one Rekey
+   * provisioned itself (a hand-granted plan, an import, a Cloud subscription
+   * set up by an operator).
+   *
+   * This shipped as `providerSubId` alone, which is an id belonging to nobody:
+   * a consumer could see `sub_1A2B3C` and had no way to know whether that was
+   * Stripe's, PayPal's or Razorpay's. Every question worth asking about a live
+   * subscription needs the name. Which "Manage billing" link to render. Which
+   * logo to put next to it. Whether a support ticket goes to the Stripe
+   * dashboard or the PayPal one.
+   *
+   * It also fixes a rule that the new provider picker makes easy to break: a
+   * subscription cannot move between processors. A buyer already paying
+   * through PayPal who is offered a Stripe checkout for an upgrade gets a
+   * SECOND subscription, not a changed one, and is billed twice. Reading this
+   * field is how a pricing page avoids offering that choice.
+   *
+   * Open string, not an enum, for the same reason as `BillingProviderSchema`:
+   * the authoritative set is the API's runtime module registry, so a new
+   * provider must not require an SDK release.
+   */
+  provider: z.string().nullable(),
   providerSubId: z.string().nullable(),
   metadata: z.record(z.unknown()),
   createdAt: z.string().datetime(),

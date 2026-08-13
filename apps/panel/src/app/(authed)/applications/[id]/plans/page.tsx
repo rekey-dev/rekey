@@ -8,6 +8,7 @@ import { BillingModeBanner } from '@/components/BillingModeBanner';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { Modal } from '@/components/Modal';
 import { PlanCreateForm } from '@/components/PlanCreateForm';
+import { PlanEditForm } from '@/components/PlanEditForm';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
@@ -91,13 +92,69 @@ async function createPlan(applicationId: string, formData: FormData): Promise<vo
 
 async function registerPlan(applicationId: string, slug: string): Promise<void> {
   'use server';
-  await api({
-    method: 'POST',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/plans/${encodeURIComponent(slug)}/register`,
-  });
+  try {
+    await api({
+      method: 'POST',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/plans/${encodeURIComponent(slug)}/register`,
+    });
+  } catch (err) {
+    // Registration reaches Stripe, so it fails for reasons the operator can do
+    // something about: no credentials configured, credentials the provider
+    // rejected, a provider that is simply down. This was the one action in the
+    // file with no catch, which turned every one of those into the whole-page
+    // error boundary and a Try again button that could not succeed. The state
+    // this button exists for is exactly the state most likely to produce them.
+    if (err instanceof PanelApiError) {
+      redirect(`/applications/${applicationId}/plans?${await errorQuery(err)}`);
+    }
+    throw err;
+  }
   // `redirect`, not `revalidatePath` — matching every other action in this
   // file. A same-action revalidatePath kills Next's seeded prefetch here and
   // the page renders blank for a full RSC round-trip.
+  redirect(`/applications/${applicationId}/plans`);
+}
+
+/**
+ * Edit an existing plan's name, and its price while no provider price exists.
+ *
+ * The API refuses `amount`/`currency`/`interval` on a registered plan with
+ * `PLAN_PRICE_IMMUTABLE`, so the form hides those inputs there rather than
+ * offering an edit that cannot succeed. Only the fields actually submitted are
+ * sent, so a name-only edit never touches the price.
+ */
+async function editPlan(applicationId: string, slug: string, formData: FormData): Promise<void> {
+  'use server';
+  const name = String(formData.get('name') ?? '').trim();
+  if (!name) {
+    redirect(`/applications/${applicationId}/plans?editError=missing&editSlug=${encodeURIComponent(slug)}`);
+  }
+
+  const amountRaw = formData.get('amount');
+  const currencyRaw = String(formData.get('currency') ?? '').trim();
+  const intervalRaw = String(formData.get('interval') ?? '').trim();
+  const body: Record<string, unknown> = { name };
+  if (amountRaw !== null && String(amountRaw) !== '') body.amount = Number(amountRaw);
+  if (currencyRaw) body.currency = currencyRaw.toUpperCase();
+  if (intervalRaw) body.interval = intervalRaw;
+
+  try {
+    await api({
+      method: 'PATCH',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/plans/${encodeURIComponent(slug)}`,
+      body,
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(
+        `/applications/${applicationId}/plans?${await errorQuery(err, {
+          editError: err.code,
+          editSlug: slug,
+        })}`,
+      );
+    }
+    throw err;
+  }
   redirect(`/applications/${applicationId}/plans`);
 }
 
@@ -215,6 +272,8 @@ export default async function PlansPage({
   const created = typeof sp.created === 'string' ? sp.created : undefined;
   const entError = typeof sp.entError === 'string' ? sp.entError : undefined;
   const entSaved = typeof sp.entSaved === 'string' ? sp.entSaved : undefined;
+  const editError = typeof sp.editError === 'string' ? sp.editError : undefined;
+  const editSlug = typeof sp.editSlug === 'string' ? sp.editSlug : undefined;
 
   // Billing master switch off → point at the switch instead of an empty table
   // (same guard the Revenue page renders; the tab group is hidden but the URL
@@ -263,6 +322,18 @@ export default async function PlansPage({
   const active = plans.filter((p) => p.active);
   const inactive = plans.filter((p) => !p.active);
 
+  // Plans on the pricing page right now that no provider will honour. Scoped to
+  // `active` deliberately: an archived plan nobody can buy is not a problem,
+  // and warning about it buries the ones that are costing money. The status
+  // column already covers PENDING and FAILED, so they are left out here rather
+  // than counted twice.
+  const unbuyable = active.filter(
+    (p) =>
+      p.checkout?.ready === false &&
+      p.registrationStatus !== 'PENDING' &&
+      p.registrationStatus !== 'FAILED',
+  );
+
   return (
     <div className="space-y-5">
       <BillingModeBanner applicationId={id} />
@@ -279,6 +350,35 @@ export default async function PlansPage({
       {entError && (
         <Banner tone="error">
           {ERR[entError] ?? entError}
+        </Banner>
+      )}
+      {unbuyable.length > 0 && (
+        // The one state nothing else on this page reveals. Every other signal
+        // says these plans are fine, so the notice has to say what the symptom
+        // will be rather than only naming the state.
+        <Banner tone="error">
+          <p>
+            {unbuyable.length === 1 ? 'One live plan cannot' : `${unbuyable.length} live plans cannot`}{' '}
+            be bought. A buyer who clicks Buy is refused.
+          </p>
+          <ul className="mt-2 space-y-1">
+            {unbuyable.map((p) => (
+              <li key={p.id} className="text-xs">
+                <code className="font-mono">{p.slug}</code>
+                {p.checkout?.blockers.map((b) => (
+                  <span key={`${p.id}-${b.provider ?? 'none'}-${b.code}`}>
+                    {' — '}
+                    {b.message}
+                  </span>
+                ))}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 text-xs">
+            Plans register with the payment provider when they are created, so a plan created
+            before you connected one was never registered and connecting it afterwards does not
+            repair them. Use <strong>Register</strong> on each row, or recreate them.
+          </p>
         </Banner>
       )}
 
@@ -323,6 +423,8 @@ export default async function PlansPage({
           rows={[...active, ...inactive]}
           applicationId={id}
           entBySlug={entBySlug}
+          editError={editError}
+          editSlug={editSlug}
         />
       )}
     </div>
@@ -333,10 +435,15 @@ function PlansTable({
   rows,
   applicationId,
   entBySlug,
+  editError,
+  editSlug,
 }: {
   rows: PlanRow[];
   applicationId: string;
   entBySlug: Record<string, PlanEntitlementRow[]>;
+  /** Failure from the last Edit submit, rendered inside that plan's modal. */
+  editError?: string | undefined;
+  editSlug?: string | undefined;
 }): React.JSX.Element {
   return (
     <Table minWidth="min-w-[60rem]">
@@ -414,6 +521,19 @@ function PlansTable({
                   </span>
                 ) : p.registrationStatus === 'PENDING' ? (
                   <Badge tone="neutral" dot>registering…</Badge>
+                ) : p.checkout?.ready === false ? (
+                  // `active` and buyable are different facts, and this is the
+                  // row where they disagree. Showing "active" here would be
+                  // technically true and the most misleading thing on the page.
+                  <span
+                    className="inline-flex flex-col items-start gap-0.5"
+                    title={p.checkout.blockers.map((b) => b.message).join(' ')}
+                  >
+                    <Badge tone="danger" dot>cannot be bought</Badge>
+                    <span className="block max-w-[9rem] truncate text-[10px] text-[var(--color-muted-fg)]">
+                      {p.checkout.blockers[0]?.message ?? 'No provider will accept this plan.'}
+                    </span>
+                  </span>
                 ) : p.active ? (
                   <Badge tone="success" dot>active</Badge>
                 ) : (
@@ -422,6 +542,31 @@ function PlansTable({
               </TD>
               <TD align="right">
                 <div className="flex items-center justify-end gap-3">
+                  <Modal
+                    modalKey={`edit_${p.slug}`}
+                    size="md"
+                    title={`Edit plan — ${p.slug}`}
+                    description="Rename the plan, and correct its price while no provider price exists yet. The slug is permanent because your integration passes it to checkout."
+                    trigger="Edit"
+                    triggerClassName="cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
+                  >
+                    <PlanEditForm
+                      plan={{
+                        slug: p.slug,
+                        name: p.name,
+                        amount: p.amount,
+                        currency: p.currency,
+                        interval: p.interval,
+                        // A provider price is immutable once minted, so the
+                        // price inputs only render while none exists. FAILED
+                        // and PENDING are exactly the repair cases: the plan is
+                        // un-purchasable and nothing has been minted yet.
+                        priceEditable: p.registrationStatus !== 'REGISTERED',
+                      }}
+                      action={editPlan.bind(null, applicationId, p.slug)}
+                      error={editSlug === p.slug ? editError : undefined}
+                    />
+                  </Modal>
                   <Modal
                     modalKey={`ent_${p.slug}`}
                     size="lg"
@@ -455,6 +600,27 @@ function PlansTable({
                       <EntitlementForm action={addEntitlement.bind(null, applicationId, p.slug)} />
                     </div>
                   </Modal>
+                  {p.checkout?.ready === false &&
+                    // NO_BILLING_PROVIDER is not a plan problem and Register
+                    // cannot fix it: with nothing configured the call can only
+                    // come back 400. Offering it here put a button on every
+                    // active plan whose sole outcome was an error, in the very
+                    // state this feature was written to explain.
+                    !p.checkout.blockers.some((b) => b.code === 'NO_BILLING_PROVIDER') &&
+                    p.registrationStatus !== 'FAILED' &&
+                    p.registrationStatus !== 'PENDING' && (
+                      // Offered alongside Archive rather than instead of it:
+                      // this plan is live and the operator may reasonably want
+                      // either to fix it or to pull it down.
+                      <form action={registerPlan.bind(null, applicationId, p.slug)} className="inline">
+                        <SubmitButton
+                          pendingLabel="Registering…"
+                          className="rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
+                        >
+                          Register
+                        </SubmitButton>
+                      </form>
+                    )}
                   {p.registrationStatus === 'FAILED' || p.registrationStatus === 'PENDING' ? (
                     // Activating an unregistered plan is refused by the API —
                     // nothing can be sold against it until the provider accepts

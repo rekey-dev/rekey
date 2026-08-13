@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { errorQuery, readErrorFlash, api, PanelApiError, type BillingCredentialRow, type BillingProviderDescriptor, type BillingProviderName, getApplication } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, type PlanRow, type BillingCredentialRow, type BillingProviderDescriptor, type BillingProviderName, getApplication } from '@/lib/api';
 import { CopyButton } from '@/components/CopyButton';
 import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -252,7 +252,7 @@ export default async function BillingPage({
   const edit = typeof sp.edit === 'string' ? sp.edit : undefined;
   const webhook = typeof sp.webhook === 'string' ? sp.webhook : undefined;
 
-  const [app, discovery, webhookEventPage] = await Promise.all([
+  const [app, discovery, webhookEventPage, planPage] = await Promise.all([
     getApplication(id),
     // P4 discovery: every registered provider module + this app's configured
     // status in one call — drives the provider table, labels, and the
@@ -265,7 +265,26 @@ export default async function BillingPage({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/billing-credentials/webhook-events?limit=25`,
     }).catch(() => emptyPage<WebhookEventRow>(25)),
+    // Read here because THIS is the page where the damage is done. Connecting a
+    // provider does not reach back and register the plans that already exist,
+    // and the operator who just pasted a secret key has every reason to believe
+    // billing now works. It does not, for exactly the plans they created first.
+    api<Page<PlanRow>>({
+      method: 'GET',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/plans`,
+    }).catch(() => emptyPage<PlanRow>()),
   ]);
+
+  // Active plans no configured provider will honour. PENDING and FAILED are
+  // excluded: those already have their own state and their own repair on the
+  // Plans page, and this notice is about the ones that look healthy.
+  const unbuyablePlans = planPage.items.filter(
+    (p) =>
+      p.active &&
+      p.checkout?.ready === false &&
+      p.registrationStatus !== 'PENDING' &&
+      p.registrationStatus !== 'FAILED',
+  );
 
   const webhookEvents = webhookEventPage.items;
   const providers = discovery.providers;
@@ -299,6 +318,31 @@ export default async function BillingPage({
   return (
     <div className="space-y-5">
       {billingEnabled && <BillingModeNotice rows={list} />}
+      {unbuyablePlans.length > 0 && (
+        <div className="rounded-md border border-[var(--color-danger)] bg-[color-mix(in_srgb,var(--color-danger)_8%,transparent)] px-3 py-2.5 text-sm text-[var(--color-fg)]">
+          <p className="font-medium">
+            {unbuyablePlans.length === 1
+              ? 'One live plan is not registered with your payment provider.'
+              : `${unbuyablePlans.length} live plans are not registered with your payment provider.`}
+          </p>
+          <p className="mt-1 text-xs text-[var(--color-muted-fg)]">
+            Plans register when they are created, so anything created before these credentials
+            existed has no price behind it. It still lists, it is still active, and a buyer who
+            clicks Buy is refused. Changing or adding a provider has the same effect on plans that
+            were already there.{' '}
+            <a
+              className="underline"
+              href={`/applications/${encodeURIComponent(id)}/plans`}
+            >
+              Register them on the Plans tab
+            </a>
+            .
+          </p>
+          <p className="mt-1.5 font-mono text-[11px] text-[var(--color-muted-fg)]">
+            {unbuyablePlans.map((p) => p.slug).join(', ')}
+          </p>
+        </div>
+      )}
       {saved === 'billing' && (
         <SavedBanner message={`Billing ${billingEnabled ? 'enabled' : 'disabled'} for this application.`} />
       )}

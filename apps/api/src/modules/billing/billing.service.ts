@@ -30,10 +30,13 @@ import { plansService } from '../plans/plans.service.js';
 import { couponsService } from '../coupons/coupons.service.js';
 import { resolveCheckoutDiscount } from './checkout-discount.js';
 import { resolveCheckoutTrial } from './checkout-trial.js';
-import { buildCheckoutSessionMetadata } from './checkout-sessions.js';
+import {
+  buildCheckoutSessionMetadata,
+  CHECKOUT_SESSION_LIFETIME_MS,
+} from './checkout-sessions.js';
 import { getProviderForApplication, pickProvider } from './providers/index.js';
 import type { BillingProviderName } from './credentials.service.js';
-import { BillingConfigSchema, cancelEffect, isEntitlingStatus } from '@rekey.dev/shared-types';
+import { BillingConfigSchema, cancelEffect, isEntitlingStatus, ENTITLING_SUBSCRIPTION_STATUSES } from '@rekey.dev/shared-types';
 import { enqueueSubscriptionEvent } from './webhooks/billing-events.js';
 import { kickDeliveries } from '../webhooks/webhook.service.js';
 
@@ -380,11 +383,171 @@ export const billingService = {
       };
     }
 
-    const providerName = await pickProvider({
-      application: input.application,
-      ...(input.country !== undefined && { country: input.country }),
-      ...(input.provider !== undefined && { preferred: input.provider }),
-    });
+    // Which processor this buyer is ALREADY paying through, if any.
+    //
+    // Resolved before the router runs, because it outranks the router. A
+    // subscription's provider is immutable for its lifetime, so a buyer who
+    // holds one and starts a second checkout somewhere else does not get a
+    // changed subscription: they get a SECOND one, and two charges a month.
+    //
+    // Scoped to the whole Application and not to this plan. The guard that used
+    // to sit further down keyed on (application, endUser, PLAN), which only ever
+    // caught re-buying the identical plan. The case that bills twice is the
+    // ordinary one: on `basic` through PayPal, upgrade to `pro`, get routed to
+    // Stripe. Different planId, guard missed, two live subscriptions.
+    //
+    // TWO KEYS ARE MATCHED, and they guard different things, which is why the
+    // old plan-keyed comparison was not redundant and both belong in here:
+    //
+    //   * the SUBJECT. An org-billed subscription belongs to the org, not to
+    //     whoever happens to be checking out for it. This is what catches the
+    //     second billing relationship.
+    //   * the ROW THIS CHECKOUT WILL WRITE, keyed `(applicationId, endUserId,
+    //     planId)` by the upsert below, which does NOT include
+    //     `beneficiaryOrgId`. When the two disagree, guarding only by subject
+    //     inspects one row and writes another: a personal PayPal subscription
+    //     on `pro` plus an org checkout of `pro` through Stripe answered 200,
+    //     flipped `provider` to stripe and left the PayPal `providerSubId` in
+    //     place. PayPal kept charging and nothing local pointed at it.
+    //
+    // The real fix for the second one is `beneficiaryOrgId` in the uniqueness
+    // constraint, which ORG_BILLING.md §5 already flags. Until that migration
+    // exists the guard covers both keys.
+    const boundSubject =
+      input.beneficiaryOrgId !== undefined
+        ? { beneficiaryOrgId: input.beneficiaryOrgId }
+        : { endUserId: input.endUser.id, beneficiaryOrgId: null };
+    const bound = isOneTime
+      ? null
+      : await prisma.subscription.findFirst({
+          where: {
+            applicationId: input.application.id,
+            provider: { not: null },
+            // One-off purchases neither bind nor are bound. A CREDIT pack or a
+            // perpetual licence is a single charge that creates no second
+            // billing relationship, so refusing over one would block a
+            // legitimate sale to defend against a problem it cannot cause.
+            // `applyCheckoutCompleted` also writes one-time rows ACTIVE with no
+            // period, so they stay ACTIVE forever and would pin a buyer to
+            // whichever processor sold them a $5 credit pack once. Stated as
+            // the recurring kinds rather than as a negation so it cannot go
+            // quietly wrong on a NULL `licenseKind`; it is the exact
+            // complement of `isOneTime` above. TIMED licences DO recur.
+            plan: {
+              OR: [
+                { kind: { in: ['SUBSCRIPTION', 'USAGE'] } },
+                { kind: 'LICENSE', licenseKind: 'TIMED' },
+              ],
+            },
+            AND: [
+              { OR: [boundSubject, { endUserId: input.endUser.id, planId: plan.id }] },
+              {
+                OR: [
+                  { status: { in: [...ENTITLING_SUBSCRIPTION_STATUSES] } },
+                  // A started-but-unfinished checkout on ANOTHER plan binds
+                  // too, for as long as its session could still be paid.
+                  // Excluding PENDING left the reachable version of this bug:
+                  // start a PayPal checkout for `basic`, abandon the tab, start
+                  // a Stripe one for `pro`, pay both. Two rows, two webhooks,
+                  // two ACTIVE subscriptions on two processors.
+                  //
+                  // The tradeoff is the window, since nothing here can ask the
+                  // processor whether a session it minted is still open. Bound
+                  // to the session lifetime (see checkout-sessions.ts) an
+                  // abandoned checkout stops pinning once nobody can complete
+                  // it, at the cost of a buyer who leaves both tabs open for a
+                  // day still being able to pay both. That is the narrower
+                  // hole, and it runs on the same clock the coupon reservation
+                  // already uses.
+                  //
+                  // Excluded: the row THIS checkout will write. Two open
+                  // sessions on one plan are one row by design, and both stay
+                  // completable on purpose, which is why the row remembers a
+                  // list of them (see checkout-sessions.ts). Binding on it
+                  // would refuse the ordinary "picked PayPal, went back, chose
+                  // Stripe" without closing anything: the abandoned session
+                  // survives either way.
+                  //
+                  // What DOES stop two completions is the second-completion
+                  // guard in `applyCheckoutCompleted`. This comment used to
+                  // say the applier was "the place to stop that", which read
+                  // as a description of something that existed and was not:
+                  // both completions landed, leaving two live provider-side
+                  // subscriptions and one local row pointing at the last. The
+                  // guard is there now. Do not widen this exclusion without
+                  // checking it is still there.
+                  {
+                    status: 'PENDING',
+                    updatedAt: { gt: new Date(Date.now() - CHECKOUT_SESSION_LIFETIME_MS) },
+                    NOT: { endUserId: input.endUser.id, planId: plan.id },
+                  },
+                ],
+              },
+            ],
+          },
+          // A buyer already billed twice by this bug holds two entitling
+          // subscriptions, and without this the binding provider was whatever
+          // Postgres handed back first, which is a different answer on two
+          // consecutive requests. Oldest wins, so the answer is stable and is
+          // the relationship they have had longest.
+          orderBy: { createdAt: 'asc' },
+          select: { provider: true, plan: { select: { slug: true } } },
+        });
+    const boundProvider = bound?.provider ?? null;
+
+    // An explicit request we cannot honour is refused; an absent one is pinned.
+    //
+    // The split matters. Asking for PayPal when you are already on Stripe is a
+    // request with no correct outcome, and answering it by quietly charging you
+    // on Stripe would be worse than saying no. But when nobody asked, the geo
+    // router is free to pick a different provider than last time (a trip
+    // abroad, a routing change), and that silent drift is the version of this
+    // bug nobody would ever report. Pinning removes it.
+    if (
+      bound !== null &&
+      boundProvider !== null &&
+      input.provider !== undefined &&
+      input.provider !== boundProvider
+    ) {
+      throw new RekeyError({
+        statusCode: 409,
+        code: 'BILLING_PROVIDER_SWITCH_BLOCKED',
+        message: `This subscriber already pays for "${bound.plan.slug}" through "${boundProvider}", and a subscription cannot be moved between payment providers. Checking out through "${input.provider}" would create a second subscription and bill them twice.`,
+        fix: `Check out through "${boundProvider}", or cancel the existing subscription and let it terminate before starting a new one elsewhere. Read \`provider\` off the active subscription to know which one to offer.`,
+      });
+    }
+
+    let providerName: BillingProviderName;
+    try {
+      providerName = await pickProvider({
+        application: input.application,
+        ...(input.country !== undefined && { country: input.country }),
+        ...(boundProvider !== null
+          ? { preferred: boundProvider as BillingProviderName }
+          : input.provider !== undefined && { preferred: input.provider }),
+      });
+    } catch (e) {
+      // The pin can name a provider the operator has since disabled, and the
+      // router's own refusal is written for a caller who asked for one: it says
+      // to omit `provider`, which is exactly what this caller did. Every
+      // existing subscriber is locked out of every recurring purchase at this
+      // point, and answering that sends them looking for a mistake they did
+      // not make. Blocking is still right; only the wording changes, and it
+      // names the two ways out.
+      if (
+        boundProvider !== null &&
+        e instanceof RekeyError &&
+        e.code === 'BILLING_PROVIDER_NOT_AVAILABLE'
+      ) {
+        throw new RekeyError({
+          statusCode: 409,
+          code: 'BILLING_BOUND_PROVIDER_UNAVAILABLE',
+          message: `This subscriber pays through "${boundProvider}", which is no longer configured or enabled for this Application. A subscription cannot be moved between payment providers, so no checkout can be issued for them until that is resolved.`,
+          fix: `Re-enable "${boundProvider}" in Panel → Application → Billing so existing subscribers can keep buying, or cancel their "${boundProvider}" subscription, let it terminate, and have them buy again through a provider that is still enabled.`,
+        });
+      }
+      throw e;
+    }
 
     // Resolved as soon as the provider is known and BEFORE any row is written:
     // whether the discount can actually be charged depends on the provider and
@@ -399,9 +562,20 @@ export const billingService = {
     // advertised as a free trial is not a failure mode worth having.
     const trial = resolveCheckoutTrial({ plan, provider: providerName, isOneTime });
 
-    // Guard: if the user already has an ACTIVE/PAST_DUE sub on this plan
-    // bound to a different provider, refuse the switch — they need to
-    // cancel first. Subscription.provider is immutable once active.
+    // The row this checkout will upsert, read for its metadata and its status
+    // further down (a live provider session must not be stranded, and an
+    // entitled row keeps its dates through an upgrade) — and, immediately
+    // below, for whose subscription it actually is.
+    //
+    // The provider-switch guard that used to sit here, keyed on this same
+    // (application, endUser, plan) and compared AFTER the router had run, is
+    // gone, but its KEY is not. It moved into the lookup above, as the second
+    // arm of that `OR`, because the two keys protect different things and the
+    // subject-scoped one alone let an org checkout rewrite a personal row's
+    // provider. Read the comment there before narrowing either arm.
+    //
+    // It was also doing a job that had nothing to do with providers, and that
+    // job is now the guard below rather than a side effect.
     const existing = await prisma.subscription.findUnique({
       where: {
         applicationId_endUserId_planId: {
@@ -411,17 +585,51 @@ export const billingService = {
         },
       },
     });
+
+    // A LIVE subscription is not moved from one billing subject to another by
+    // somebody opening a checkout.
+    //
+    // `beneficiaryOrgId` is not in the uniqueness constraint (#431), so a
+    // personal subscription to `pro` and an org-billed one to `pro` for the
+    // same buyer are the SAME row, and the upsert below writes
+    // `beneficiaryOrgId` unconditionally. Alice owns Acme and Beta; Acme holds
+    // `pro`; Alice opens a checkout for `pro` on behalf of Beta. That rewrote
+    // Acme's row: still ACTIVE, still carrying Acme's `providerSubId`, but
+    // billed to Beta. Acme's entitlement read null, Beta had it for free, the
+    // processor kept charging Acme, and no payment was involved. Opening
+    // checkout did it.
+    //
+    // This was covered by ACCIDENT until the provider binding above existed.
+    // The guard that used to sit right here compared `existing.provider !==
+    // providerName`, which also refused the rewrite — but only when the router
+    // happened to disagree, and pinning now makes the two agree by
+    // construction for every bound buyer. Fixing the reported axis removed the
+    // cover on this one, so the refusal has to be stated rather than fall out.
+    //
+    // Only an ENTITLING row is protected. A PENDING one is a checkout nobody
+    // completed: refusing over it would offer a remedy ("cancel it") that does
+    // not exist, which is precisely the shape of refusal this change had to
+    // remove once already for one-off purchases. The narrower hole it leaves —
+    // the earlier subject pays, the later subject is entitled — is the same
+    // one two open sessions on a single row already carry, and it closes for
+    // good with #431.
     if (
       existing &&
-      existing.provider &&
-      existing.provider !== providerName &&
-      isEntitlingStatus(existing.status)
+      isEntitled(existing.status) &&
+      existing.beneficiaryOrgId !== (input.beneficiaryOrgId ?? null)
     ) {
+      // The held subject is described, not named: the caller was authorised for
+      // the org they are BUYING for, and may not be a member of the one that
+      // holds the row.
+      const held =
+        existing.beneficiaryOrgId === null ? 'their personal account' : 'a different organization';
+      const wanted =
+        input.beneficiaryOrgId === undefined ? 'their personal account' : 'this organization';
       throw new RekeyError({
         statusCode: 409,
-        code: 'BILLING_PROVIDER_SWITCH_BLOCKED',
-        message: `You already have an active subscription on this plan via "${existing.provider}". Cancel it first to switch to "${providerName}".`,
-        fix: 'Cancel the current subscription, wait for it to terminate, then start a new checkout.',
+        code: 'BILLING_SUBSCRIPTION_SUBJECT_CONFLICT',
+        message: `This buyer already holds a live subscription to "${plan.slug}" billed to ${held}, and a subscription to one plan is stored once per buyer. Checking out "${plan.slug}" for ${wanted} would move that subscription instead of starting a second one: the current holder would lose the entitlement while the payment provider kept charging for it.`,
+        fix: `Cancel the existing "${plan.slug}" subscription and let it terminate before starting one for a different billing subject, or bill the two subjects on separate plans. Read the live subscription with GET /billing/subscription (pass \`organizationId\` for an org's) to see which subject holds it.`,
       });
     }
 
@@ -503,6 +711,7 @@ export const billingService = {
       previous: existing?.metadata ?? null,
       sessionId: session.sessionId,
       isOneTime,
+      provider: providerName,
       coupon: couponContext
         ? { couponId: couponContext.couponId, discountAmount: couponContext.discountAmount }
         : null,

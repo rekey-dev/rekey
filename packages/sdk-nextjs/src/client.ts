@@ -64,7 +64,9 @@ export function rekeyBrowser(opts: RekeyBrowserOptions = {}): RekeyBrowserClient
   const publishableKey = opts.publishableKey ?? process.env.NEXT_PUBLIC_REKEY_PUBLIC_KEY;
   if (!apiUrl) {
     throw new Error(
-      '@rekey.dev/nextjs/client: NEXT_PUBLIC_REKEY_URL is not set (or pass { apiUrl }).',
+      '@rekey.dev/nextjs/client: NEXT_PUBLIC_REKEY_URL is not set (or pass { apiUrl }). ' +
+        'On Rekey Cloud that value is https://api.rekey.dev. Self-hosted, it is your own ' +
+        "deployment's public origin (locally, http://localhost:3030).",
     );
   }
   if (!publishableKey) {

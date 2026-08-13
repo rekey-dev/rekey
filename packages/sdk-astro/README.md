@@ -22,9 +22,29 @@ It deliberately does *not* read `x-forwarded-host`: a client can send that heade
 ## Setup
 
 ```bash
-REKEY_URL=https://api.rekey.dev
-REKEY_SECRET=rp_live_…   # Application secret key (Panel → Application → API Keys)
+REKEY_URL=https://api.rekey.dev   # Rekey Cloud; self-hosted, use your own origin
+REKEY_SECRET=rp_live_…            # Application secret key (Panel → Application → API Keys)
 ```
+
+**`https://api.rekey.dev` is Rekey Cloud's API** — one origin for every Cloud
+workspace, scoped by your API key rather than by the URL. Self-hosting, point
+`REKEY_URL` at your own deployment's public origin (`http://localhost:3030`
+locally). Both variables are required and neither has a default; see
+[docs/api-url.md](../../docs/api-url.md).
+
+> **Breaking, from `2.0.0-rc.9`.** Up to and including `2.0.0-rc.8`, `REKEY_URL`
+> fell back to `https://api.rekey.dev` when unset. It no longer does — it throws.
+>
+> If you self-host and were relying on that fallback, every request this SDK made
+> went to Rekey Cloud carrying credentials: your `REKEY_SECRET` in an
+> `Authorization` header on all of them, plus the **end-user's refresh token**
+> (`auth.refresh`, `auth.signOut`) and **access token** (`getCurrentUser`) on the
+> session calls. Set `REKEY_URL`, rotate the secret key, and treat any end-user
+> session that was live during that period as disclosed.
+>
+> Note that `^2.0.0-rc.8` matches `2.0.0-rc.9`, so a lockfile refresh alone will
+> pick this up. That is deliberate: it fails immediately, loudly, and with the
+> value it needs named in the message.
 
 > The built server reads `process.env`, not `.env`. Vite loads `.env` for `astro dev`; in production, pass the variables through your process manager or platform. This is the single most common "works locally, 500s on deploy".
 

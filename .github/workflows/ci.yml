@@ -119,7 +119,26 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 45, not 20.
+    #
+    # A healthy run of this job is 9-11 minutes. The old ceiling left under 2x
+    # headroom, and GitHub's shared runners are not consistent enough for that:
+    # on a slow one every test file takes 2-10x longer — `operator-pat` measured
+    # 6.5s on one run and 65s on the next, with the diff between them touching
+    # neither — and the job is killed mid-suite with ZERO failing tests. It
+    # reports as a red X on the PR, which reads as "your change broke CI".
+    #
+    # That happened five times in one afternoon across three unrelated
+    # branches. It was diagnosed rather than assumed: a same-machine A/B of the
+    # suite before and after one of those branches came out 627.7s vs 609.2s,
+    # so the diffs were not the cause, and the identical commit passed in
+    # 11m27s on a re-run.
+    #
+    # 45 gives ~4x on a healthy run and survives a 3x-slow runner. It is a
+    # ceiling for a hung job, not a performance budget — if the suite ever
+    # genuinely approaches it, that is a signal to split it, not to raise this
+    # again.
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:16-alpine

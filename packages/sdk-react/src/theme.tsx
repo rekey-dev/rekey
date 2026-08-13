@@ -42,8 +42,26 @@ export interface AppearanceVariables {
   colorBorder?: string;
   /** Danger/destructive colour (sign-out everywhere, errors). */
   colorDanger?: string;
-  /** Corner radius for cards. */
+  /**
+   * Corner radius for surfaces — cards, plan tiles, menus.
+   *
+   * Defaults to 2px. Rekey's own look is flat and editorial: hairline rules
+   * and square corners, with the accent colour doing the work that a rounded,
+   * shadowed card would do elsewhere. Raise it if your product is softer.
+   */
   borderRadius?: string;
+  /**
+   * Corner radius for controls — inputs, buttons, badges.
+   *
+   * Separate from `borderRadius` because these used to be derived from it by
+   * subtraction, which silently broke at small values: a 2px surface radius
+   * made every control `calc(2px - 4px)`.
+   *
+   * Defaults to whatever `borderRadius` is set to, so the one knob the docs
+   * have always taught keeps driving both. Set this only when the two should
+   * genuinely differ.
+   */
+  borderRadiusControl?: string;
   /** Base font family. */
   fontFamily?: string;
   /** Base font size. */
@@ -112,10 +130,14 @@ export const STYLES = `
   --rekey-color-background: #ffffff;
   --rekey-color-surface: #ffffff;
   --rekey-color-text: #171717;
-  --rekey-color-text-muted: #737373;
-  --rekey-color-border: #e5e5e5;
+  --rekey-color-text-muted: #6b6b6b;
+  --rekey-color-border: #d4d4d4;
   --rekey-color-danger: #dc2626;
-  --rekey-radius: 12px;
+  /* Flat and editorial. The accent and the hairline rules carry the design;
+     rounding and shadows are not asked to. Both are overridable, and an
+     integrator who wants a softer product raises them together. */
+  --rekey-radius: 2px;
+  --rekey-radius-control: 2px;
   --rekey-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --rekey-font-size: 14px;
   --rekey-spacing: 8px;
@@ -164,7 +186,7 @@ export const STYLES = `
 .rekey-input {
   width: 100%;
   border: 1px solid var(--rekey-color-border);
-  border-radius: calc(var(--rekey-radius) - 4px);
+  border-radius: var(--rekey-radius-control);
   background: var(--rekey-color-background);
   color: var(--rekey-color-text);
   padding: calc(var(--rekey-spacing) * 1.25) calc(var(--rekey-spacing) * 1.5);
@@ -175,7 +197,7 @@ export const STYLES = `
 .rekey-input:focus { border-color: var(--rekey-color-primary); }
 .rekey-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: calc(var(--rekey-spacing) * 0.75);
-  border-radius: calc(var(--rekey-radius) - 4px);
+  border-radius: var(--rekey-radius-control);
   padding: calc(var(--rekey-spacing) * 1.25) calc(var(--rekey-spacing) * 2);
   font: inherit; font-weight: 600;
   cursor: pointer; border: 1px solid transparent;
@@ -198,19 +220,36 @@ export const STYLES = `
 .rekey-link { color: var(--rekey-color-primary); text-decoration: none; cursor: pointer; background: none; border: none; font: inherit; padding: 0; }
 .rekey-link:hover { text-decoration: underline; }
 
-.rekey-alert { border-radius: calc(var(--rekey-radius) - 4px); padding: calc(var(--rekey-spacing) * 1.25) calc(var(--rekey-spacing) * 1.5); font-size: 0.8125rem; border: 1px solid var(--rekey-color-border); }
+.rekey-alert { border-radius: var(--rekey-radius-control); padding: calc(var(--rekey-spacing) * 1.25) calc(var(--rekey-spacing) * 1.5); font-size: 0.8125rem; border: 1px solid var(--rekey-color-border); }
 .rekey-alert-error { color: var(--rekey-color-danger); border-color: var(--rekey-color-danger); background: color-mix(in srgb, var(--rekey-color-danger) 8%, transparent); }
 .rekey-alert-info { color: var(--rekey-color-primary); border-color: var(--rekey-color-primary); background: color-mix(in srgb, var(--rekey-color-primary) 8%, transparent); }
 
-.rekey-badge { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid var(--rekey-color-border); padding: 1px 10px; font-size: 0.6875rem; color: var(--rekey-color-text-muted); }
+.rekey-badge {
+  display: inline-flex; align-items: center;
+  border-radius: var(--rekey-radius-control);
+  border: 1px solid var(--rekey-color-border);
+  padding: 1px 8px;
+  font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+  color: var(--rekey-color-text-muted);
+}
 .rekey-badge-primary { border-color: var(--rekey-color-primary); color: var(--rekey-color-primary); }
+
+/* Small uppercase section label. The typographic device the rest of Rekey uses
+   to introduce a block without spending a heading level on it. */
+.rekey-eyebrow {
+  display: block;
+  font-size: 0.6875rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--rekey-color-text-muted);
+}
 
 .rekey-oauth-list { display: flex; flex-direction: column; gap: var(--rekey-spacing); }
 
 /* UserButton */
 .rekey-userbtn { position: relative; display: inline-block; }
 .rekey-avatar {
-  width: 2rem; height: 2rem; border-radius: 999px;
+  width: 2rem; height: 2rem; border-radius: var(--rekey-radius-control);
   background: var(--rekey-color-primary); color: var(--rekey-color-primary-text);
   display: inline-flex; align-items: center; justify-content: center;
   font-weight: 600; font-size: 0.8125rem; cursor: pointer; border: none; padding: 0;
@@ -220,8 +259,11 @@ export const STYLES = `
   min-width: 14rem;
   background: var(--rekey-color-surface);
   border: 1px solid var(--rekey-color-border);
-  border-radius: calc(var(--rekey-radius) - 2px);
-  box-shadow: 0 8px 30px rgba(0,0,0,0.12);
+  border-radius: var(--rekey-radius-control);
+  /* A hairline and a solid surface, not a drop shadow. The menu is above the
+     page because it overlaps it, and it reads that way without pretending to
+     float. Solid because a translucent menu over arbitrary host content is
+     unreadable in exactly the cases nobody tests. */
   padding: calc(var(--rekey-spacing) * 0.5);
   display: flex; flex-direction: column;
 }
@@ -230,7 +272,7 @@ export const STYLES = `
 .rekey-menu-item {
   display: flex; align-items: center; gap: var(--rekey-spacing);
   padding: calc(var(--rekey-spacing) * 1) calc(var(--rekey-spacing) * 1.25);
-  border-radius: calc(var(--rekey-radius) - 6px);
+  border-radius: var(--rekey-radius-control);
   font: inherit; font-size: 0.8125rem; text-align: left;
   background: none; border: none; cursor: pointer; color: var(--rekey-color-text);
   text-decoration: none; width: 100%;
@@ -247,7 +289,9 @@ export const STYLES = `
   padding: calc(var(--rekey-spacing) * 2.5);
   display: flex; flex-direction: column; gap: var(--rekey-spacing);
 }
-.rekey-plan-current { border-color: var(--rekey-color-primary); }
+/* The plan you are on, marked with a solid rule rather than a tint. A tinted
+   card competes with the CTA for the same attention; a rule states a fact. */
+.rekey-plan-current { border-color: var(--rekey-color-primary); border-top-width: 2px; }
 .rekey-plan-name { font-weight: 600; }
 .rekey-price { font-size: 1.5rem; font-weight: 700; }
 .rekey-price-sub { font-size: 0.75rem; font-weight: 400; color: var(--rekey-color-text-muted); }
@@ -259,7 +303,7 @@ export const STYLES = `
 .rekey-provider-option {
   display: inline-flex; align-items: center; gap: calc(var(--rekey-spacing) * 1);
   border: 1px solid var(--rekey-color-border);
-  border-radius: calc(var(--rekey-radius) - 4px);
+  border-radius: var(--rekey-radius-control);
   background: var(--rekey-color-background);
   color: var(--rekey-color-text);
   padding: calc(var(--rekey-spacing) * 1.25) calc(var(--rekey-spacing) * 1.75);
@@ -295,7 +339,7 @@ export const STYLES = `
 .rekey-select {
   width: 100%;
   border: 1px solid var(--rekey-color-border);
-  border-radius: calc(var(--rekey-radius) - 4px);
+  border-radius: var(--rekey-radius-control);
   background: var(--rekey-color-background);
   color: var(--rekey-color-text);
   padding: calc(var(--rekey-spacing) * 1.25) calc(var(--rekey-spacing) * 1.5);
@@ -304,7 +348,7 @@ export const STYLES = `
 .rekey-member-row {
   display: flex; align-items: center; gap: var(--rekey-spacing);
   border: 1px solid var(--rekey-color-border);
-  border-radius: calc(var(--rekey-radius) - 4px);
+  border-radius: var(--rekey-radius-control);
   padding: var(--rekey-spacing) calc(var(--rekey-spacing) * 1.5);
   font-size: 0.8125rem;
 }
@@ -387,7 +431,7 @@ export function RekeyStyles({ children }: { children?: React.ReactNode }): React
 }
 
 /** Map appearance variables → inline CSS custom properties. */
-function variablesToStyle(vars: AppearanceVariables | undefined): React.CSSProperties {
+export function variablesToStyle(vars: AppearanceVariables | undefined): React.CSSProperties {
   if (!vars) return {};
   const s: Record<string, string> = {};
   if (vars.colorPrimary) s['--rekey-color-primary'] = vars.colorPrimary;
@@ -399,6 +443,14 @@ function variablesToStyle(vars: AppearanceVariables | undefined): React.CSSPrope
   if (vars.colorBorder) s['--rekey-color-border'] = vars.colorBorder;
   if (vars.colorDanger) s['--rekey-color-danger'] = vars.colorDanger;
   if (vars.borderRadius) s['--rekey-radius'] = vars.borderRadius;
+  // Falls back to `borderRadius`, because that is the only knob the docs have
+  // ever taught and every existing integrator sets it alone. Without this,
+  // splitting the token silently gave them 12px cards with 2px inputs: a
+  // regression produced by an SDK upgrade they did not ask for, in code they
+  // did not change. Setting `borderRadiusControl` still wins when they want
+  // the two to differ.
+  const control = vars.borderRadiusControl ?? vars.borderRadius;
+  if (control) s['--rekey-radius-control'] = control;
   if (vars.fontFamily) s['--rekey-font'] = vars.fontFamily;
   if (vars.fontSize) s['--rekey-font-size'] = vars.fontSize;
   if (vars.spacing) s['--rekey-spacing'] = vars.spacing;

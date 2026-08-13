@@ -362,6 +362,29 @@ export const stripeModule: ProviderModule = {
     // single recorded redemption actually buys — see stripe-real.ts.
     discounts: { oneTime: true, recurring: true },
   },
+  // Stripe checkout takes a `price` id and nothing else, so a plan with no
+  // stored price cannot be bought and never will be until someone registers
+  // it. `createCheckoutSession` already refuses with the same repair; saying
+  // it here means the operator hears it while looking at the plan list rather
+  // than from the first buyer who tried to pay.
+  planCheckoutBlocker(plan) {
+    if (plan.registrationStatus === 'FAILED') {
+      return {
+        code: 'PLAN_REGISTRATION_FAILED',
+        message:
+          plan.registrationError ??
+          `Stripe refused to register plan "${plan.slug}", so it has no price behind it.`,
+        fix: `Fix whatever Stripe objected to, then POST /api/v1/tenant/applications/${plan.applicationId}/plans/${plan.slug}/register to retry.`,
+      };
+    }
+    const priceId = (plan.metadata as { stripe?: { priceId?: string } } | null)?.stripe?.priceId;
+    if (priceId) return null;
+    return {
+      code: 'PLAN_NOT_REGISTERED',
+      message: `Plan "${plan.slug}" has no Stripe price, so a buyer sent to Stripe checkout is refused.`,
+      fix: `Plans register with Stripe when they are created, so a plan created before these credentials existed was never registered. Repair it in place: POST /api/v1/tenant/applications/${plan.applicationId}/plans/${plan.slug}/register`,
+    };
+  },
   credentialSchema: [
     {
       key: 'apiKey',

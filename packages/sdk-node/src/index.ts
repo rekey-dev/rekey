@@ -86,6 +86,13 @@ export type {
   CreateCheckoutRequest,
   CheckoutResultDto,
   CouponDto,
+  // `billing.getProviders()` returns ProvidersListDto and this file already
+  // imported it, but it was missing from the public block. Typing a
+  // server-side providers fetch therefore meant importing the type from the
+  // BROWSER package or reaching into the transitive shared-types dependency,
+  // for a value this package hands you itself.
+  ProvidersListDto,
+  BillingProviderInfoDto,
   ValidateCouponRequest,
   ValidateCouponResultDto,
   CouponDiscountTypeValue,
@@ -255,10 +262,15 @@ export class Rekey {
 
   constructor(config: RekeyConfig) {
     if (!config.apiUrl) {
+      // Name the Cloud value outright. There is no default and there should
+      // not be one — a wrong default would silently point a self-hosted
+      // deployment's traffic at somebody else's API — but "requires apiUrl"
+      // alone leaves a Rekey Cloud customer with no way to find out what to
+      // put, because every example in the docs reads as a placeholder.
       throw new RekeyError({
         code: 'CONFIG_MISSING_API_URL',
         message: 'Rekey client requires `apiUrl`.',
-        fix: 'Pass `apiUrl: process.env.REKEY_URL` when constructing the client.',
+        fix: 'Set REKEY_URL and pass `apiUrl: process.env.REKEY_URL`. On Rekey Cloud that value is `https://api.rekey.dev`. Self-hosted, it is your own deployment\'s public origin (locally, `http://localhost:3030`).',
       });
     }
     if (!config.secretKey || !config.secretKey.startsWith('rp_')) {
