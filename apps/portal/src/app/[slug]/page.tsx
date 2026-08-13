@@ -34,6 +34,10 @@ const CHECKOUT_ERR: Record<string, string> = {
     'This plan is billed to your team, so a team owner or admin has to start it.',
   BILLING_PROVIDER_SWITCH_BLOCKED:
     'Your current subscription is billed through a different payment provider. It needs to be canceled before you start this one.',
+  BILLING_BOUND_PROVIDER_UNAVAILABLE:
+    'The payment provider holding your current subscription isn’t available here any more, so a new one can’t be started. Contact support.',
+  BILLING_SUBSCRIPTION_SUBJECT_CONFLICT:
+    'You already have this plan on another account of yours. It has to be canceled and finish before you can start it here.',
   SUBSCRIPTION_NOT_FOUND: 'We couldn’t find that subscription — it may already be canceled.',
 };
 

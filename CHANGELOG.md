@@ -4,6 +4,215 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.0.0-rc.9
+
+Everything below was found the way rc.8 said it would have to be: by running
+the product signed in, against a live deployment, and clicking. The suite was
+green for every one of them.
+
+Still a release candidate. The panel has not had a full signed-in click-through
+of its mutation paths (see Known issues).
+
+### Fixed
+
+- **An API-key rejection now names the deployment that rejected it.** Keys
+  belong to the deployment that minted them, and the commonest integration
+  mistake is pointing half a configuration at one deployment and half at
+  another — a server `REKEY_URL` still on localhost while the browser's
+  `NEXT_PUBLIC_REKEY_URL` has moved to Cloud. The old message listed three
+  states the key might be in and never mentioned the one thing that decides it:
+  where it was checked. `API_KEY_INVALID` and `PUBLISHABLE_KEY_INVALID` now name
+  the origin and say a key from another deployment is unknown here. Reported by
+  a user who could not find which URL to use (rekey-dev/rekey#29), which the
+  new `docs/api-url.md` answers.
+
+- **Plans can be edited from the panel.** `plansService.update`, the REST
+  `PATCH` and the `update_plan` MCP tool all shipped, so an agent could correct
+  a plan while the operator who created it could not — the table offered only
+  Entitlements, Archive and Reactivate. A plan created with a typo or a missing
+  price had to be archived and re-created under a different slug. There is now
+  an Edit action; it renames always, and edits the price only while no provider
+  price exists, because a minted provider price is immutable and the API
+  refuses to change it. That makes it the repair path for a plan whose
+  registration FAILED. Reported as rekey-dev/rekey#30.
+
+- **A duplicate-slug refusal says when the holder is an ARCHIVED plan.**
+  Archiving flips `active` and keeps the row, so the slug stays reserved, and
+  "a plan with that slug already exists" sent operators looking for a plan they
+  believed they had removed. The message now says the existing plan is archived
+  and the fix names both ways out: reactivate and edit it, or choose a
+  different slug. The slug is deliberately not released — it is the public
+  identifier integrations pass to checkout and read back off a subscription, so
+  reusing it would silently change what an existing caller's `pro` means.
+
+- **A buyer who already pays through one processor can no longer be checked
+  out through another.** `Subscription.provider` is immutable for a row's
+  lifetime, so a second checkout somewhere else never produced a changed
+  subscription. It produced a SECOND one and two charges a month, with nothing
+  in either processor's dashboard hinting at the other. The guard that existed
+  keyed on (application, end-user, PLAN), so it only fired on re-buying the
+  identical plan and missed the ordinary path: subscribed to `basic` through
+  PayPal, upgrade to `pro`, get routed to Stripe. Checkout now resolves the
+  processor the buyer is already on across the whole Application, before the
+  geo router runs, and matches both the billing subject and the row the upsert
+  will write (they are keyed differently, and an org checkout could otherwise
+  rewrite a personal row's `provider` while leaving the other processor's
+  subscription id on it). A `provider` that disagrees is refused with
+  `BILLING_PROVIDER_SWITCH_BLOCKED`; a checkout that named none is pinned to
+  the bound processor instead of being left to drift. One-off purchases
+  neither bind nor are bound, since a credit pack or a perpetual licence is a
+  single charge that creates no second billing relationship, while TIMED
+  licences recur and stay guarded. A subscriber whose processor the operator
+  has since disabled now gets `BILLING_BOUND_PROVIDER_UNAVAILABLE`, which
+  names re-enabling it or cancel-then-rebuy rather than telling them to omit a
+  `provider` they never sent.
+
+- **Opening a checkout could move a live subscription to a different billing
+  subject.** `beneficiaryOrgId` is not part of the `Subscription` uniqueness
+  constraint, so a personal subscription to `pro` and an org-billed one to
+  `pro` for the same buyer are one row. An owner of two organizations who
+  opened a checkout for a plan the FIRST one already held rewrote that row:
+  200 OK, still `ACTIVE`, still carrying the first organization's provider
+  subscription id, now billed to the second. The first lost the entitlement,
+  the second had it for free, the processor kept charging, and no payment was
+  involved. A guard on the provider had been covering this by accident, and
+  only when the geo router disagreed; pinning made the two agree by
+  construction and removed the cover, so the refusal is now stated —
+  `BILLING_SUBSCRIPTION_SUBJECT_CONFLICT`. It protects a LIVE subscription
+  only: a checkout nobody completed can still change subject, because refusing
+  there would tell a buyer to cancel something that does not exist.
+
+- **Two checkout sessions on one subscription could both be completed.** One
+  row deliberately carries several completable sessions, and checkout
+  deliberately lets the second be opened at a different processor — but
+  nothing stopped both being paid. `applyCheckoutCompleted` had no
+  second-completion check and `ACTIVE → ACTIVE` is an allowed transition, so
+  the second completion overwrote `providerSubId` and the first provider-side
+  subscription became unreachable: cancel could not find it and it billed
+  forever. The second completion is now refused, and the subscription it
+  created is recorded on the row (`metadata.unappliedCompletions`) so an
+  operator can find and cancel it. Relatedly, `Subscription.provider` is
+  written by checkout before anybody has paid, so a buyer who opened Stripe,
+  went back, opened PayPal and then paid at Stripe left the row naming one
+  processor and carrying the other's id — which is the column `cancel` dials.
+  The completion now stamps the processor whose session actually completed.
+
+- **A plan created before its billing provider was silently un-checkoutable.**
+  Plans register with the provider at creation time, so a plan created before
+  its Application had credentials has no price behind it, and connecting a
+  provider afterwards does not reach back and repair it. Nothing surfaced that:
+  the plan listed, it was `active`, `registrationStatus` read `NOT_REQUIRED`,
+  and the first thing that disagreed was a buyer clicking Buy and getting a
+  409. Providers now answer `planCheckoutBlocker()`, plans carry
+  `checkout.ready`, the panel warns on both the Billing and Plans tabs, and
+  `register_plan_with_provider` over MCP performs the repair.
+
+- **`RekeyProvider` treated any failed session refetch as a signed-out user.**
+  `catch { setUser(null) }` meant a CORS failure from a non-allowlisted origin
+  flipped `useUser()`, `<SignedIn>` and `<SignedOut>` to signed-out the instant
+  the page hydrated, on a page that server-rendered signed-in. The same shape
+  turned any transient API outage into a fleet-wide sign-out. Only 401 and 403
+  clear the user now.
+
+- **The panel could hang on a blank page for five minutes.** No request carried
+  a deadline, so a stalled fetch sat on undici's default. That is invisible on
+  a page load and not invisible after a mutation, because Next renders `null`
+  for the page subtree while a server action's redirect is in flight. Reads now
+  time out at 15s, writes at 30s, the refresh exchange at 10s. A timed-out
+  write reports that it MAY have applied, because we stopped listening, which
+  is not the same as it not happening.
+
+- **`SubscriptionDto` did not say which processor holds the subscription.** It
+  carried `providerSubId` and not `provider`, which is an id belonging to
+  nobody. `provider` is now on the DTO.
+
+- **`ProvidersListDto` and `BillingProviderInfoDto` are exported from
+  `@rekey.dev/node`.** `billing.getProviders()` returns the former and the
+  package already imported it; the public export block omitted it.
+
+- **`@rekey.dev/astro` no longer falls back to `https://api.rekey.dev` when
+  `REKEY_URL` is unset — BREAKING.** The fallback did not fail: it sent every
+  request this SDK makes to Rekey Cloud, carrying the deployment's
+  `REKEY_SECRET` in an `Authorization` header, and on the session calls the
+  **end-user's refresh token** (`auth.refresh`, `auth.signOut`) and **access
+  token** (`getCurrentUser`) as well. The requests die there because the key is
+  unknown at Rekey Cloud, so the only symptom was a puzzling 401 — by which
+  point the credentials had left the operator's infrastructure.
+  `@rekey.dev/node` and `@rekey.dev/nextjs` have always required the value; the
+  three now agree, and the refusal names the Cloud, self-hosted and local
+  answers. This SDK arrived after the pass that removed every other Rekey-owned
+  default and reintroduced the pattern.
+
+  **If you self-host with `@rekey.dev/astro` and never set `REKEY_URL`: set it,
+  rotate that secret key, and treat any end-user session live during that
+  period as disclosed.** `^2.0.0-rc.8` matches `2.0.0-rc.9`, so a lockfile
+  refresh alone picks this up — deliberately, since it now fails loudly with
+  the value it needs named in the message.
+
+- **A self-hosted deployment's own `/docs` no longer advertises our API as a
+  server.** The OpenAPI document hard-coded `https://api.rekey.dev` and
+  `http://localhost:3030` in `servers`, which every deployment then served from
+  its own Swagger UI. "Try it out" posts to the selected server, so an operator
+  pasting their own key into their own docs page sent that credential to a host
+  they never chose — the same shape as the astro fallback above, on a surface
+  where the credential is typed in by hand. It now lists that deployment's own
+  `API_URL`, and only that.
+
+### Changed
+
+- **The drop-in components look like Rekey.** Flat and editorial: 2px radii,
+  squared badges and avatar, the user menu on a hairline instead of a drop
+  shadow, uppercase letter-spaced badges, and the current plan marked with a
+  solid rule rather than a tint.
+
+- **Control radii no longer derive from the surface radius by subtraction.**
+  A 2px surface radius made every input and button `calc(2px - 4px)`. Controls
+  read `--rekey-radius-control`, exposed as
+  `appearance.variables.borderRadiusControl`, which **defaults to whatever
+  `borderRadius` is set to**. An integrator who set only `borderRadius` (the
+  one knob the docs teach) keeps getting it applied to both, so upgrading
+  changes nothing they did not ask for.
+
+- **Every SDK now says which URL to use.** `apiUrl` / `REKEY_URL` is required
+  and has no default, but the errors said only that it was required, and the
+  READMEs showed `https://api.rekey.dev` labelled "Your Rekey deployment" —
+  which reads as a placeholder, so a Rekey Cloud customer had nothing to go on.
+  The missing-value errors in `@rekey.dev/node`, `@rekey.dev/nextjs` and
+  `@rekey.dev/astro` now name the Cloud host, the self-hosted answer and the
+  local one, and [docs/api-url.md](docs/api-url.md) covers it in full —
+  including that Cloud is a single origin for every workspace, scoped by API
+  key rather than by hostname, and how to verify an origin with `/health`
+  before wiring any keys.
+### Security
+
+- **The four MCP read tools that live in the operator write-tool set enforce
+  per-application grants.** `list_plans`, `list_plan_entitlements`,
+  `list_usage_meters` and `list_api_keys` are declared next to the write tools
+  but carry no `write`, `admin` or `minRole`, so the dispatcher's role gate does
+  not apply to them — and they resolved their Application through a helper that
+  checked the workspace and not the caller's grants. A workspace MEMBER with
+  zero grants could read the plan and pricing catalogue, and API-key metadata,
+  for every Application in the workspace. The REST routes enforce grants and so
+  does the read-tool set; this file was the seam between them. No credential was
+  exposed (the key hash is never returned) and nothing crossed a workspace
+  boundary. The check is now applied to every app-targeted tool in the file, not
+  only the reads, so a tool that grows a write later cannot forget to opt in.
+
+### Known issues
+
+- **A `Subscription`'s uniqueness constraint does not include
+  `beneficiaryOrgId`**, so a personal subscription and an org-billed one for
+  the same (end-user, plan) are the same row, and one buyer cannot hold one
+  plan for two organizations at once. Checkout refuses rather than overwrites,
+  but the refusal is the mitigation, not the fix: a checkout that is still
+  PENDING can change subject, which means the earlier subject's session can
+  still be paid after the row has moved. Flagged in `ORG_BILLING.md` §5,
+  tracked as #431.
+
+- **Fastify response schemas are documentation, not enforcement.** A route can
+  emit fields its OpenAPI does not promise; `GET /billing/subscription` returns
+  the raw row.
+
 ## 2.0.0-rc.8
 
 The release that a security audit, an architecture review and three senior

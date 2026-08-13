@@ -14,7 +14,21 @@
  * pairs previously each solved differently.
  */
 
+import type { Plan } from '@prisma/client';
 import type { FastifyBaseLogger } from 'fastify';
+
+/**
+ * A named reason a plan cannot currently be bought through one provider.
+ *
+ * Shaped like `RekeyError` on purpose, and carried rather than thrown: this
+ * describes a plan the operator is looking at, not a request that failed, and
+ * the same value has to survive a trip through JSON to the panel.
+ */
+export interface PlanCheckoutBlocker {
+  code: string;
+  message: string;
+  fix: string;
+}
 
 /**
  * One credential input field. The generic credentials service (P3) builds
@@ -389,6 +403,34 @@ export interface ProviderModule {
       recurring: boolean;
     };
   };
+  /**
+   * Why a buyer cannot be sent to this provider's checkout for this plan, or
+   * `null` when they can.
+   *
+   * Answers the one question an operator cannot answer by looking at the plan:
+   * *is this thing actually buyable?* A plan that was never registered with an
+   * eager provider looks identical to a working one everywhere it is shown. It
+   * is listed, it is `active`, the pricing page renders a Buy button, and the
+   * only symptom arrives when a buyer clicks and gets a 409.
+   *
+   * The gap this closes is an ordering trap, not an exotic one: plans register
+   * at creation time, so any plan created BEFORE its Application had provider
+   * credentials has no price behind it and stays that way forever. Configuring
+   * the provider afterwards does not reach back and fix them. That ordering is
+   * the common one over MCP, where creating an application and a plan is two
+   * quick calls and pasting a provider secret is a trip to another surface.
+   *
+   * OPTIONAL, and absent means **no blocker** — the deliberate opposite of the
+   * fail-closed reading `trials` and `discounts` take, because the two
+   * directions cost different things here. This method does not gate a
+   * checkout; `createCheckoutSession` still refuses on its own. It only decides
+   * whether we WARN. A wrong "blocked" cries wolf on every PayPal and Razorpay
+   * plan, which register lazily on first checkout and are perfectly buyable;
+   * a wrong "fine" costs a warning that the checkout itself will still raise.
+   *
+   * Implement it in any module that registers plans eagerly.
+   */
+  planCheckoutBlocker?(plan: Plan): PlanCheckoutBlocker | null;
   credentialSchema: CredentialField[];
   /** Escape hatch for cross-field rules the declarative schema can't express. */
   validateCredentials?(creds: Record<string, string>): void;

@@ -92,6 +92,7 @@ Docs (`docs/`):
 | Doc | What |
 |---|---|
 | [quickstart.md](docs/quickstart.md) | Fresh clone → running API → first Application → first end-user |
+| [api-url.md](docs/api-url.md) | Which URL to point the SDK at — Rekey Cloud vs self-hosted |
 | [concepts.md](docs/concepts.md) | Tenant / Application / EndUser data model |
 | [api-keys.md](docs/api-keys.md) | The three credential types, and environments |
 | [api-key-rotation.md](docs/api-key-rotation.md) | Leaked-key drill + rotation cadence |

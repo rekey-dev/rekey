@@ -1,12 +1,30 @@
 /**
  * Operator MCP WRITE tools — phase 1 (reversible workspace configuration).
  *
- * These mutate the operator's workspace and are listed / dispatchable only when
- * the caller's token carries write capability (`mcp:operator:write` for the
- * OAuth path, `applications:write` for a PAT) AND their role clears the tool's
+ * Most tools here mutate, and those are listed / dispatchable only when the
+ * caller's token carries write capability (`mcp:operator:write` for the OAuth
+ * path, `applications:write` for a PAT) AND their role clears the tool's
  * `minRole` (default ADMIN). The dispatcher in `tenant-mcp-server.ts` enforces
  * both before a handler runs — but every handler ALSO re-scopes by tenant, so a
  * dispatch bug can't become a cross-workspace write.
+ *
+ * ## FOUR TOOLS IN THIS FILE ARE READS, AND THE PARAGRAPH ABOVE IS NOT ABOUT THEM
+ *
+ * `list_usage_meters`, `list_plan_entitlements`, `list_plans` and
+ * `list_api_keys` declare no `write`, no `admin` and no `minRole`. The
+ * dispatcher only role-gates tools that declare one of those, so these four are
+ * callable by ANY role, including a read-only PAT held by a MEMBER. They live
+ * here because they are the read half of the write workflows, not because they
+ * are gated like them.
+ *
+ * That sentence used to be absent, and its absence was the bug: this header
+ * said every tool in the file was write-gated, so nobody checked what the four
+ * reads were scoped by. The answer was "the workspace, and nothing else", while
+ * their REST twins and the read-tool set both enforce per-application grants.
+ *
+ * App-targeted authorization for EVERY tool in this file — read and write —
+ * lives in `loadAppInTenant` below. Read its docstring before adding a tool
+ * that takes an `applicationId`.
  *
  * Reuse, not reimplementation: each handler calls the same service the panel
  * routes use (`applicationsService`, `plansService`, `webhookService`), so
@@ -33,6 +51,7 @@ import { apiKeysService } from '../api-keys/api-keys.service.js';
 import { entitlementsService } from '../billing/entitlements.service.js';
 import { usageService } from '../usage/usage.service.js';
 import { applicationsService } from '../applications/applications.service.js';
+import { planCheckoutReadiness, planCheckoutReadinessFor } from '../plans/plan-readiness.js';
 import { plansService } from '../plans/plans.service.js';
 import { webhookService } from '../webhooks/webhook.service.js';
 import { billingService } from '../billing/billing.service.js';
@@ -41,7 +60,11 @@ import {
   type BillingMode,
 } from '../billing/credentials.service.js';
 import { tenantWorkspacesService } from '../tenant-workspaces/tenant-workspaces.service.js';
-import type { OperatorTool, OperatorToolContext } from './operator-tools.js';
+import {
+  accessibleApplicationIds,
+  type OperatorTool,
+  type OperatorToolContext,
+} from './operator-tools.js';
 
 /**
  * Resolve a workspace member's membership id from their tenant-user id, scoped
@@ -64,17 +87,57 @@ async function membershipIdInTenant(tenantId: string, tenantUserId: string): Pro
 }
 
 /**
- * Load an application and assert it belongs to the caller's workspace.
+ * Load an application and assert the caller may reach it — same workspace AND
+ * within their per-application grants.
  *
  * `applicationsService.get` is NOT tenant-scoped (it fetches by id alone), so
- * every app-targeted write MUST funnel through here — otherwise an operator
- * could pass another tenant's applicationId and mutate it. The not-found and
- * wrong-tenant cases return the SAME error so the caller can't probe which
- * application ids exist outside their workspace.
+ * every app-targeted tool MUST funnel through here — otherwise an operator
+ * could pass another tenant's applicationId and mutate it. The not-found,
+ * wrong-tenant and not-granted cases return the SAME error so the caller can't
+ * probe which application ids exist outside what they may see.
+ *
+ * The GRANT half was missing, and it mattered for the four READ tools that live
+ * in this file — `list_plans`, `list_plan_entitlements`, `list_usage_meters`,
+ * `list_api_keys`. They carry neither `write` nor `admin` nor a `minRole`, so
+ * the dispatcher in `tenant-mcp-server.ts` leaves them open to any role, and a
+ * workspace MEMBER with zero grants could read the plan and pricing catalogue
+ * and API-key metadata for every Application in the workspace. Their REST
+ * equivalents enforce grants; the read-tool set in `operator-tools.ts`
+ * grant-scopes MEMBERs correctly. This file was the seam between the two.
+ *
+ * ## What this is NOT
+ *
+ * `accessibleApplicationIds` models `need: 'read'` and only that. It ignores
+ * `ApplicationGrant.role` (an `APP_VIEWER` is in the set) and it hands the whole
+ * workspace to a `legacyWorkspaceRead` MEMBER — both of which `ensureAppAccess`
+ * refuses for a WRITE (see `legacyWriteDenied` / `grantDenied` in
+ * `lib/app-access.ts`).
+ *
+ * So this call is not what authorizes the writes in this file. The dispatcher's
+ * `role >= ADMIN` gate is, and this is a redundant read check on top of it,
+ * harmless because OWNER/ADMIN receive the whole workspace here anyway. Adding
+ * a write tool with `minRole: 'MEMBER'` would NOT be protected by this line: a
+ * legacy member would get a workspace-wide write that REST answers 403 for.
+ * If that day comes, give this helper a `need` parameter mirroring
+ * `ensureAppAccess` rather than assuming it already covers you.
+ *
+ * The grandfathered `legacyWorkspaceRead` exception survives here deliberately,
+ * because it survives over REST too — this is parity, not a gap.
  */
-async function loadAppInTenant(tenantId: string, applicationId: string): Promise<Application> {
-  const app = await prisma.application.findUnique({ where: { id: applicationId } });
-  if (!app || app.tenantId !== tenantId) {
+async function loadAppInTenant(
+  ctx: OperatorToolContext,
+  applicationId: string,
+): Promise<Application> {
+  // Both resolved unconditionally and in parallel, so every rejection path
+  // costs the same work. Checking the tenant first and the grants only on a
+  // hit made the two distinguishable by latency: one query for "not in this
+  // workspace", four for "in it but not yours". The response bodies were
+  // already identical; this makes the timing identical too.
+  const [app, readable] = await Promise.all([
+    prisma.application.findUnique({ where: { id: applicationId } }),
+    accessibleApplicationIds(ctx),
+  ]);
+  if (!app || app.tenantId !== ctx.tenantId || !readable.includes(app.id)) {
     throw new RekeyError({
       statusCode: 404,
       code: 'APPLICATION_NOT_FOUND',
@@ -125,7 +188,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       const meter = await usageService.createMeter({
         applicationId: app.id,
         slug: String(args.slug),
@@ -148,7 +211,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       return { meters: await usageService.listMeters(app.id) };
     },
   },
@@ -180,7 +243,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       const plan = await plansService.getBySlug(app.id, String(args.planSlug));
       const ent = await entitlementsService.upsert({
         planId: plan.id,
@@ -217,14 +280,20 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       const plan = await plansService.getBySlug(app.id, String(args.planSlug));
       return { planSlug: plan.slug, entitlements: await entitlementsService.listForPlan(plan.id) };
     },
   },
   {
     name: 'list_plans',
-    description: 'Plans on an application, including inactive ones. Slugs for the other tools.',
+    description:
+      'Plans on an application, including inactive ones. Slugs for the other tools. Each plan ' +
+      'carries `checkout.ready` — false means a buyer sent to checkout for it is refused, and ' +
+      '`checkout.blockers` says by which provider and how to repair it. Check it after ' +
+      'configuring a billing provider: plans register with the provider when they are CREATED, ' +
+      'so any plan created before the credentials existed has no price behind it and connecting ' +
+      'the provider afterwards does not repair it.',
     write: false,
     inputSchema: {
       type: 'object',
@@ -233,9 +302,51 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       const plans = await plansService.listForApplication(app.id, true);
-      return { plans };
+      const readiness = await planCheckoutReadiness(app.id, plans);
+      return {
+        plans: plans.map((plan) => ({
+          ...plan,
+          checkout: readiness.get(plan.id) ?? { ready: true, blockers: [] },
+        })),
+      };
+    },
+  },
+  {
+    name: 'register_plan_with_provider',
+    description:
+      'Register an existing plan with the billing provider, giving it a price so it can be ' +
+      'bought. The repair for `checkout.ready: false` on a plan created before the provider ' +
+      'was configured. Idempotent: a plan that already has a price is answered from the row ' +
+      'without calling the provider. A plan the provider previously refused is reactivated on ' +
+      'success, because it was deactivated by Rekey rather than by you; a plan you retired on ' +
+      'purpose keeps its `active: false`, since this registers rather than publishes.',
+    write: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        applicationId: { type: 'string', minLength: 1 },
+        planSlug: { type: 'string', minLength: 1 },
+      },
+      required: ['applicationId', 'planSlug'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const plan = await plansService.registerWithProvider(app.id, String(args.planSlug));
+      // Its REST twin records `app.plan_updated` and this file's header claims
+      // every write tool leaves a trail. A tool that mints a live price at a
+      // payment provider is not the one to be missing from the audit log.
+      await recordSecurityEvent({
+        type: 'app.plan_updated',
+        actorType: 'operator',
+        actorId: ctx.tenantUserId,
+        tenantId: ctx.tenantId,
+        applicationId: app.id,
+        metadata: { planSlug: plan.slug, via: 'mcp', registrationStatus: plan.registrationStatus },
+      });
+      return { plan, checkout: await planCheckoutReadinessFor(app.id, plan) };
     },
   },
   {
@@ -251,7 +362,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       return { apiKeys: await apiKeysService.listForApplication(app.id) };
     },
   },
@@ -272,7 +383,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       await apiKeysService.revoke(app.id, String(args.apiKeyId));
       audit(ctx, 'app.api_key.revoked', app.id, { apiKeyId: String(args.apiKeyId) });
       return { revoked: true, apiKeyId: String(args.apiKeyId) };
@@ -310,7 +421,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
 
       // Empty scopes mean full access in the service, which is the same default
       // the panel's mint form applies. Passing a list narrows the key.
@@ -427,7 +538,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       const patch = {
         ...(args.methods !== undefined && { methods: args.methods as string[] }),
         ...(args.passwordMinLength !== undefined && {
@@ -480,7 +591,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       const plan = await plansService.create({
         applicationId: app.id,
         slug: String(args.slug),
@@ -523,7 +634,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       const plan = await plansService.setActive(app.id, String(args.slug), args.active === true);
       audit(ctx, 'app.plan_active_changed', app.id, { planSlug: plan.slug, active: plan.active });
       return { slug: plan.slug, active: plan.active };
@@ -552,7 +663,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       const patch = {
         ...(args.name !== undefined && { name: String(args.name) }),
         ...(args.licenseSeatsAllowed !== undefined && {
@@ -598,7 +709,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       const { endpoint, secret } = await webhookService.createEndpoint({
         applicationId: app.id,
         url: String(args.url),
@@ -636,7 +747,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       const endpoint = await webhookService.updateEndpoint({
         applicationId: app.id,
         endpointId: String(args.endpointId),
@@ -819,7 +930,7 @@ export const operatorWriteTools: OperatorTool[] = [
       additionalProperties: false,
     },
     handler: async (ctx, args) => {
-      const app = await loadAppInTenant(ctx.tenantId, String(args.applicationId));
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
       const provider = String(args.provider) as 'stripe' | 'paypal' | 'razorpay';
       const mode = args.mode === 'test' || args.mode === 'live' ? (args.mode as BillingMode) : undefined;
       const options = {
@@ -885,8 +996,16 @@ export const operatorWriteTools: OperatorTool[] = [
       // Resolve the subscription's application and confirm it's in this tenant
       // BEFORE acting — a subscription id from another workspace is treated as
       // not-found (no cross-tenant cancel, no existence probing).
-      const sub = await prisma.subscription.findUnique({
-        where: { id: subscriptionId },
+      //
+      // The tenant filter is IN the query, not applied afterwards. Looking the
+      // row up by id alone and then checking its application made this an
+      // existence oracle: a foreign subscription id answered
+      // `APPLICATION_NOT_FOUND` while an absent one answered
+      // `SUBSCRIPTION_NOT_FOUND`, and the first of those interpolated the
+      // FOREIGN application id into the message it handed back. Two codes and a
+      // leaked id, from the comment that says neither happens.
+      const sub = await prisma.subscription.findFirst({
+        where: { id: subscriptionId, application: { tenantId: ctx.tenantId } },
         select: { applicationId: true },
       });
       if (!sub) {
@@ -897,7 +1016,7 @@ export const operatorWriteTools: OperatorTool[] = [
           fix: 'Use recent_subscriptions to find a subscription id in this workspace.',
         });
       }
-      const app = await loadAppInTenant(ctx.tenantId, sub.applicationId);
+      const app = await loadAppInTenant(ctx, sub.applicationId);
       const atPeriodEnd = args.atPeriodEnd !== false;
       const updated = await billingService.cancelSubscriptionById(app, subscriptionId, {
         atPeriodEnd,

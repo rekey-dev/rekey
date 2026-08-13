@@ -40,6 +40,7 @@
 
 import type { FastifyBaseLogger } from 'fastify';
 import type { Subscription } from '@prisma/client';
+import { isEntitlingStatus } from '@rekey.dev/shared-types';
 import { prisma } from '../../../lib/prisma.js';
 import { entitlementsService } from '../entitlements.service.js';
 import { dunningService } from '../dunning.service.js';
@@ -47,6 +48,8 @@ import {
   checkoutSessionMatchers,
   checkoutSessionWhere,
   couponForSession,
+  providerForSession,
+  recordUnappliedCompletion,
 } from '../checkout-sessions.js';
 import { advanceBillingPeriod } from './period.js';
 import { enqueuePaymentEvent, enqueueSubscriptionEvent } from './billing-events.js';
@@ -349,7 +352,7 @@ export async function applyCheckoutCompleted(
   // already ACTIVE must not re-announce.
   const before = await prisma.subscription.findFirst({
     where,
-    select: { id: true, status: true },
+    select: { id: true, status: true, provider: true, providerSubId: true, metadata: true },
   });
   // Same terminal-state guard the status mirror applies, and for the same
   // reason: a re-delivered completion for an old session must not resurrect a
@@ -368,6 +371,73 @@ export async function applyCheckoutCompleted(
     return;
   }
 
+  // A SECOND completion against a subscription that is already live.
+  //
+  // One row can hold several completable sessions at once, by design: the
+  // buyer who opens checkout twice reuses the row (see checkout-sessions.ts),
+  // and `createCheckoutSession` deliberately lets the second one be opened at
+  // a different processor, because both sessions survive either way and
+  // refusing would block "picked PayPal, went back, chose Stripe" without
+  // closing anything. That decision names this function as the place the
+  // damage is stopped. Nothing here stopped it: `transitionAllowed('ACTIVE',
+  // 'ACTIVE')` passes, so the second completion overwrote `providerSubId` and
+  // the FIRST provider-side subscription became unreachable — cancel could
+  // never find it and it billed forever, in a processor's dashboard nobody was
+  // looking at.
+  //
+  // The discriminator is the provider subscription id, not the fact of a
+  // second event, because a re-delivery carries the SAME id and has to stay
+  // idempotent. A resubscribe is not caught either: its checkout walks the row
+  // back to PENDING, which is not entitling.
+  //
+  // Refusing keeps the row pointing at the relationship that settled first.
+  // The other one still exists and is still charging, so it is recorded on the
+  // row rather than only in a log line nobody can query later.
+  if (
+    before &&
+    isEntitlingStatus(before.status) &&
+    before.providerSubId !== null &&
+    ev.providerSubscriptionId !== null &&
+    before.providerSubId !== ev.providerSubscriptionId
+  ) {
+    ctx.log.error(
+      {
+        subscriptionId: before.id,
+        applicationId: ev.applicationId,
+        heldProvider: before.provider,
+        heldProviderSubId: before.providerSubId,
+        orphanedProvider: providerForSession(before.metadata, ev.checkoutSessionId),
+        orphanedProviderSubId: ev.providerSubscriptionId,
+        sessionId: ev.checkoutSessionId,
+        providerEventId: ev.providerEventId,
+      },
+      'a second checkout completed against an already-live subscription — refusing to overwrite ' +
+        'the provider subscription id; the newly completed one is live at its processor and is ' +
+        'not cancellable from here',
+    );
+    await prisma.subscription.update({
+      where: { id: before.id },
+      data: {
+        metadata: recordUnappliedCompletion(before.metadata, {
+          checkoutSessionId: ev.checkoutSessionId,
+          providerSubId: ev.providerSubscriptionId,
+          provider: providerForSession(before.metadata, ev.checkoutSessionId),
+          at: new Date().toISOString(),
+        }) as never,
+      },
+    });
+    return;
+  }
+
+  // Which processor actually completed, as opposed to which one the most
+  // recent checkout was opened at. `Subscription.provider` is written by
+  // checkout, before anybody has paid, so a buyer who opens Stripe, goes back
+  // and opens PayPal, then returns to the first tab and pays leaves the column
+  // naming PayPal while `providerSubId` is a Stripe id — and cancel dials the
+  // column. Null on rows written before `providerBySession` existed, which
+  // leaves the column untouched exactly as before.
+  const completingProvider = providerForSession(before?.metadata ?? null, ev.checkoutSessionId);
+
   // Status flip + its outbox rows in ONE transaction, so a
   // `subscription.activated` announcement can never be lost by a crash between
   // the two. The delivery ATTEMPT is kicked post-commit, at the point the emit
@@ -379,6 +449,7 @@ export async function applyCheckoutCompleted(
       data: {
         status: 'ACTIVE',
         ...(ev.providerSubscriptionId !== null && { providerSubId: ev.providerSubscriptionId }),
+        ...(completingProvider !== null && { provider: completingProvider }),
         // Activation payloads that carry the period anchor (Razorpay
         // `current_end`, PayPal `billing_info.next_billing_time`) mirror it in
         // the same write; undefined = untouched.

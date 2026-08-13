@@ -18,13 +18,20 @@ One client instance per Application, constructed with that Application's **secre
 | Key | Format | Where to get it |
 | --- | --- | --- |
 | Secret key | `rp_live_…` (production) or `rp_test_…` (sandbox) | Panel → Application → API Keys |
-| API URL | `https://api.rekey.dev` or `http://localhost:3030` | Your Rekey deployment |
+| API URL | see below | Rekey Cloud, or your own deployment |
+
+**`REKEY_URL` is `https://api.rekey.dev` on Rekey Cloud**, and your own
+deployment's public origin when self-hosting (`http://localhost:3030` locally).
+There is no default: a default would have to be the Cloud host, and a
+self-hosted deployment that forgot the variable would then send its secret key
+to a host its operator never chose. Full explanation, including how to verify
+the origin before wiring any keys, in [docs/api-url.md](../../docs/api-url.md).
 
 Convention: read both from the environment — never hardcode.
 
 ```bash
-REKEY_URL=https://api.rekey.dev
-REKEY_SECRET=rp_live_…   # the Application secret key
+REKEY_URL=https://api.rekey.dev   # Rekey Cloud; self-hosted, use your own origin
+REKEY_SECRET=rp_live_…            # the Application secret key
 ```
 
 > **Never ship the secret key to the browser.** It authenticates as the whole

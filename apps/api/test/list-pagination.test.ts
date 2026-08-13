@@ -43,6 +43,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 
 /** Shape of every paginated `data` in this API. */
 interface PageEnvelope<T = unknown> {
@@ -301,7 +302,16 @@ describe('list endpoints report truncation', () => {
   // -------------------------------------------------------------------------
 
   it('security-events returns {items, page}, not {events}', async () => {
-    const { operatorToken } = await fixture('sec-events');
+    const { operatorToken, applicationId } = await fixture('sec-events');
+    // `recordSecurityEvent` is called fire-and-forget everywhere, deliberately,
+    // so the rows land AFTER the responses `fixture` already awaited. Asserting
+    // `items.length > 0` directly is a race that reads as stable locally and
+    // fails in CI roughly one run in ten — which is exactly what it did here.
+    // The fixture's api-key mint emits `app.api_key.created` carrying this
+    // applicationId, so waiting on it is precise rather than a sleep.
+    // See wait-for-security-events.ts, which documents this failure mode and
+    // which this test predates.
+    await waitForSecurityEvents({ applicationId });
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/tenant/security-events',

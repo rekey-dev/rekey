@@ -120,7 +120,14 @@ interface CookieJar {
 export interface RekeyAstroConfig {
   /** Defaults to `REKEY_SECRET` from the environment. */
   secretKey?: string;
-  /** Defaults to `REKEY_URL`, then `https://api.rekey.dev`. */
+  /**
+   * Defaults to `REKEY_URL`. Required — there is deliberately no fallback.
+   *
+   * On Rekey Cloud this is `https://api.rekey.dev`; self-hosted it is your own
+   * deployment's public origin. This used to fall back to `api.rekey.dev`,
+   * which meant a self-hosted deployment that forgot the variable sent its
+   * `REKEY_SECRET` to a host its operator never chose. See the throw below.
+   */
   apiUrl?: string;
   /**
    * Force the `Secure` flag instead of deciding per request. Only set this to
@@ -188,7 +195,28 @@ export function rekey(config: RekeyAstroConfig = {}): Rekey {
         'process.env, not .env — Vite loads .env for `astro dev` only.',
     );
   }
-  const apiUrl = config.apiUrl ?? readEnv('REKEY_URL') ?? 'https://api.rekey.dev';
+  // No fallback, deliberately, and this one is not a convenience question.
+  //
+  // It used to default to `https://api.rekey.dev`. A self-hosted deployment
+  // that forgot `REKEY_URL` therefore did not fail — it sent its own
+  // `REKEY_SECRET`, in an Authorization header, to a host its operator never
+  // chose. The request fails at that host (the key is unknown there), but the
+  // credential has already left, and the only symptom is a confusing 401.
+  //
+  // `decisions.md` (2026-07-30, "removed every default that quietly pointed a
+  // self-hosted deployment at Rekey-owned values") settled this for the panel
+  // and marketing apps; this SDK arrived after that pass and reintroduced the
+  // pattern. The other SDKs (`@rekey.dev/node`, `@rekey.dev/nextjs`) have
+  // always required the value. This makes the three agree.
+  const apiUrl = config.apiUrl ?? readEnv('REKEY_URL');
+  if (!apiUrl) {
+    throw new RekeyAstroConfigError(
+      '@rekey.dev/astro: REKEY_URL is not set. On Rekey Cloud it is ' +
+        "https://api.rekey.dev; self-hosted it is your own deployment's public origin " +
+        '(locally, http://localhost:3030). Note the built server reads process.env, not ' +
+        '.env — Vite loads .env for `astro dev` only.',
+    );
+  }
 
   // Keyed on the resolved config, not just "have we built one". A single
   // cached client meant the first caller won and every later config was

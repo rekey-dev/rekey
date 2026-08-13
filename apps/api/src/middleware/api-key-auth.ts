@@ -19,6 +19,7 @@ import type { ApiKey, Application } from '@prisma/client';
 import { apiKeysService } from '../modules/api-keys/api-keys.service.js';
 import { prisma } from '../lib/prisma.js';
 import { shouldWriteLastUsed } from '../lib/last-used-throttle.js';
+import { env } from '../config/env.js';
 import { RekeyError } from '../lib/error.js';
 import { ipMatchesAllowlist } from '../lib/ip-allowlist.js';
 import { portalOriginsForApp } from '../lib/portal-origins.js';
@@ -79,8 +80,21 @@ export async function requireApiKey(
     throw new RekeyError({
       statusCode: 401,
       code: 'API_KEY_INVALID',
-      message: 'API key is unknown, revoked, or expired.',
-      fix: 'List your active keys with the panel; if needed, mint a new one.',
+      // Name the deployment that rejected it.
+      //
+      // Keys are per-deployment: one minted on a local instance does not exist
+      // on Rekey Cloud and vice versa, and the single commonest integration
+      // mistake is pointing half a configuration at one and half at the other
+      // (server `REKEY_URL` still on localhost while the browser's
+      // `NEXT_PUBLIC_REKEY_URL` moved to Cloud, say). The old message described
+      // three states the key could be in and never mentioned the one thing that
+      // makes the difference — WHERE it was checked — so the reader went
+      // looking for a revoked key that was never revoked. Reported as #29.
+      //
+      // This discloses nothing: the caller already knows the origin they sent
+      // the request to, and `API_URL` is public.
+      message: `API key is unknown, revoked, or expired at ${env.API_URL}.`,
+      fix: `Keys belong to the deployment that minted them. Confirm this key came from ${env.API_URL} (Panel → Application → API Keys) and not from another Rekey deployment — a key from a local or staging instance is unknown here. If the origin is right, list your active keys in the panel and mint a new one if needed.`,
     });
   }
 
@@ -221,8 +235,12 @@ export async function requirePublishableOrSecretKey(
     throw new RekeyError({
       statusCode: 401,
       code: 'PUBLISHABLE_KEY_INVALID',
-      message: 'The presented publishable key is unknown or has been rotated out.',
-      fix: 'Use the current publishable key (rp_pub_…) from Panel → Application. If you just rotated, redeploy clients with the new key before the grace window ends.',
+      // Names the deployment for the same reason API_KEY_INVALID does: a
+      // publishable key minted on one deployment is unknown on another, and
+      // browser config is the half most likely to point somewhere else. See
+      // the note on API_KEY_INVALID above.
+      message: `The presented publishable key is unknown at ${env.API_URL}, or has been rotated out.`,
+      fix: `Use the current publishable key (rp_pub_…) from Panel → Application on ${env.API_URL} — a key from another Rekey deployment is unknown here, so check the origin your client points at as well as the key. If you just rotated, redeploy clients with the new key before the grace window ends.`,
     });
   }
 

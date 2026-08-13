@@ -27,3 +27,6 @@ dump.rdb
 # Editor/tool backup files. Six of these were committed by accident in
 # #255 (a `cp "$f" "$f.bak"` before an in-place edit).
 *.bak
+
+# Vitest writes these next to a config when it transpiles it; they are per-run.
+*.timestamp-*.mjs

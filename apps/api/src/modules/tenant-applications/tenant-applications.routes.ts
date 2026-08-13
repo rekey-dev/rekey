@@ -15,6 +15,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { applicationsService } from '../applications/applications.service.js';
 import { apiKeysService } from '../api-keys/api-keys.service.js';
+import { planCheckoutReadiness } from '../plans/plan-readiness.js';
 import { plansService } from '../plans/plans.service.js';
 import { couponsService } from '../coupons/coupons.service.js';
 import {
@@ -1040,7 +1041,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         summary: 'List Plans',
         description:
           'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
-          'any grant on it. A MEMBER with no grant on this Application gets 404.',
+          'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
+          'Each plan carries a `checkout` object saying whether a buyer would actually get a ' +
+          'checkout for it. A plan created before this Application had provider credentials was ' +
+          'never registered and has no price behind it, and connecting the provider afterwards ' +
+          'does not repair it — `checkout.blockers` names the provider and the repair.',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
         response: {
           200: okPage(ref('Plan'), 'A page of Plans (active and inactive), newest first.'),
@@ -1056,7 +1061,15 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         plansService.listForApplication(id, true, { take, skip }),
         plansService.countForApplication(id, true),
       ]);
-      return { success: true, data: paged(items, total, take, skip) };
+      // One credential lookup for the page, not one per plan. Evaluating the
+      // blockers themselves is pure and calls neither the database nor the
+      // provider.
+      const readiness = await planCheckoutReadiness(id, items);
+      const withReadiness = items.map((plan) => ({
+        ...plan,
+        checkout: readiness.get(plan.id) ?? { ready: true, blockers: [] },
+      }));
+      return { success: true, data: paged(withReadiness, total, take, skip) };
     },
   );
 

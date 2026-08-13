@@ -25,6 +25,14 @@ NEXT_PUBLIC_REKEY_URL=https://api.rekey.dev
 NEXT_PUBLIC_REKEY_PUBLIC_KEY=rp_pub_…   # Application publishable key
 ```
 
+**`https://api.rekey.dev` is Rekey Cloud's API**, the same origin for every
+Cloud workspace — requests are scoped by your API key, not by the URL. Self-hosting,
+use your own deployment's public origin instead (`http://localhost:3030` locally).
+Both URL variables are the same origin; the `NEXT_PUBLIC_` prefix only tells the
+bundler it may be inlined. There is no default for either — see
+[docs/api-url.md](../../docs/api-url.md) for why, and for how to verify the origin
+before wiring keys.
+
 > **Never ship the secret key to the browser.** `@rekey.dev/nextjs/server` pulls
 > Node-only deps and reads `REKEY_SECRET`; importing it from a Client
 > Component or middleware will fail to bundle (that's the safety net working).

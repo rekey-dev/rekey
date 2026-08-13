@@ -146,7 +146,7 @@ function clampLimit(raw: unknown, def = 25): number {
  * no Applications gets, so a denied Application is indistinguishable from an
  * absent one.
  */
-async function accessibleApplicationIds(ctx: OperatorToolContext): Promise<string[]> {
+export async function accessibleApplicationIds(ctx: OperatorToolContext): Promise<string[]> {
   const all = await prisma.application.findMany({
     where: { tenantId: ctx.tenantId },
     select: { id: true },
