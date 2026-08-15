@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation';
 import { publicPost, setSessionCookies, PanelApiError, type AuthResponse } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
+import { safeNext } from '@/lib/safe-next';
 
 export const metadata: Metadata = { title: 'Two-factor authentication · Rekey' };
 
@@ -16,18 +17,6 @@ export const metadata: Metadata = { title: 'Two-factor authentication · Rekey' 
  * token in the query string. The token is single-use, 5-minute-lifetime,
  * and only valid for the operator that just passed the primary factor.
  */
-/**
- * Only follow a post-auth `next` target that is a local path: must start
- * with '/', must not be scheme-relative ('//' or '/\') — anything else
- * (absolute URLs, schemes) is dropped to prevent open redirects.
- * (Mirrored in login/page.tsx and sign-up/page.tsx.)
- */
-function safeNext(raw: FormDataEntryValue | null): string | null {
-  const v = String(raw ?? '');
-  return v.startsWith('/') && !v.startsWith('//') && !v.startsWith('/\\') && !v.includes('://')
-    ? v
-    : null;
-}
 
 async function verify(formData: FormData): Promise<void> {
   'use server';

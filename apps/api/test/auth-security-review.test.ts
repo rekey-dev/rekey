@@ -1,5 +1,5 @@
 /**
- * Regressions for the adversarial review of the auth surface that landed in
+ * Regressions for the auth-surface hardening that landed in
  * 2.0.0-rc.1 — the `PATCH /users/me` self-service route, the OpenID Provider,
  * and the two email-verification switches, which merged within an hour of each
  * other and whose INTERACTION is where most of this came from.
@@ -528,9 +528,9 @@ describe('auth security review (2.0.0-rc.1)', () => {
         email: 'erased@example.com',
         scope: 'openid email mcp:account',
       });
-      // Stamped directly, as the reviewer did: it isolates the token-resolving
-      // paths from erasure's own credential deletion, which is the belt the
-      // braces here are for.
+      // Stamped directly rather than through the erase endpoint: it isolates
+      // the token-resolving paths from erasure's own credential deletion,
+      // which is the belt the braces here are for.
       await prisma.endUser.update({ where: { id: euId }, data: { erasedAt: new Date() } });
       return { fx, clientId, tokens, euId };
     }

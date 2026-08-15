@@ -12,6 +12,7 @@ import { cookies } from 'next/headers';
 import { type NextRequest, NextResponse } from 'next/server';
 import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE } from '@/lib/api';
 import { cookieSecure } from '@/lib/cookie-secure';
+import { safeNext } from '@/lib/safe-next';
 
 type CallbackResult =
   | { mfaRequired: true; mfaChallengeToken: string }
@@ -28,17 +29,6 @@ function seeOther(path: string): NextResponse {
   return new NextResponse(null, { status: 303, headers: { Location: path } });
 }
 
-/**
- * Only follow a post-auth `next` target that is a local path — mirrors
- * login/page.tsx's safeNext. Re-validated here even though startOAuth already
- * checked it, so a tampered cookie can't become an open redirect.
- */
-function safeNext(raw: string | undefined): string | null {
-  const v = String(raw ?? '');
-  return v.startsWith('/') && !v.startsWith('//') && !v.startsWith('/\\') && !v.includes('://')
-    ? v
-    : null;
-}
 
 export async function GET(
   req: NextRequest,

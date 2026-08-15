@@ -338,13 +338,16 @@ export const operatorWriteTools: OperatorTool[] = [
       // Its REST twin records `app.plan_updated` and this file's header claims
       // every write tool leaves a trail. A tool that mints a live price at a
       // payment provider is not the one to be missing from the audit log.
-      await recordSecurityEvent({
-        type: 'app.plan_updated',
-        actorType: 'operator',
-        actorId: ctx.tenantUserId,
-        tenantId: ctx.tenantId,
-        applicationId: app.id,
-        metadata: { planSlug: plan.slug, via: 'mcp', registrationStatus: plan.registrationStatus },
+      //
+      // Through `audit` like every other write tool here, not a hand-rolled
+      // call. The hand-rolled one omitted `ip` and `userAgent`, so the single
+      // most consequential entry in this file was also the only one that could
+      // not be traced to a request, and it wrote `via: 'mcp'` where the rest
+      // of the file writes `via: 'operator_mcp'`, which quietly breaks any
+      // query that filters on it.
+      audit(ctx, 'app.plan_updated', app.id, {
+        planSlug: plan.slug,
+        registrationStatus: plan.registrationStatus,
       });
       return { plan, checkout: await planCheckoutReadinessFor(app.id, plan) };
     },

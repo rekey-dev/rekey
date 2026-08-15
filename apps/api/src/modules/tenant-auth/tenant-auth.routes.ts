@@ -228,6 +228,13 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/sign-up',
     {
+      // Unauthenticated, and it creates an operator account AND a Tenant AND
+      // an OWNER membership per call, which is the most expensive thing an
+      // anonymous caller can ask this API to do. Every sibling on this router
+      // carries a ceiling; this one did not. Same budget as sign-in: the
+      // bucket keys on the submitted identity plus the IP, so a real person
+      // signing up once is nowhere near it.
+      config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
         security: [],

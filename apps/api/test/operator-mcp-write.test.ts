@@ -19,6 +19,7 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
 import { handleOperatorMcpMessage } from '../src/modules/tenant-mcp/tenant-mcp-server.js';
+import { configureSandboxStripe } from './fakes/billing-credentials.js';
 
 interface OperatorSession {
   accessToken: string;
@@ -571,6 +572,77 @@ describe('Operator MCP write tools', () => {
 
       expect(out.isError).toBe(false);
       expect(JSON.parse(out.text)).toHaveProperty('plans');
+    });
+  });
+
+  describe('register_plan_with_provider leaves the same audit trail as every other write tool', () => {
+    // This tool had no test at all, and nothing anywhere asserted on `via`,
+    // which is how its audit call drifted. It wrote the security event by
+    // hand instead of through this file's `audit` helper, so the one entry
+    // recording that an agent minted a LIVE price at a payment provider was
+    // also the only one that could not be traced to a request: no `ip`, no
+    // `userAgent`, and `via: 'mcp'` where every other tool writes
+    // `via: 'operator_mcp'`, which silently drops it out of any query
+    // filtering on that.
+
+    it('records ip, userAgent and via: operator_mcp', async () => {
+      const op = await makeOperator('regaudit');
+      const token = await mintPat(op, ['read', 'applications:write']);
+
+      const appId = (
+        readToolResult(
+          (
+            await rpc(token, 'tools/call', {
+              name: 'create_application',
+              arguments: { name: 'RegAudit', slug: 'reg-audit', enableBilling: true },
+            })
+          ).body,
+        ).data as { id: string }
+      ).id;
+
+      // registerWithProvider dials the provider, so the Application needs
+      // credentials. test/setup.ts swaps in a fake, so nothing is reached.
+      await configureSandboxStripe(appId);
+
+      readToolResult(
+        (
+          await rpc(token, 'tools/call', {
+            name: 'create_plan',
+            arguments: { applicationId: appId, slug: 'pro', name: 'Pro', amount: 2900 },
+          })
+        ).body,
+      );
+
+      // Sent with an explicit User-Agent, because the assertion is that the
+      // request context reaches the audit row, and `inject` sends none by
+      // default.
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/tenant/mcp',
+        headers: { authorization: `Bearer ${token}`, 'user-agent': 'probe-agent/1.0' },
+        payload: {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'register_plan_with_provider',
+            arguments: { applicationId: appId, planSlug: 'pro' },
+          },
+        },
+      });
+      expect(readToolResult(res.body).isError).toBe(false);
+
+      const events = await waitForSecurityEvents({
+        tenantId: op.tenantId,
+        type: 'app.plan_updated',
+      });
+      const event = events[0]!;
+      expect((event.metadata as { via?: string }).via).toBe('operator_mcp');
+      expect((event.metadata as { planSlug?: string }).planSlug).toBe('pro');
+      expect(event.applicationId).toBe(appId);
+      // The three the hand-rolled call dropped.
+      expect(event.ip).not.toBeNull();
+      expect(event.userAgent).toBe('probe-agent/1.0');
     });
   });
 });

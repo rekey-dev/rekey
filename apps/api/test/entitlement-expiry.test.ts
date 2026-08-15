@@ -7,7 +7,7 @@
  * terminates it lazily when someone reads it through
  * `billingService.getCurrentSubscription`.
  *
- * The gap, found by a reviewer rather than by me: **entitlement resolution
+ * The gap: **entitlement resolution
  * never goes through that read.** `entitlements.service.ts` queries the
  * subscription table directly, so it saw a row that was still nominally
  * ACTIVE and kept granting features, credits and usage allowance past the

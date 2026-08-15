@@ -32,10 +32,16 @@ const CHECKOUT_ERR: Record<string, string> = {
   PLAN_INACTIVE: 'That plan isn’t available any more.',
   BILLING_ORGANIZATION_REQUIRED:
     'This plan is billed to your team, so a team owner or admin has to start it.',
+  // One string, two binder states: a paid subscription and an unfinished
+  // checkout both raise this, and the old text ("It needs to be canceled")
+  // told a buyer who had never paid to cancel something that does not exist.
   BILLING_PROVIDER_SWITCH_BLOCKED:
-    'Your current subscription is billed through a different payment provider. It needs to be canceled before you start this one.',
+    'You already have a subscription or an unfinished checkout with a different payment provider. That one has to finish first. If you meant to keep it, choose that same provider here; otherwise cancel it before starting this one.',
+  // Same two binder states as the code above, and this one is now the more
+  // likely of the two to be reached: checkout answers "the bound provider is
+  // gone" before it judges the provider you picked.
   BILLING_BOUND_PROVIDER_UNAVAILABLE:
-    'The payment provider holding your current subscription isn’t available here any more, so a new one can’t be started. Contact support.',
+    'The payment provider holding your subscription or unfinished checkout isn’t available here any more, so a new one can’t be started. Contact support.',
   BILLING_SUBSCRIPTION_SUBJECT_CONFLICT:
     'You already have this plan on another account of yours. It has to be canceled and finish before you can start it here.',
   SUBSCRIPTION_NOT_FOUND: 'We couldn’t find that subscription — it may already be canceled.',

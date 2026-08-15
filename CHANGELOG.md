@@ -97,6 +97,46 @@ of its mutation paths (see Known issues).
   processor and carrying the other's id — which is the column `cancel` dials.
   The completion now stamps the processor whose session actually completed.
 
+- **A provider-binding refusal could name a provider nobody can use, or tell a
+  buyer to cancel something they never bought.** Three faults in the wording
+  and ordering of the two refusals above, all reachable by an ordinary buyer.
+  Landed after `v2.0.0-rc.9` was tagged, so the published rc.9 does not carry
+  them; they ship with whatever release follows it.
+
+  The switch refusal was decided before the router had looked at availability,
+  so a subscriber bound to a DISABLED provider who named another one was told
+  to check out through the disabled one. Availability is now settled first,
+  whether or not the caller named a provider.
+
+  Its remedy did not distinguish credentials that are disabled from
+  credentials that were deleted. Cancellation dials the processor, so with the
+  credentials gone a buyer whose row carries a provider subscription id can
+  neither buy nor cancel; a checkout nobody finished carries no such id and
+  stays cancellable either way. The two states now get different instructions.
+
+  And a started checkout binds just as a subscription does, but was described
+  as one ("already pays", "cancel the existing subscription") to somebody who
+  had never paid. Both refusals now name an unfinished checkout for what it is,
+  and say that no completed payment has been RECORDED rather than that nothing
+  was charged, because a paid checkout whose webhook was lost sits in exactly
+  that state. That wording is keyed on the row having no provider subscription
+  id as well as being PENDING: Stripe's `paused`, and every status the codebase
+  does not recognise, also map to PENDING while keeping the id, and those rows
+  are paid. A trial gets its own wording on both refusals for the same reason.
+  The portal and the marketing checkout repeated the assumption and were
+  corrected.
+
+  Two consequences worth knowing. A checkout by a buyer bound to an Application
+  with no enabled providers at all now answers `409
+  BILLING_BOUND_PROVIDER_UNAVAILABLE`, naming the provider that buyer actually
+  uses, where it previously answered `400
+  BILLING_CREDENTIALS_NOT_CONFIGURED`, which named whichever provider
+  `billingConfig` mentioned and could be one the buyer has no relationship
+  with. And the unfinished-checkout remedy deliberately quotes no duration: the
+  24-hour window is measured from `updatedAt`, so re-opening the same checkout
+  restarts it, and a number there would be a promise the code does not keep
+  (rekey-dev/rekey#438).
+
 - **A plan created before its billing provider was silently un-checkoutable.**
   Plans register with the provider at creation time, so a plan created before
   its Application had credentials has no price behind it, and connecting a

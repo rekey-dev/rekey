@@ -12,19 +12,8 @@ import { Banner } from '@/components/Banner';
 import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
 import { cookieSecure } from '@/lib/cookie-secure';
+import { safeNext } from '@/lib/safe-next';
 
-/**
- * Only follow a post-auth `next` target that is a local path: must start
- * with '/', must not be scheme-relative ('//' or '/\') — anything else
- * (absolute URLs, schemes) is dropped to prevent open redirects.
- * (Mirrored in sign-up/page.tsx.)
- */
-function safeNext(raw: FormDataEntryValue | null): string | null {
-  const v = String(raw ?? '');
-  return v.startsWith('/') && !v.startsWith('//') && !v.startsWith('/\\') && !v.includes('://')
-    ? v
-    : null;
-}
 
 async function signIn(formData: FormData): Promise<void> {
   'use server';

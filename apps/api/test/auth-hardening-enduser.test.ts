@@ -260,8 +260,8 @@ describe('end-user auth hardening', () => {
       expect(invite.statusCode, invite.body).toBe(201);
       const rawToken = (invite.json().data as { token: string }).token;
 
-      // A completely unrelated account in the same Application — the reviewer's
-      // exact scenario: they held the link, not the mailbox.
+      // A completely unrelated account in the same Application: the holder of
+      // the link is not the holder of the mailbox.
       const stranger = await app
         .inject({
           method: 'POST',

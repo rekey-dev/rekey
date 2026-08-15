@@ -35,7 +35,7 @@ import {
   CHECKOUT_SESSION_LIFETIME_MS,
 } from './checkout-sessions.js';
 import { getProviderForApplication, pickProvider } from './providers/index.js';
-import type { BillingProviderName } from './credentials.service.js';
+import { billingCredentialsService, type BillingProviderName } from './credentials.service.js';
 import { BillingConfigSchema, cancelEffect, isEntitlingStatus, ENTITLING_SUBSCRIPTION_STATUSES } from '@rekey.dev/shared-types';
 import { enqueueSubscriptionEvent } from './webhooks/billing-events.js';
 import { kickDeliveries } from '../webhooks/webhook.service.js';
@@ -443,7 +443,23 @@ export const billingService = {
               { OR: [boundSubject, { endUserId: input.endUser.id, planId: plan.id }] },
               {
                 OR: [
-                  { status: { in: [...ENTITLING_SUBSCRIPTION_STATUSES] } },
+                  {
+                    status: { in: [...ENTITLING_SUBSCRIPTION_STATUSES] },
+                    // A row whose scheduled cancellation has already come due
+                    // does not bind. `expireIfDue` is lazy by design: it flips
+                    // such a row to CANCELED the first time anybody READS it,
+                    // and this query is not a read that runs it. So without
+                    // this clause the same database state answered checkout
+                    // two different ways depending on whether an unrelated
+                    // `GET /billing/subscription` happened to run first, which
+                    // is the kind of thing that makes a support report
+                    // impossible to reproduce (#439).
+                    //
+                    // Filtered here rather than by sweeping first, because the
+                    // sweep is a write and nothing on the checkout path should
+                    // take one to answer a question.
+                    OR: [{ cancelAt: null }, { cancelAt: { gt: new Date() } }],
+                  },
                   // A started-but-unfinished checkout on ANOTHER plan binds
                   // too, for as long as its session could still be paid.
                   // Excluding PENDING left the reachable version of this bug:
@@ -491,63 +507,161 @@ export const billingService = {
           // consecutive requests. Oldest wins, so the answer is stable and is
           // the relationship they have had longest.
           orderBy: { createdAt: 'asc' },
-          select: { provider: true, plan: { select: { slug: true } } },
+          // `status` is read only to word the refusal below. A PENDING binder
+          // is somebody who has never paid, and telling them to cancel a
+          // subscription is telling them to cancel nothing.
+          select: {
+            provider: true,
+            status: true,
+            // Read with `status` because PENDING alone does not mean "unfinished
+            // checkout". Stripe's `paused`, and every status this codebase does
+            // not recognise, also map to PENDING (providers/modules/stripe:75,
+            // and the `default` arm below it), and those rows KEEP their
+            // `providerSubId`. Such a row is a real provider-side subscription,
+            // so calling it an unfinished checkout, saying nothing was
+            // recorded, or saying it can always be cancelled would all be
+            // false. The pair is the honest test.
+            providerSubId: true,
+            plan: { select: { slug: true } },
+          },
         });
     const boundProvider = bound?.provider ?? null;
 
-    // An explicit request we cannot honour is refused; an absent one is pinned.
+    // Whether the bound provider is still REACHABLE is settled before the
+    // caller's request is judged, because it is the more fundamental fact and
+    // it does not depend on what they asked for.
     //
-    // The split matters. Asking for PayPal when you are already on Stripe is a
-    // request with no correct outcome, and answering it by quietly charging you
-    // on Stripe would be worse than saying no. But when nobody asked, the geo
-    // router is free to pick a different provider than last time (a trip
-    // abroad, a routing change), and that silent drift is the version of this
-    // bug nobody would ever report. Pinning removes it.
-    if (
-      bound !== null &&
-      boundProvider !== null &&
-      input.provider !== undefined &&
-      input.provider !== boundProvider
-    ) {
-      throw new RekeyError({
-        statusCode: 409,
-        code: 'BILLING_PROVIDER_SWITCH_BLOCKED',
-        message: `This subscriber already pays for "${bound.plan.slug}" through "${boundProvider}", and a subscription cannot be moved between payment providers. Checking out through "${input.provider}" would create a second subscription and bill them twice.`,
-        fix: `Check out through "${boundProvider}", or cancel the existing subscription and let it terminate before starting a new one elsewhere. Read \`provider\` off the active subscription to know which one to offer.`,
-      });
-    }
-
-    let providerName: BillingProviderName;
-    try {
-      providerName = await pickProvider({
-        application: input.application,
-        ...(input.country !== undefined && { country: input.country }),
-        ...(boundProvider !== null
-          ? { preferred: boundProvider as BillingProviderName }
-          : input.provider !== undefined && { preferred: input.provider }),
-      });
-    } catch (e) {
-      // The pin can name a provider the operator has since disabled, and the
-      // router's own refusal is written for a caller who asked for one: it says
-      // to omit `provider`, which is exactly what this caller did. Every
-      // existing subscriber is locked out of every recurring purchase at this
-      // point, and answering that sends them looking for a mistake they did
-      // not make. Blocking is still right; only the wording changes, and it
-      // names the two ways out.
-      if (
-        boundProvider !== null &&
-        e instanceof RekeyError &&
-        e.code === 'BILLING_PROVIDER_NOT_AVAILABLE'
-      ) {
+    // Ordering used to be the other way round, and the switch refusal below
+    // ran before the router had ever looked at availability. So a subscriber
+    // bound to a provider the operator had disabled, who named a different
+    // one, was told to "check out through <bound>", an instruction that cannot
+    // be followed, and sent to look for a mistake they did not make. The
+    // unavailable case was only ever reached by callers who named nothing,
+    // which is the narrower half of the same situation.
+    if (bound !== null && boundProvider !== null) {
+      const enabled = await billingCredentialsService.listEnabled(input.application.id);
+      if (!enabled.some((p) => p.provider === boundProvider)) {
+        // Disabled and deleted are one state to the router and two states to
+        // the operator, and only one of them has "cancel it" as a way out.
+        // `getProviderForApplication` decrypts whatever row exists and does
+        // not consult `enabled`, so cancellation still dials a DISABLED
+        // provider fine. With the credentials REMOVED it throws, and the
+        // remedy this error used to offer was one the buyer could not take:
+        // they could neither buy nor cancel, and nothing said why.
+        const stillConfigured = await billingCredentialsService.isConfigured(
+          input.application.id,
+          boundProvider as BillingProviderName,
+        );
+        // The PENDING split belongs on BOTH refusals, not only on the switch
+        // one below.
+        //
+        // Availability is decided before the caller's request, so a PENDING
+        // binder reaches THIS error rather than the sibling. Wording only one
+        // of the two leaves the other telling a buyer who has never paid that
+        // they "already pay" and should "cancel the existing subscription".
+        // Change them together.
+        //
+        // For a PENDING binder the deleted-credentials text is not merely
+        // clumsy, it is false. `providerBacked` is
+        // `Boolean(sub.provider && sub.providerSubId)` and an unfinished
+        // checkout has no `providerSubId`, so cancellation never dials the
+        // processor and works whatever the credentials say.
+        //
+        // "No completed payment has been recorded", not "nothing has been
+        // charged". PENDING means no completion has been APPLIED, which is not
+        // the same as unpaid: a buyer who paid at the processor while the
+        // webhook was lost or exhausted its retries sits in exactly this state
+        // (see docs/specs/billing-reconciliation.md, F-A and F-D). Telling
+        // that operator nothing was charged is false at the moment it matters
+        // most, and nothing local can tell the two apart, so the sentence says
+        // only what Rekey actually knows.
+        // Three binder states here, matching the sibling refusal below. Adding
+        // the trial wording to only one of the two is the mistake this change
+        // has now made twice, once with PENDING and once with TRIALING, and
+        // the reorder makes THIS the more reachable refusal of the pair: it
+        // fires whether or not the caller named a provider.
+        const unpaidBinder = bound.status === 'PENDING' && bound.providerSubId === null;
+        const held = unpaidBinder
+          ? `has an unfinished checkout at "${boundProvider}"`
+          : bound.status === 'TRIALING'
+            ? `is on a trial that will charge through "${boundProvider}"`
+            : `pays through "${boundProvider}"`;
         throw new RekeyError({
           statusCode: 409,
           code: 'BILLING_BOUND_PROVIDER_UNAVAILABLE',
-          message: `This subscriber pays through "${boundProvider}", which is no longer configured or enabled for this Application. A subscription cannot be moved between payment providers, so no checkout can be issued for them until that is resolved.`,
-          fix: `Re-enable "${boundProvider}" in Panel → Application → Billing so existing subscribers can keep buying, or cancel their "${boundProvider}" subscription, let it terminate, and have them buy again through a provider that is still enabled.`,
+          message: `This subscriber ${held}, which is ${stillConfigured ? 'disabled' : 'no longer configured'} for this Application. A subscription cannot be moved between payment providers, so no checkout can be issued for them until that is resolved.`,
+          fix: unpaidBinder
+            ? stillConfigured
+              ? `Re-enable "${boundProvider}" in Panel → Application → Billing so this buyer can open checkouts there again. The one they already started is unaffected either way: completions do not consult whether a provider is enabled, so a payment made at "${boundProvider}" is still recorded while it is disabled. Otherwise leave it until it can no longer be completed, after which a checkout elsewhere is allowed. No completed payment has been recorded here, so there is nothing for Rekey to cancel.`
+              : `Re-add the "${boundProvider}" credentials in Panel → Application → Billing so a payment completed there can still be recorded: without them the completion is refused and the checkout they started stays open. Otherwise leave it until it can no longer be completed, after which a checkout elsewhere is allowed. No completed payment has been recorded here, so there is nothing for Rekey to cancel.`
+            : stillConfigured
+              ? `Re-enable "${boundProvider}" in Panel → Application → Billing so existing subscribers can keep buying, or cancel their "${boundProvider}" subscription, let it terminate, and have them buy again through a provider that is still enabled.`
+              : `Re-add the "${boundProvider}" credentials in Panel → Application → Billing; that restores both cancellation and checkout, because a re-added credential is enabled unless you say otherwise. While they are deleted this subscriber can neither buy nor cancel here, and cancelling in "${boundProvider}"'s own dashboard leaves this subscription live in Rekey. (An unfinished checkout is different: it has no provider-side subscription, so there is nothing to dial and it can still be cancelled.)`,
         });
       }
-      throw e;
+
+      // An explicit request we cannot honour is refused; an absent one is
+      // pinned.
+      //
+      // The split matters. Asking for PayPal when you are already on Stripe is
+      // a request with no correct outcome, and answering it by quietly
+      // charging you on Stripe would be worse than saying no. But when nobody
+      // asked, the geo router is free to pick a different provider than last
+      // time (a trip abroad, a routing change), and that silent drift is the
+      // version of this bug nobody would ever report. Pinning removes it.
+      if (input.provider !== undefined && input.provider !== boundProvider) {
+        // A PENDING binder is an unfinished checkout, not a subscription. The
+        // refusal is the same and its reason is not: two payable sessions at
+        // two processors bill twice just as two subscriptions do, but there is
+        // nothing Rekey can cancel, so saying "already pays" and "cancel the
+        // existing subscription" describes a person who does not exist. The
+        // portal repeats this text verbatim.
+        //
+        // It says "no completed payment has been recorded" rather than
+        // "nothing has been charged", for the reason given on the sibling
+        // refusal above: PENDING is not proof of unpaid.
+        //
+        // No duration is quoted, deliberately. The window is 24h, but it is
+        // measured from `updatedAt`, which moves on any write to the row, and
+        // re-opening the same checkout is explicitly allowed (there is a test
+        // named for it). So a buyer who clicks Buy once more restarts their
+        // own clock, and "leave it for 24 hours" becomes false by doing the
+        // obvious thing. It is also counted from now while the window runs
+        // from `updatedAt`, which may already be most of a day old. See #438;
+        // put the number back when that lands and the clock is honest.
+        // TRIALING is grouped with PENDING for the "has not paid" half only.
+        // A trial is a live billing relationship that converts into a charge,
+        // so it IS cancellable and the remedy stays; what is untrue of it is
+        // "already pays". PAST_DUE has paid before, so it keeps the paid
+        // wording.
+        const unpaid = bound.status === 'PENDING' && bound.providerSubId === null;
+        const trialing = bound.status === 'TRIALING';
+        throw new RekeyError({
+          statusCode: 409,
+          code: 'BILLING_PROVIDER_SWITCH_BLOCKED',
+          message: unpaid
+            ? `This subscriber has an unfinished checkout for "${bound.plan.slug}" at "${boundProvider}" that can still be paid, and a subscription cannot be moved between payment providers. Checking out through "${input.provider}" would leave two payable checkouts at two processors and bill them twice.`
+            : trialing
+              ? `This subscriber is on a trial of "${bound.plan.slug}" that will charge through "${boundProvider}", and a subscription cannot be moved between payment providers. Checking out through "${input.provider}" would create a second subscription and bill them twice.`
+              : `This subscriber already pays for "${bound.plan.slug}" through "${boundProvider}", and a subscription cannot be moved between payment providers. Checking out through "${input.provider}" would create a second subscription and bill them twice.`,
+          fix: unpaid
+            ? `Finish the checkout at "${boundProvider}", or abandon it: it stops reserving the provider once it can no longer be paid, after which a checkout elsewhere is allowed. No completed payment has been recorded here, so there is nothing for Rekey to cancel.`
+            : `Check out through "${boundProvider}", or cancel the existing subscription and let it terminate before starting a new one elsewhere. Read \`provider\` off the active subscription to know which one to offer.`,
+        });
+      }
     }
+
+    // No try/catch around the bound case any more: the guard above is the one
+    // site that decides "the provider this buyer is bound to is gone", and it
+    // has already run. A second, half-reachable copy of that decision living
+    // in a catch block is how the reachable one gets deleted.
+    const providerName: BillingProviderName = await pickProvider({
+      application: input.application,
+      ...(input.country !== undefined && { country: input.country }),
+      ...(boundProvider !== null
+        ? { preferred: boundProvider as BillingProviderName }
+        : input.provider !== undefined && { preferred: input.provider }),
+    });
 
     // Resolved as soon as the provider is known and BEFORE any row is written:
     // whether the discount can actually be charged depends on the provider and

@@ -359,8 +359,8 @@ describe('idempotency-key middleware', () => {
    * workspace never share a cache slot.
    *
    * Honest scoping note — this asserts the invariant, not the end-to-end
-   * exploit. The exploit was proven separately by an adversarial reviewer
-   * against `POST /:id/api-keys`: a workspace MEMBER whose own mint returned
+   * exploit. The exploit was proven separately against
+   * `POST /:id/api-keys`: a workspace MEMBER whose own mint returned
    * 403 replayed an OWNER's key and received the plaintext key with
    * `scopes: ['*']`, because the replay lives in an instance-level
    * `preHandler` that runs BEFORE route-level guards and before the handler

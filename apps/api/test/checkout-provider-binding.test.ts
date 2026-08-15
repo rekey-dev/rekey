@@ -13,8 +13,13 @@
  * planId, guard missed, two live subscriptions.
  *
  * These tests mostly seed the existing subscription directly rather than buying
- * one, because the refusal has to happen BEFORE any provider is dialled, which
- * is also why proving it needs no PayPal credentials.
+ * one, because the refusal has to happen BEFORE any provider is dialled, so no
+ * PayPal call is ever made.
+ *
+ * PayPal credentials are still configured wherever the SWITCH axis is the
+ * claim. Without them the bound provider is also UNAVAILABLE, and since
+ * availability is now answered first the test would read a refusal it did not
+ * mean. See `boundProviderAlsoEnabled`.
  *
  * The exception is the positive case. Refusals alone are not evidence that the
  * pin works: a regression that silently stopped pinning would keep every
@@ -29,7 +34,7 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
 import { CHECKOUT_SESSION_LIFETIME_MS } from '../src/modules/billing/checkout-sessions.js';
-import { configureSandboxStripe } from './fakes/billing-credentials.js';
+import { configureSandboxPaypal, configureSandboxStripe } from './fakes/billing-credentials.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -108,7 +113,23 @@ describe('a subscription binds its buyer to one payment provider', () => {
     provider?: string | null;
     status?: 'ACTIVE' | 'TRIALING' | 'PAST_DUE' | 'PENDING' | 'CANCELED';
     beneficiaryOrgId?: string;
-    providerSubId?: string;
+    /**
+     * Defaults to a PayPal-shaped id, EXCEPT on a PENDING row, where it
+     * defaults to `null`.
+     *
+     * That split is what a real row looks like: checkout writes PENDING with
+     * no provider subscription id, and a completion writes the id. Defaulting
+     * one onto a PENDING fixture made two tests here assert the
+     * unfinished-checkout wording against a row that carried a provider
+     * subscription id, which is a state the wording is false of.
+     *
+     * Pass an explicit id with PENDING to build the other real case: Stripe's
+     * `paused`, and every status this codebase does not recognise, map to
+     * PENDING while KEEPING the id (providers/modules/stripe/index.ts:75).
+     * `providerBacked` in `cancelCurrentSubscription` keys on the id, not the
+     * status, so those rows are cancellable and paid.
+     */
+    providerSubId?: string | null;
     createdAt?: Date;
   }): Promise<{ id: string }> {
     const plan = await prisma.plan.findFirstOrThrow({
@@ -120,7 +141,12 @@ describe('a subscription binds its buyer to one payment provider', () => {
         endUserId: input.endUserId,
         planId: plan.id,
         provider: input.provider === undefined ? 'paypal' : input.provider,
-        providerSubId: input.providerSubId ?? `I-PAYPALSUB-${Math.random().toString(36).slice(2)}`,
+        providerSubId:
+          input.providerSubId !== undefined
+            ? input.providerSubId
+            : (input.status ?? 'ACTIVE') === 'PENDING'
+              ? null
+              : `I-PAYPALSUB-${Math.random().toString(36).slice(2)}`,
         status: input.status ?? 'ACTIVE',
         ...(input.beneficiaryOrgId !== undefined && { beneficiaryOrgId: input.beneficiaryOrgId }),
         ...(input.createdAt !== undefined && { createdAt: input.createdAt }),
@@ -132,6 +158,22 @@ describe('a subscription binds its buyer to one payment provider', () => {
   /** An existing, entitling subscription held at another processor. */
   async function seedPaypalSub(endUserId: string, planSlug: string): Promise<void> {
     await seedSub({ endUserId, planSlug, providerSubId: 'I-PAYPALSUB123' });
+  }
+
+  /**
+   * PayPal configured and enabled, for the tests that mean to exercise the
+   * SWITCH axis.
+   *
+   * `beforeEach` configures Stripe only, so seeding a PayPal subscription
+   * also leaves PayPal unavailable. Availability is answered before the
+   * caller's request, so without this the tests below would read the
+   * availability guard rather than the switch guard, and their names would
+   * stop describing what they measure. The two axes are told apart by the
+   * error code; the tests that want the bound provider GONE say so by not
+   * calling this.
+   */
+  async function boundProviderAlsoEnabled(): Promise<void> {
+    await configureSandboxPaypal(applicationId);
   }
 
   /** An org the end-user OWNS, so they may check out on its behalf. */
@@ -204,6 +246,7 @@ describe('a subscription binds its buyer to one payment provider', () => {
   }
 
   it('refuses an upgrade routed to a different processor, which is the case that bills twice', async () => {
+    await boundProviderAlsoEnabled();
     const { basic, pro } = await twoPlans();
     const user = await signUp();
     await seedPaypalSub(user.id, basic);
@@ -284,6 +327,7 @@ describe('a subscription binds its buyer to one payment provider', () => {
     // inspected one row and wrote another: 200 OK, `provider` flipped
     // paypal→stripe while `providerSubId` stayed the PayPal one. PayPal kept
     // charging and no local row pointed at it any more.
+    await boundProviderAlsoEnabled();
     const { pro } = await twoPlans();
     const user = await signUp();
     await seedSub({
@@ -454,6 +498,7 @@ describe('a subscription binds its buyer to one payment provider', () => {
     // The one-off carve-out is about purchases that create no second billing
     // relationship. A TIMED licence renews, so it is neither exempt as the
     // thing being bought nor exempt as the thing that binds.
+    await boundProviderAlsoEnabled();
     const { pro } = await twoPlans();
     const timed = await rawPlan({ slug: 'timed-lic', kind: 'LICENSE', licenseKind: 'TIMED' });
 
@@ -473,6 +518,7 @@ describe('a subscription binds its buyer to one payment provider', () => {
   it.each(['TRIALING', 'PAST_DUE'] as const)('binds on a %s subscription too', async (status) => {
     // Both are entitling and both are live billing relationships: a trial
     // converts into a charge and a past-due one is still being retried.
+    await boundProviderAlsoEnabled();
     const { basic, pro } = await twoPlans();
     const user = await signUp();
     await seedSub({ endUserId: user.id, planSlug: basic, status });
@@ -508,6 +554,7 @@ describe('a subscription binds its buyer to one payment provider', () => {
     // PENDING was excluded, which left the reachable version of the bug: start
     // a PayPal checkout, abandon the tab, start a Stripe one on another plan,
     // pay both. Two webhooks land, two ACTIVE subscriptions on two processors.
+    await boundProviderAlsoEnabled();
     const { basic, pro } = await twoPlans();
     const user = await signUp();
     await seedSub({ endUserId: user.id, planSlug: basic, status: 'PENDING' });
@@ -585,6 +632,332 @@ describe('a subscription binds its buyer to one payment provider', () => {
     expect(err.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
     expect(err.message).toContain('stripe');
     expect(err.fix).toMatch(/re-enable|cancel/i);
+  });
+
+  it('says the bound provider is gone even when the caller named a different one', async () => {
+    // The availability question is settled before the caller's request is
+    // judged, because it does not depend on what they asked for.
+    //
+    // It used to be judged after. The switch guard ran first and had never
+    // looked at availability, so a subscriber bound to a DISABLED provider who
+    // named another one was told to "check out through <bound>", the one
+    // instruction that cannot be followed. Naming a provider and naming none
+    // are the same situation from the operator's side, and the answer is the
+    // same fact.
+    await configureSandboxPaypal(applicationId);
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    await seedSub({ endUserId: user.id, planSlug: basic, provider: 'paypal' });
+    await billingCredentialsService.setEnabled(applicationId, 'paypal', false);
+
+    const res = await checkout(user.token, pro, 'stripe');
+
+    expect(res.statusCode, JSON.stringify(res.json())).toBe(409);
+    const err = errorOf(res);
+    expect(err.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
+    // Specifically NOT the switch refusal, whose fix orders them to use PayPal.
+    expect(err.fix).not.toMatch(/check out through "paypal"/i);
+  });
+
+  it('does not offer "cancel it" as the way out when the credentials are deleted rather than disabled', async () => {
+    // Disabled and deleted are one state to the router and two to the operator.
+    // `getProviderForApplication` decrypts whatever row exists and ignores
+    // `enabled`, so cancellation still reaches a DISABLED provider. With the
+    // credentials REMOVED it throws, so the buyer can neither buy nor cancel,
+    // and the remedy the error offered was one nobody could take.
+    await configureSandboxPaypal(applicationId);
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    await seedSub({ endUserId: user.id, planSlug: basic, provider: 'paypal' });
+    await billingCredentialsService.remove(applicationId, 'paypal');
+
+    const res = await checkout(user.token, pro);
+
+    expect(res.statusCode, JSON.stringify(res.json())).toBe(409);
+    const err = errorOf(res);
+    expect(err.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
+    expect(err.message).toContain('no longer configured');
+    expect(err.fix).toMatch(/re-add/i);
+    // And it must not send them to a cancel that cannot run.
+    expect(err.fix).not.toMatch(/cancel their "paypal" subscription/i);
+
+    // NOT asserted here, because this suite cannot see it: that cancellation
+    // fails in this state. `test/setup.ts` mocks `getProviderForApplication`
+    // for every file, so the real one (`providers/index.ts`, which throws
+    // `credentialsNotConfigured` when `loadDecryptedWithMode` returns null)
+    // never runs, and an injected cancel returns 200 here whatever the
+    // credentials say. The un-mocked suite that would see it,
+    // `test-providers/`, needs real sandbox credentials and is not run in CI.
+    //
+    // So this test pins the WORDING and the reasoning behind it is recorded
+    // rather than proved. If the mock seam ever moves, prove it here.
+  });
+
+  it('does not tell a buyer who has never paid to cancel a subscription', async () => {
+    // A PENDING row binds (two payable sessions at two processors bill twice
+    // just as two subscriptions do), but it is an unfinished checkout, not a
+    // subscription. "already pays" and "cancel the existing subscription"
+    // describe somebody who does not exist, and the portal repeats this text
+    // to the buyer verbatim.
+    await boundProviderAlsoEnabled();
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    await seedSub({ endUserId: user.id, planSlug: basic, status: 'PENDING' });
+
+    const res = await checkout(user.token, pro, 'stripe');
+
+    expect(res.statusCode, JSON.stringify(res.json())).toBe(409);
+    const err = errorOf(res);
+    expect(err.code).toBe('BILLING_PROVIDER_SWITCH_BLOCKED');
+    expect(err.message).not.toMatch(/already pays/i);
+    expect(err.message).toMatch(/unfinished checkout/i);
+    // It may SAY there is nothing for Rekey to cancel; it must not order one,
+    // and it must not assert that nothing was charged.
+    expect(err.fix).not.toMatch(/cancel the existing subscription/i);
+    expect(err.fix).not.toMatch(/nothing has been charged/i);
+    // And it says what the buyer can actually do instead.
+    expect(err.fix).toMatch(/finish the checkout/i);
+  });
+
+  it('does not say a trialist "already pays"', async () => {
+    // Third binder state where the paid wording is untrue. A trial is a live
+    // billing relationship that converts into a charge, so unlike a PENDING
+    // checkout it IS cancellable and the remedy stands; what is false is
+    // "already pays for X". PAST_DUE keeps the paid wording, because it has
+    // paid before and the card is being retried.
+    await boundProviderAlsoEnabled();
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    await seedSub({ endUserId: user.id, planSlug: basic, status: 'TRIALING' });
+
+    const res = await checkout(user.token, pro, 'stripe');
+
+    const err = errorOf(res);
+    expect(err.code).toBe('BILLING_PROVIDER_SWITCH_BLOCKED');
+    expect(err.message).not.toMatch(/already pays/i);
+    expect(err.message).toMatch(/on a trial/i);
+    // The remedy is still cancellation, because a trial can be cancelled.
+    expect(err.fix).toMatch(/cancel the existing subscription/i);
+  });
+
+  it('still says "already pays" when the binder is a real subscription', async () => {
+    // The other half of the split. Without this, wording the PENDING case
+    // could quietly reword the paid one and nothing would notice.
+    await boundProviderAlsoEnabled();
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    await seedPaypalSub(user.id, basic);
+
+    const res = await checkout(user.token, pro, 'stripe');
+
+    const err = errorOf(res);
+    expect(err.code).toBe('BILLING_PROVIDER_SWITCH_BLOCKED');
+    expect(err.message).toMatch(/already pays/i);
+    expect(err.fix).toMatch(/cancel the existing subscription/i);
+  });
+
+  it('does not tell an unfinished checkout to cancel a subscription on the OTHER refusal either', async () => {
+    // Availability is answered before the caller's provider, so a PENDING
+    // binder at a disabled processor lands here rather than on
+    // BILLING_PROVIDER_SWITCH_BLOCKED. Both refusals therefore need the
+    // unpaid wording; wording only one of them leaves this path telling a
+    // buyer who has never paid to cancel a subscription.
+    await configureSandboxPaypal(applicationId);
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    await seedSub({ endUserId: user.id, planSlug: basic, provider: 'paypal', status: 'PENDING' });
+    await billingCredentialsService.setEnabled(applicationId, 'paypal', false);
+
+    const res = await checkout(user.token, pro, 'stripe');
+
+    expect(res.statusCode, JSON.stringify(res.json())).toBe(409);
+    const err = errorOf(res);
+    expect(err.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
+    expect(err.message).not.toMatch(/pays through/i);
+    expect(err.message).toMatch(/unfinished checkout/i);
+    expect(err.fix).not.toMatch(/cancel their/i);
+    expect(err.fix).toMatch(/nothing for Rekey to cancel/i);
+    // Specifically not "nothing has been charged". PENDING means no completion
+    // was applied, and a buyer whose payment succeeded while the webhook was
+    // lost is in this state (billing-reconciliation.md, F-A and F-D).
+    expect(err.fix).not.toMatch(/nothing has been charged/i);
+  });
+
+  it('does not claim an unfinished checkout cannot be cancelled when the credentials are deleted', async () => {
+    // Stronger than wording. `providerBacked` is
+    // `Boolean(sub.provider && sub.providerSubId)`, and a PENDING row has no
+    // `providerSubId`, so cancelling it never dials the processor and works
+    // whatever the credentials say. The deleted-credentials text asserts the
+    // opposite, which would be a false statement about the product.
+    await configureSandboxPaypal(applicationId);
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+
+    // The binder is created by a REAL checkout rather than seeded. Seeding
+    // `providerSubId: null` and asserting it is null measures the fixture, and
+    // would stay green on the day checkout starts stamping an id on PENDING
+    // rows, which is the fact the message rests on.
+    const opened = await checkout(user.token, basic, 'paypal');
+    expect(opened.statusCode, JSON.stringify(opened.json())).toBe(200);
+    const binder = await prisma.subscription.findFirstOrThrow({
+      where: { applicationId, endUserId: user.id },
+    });
+    expect(binder.status).toBe('PENDING');
+    // Not provider-backed, so `cancelCurrentSubscription` dials nobody and
+    // cancelling works whatever the credentials say.
+    expect(binder.providerSubId).toBeNull();
+
+    await billingCredentialsService.remove(applicationId, 'paypal');
+
+    const res = await checkout(user.token, pro, 'stripe');
+
+    const err = errorOf(res);
+    expect(err.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
+    expect(err.fix).not.toMatch(/neither buy nor cancel/i);
+    // And it must not claim nothing was charged: PENDING means no completion
+    // was applied, which a lost webhook also produces.
+    expect(err.fix).not.toMatch(/nothing has been charged/i);
+
+    // The remedy the text offers, performed literally: re-adding the
+    // credentials the way the panel does restores checkout on its own, with
+    // no separate enable step, because `upsertRaw`'s create branch defaults
+    // `enabled: true`.
+    //
+    // It checks out `pro`, not `basic`. `basic` is the binder's own plan and
+    // the PENDING clause excludes it, so with no provider named that checkout
+    // routes to the still-enabled Stripe and returns 200 whether or not the
+    // remedy was performed. Asserting the ISSUED PROVIDER is what makes this
+    // measure the remedy rather than the fallback.
+    await configureSandboxPaypal(applicationId);
+    const afterReAdd = await checkout(user.token, pro);
+    expect(afterReAdd.statusCode, JSON.stringify(afterReAdd.json())).toBe(200);
+    expect(issuedProvider(afterReAdd)).toBe('paypal');
+  });
+
+  it('does not tell a trialist they "pay through" a provider on the availability refusal either', async () => {
+    // The TRIALING split has to be on BOTH refusals. Putting it on one is the
+    // mistake this change already made with PENDING, and this is the more
+    // reachable of the two: it fires whether or not a provider was named.
+    await configureSandboxPaypal(applicationId);
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    await seedSub({ endUserId: user.id, planSlug: basic, status: 'TRIALING' });
+    await billingCredentialsService.setEnabled(applicationId, 'paypal', false);
+
+    for (const named of ['stripe', undefined] as const) {
+      const res = await checkout(user.token, pro, named);
+      const err = errorOf(res);
+      expect(err.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
+      expect(err.message).not.toMatch(/pays through/i);
+      expect(err.message).toMatch(/on a trial/i);
+    }
+  });
+
+  it('does not call a PAUSED subscription an unfinished checkout', async () => {
+    // PENDING alone does not mean "unfinished checkout". Stripe's `paused`
+    // maps to PENDING (providers/modules/stripe/index.ts:75), as does every
+    // status this codebase does not recognise, and those rows KEEP their
+    // `providerSubId`. Such a row is a real provider-side subscription, so
+    // every sentence the unpaid wording asserts is false of it: there IS
+    // something to cancel, a payment HAS been recorded, and cancelling dials
+    // the processor like any other provider-backed row.
+    await configureSandboxPaypal(applicationId);
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    await seedSub({
+      endUserId: user.id,
+      planSlug: basic,
+      provider: 'paypal',
+      status: 'PENDING',
+      providerSubId: 'I-PAUSED-SUB',
+    });
+
+    const switched = errorOf(await checkout(user.token, pro, 'stripe'));
+    expect(switched.code).toBe('BILLING_PROVIDER_SWITCH_BLOCKED');
+    expect(switched.message).not.toMatch(/unfinished checkout/i);
+    expect(switched.fix).not.toMatch(/nothing for Rekey to cancel/i);
+
+    await billingCredentialsService.setEnabled(applicationId, 'paypal', false);
+    const unavailable = errorOf(await checkout(user.token, pro, 'stripe'));
+    expect(unavailable.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
+    expect(unavailable.message).not.toMatch(/unfinished checkout/i);
+    expect(unavailable.fix).not.toMatch(/nothing for Rekey to cancel/i);
+  });
+
+  it('does not claim a disabled provider stops the checkout already started being paid', async () => {
+    // Completions resolve credentials through `loadDecryptedWithMode`, which
+    // never consults `enabled`. So a checkout opened at a provider that is
+    // later DISABLED still completes; only DELETED credentials refuse it. The
+    // remedy text said re-enabling was what let the started checkout be paid,
+    // which is false in the disabled case and true only in the deleted one.
+    await configureSandboxPaypal(applicationId);
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    await seedSub({
+      endUserId: user.id,
+      planSlug: basic,
+      provider: 'paypal',
+      status: 'PENDING',
+      providerSubId: null,
+    });
+    await billingCredentialsService.setEnabled(applicationId, 'paypal', false);
+
+    const disabled = errorOf(await checkout(user.token, pro, 'stripe'));
+    expect(disabled.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
+    expect(disabled.fix).toMatch(/completions do not consult whether a provider is enabled/i);
+
+    await billingCredentialsService.remove(applicationId, 'paypal');
+    const deleted = errorOf(await checkout(user.token, pro, 'stripe'));
+    expect(deleted.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
+    expect(deleted.fix).toMatch(/so a payment completed there can still be recorded/i);
+    // And the two must not share the claim that only one of them supports.
+    expect(deleted.fix).not.toMatch(/completions do not consult/i);
+  });
+
+  it('names the buyer’s own provider when an Application has no enabled providers at all', async () => {
+    // A status change worth pinning: this used to answer 400
+    // BILLING_CREDENTIALS_NOT_CONFIGURED, which names
+    // `billingConfig.provider ?? 'stripe'` and so could name a processor this
+    // buyer has no relationship with. The binding is the more specific fact.
+    await configureSandboxPaypal(applicationId);
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    await seedSub({ endUserId: user.id, planSlug: basic, provider: 'paypal' });
+    await billingCredentialsService.setEnabled(applicationId, 'paypal', false);
+    await billingCredentialsService.setEnabled(applicationId, 'stripe', false);
+
+    const res = await checkout(user.token, pro);
+
+    expect(res.statusCode, JSON.stringify(res.json())).toBe(409);
+    const err = errorOf(res);
+    expect(err.code).toBe('BILLING_BOUND_PROVIDER_UNAVAILABLE');
+    expect(err.message).toContain('paypal');
+  });
+
+  it('does not bind on a subscription whose scheduled cancellation has already passed', async () => {
+    // Same database state answered checkout two different ways depending on
+    // whether an unrelated read had run first. `expireIfDue` is lazy: it flips
+    // a due row to CANCELED the first time anybody READS it, and the binding
+    // query is not such a read. So a buyer got 409 until someone happened to
+    // load GET /billing/subscription, and 200 afterwards, with nothing about
+    // the subscription having changed in between (#439).
+    await boundProviderAlsoEnabled();
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    const seeded = await seedSub({ endUserId: user.id, planSlug: basic, provider: 'paypal' });
+    // Scheduled to cancel, and that moment has passed. Nothing has swept it.
+    await prisma.subscription.update({
+      where: { id: seeded.id },
+      data: { cancelAt: new Date(Date.now() - 60_000) },
+    });
+
+    const res = await checkout(user.token, pro, 'stripe');
+
+    expect(res.statusCode, JSON.stringify(res.json())).toBe(200);
+    // And the row really was still ACTIVE when the checkout was answered, so
+    // the test is measuring the filter and not a sweep that beat it there.
+    const row = await prisma.subscription.findUniqueOrThrow({ where: { id: seeded.id } });
+    expect(row.status).toBe('ACTIVE');
   });
 
   it('leaves a buyer with no subscription free to pick any configured processor', async () => {

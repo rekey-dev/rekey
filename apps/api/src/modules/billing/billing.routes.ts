@@ -491,10 +491,12 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
               'IDEMPOTENCY_KEY_IN_FLIGHT — a request with this Idempotency-Key is still being ' +
               'processed; or IDEMPOTENCY_KEY_REUSED — the key was already used for a different ' +
               'method, path, or body; or BILLING_PROVIDER_SWITCH_BLOCKED, meaning `provider` ' +
-              'names a processor other than the one this buyer is already subscribed through ' +
-              'anywhere in the application (omit it and the checkout is pinned to that one ' +
-              'instead); or BILLING_BOUND_PROVIDER_UNAVAILABLE, meaning the buyer is bound to a ' +
-              'provider that is no longer configured or enabled; or ' +
+              'names a processor other than the one this buyer is bound to anywhere in the ' +
+              'application, by a live subscription or by a checkout they have not finished ' +
+              '(omit it and the checkout is pinned to that one instead); or ' +
+              'BILLING_BOUND_PROVIDER_UNAVAILABLE, meaning the buyer is bound to a provider ' +
+              'that is no longer configured or enabled, which is answered before `provider` is ' +
+              'judged and so is returned whether or not one was named; or ' +
               'BILLING_SUBSCRIPTION_SUBJECT_CONFLICT, meaning this buyer already holds a live ' +
               'subscription to this plan billed to a different subject (their personal account ' +
               'vs an organization), and one buyer holds a plan once — the checkout would move ' +

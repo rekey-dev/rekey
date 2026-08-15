@@ -8,21 +8,10 @@ import { normalizeErrorCode } from '@/lib/error-code';
 import { AuthCard } from '@/components/AuthCard';
 import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
+import { safeNext } from '@/lib/safe-next';
 
 export const metadata: Metadata = { title: 'Create your workspace · Rekey' };
 
-/**
- * Only follow a post-auth `next` target that is a local path: must start
- * with '/', must not be scheme-relative ('//' or '/\') — anything else
- * (absolute URLs, schemes) is dropped to prevent open redirects.
- * (Mirrored in login/page.tsx.)
- */
-function safeNext(raw: FormDataEntryValue | null): string | null {
-  const v = String(raw ?? '');
-  return v.startsWith('/') && !v.startsWith('//') && !v.startsWith('/\\') && !v.includes('://')
-    ? v
-    : null;
-}
 
 type SignupMode = 'open' | 'invite' | 'closed';
 

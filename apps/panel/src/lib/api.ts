@@ -18,6 +18,7 @@ import { cache } from 'react';
 import { cookies, headers } from 'next/headers';
 import { forbidden, notFound, redirect } from 'next/navigation';
 import { cookieSecure } from './cookie-secure';
+import { clientIpFrom } from '@/lib/client-ip';
 
 export const ACCESS_COOKIE = 'rekey_access';
 export const REFRESH_COOKIE = 'rekey_refresh';
@@ -72,8 +73,7 @@ function apiUrl(): string {
 async function forwardedClientHeaders(): Promise<Record<string, string>> {
   try {
     const h = await headers();
-    const xff = h.get('x-forwarded-for');
-    const ip = (xff?.split(',')[0] ?? h.get('x-real-ip') ?? '').trim();
+    const ip = clientIpFrom(h.get('x-forwarded-for'), h.get('x-real-ip'));
     return ip ? { 'x-forwarded-for': ip } : {};
   } catch {
     return {};
