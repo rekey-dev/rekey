@@ -106,6 +106,32 @@ const PROBES: Probe[] = [
   { subResource: 'rotate-public-key', method: 'POST', suffix: '/rotate-public-key', payload: {} },
   { subResource: 'rotate-sessions', method: 'POST', suffix: '/rotate-sessions', payload: {} },
   { subResource: 'stats', method: 'GET', suffix: '/stats' },
+  // Value leaves the building through all three POSTs, so each is probed and
+  // not just the list. A cross-tenant refund would pay a stranger's buyer back
+  // out of this operator's balance; a cross-tenant extend would hand a
+  // stranger's customer free access. The case id is a non-existent one on
+  // purpose — the tenant check has to refuse before anything looks it up, so a
+  // 404 for "wrong workspace" and a 404 for "no such case" must be
+  // indistinguishable from outside.
+  { subResource: 'unapplied-payments', method: 'GET', suffix: '/unapplied-payments' },
+  {
+    subResource: 'unapplied-payments',
+    method: 'POST',
+    suffix: '/unapplied-payments/probe-case/refund',
+    payload: {},
+  },
+  {
+    subResource: 'unapplied-payments',
+    method: 'POST',
+    suffix: '/unapplied-payments/probe-case/extend',
+    payload: { days: 30 },
+  },
+  {
+    subResource: 'unapplied-payments',
+    method: 'POST',
+    suffix: '/unapplied-payments/probe-case/dismiss',
+    payload: { note: 'probe' },
+  },
   { subResource: 'usage-meters', method: 'GET', suffix: '/usage-meters' },
   { subResource: 'webhooks', method: 'GET', suffix: '/webhooks' },
 ];

@@ -38,3 +38,25 @@ export function paypalMajorString(minor: number, currency: string | undefined): 
   const scale = paypalScale(currency);
   return scale === 1 ? String(Math.round(minor)) : (minor / scale).toFixed(2);
 }
+
+/**
+ * The exact inverse of `paypalMajorString`, for reading an amount back off a
+ * PayPal API RESPONSE — today, the refund we just issued.
+ *
+ * Deliberately separate from the webhook path's `paypalAmountToMinor`, which
+ * looks like it does the same arithmetic and does not do the same job. That
+ * one gates an untrusted inbound payload: it takes a logger, refuses negative
+ * and non-finite values, enforces `MAX_PAYMENT_AMOUNT`, and returns `null` so
+ * the applier can drop the whole event. None of that fits here, where the
+ * amount is PayPal echoing back a refund we asked for and the caller has a
+ * sensible fallback of its own. Collapsing the two would mean either dragging
+ * a logger and an event-dropping return type into the provider, or quietly
+ * weakening the gate on the path that actually faces the internet.
+ *
+ * Returns `null` on anything unparseable rather than a wrong number.
+ */
+export function paypalMinorFromMajor(value: string, currency: string | undefined): number | null {
+  const major = Number(value);
+  if (!Number.isFinite(major) || major < 0) return null;
+  return Math.round(major * paypalScale(currency));
+}

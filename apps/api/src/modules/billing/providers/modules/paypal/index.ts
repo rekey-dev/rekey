@@ -503,6 +503,11 @@ export const paypalModule: ProviderModule = {
     // Signature verification calls PayPal's API — the pipeline's
     // centralized gate skips it under NODE_ENV=test (never in production).
     onlineVerify: true,
+    // 180 days is PayPal's own number and they state it in days, so this one
+    // is exact. Past it the API refuses with
+    // REFUND_NOT_ALLOWED_AFTER_180_DAYS and the money has to move some other
+    // way — see RealPaypalProvider.refundPayment.
+    refunds: { partial: true, windowDays: 180 },
     // Orders v2 takes a real discount line (`amount.breakdown.discount`), so
     // one-off purchases discount cleanly. Subscriptions v1 does not: the only
     // per-subscription price control is the inline `plan` override at create

@@ -21,11 +21,13 @@ import type {
   CheckoutSessionInput,
   CheckoutSessionResult,
   ProviderPlanRef,
+  RefundPaymentInput,
+  RefundPaymentResult,
 } from './types.js';
 import { discountUnsupported } from './discount.js';
 import type { PaypalCredentials, BillingMode } from '../credentials.service.js';
 import { RekeyError } from '../../../lib/error.js';
-import { paypalMajorString } from './paypal-money.js';
+import { paypalMajorString, paypalMinorFromMajor } from './paypal-money.js';
 
 const SANDBOX_BASE = 'https://api-m.sandbox.paypal.com';
 const LIVE_BASE = 'https://api-m.paypal.com';
@@ -507,6 +509,141 @@ export class RealPaypalProvider implements BillingProvider {
    * PayPal answers for an agreement it has already terminated, so a retry after
    * a partial failure settles instead of wedging.
    */
+  /**
+   * Refund a captured PayPal payment.
+   *
+   * The endpoint is not a constant, and this is the whole difficulty. PayPal
+   * has two live refund APIs and the one that applies depends on how the
+   * payment was taken:
+   *
+   *   - Orders v2 one-off checkouts produce a CAPTURE id, refunded at
+   *     `POST /v2/payments/captures/{id}/refund`, body `amount.value`.
+   *   - Subscriptions produce a SALE id (`PAYMENT.SALE.COMPLETED`), whose
+   *     documented refund route is `POST /v1/payments/sale/{id}/refund`, body
+   *     `amount.total`. The `/v1/payments` namespace is deprecated but still
+   *     live, and PayPal's own current webhook reference still points
+   *     `PAYMENT.SALE.REFUNDED` at it.
+   *
+   * Whether a sale id is ALSO accepted by the v2 captures endpoint is
+   * undocumented in both directions. PayPal's subscriptions spec models the
+   * transaction as a capture (the status field is titled "Capture Status" and
+   * carries the capture enum) and the id formats are identical, which suggests
+   * it works; a production gateway explicitly falls back to v1 with the
+   * comment that renewals use the v1 Sale resource, which suggests it does
+   * not. No PayPal statement settles it.
+   *
+   * So this does not guess. In order:
+   *   1. `input.refundHref` — the `rel:"refund"` link PayPal itself put on
+   *      that transaction. It names the right endpoint AND version for that
+   *      specific payment, so when we have it the question does not arise.
+   *   2. v2 captures.
+   *   3. v1 sale, on a 404 from v2 — which is exactly the signal that the id
+   *      was not in the capture namespace.
+   *
+   * Note the bodies differ between versions (`amount.value` +
+   * `currency_code` vs `amount.total` + `currency`). Crossing them produces a
+   * confusing 400 rather than a clear one, so each request builds its own.
+   */
+  async refundPayment(input: RefundPaymentInput): Promise<RefundPaymentResult> {
+    const token = await this.accessToken();
+    const amountMajor =
+      input.amount !== undefined ? paypalMajorString(input.amount, input.currency) : null;
+
+    const post = (url: string, body: unknown) =>
+      paypalFetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          // PayPal keeps the id for 45 days and replays the original result,
+          // so a retried refund returns the first refund instead of issuing a
+          // second one.
+          'PayPal-Request-Id': input.idempotencyKey,
+          // Without this PayPal may answer `return=minimal` — id and status
+          // only — and the amount we report back would be a guess.
+          Prefer: 'return=representation',
+        },
+        body: JSON.stringify(body),
+      });
+
+    // v2 body. An absent amount is a full refund of what remains, which is
+    // what an empty payload means to PayPal.
+    const v2Body =
+      amountMajor === null
+        ? {}
+        : {
+            amount: { value: amountMajor, currency_code: input.currency },
+            // `note_to_payer`, NOT `note`. PayPal's own examples show `note`,
+            // contradicting their schema; `note` is silently dropped.
+            ...(input.reason && { note_to_payer: input.reason.slice(0, 255) }),
+          };
+
+    let res: Response;
+    if (input.refundHref) {
+      res = await post(input.refundHref, v2Body);
+    } else {
+      res = await post(`${this.base}/v2/payments/captures/${input.providerPaymentId}/refund`, v2Body);
+      if (res.status === 404) {
+        // Not a capture id. It is a subscription sale id, so use the resource
+        // PayPal documents for one. Different field names, deliberately.
+        res = await post(`${this.base}/v1/payments/sale/${input.providerPaymentId}/refund`, {
+          ...(amountMajor === null
+            ? {}
+            : { amount: { total: amountMajor, currency: input.currency } }),
+          ...(input.reason && { description: input.reason.slice(0, 255) }),
+        });
+      }
+    }
+
+    if (!res.ok) {
+      const text = await res.text();
+      // The two refusals an operator can act on without opening PayPal. Both
+      // arrive as 422 with the meaning in `details[].issue` — matched there
+      // rather than on `name`, because PayPal ships both
+      // `UNPROCESSABLE_ENTITY` and the misspelled `UNPROCCESSABLE_ENTITY`.
+      if (text.includes('REFUND_NOT_ALLOWED_AFTER_180_DAYS')) {
+        throw new RekeyError({
+          statusCode: 409,
+          code: 'BILLING_REFUND_WINDOW_CLOSED',
+          message: 'PayPal will not refund a payment more than 180 days old.',
+          fix: 'PayPal cannot move this money back. Settle it with the buyer another way, or extend their entitlements instead and resolve the case that way.',
+        });
+      }
+      if (text.includes('CAPTURE_FULLY_REFUNDED')) {
+        throw new RekeyError({
+          statusCode: 409,
+          code: 'BILLING_PAYMENT_ALREADY_REFUNDED',
+          message: 'PayPal has already refunded this payment in full.',
+          fix: 'Nothing to do — the buyer has their money. Resolve the case as refunded.',
+        });
+      }
+      console.error('paypal refund failed', res.status, text);
+      throw paypalError('refund', res.status, text);
+    }
+
+    const json = (await res.json()) as {
+      id?: string;
+      status?: string;
+      state?: string;
+      amount?: { value?: string; currency_code?: string; total?: string; currency?: string };
+    };
+    // v2 says `status: COMPLETED`; v1 says `state: completed`. Read both, and
+    // treat only an explicit success as success — PayPal returns PENDING for
+    // eCheck-funded refunds, where the money has not moved yet.
+    const state = (json.status ?? json.state ?? '').toUpperCase();
+    const currency = json.amount?.currency_code ?? json.amount?.currency ?? input.currency ?? 'USD';
+    const major = json.amount?.value ?? json.amount?.total ?? null;
+    return {
+      refundId: json.id ?? input.idempotencyKey,
+      // PayPal reports money in major units; ours is minor everywhere. Falls
+      // back to what we asked for if PayPal's echo is unreadable, which is
+      // the honest answer when the refund itself succeeded.
+      amount: (major !== null ? paypalMinorFromMajor(major, currency) : null) ?? input.amount ?? 0,
+      currency: currency.toUpperCase(),
+      status: state === 'COMPLETED' ? 'succeeded' : 'pending',
+    };
+  }
+
   async cancelSubscription(input: CancelSubscriptionInput): Promise<void> {
     const providerSubId = input.subscription.providerSubId;
     if (!providerSubId) return;

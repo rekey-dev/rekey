@@ -28,6 +28,10 @@ export const DOMAIN_TABLES = [
   'license_activations',
   'licenses',
   'dunning_cases',
+  // Listed BEFORE payments: it FKs to payments, and while CASCADE would
+  // reach it anyway, an explicit entry keeps the list a readable inventory of
+  // what a test starts with rather than something to be derived.
+  'unapplied_payments',
   'payments',
   'subscriptions',
   'plans',

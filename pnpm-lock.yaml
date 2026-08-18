@@ -2045,8 +2045,8 @@ packages:
   '@ungap/structured-clone@1.3.1':
     resolution: {integrity: sha512-mUFwbeTqrVgDQxFveS+df2yfap6iuP20NAKAsBt5jDEoOTDew+zwLAOilHCeQJOVSvmgCX4ogqIrA0mnyr08yQ==}
 
-  '@unlayer/types@1.469.0':
-    resolution: {integrity: sha512-PCt2H02gzpWiKbVKjh8tmVSAAPZc/i+yaad8cDbYPK/sw7G7GC1qWuH4zRyW0qpqtZTO5pgqk3qbQreohJYpEg==}
+  '@unlayer/types@1.472.0':
+    resolution: {integrity: sha512-+sDO6TM2/4oYvZtAWpuJzy1J7wmaJu/2BicYNbOIyVaVj2KPDADmvmA3DTMuMZhHbdBD8R9ugSgpe6xZIHN57g==}
 
   '@vitejs/plugin-react@4.7.0':
     resolution: {integrity: sha512-gUu9hwfWvvEDBBmgtAowQCojwZmJ5mcLn3aufeCsitijs3+f2NsrPtlAWIR6OPiqljl96GVCUbLe0HyqIpVaoA==}
@@ -2406,6 +2406,7 @@ packages:
   cron-parser@4.9.0:
     resolution: {integrity: sha512-p0SaNjrHOnQeR8/VnfGbmg9te2kfyYSQ7Sc/j/6DtPL3JQvKxmjO9TSjNFpujqV3vEYYBvNNvXSxzyksBWAx1Q==}
     engines: {node: '>=12.0.0'}
+    deprecated: v4 is no longer maintained, upgrade to v5
 
   cross-spawn@7.0.6:
     resolution: {integrity: sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==}
@@ -5969,7 +5970,7 @@ snapshots:
 
   '@ungap/structured-clone@1.3.1': {}
 
-  '@unlayer/types@1.469.0': {}
+  '@unlayer/types@1.472.0': {}
 
   '@vitejs/plugin-react@4.7.0(vite@8.1.5(@types/node@24.12.4)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.21.0)(yaml@2.8.4))':
     dependencies:
@@ -7777,7 +7778,7 @@ snapshots:
 
   react-email-editor@1.8.0(react@19.2.5):
     dependencies:
-      '@unlayer/types': 1.469.0
+      '@unlayer/types': 1.472.0
       react: 19.2.5
 
   react-is@17.0.2: {}

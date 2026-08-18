@@ -4,6 +4,97 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.0.0
+
+The first stable release. The release-candidate series ends here; `latest` on
+npm now points at a stable version rather than an RC.
+
+Everything below landed after rc.9. Two of them are behaviour changes an
+existing rc integration can notice, and they are listed first for that reason.
+
+### Changed
+
+- **An Application now bills individuals OR organizations, never both.**
+  `billingConfig.billingSubject` already decided this, but only one direction
+  was enforced: an org-subject Application refused a checkout with no
+  organization, while a user-subject one quietly ACCEPTED an `organizationId`
+  and wrote an org-billed subscription beside the personal ones. Because
+  `Subscription` is unique on `(applicationId, endUserId, planId)` with no
+  beneficiary in the key, those two rows are one row, and whichever arrived
+  second silently replaced the other while the subscription it replaced kept
+  billing at its processor. A user-subject checkout that names an organization
+  is now refused with `BILLING_ORGANIZATION_NOT_ACCEPTED`.
+
+  If you were passing `organizationId` into a user-subject Application, switch
+  that Application to `billingSubject: 'org'` or drop the parameter. Changing
+  the subject is refused while subscriptions of the other subject are live
+  (`BILLING_SUBJECT_CHANGE_BLOCKED`), because flipping it would strand them.
+
+- **A succeeded Razorpay payment that matches no local subscription is now
+  recorded.** It used to be dropped entirely: no `Payment` row, no log, no
+  trace of the money anywhere. Operators running Razorpay should expect the
+  first look at the new unapplied-payments queue to surface historical charges
+  that were previously invisible.
+
+### Added
+
+- **Refunds, across Stripe, PayPal and Razorpay.** `refundPayment` on the
+  provider interface, paired with a `capabilities.refunds` declaration so a
+  provider that cannot refund says so rather than failing when an operator
+  presses the button. Partial refunds are supported everywhere. Note that no
+  provider returns its fee on a refund, so a refund costs the operator the
+  original processing fee.
+
+- **Unapplied payments: a queue for money that arrived for something Rekey
+  never applied.** Usually a checkout that completed at the provider after
+  Rekey stopped waiting for it, which means the customer most likely paid for
+  something they expect to receive. Rekey never refunds these automatically;
+  the operator decides between refunding, keeping the money and extending the
+  customer's access, or closing the case with a note. Ordered oldest first,
+  because refund windows close (PayPal at 180 days, Razorpay at six months)
+  while card-network dispute windows stay open. Panel → Application →
+  Unapplied, plus `GET/POST /api/v1/tenant/applications/:id/unapplied-payments`.
+
+### Fixed
+
+- **Concurrent checkouts could reach two processors.** The provider binding was
+  read-then-act with nothing holding the two together, so two overlapping
+  checkouts by one buyer both read a state in which nothing bound them and both
+  proceeded. Measured: two concurrent checkouts on different plans naming
+  different processors both returned 200 and left the buyer billable by Stripe
+  AND PayPal. The binding decision is now serialised per buyer. The
+  second-completion guard had the same shape and is now stated as a write
+  predicate, so two completions arriving at once cannot both win.
+
+- **Every Server Action answered 500 when the browser sent a malformed
+  `Origin`.** Next reads the header with `new URL()` guarded only by a
+  `typeof` check, and a browser sends the literal string `"null"` from an
+  opaque origin — a sandboxed iframe, or a form POST that followed a
+  cross-origin redirect. The action failed before any application code ran, so
+  nothing saved, and because it never resolved the submit button sat on
+  "Saving…" until the page was reloaded. Reported against the panel's OAuth
+  provider form; it affected every Server Action in the panel, marketing,
+  portal and admin.
+
+- **The account funnel pages were never centred.** Sign-in, sign-up,
+  forgot-password, reset, verify, account, error and not-found all capped their
+  width without centring, so on any wide viewport the form sat against the left
+  gutter.
+
+- **The OAuth redirect URI field said the wrong thing.** It is the operator's
+  own application callback, never a Rekey URL: the provider redirects the
+  browser to their server, which then hands Rekey the code. The hint now says
+  so, and warns that the provider compares the string byte for byte.
+
+### Known issues
+
+- Passkeys remain unavailable. The WebAuthn routes, SDK helpers and storage are
+  built, but there is still no way to configure the relying party from the
+  panel or the API, so no deployment can turn them on.
+- A sign-in page cannot discover which OAuth providers an Application has
+  configured; the consuming app must also carry the list in its own
+  environment. Tracked as #463.
+
 ## 2.0.0-rc.9
 
 Everything below was found the way rc.8 said it would have to be: by running

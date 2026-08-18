@@ -176,6 +176,99 @@ Reminder emails go through the **per-Application email system** (event key `bill
 
 **Operator visibility:** `GET /api/v1/tenant/applications/:id/dunning` (filter `?status=`, paginated/sortable like `/payments`), plus the Billing → Dunning tab and the "Dunning" tile on the revenue overview in the panel.
 
+## Unapplied payments — money we could not apply
+
+Sometimes a provider captures money for something Rekey never applied. The
+buyer's checkout completed at the provider **after** Rekey had stopped waiting
+for it, or two checkouts raced and only one won. The money is real, the
+customer is real, and nothing was provisioned.
+
+Rekey records these as an **unapplied payment** (`UnappliedPayment` row). The
+definition is exact:
+
+> a `Payment` with `status = SUCCEEDED` and `subscriptionId IS NULL`
+
+"Unapplied" is the term the wider billing and accounting world uses for
+received money that cannot be matched to what it was meant to pay for (Zuora,
+Maxio, Oracle, QuickBooks). If you have a finance person, they already know it.
+
+### Rekey never refunds one automatically
+
+This is the central design decision and it is deliberate. Auto-refunding
+anything unmatched would be wrong in the common case: most of these buyers
+**received the service they paid for** through a path we lost track of, and
+silently reversing the charge takes away something they are actively using. The
+operator knows things Rekey does not.
+
+Leaving the money unflagged would be worse than either, though — an unresolved
+case does not stay neutral. Both scenarios that produce one map to named
+card-network reason codes with roughly 120-day issuer filing windows (Visa
+12.6.1 "Duplicate Processing", Visa 12.6.2 "Paid by Other Means", Mastercard
+4834), and refund windows close on their own schedule. So the queue is
+**ordered oldest first**, which is the opposite of every other list in the
+panel, and the age column turns red past 90 days.
+
+### The three dispositions
+
+Panel → Application → **Unapplied**. Each open case offers exactly three
+outcomes, and a case can be resolved only once — the second attempt answers
+`409 UNAPPLIED_PAYMENT_ALREADY_RESOLVED`, which is what stops a double-click
+paying a buyer back twice.
+
+| Action | What happens | API |
+|---|---|---|
+| **Refund** | A real refund at the provider, then the case closes. Partial amounts supported; blank means everything not already refunded. | `POST /api/v1/tenant/applications/:id/unapplied-payments/:caseId/refund` |
+| **Extend** | Keep the money, add days to the customer's current subscription period, re-provision entitlements. | `…/:caseId/extend` |
+| **Close** | Move nothing. For cases settled somewhere Rekey cannot see. **Note required.** | `…/:caseId/dismiss` |
+
+The refund is issued **before** the case is marked resolved, and only marked
+resolved if the provider accepted it. The other order produces the worst state
+this feature can reach: a case claiming the buyer was refunded when they were
+not, which nothing will ever revisit because it has left the queue.
+
+**Extend has no precedent among billing vendors** — Stripe, Chargebee, Recurly
+and Zuora all credit *money*. Crediting service is also the cleaner outcome in
+the books: you deliver what was paid for, so revenue recognises normally
+instead of parking a liability. It needs Rekey to know who paid; an
+unattributable payment answers `409 UNAPPLIED_PAYMENT_UNATTRIBUTED`.
+
+### Things that will surprise you
+
+- **Provider fees are not returned on a refund.** None of the three reverse
+  them — PayPal since October 2019, and Razorpay keeps MDR plus 18% GST. A
+  refund costs you the original processing fee. This is a real input to
+  refund-versus-extend.
+- **The refund response is not the outcome.** Razorpay creates every refund
+  `pending` and reports the result later on `refund.processed`; PayPal returns
+  PENDING for eCheck-funded refunds. Rekey records what the provider said at
+  create time and waits for the webhook.
+- **Refund windows close.** PayPal refuses past **180 days**
+  (`REFUND_NOT_ALLOWED_AFTER_180_DAYS`); Razorpay past **six months**. Stripe
+  documents no limit. Past the window the money cannot be moved back at all and
+  extending is the only lever left.
+- **Refunding never cancels the subscription.** Separate call at all three
+  providers.
+- **Attribution is best-effort.** When a charge matches no subscription, Rekey
+  looks for the checkout breadcrumb (`unappliedCompletions`) to work out who
+  paid. It reports `unknown` rather than guessing — attributing a stranger's
+  money to the wrong customer is worse than admitting we do not know.
+
+### Notification
+
+Opening a case emails the workspace **owners** (admins if there is no owner),
+using event key `billing_unapplied_payment` — customisable in Panel →
+Application → Email like any other template. It is the only operator-addressed
+template in that list. If no transport is configured the send is logged and the
+case still stands; the queue, not the inbox, is the source of truth.
+
+### A note on Razorpay
+
+Before this existed, an unmatched Razorpay payment was **dropped entirely** —
+no `Payment` row, no log, nothing. Every provider now records a succeeded
+charge whether or not it matched, which is what Stripe and PayPal already did.
+If you run Razorpay and have been live for a while, expect the first sync of
+this queue to surface historical money you could not previously see.
+
 ## Webhooks — two directions, don't conflate them
 
 Rekey is in the middle of **two separate webhook flows**, and they have nothing in common beyond the word "webhook":

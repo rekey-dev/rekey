@@ -4,14 +4,18 @@
  * tenant, and read back via the operator security-events route filtered by
  * `actorType=end_user`.
  *
- * Events are written fire-and-forget (best-effort), but the subsequent HTTP
- * round-trip gives the microtask time to flush — same pattern the existing
- * `app.sessions_rotated` audit assertion relies on.
+ * Events are written fire-and-forget (`void recordSecurityEvent(...)`), so the
+ * rows land some time AFTER the response this test awaited. The header used to
+ * claim "the subsequent HTTP round-trip gives the microtask time to flush",
+ * which is not a guarantee - it is a race, and it lost on CI while passing
+ * locally, which is the signature `wait-for-security-events.ts` was written
+ * for. The events are awaited explicitly now, before the feed is read.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 
 describe('per-app activity log', () => {
   let app: FastifyInstance;
@@ -71,6 +75,13 @@ describe('per-app activity log', () => {
       payload: { email: `eu-${slug}@example.com`, password: 'pw-one-two-three' },
     });
     expect(signIn.statusCode).toBe(200);
+
+    // Both writes are fire-and-forget, so wait for them to actually land before
+    // reading the feed. Polling, not a fixed sleep: the common case stays fast.
+    await waitForSecurityEvents(
+      { applicationId, actorType: 'end_user' },
+      { atLeast: 2 },
+    );
 
     // Operator reads the activity feed, filtered to end-user events for this app.
     const log = await app.inject({

@@ -177,7 +177,8 @@ have decided them for you.
 
 Every command in this section assumes the **bundled** `postgres` service from
 `docker-compose.prod.yml`. If you pointed `DATABASE_URL` at a managed database
-instead (Neon, RDS, Cloud SQL), there is no container to `exec` into: drop the
+instead (Azure Database for PostgreSQL, Neon, RDS, Cloud SQL), there is no
+container to `exec` into: drop the
 `docker compose … exec -T postgres` prefix and run `pg_dump "$DATABASE_URL"`
 from a host with a matching client version, or use the provider's own snapshots.
 The rest — what is in the dump, why `ENCRYPTION_KEY` has to be backed up

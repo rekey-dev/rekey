@@ -50,7 +50,11 @@ export interface EndUserPaymentDto {
   id: string;
   amount: number;
   currency: string;
-  status: 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'REFUNDED';
+  // Mirrors the Prisma enum. `PARTIALLY_REFUNDED` is deliberately visible to
+  // the end user: a buyer looking at their own payment history should be able
+  // to see that some of a charge came back, and showing it as SUCCEEDED or as
+  // REFUNDED would each be wrong in a way that costs them a support ticket.
+  status: 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'REFUNDED' | 'PARTIALLY_REFUNDED';
   description: string | null;
   createdAt: Date;
   subscriptionId: string | null;
@@ -345,6 +349,30 @@ export const billingService = {
         code: 'BILLING_ORGANIZATION_REQUIRED',
         message: 'This Application bills per organization, but no organization was provided for checkout.',
         fix: 'Pass `organizationId` of a team the user OWNS or ADMINS (set the session\'s active org via organizations.switch, or pass organizationId to createCheckout). Change the model in Panel → Application → Billing → Subject.',
+      });
+    }
+
+    // ...and the mirror image, which was never checked (#431).
+    //
+    // The subject is a property of the APPLICATION: it bills individuals or it
+    // bills organizations, never both. Only the org-mode-without-org direction
+    // was guarded, so a user-subject Application accepted an `organizationId`
+    // and wrote an org-billed subscription beside the personal ones.
+    //
+    // That is what makes the uniqueness defect in #431 reachable at all.
+    // `Subscription` is unique on `(applicationId, endUserId, planId)` with no
+    // beneficiary in the key, so a buyer's personal subscription to a plan and
+    // an org-billed subscription to the SAME plan are ONE ROW — whichever
+    // arrived second silently took the other's place, and the subscription it
+    // replaced kept billing at its processor with nothing local naming it.
+    // Refusing the mixed state is the fix; widening the constraint would only
+    // make a state the product does not have somewhere to live.
+    if (billingConfig.billingSubject !== 'org' && input.beneficiaryOrgId !== undefined) {
+      throw new RekeyError({
+        statusCode: 400,
+        code: 'BILLING_ORGANIZATION_NOT_ACCEPTED',
+        message: 'This Application bills individual users, so a checkout cannot name an organization.',
+        fix: 'Drop `organizationId` to bill the user, or switch the Application to organization billing in Panel → Application → Billing → Subject (only possible while nothing is subscribed).',
       });
     }
 
@@ -782,6 +810,159 @@ export const billingService = {
       // charge, so a trial that stops at our own rows charges the buyer today.
       ...(trial !== null && { trial }),
     };
+    // ---- Serialise the binding decision (#437) -------------------------
+    //
+    // Everything above is read-then-act with nothing holding the two together,
+    // so two overlapping checkouts by the same buyer BOTH read a state in
+    // which nothing binds them and both proceed. Neither guard above is wrong;
+    // each request is right about what it saw. Measured: two concurrent
+    // checkouts on different plans naming different processors both returned
+    // 200 and left the buyer billable by Stripe AND PayPal.
+    //
+    // Three things this is NOT, because each looks like the obvious fix:
+    //
+    //   * `SELECT ... FOR UPDATE` on the subscription row. On a buyer's first
+    //     checkout there is no row to lock, and that is exactly the racing
+    //     case. You cannot lock a row that does not exist yet.
+    //   * The uniqueness constraint. `(applicationId, endUserId, planId)`
+    //     already collapses two racing checkouts on the SAME plan into one row
+    //     — that case is genuinely safe today. The one that bills twice is two
+    //     DIFFERENT plans, where the keys differ and nothing collides. An
+    //     index cannot serialise a decision, only reject a duplicate.
+    //   * Wrapping the whole method in a transaction. The provider network
+    //     call sits between the decision and the write, so that would hold a
+    //     Postgres connection open across a call to Stripe for up to its 10s
+    //     budget. Under the double-click storm this exists to survive, that
+    //     trades double billing for pool exhaustion on the checkout path.
+    //
+    // So: a transaction-scoped ADVISORY lock keyed on (application, end-user),
+    // which works whether or not a row exists, taken for a short DB-only
+    // window that re-reads the binding and CLAIMS the row. The provider call
+    // stays outside it.
+    //
+    // The claim is not decoration, and the reason is worth stating precisely.
+    // The lock alone serialises the two requests, but the winner does not
+    // write its real row until AFTER the lock has been released — the provider
+    // call sits in between — so a loser that acquires the lock in that window
+    // still finds nothing and proceeds. Measured with the claim removed and
+    // the lock kept: two concurrent checkouts happened to be safe, ten were
+    // not, and still split across both processors. Claiming the row before the
+    // lock lifts is what closes that window.
+    //
+    // The check above and this one are not redundant. The first produces the
+    // worded, buyer-facing refusals; this one is the authoritative gate, and
+    // it only ever fires on a genuine race.
+    //
+    // Skipped entirely for a one-off purchase. A credit pack or a perpetual
+    // licence creates no billing relationship, so there is no binding to race
+    // over and nothing to claim — and running it anyway REFUSED a legitimate
+    // one-off from a buyer who happened to hold a recurring subscription
+    // elsewhere, because this re-check filters the candidate ROWS by kind but
+    // cannot see the kind of the purchase being made.
+    // Placed as LATE as possible while still preceding the provider call.
+    // It sat right after the provider was picked, which is before the discount
+    // and trial refusals — so a checkout refused for an unsupported coupon
+    // left a claimed PENDING row behind, and that row binds the buyer. The
+    // window this has to close is the provider round-trip; everything before
+    // it is local and fast.
+    const bindingLockKey = `rekey:checkout:${input.application.id}:${input.endUser.id}`;
+    let claimCreatedRow = false;
+    if (!isOneTime) await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${bindingLockKey}, 0))`;
+
+      const existingBeforeClaim = await tx.subscription.findUnique({
+        where: {
+          applicationId_endUserId_planId: {
+            applicationId: input.application.id,
+            endUserId: input.endUser.id,
+            planId: plan.id,
+          },
+        },
+        select: { id: true },
+      });
+
+      const raced = await tx.subscription.findFirst({
+        where: {
+          applicationId: input.application.id,
+          endUserId: input.endUser.id,
+          provider: { not: null },
+          NOT: { provider: providerName },
+          // Same recurring-kinds filter as the binder read above: a one-off
+          // credit pack must not pin a buyer to whoever sold it.
+          plan: {
+            OR: [
+              { kind: { in: ['SUBSCRIPTION', 'USAGE'] } },
+              { kind: 'LICENSE', licenseKind: 'TIMED' },
+            ],
+          },
+          OR: [
+            {
+              status: { in: [...ENTITLING_SUBSCRIPTION_STATUSES] },
+              // A row whose scheduled cancellation has already come due does
+              // not bind, exactly as in the binder read above (#439).
+              // `expireIfDue` is lazy and this query does not run it, so
+              // without this clause the same state answers checkout
+              // differently depending on whether an unrelated read happened
+              // first — and here it answered by refusing a legitimate sale.
+              OR: [{ cancelAt: null }, { cancelAt: { gt: new Date() } }],
+            },
+            {
+              // A live checkout somebody else opened. Same session clock the
+              // binder read uses, and the same exclusion of the row THIS
+              // checkout writes — otherwise a buyer retrying their own
+              // checkout would be refused by their own previous attempt.
+              status: 'PENDING',
+              updatedAt: { gt: new Date(Date.now() - CHECKOUT_SESSION_LIFETIME_MS) },
+              NOT: { planId: plan.id },
+            },
+          ],
+        },
+        orderBy: { createdAt: 'asc' },
+        select: { provider: true },
+      });
+
+      if (raced?.provider) {
+        // Retryable on purpose, and worded that way. The buyer double-clicked;
+        // the other click won and bound them. Retrying now reads the binding
+        // above and routes them to the SAME processor, which is the outcome
+        // they wanted — so this must not read like a dead end.
+        throw new RekeyError({
+          statusCode: 409,
+          code: 'BILLING_CHECKOUT_RACE',
+          message: `Another checkout for this account completed first and is paying through "${raced.provider}".`,
+          fix: 'Try again. The retry will send you to the same payment provider as the checkout that won.',
+        });
+      }
+
+      // Claim the row so a checkout racing this one SEES a binding. `update`
+      // is empty deliberately: an existing row is somebody's real subscription
+      // and the upsert further down owns every field on it. All this needs is
+      // for the row to exist, holding this provider, before the lock lifts.
+      await tx.subscription.upsert({
+        where: {
+          applicationId_endUserId_planId: {
+            applicationId: input.application.id,
+            endUserId: input.endUser.id,
+            planId: plan.id,
+          },
+        },
+        create: {
+          applicationId: input.application.id,
+          endUserId: input.endUser.id,
+          planId: plan.id,
+          provider: providerName,
+          status: 'PENDING',
+          ...(input.beneficiaryOrgId !== undefined && { beneficiaryOrgId: input.beneficiaryOrgId }),
+        },
+        update: {},
+      });
+      // Whether the row is OURS. A checkout that fails after this point must
+      // not leave a PENDING row claiming a provider behind: that row binds the
+      // buyer, so the next legitimate checkout they start somewhere else is
+      // refused by the wreckage of one that never happened.
+      claimCreatedRow = existingBeforeClaim === null;
+    });
+
     let session;
     try {
       session = isOneTime
@@ -793,6 +974,30 @@ export const billingService = {
       // outlives the checkout it was for is a denial-of-discount against the
       // next buyer.
       if (reservation) await couponsService.releaseReservation(reservation.reservationId);
+      // Same reasoning for the binding claim (#437): the row exists only to
+      // hold this buyer's provider across the window below, and the checkout
+      // it was claimed for has just failed. Left behind it would BIND them —
+      // an unpaid PENDING row pinning them to a processor they never reached,
+      // so their next checkout elsewhere is refused by a sale that never
+      // happened. Deleted only when this call created it; an existing row is
+      // somebody's real subscription.
+      if (claimCreatedRow) {
+        await prisma.subscription
+          .delete({
+            where: {
+              applicationId_endUserId_planId: {
+                applicationId: input.application.id,
+                endUserId: input.endUser.id,
+                planId: plan.id,
+              },
+            },
+          })
+          .catch(() => {
+            // Best-effort. The provider failure is the error worth reporting,
+            // and the claim expires from the binder read on the session clock
+            // regardless (see CHECKOUT_SESSION_LIFETIME_MS).
+          });
+      }
       // `audience: 'end-user'`. This is the public checkout surface: the caller
       // is the operator's CUSTOMER. Rethrowing raw gave them `500
       // INTERNAL_ERROR / "share this request id with support"` for somebody

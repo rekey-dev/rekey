@@ -361,6 +361,11 @@ export const stripeModule: ProviderModule = {
     // subscription the coupon is created `duration: 'once'`, which is what a
     // single recorded redemption actually buys — see stripe-real.ts.
     discounts: { oneTime: true, recurring: true },
+    // Stripe documents no deadline on refunds — the API will take an old
+    // charge, and what actually stops one is the card network or the buyer's
+    // bank rather than Stripe. `null` says that honestly instead of inventing
+    // a limit to look symmetrical with the other two.
+    refunds: { partial: true, windowDays: null },
   },
   // Stripe checkout takes a `price` id and nothing else, so a plan with no
   // stored price cannot be bought and never will be until someone registers

@@ -31,6 +31,7 @@ import {
   providerDescriptor,
 } from '../billing/providers/registry.js';
 import { billingStatsService } from '../billing/stats.service.js';
+import { unappliedPaymentsService } from '../billing/unapplied-payments.service.js';
 import { oauthService } from '../oauth/oauth.service.js';
 import { licensesService } from '../licenses/licenses.service.js';
 import { usageService } from '../usage/usage.service.js';
@@ -39,7 +40,7 @@ import { prisma } from '../../lib/prisma.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
 import { listApiRequests } from '../../lib/request-log.js';
 import { CouponDiscountType, type LicenseKind } from '@prisma/client';
-import { AppEnvironmentSchema, BillingProviderSchema, GrantCreditsRequestSchema } from '@rekey.dev/shared-types';
+import { AppEnvironmentSchema, BillingConfigSchema, BillingProviderSchema, GrantCreditsRequestSchema } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../lib/error.js';
 import { hashPassword } from '../../lib/passwords.js';
 import { assertMetadataWithinLimit } from '../auth/auth.service.js';
@@ -861,6 +862,46 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             message: `No active plan "${body.defaultPlanSlug}" in this Application.`,
             fix: 'Pass the slug of an existing active plan to use as the free tier, or null to clear it.',
           });
+        }
+      }
+      // Changing the billing subject under live subscriptions strands every
+      // one of them on the wrong side of the setting (#431).
+      //
+      // A personal subscription in an org-subject Application cannot be
+      // reached through the org path, does not appear in the org's portal, and
+      // keeps being charged; an org subscription in a user-subject one is the
+      // same story pointed the other way. Rekey cannot decide who should own
+      // those rows instead — that is a commercial decision about whose money
+      // it is — so it refuses and says how many are in the way rather than
+      // silently reassigning them.
+      //
+      // Only when the value actually CHANGES. Patching the config for an
+      // unrelated reason must not be blocked by a subject that is staying put.
+      if (body.billingSubject !== undefined) {
+        const current = await applicationsService.get(id);
+        const currentSubject =
+          BillingConfigSchema.parse(current.billingConfig).billingSubject ?? 'user';
+        if (body.billingSubject !== currentSubject) {
+          // Terminal rows are history and cannot be stranded: nothing bills
+          // them and nothing resolves them.
+          const stranded = await prisma.subscription.count({
+            where: {
+              applicationId: id,
+              status: { notIn: ['CANCELED', 'EXPIRED'] },
+              ...(body.billingSubject === 'org'
+                ? { beneficiaryOrgId: null }
+                : { beneficiaryOrgId: { not: null } }),
+            },
+          });
+          if (stranded > 0) {
+            const kind = body.billingSubject === 'org' ? 'personal' : 'organization';
+            throw new RekeyError({
+              statusCode: 409,
+              code: 'BILLING_SUBJECT_CHANGE_BLOCKED',
+              message: `${stranded} live ${kind} subscription${stranded === 1 ? '' : 's'} would be stranded by changing the billing subject.`,
+              fix: `Cancel or migrate the ${stranded} ${kind} subscription${stranded === 1 ? '' : 's'} first — they are listed under Billing → Payments and the end-user pages. The subject can be changed freely once none are live.`,
+            });
+          }
         }
       }
       const updated = await applicationsService.updateBillingConfig({
@@ -2428,6 +2469,266 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           take,
           skip,
         ),
+      };
+    },
+  );
+
+
+  // ---------- Unapplied payments (money we could not apply) ----------
+
+  const UNAPPLIED_STATUSES = ['OPEN', 'REFUNDED', 'ENTITLEMENT_GRANTED', 'DISMISSED'] as const;
+
+  const unappliedRowSchema = {
+    type: 'object',
+    properties: {
+      id: { type: 'string' },
+      paymentId: { type: 'string' },
+      provider: { type: 'string' },
+      amount: { type: 'integer', description: 'Smallest currency unit.' },
+      currency: { type: 'string' },
+      refundedAmount: { type: 'integer', description: 'Cumulative amount already refunded, smallest currency unit.' },
+      status: { type: 'string', enum: UNAPPLIED_STATUSES },
+      endUserId: { type: 'string', nullable: true },
+      endUserEmail: { type: 'string', nullable: true },
+      providerPaymentId: { type: 'string', nullable: true },
+      providerRefundId: { type: 'string', nullable: true },
+      resolutionNote: { type: 'string', nullable: true },
+      resolvedBy: { type: 'string', nullable: true },
+      resolvedAt: { type: 'string', format: 'date-time', nullable: true },
+      openedAt: { type: 'string', format: 'date-time' },
+      ageDays: { type: 'integer', description: 'Whole days since the money arrived. Refund windows close and dispute windows open, so age decides which case to work first.' },
+      refundable: { type: 'boolean', description: 'Whether Rekey can issue a refund through this provider.' },
+    },
+    required: ['id', 'paymentId', 'provider', 'amount', 'currency', 'refundedAmount', 'status', 'openedAt', 'ageDays', 'refundable'],
+  } as const;
+
+  app.get(
+    '/:id/unapplied-payments',
+    {
+      schema: {
+        tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
+        summary: 'List unapplied payments for this Application (OLDEST first)',
+        description:
+          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
+          'Money that reached a payment provider for something Rekey never applied: a ' +
+          '`Payment` with status SUCCEEDED and no subscription. Usually a checkout that ' +
+          'completed at the provider after Rekey stopped waiting for it, which means the ' +
+          'customer most likely paid for something they expect to receive.\n\n' +
+          'Rekey never refunds one of these on its own — see ' +
+          'docs/billing.md → Unapplied payments. Sorted OLDEST first on purpose: this is a ' +
+          'worklist, and refund windows close while card-network dispute windows stay open. ' +
+          'Filter with `?status=`.',
+        params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        querystring: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: UNAPPLIED_STATUSES },
+            ...paginationJsonSchema,
+          },
+        },
+        response: {
+          200: okPage(unappliedRowSchema, 'A page of unapplied payments, oldest first.'),
+          ...errs({ 400: 'VALIDATION_ERROR — `limit`/`offset` out of range, or an invalid `status`.', ...APP_READ_ERRORS }),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'read');
+      const q = z
+        .object({ status: z.enum(UNAPPLIED_STATUSES).optional() })
+        .merge(PaginationQuery)
+        .parse(req.query);
+      const { take, skip } = parsePagination(q);
+      const page = await unappliedPaymentsService.list(id, {
+        ...(q.status && { status: q.status }),
+        limit: take,
+        offset: skip,
+      });
+      return { success: true, data: paged(page.items, page.total, page.limit, page.offset) };
+    },
+  );
+
+  app.post(
+    '/:id/unapplied-payments/:caseId/refund',
+    {
+      schema: {
+        tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
+        summary: 'Refund an unapplied payment',
+        description:
+          'Requires **write** access to this Application.\n\n' +
+          'Issues a real refund at the provider and then resolves the case, in that order — ' +
+          'a case is never marked refunded unless the provider accepted it.\n\n' +
+          'Omit `amount` for a full refund of whatever remains unrefunded; every provider ' +
+          'treats an absent amount that way, so Rekey never guesses the remainder itself. ' +
+          'Partial refunds are supported by all three providers.\n\n' +
+          'The response reports the case, not the money: Razorpay creates every refund ' +
+          '`pending` and PayPal returns PENDING for eCheck-funded refunds, so the terminal ' +
+          'outcome arrives later on the provider webhook. Provider fees are NOT returned by ' +
+          'any of the three, so a refund costs the operator the original processing fee.',
+        params: {
+          type: 'object',
+          properties: { id: { type: 'string' }, caseId: { type: 'string' } },
+          required: ['id', 'caseId'],
+        },
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            amount: { type: 'integer', minimum: 1, description: 'Smallest currency unit. Omit to refund everything that remains.' },
+            note: { type: 'string', maxLength: 500, description: 'Why. Passed to the provider where it shows the buyer a reason, and recorded on the case.' },
+          },
+        },
+        response: {
+          200: ok(unappliedRowSchema, 'The resolved case.'),
+          ...errs({
+            400: 'VALIDATION_ERROR — `amount` above what remains unrefunded.',
+            409:
+              'UNAPPLIED_PAYMENT_ALREADY_RESOLVED — resolving twice would refund twice. ' +
+              'BILLING_REFUND_UNSUPPORTED / BILLING_PAYMENT_NOT_REFUNDABLE — no refund route for this charge. ' +
+              'BILLING_REFUND_WINDOW_CLOSED — the provider will not refund a charge this old. ' +
+              'BILLING_PAYMENT_ALREADY_REFUNDED — the provider says it is already fully refunded.',
+            ...APP_WRITE_ERRORS,
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'write');
+      const { caseId } = z.object({ caseId: z.string().min(1) }).parse(req.params);
+      const body = z
+        .object({ amount: z.number().int().positive().optional(), note: z.string().max(500).optional() })
+        .parse(req.body ?? {});
+      return {
+        success: true,
+        data: await unappliedPaymentsService.refund({
+          applicationId: id,
+          caseId,
+          ...(body.amount !== undefined && { amount: body.amount }),
+          ...(body.note && { note: body.note }),
+          actorId: req.tenantUser!.id,
+        }),
+      };
+    },
+  );
+
+  app.post(
+    '/:id/unapplied-payments/:caseId/extend',
+    {
+      schema: {
+        tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
+        summary: 'Keep an unapplied payment and extend the customer instead',
+        description:
+          'Requires **write** access to this Application.\n\n' +
+          "The alternative to refunding: keep the money and give the customer time. Extends " +
+          "the end-user's most recent subscription by `days` and re-provisions entitlements " +
+          'through the normal machinery.\n\n' +
+          'Extends from the later of the current period end and now, so a lapsed period does ' +
+          'not hand the buyer days that are already in the past.\n\n' +
+          'Needs Rekey to know who paid. A payment it could not attribute answers 409 ' +
+          'UNAPPLIED_PAYMENT_UNATTRIBUTED — find the payer in the provider dashboard by the ' +
+          'charge id and act from their end-user page instead.',
+        params: {
+          type: 'object',
+          properties: { id: { type: 'string' }, caseId: { type: 'string' } },
+          required: ['id', 'caseId'],
+        },
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            days: { type: 'integer', minimum: 1, maximum: 3650, description: 'Days to add to the current period.' },
+            note: { type: 'string', maxLength: 500 },
+          },
+          required: ['days'],
+        },
+        response: {
+          200: ok(unappliedRowSchema, 'The resolved case.'),
+          ...errs({
+            400: 'VALIDATION_ERROR — `days` missing or out of range.',
+            409:
+              'UNAPPLIED_PAYMENT_ALREADY_RESOLVED — resolving twice would grant twice. ' +
+              'UNAPPLIED_PAYMENT_UNATTRIBUTED — Rekey does not know which customer paid. ' +
+              'UNAPPLIED_PAYMENT_NO_SUBSCRIPTION — that customer has nothing to extend.',
+            ...APP_WRITE_ERRORS,
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'write');
+      const { caseId } = z.object({ caseId: z.string().min(1) }).parse(req.params);
+      const body = z
+        .object({ days: z.number().int().min(1).max(3650), note: z.string().max(500).optional() })
+        .parse(req.body);
+      return {
+        success: true,
+        data: await unappliedPaymentsService.grantEntitlement({
+          applicationId: id,
+          caseId,
+          days: body.days,
+          ...(body.note && { note: body.note }),
+          actorId: req.tenantUser!.id,
+          log: req.log,
+        }),
+      };
+    },
+  );
+
+  app.post(
+    '/:id/unapplied-payments/:caseId/dismiss',
+    {
+      schema: {
+        tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
+        summary: 'Close an unapplied payment without moving money',
+        description:
+          'Requires **write** access to this Application.\n\n' +
+          'For cases Rekey cannot see the resolution of — the operator refunded it in the ' +
+          'provider dashboard, or settled with the buyer another way. Moves no money and ' +
+          'grants nothing.\n\n' +
+          '`note` is REQUIRED, unlike the other two actions: dismissal is the only ' +
+          'disposition that leaves no other record of what happened to the money.',
+        params: {
+          type: 'object',
+          properties: { id: { type: 'string' }, caseId: { type: 'string' } },
+          required: ['id', 'caseId'],
+        },
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { note: { type: 'string', minLength: 1, maxLength: 500 } },
+          required: ['note'],
+        },
+        response: {
+          200: ok(unappliedRowSchema, 'The resolved case.'),
+          ...errs({
+            400: 'VALIDATION_ERROR — `note` missing or empty.',
+            409: 'UNAPPLIED_PAYMENT_ALREADY_RESOLVED — the case is not open.',
+            ...APP_WRITE_ERRORS,
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'write');
+      const { caseId } = z.object({ caseId: z.string().min(1) }).parse(req.params);
+      const body = z.object({ note: z.string().min(1).max(500) }).parse(req.body);
+      return {
+        success: true,
+        data: await unappliedPaymentsService.dismiss({
+          applicationId: id,
+          caseId,
+          note: body.note,
+          actorId: req.tenantUser!.id,
+        }),
       };
     },
   );

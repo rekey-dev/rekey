@@ -498,6 +498,7 @@ model Application {
   plans               Plan[]
   subscriptions       Subscription[]
   payments            Payment[]
+  unappliedPayments   UnappliedPayment[]
   coupons             Coupon[]
   oauthIdentities     OAuthIdentity[]
   licenses            License[]
@@ -1420,6 +1421,28 @@ enum PaymentStatus {
   SUCCEEDED
   FAILED
   REFUNDED
+  // Some, but not all, of the money went back. Distinct from REFUNDED because
+  // the buyer still holds part of the charge and the operator can still refund
+  // the rest — collapsing the two would lose the difference between a case
+  // that is finished and one that is half-finished.
+  PARTIALLY_REFUNDED
+}
+
+/**
+ * How an operator resolved an unapplied payment.
+ *
+ * OPEN is not a resolution and every other value is terminal. The three
+ * terminal ones are genuinely different outcomes and not shades of "handled":
+ * money went back, money was kept and the buyer got service for it, or money
+ * was kept and nothing was given. Finance needs to tell them apart, because a
+ * refund books a refund liability and reverses revenue while an entitlement
+ * grant recognises revenue normally.
+ */
+enum UnappliedPaymentStatus {
+  OPEN
+  REFUNDED
+  ENTITLEMENT_GRANTED
+  DISMISSED
 }
 
 enum CouponDiscountType {
@@ -1682,6 +1705,21 @@ model Payment {
   // The provider's charge/sale id. Scoped by applicationId, NOT globally
   // unique — see @@unique below.
   providerPaymentId String?     @map("provider_payment_id")
+  // The provider's SUBSCRIPTION id, when the charge carried one.
+  //
+  // The only thing that identifies WHO was charged when a payment matches no
+  // local subscription. Without it an unapplied payment can be seen but not
+  // attributed, and the operator queue's whole job is to tell the operator
+  // which end-user's money is sitting there. Correlating through
+  // `Subscription.metadata.unappliedCompletions` instead would be a JSON scan
+  // over every subscription in the application.
+  providerSubscriptionId String? @map("provider_subscription_id")
+  // Cumulative refunded amount in the smallest currency unit.
+  //
+  // A counter rather than a boolean because every provider supports partial
+  // refunds and reports its own running total (PayPal literally calls it
+  // `total_refunded_amount`). `status` alone cannot express "40 of 100 back".
+  refundedAmount  Int           @default(0) @map("refunded_amount")
   description     String?
   metadata        Json          @default("{}")
   createdAt       DateTime      @default(now()) @map("created_at")
@@ -1689,6 +1727,7 @@ model Payment {
 
   application  Application   @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  unapplied    UnappliedPayment?
 
   // Payment idempotency, scoped to the Application that owns the row.
   //
@@ -1739,6 +1778,77 @@ enum DunningCaseStatus {
   RECOVERED // a later successful payment / reactivation closed it
   EXHAUSTED // day-14 deadline passed → subscription canceled
   CANCELED  // subscription was canceled (user/provider) while in dunning
+}
+
+/**
+ * A payment that arrived at a processor for something Rekey never applied.
+ *
+ * "Unapplied" is the term the rest of the industry uses for money received
+ * that could not be matched to what it was meant to pay for — Zuora, Maxio,
+ * Oracle and QuickBooks all call it that — so a finance hire already knows
+ * what this table is. The precise definition is a `Payment` with
+ * `status = SUCCEEDED` and `subscriptionId IS NULL`: real money that moved,
+ * against no local subscription.
+ *
+ * Why a table and not the JSON it replaces. `Subscription.metadata.
+ * unappliedCompletions` already noted some of these, but it is an array
+ * bounded to the last 10 entries holding no amount, no payment id and no
+ * resolution state, and being JSON it cannot be indexed, filtered, joined or
+ * counted. None of that supports a queue an operator works through.
+ *
+ * The money state stays on `Payment` (`amount`, `refundedAmount`); this row
+ * holds only the WORKFLOW — who is looking at it, how it ended, and why. The
+ * two have different lifetimes, and conflating them is the modelling mistake
+ * to avoid.
+ *
+ * Rekey never resolves one of these on its own. Refunding automatically would
+ * be wrong in the common case: most of these buyers received the service they
+ * paid for through a path we lost track of, and taking their money back
+ * silently removes something they are actively using.
+ */
+model UnappliedPayment {
+  id            String                 @id @default(cuid())
+  applicationId String                 @map("application_id")
+  // One case per payment. The unique constraint IS the idempotency guard: a
+  // replayed webhook that somehow reaches case creation twice conflicts
+  // rather than opening a second case for the same money.
+  paymentId     String                 @unique @map("payment_id")
+  // Denormalized at open time, like DunningCase — no FK, so end-user deletion
+  // semantics stay independent of this queue. Null when the charge carried no
+  // subscription id to attribute it with, which the operator needs to see
+  // rather than have hidden.
+  endUserId     String?                @map("end_user_id")
+  provider      String
+  amount        Int
+  currency      String
+  status        UnappliedPaymentStatus @default(OPEN)
+  // Free text from the operator explaining the disposition. Stored because a
+  // refund and an entitlement grant produce different journal entries, so
+  // "which" without "why" is not enough for whoever reconciles this later.
+  resolutionNote String?               @map("resolution_note")
+  // The TenantUser who resolved it. Plain column, not an FK: the record of
+  // who decided must outlive the account that decided it.
+  resolvedBy    String?                @map("resolved_by")
+  resolvedAt    DateTime?              @map("resolved_at")
+  // The provider's refund id once one succeeds, so the row can be matched to
+  // the `refund.processed` / `PAYMENT.SALE.REFUNDED` webhook that carries the
+  // real outcome. The refund-create response is NOT the outcome at Razorpay
+  // or for a PayPal eCheck.
+  providerRefundId String?             @map("provider_refund_id")
+  openedAt      DateTime               @default(now()) @map("opened_at")
+  metadata      Json                   @default("{}")
+  createdAt     DateTime               @default(now()) @map("created_at")
+  updatedAt     DateTime               @updatedAt @map("updated_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  payment     Payment     @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  // The queue itself: one application's open cases, oldest first. Aged order
+  // is the point — the oldest unresolved case is the one closest to becoming
+  // a chargeback instead of a refund.
+  @@index([applicationId, status, openedAt])
+  @@index([endUserId])
+  @@map("unapplied_payments")
 }
 
 model DunningCase {

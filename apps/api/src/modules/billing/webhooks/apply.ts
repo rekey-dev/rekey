@@ -40,7 +40,7 @@
 
 import type { FastifyBaseLogger } from 'fastify';
 import type { Subscription } from '@prisma/client';
-import { isEntitlingStatus } from '@rekey.dev/shared-types';
+import { isEntitlingStatus, ENTITLING_SUBSCRIPTION_STATUSES } from '@rekey.dev/shared-types';
 import { prisma } from '../../../lib/prisma.js';
 import { entitlementsService } from '../entitlements.service.js';
 import { dunningService } from '../dunning.service.js';
@@ -54,6 +54,7 @@ import {
 import { advanceBillingPeriod } from './period.js';
 import { enqueuePaymentEvent, enqueueSubscriptionEvent } from './billing-events.js';
 import { kickDeliveries } from '../../webhooks/webhook.service.js';
+import { openUnappliedPaymentCase } from '../unapplied-payments.service.js';
 import type {
   CheckoutApprovedEvent,
   CheckoutCompletedEvent,
@@ -68,6 +69,16 @@ import type { BillingProviderName } from '../credentials.service.js';
 
 export interface ApplyContext {
   log: FastifyBaseLogger;
+  /**
+   * The provider module whose webhook produced this event ('stripe' etc).
+   *
+   * Optional so the many existing test call sites that build a context by
+   * hand keep compiling. Only the unapplied-payment queue reads it, and it
+   * records 'unknown' rather than guessing when absent — a queue row naming
+   * the wrong processor would send an operator to refund money in the wrong
+   * dashboard.
+   */
+  provider?: string;
 }
 
 /**
@@ -445,7 +456,38 @@ export async function applyCheckoutCompleted(
   const activatedFrom = before && before.status !== 'ACTIVE' ? before : null;
   const { updated, deliveryIds } = await prisma.$transaction(async (tx) => {
     const result = await tx.subscription.updateMany({
-      where,
+      where: {
+        ...where,
+        // The guard above, repeated as a WRITE PREDICATE — and this repetition
+        // is the whole point, not redundancy (#437).
+        //
+        // The read above happens outside this transaction, so two completions
+        // that both observe a PENDING row both pass it and both fall through
+        // to here. Last write wins: the row ends up holding one processor's
+        // subscription id and the other is live, billing, and recorded
+        // nowhere. That is the same money the unapplied-payments queue exists
+        // to catch, arriving through a path that never even records it.
+        //
+        // Stated on the UPDATE, Postgres settles it. Two concurrent updates of
+        // one row serialise on its lock, and under READ COMMITTED the loser
+        // re-evaluates this predicate against the winner's committed version —
+        // where `providerSubId` is now the winner's — so it matches zero rows
+        // instead of overwriting. `result.count === 0` below is how we learn
+        // we lost, which is exactly when the orphaned completion needs
+        // recording.
+        ...(ev.providerSubscriptionId !== null && {
+          OR: [
+            // Never completed before, or completed by THIS event (a
+            // re-delivery, which must stay idempotent).
+            { providerSubId: null },
+            { providerSubId: ev.providerSubscriptionId },
+            // Held by a different id, but not yet entitling — a PENDING row
+            // carrying a stale id is a checkout that never settled, and the
+            // sale that IS settling now is the one that should own the row.
+            { NOT: { status: { in: [...ENTITLING_SUBSCRIPTION_STATUSES] } } },
+          ],
+        }),
+      },
       data: {
         status: 'ACTIVE',
         ...(ev.providerSubscriptionId !== null && { providerSubId: ev.providerSubscriptionId }),
@@ -468,6 +510,44 @@ export async function applyCheckoutCompleted(
         : [];
     return { updated: result, deliveryIds: ids };
   });
+
+  // We lost the race. The predicate above matched nothing, which — when a row
+  // was there to match — means another completion got the row first and this
+  // sale is live at its processor with nothing local pointing at it.
+  //
+  // Recorded on the row rather than only in a log line, for the same reason
+  // the sequential guard above does it: a log nobody can query is not a
+  // record of somebody's money. This is the concurrent twin of that guard,
+  // and before it existed this path silently overwrote instead.
+  if (updated.count === 0 && before && ev.providerSubscriptionId !== null) {
+    ctx.log.error(
+      {
+        subscriptionId: before.id,
+        applicationId: ev.applicationId,
+        heldProviderSubId: before.providerSubId,
+        orphanedProviderSubId: ev.providerSubscriptionId,
+        sessionId: ev.checkoutSessionId,
+        providerEventId: ev.providerEventId,
+      },
+      'a concurrent checkout completion lost the row — the subscription it created is live at ' +
+        'its processor and is not cancellable from here',
+    );
+    await prisma.subscription
+      .update({
+        where: { id: before.id },
+        data: {
+          metadata: recordUnappliedCompletion(before.metadata, {
+            checkoutSessionId: ev.checkoutSessionId,
+            providerSubId: ev.providerSubscriptionId,
+            provider: providerForSession(before.metadata, ev.checkoutSessionId),
+            at: new Date().toISOString(),
+          }) as never,
+        },
+      })
+      .catch((e: unknown) => {
+        ctx.log.error({ err: e, subscriptionId: before.id }, 'could not record the lost completion');
+      });
+  }
 
   // Materialize the plan's entitlements (licenses, credits, …) onto the buyer.
   // Idempotent, and covers both legacy single-kind plans (via synthesizeLegacy)
@@ -732,15 +812,21 @@ export async function applyPaymentSucceeded(
   // Find local subscription if present so the Payment links to it.
   const where = localSubscriptionWhere(ev.applicationId, ev.providerSubscriptionId, ev.checkoutSessionId);
   const localSub = where ? await prisma.subscription.findFirst({ where }) : null;
-  if (!localSub && ev.requireLocalSubscription) {
-    // Razorpay posture: an event that matches no local row records nothing
-    // (never write an unlinked Payment for a subscription we don't know).
-    ctx.log.warn(
-      { providerPaymentId: ev.providerPaymentId, providerSubscriptionId: ev.providerSubscriptionId },
-      'payment.succeeded: no local subscription matched — skipping',
-    );
-    return;
-  }
+  // `requireLocalSubscription` is deliberately NOT honoured on this path any
+  // more, and Razorpay is the only module that sets it.
+  //
+  // The flag preserved the posture of Razorpay's old bespoke handler, which
+  // dropped an unmatched event rather than writing an unlinked Payment. For a
+  // FAILED payment that is still right — an unlinked failure record buys
+  // nothing. For a SUCCEEDED one it means a Razorpay customer's money can
+  // arrive, be captured, and leave no trace anywhere in Rekey: not in the
+  // payments list, not in the operator queue below, nowhere. The operator
+  // cannot refund what they cannot see, and the buyer's next move is a
+  // chargeback rather than a support ticket.
+  //
+  // So a succeeded payment is recorded for every provider, which is what
+  // Stripe and PayPal already did, and what the applier's own "money that
+  // moved is a fact" comment claims a few lines down.
   // Amount + currency cross-checked against the plan before either reaches a
   // row — see resolveChargeCurrency.
   const currency = await resolveChargeCurrency(localSub, { amount, currency: ev.currency }, ctx.log, {
@@ -773,6 +859,10 @@ export async function applyPaymentSucceeded(
           currency,
           status: 'SUCCEEDED',
           providerPaymentId: ev.providerPaymentId,
+          // Stored on every payment, not just unmatched ones: it is what lets
+          // an unapplied payment be attributed to an end-user later, and it
+          // costs nothing to keep on the ones that matched.
+          providerSubscriptionId: ev.providerSubscriptionId ?? null,
           description: ev.description ?? null,
         },
         select: { id: true },
@@ -838,6 +928,29 @@ export async function applyPaymentSucceeded(
   // First delivery attempt for the rows committed above. A replayed payment
   // (P2002 → deliveryIds stays empty) announces nothing.
   kickDeliveries(deliveryIds);
+
+  // Money arrived for something we never applied. Open a case and tell the
+  // operator; Rekey does not decide what happens to it.
+  //
+  // Gated on `createdPayment` so a replay does not re-announce a case that is
+  // already open, and awaited rather than fired-and-forgotten so the row and
+  // the mail are done before the webhook is acknowledged — a provider that
+  // gets its 200 and never retries is the last chance this event had.
+  if (createdPayment && !localSub) {
+    await openUnappliedPaymentCase(
+      {
+        paymentId: createdPayment.id,
+        applicationId: ev.applicationId,
+        endUserId: null,
+        provider: ctx.provider ?? 'unknown',
+        amount,
+        currency,
+        providerPaymentId: ev.providerPaymentId,
+        providerSubscriptionId: ev.providerSubscriptionId ?? null,
+      },
+      ctx.log,
+    );
+  }
 
   // Coupon redemption — post-commit, and keyed on the session the EVENT names,
   // never on whichever session the row issued most recently.
