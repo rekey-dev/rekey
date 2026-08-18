@@ -21,6 +21,8 @@ import type {
   CheckoutSessionInput,
   CheckoutSessionResult,
   ProviderPlanRef,
+  RefundPaymentInput,
+  RefundPaymentResult,
 } from './types.js';
 import type { Plan } from '@prisma/client';
 
@@ -326,6 +328,111 @@ export class RealStripeProvider implements BillingProvider {
       description: 'Rekey (auto-configured)',
     });
     return { webhookId: created.id, ...(created.secret && { secret: created.secret }) };
+  }
+
+  /**
+   * Resolve whatever we stored on `Payment.providerPaymentId` into something
+   * the Refunds API will actually take.
+   *
+   * This step is not incidental. Stripe's Refunds API accepts a `charge` or a
+   * `payment_intent` and NOTHING else, but the column holds four different id
+   * kinds depending on which event wrote the row:
+   *
+   *   `pi_` — checkout.session.completed, when the session had one    (direct)
+   *   `ch_` — never written today, but a charge id is refundable      (direct)
+   *   `in_` — invoice.payment_succeeded, i.e. EVERY RENEWAL           (resolve)
+   *   `cs_` — checkout.session.completed with no payment intent yet   (resolve)
+   *
+   * So the ids for renewals — the majority of payments any live application
+   * has — are the ones the API rejects. Passing the stored id through
+   * unexamined would refuse most real refunds with Stripe's own opaque
+   * "No such payment_intent" rather than anything an operator could act on.
+   *
+   * Matched by PREFIX rather than against a list of known values, so an id
+   * kind Stripe adds later fails as an unrecognised id instead of being
+   * silently posted as a payment intent.
+   */
+  private async resolveRefundTarget(
+    providerPaymentId: string,
+  ): Promise<{ payment_intent: string } | { charge: string }> {
+    if (providerPaymentId.startsWith('pi_')) return { payment_intent: providerPaymentId };
+    if (providerPaymentId.startsWith('ch_')) return { charge: providerPaymentId };
+
+    const unpaid = (kind: string) =>
+      new RekeyError({
+        statusCode: 409,
+        code: 'BILLING_PAYMENT_NOT_REFUNDABLE',
+        message: `This payment's Stripe ${kind} has no payment behind it, so there is nothing to refund.`,
+        fix: 'Check the payment in the Stripe dashboard. A charge that never completed has nothing to pay back, and the money the operator is looking for is somewhere else.',
+      });
+
+    if (providerPaymentId.startsWith('in_')) {
+      const invoice = await this.stripe.invoices.retrieve(providerPaymentId);
+      const pi = invoice.payment_intent;
+      const id = typeof pi === 'string' ? pi : (pi?.id ?? null);
+      if (!id) throw unpaid('invoice');
+      return { payment_intent: id };
+    }
+    if (providerPaymentId.startsWith('cs_')) {
+      const session = await this.stripe.checkout.sessions.retrieve(providerPaymentId);
+      const pi = session.payment_intent;
+      const id = typeof pi === 'string' ? pi : (pi?.id ?? null);
+      if (!id) throw unpaid('checkout session');
+      return { payment_intent: id };
+    }
+    throw new RekeyError({
+      statusCode: 409,
+      code: 'BILLING_PAYMENT_NOT_REFUNDABLE',
+      message: `Rekey does not recognise "${providerPaymentId}" as a Stripe id it can refund.`,
+      fix: 'Refund this one in the Stripe dashboard directly, and open an issue with the id — Rekey should have been able to resolve it.',
+    });
+  }
+
+  async refundPayment(input: RefundPaymentInput): Promise<RefundPaymentResult> {
+    const target = await this.resolveRefundTarget(input.providerPaymentId);
+    let refund: Stripe.Refund;
+    try {
+      refund = await this.stripe.refunds.create(
+        {
+          ...target,
+          // Absent = Stripe refunds the full remaining amount itself.
+          ...(input.amount !== undefined && { amount: input.amount }),
+          // Stripe's enum is fixed (`duplicate` / `fraudulent` /
+          // `requested_by_customer`); the operator's own words go in metadata
+          // where they survive for whoever reads this later.
+          ...(input.reason && { metadata: { rekey_reason: input.reason } }),
+        },
+        { idempotencyKey: input.idempotencyKey },
+      );
+    } catch (e) {
+      const err = e as { code?: string; message?: string };
+      // `charge_already_refunded` is the one refusal an operator can read off
+      // the screen and act on without opening Stripe.
+      if (err.code === 'charge_already_refunded') {
+        throw new RekeyError({
+          statusCode: 409,
+          code: 'BILLING_PAYMENT_ALREADY_REFUNDED',
+          message: 'Stripe has already refunded this charge in full.',
+          fix: 'Nothing to do — the buyer has their money. Resolve the case as refunded.',
+        });
+      }
+      throw new RekeyError({
+        statusCode: 502,
+        code: 'BILLING_REFUND_REJECTED',
+        message: `Stripe refused the refund: ${err.message ?? 'no reason given'}`,
+        fix: 'Check the charge in the Stripe dashboard. A charge outside the window, or one whose funding source is gone, has to be settled with the buyer another way.',
+      });
+    }
+    return {
+      refundId: refund.id,
+      amount: refund.amount,
+      currency: refund.currency.toUpperCase(),
+      // Stripe's `pending` is a real state for delayed-notification methods.
+      // Anything that is not outright succeeded is reported as pending so the
+      // caller waits for the webhook rather than telling an operator the money
+      // has moved when it has not.
+      status: refund.status === 'succeeded' ? 'succeeded' : 'pending',
+    };
   }
 
   async cancelSubscription(input: CancelSubscriptionInput): Promise<void> {

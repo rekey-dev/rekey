@@ -224,6 +224,45 @@ describe('a subscription row that has two completable checkout sessions', () => 
     });
   });
 
+  it('two completions arriving AT ONCE still leave one winner and record the loser (#437)', async () => {
+    // The sequential guard above reads the row, decides, then writes, and the
+    // read is outside the transaction. Two completions that both observe a
+    // PENDING row therefore both pass it and both fall through to the write —
+    // last one wins, and the losing processor's subscription is live, billing,
+    // and named nowhere. That is money arriving through a path that does not
+    // even record it.
+    //
+    // The fix states the guard as a WRITE predicate, so Postgres settles it:
+    // the two updates serialise on the row lock and the loser re-evaluates
+    // against the winner's committed version, matching zero rows.
+    const stripeSession = await checkout('stripe');
+    const paypalSession = await checkout('paypal');
+
+    await Promise.all([
+      completeStripe(stripeSession, 'sub_REAL_STRIPE'),
+      completePaypal(paypalSession),
+    ]);
+
+    const row = await theRow();
+    // Exactly one row, and it is ACTIVE against exactly one processor.
+    expect(await prisma.subscription.count({ where: { applicationId } })).toBe(1);
+    expect(row.status).toBe('ACTIVE');
+
+    // Whichever won, the OTHER one must be recorded rather than lost. Without
+    // the write predicate the loser silently overwrote the winner and nothing
+    // was recorded at all, so this is the assertion that fails on the old code.
+    const orphans =
+      ((row.metadata as { unappliedCompletions?: Array<{ providerSubId?: string }> })
+        .unappliedCompletions ?? []);
+    const held = row.providerSubId;
+    expect(held).toBeTruthy();
+    const loser = held === 'sub_REAL_STRIPE' ? paypalSession : 'sub_REAL_STRIPE';
+    expect(
+      orphans.map((o) => o.providerSubId),
+      `row holds ${held}; the other completion must be recorded, not dropped`,
+    ).toContain(loser);
+  });
+
   it('records the orphan once however many times its completion is re-delivered', async () => {
     // Webhook re-delivery is routine, and a list that grows per delivery is a
     // leak on a JSON column every completion reads.

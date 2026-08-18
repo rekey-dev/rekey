@@ -502,9 +502,18 @@ export const BillingConfigSchema = z.object({
   /**
    * Who a subscription bills + benefits by default: the individual end-user,
    * or their organization (shared credit pool / feature access for members).
-   * `'org'` requires `authConfig.organizationsEnabled`. Checkout can override
-   * per call via `organizationId`. Default `'user'` — no change for existing
-   * apps. See ORG_BILLING.md.
+   * `'org'` requires `authConfig.organizationsEnabled`. Default `'user'`.
+   *
+   * EXCLUSIVE, and not a per-call default (#431). An `'org'` Application
+   * refuses a checkout with no organization, and a `'user'` one refuses a
+   * checkout that names one. Checkout used to be able to override this per
+   * call, which is what let a personal and an org-billed subscription to the
+   * same plan exist at once — and `Subscription` is unique on
+   * `(applicationId, endUserId, planId)` with no beneficiary in the key, so
+   * those two are ONE ROW and the second silently replaced the first.
+   *
+   * Changing it is refused while subscriptions of the other subject are live,
+   * since flipping would strand them. See ORG_BILLING.md.
    */
   billingSubject: z.enum(['user', 'org']).default('user'),
   /**
@@ -1637,7 +1646,16 @@ export type RetryWebhookDeliveryResultDto = z.infer<typeof RetryWebhookDeliveryR
 // deliberately do NOT expose them. The shapes live here so the panel, agents,
 // and any session-bearing automation share one definition.
 
-export const PaymentStatusSchema = z.enum(['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED']);
+export const PaymentStatusSchema = z.enum([
+  'PENDING',
+  'SUCCEEDED',
+  'FAILED',
+  'REFUNDED',
+  // Part of the charge went back and part did not. Distinct from REFUNDED
+  // because the buyer still holds some of the money and the operator can
+  // still refund the rest.
+  'PARTIALLY_REFUNDED',
+]);
 /** The payment statuses this SDK version knows about. Closed — use it for registries. */
 export type KnownPaymentStatus = z.infer<typeof PaymentStatusSchema>;
 /** {@link Open}. */

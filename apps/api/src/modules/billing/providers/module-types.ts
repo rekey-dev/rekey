@@ -402,6 +402,35 @@ export interface ProviderModule {
       /** A FIRST-PERIOD-ONLY discount on a recurring subscription. */
       recurring: boolean;
     };
+    /**
+     * Whether the provider can pay a captured charge back, and on what terms.
+     *
+     * OPTIONAL, and absent means **cannot**, for the same reason as
+     * `discounts` and `trials`. The cost of guessing wrong is higher here
+     * though: an operator who is shown a refund button for a provider that
+     * cannot refund will have already told a customer their money is coming
+     * back before anything fails.
+     *
+     * A module that declares this MUST implement `refundPayment` on its
+     * provider — `provider-refunds.test.ts` asserts the two agree, so the
+     * declaration cannot drift away from the capability.
+     */
+    refunds?: {
+      /** Refunds of less than the captured amount. All three support them. */
+      partial: boolean;
+      /**
+       * Days after the charge beyond which the provider refuses to refund it,
+       * or `null` where none is documented.
+       *
+       * ADVISORY, for warning an operator early — the provider is the only
+       * authority and will refuse on its own. Treating this as the truth would
+       * be wrong in both directions: it is approximate where a provider states
+       * the limit in months rather than days, and a provider can refuse a
+       * charge well inside the window for reasons of its own (the funding
+       * source is gone, the buyer's bank will not take it).
+       */
+      windowDays: number | null;
+    };
   };
   /**
    * Why a buyer cannot be sent to this provider's checkout for this plan, or

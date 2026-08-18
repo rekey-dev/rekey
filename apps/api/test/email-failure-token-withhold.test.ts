@@ -25,6 +25,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { emailService } from '../src/modules/email/email.service.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -174,11 +175,11 @@ describe('failed email send withholds the token', () => {
       stubSendError();
       await post(c.url, { email: 'target@example.com' });
 
-      // The event is fire-and-forget, so give the insert a moment to land.
-      await new Promise((r) => setTimeout(r, 150));
-
-      const events = await prisma.securityEvent.findMany({
-        where: { type: 'auth.email_delivery_failed', tenantId },
+      // Fire-and-forget, so poll until it lands. The old fixed 150ms passed
+      // locally and lost on a loaded CI runner.
+      const events = await waitForSecurityEvents({
+        type: 'auth.email_delivery_failed',
+        tenantId,
       });
       expect(events.length).toBeGreaterThan(0);
       // tenantId is what makes it visible: listSecurityEvents filters on it, so

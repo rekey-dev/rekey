@@ -23,7 +23,8 @@ export type EmailEventKey =
   | 'welcome'
   | 'mfa_enabled'
   | 'password_changed'
-  | 'billing_payment_failed_reminder';
+  | 'billing_payment_failed_reminder'
+  | 'billing_unapplied_payment';
 
 export interface EmailEventDef {
   key: EmailEventKey;
@@ -115,6 +116,27 @@ export const EMAIL_EVENTS: Record<EmailEventKey, EmailEventDef> = {
       amountDue: '9.99 USD',
       attempt: '1',
       graceEndsAtIso: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+    },
+  },
+  // Addressed to the OPERATOR, not to a buyer — the only event here that is.
+  // It reports money the operator has received and Rekey could not attribute,
+  // and asks them to decide what happens to it.
+  billing_unapplied_payment: {
+    key: 'billing_unapplied_payment',
+    label: 'Unapplied payment received (operator)',
+    variables: [
+      'amount',
+      'provider',
+      'providerPaymentId',
+      'endUserEmail',
+      'receivedAtIso',
+    ] as const,
+    sampleValues: {
+      amount: '9.99 USD',
+      provider: 'stripe',
+      providerPaymentId: 'pi_3QSampleSample',
+      endUserEmail: 'sample@example.com',
+      receivedAtIso: new Date().toISOString(),
     },
   },
 };

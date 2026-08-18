@@ -18,6 +18,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -162,15 +163,22 @@ describe('admin: add an operator to a workspace', () => {
   it('records a security event when a membership is actually created', async () => {
     const fx = await fixture();
     expect((await addMember(fx.bareTenantId, { email: fx.email })).statusCode).toBe(200);
-    await new Promise((r) => setTimeout(r, 150));
-    const events = await prisma.securityEvent.findMany({
-      where: { type: 'workspace.member_added_by_admin', tenantId: fx.bareTenantId },
+    // Poll rather than sleep: the write is fire-and-forget, so a fixed delay
+    // passes locally and loses on a loaded runner.
+    const events = await waitForSecurityEvents({
+      type: 'workspace.member_added_by_admin',
+      tenantId: fx.bareTenantId,
     });
     expect(events).toHaveLength(1);
 
     // A no-op retry must not add noise to the audit log.
     expect((await addMember(fx.bareTenantId, { email: fx.email })).statusCode).toBe(200);
-    await new Promise((r) => setTimeout(r, 150));
+    // This half asserts an ABSENCE (the retry added no second event), and
+    // polling cannot establish that - there is no moment at which "still not
+    // there" becomes conclusive. A settle window is the honest tool here, and
+    // it is the one assertion in this file that a slow enough runner could
+    // still pass vacuously. Deliberately longer than the old 150ms.
+    await new Promise((r) => setTimeout(r, 750));
     expect(
       await prisma.securityEvent.count({
         where: { type: 'workspace.member_added_by_admin', tenantId: fx.bareTenantId },

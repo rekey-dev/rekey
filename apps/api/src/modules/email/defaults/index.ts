@@ -134,4 +134,24 @@ ${cta('appUrl', 'Get started')}
 <p style="margin:0 0 12px;color:#86868b;font-size:13px;">Reminder {{attempt}} — if you've already updated your payment details, you can ignore this email.</p>
 `),
   },
+  // The one operator-addressed template here. It reports money received that
+  // Rekey could not match to anything, so it names an amount and asks for a
+  // decision rather than reassuring anybody. No CTA button: the action lives
+  // behind an operator sign-in and a dead-ended link in a mail about missing
+  // money would be worse than none.
+  billing_unapplied_payment: {
+    subject: 'Unapplied payment: {{amount}} received with nothing to apply it to',
+    html: shell(`
+<h1 style="font-size:20px;margin:0 0 16px;font-weight:600;">A payment arrived that we couldn't apply</h1>
+<p style="margin:0 0 12px;"><strong>{{amount}}</strong> was captured at <strong>{{provider}}</strong> on {{receivedAtIso}}, but it doesn't match any subscription in your Rekey application. The money is with your payment provider and nothing has been refunded.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:0 0 16px;font-size:14px;">
+  <tr><td style="padding:4px 0;color:#86868b;width:150px;">Customer</td><td style="padding:4px 0;">{{endUserEmail}}</td></tr>
+  <tr><td style="padding:4px 0;color:#86868b;">Provider</td><td style="padding:4px 0;">{{provider}}</td></tr>
+  <tr><td style="padding:4px 0;color:#86868b;">Payment ID</td><td style="padding:4px 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">{{providerPaymentId}}</td></tr>
+</table>
+<p style="margin:0 0 12px;">This usually means a checkout completed at the provider after we had stopped waiting for it. The customer has most likely paid you for something they expect to receive.</p>
+<p style="margin:0 0 12px;">Open <strong>Billing → Unapplied payments</strong> in your Rekey dashboard to refund it, or to keep the money and extend the customer's access instead.</p>
+<p style="margin:0 0 12px;color:#86868b;font-size:13px;">Rekey will not refund this on its own. Left unresolved, a customer who paid and received nothing is likely to raise a chargeback rather than ask.</p>
+`),
+  },
 };

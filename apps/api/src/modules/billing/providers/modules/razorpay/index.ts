@@ -332,6 +332,12 @@ export const razorpayModule: ProviderModule = {
     // off the provider's own event, no local advance needed.
     periodRotationEvents: true,
     onlineVerify: false,
+    // Razorpay states this cliff as "6 months" and never as a day count, so
+    // 180 is an APPROXIMATION here — close enough to warn an operator early,
+    // never precise enough to refuse on. Razorpay itself is the authority and
+    // answers "Normal refund is not possible for a payment which is more than
+    // 6 months old."
+    refunds: { partial: true, windowDays: 180 },
     // A Payment Link's amount is ours to set, so a one-off discount is simply
     // a smaller amount. Subscriptions bill straight off the plan: the only
     // discount surface is an Offer (`offer_id`), which is created in the

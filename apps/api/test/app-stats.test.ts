@@ -9,6 +9,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 
 interface Stats {
   users: { total: number; verified: number; newLast7d: number; newLast30d: number; signupTrend: Array<{ date: string; count: number }> };
@@ -68,6 +69,12 @@ describe('per-app overview stats', () => {
       expect(res.statusCode).toBe(201);
     }
 
+    // The security summary below counts `user.signed_up` events, which are
+    // written fire-and-forget. Wait for both to land BEFORE reading stats -
+    // the old comment claimed they "flush on the round-trip", which is a race,
+    // not a guarantee, and it lost on a loaded CI runner.
+    await waitForSecurityEvents({ type: 'user.signed_up', applicationId }, { atLeast: 2 });
+
     const res = await app.inject({
       method: 'GET',
       url: `/api/v1/tenant/applications/${applicationId}/stats`,
@@ -92,7 +99,7 @@ describe('per-app overview stats', () => {
     expect(stats.usage.creditsOutstanding).toBe(0);
     expect(stats.usage.usageLast30d).toBe(0);
 
-    // Security summary captured the two sign-ups (events flush on the round-trip).
+    // Security summary captured the two sign-ups (awaited above).
     expect(stats.security.signUpsLast30d).toBeGreaterThanOrEqual(2);
   });
 

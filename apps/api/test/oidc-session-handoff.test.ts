@@ -26,6 +26,7 @@ import jwt from 'jsonwebtoken';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 
 function pkce(): { verifier: string; challenge: string } {
   const verifier = randomBytes(32).toString('base64url');
@@ -220,10 +221,11 @@ describe('app-authorised session handoff', () => {
     const { challenge } = pkce();
     expect((await handoff(fx, { challenge })).statusCode).toBe(200);
 
-    // The event is recorded fire-and-forget; give it a beat to land.
-    await new Promise((r) => setTimeout(r, 150));
-    const events = await prisma.securityEvent.findMany({
-      where: { type: 'user.session_handoff_granted', applicationId: fx.appId },
+    // Recorded fire-and-forget, so poll until it lands rather than guessing a
+    // delay: 150ms passed locally and lost on a loaded CI runner.
+    const events = await waitForSecurityEvents({
+      type: 'user.session_handoff_granted',
+      applicationId: fx.appId,
     });
     expect(events).toHaveLength(1);
     expect(events[0]!.actorId).toBe(fx.euId);

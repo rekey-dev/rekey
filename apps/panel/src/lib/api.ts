@@ -697,6 +697,28 @@ export interface DunningCaseRow {
   closedAt: string | null;
 }
 
+export interface UnappliedPaymentRow {
+  id: string;
+  paymentId: string;
+  provider: string;
+  amount: number;
+  currency: string;
+  refundedAmount: number;
+  status: 'OPEN' | 'REFUNDED' | 'ENTITLEMENT_GRANTED' | 'DISMISSED';
+  endUserId: string | null;
+  endUserEmail: string | null;
+  providerPaymentId: string | null;
+  providerRefundId: string | null;
+  resolutionNote: string | null;
+  resolvedBy: string | null;
+  resolvedAt: string | null;
+  openedAt: string;
+  /** Whole days since the money arrived. Drives the urgency column. */
+  ageDays: number;
+  /** Whether Rekey can issue a refund through this provider at all. */
+  refundable: boolean;
+}
+
 export interface EndUserRow {
   id: string;
   email: string;

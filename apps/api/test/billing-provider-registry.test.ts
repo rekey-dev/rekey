@@ -277,6 +277,11 @@ describe('discovery projection (P4)', () => {
         'oneTime',
         'onlineVerify',
         'periodRotationEvents',
+        // Reaches clients deliberately: the panel decides whether to offer a
+        // refund button from this, and a button for a provider that cannot
+        // refund is one an operator presses after promising a customer their
+        // money back.
+        'refunds',
         'trials',
       ]);
     }

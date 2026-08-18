@@ -280,7 +280,17 @@ function ConfigForm({
         />
       </Field>
 
-      <Field label="Redirect URI" hint="Must match what's registered upstream exactly. Usually your app's /oauth/callback route.">
+      {/* The single most misread field on this page, and the reason is that
+          the answer is counter-intuitive on Rekey Cloud: it is YOUR app's URL,
+          never a rekey.dev one. The provider redirects the browser back to
+          your server, which then posts the `code` to Rekey's
+          /auth/oauth/:provider/callback. Rekey never receives the redirect, so
+          pointing this at rekey.dev or at the API host silently breaks the
+          flow with an upstream mismatch that names neither side. */}
+      <Field
+        label="Redirect URI"
+        hint="Your own app's callback URL, not a Rekey one. The provider sends the browser back here; your server then hands Rekey the code. Register this exact string in the provider console too: they compare byte for byte, so a trailing slash or a www. is a hard failure."
+      >
         <input
           type="url"
           name="redirectUri"

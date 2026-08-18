@@ -47,9 +47,22 @@ describe('Audit — credential + auth-config mutations write SecurityEvents', ()
     return { applicationId: application.id, tenantAccess: ts.accessToken };
   }
 
-  async function eventsFor(b: Bootstrapped): Promise<Array<{ type: string; applicationId: string | null; metadata: unknown }>> {
-    // Poll briefly — most of these events are fire-and-forget.
-    const deadline = Date.now() + 2000;
+  /**
+   * Poll until the events this assertion needs are present.
+   *
+   * `expectTypes` is required, and the exit condition is "every one of these
+   * has arrived", not "at least one row exists". The previous version returned
+   * as soon as `rows.length > 0`, so a test that performs PUT then PATCH then
+   * DELETE and asserts on the LAST event returned after the FIRST one landed
+   * and failed with `expected undefined to be defined` on a loaded runner.
+   * These writes are fire-and-forget (`void recordSecurityEvent(...)`), so each
+   * lands independently and the first arriving says nothing about the rest.
+   */
+  async function eventsFor(
+    b: Bootstrapped,
+    expectTypes: string[],
+  ): Promise<Array<{ type: string; applicationId: string | null; metadata: unknown }>> {
+    const deadline = Date.now() + 5000;
     let rows: Array<{ type: string; applicationId: string | null; metadata: unknown }> = [];
     // eslint-disable-next-line no-constant-condition
     while (true) {
@@ -59,7 +72,11 @@ describe('Audit — credential + auth-config mutations write SecurityEvents', ()
         headers: { authorization: `Bearer ${b.tenantAccess}` },
       });
       rows = (log.json().data as { items: typeof rows }).items;
-      if (rows.length > 0 || Date.now() > deadline) return rows;
+      const mine = rows.filter((r) => r.applicationId === b.applicationId);
+      const haveAll = expectTypes.every((t) => mine.some((r) => r.type === t));
+      // Deadline still returns what we have, so the assertion below reports the
+      // missing event rather than a timeout with no detail.
+      if (haveAll || Date.now() > deadline) return rows;
       await new Promise((r) => setTimeout(r, 25));
     }
   }
@@ -74,7 +91,7 @@ describe('Audit — credential + auth-config mutations write SecurityEvents', ()
     });
     expect(res.statusCode).toBe(200);
 
-    const events = await eventsFor(b);
+    const events = await eventsFor(b, ['app.billing_credentials_updated']);
     const e = events.find((x) => x.type === 'app.billing_credentials_updated' && x.applicationId === b.applicationId);
     expect(e).toBeDefined();
     expect((e!.metadata as { provider: string; action: string }).provider).toBe('stripe');
@@ -105,7 +122,10 @@ describe('Audit — credential + auth-config mutations write SecurityEvents', ()
       })).statusCode,
     ).toBe(200);
 
-    const events = await eventsFor(b);
+    const events = await eventsFor(b, [
+      'app.billing_credentials_updated',
+      'app.billing_credentials_deleted',
+    ]);
     expect(events.some((e) => e.type === 'app.billing_credentials_updated' && e.applicationId === b.applicationId)).toBe(true);
     const del = events.find((e) => e.type === 'app.billing_credentials_deleted' && e.applicationId === b.applicationId);
     expect(del).toBeDefined();
@@ -122,7 +142,7 @@ describe('Audit — credential + auth-config mutations write SecurityEvents', ()
     });
     expect(res.statusCode).toBe(200);
 
-    const events = await eventsFor(b);
+    const events = await eventsFor(b, ['app.auth_config_updated']);
     const e = events.find((x) => x.type === 'app.auth_config_updated' && x.applicationId === b.applicationId);
     expect(e).toBeDefined();
     expect((e!.metadata as { tokenAlg: string }).tokenAlg).toBe('RS256');

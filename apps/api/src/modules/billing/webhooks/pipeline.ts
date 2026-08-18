@@ -328,7 +328,7 @@ export async function handleBillingProviderWebhook(
           fix: 'Send the event to the route for the Application whose webhook secret signed it.',
         });
       }
-      await applyBillingEvent(ev, { log: request.log });
+      await applyBillingEvent(ev, { log: request.log, provider: module.name });
     }
     await prisma.webhookEvent.update({
       where: { id: webhookRow.id },

@@ -216,6 +216,33 @@ describe('a subscription binds its buyer to one payment provider', () => {
     return plan.slug;
   }
 
+  /**
+   * Flip this Application to ORG billing.
+   *
+   * The subject is exclusive per Application (#431): a user-subject app now
+   * refuses a checkout that names an organization outright, before any binding
+   * guard runs. The tests below are about the SUBJECT-CONFLICT guard, which
+   * survives that change because it defends a state exclusivity cannot undo —
+   * rows that already mix subjects, from before the rule existed or from an
+   * app that was toggled while empty. Seeding a personal row here and checking
+   * out for an org is exactly that legacy shape.
+   */
+  async function orgSubjectApp(): Promise<void> {
+    const current = await prisma.application.findUniqueOrThrow({
+      where: { id: applicationId },
+      select: { billingConfig: true },
+    });
+    await prisma.application.update({
+      where: { id: applicationId },
+      data: {
+        billingConfig: {
+          ...(current.billingConfig as Record<string, unknown>),
+          billingSubject: 'org',
+        },
+      },
+    });
+  }
+
   async function checkout(
     token: string,
     planSlug: string,
@@ -321,6 +348,7 @@ describe('a subscription binds its buyer to one payment provider', () => {
   });
 
   it('refuses when the row the checkout would WRITE is bound elsewhere, even when the subject differs', async () => {
+    await orgSubjectApp();
     // The upsert is keyed `(applicationId, endUserId, planId)` and does not
     // include `beneficiaryOrgId`, so a personal row and an org-billed checkout
     // for the same (user, plan) are the SAME row. Guarding only by subject
@@ -349,6 +377,7 @@ describe('a subscription binds its buyer to one payment provider', () => {
   });
 
   it('refuses to move an entitling row onto a different billing subject, even when the processor agrees', async () => {
+    await orgSubjectApp();
     // The provider comparison that used to sit at the upsert was doing two
     // jobs, and only one of them was about providers. `existing.provider !==
     // providerName` also refused any checkout about to REWRITE an entitling
@@ -394,6 +423,7 @@ describe('a subscription binds its buyer to one payment provider', () => {
   });
 
   it('refuses the personal↔org direction of the same rewrite', async () => {
+    await orgSubjectApp();
     // The mirror, and the one that does not need two orgs to reach: a personal
     // subscription and an org checkout for the same (user, plan) are the same
     // row too. Only the provider disagreeing used to stop this.
@@ -446,6 +476,7 @@ describe('a subscription binds its buyer to one payment provider', () => {
   });
 
   it('lets the same subject re-open a checkout on a plan it already holds', async () => {
+    await orgSubjectApp();
     // The guard is about the subject CHANGING, not about an entitling row
     // being present. Upgrading, re-entering a coupon, or resubscribing on the
     // same subject all land on the row legitimately, and refusing those would
@@ -550,10 +581,49 @@ describe('a subscription binds its buyer to one payment provider', () => {
     expect(issuedProvider(res)).toBe('stripe');
   });
 
+  it('lets a buyer switch to a DIFFERENT plan on an unfinished checkout when they name no provider', async () => {
+    // The "switched plan" half of the misclick requirement (#437). Buyer has an
+    // unfinished checkout on `basic`, comes back and picks `pro` instead. They
+    // name no provider, so the pin routes them to the one they already started
+    // on, and the checkout proceeds. No 409: switching plan is not switching
+    // processor, and there is nothing to bill twice because they name no second
+    // one.
+    //
+    // PayPal is configured as the DE geo winner and the buyer checks out from
+    // DE, so "pinned" and "routed" give DIFFERENT answers. Asserting `stripe`
+    // therefore proves the PIN steered this, not the router. Configuring only
+    // Stripe would make the assertion pass with pinning entirely removed, since
+    // Stripe would be the sole option.
+    await billingCredentialsService.upsertRaw(
+      applicationId,
+      'paypal',
+      { clientId: 'pp_bind', clientSecret: 'pp_secret', webhookId: 'WH-bind' },
+      { mode: 'test', enabled: true, countries: ['DE'], priority: 10 },
+    );
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    await seedSub({ endUserId: user.id, planSlug: basic, provider: 'stripe', status: 'PENDING' });
+
+    const res = await checkout(user.token, pro, undefined, { country: 'DE' });
+
+    expect(res.statusCode, JSON.stringify(res.json())).toBe(200);
+    // The unfinished Stripe checkout wins over the DE geo route to PayPal.
+    expect(issuedProvider(res)).toBe('stripe');
+  });
+
   it('binds on a checkout that is still open, so two tabs cannot complete on two processors', async () => {
     // PENDING was excluded, which left the reachable version of the bug: start
     // a PayPal checkout, abandon the tab, start a Stripe one on another plan,
     // pay both. Two webhooks land, two ACTIVE subscriptions on two processors.
+    //
+    // This is the ONE misclick/switch shape that is still refused (#437): a
+    // DIFFERENT plan AND an explicitly DIFFERENT provider, both while a prior
+    // checkout is unfinished. It is refused because letting it through is that
+    // two-subscriptions-on-two-processors double charge, and best-effort
+    // session expiry cannot make it safe (a PayPal session is an unapprovable
+    // subscription that cannot be expired via API). It stays refused until the
+    // cross-plan guarantee in #431/#437 lands. Every other misclick/switch case
+    // above already succeeds.
     await boundProviderAlsoEnabled();
     const { basic, pro } = await twoPlans();
     const user = await signUp();

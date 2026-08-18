@@ -26,8 +26,11 @@ import type {
   CheckoutSessionInput,
   CheckoutSessionResult,
   ProviderPlanRef,
+  RefundPaymentInput,
+  RefundPaymentResult,
 } from './types.js';
 import { discountUnsupported } from './discount.js';
+import { RekeyError } from '../../../lib/error.js';
 import type { RazorpayCredentials } from '../credentials.service.js';
 
 /**
@@ -186,6 +189,85 @@ export class RealRazorpayProvider implements BillingProvider {
       'paymentLink.create',
     )) as { id: string; short_url: string };
     return { url: link.short_url, sessionId: link.id };
+  }
+
+  /**
+   * Refund a captured Razorpay payment.
+   *
+   * The id must be a `pay_…` in `captured` state. There is no standalone
+   * `POST /v1/refunds` — `/v1/refunds` is read-only — and an `order_…` cannot
+   * be refunded. Our column already holds `payment.id` for every Razorpay
+   * event (`modules/razorpay/index.ts`), so the stored id is the right one,
+   * which is not true of Stripe.
+   *
+   * Two things about the result are easy to get wrong:
+   *
+   * 1. **The create response is not the outcome.** Razorpay creates every
+   *    refund `pending` and reports the real result later on the
+   *    `refund.processed` / `refund.failed` webhooks. Reporting `pending` here
+   *    is therefore the normal, successful path and not a degraded one.
+   * 2. **Razorpay does not return its fee.** The MDR and its 18% GST on the
+   *    original capture are NOT reversed by a refund, so a refunded payment
+   *    still costs the operator money. That is a real input to
+   *    refund-versus-extend and belongs in front of the operator, not here.
+   */
+  async refundPayment(input: RefundPaymentInput): Promise<RefundPaymentResult> {
+    // Idempotency via `receipt`, which Razorpay scopes per payment and refuses
+    // on reuse ("Duplicate receipt found for this refund request."). Razorpay
+    // also documents an `X-Refund-Idempotency` HEADER, which is the better
+    // mechanism — it replays the original result instead of erroring — but
+    // razorpay@2.9.6 takes headers only on the constructor, and an idempotency
+    // key must vary per request. Switch to the header if the SDK grows a
+    // per-call option; until then `receipt` is what this SDK can actually
+    // carry, and it does stop a double refund.
+    let refund: { id?: string; amount?: number; currency?: string; status?: string };
+    try {
+      refund = (await this.withTimeout(
+        this.client.payments.refund(input.providerPaymentId, {
+          // Absent = Razorpay refunds the full remaining amount. Amounts are
+          // already in the smallest unit on both sides, so no conversion.
+          ...(input.amount !== undefined && { amount: input.amount }),
+          receipt: input.idempotencyKey.slice(0, 40),
+          ...(input.reason && { notes: { rekey_reason: input.reason.slice(0, 255) } }),
+        }),
+        'payments.refund',
+      )) as typeof refund;
+    } catch (e) {
+      const text = (e as { error?: { description?: string } })?.error?.description ?? String(e);
+      // Razorpay states this limit as "6 months" and never as a day count, so
+      // the message says months too rather than inventing a precision the
+      // provider does not publish.
+      if (text.includes('more than 6 months old')) {
+        throw new RekeyError({
+          statusCode: 409,
+          code: 'BILLING_REFUND_WINDOW_CLOSED',
+          message: 'Razorpay will not refund a payment more than 6 months old.',
+          fix: 'Razorpay cannot move this money back. Settle it with the buyer another way, or extend their entitlements instead and resolve the case that way.',
+        });
+      }
+      if (text.includes('Duplicate receipt found')) {
+        throw new RekeyError({
+          statusCode: 409,
+          code: 'BILLING_REFUND_ALREADY_REQUESTED',
+          message: 'This exact refund has already been sent to Razorpay.',
+          fix: 'Nothing to do — a second one would pay the buyer twice. Check the payment in the Razorpay dashboard for the outcome; it arrives on the `refund.processed` webhook.',
+        });
+      }
+      throw new RekeyError({
+        statusCode: 502,
+        code: 'BILLING_REFUND_REJECTED',
+        message: `Razorpay refused the refund: ${text}`,
+        fix: 'Check the payment in the Razorpay dashboard. A payment that was never captured, or whose source cannot take the money back (some UPI and NRE accounts), has to be settled with the buyer another way.',
+      });
+    }
+    return {
+      refundId: refund.id ?? input.idempotencyKey,
+      amount: refund.amount ?? input.amount ?? 0,
+      currency: (refund.currency ?? input.currency ?? 'INR').toUpperCase(),
+      // `processed` is the only terminal success. `pending` is the usual
+      // answer here and the webhook carries the real one.
+      status: refund.status === 'processed' ? 'succeeded' : 'pending',
+    };
   }
 
   async cancelSubscription(input: CancelSubscriptionInput): Promise<void> {

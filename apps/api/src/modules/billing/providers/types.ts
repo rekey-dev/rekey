@@ -83,6 +83,71 @@ export interface CancelSubscriptionInput {
 }
 
 /**
+ * One refund of one already-captured charge, issued by an operator.
+ *
+ * Refunding never cancels a subscription at any of the three providers — they
+ * are separate calls everywhere — so a caller that wants both must make both.
+ */
+export interface RefundPaymentInput {
+  /**
+   * The provider's charge id, as stored on `Payment.providerPaymentId`.
+   *
+   * NOT uniformly refundable as stored. Stripe writes an INVOICE id here for
+   * renewals and a Checkout Session id for the first payment, and the Refunds
+   * API accepts neither — the Stripe implementation resolves those to a
+   * PaymentIntent before refunding. PayPal writes the sale id, which is the
+   * refundable one (a subscription id `I-…` is not refundable at all).
+   */
+  providerPaymentId: string;
+  /**
+   * Partial amount in the smallest currency unit. Omit for a full refund of
+   * whatever remains unrefunded — which is what every provider does with an
+   * absent amount, so an omitted amount is never a full-amount guess on our
+   * part.
+   */
+  amount?: number;
+  /** Currency of `amount`, ISO 4217. Required whenever `amount` is set. */
+  currency?: string;
+  /** Operator's reason. Surfaced to the buyer by providers that show one. */
+  reason?: string;
+  /**
+   * Caller-supplied idempotency key, so an operator double-clicking "Refund",
+   * or a retried request, cannot pay the same money back twice. Every provider
+   * has a mechanism for this and all three are wired up.
+   */
+  idempotencyKey: string;
+  /**
+   * The provider's own refund URL, captured from the payment webhook.
+   *
+   * PayPal only, and preferred over `providerPaymentId` when present: PayPal
+   * hands us a `rel:"refund"` href per transaction, which names the correct
+   * endpoint AND API version for that specific payment. Using it sidesteps a
+   * question PayPal's documentation does not answer — whether a subscription
+   * sale id is accepted by the v2 captures endpoint (see the module).
+   */
+  refundHref?: string;
+}
+
+export interface RefundPaymentResult {
+  /** The provider's refund id, for reconciliation against its webhooks. */
+  refundId: string;
+  /** Amount actually refunded, smallest currency unit. */
+  amount: number;
+  /** Currency of `amount`, ISO 4217. */
+  currency: string;
+  /**
+   * Whether the money has actually moved.
+   *
+   * `pending` is not a failure and not a retry signal: Razorpay CREATES every
+   * refund `pending` and reports the outcome later on `refund.processed`, and
+   * PayPal returns `PENDING` for eCheck-funded refunds. A caller that treats
+   * the create response as the outcome will mark refunds succeeded that later
+   * failed, so the terminal answer comes from the webhook, not from here.
+   */
+  status: 'succeeded' | 'pending';
+}
+
+/**
  * The methods every BillingProvider must implement. Synchronous failures
  * should throw `RekeyError` with a `BILLING_*` code; asynchronous state
  * changes (subscription activated, payment succeeded) flow through the
@@ -141,4 +206,21 @@ export interface BillingProvider {
 
   /** Cancel a subscription. Default = at period end. */
   cancelSubscription(input: CancelSubscriptionInput): Promise<void>;
+
+  /**
+   * Pay a captured charge back to the buyer.
+   *
+   * OPTIONAL, and absent means **cannot** — same fail-closed posture as
+   * `capabilities.discounts` and `capabilities.trials`. A provider that has no
+   * refund API must say nothing here rather than throw at the moment an
+   * operator presses the button, because the operator needs to learn that
+   * before they promise a customer their money back. `capabilities.refunds` is
+   * the declaration the UI reads; this method is what it promises.
+   *
+   * Throws `RekeyError` when the provider refuses. The common refusals are
+   * worth distinguishing in the UI because their remedies differ: the charge
+   * is too old (every provider has a window), it is already fully refunded, or
+   * the requested amount exceeds what remains.
+   */
+  refundPayment?(input: RefundPaymentInput): Promise<RefundPaymentResult>;
 }
