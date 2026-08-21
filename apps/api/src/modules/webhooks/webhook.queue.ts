@@ -34,7 +34,7 @@
 import { Queue, Worker, type JobsOptions, type ConnectionOptions } from 'bullmq';
 import type { Redis } from 'ioredis';
 import type { FastifyBaseLogger } from 'fastify';
-import { createQueueRedis, isQueueEnabled } from '../../lib/queue.js';
+import { createQueueRedis, isQueueEnabled, lastQueueConnectionError } from '../../lib/queue.js';
 import { attemptDelivery, setDeliveryScheduler } from './webhook.service.js';
 
 const QUEUE_NAME = 'webhook-delivery';
@@ -119,6 +119,20 @@ export async function startWebhookWorker(log: FastifyBaseLogger): Promise<void> 
     await assertRedisReachable(queueConn);
 
     queue = new Queue(QUEUE_NAME, { connection: asConnection(queueConn) });
+    // Symmetric with the worker's handler below, and not optional.
+    //
+    // A BullMQ primitive with no `error` listener re-emits its connection's
+    // errors as an UNHANDLED 'error' event, which is a hard Node crash, not a
+    // logged warning. The worker had a handler from the start and the queue
+    // never did, so any Redis error surfacing on the queue side took the whole
+    // process down — a reconnect blip turning into an API outage, and every
+    // shutdown racing a crash.
+    //
+    // Found because it killed the CI job that regenerates the OpenAPI spec:
+    // the dump wrote the file, `app.close()` tore the connections down, the
+    // queue emitted "Connection is closed." with nothing listening, and node
+    // exited 1 having already done the work.
+    queue.on('error', (err) => log.error({ err }, 'webhook queue error'));
     const q = queue;
 
     // Route all scheduling through Redis. `void`: emit() is fire-and-forget and
@@ -144,19 +158,42 @@ export async function startWebhookWorker(log: FastifyBaseLogger): Promise<void> 
     );
     worker.on('error', (err) => log.error({ err }, 'webhook delivery worker error'));
   } catch (err) {
+    // Captured before the connections are nulled out below.
+    const failedConn = queueConn;
     setDeliveryScheduler(null);
     await worker?.close().catch(() => undefined);
     await queue?.close().catch(() => undefined);
-    await queueConn.quit().catch(() => undefined);
-    await workerConn.quit().catch(() => undefined);
+    // `disconnect()`, NOT `quit()`. QUIT is a Redis COMMAND, so on a client
+    // that never connected it goes into the offline queue and its promise
+    // never settles — `.catch()` cannot rescue a promise that does not
+    // resolve. That is the real reason booting against an unreachable Redis
+    // hung with no output: the PING race above rejects correctly at ~5s, and
+    // then startup stalls HERE, before the throw below ever runs. Measured:
+    // PING rejected at 5009ms, quit() still pending at 13s.
+    // `disconnect()` tears the socket down immediately and returns void.
+    queueConn.disconnect();
+    workerConn.disconnect();
     worker = null;
     queue = null;
     queueConn = null;
     workerConn = null;
+    // The PING timeout says the queue did not start; the connection error says
+    // WHY, and it is the only place that does. Without it the operator gets
+    // "Redis PING timed out after 5000ms" and no indication whether the host
+    // refused the connection, failed to resolve, or wanted a password.
+    //
+    // This used to be unreachable, and the reason was misdiagnosed in an
+    // earlier revision of this comment: the bounded PING race does reject, on
+    // time. What hung was the `quit()` teardown a few lines up, which never
+    // settled, so the throw below never ran and boot stalled with no output at
+    // all. Fixed there; the cause now actually reaches the operator.
+    const cause = failedConn ? lastQueueConnectionError(failedConn) : undefined;
     throw new Error(
       `[webhooks] Redis is required for the webhook delivery queue but the queue ` +
-        `failed to start: ${(err as Error).message}. Set REDIS_URL to a reachable ` +
-        `instance (the server will not start without it).`,
+        `failed to start: ${(err as Error).message}` +
+        (cause ? ` (connection error: ${cause.message})` : '') +
+        `. Set REDIS_URL to a reachable instance (the server will not start ` +
+        `without it).`,
     );
   }
 

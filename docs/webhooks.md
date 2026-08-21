@@ -68,9 +68,26 @@ X-Rekey-Signature: t=1751274862,v1=3f8a1c…(64 hex chars)
 Every envelope has the same five fields. `data` is the only one that varies by
 event type; the catalog below says what each carries.
 
-**`eventId` is your idempotency key.** A retry — ours, or a re-emit triggered
-by a provider retrying us — reuses the same id, so deduping is one upsert.
+## Idempotency
+
+**The field is `eventId`. There is no `id`.**
+
+Stated plainly because it has cost an integrator a production outage: a receiver
+was written to reject any envelope without an `id` and returned 400, which meant
+it rejected every delivery Rekey has ever sent, including the `user.erased`
+events the check was built to protect.
+
+`eventId` is present on every envelope, is a stable cuid, and is the
+consumer-side idempotency key. A retry reuses it, whether the retry is ours or a
+re-emit triggered by a provider retrying us: the envelope is frozen on the
+delivery row at enqueue time and resent byte for byte, so deduping is one upsert.
 Do that before you act on the payload, not after.
+
+It also rides as the `X-Rekey-Event-Id` header, next to `X-Rekey-Event-Type`, if
+you would rather dedupe before parsing a body.
+
+It is inside the signed payload, not only in a header, so a replay cannot present
+a fresh id without breaking `X-Rekey-Signature`.
 
 ## Verifying a delivery
 

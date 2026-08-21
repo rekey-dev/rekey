@@ -284,6 +284,20 @@ Not built (deliberately, listed so nobody assumes otherwise):
   when this shipped — there was no panel toggle either, so the only way in was
   a hand-rolled `PATCH`. The `oidcEnabled` toggle is now on the Auth tab; see
   the top of this document.)
+
+  This is now enforced rather than remembered. Both fields are listed in
+  `NOT_IN_MCP` in `apps/api/test/auth-config-surface-parity.test.ts`, which fails if
+  either appears on the tool. They were briefly added, on the reasoning that
+  the panel exposes them so MCP should too, and reverted: the panel is a human
+  holding the operator's session, and the argument above is about WHO decides,
+  not about which surface happens to have a control.
+
+  `hostedAuthorizeUrl` **is** settable through the tool. It is not a switch
+  that exposes a new public surface; it redirects the sign-in half of a flow
+  the operator has already turned on. It is still the most sensitive field the
+  tool can write, since it names where a signing-in user's browser is sent, so
+  its description carries an explicit security note and the parity test asserts
+  that note stays there.
 - No panel toggle for `dynamicClientRegistration` — `PATCH …/auth-config` is
   still the only surface for that one.
 - No operator-side client registration. `POST /oauth/register` is the only way

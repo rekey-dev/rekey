@@ -142,7 +142,7 @@ export default async function UsagePage({
               <Field label="Slug" hint="URL-safe identifier — what your SDK calls report against.">
                 <input
                   type="text" name="slug" required autoFocus placeholder="api_calls"
-                  pattern="^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$"
+                  pattern="^[a-z0-9](?:[a-z0-9_\-]{0,38}[a-z0-9])?$"
                   className={`${inputCls} font-mono`}
                 />
               </Field>

@@ -1,3 +1,4 @@
+import { KNOWN_WEBHOOK_EVENTS } from '@rekey.dev/shared-types';
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
@@ -25,21 +26,19 @@ interface EndpointRow {
   createdAt: string;
 }
 
-const ALL_EVENTS = [
-  'user.created',
-  'user.updated',
-  'user.deleted',
-  'session.revoked',
-  'mfa.enabled',
-  'mfa.disabled',
-  'password.changed',
-  'email.verified',
-  'subscription.activated',
-  'subscription.canceled',
-  'subscription.past_due',
-  'payment.succeeded',
-  'payment.failed',
-];
+/**
+ * Every event an endpoint can subscribe to, DERIVED from the shared registry.
+ *
+ * This used to be a hand-maintained copy, and it had silently fallen five
+ * events behind: `user.erased` and all three `dunning.*` had shipped in the API
+ * and were unreachable here, so an operator could not subscribe to them from
+ * the only UI that creates endpoints. The API would happily have accepted them.
+ *
+ * Deriving it is the same fix applied to the API's own registry: a list that
+ * must mirror another list will drift, and the way to stop that is to stop
+ * having two lists rather than to check them against each other.
+ */
+const ALL_EVENTS: readonly string[] = KNOWN_WEBHOOK_EVENTS;
 
 /**
  * Per-endpoint delivery health over the last 24 hours.

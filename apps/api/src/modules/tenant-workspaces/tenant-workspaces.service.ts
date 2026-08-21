@@ -19,7 +19,7 @@
  */
 
 import type {
-  ApplicationRole,
+  ApplicationGrantRole,
   TenantInvitation,
   TenantMembership,
   TenantRole,
@@ -85,7 +85,7 @@ export interface MemberGrantRow {
   applicationId: string;
   applicationName: string;
   applicationSlug: string;
-  role: ApplicationRole;
+  role: ApplicationGrantRole;
   createdAt: Date;
 }
 
@@ -254,7 +254,7 @@ export const tenantWorkspacesService = {
     tenantId: string;
     membershipId: string;
     applicationId: string;
-    role: ApplicationRole;
+    role: ApplicationGrantRole;
   }): Promise<MemberGrantRow> {
     const membership = await this.loadMembershipOrThrow(args.tenantId, args.membershipId);
     if (membership.role !== 'MEMBER') {

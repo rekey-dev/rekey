@@ -228,6 +228,46 @@ export function Modal({
     unlockScroll();
   }
 
+  /**
+   * Has the operator entered anything that closing would throw away?
+   *
+   * Read from the live DOM rather than tracked in state: these modals wrap
+   * uncontrolled forms (server actions, no onChange handlers), so the DOM is
+   * the only place the current values exist.
+   *
+   * A checkbox or select counts only when moved off its default, so a form the
+   * operator merely opened is still considered clean and closes freely.
+   */
+  function hasUnsavedInput(): boolean {
+    const dialog = ref.current;
+    if (!dialog) return false;
+    const fields = dialog.querySelectorAll<
+      HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+    >('input, textarea, select');
+    for (const field of fields) {
+      if (field instanceof HTMLInputElement) {
+        if (field.type === 'hidden' || field.type === 'submit' || field.type === 'button') continue;
+        if (field.type === 'checkbox' || field.type === 'radio') {
+          if (field.checked !== field.defaultChecked) return true;
+          continue;
+        }
+        if (field.value !== field.defaultValue) return true;
+        continue;
+      }
+      if (field instanceof HTMLTextAreaElement) {
+        if (field.value !== field.defaultValue) return true;
+        continue;
+      }
+      // <select>: compare against the option marked selected in the markup.
+      const initial =
+        Array.from(field.options).find((o) => o.defaultSelected)?.value ??
+        field.options[0]?.value ??
+        '';
+      if (field.value !== initial) return true;
+    }
+    return false;
+  }
+
   // Fires for every close path (X button, backdrop click, native Esc — all of
   // which end in the dialog's `close` event).
   function handleClose(): void {
@@ -272,10 +312,27 @@ export function Modal({
         className={dialogChromeCls(size)}
         onClose={handleClose}
         onClick={(e) => {
-          // Click on backdrop → close. Safari is unreliable comparing
-          // `e.target === ref.current`, so we additionally check that the
-          // closest dialog is ours (rather than a child element bubbling up).
-          if (e.target === e.currentTarget) close();
+          // Click on backdrop → close, but only when nothing would be lost.
+          // These dialogs hold real forms (credentials, role definitions, new
+          // applications), and a stray click just outside the card used to
+          // discard everything typed with no warning and no undo. A modal the
+          // operator has started filling in now ignores the backdrop; the X
+          // button and Esc still close it, because both are deliberate.
+          //
+          // Safari is unreliable comparing `e.target === ref.current`, hence
+          // the currentTarget comparison rather than a ref check.
+          if (e.target !== e.currentTarget) return;
+          if (hasUnsavedInput()) return;
+          close();
+        }}
+        onCancel={(e) => {
+          // Esc is deliberate, but not deliberate enough to justify silently
+          // dropping a half-filled credentials form: browsers also fire this
+          // when leaving fullscreen, and Esc is a reflex. Ask once, and only
+          // when there is something to lose.
+          if (!hasUnsavedInput()) return;
+          e.preventDefault();
+          if (window.confirm('Discard your unsaved changes?')) close();
         }}
       >
         <ModalHeader

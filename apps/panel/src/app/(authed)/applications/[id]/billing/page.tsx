@@ -49,12 +49,25 @@ async function saveProviderCredentials(
   applicationId: string,
   provider: BillingProviderName,
   fieldKeys: string[],
+  isEdit: boolean,
   formData: FormData,
 ): Promise<void> {
   'use server';
   const data: Record<string, string> = {};
   for (const key of fieldKeys) {
-    data[key] = String(formData.get(key) ?? '').trim();
+    const value = String(formData.get(key) ?? '').trim();
+    // On an EDIT, a blank input is "I did not touch this", so the key is
+    // omitted and the API keeps the stored value. That is what this dialog has
+    // always said it does; before the API learned to merge, sending the blank
+    // through overwrote the stored secret and the request was rejected.
+    //
+    // On first configuration there is nothing to keep, so blanks are sent and
+    // the API reports which required field is missing.
+    //
+    // Clearing a stored field is deliberately not reachable from here: send an
+    // explicit empty string over the API or MCP for that.
+    if (isEdit && value === '') continue;
+    data[key] = value;
   }
   const countries = parseCountries(formData.get('countries'));
   const priority = parsePriority(formData.get('priority'));
@@ -890,6 +903,7 @@ function ProviderEditModal({
     applicationId,
     provider,
     credentialFields.map((f) => f.key),
+    Boolean(existing),
   );
 
   return (
@@ -900,7 +914,7 @@ function ProviderEditModal({
       title={`${existing ? 'Edit' : 'Configure'} ${label}`}
       description={
         existing
-          ? 'Rotate keys or change routing. Leaving a secret blank keeps the existing value.'
+          ? 'Rotate keys or change routing. Leave a field blank to keep its stored value.'
           : `Connect your ${label} account. Credentials are AES-256-GCM encrypted at rest; never returned in any API response.`
       }
       trigger={existing ? 'Edit' : 'Configure'}
@@ -918,7 +932,10 @@ function ProviderEditModal({
             <input
               type={f.secret ? 'password' : 'text'}
               name={f.key}
-              required={!f.optional}
+              // Nothing is required on an edit: a blank field means "keep the
+              // stored value", and marking it required blocks submission in the
+              // browser before the request is ever made.
+              required={!f.optional && !existing}
               autoComplete="off"
               {...(f.placeholder !== undefined && { placeholder: f.placeholder })}
               className={`${inputCls} font-mono`}

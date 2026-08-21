@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import type { ApplicationRole, TenantRole } from '@prisma/client';
+import type { ApplicationGrantRole, TenantRole } from '@prisma/client';
 import { tenantWorkspacesService, workspaceCreationMode } from './tenant-workspaces.service.js';
+import { tenantsService } from '../tenants/tenants.service.js';
 import { emailService } from '../email/email.service.js';
 import {
   requireTenantSession,
@@ -164,6 +165,101 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
       },
     },
     async () => ({ success: true, data: { mode: workspaceCreationMode() } }),
+  );
+
+  app.get(
+    '/limits',
+    {
+      preHandler: requireTenantRole(['OWNER', 'ADMIN']),
+      schema: {
+        tags: ['Tenant · Workspace'],
+        security: [{ tenantSession: [] }],
+        summary: "Read the active workspace's resource ceilings and current usage",
+        description:
+          'Requires the **OWNER or ADMIN** workspace role. Read-only even then — only a ' +
+          'deployment super-admin can change these, via ' +
+          '`PUT /api/v1/admin/tenants/:id/limits`.\n\n' +
+          'An **absent** key under `limits` means that resource is unlimited, which is the ' +
+          'default for every workspace and the state of every self-host deployment that ' +
+          'never sets one. Do not read a missing key as zero.\n\n' +
+          'This exists so a client can tell a user *before* they act that an action will be ' +
+          'refused, rather than after. It is a UX hint and nothing more: every quota is ' +
+          'enforced server-side on the acting endpoint regardless of what this reports, so ' +
+          'a client that skips the check gets a 403, not a bypass.\n\n' +
+          '`usage.productionApps` counts production applications that are **running** — ' +
+          '`environment: PRODUCTION` and not disabled. A disabled production application ' +
+          'holds no slot, which is why disabling one frees capacity and re-enabling one can ' +
+          'be refused.\n\n' +
+          'MEMBERs are excluded deliberately. Both usage figures are workspace-wide, and the ' +
+          'application list is grant-scoped precisely so a MEMBER with access to three ' +
+          'applications is not told the workspace has forty — that is an existence oracle. This ' +
+          'endpoint would hand them the same count plus a workspace-wide end-user headcount. ' +
+          'Nothing is lost by excluding them: every action these ceilings gate (creating, ' +
+          'promoting, disabling and re-enabling an application) already requires OWNER or ADMIN.',
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                limits: {
+                  type: 'object',
+                  description:
+                    'Ceilings in force. An absent key means unlimited for that resource.',
+                  properties: {
+                    maxProductionApps: {
+                      type: 'integer',
+                      nullable: true,
+                      description:
+                        'Maximum production applications this workspace may run at once. ' +
+                        'Absent or null means unlimited.',
+                    },
+                    maxActiveEndUsers: {
+                      type: 'integer',
+                      nullable: true,
+                      description:
+                        'Maximum non-erased end-users across every application in the ' +
+                        'workspace. Absent or null means unlimited.',
+                    },
+                  },
+                },
+                usage: {
+                  type: 'object',
+                  properties: {
+                    productionApps: {
+                      type: 'integer',
+                      description:
+                        'Applications with `environment: PRODUCTION` that are not disabled.',
+                    },
+                    activeEndUsers: {
+                      type: 'integer',
+                      description:
+                        'Non-erased end-users across every application in the workspace.',
+                    },
+                  },
+                  required: ['productionApps', 'activeEndUsers'],
+                },
+              },
+              required: ['limits', 'usage'],
+            },
+            "The active workspace's ceilings and the usage counted against them.",
+          ),
+          ...errs({
+            ...TENANT_SESSION_ERRORS,
+            403:
+              'TENANT_ROLE_INSUFFICIENT — the operator is a MEMBER. Workspace usage is ' +
+              'aggregate across every application, including ones a MEMBER has no grant on.',
+            404: 'TENANT_NOT_FOUND — the active workspace no longer exists.',
+          }),
+        },
+      },
+    },
+    async (req) => ({
+      success: true,
+      // Same service call the super-admin surface makes. Deliberately not a
+      // second implementation: two ways to compute a quota is how the number an
+      // operator is shown and the number the server enforces drift apart.
+      data: await tenantsService.getLimits(req.tenantId!),
+    }),
   );
 
   app.get(
@@ -467,7 +563,7 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
         tenantId: req.tenantId!,
         membershipId: id,
         applicationId: body.applicationId,
-        role: body.role as ApplicationRole,
+        role: body.role as ApplicationGrantRole,
       });
       void recordSecurityEvent({
         type: 'member.app_grant_set',

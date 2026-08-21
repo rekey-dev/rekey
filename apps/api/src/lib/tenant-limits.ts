@@ -20,12 +20,39 @@
  *
  * ## What is enforced
  *
- * `maxProductionApps` gates the CREATION of new Applications whose
- * `environment` is PRODUCTION. STAGING and DEVELOPMENT are never counted and
- * never blocked, so a workspace sitting at its ceiling can still spin up as
- * many test environments as it wants. `Application.environment` is write-once
- * (set at create, never updated), so there is no promote-a-dev-app path around
- * it — that immutability is what makes counting at creation sufficient.
+ * `maxProductionApps` is a ceiling on **running production Applications**.
+ * Precisely: the number of Applications whose `environment` is PRODUCTION and
+ * whose `disabledAt` is NULL must never exceed it. STAGING and DEVELOPMENT are
+ * never counted and never blocked, so a workspace sitting at its ceiling can
+ * still spin up as many test environments as it wants.
+ *
+ * Three doors lead into that count, and all three assert here:
+ *
+ *   1. CREATING an Application with `environment: PRODUCTION`.
+ *   2. PROMOTING a DEVELOPMENT/STAGING Application into PRODUCTION.
+ *   3. RE-ENABLING a disabled PRODUCTION Application.
+ *
+ * Door 2 did not exist before 2026-08-20; this docblock used to argue that
+ * `Application.environment` was write-once and that its immutability was what
+ * made counting at creation sufficient. Promotion opened a second door, and
+ * `applicationsService.promote` asserts here for exactly that reason.
+ *
+ * All three take the same per-workspace advisory lock before counting
+ * (`lockWorkspaceSlots` in modules/applications/applications.service.ts). A
+ * lock that only some doors take serialises nothing, which is exactly the bug
+ * that existed briefly when door 2 was added and door 1 was left unlocked.
+ *
+ * Door 3 is the one that is easy to miss. Because a DISABLED production
+ * Application does not count, disabling frees a slot — that is deliberate,
+ * it is what makes disable a usable substitute for the Application delete
+ * Rekey does not have. But it means re-enabling CONSUMES a slot and can be
+ * refused, and if it were not asserted, disable/re-enable would launder an
+ * unlimited number of running production Applications past the ceiling.
+ *
+ * The `disabledAt: null` predicate is the pricing decision. It lives in
+ * `countProductionApps` and nowhere else: anything that counts production
+ * Applications for money must call that function rather than filtering on
+ * `environment` alone, or it will bill for frozen Applications.
  *
  * `maxActiveEndUsers` gates the CREATION of new end-users only, counted
  * tenant-wide (summed across every Application the Tenant owns, not
@@ -214,26 +241,75 @@ export async function countActiveEndUsers(
   });
 }
 
-/** Applications owned by this Tenant whose environment is PRODUCTION. */
+/**
+ * RUNNING production Applications owned by this Tenant: `environment` is
+ * PRODUCTION **and** the Application is not disabled.
+ *
+ * The `disabledAt: null` half is load-bearing and is the reason this function
+ * exists rather than an inline `count`. A disabled Application serves no
+ * traffic — both API-key middlewares refuse it — so charging a workspace for
+ * one would be charging for nothing, and with no Application delete in the
+ * product the operator would have no way to stop paying. Freeing the slot is
+ * what makes `disable` a real substitute for `delete`.
+ *
+ * The cost of that choice, accepted knowingly: `environment == 'PRODUCTION'`
+ * is NOT a proxy for "billable". A workspace can legitimately own more
+ * PRODUCTION rows than its ceiling as long as all but `maxProductionApps` of
+ * them are disabled. Every count that means money must come from here.
+ */
 export async function countProductionApps(
   tenantId: string,
   db: LimitsDb = prisma,
 ): Promise<number> {
   return db.application.count({
-    where: { tenantId, environment: 'PRODUCTION' },
+    where: { tenantId, environment: 'PRODUCTION', disabledAt: null },
   });
 }
 
 /**
- * Throw `TENANT_QUOTA_EXCEEDED` when this workspace has no room for another
- * PRODUCTION Application. Call immediately before creating one; non-production
- * Applications must not route through here at all.
+ * Which door the caller is coming through. It changes only the `fix` text, but
+ * that text is the entire difference between a useful refusal and a dead end,
+ * so it is a required argument rather than an optional one with a default.
  *
- * No-op (and no query) when the workspace has no limit set, which is the
- * default everywhere.
+ * `create` has an easy out: make it a staging Application instead. `promote`
+ * has the same out, because the Application keeps working exactly as it does
+ * today if you leave it alone. `enable` has NEITHER — the operator is trying
+ * to bring a real product back online and "create a staging app" is not a
+ * remedy for that. Only two things help there, and the message must say both.
+ */
+export type ProductionAppQuotaDoor = 'create' | 'promote' | 'enable';
+
+/**
+ * The Applications currently holding this workspace's production slots, named
+ * so the refusal can tell the operator which ones to look at. Bounded by
+ * `maxProductionApps`, which is a single-digit number in every real
+ * deployment; the take() is belt and braces against a hand-edited ceiling.
+ */
+async function runningProductionAppNames(tenantId: string, db: LimitsDb): Promise<string[]> {
+  const apps = await db.application.findMany({
+    where: { tenantId, environment: 'PRODUCTION', disabledAt: null },
+    select: { slug: true },
+    orderBy: { createdAt: 'asc' },
+    take: 20,
+  });
+  return apps.map((a) => a.slug);
+}
+
+/**
+ * Throw `TENANT_QUOTA_EXCEEDED` when this workspace has no room for another
+ * RUNNING production Application.
+ *
+ * Call immediately before creating one, promoting one, or re-enabling a
+ * disabled one — the three doors in the module docblock. Non-production
+ * Applications must not route through here at all, and neither must
+ * `disable`, which frees a slot and can therefore never fail on quota.
+ *
+ * No-op (and one cheap indexed read) when the workspace has no limit set,
+ * which is the default everywhere.
  */
 export async function assertProductionAppQuota(
   tenantId: string,
+  door: ProductionAppQuotaDoor,
   db: LimitsDb = prisma,
 ): Promise<void> {
   const tenant = await db.tenant.findUnique({
@@ -248,20 +324,42 @@ export async function assertProductionAppQuota(
   const current = await countProductionApps(tenantId, db);
   if (current < max) return;
 
-  throw new RekeyError({
-    statusCode: 403,
-    code: 'TENANT_QUOTA_EXCEEDED',
-    message:
-      `This workspace has reached its limit of ${max} production application` +
-      `${max === 1 ? '' : 's'} (currently ${current}). Applications in the staging and ` +
-      'development environments are not counted and can still be created. Production ' +
-      'applications that already exist are unaffected and keep serving traffic.',
-    fix:
-      'Create the application in the development or staging environment instead, ask a ' +
-      'deployment super-admin to raise the workspace limit ' +
-      '(PUT /api/v1/admin/tenants/:id/limits), or delete a production application the ' +
-      'workspace no longer needs.',
-  });
+  const plural = max === 1 ? '' : 's';
+  // Name the slot holders. Without this the operator is told a number and left
+  // to work out which of their Applications produced it, which on a workspace
+  // with a dozen Applications is a genuine hunt.
+  const holders = await runningProductionAppNames(tenantId, db);
+  const holderText =
+    holders.length > 0
+      ? ` The slot${plural} ${max === 1 ? 'is' : 'are'} held by: ${holders.join(', ')}.`
+      : '';
+
+  // `disabled do not count` is stated on every door, not just `enable`. It is
+  // the non-obvious half of the rule, and an operator who does not know it
+  // cannot find the remedy on their own.
+  const message =
+    `This workspace is running its limit of ${max} production application${plural} ` +
+    `(currently ${current}). Disabled production applications are not counted, and ` +
+    'applications in the staging and development environments are neither counted nor ' +
+    `restricted.${holderText}`;
+
+  const fix =
+    door === 'enable'
+      ? 'Disable one of the production applications listed above to free its slot, then ' +
+        'enable this one. If you need to run more production applications at the same ' +
+        'time, contact support to raise the workspace limit — there is no self-serve way ' +
+        'to raise it.'
+      : door === 'promote'
+        ? 'Disable a production application the workspace is no longer running to free its ' +
+          'slot, or contact support to raise the workspace limit. Leaving this application ' +
+          'in its current environment changes nothing about how it works today — only the ' +
+          'key prefix and the production slot are at stake.'
+        : 'Create the application in the development or staging environment instead (you ' +
+          'can promote it to production later), disable a production application the ' +
+          'workspace is no longer running to free its slot, or contact support to raise ' +
+          'the workspace limit.';
+
+  throw new RekeyError({ statusCode: 403, code: 'TENANT_QUOTA_EXCEEDED', message, fix });
 }
 
 /**

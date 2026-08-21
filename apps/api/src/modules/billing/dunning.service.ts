@@ -342,6 +342,33 @@ export async function processDueDunningCases(
       data: { nextActionAt: new Date(Date.now() + CLAIM_WINDOW_MS) },
     });
     if (claimed.count !== 1) continue;
+
+    // A disabled Application's dunning is paused, not cancelled.
+    //
+    // The email and webhook halves of a dunning action are already suppressed
+    // downstream (sendEmail and enqueueEvent both refuse a disabled
+    // Application), but the day-14 escalation CANCELS the subscription, and
+    // that is a state change, not a notification. Cancelling a customer's
+    // subscriptions while their Application is frozen would make the freeze
+    // partly irreversible: re-enabling cannot un-cancel them, and the operator
+    // never chose it.
+    //
+    // So: leave the case OPEN, untouched, and let the claim above carry
+    // `nextActionAt` forward. The recovery clock effectively stops for the
+    // duration of the freeze and resumes on the thaw, which is the only
+    // reading of "frozen" that the operator can predict.
+    const dunningApp = await prisma.application.findUnique({
+      where: { id: dunningCase.applicationId },
+      select: { disabledAt: true },
+    });
+    if (dunningApp?.disabledAt != null) {
+      log?.info(
+        { dunningCaseId: dunningCase.id, applicationId: dunningCase.applicationId },
+        'application disabled — dunning case paused, not processed',
+      );
+      continue;
+    }
+
     claimedCount += 1;
     try {
       await processCase(dunningCase, log);

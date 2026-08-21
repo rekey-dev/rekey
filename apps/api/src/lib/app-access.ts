@@ -53,7 +53,7 @@
  */
 
 import type { FastifyRequest } from 'fastify';
-import type { ApplicationRole } from '@prisma/client';
+import type { ApplicationGrantRole } from '@prisma/client';
 import { prisma } from './prisma.js';
 import { RekeyError } from './error.js';
 
@@ -64,9 +64,9 @@ export interface AppAccess {
    * How the access was satisfied:
    *  - 'workspace-admin' — caller is OWNER/ADMIN (implicit full access)
    *  - 'legacy-member'   — grandfathered pre-grants membership (read-only)
-   *  - ApplicationRole   — MEMBER via an explicit grant on this Application
+   *  - ApplicationGrantRole   — MEMBER via an explicit grant on this Application
    */
-  level: 'workspace-admin' | 'legacy-member' | ApplicationRole;
+  level: 'workspace-admin' | 'legacy-member' | ApplicationGrantRole;
 }
 
 function notFound(applicationId: string): RekeyError {
@@ -91,7 +91,7 @@ function legacyWriteDenied(role: string): RekeyError {
   });
 }
 
-function grantDenied(need: AppAccessNeed, granted: ApplicationRole): RekeyError {
+function grantDenied(need: AppAccessNeed, granted: ApplicationGrantRole): RekeyError {
   return new RekeyError({
     statusCode: 403,
     code: 'APP_ACCESS_DENIED',
@@ -192,7 +192,7 @@ export interface AppAccessScope {
   /** Granted application ids (only meaningful when restricted). */
   applicationIds: string[];
   /** applicationId → granted role (only meaningful when restricted). */
-  roleByApplicationId: Map<string, ApplicationRole>;
+  roleByApplicationId: Map<string, ApplicationGrantRole>;
 }
 
 /**

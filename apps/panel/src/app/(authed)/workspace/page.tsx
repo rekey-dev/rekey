@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { errorQuery, readErrorFlash, api, PanelApiError, getMe } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, getMe, getWorkspaceLimits } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
 import { ApiErrorText } from '@/components/api-error';
 import { SavedBanner } from '@/components/SavedBanner';
@@ -10,6 +10,7 @@ import { Card } from '@/components/Card';
 import { CopyButton } from '@/components/CopyButton';
 import { Field, fieldInputCls } from '@/components/Field';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
+import { WorkspaceLimits } from '@/components/WorkspaceLimits';
 
 interface WorkspaceDto {
   id: string;
@@ -98,6 +99,13 @@ export default async function WorkspaceSettingsPage({
   const canEdit = me.activeRole === 'OWNER' || me.activeRole === 'ADMIN';
   const isOwner = me.activeRole === 'OWNER';
 
+  // OWNER/ADMIN only, and fetched conditionally rather than fetched-and-caught:
+  // both usage figures are workspace-wide, so the API refuses a MEMBER (the
+  // application list is grant-scoped for the same reason). Requesting it anyway
+  // and swallowing a 403 would make every MEMBER's page load carry a failing
+  // request, and the panel's api() helper treats access errors as interrupts.
+  const limits = canEdit ? await getWorkspaceLimits() : null;
+
   const support = supportEmail();
   const supportMailto =
     support === null
@@ -112,7 +120,7 @@ export default async function WorkspaceSettingsPage({
         title="Workspace settings"
         description={
           <>
-            Name and lifecycle for{' '}
+            Name, usage and lifecycle for{' '}
             <strong className="text-[var(--color-fg)]">{workspace.name}</strong>.
           </>
         }
@@ -172,6 +180,16 @@ export default async function WorkspaceSettingsPage({
           )}
         </form>
       </Card>
+
+      {/* Usage and limits — read-only for every role. Placed between identity
+          and the destructive section because "what is this workspace using"
+          is the question an operator arrives with, and because the production
+          figure is what the application Lifecycle tab refuses against. */}
+      {limits !== null && (
+        <Card>
+          <WorkspaceLimits data={limits} />
+        </Card>
+      )}
 
       {/* Danger zone — owner-only deletion (handled manually by support) */}
       {isOwner && (

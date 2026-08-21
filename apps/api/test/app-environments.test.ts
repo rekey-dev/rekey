@@ -6,10 +6,13 @@
  *
  *   1. New applications are DEVELOPMENT. Least privilege: nobody gets a
  *      production-grade app by forgetting to say so.
- *   2. The environment is immutable. There is no endpoint that changes it, so
- *      the `rp_live_`/`rp_test_` prefix on every already-minted key keeps
- *      matching the Application it was minted from. "Go live" is a second
- *      Application, not a state change on this one.
+ *   2. The environment moves through exactly ONE door. Since 2026-08-20 it is
+ *      no longer immutable: POST /:id/promote raises DEVELOPMENT/STAGING to
+ *      PRODUCTION, once, one-way. What these tests defend is that promote is
+ *      the ONLY door — no config route accepts the field, and nothing moves an
+ *      Application back down. See lifecycle behaviour in
+ *      app-lifecycle.test.ts; what is tested here is that every OTHER route
+ *      still refuses.
  *   3. Environment does NOT constrain billing credentials — any app may hold
  *      live keys. What is enforced is that the recorded `mode` cannot
  *      contradict the key material, so the label never lies about the key.
@@ -123,14 +126,19 @@ describe('Application environments', () => {
     expect((prodKey.json().data as { rawKey: string }).rawKey).toMatch(/^rp_live_/);
   });
 
-  // The environment is write-once. Not "one-way", not "guarded" — absent.
-  // This test is the standing check that nobody adds a way back in: if a
-  // future route starts accepting the field, the last assertion here fails.
-  it('environment cannot be changed after creation, by any route', async () => {
+  // Promote is the only door into PRODUCTION, and this is the standing check
+  // that it stays the only one. Every route swept below must keep ignoring the
+  // field: if a future config route starts accepting it, the last assertion
+  // here fails. (`promote` itself is covered in app-lifecycle.test.ts — the
+  // point of this test is everything that must NOT work.)
+  it('environment cannot be changed by any route except promote', async () => {
     const a = await createApp('env-immutable');
     expect(a.environment).toBe('DEVELOPMENT');
 
-    // The endpoint that used to do this is gone, not merely restricted.
+    // The old PATCH /environment endpoint is gone, not merely restricted.
+    // Promotion is a POST to /promote with its own preconditions; a general
+    // "set the environment to whatever I say" route has never come back, and
+    // in particular there is still no way to ask for DEVELOPMENT.
     const gone = await app.inject({
       method: 'PATCH',
       url: `/api/v1/tenant/applications/${a.id}/environment`,

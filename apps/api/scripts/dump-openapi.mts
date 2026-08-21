@@ -37,12 +37,39 @@ await app.ready();
 const spec = app.swagger();
 const json = JSON.stringify(spec, null, 2);
 
+// Both branches below exit without `app.close()`, deliberately.
+//
+// The document is already produced; everything past this point is teardown of a
+// process that is about to end anyway, and the OS reclaims the sockets. What
+// the close bought instead was a race: BullMQ's own RedisConnection re-emits a
+// late "Connection is closed." after `close()` has detached the listeners that
+// would have handled it, which is an unhandled 'error' event and therefore a
+// hard crash. Exit 1 from a run that had already done its job, measured at
+// roughly one run in ten: often enough to redden CI at random, rare enough to
+// look like nothing but flake.
+//
+// A long-running server still shuts down through the normal path; this is a
+// build tool.
 const out = process.argv[2];
 if (out) {
+  // Synchronous, so the bytes are on disk before the exit.
   writeFileSync(out, json);
-  console.error(`wrote ${out}`);
-} else {
-  process.stdout.write(json);
+  // stderr is asynchronous on a pipe for the same reason stdout is, so leave
+  // from the write callback here too or the confirmation line can be lost in
+  // CI. The document itself is already on disk: writeFileSync above is
+  // synchronous, which is why this line is a nicety and not the artifact.
+  process.stderr.write(`wrote ${out}\n`, () => process.exit(0));
 }
-await app.close();
-process.exit(0);
+
+// The stdout branch must NOT exit the same way. Node's stdout is asynchronous
+// when it is a pipe and `process.exit` does not flush it, so piping this
+// document anywhere delivered exactly one or two 64KB pipe buffers of the
+// 1.4MB: 65,536 or 131,072 bytes, and invalid JSON either way. The write
+// callback fires once the data has actually been handed over, which is the
+// only safe moment to leave.
+//
+// The `openapi:dump` script always passes an output path, so this branch is
+// only reached by invoking the script directly. That is also why the bug
+// survived: measuring it through `pnpm openapi:dump | wc -c` shows a steady
+// 225 bytes, which is pnpm's own banner and not this document at all.
+process.stdout.write(json, () => process.exit(0));

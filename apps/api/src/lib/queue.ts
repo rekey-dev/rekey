@@ -29,11 +29,39 @@ export function isQueueEnabled(): boolean {
  * connection and must not share it with the Queue.
  */
 export function createQueueRedis(): Redis {
-  return new Redis(env.REDIS_URL, {
+  const client = new Redis(env.REDIS_URL, {
     // BullMQ contract: blocking commands break with a finite retry cap.
     maxRetriesPerRequest: null,
     // Let commands queue while (re)connecting rather than throwing — queue
     // work is background, so a brief reconnect should buffer, not fail.
     enableOfflineQueue: true,
   });
+  // An ioredis client with no 'error' listener turns every connection error
+  // into an unhandled 'error' event, which is a hard process crash rather than
+  // a logged warning. The same reasoning as `lib/redis.ts`, which has always
+  // had one.
+  //
+  // Not logged, because reconnects are routine and the failures that matter are
+  // reported through the queue and worker 'error' listeners. But the LAST one
+  // is kept, because discarding it entirely costs the boot diagnosis: startup
+  // fails on a PING timeout, and "Redis PING timed out after 5000ms" does not
+  // say whether the host refused the connection, resolved to nothing, or asked
+  // for a password. That cause is only ever on this event.
+  client.on('error', (err: Error) => {
+    lastConnectionError.set(client, err);
+  });
+  return client;
+}
+
+/**
+ * The most recent connection error per queue client, for error messages.
+ *
+ * A WeakMap so a client that goes away takes its entry with it, and so this
+ * never becomes a second place that owns connection state.
+ */
+const lastConnectionError = new WeakMap<Redis, Error>();
+
+/** The last connection error seen on `client`, if any. */
+export function lastQueueConnectionError(client: Redis): Error | undefined {
+  return lastConnectionError.get(client);
 }

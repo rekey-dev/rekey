@@ -14,6 +14,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
+import { prisma } from '../src/lib/prisma.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -119,6 +120,68 @@ describe('billing scaffold', () => {
     });
     expect(dup.statusCode).toBe(409);
     expect(dup.json().error.code).toBe('PLAN_SLUG_TAKEN');
+  });
+
+  it('sends a price change down a route that actually works, slug and all', async () => {
+    // A truth matrix for four `fix` strings that all describe the same journey:
+    // PLAN_PRICE_IMMUTABLE's fix, PLAN_SLUG_TAKEN's archived-case fix, and the
+    // MCP `set_plan_active` / `update_plan` tool descriptions. Every one of them
+    // said "archive it and create a replacement" and none said the replacement
+    // needs a different slug, so following any of them literally ended in a 409.
+    //
+    // This test walks the advice instead of reading it.
+    const plan = await createPlan(applicationId, { slug: 'priced', name: 'Priced', amount: 500 });
+
+    // Registration is what freezes the price, and it is decided by provider
+    // metadata rather than by a live provider call, so this needs no Stripe.
+    await prisma.plan.update({
+      where: { id: plan.id as string },
+      data: { metadata: { stripe: { priceId: 'price_test_immutable' } } },
+    });
+
+    const repriced = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/admin/applications/${applicationId}/plans/priced`,
+      headers: { authorization: `Bearer ${ADMIN_KEY}` },
+      payload: { amount: 900 },
+    });
+    expect(repriced.statusCode).toBe(409);
+    const immutable = repriced.json().error as { code: string; fix: string };
+    expect(immutable.code).toBe('PLAN_PRICE_IMMUTABLE');
+    // The half that was missing, and the whole reason this test exists.
+    expect(immutable.fix).toMatch(/different slug/i);
+
+    // Now follow it. Step one: retire the plan, exactly as the fix says.
+    const archived = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/admin/applications/${applicationId}/plans/priced`,
+      headers: { authorization: `Bearer ${ADMIN_KEY}` },
+      payload: { active: false },
+    });
+    expect(archived.statusCode).toBe(200);
+
+    // Step two, the way the strings USED to read: same slug. Still refused, and
+    // that refusal is correct, because the slug is what integrations pass to
+    // checkout. The old advice simply did not mention it.
+    const sameSlug = await app.inject({
+      method: 'POST',
+      url: `/api/v1/admin/applications/${applicationId}/plans`,
+      headers: { authorization: `Bearer ${ADMIN_KEY}` },
+      payload: { slug: 'priced', name: 'Priced v2', amount: 900 },
+    });
+    expect(sameSlug.statusCode).toBe(409);
+    expect(sameSlug.json().error.code).toBe('PLAN_SLUG_TAKEN');
+
+    // Step two, the way they read now. This is the assertion that makes the
+    // prose true rather than merely different.
+    const newSlug = await app.inject({
+      method: 'POST',
+      url: `/api/v1/admin/applications/${applicationId}/plans`,
+      headers: { authorization: `Bearer ${ADMIN_KEY}` },
+      payload: { slug: 'priced-v2', name: 'Priced v2', amount: 900 },
+    });
+    expect(newSlug.statusCode).toBe(201);
+    expect((newSlug.json().data as { amount: number }).amount).toBe(900);
   });
 
   it('says an ARCHIVED plan is what holds the slug, instead of "already exists"', async () => {

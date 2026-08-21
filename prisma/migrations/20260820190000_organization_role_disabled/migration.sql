@@ -1,0 +1,13 @@
+-- Revocation switch for an organization role.
+--
+-- A disabled role stays in the catalog and stays on the memberships holding it,
+-- but every organization-scoped request from a holder is refused and the role
+-- cannot be newly assigned. It is the "take this away now" primitive:
+-- re-tiering downward degrades holders silently, and deleting requires somewhere
+-- to move everyone to first.
+--
+-- Adding a NOT NULL column with a constant default does not rewrite the table on
+-- Postgres 11+, so this takes a brief ACCESS EXCLUSIVE lock to update the
+-- catalog metadata and no more. `organization_roles` holds a handful of rows per
+-- Application in any case.
+ALTER TABLE "organization_roles" ADD COLUMN "disabled" BOOLEAN NOT NULL DEFAULT false;

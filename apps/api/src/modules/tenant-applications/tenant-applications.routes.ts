@@ -40,12 +40,15 @@ import { prisma } from '../../lib/prisma.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
 import { listApiRequests } from '../../lib/request-log.js';
 import { CouponDiscountType, type LicenseKind } from '@prisma/client';
-import { AppEnvironmentSchema, BillingConfigSchema, BillingProviderSchema, GrantCreditsRequestSchema } from '@rekey.dev/shared-types';
+import { AppEnvironmentSchema, AuthConfigSchema, BillingConfigSchema, BillingProviderSchema, GrantCreditsRequestSchema } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../lib/error.js';
 import { hashPassword } from '../../lib/passwords.js';
 import { assertMetadataWithinLimit } from '../auth/auth.service.js';
 import { assertEndUserQuota } from '../../lib/tenant-limits.js';
-import { endUserRolesService } from '../end-user-roles/end-user-roles.service.js';
+import { entitlementOverridesService } from '../billing/entitlement-overrides.service.js';
+import { kickDeliveries } from '../webhooks/webhook.service.js';
+import { applicationRolesService } from '../application-roles/application-roles.service.js';
+import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 import { organizationsService } from '../organizations/organizations.service.js';
 import { entitlementsService } from '../billing/entitlements.service.js';
 import {
@@ -67,6 +70,152 @@ import { emitDetached } from '../webhooks/webhook.service.js';
 import { euLoginLockScope, getScopeLockState, LOGIN_POLICY } from '../../lib/brute-force.js';
 import { moneyAmount, positiveBoundedInt } from '../../lib/bounded-int.js';
 import { ok, okPage, okArray, okFlag, errs, ref, type JsonSchema } from '../../lib/openapi.js';
+
+/**
+ * OpenAPI/Fastify body schema for the auth-config patch.
+ *
+ * Deliberately a SECOND declaration alongside `AUTH_CONFIG_PATCH_BODY`, not a
+ * generated view of it: this one carries the prose that documents each switch
+ * for anyone reading the published spec, and zod carries the validation. What
+ * they must not do is disagree about which fields EXIST.
+ *
+ * They did. This schema omitted `hostedAuthorizeUrl` while the zod body
+ * accepted it, and there is no `additionalProperties: false` here, so the
+ * field worked perfectly and was invisible in `openapi.json`, undiscoverable
+ * to every generated client. That is the same failure that was reported from
+ * outside when the organization-role catalog shipped against a stale spec: a
+ * feature nobody can call from a generated client is not shipped.
+ *
+ * Exported so the parity test can compare its keys against the zod body.
+ */
+export const AUTH_CONFIG_PATCH_BODY_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    methods: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 40 } },
+    passwordMinLength: { type: 'integer', minimum: 8, maximum: 128 },
+    redirectUrls: { type: 'array', items: { type: 'string', format: 'uri' } },
+    appUrl: {
+      // `nullable: true`, not `type: ['string', 'null']`. The draft-07
+      // type-array form is not valid OpenAPI 3.0 (what this document
+      // declares), so it made the published openapi.json fail every
+      // real validator. Fastify's ajv treats the two identically at
+      // runtime, so this is a spelling change, not a contract change.
+      type: 'string',
+      nullable: true,
+      description:
+        "Base URL of your own application — what transactional emails link back to " +
+        '(the welcome mail CTA, and the base for reset/verify/magic-link URLs when the ' +
+        'SDK call does not supply one). Send null or "" to clear it. When unset, and ' +
+        'nothing else resolves (first redirectUrl origin, then DEFAULT_APP_URL), emails ' +
+        'render WITHOUT the call-to-action button rather than with a broken link.',
+    },
+    hostedAuthorizeUrl: {
+      // `nullable: true`, for the same OpenAPI 3.0 reason as `appUrl` above.
+      type: 'string',
+      nullable: true,
+      description:
+        "Where to send the browser for the sign-in half of this application's OpenID " +
+        'Connect flow, instead of the built-in email + password page. Send null or "" ' +
+        'to turn delegation off. The API refuses to delegate to its own authorize ' +
+        'endpoint, so a misconfiguration cannot loop the browser.',
+    },
+    organizationsEnabled: { type: 'boolean' },
+    passwordBreachCheckEnabled: { type: 'boolean', description: 'HIBP Pwned-Passwords breach check at sign-up/reset/change. Default true.' },
+    sendVerificationEmailOnSignUp: {
+      type: 'boolean',
+      description:
+        'Send the email-verification link automatically on password sign-up, alongside the welcome mail. Default true. Delivery is best-effort — a failed send never fails the sign-up.',
+    },
+    requireEmailVerification: {
+      type: 'boolean',
+      description:
+        'Refuse password sign-in with 403 EMAIL_NOT_VERIFIED until the end-user confirms their address. Default false; turning it on applies to existing unverified accounts immediately.',
+    },
+    signupEnabled: { type: 'boolean', description: 'Legacy alias for signupMode (false ⇔ invite_only). Prefer signupMode.' },
+    signupMode: {
+      type: 'string',
+      enum: ['public', 'secret_only', 'invite_only'],
+      description:
+        'Who may create end-users: public (any key), secret_only (server-side secret key only — publishable key refused with SIGNUP_REQUIRES_SECRET_KEY), or invite_only (no public sign-up).',
+    },
+    mfa: { type: 'string', enum: ['off', 'optional', 'required'], description: 'End-user 2FA policy.' },
+    mcpEnabled: { type: 'boolean', description: 'Expose a hosted MCP server + OAuth AS for this app.' },
+    oidcEnabled: {
+      type: 'boolean',
+      description:
+        'Act as an OpenID Connect provider: serve /.well-known/openid-configuration, ' +
+        'issue an id_token when the openid scope is granted, and expose /oauth/userinfo. ' +
+        'Independent of mcpEnabled. The `email` scope additionally needs ' +
+        'requireEmailVerification — Rekey will not assert an address nobody proved.',
+    },
+    dynamicClientRegistration: {
+      type: 'boolean',
+      description:
+        'Allow anyone to register an OAuth client with POST /oauth/register (RFC 7591 ' +
+        'open registration). Default true — MCP clients self-register and there is no ' +
+        'operator-side client-creation surface yet. Turn it off once your relying ' +
+        'parties are registered: open registration on a public IdP lets anyone put a ' +
+        "password prompt on this deployment's issuer origin.",
+    },
+    tokenAlg: {
+      type: 'string',
+      enum: ['HS256', 'RS256'],
+      description:
+        'Signature alg for NEW end-user access tokens. RS256 tokens verify offline ' +
+        'against GET /.well-known/jwks.json; HS256 (default) requires the API. ' +
+        'Switching never breaks outstanding tokens — the API verifies both.',
+    },
+  },
+} as const;
+
+/**
+ * Body of `PATCH /tenant/applications/:id/auth-config`.
+ *
+ * `.strict()`, matching the billing-config patch. Every key is optional, so a
+ * non-strict object accepted `{"mfaa":"required","tokenAlgorithm":"none"}`,
+ * dropped both, and answered 200 with an unchanged authConfig — a
+ * one-character typo silently no-opping this Application's MFA policy and
+ * token signing algorithm while telling the caller it worked. A patch body
+ * whose keys are ALL optional has no shape left to fail on except the key
+ * names, so those have to be the check. Unknown keys surface as 400
+ * VALIDATION_ERROR naming the offender (see the ZodError branch in
+ * lib/error.ts).
+ *
+ * EXPORTED, and at module scope, so the operator MCP tool that writes the same
+ * configuration can be checked against it mechanically rather than by someone
+ * remembering. `.strict()` means a field declared on `AuthConfigSchema` but
+ * missing HERE is refused however well it is declared there, and that failure
+ * is silent until a caller hits it: the panel sent `hostedAuthorizeUrl` and got
+ * "Unrecognized key(s)" in production. The same thing then happened again on
+ * the MCP tool, which was missing four of these. See the parity test in
+ * test/auth-config-surface-parity.test.ts.
+ */
+export const AUTH_CONFIG_PATCH_BODY = z
+  .object({
+    methods: z.array(z.string().min(1).max(40)).optional(),
+    passwordMinLength: z.number().int().min(8).max(128).optional(),
+    redirectUrls: z.array(z.string().url()).optional(),
+    // A URL, or null/'' to clear. Validated here rather than left to the
+    // AuthConfigSchema merge so a bad value is a 400 with a field path
+    // instead of a confusing schema error on an unrelated key.
+    appUrl: z.union([z.string().url(), z.literal(''), z.null()]).optional(),
+    // Same shape as `appUrl`, and for the same reason: '' or null clears it,
+    // which is how an operator turns the delegation back off without needing
+    // a second endpoint.
+    hostedAuthorizeUrl: z.union([z.string().url(), z.literal(''), z.null()]).optional(),
+    organizationsEnabled: z.boolean().optional(),
+    passwordBreachCheckEnabled: z.boolean().optional(),
+    sendVerificationEmailOnSignUp: z.boolean().optional(),
+    requireEmailVerification: z.boolean().optional(),
+    signupEnabled: z.boolean().optional(),
+    signupMode: z.enum(['public', 'secret_only', 'invite_only']).optional(),
+    mfa: z.enum(['off', 'optional', 'required']).optional(),
+    mcpEnabled: z.boolean().optional(),
+    oidcEnabled: z.boolean().optional(),
+    dynamicClientRegistration: z.boolean().optional(),
+    tokenAlg: z.enum(['HS256', 'RS256']).optional(),
+  })
+  .strict();
 
 // ---------------------------------------------------------------------------
 // Shared error groups
@@ -116,6 +265,27 @@ const APP_BILLING_WRITE_ERRORS = {
     'TENANT_ROLE_INSUFFICIENT — a legacy MEMBER (zero application grants) attempted a billing ' +
     "write; or APP_ACCESS_DENIED — the operator's grant on this Application (needs APP_BILLING " +
     'or APP_ADMIN) does not permit this action.',
+  404: APP_READ_ERRORS[404],
+} as const;
+
+/**
+ * Routes gated by `requireTenantRole(['OWNER'])` — the workspace lifecycle tier.
+ *
+ * Stricter than every other tier in this file, including OWNER_ADMIN_ONLY, and
+ * deliberately so. These three routes change what the workspace as a whole is
+ * running: promotion consumes a production slot permanently and cannot be
+ * undone, and disable takes a live product offline. Both are workspace-level
+ * consequences reached through a single application, so they answer to the
+ * workspace owner rather than to whoever administers that one application.
+ *
+ * No grant unlocks these, and ADMIN does not either.
+ */
+const OWNER_ONLY_ERRORS = {
+  401: TENANT_SESSION_ERRORS[401],
+  403:
+    'TENANT_MEMBERSHIP_REVOKED — the operator is no longer a member of this workspace; or ' +
+    'TENANT_ROLE_INSUFFICIENT — the operator is an ADMIN or MEMBER. This route requires the ' +
+    'workspace OWNER; no application grant and no admin role unlocks it.',
   404: APP_READ_ERRORS[404],
 } as const;
 
@@ -184,6 +354,31 @@ async function endUserLockState(
 // ---- request shapes (mirror the admin routes) ----
 
 const AppParam = z.object({ id: z.string().min(1) });
+
+/**
+ * `.strict()`, matching the other body schemas here: an unknown key on a
+ * disable request is far more likely to be a caller who thinks they are
+ * passing something meaningful (a duration, a notify flag) than a harmless
+ * typo, and silently dropping it would let them believe it took effect.
+ */
+const DisableAppBody = z.object({ reason: z.string().min(1).max(500).optional() }).strict();
+
+const SubscriptionParam = z.object({ id: z.string().min(1), subId: z.string().min(1) });
+
+/**
+ * A sparse map of `KIND:key` to the value this subscription should get.
+ *
+ * Deliberately loose HERE and strict in the service: `entitlementOverridesService`
+ * knows which kinds accept which value shapes and, more importantly, can say in
+ * the `fix` why a rejected value would have been silently discarded at resolve
+ * time. A zod union at the edge could only say "invalid".
+ *
+ * `null` is meaningful — it removes an override — so it is not stripped.
+ */
+const OverridePatchBody = z.record(
+  z.string(),
+  z.union([z.string(), z.number(), z.boolean(), z.null()]),
+);
 const KeyIdParam = z.object({ id: z.string().min(1), keyId: z.string().min(1) });
 const PlanSlugParam = z.object({ id: z.string().min(1), slug: z.string().min(1) });
 const CouponCodeParam = z.object({ id: z.string().min(1), code: z.string().min(1) });
@@ -268,6 +463,37 @@ const CreateCouponBody = z.object({
 const CouponActiveBody = z.object({ active: z.boolean() });
 
 /** Mounted under /api/v1/tenant/applications. */
+
+/**
+ * Refuse organization-role writes on an Application that has organizations
+ * turned off.
+ *
+ * Reads are deliberately NOT gated: the catalog is seeded on every Application,
+ * so a panel can show the vocabulary, and the enable prompt, before the
+ * feature is switched on. Writes are gated because authoring org roles for an
+ * Application that cannot hold an organization is meaningless, and because this
+ * refusal is the signal the panel and the MCP tools turn into "enable
+ * organizations first" rather than a silent no-op.
+ *
+ * The `fix` names both routes to it, since the caller may be a human in the
+ * panel or an agent over MCP.
+ */
+async function requireOrganizationsEnabled(applicationId: string): Promise<void> {
+  const app = await prisma.application.findUnique({
+    where: { id: applicationId },
+    select: { authConfig: true },
+  });
+  const config = AuthConfigSchema.parse(app?.authConfig ?? {});
+  if (!config.organizationsEnabled) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'ORGANIZATIONS_NOT_ENABLED',
+      message: 'Organizations are not enabled for this Application, so it has no use for custom organization roles.',
+      fix: 'Enable them first: Panel → Application → Auth → Organizations, or PATCH /api/v1/tenant/applications/:id/auth-config with `{"organizationsEnabled": true}` (MCP: update_auth_config).',
+    });
+  }
+}
+
 export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('onRequest', requireTenantSession);
 
@@ -579,8 +805,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           'Requires the **OWNER or ADMIN** workspace role.\n\n' +
           'The Application is the isolation boundary in Rekey — every row carries its ' +
           '`applicationId`. Create a separate Application per environment rather than ' +
-          'mixing real and rehearsal data in one: `environment` is fixed here and cannot ' +
-          'be changed afterwards.',
+          'mixing real and rehearsal data in one.\n\n' +
+          '`environment` set here can later be raised to PRODUCTION exactly once, via ' +
+          'POST /api/v1/tenant/applications/:id/promote. It can never be lowered.',
         body: {
           type: 'object',
           required: ['name', 'slug'],
@@ -592,11 +819,13 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               enum: ['PRODUCTION', 'STAGING', 'DEVELOPMENT'],
               default: 'DEVELOPMENT',
               description:
-                'What this Application is, fixed at creation and **immutable** — there is no ' +
-                'endpoint that changes it. Defaults to DEVELOPMENT. A PRODUCTION app mints ' +
+                'What this Application is. Defaults to DEVELOPMENT. A PRODUCTION app mints ' +
                 'rp_live_ keys, others mint rp_test_ — the prefix is descriptive. Environment ' +
-                'does NOT restrict which billing credentials the app may hold. To go live, ' +
-                'create a PRODUCTION Application.',
+                'does NOT restrict which billing credentials the app may hold.\n\n' +
+                'Creating it PRODUCTION consumes a production slot immediately. Creating it ' +
+                'DEVELOPMENT or STAGING costs nothing and can be promoted to PRODUCTION later ' +
+                '(one-way, once-only) via POST /:id/promote, so it is the safer default when ' +
+                'you are not sure yet.',
             },
             billingProvider: { type: 'string', enum: registryNames },
             enableBilling: {
@@ -637,6 +866,333 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     },
   );
 
+  // ---------- Lifecycle: promote to production, disable / enable ----------
+  //
+  // See docs/specs/app-lifecycle.md. These three are the only endpoints that
+  // move an Application between lifecycle states, and the only writers of
+  // `environment` after create.
+
+  app.post(
+    '/:id/promote',
+    {
+      preHandler: requireTenantRole(['OWNER']),
+      schema: {
+        tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
+        summary: 'Promote an Application to the production environment',
+        description:
+          'Requires the **workspace OWNER** role. An ADMIN cannot promote, and no application ' +
+          'grant unlocks it: promotion permanently consumes one of the workspace\'s production ' +
+          'slots, which is a workspace-level commitment made through a single application.\n\n' +
+          'Moves a DEVELOPMENT or STAGING Application to PRODUCTION. **One-way and ' +
+          'once-only**: there is no endpoint that moves an Application back out of ' +
+          'production, and calling this again returns 409.\n\n' +
+          'Consumes one of the workspace\'s production slots, so it fails with ' +
+          '`TENANT_QUOTA_EXCEEDED` when `maxProductionApps` is already met. Read the ' +
+          'current figure from `GET /api/v1/tenant/workspace/limits` before offering this ' +
+          'to a user, and note that a *disabled* production application does not hold a ' +
+          'slot.\n\n' +
+          'Existing API keys are **not** touched. Keys minted before the promotion keep ' +
+          'their `rp_test_` prefix and keep working — the prefix is a label, not a ' +
+          'capability. Mint a `rp_live_` key and retire the old one when convenient.',
+        params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        response: {
+          200: ok(ref('Application'), 'The promoted application, now in the production environment.'),
+          ...errs({
+            ...OWNER_ONLY_ERRORS,
+            403:
+              OWNER_ONLY_ERRORS[403] +
+              ' Or TENANT_QUOTA_EXCEEDED — the workspace is already running its ' +
+              '`maxProductionApps` limit. Disabling a production application frees its slot.',
+            409:
+              'ALREADY_PROMOTED — the application is already in the production environment; or ' +
+              'APPLICATION_DISABLED — the application is disabled and must be enabled before ' +
+              'it can be promoted.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'write');
+      const promoted = await applicationsService.promote(id, req.tenantUser?.id ?? null);
+      void recordSecurityEvent({
+        type: 'app.promoted',
+        actorType: 'operator',
+        tenantId: req.tenantId!,
+        applicationId: id,
+        ...requestContext(req),
+        metadata: { slug: promoted.slug },
+      });
+      return { success: true, data: stripApplicationSecrets(promoted) };
+    },
+  );
+
+  app.post(
+    '/:id/disable',
+    {
+      preHandler: requireTenantRole(['OWNER']),
+      schema: {
+        tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
+        summary: 'Disable an Application',
+        description:
+          'Requires the **workspace OWNER** role. An ADMIN cannot disable, and no application ' +
+          'grant unlocks it: taking a live product offline is a workspace-level decision.\n\n' +
+          'Rekey has no Application delete; this is the reversible substitute. A disabled ' +
+          'Application refuses every end-user-facing request (403 `APPLICATION_DISABLED` on ' +
+          'both the secret-key and publishable-key surfaces), serves no hosted portal, and ' +
+          'dispatches no outbound webhook, transactional email or dunning escalation. Its ' +
+          'dunning clock is paused rather than advanced.\n\n' +
+          '**Nothing is deleted and no session is revoked.** End-user access tokens issued ' +
+          'before the freeze are still valid after it is lifted. Every operator surface — ' +
+          'this API and the panel — stays fully readable while disabled.\n\n' +
+          'A disabled PRODUCTION Application does **not** hold a production slot, so this ' +
+          'frees capacity under `maxProductionApps`. Re-enabling therefore requires a free ' +
+          'slot and can be refused. Never fails on quota, and disabling an ' +
+          'already-disabled Application is a no-op that preserves the original timestamp ' +
+          'and reason.',
+        params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        body: {
+          type: 'object',
+          properties: {
+            reason: {
+              type: 'string',
+              maxLength: 500,
+              description:
+                'Your own note about why, shown in the panel alongside the disabled state. ' +
+                'Never shown to an end-user and never sent anywhere.',
+            },
+          },
+        },
+        response: {
+          200: ok(ref('Application'), 'The disabled application.'),
+          ...errs({ 400: 'VALIDATION_ERROR — `reason` failed schema validation.', ...OWNER_ONLY_ERRORS }),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'write');
+      const body = DisableAppBody.parse(req.body ?? {});
+      const disabled = await applicationsService.disable(id, {
+        ...(body.reason !== undefined && { reason: body.reason }),
+        actorId: req.tenantUser?.id ?? null,
+      });
+      void recordSecurityEvent({
+        type: 'app.disabled',
+        actorType: 'operator',
+        tenantId: req.tenantId!,
+        applicationId: id,
+        ...requestContext(req),
+        // The reason is the operator's own note and may name a customer or an
+        // incident; the security log records THAT one was given, not what it said.
+        metadata: { slug: disabled.slug, reasonGiven: body.reason !== undefined },
+      });
+      return { success: true, data: stripApplicationSecrets(disabled) };
+    },
+  );
+
+  app.delete(
+    '/:id/disable',
+    {
+      preHandler: requireTenantRole(['OWNER']),
+      schema: {
+        tags: ['Tenant · Applications'],
+        security: [{ tenantSession: [] }],
+        summary: 'Re-enable a disabled Application',
+        description:
+          'Requires the **workspace OWNER** role, the same as disabling. Re-enabling a ' +
+          'production application re-takes a production slot, so it is the same workspace-level ' +
+          'commitment as promoting one.\n\n' +
+          'Lifts the freeze and restores the Application to exactly the state it was frozen ' +
+          'in. Idempotent on an Application that is not disabled.\n\n' +
+          '**Can be refused.** A disabled PRODUCTION Application holds no production slot, ' +
+          'so re-enabling one consumes a slot and fails with `TENANT_QUOTA_EXCEEDED` when ' +
+          'the workspace is already running its `maxProductionApps` limit. Free a slot by ' +
+          'disabling a different production application, or contact support to raise the ' +
+          'limit — it cannot be raised self-serve. DEVELOPMENT and STAGING Applications ' +
+          'hold no slot and always enable.',
+        params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        response: {
+          200: ok(ref('Application'), 'The re-enabled application.'),
+          ...errs({
+            ...OWNER_ONLY_ERRORS,
+            403:
+              OWNER_ONLY_ERRORS[403] +
+              ' Or TENANT_QUOTA_EXCEEDED — re-enabling this production application would ' +
+              "exceed the workspace's `maxProductionApps`.",
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'write');
+      const enabled = await applicationsService.enable(id);
+      void recordSecurityEvent({
+        type: 'app.enabled',
+        actorType: 'operator',
+        tenantId: req.tenantId!,
+        applicationId: id,
+        ...requestContext(req),
+        metadata: { slug: enabled.slug },
+      });
+      return { success: true, data: stripApplicationSecrets(enabled) };
+    },
+  );
+
+
+  // ---------- Per-subscription entitlement overrides ----------
+  //
+  // The write path for `Subscription.entitlementOverrides`, which decides what
+  // a subscription actually grants and which nothing in the product could
+  // write before this. See docs/specs/entitlement-overrides.md.
+
+  app.patch(
+    '/:id/subscriptions/:subId/entitlement-overrides',
+    {
+      schema: {
+        tags: ['Tenant · Billing'],
+        security: [{ tenantSession: [] }],
+        summary: "Adjust what one subscription grants, without minting a private plan",
+        description:
+          'Requires **billing-write** access to this Application — OWNER/ADMIN, or a MEMBER ' +
+          'with an `APP_ADMIN` or `APP_BILLING` grant on it.\n\n' +
+          'Sells a bespoke deal to one customer by deviating from their plan, rather than ' +
+          'creating a plan for one buyer. The overrides are merged over the plan\'s ' +
+          'entitlements on every resolve, so what the customer is ENTITLED to changes ' +
+          'immediately and everywhere — `GET /billing/entitlements`, feature gates and usage ' +
+          'allowances.\n\n' +
+          '**Already-materialised grants are not retroactive.** CREDIT is granted once per ' +
+          'period against an idempotency anchor, so raising a credit allowance mid-period ' +
+          'applies at the next renewal rather than topping up now. A LICENSE that has already ' +
+          'been issued keeps the `seatsAllowed` it was issued with; changing a seat count on a ' +
+          'live licence does not re-issue it. FEATURE and USAGE are read live and do take ' +
+          'effect at once.\n\n' +
+          '**Sparse.** Keys you do not mention are left alone, so raising one allowance never ' +
+          'requires restating the rest of the deal. Send `null` as a value to REMOVE that ' +
+          'override and revert the entitlement to whatever the plan says.\n\n' +
+          '**Only FEATURE keys may introduce an entitlement the plan does not carry.** A ' +
+          'CREDIT, LICENSE or USAGE override replaces a quantity on an entitlement that must ' +
+          'already exist, because the resolver has nothing to attach it to otherwise — add it ' +
+          'to the plan first.\n\n' +
+          'Emits `subscription.entitlements_updated` when the resolved entitlements actually ' +
+          'change. Subscribe to that if you project entitlements onto state of your own: a ' +
+          'status-only subscriber never hears about a deal being adjusted.',
+        params: {
+          type: 'object',
+          properties: { id: { type: 'string' }, subId: { type: 'string' } },
+          required: ['id', 'subId'],
+        },
+        body: {
+          type: 'object',
+          minProperties: 1,
+          // Values are a union of string / number / boolean / null, which is
+          // wider than the OpenAPI 3.0 `type` keyword can express in one go.
+          // Left unconstrained here and enforced in the service, where the
+          // refusal can explain WHY a given value would have sold nothing.
+          additionalProperties: true,
+          description:
+            'Map of `KIND:key` to the value this subscription should get. KIND is FEATURE, ' +
+            'CREDIT, LICENSE or USAGE. Example: `{"FEATURE:max_production_apps": 5, ' +
+            '"FEATURE:beta_access": null}` raises one allowance and removes one override.',
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                entitlements: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    // A RESOLVED entitlement, not a stored row: it has no `id`
+                    // or `createdAt`, because a FEATURE an override introduced
+                    // exists only in the merge and was never a table row.
+                    properties: {
+                      kind: { type: 'string', enum: ['FEATURE', 'CREDIT', 'LICENSE', 'USAGE'] },
+                      key: { type: 'string', nullable: true },
+                      valueType: { type: 'string', enum: ['BOOL', 'INT', 'STRING'], nullable: true },
+                      value: { type: 'string', nullable: true },
+                      quantity: { type: 'integer', nullable: true },
+                      creditsPerUnit: { type: 'integer', nullable: true },
+                      licenseKind: { type: 'string', enum: ['PERPETUAL', 'TIMED', 'SEATS'], nullable: true },
+                      rollover: { type: 'boolean' },
+                    },
+                    required: ['kind', 'rollover'],
+                  },
+                  description:
+                    'What this subscriber now holds — the plan\'s entitlements with these ' +
+                    'overrides already merged. Deliberately not the stored override blob: the ' +
+                    'blob is the mechanism, and the question an operator is asking is what the ' +
+                    'customer gets.',
+                },
+                changed: {
+                  type: 'boolean',
+                  description:
+                    'Whether the resolved entitlements actually differ from before this call. ' +
+                    'False for a write that restated the current deal — no webhook is emitted ' +
+                    'in that case.',
+                },
+              },
+              required: ['entitlements', 'changed'],
+            },
+            'The subscription\'s entitlements after the merge.',
+          ),
+          ...errs({
+            400:
+              'ENTITLEMENT_OVERRIDE_INVALID — a key is malformed, a quantity-kind key names an ' +
+              'entitlement the plan does not carry, or a value would be discarded at resolve ' +
+              'time. The `fix` names which. Or VALIDATION_ERROR — the body is empty.',
+            ...APP_BILLING_WRITE_ERRORS,
+            404:
+              APP_BILLING_WRITE_ERRORS[404] +
+              ' Or SUBSCRIPTION_NOT_FOUND — no subscription with that id on this application.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id, subId } = SubscriptionParam.parse(req.params);
+      await ensureAppAccess(req, id, 'billing-write');
+      const patch = OverridePatchBody.parse(req.body);
+
+      const result = await entitlementOverridesService.patch({
+        applicationId: id,
+        subscriptionId: subId,
+        patch,
+      });
+
+      // After the transaction committed, never inside it: these are network
+      // sends, and a rollback would otherwise have announced a change that
+      // never landed.
+      kickDeliveries(result.deliveryIds);
+
+      void recordSecurityEvent({
+        type: 'app.subscription_entitlements_overridden',
+        actorType: 'operator',
+        tenantId: req.tenantId!,
+        applicationId: id,
+        ...requestContext(req),
+        // The KEYS touched, never the values. "Who changed this customer's deal
+        // and when" is the security question; the values are commercial terms,
+        // already readable through the billing view, and a security log is not
+        // the place to duplicate them.
+        metadata: {
+          subscriptionId: subId,
+          keys: Object.keys(patch),
+          changed: result.changed,
+        },
+      });
+
+      return {
+        success: true,
+        data: { entitlements: result.entitlements, changed: result.changed },
+      };
+    },
+  );
+
   // ---------- Auth config (which methods are enabled) ----------
 
   app.patch(
@@ -654,75 +1210,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           'or update the redirect URL allowlist. OAuth provider availability is implicit ' +
           'from the per-provider oauth-config endpoints.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
-        body: {
-          type: 'object',
-          properties: {
-            methods: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 40 } },
-            passwordMinLength: { type: 'integer', minimum: 8, maximum: 128 },
-            redirectUrls: { type: 'array', items: { type: 'string', format: 'uri' } },
-            appUrl: {
-              // `nullable: true`, not `type: ['string', 'null']`. The draft-07
-              // type-array form is not valid OpenAPI 3.0 (what this document
-              // declares), so it made the published openapi.json fail every
-              // real validator. Fastify's ajv treats the two identically at
-              // runtime, so this is a spelling change, not a contract change.
-              type: 'string',
-              nullable: true,
-              description:
-                "Base URL of your own application — what transactional emails link back to " +
-                '(the welcome mail CTA, and the base for reset/verify/magic-link URLs when the ' +
-                'SDK call does not supply one). Send null or "" to clear it. When unset, and ' +
-                'nothing else resolves (first redirectUrl origin, then DEFAULT_APP_URL), emails ' +
-                'render WITHOUT the call-to-action button rather than with a broken link.',
-            },
-            organizationsEnabled: { type: 'boolean' },
-            passwordBreachCheckEnabled: { type: 'boolean', description: 'HIBP Pwned-Passwords breach check at sign-up/reset/change. Default true.' },
-            sendVerificationEmailOnSignUp: {
-              type: 'boolean',
-              description:
-                'Send the email-verification link automatically on password sign-up, alongside the welcome mail. Default true. Delivery is best-effort — a failed send never fails the sign-up.',
-            },
-            requireEmailVerification: {
-              type: 'boolean',
-              description:
-                'Refuse password sign-in with 403 EMAIL_NOT_VERIFIED until the end-user confirms their address. Default false; turning it on applies to existing unverified accounts immediately.',
-            },
-            signupEnabled: { type: 'boolean', description: 'Legacy alias for signupMode (false ⇔ invite_only). Prefer signupMode.' },
-            signupMode: {
-              type: 'string',
-              enum: ['public', 'secret_only', 'invite_only'],
-              description:
-                'Who may create end-users: public (any key), secret_only (server-side secret key only — publishable key refused with SIGNUP_REQUIRES_SECRET_KEY), or invite_only (no public sign-up).',
-            },
-            mfa: { type: 'string', enum: ['off', 'optional', 'required'], description: 'End-user 2FA policy.' },
-            mcpEnabled: { type: 'boolean', description: 'Expose a hosted MCP server + OAuth AS for this app.' },
-            oidcEnabled: {
-              type: 'boolean',
-              description:
-                'Act as an OpenID Connect provider: serve /.well-known/openid-configuration, ' +
-                'issue an id_token when the openid scope is granted, and expose /oauth/userinfo. ' +
-                'Independent of mcpEnabled. The `email` scope additionally needs ' +
-                'requireEmailVerification — Rekey will not assert an address nobody proved.',
-            },
-            dynamicClientRegistration: {
-              type: 'boolean',
-              description:
-                'Allow anyone to register an OAuth client with POST /oauth/register (RFC 7591 ' +
-                'open registration). Default true — MCP clients self-register and there is no ' +
-                'operator-side client-creation surface yet. Turn it off once your relying ' +
-                'parties are registered: open registration on a public IdP lets anyone put a ' +
-                "password prompt on this deployment's issuer origin.",
-            },
-            tokenAlg: {
-              type: 'string',
-              enum: ['HS256', 'RS256'],
-              description:
-                'Signature alg for NEW end-user access tokens. RS256 tokens verify offline ' +
-                'against GET /.well-known/jwks.json; HS256 (default) requires the API. ' +
-                'Switching never breaks outstanding tokens — the API verifies both.',
-            },
-          },
-        },
+        body: AUTH_CONFIG_PATCH_BODY_JSON_SCHEMA,
         response: {
           200: ok(
             { type: 'object', properties: { authConfig: ref('AuthConfig') }, required: ['authConfig'] },
@@ -735,38 +1223,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     async (req) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'write');
-      // `.strict()`, matching the billing-config patch below. Every key is
-      // optional, so a non-strict object accepted `{"mfaa":"required",
-      // "tokenAlgorithm":"none"}`, dropped both, and answered 200 with an
-      // unchanged authConfig — a one-character typo silently no-opping this
-      // Application's MFA policy and token signing algorithm while telling
-      // the caller it worked. A patch body whose keys are ALL optional has no
-      // shape left to fail on except the key names, so those have to be the
-      // check. Unknown keys now surface as 400 VALIDATION_ERROR naming the
-      // offender (see the ZodError branch in lib/error.ts).
-      const body = z
-        .object({
-          methods: z.array(z.string().min(1).max(40)).optional(),
-          passwordMinLength: z.number().int().min(8).max(128).optional(),
-          redirectUrls: z.array(z.string().url()).optional(),
-          // A URL, or null/'' to clear. Validated here rather than left to the
-          // AuthConfigSchema merge so a bad value is a 400 with a field path
-          // instead of a confusing schema error on an unrelated key.
-          appUrl: z.union([z.string().url(), z.literal(''), z.null()]).optional(),
-          organizationsEnabled: z.boolean().optional(),
-          passwordBreachCheckEnabled: z.boolean().optional(),
-          sendVerificationEmailOnSignUp: z.boolean().optional(),
-          requireEmailVerification: z.boolean().optional(),
-          signupEnabled: z.boolean().optional(),
-          signupMode: z.enum(['public', 'secret_only', 'invite_only']).optional(),
-          mfa: z.enum(['off', 'optional', 'required']).optional(),
-          mcpEnabled: z.boolean().optional(),
-          oidcEnabled: z.boolean().optional(),
-          dynamicClientRegistration: z.boolean().optional(),
-          tokenAlg: z.enum(['HS256', 'RS256']).optional(),
-        })
-        .strict()
-        .parse(req.body ?? {});
+      const body = AUTH_CONFIG_PATCH_BODY.parse(req.body ?? {});
       const updated = await applicationsService.updateAuthConfig({
         applicationId: id,
         patch: body,
@@ -1143,6 +1600,18 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             meterSlug: { type: 'string', minLength: 1, maxLength: 40 },
             pricePerUnitCents: { type: 'integer', minimum: 0, maximum: 2147483647 },
             creditsAmount: { type: 'integer', minimum: 1, maximum: 2147483647 },
+            trialDays: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 365,
+              description:
+                'HELD in this release: a non-zero value is refused with ' +
+                'PLAN_TRIAL_UNAVAILABLE. ' +
+                'Free-trial length for a SUBSCRIPTION plan. The buyer is not charged until it ' +
+                'ends. SUBSCRIPTION only: a one-off purchase has no recurring charge for a ' +
+                'trial to convert into, and the provider must support trials at checkout ' +
+                '(BILLING_TRIAL_UNSUPPORTED otherwise).',
+            },
             metadata: { type: 'object', additionalProperties: true },
           },
         },
@@ -1242,6 +1711,18 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               enum: ['MONTH', 'YEAR'],
               description: 'Unregistered plans only.',
             },
+            trialDays: {
+              type: 'integer',
+              minimum: 0,
+              maximum: 365,
+              description:
+                'HELD in this release: a non-zero value is refused with ' +
+                'PLAN_TRIAL_UNAVAILABLE. ' +
+                'Free-trial length in days. Send 0 to CLEAR an existing trial, which is the ' +
+                'only way to withdraw an offer already advertised. Editable after provider ' +
+                'registration, unlike price: the trial is applied per checkout session ' +
+                'rather than baked into the immutable Price object. SUBSCRIPTION plans only.',
+            },
             metadata: { type: 'object', additionalProperties: true },
           },
         },
@@ -1264,6 +1745,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ...(body.amount !== undefined && { amount: body.amount }),
         ...(body.currency !== undefined && { currency: body.currency }),
         ...(body.interval !== undefined && { interval: body.interval }),
+        // Never forwarded before, so `UpdatePlanBody` validated a field that
+        // was then discarded one line later. 0 clears the trial.
+        ...(body.trialDays !== undefined && { trialDays: body.trialDays }),
         ...(body.metadata !== undefined && { metadata: body.metadata }),
       });
       void recordSecurityEvent({
@@ -3176,8 +3660,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // Resolve role: explicit pick must exist in the catalog; otherwise
       // assign the application's default.
       const roleName = body.role
-        ? (await endUserRolesService.assertExists(id, body.role), body.role)
-        : (await endUserRolesService.getDefault(id)).name;
+        ? (await applicationRolesService.assertExists(id, body.role), body.role)
+        : (await applicationRolesService.getDefault(id)).name;
       try {
         const created = await prisma.endUser.create({
           data: {
@@ -3620,7 +4104,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // Validate role against the catalog before writing — prevents typos
       // from creating phantom roles via the panel.
       if (body.role !== undefined) {
-        await endUserRolesService.assertExists(params.id, body.role);
+        await applicationRolesService.assertExists(params.id, body.role);
       }
       const updated = await prisma.endUser.update({
         where: { id: params.euid },
@@ -5056,15 +5540,58 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     },
   );
 
-  // ---------- End-user roles (RBAC catalog) ----------
+  // The request schemas the canonical routes and the deprecated `/end-user-roles`
+  // aliases BOTH use. Shared rather than copied: the alias first shipped without
+  // them, and the difference was not cosmetic. Fastify's route-level check
+  // answers BAD_REQUEST, the handler's zod parse answers VALIDATION_ERROR, so
+  // the same malformed request got two different error codes depending on which
+  // path the caller used. An alias that behaves differently from the route it
+  // aliases is worse than no alias.
+  const APPLICATION_ROLE_CREATE_BODY = {
+    type: 'object',
+    required: ['name'],
+    properties: {
+      name: { type: 'string', minLength: 2, maxLength: 40 },
+      description: { type: 'string', maxLength: 240 },
+      isDefault: { type: 'boolean' },
+    },
+  } as const;
+
+  const APPLICATION_ROLE_PATCH_BODY = {
+    type: 'object',
+    properties: {
+      description: { type: 'string', maxLength: 240 },
+      isDefault: { type: 'boolean' },
+    },
+  } as const;
+
+  const APPLICATION_ROLE_DELETE_QUERY = {
+    type: 'object',
+    properties: { reassignTo: { type: 'string', minLength: 1, maxLength: 40 } },
+  } as const;
+
+  // ---------- Application roles (app-wide end-user RBAC catalog) ----------
   //
   // Per-Application catalog of roles that EndUser.role validates against.
   // Single default role per Application — assigned to every public sign-up.
   // Operators manage names + isDefault here; mutations to EndUser.role
   // route through the catalog (assertExists).
+  //
+  // APP-WIDE, not organization-scoped. `EndUser.role` is one value per
+  // (Application, end-user) and is identical in every organization that user
+  // belongs to. The organization-scoped axis is a separate catalog,
+  // `/:id/organization-roles` below, feeding OrganizationMembership.role.
+  // Conflating the two is the mistake this naming exists to prevent.
+  //
+  // Served at `/:id/application-roles`. The former `/:id/end-user-roles` path
+  // is still registered (hidden, undocumented) so existing panel builds and
+  // scripts keep working; see the alias block after the DELETE handler. The
+  // END_USER_ROLE_* error codes are deliberately UNCHANGED. They are wire
+  // contract that integrators match on, and renaming them would break callers
+  // for no gain beyond tidiness.
 
   app.get(
-    '/:id/end-user-roles',
+    '/:id/application-roles',
     {
       schema: {
         tags: ['Tenant · End-users'],
@@ -5099,12 +5626,12 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
     async (req) => {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'read');
-      return { success: true, data: await endUserRolesService.list(id) };
+      return { success: true, data: await applicationRolesService.list(id) };
     },
   );
 
   app.post(
-    '/:id/end-user-roles',
+    '/:id/application-roles',
     {
       schema: {
         tags: ['Tenant · End-users'],
@@ -5113,15 +5640,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         description:
           'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.',
-        body: {
-          type: 'object',
-          required: ['name'],
-          properties: {
-            name: { type: 'string', minLength: 2, maxLength: 40 },
-            description: { type: 'string', maxLength: 240 },
-            isDefault: { type: 'boolean' },
-          },
-        },
+        body: APPLICATION_ROLE_CREATE_BODY,
         response: {
           201: ok(
             {
@@ -5161,7 +5680,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         })
         .strict()
         .parse(req.body);
-      const created = await endUserRolesService.create({
+      const created = await applicationRolesService.create({
         applicationId: id,
         name: body.name,
         ...(body.description !== undefined && { description: body.description }),
@@ -5172,7 +5691,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   );
 
   app.patch(
-    '/:id/end-user-roles/:name',
+    '/:id/application-roles/:name',
     {
       schema: {
         tags: ['Tenant · End-users'],
@@ -5181,13 +5700,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         description:
           'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.',
-        body: {
-          type: 'object',
-          properties: {
-            description: { type: 'string', maxLength: 240 },
-            isDefault: { type: 'boolean' },
-          },
-        },
+        body: APPLICATION_ROLE_PATCH_BODY,
         response: {
           200: ok(
             {
@@ -5226,7 +5739,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         })
         .strict()
         .parse(req.body ?? {});
-      const updated = await endUserRolesService.update({
+      const updated = await applicationRolesService.update({
         applicationId: params.id,
         name: params.name,
         ...(body.description !== undefined && { description: body.description }),
@@ -5237,7 +5750,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
   );
 
   app.delete(
-    '/:id/end-user-roles/:name',
+    '/:id/application-roles/:name',
     {
       schema: {
         tags: ['Tenant · End-users'],
@@ -5246,10 +5759,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         description:
           'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.',
-        querystring: {
-          type: 'object',
-          properties: { reassignTo: { type: 'string', minLength: 1, maxLength: 40 } },
-        },
+        querystring: APPLICATION_ROLE_DELETE_QUERY,
         response: {
           200: ok(
             {
@@ -5280,10 +5790,398 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         .parse(req.params);
       const q = z.object({ reassignTo: z.string().min(1).max(40).optional() }).parse(req.query);
       await ensureAppAccess(req, params.id, 'write');
-      const result = await endUserRolesService.remove({
+      const result = await applicationRolesService.remove({
         applicationId: params.id,
         name: params.name,
         ...(q.reassignTo !== undefined && { reassignTo: q.reassignTo }),
+      });
+      return { success: true, data: result };
+    },
+  );
+
+  // ---------- Deprecated path alias: /end-user-roles ----------
+  //
+  // The catalog moved to `/:id/application-roles` when it was renamed to say
+  // which axis it governs. These four re-register the old URLs against the same
+  // service so nothing that already shipped breaks. Hidden from the OpenAPI doc
+  // so the surface reads as one path, not two.
+
+  const legacyRoleAlias = { hide: true, tags: ['Tenant · End-users'] } as const;
+
+  app.get('/:id/end-user-roles', { schema: legacyRoleAlias }, async (req) => {
+    const { id } = AppParam.parse(req.params);
+    await ensureAppAccess(req, id, 'read');
+    return { success: true, data: await applicationRolesService.list(id) };
+  });
+
+  app.post(
+    '/:id/end-user-roles',
+    { schema: { ...legacyRoleAlias, body: APPLICATION_ROLE_CREATE_BODY } },
+    async (req, reply) => {
+    const { id } = AppParam.parse(req.params);
+    await ensureAppAccess(req, id, 'write');
+    const body = z
+      .object({
+        name: z.string().min(2).max(40),
+        description: z.string().max(240).optional(),
+        isDefault: z.boolean().optional(),
+      })
+      .strict()
+      .parse(req.body);
+    const created = await applicationRolesService.create({
+      applicationId: id,
+      name: body.name,
+      ...(body.description !== undefined && { description: body.description }),
+      ...(body.isDefault !== undefined && { isDefault: body.isDefault }),
+    });
+    return reply.status(201).send({ success: true, data: created });
+    },
+  );
+
+  app.patch(
+    '/:id/end-user-roles/:name',
+    { schema: { ...legacyRoleAlias, body: APPLICATION_ROLE_PATCH_BODY } },
+    async (req) => {
+    const params = z.object({ id: z.string().min(1), name: z.string().min(1) }).parse(req.params);
+    await ensureAppAccess(req, params.id, 'write');
+    const body = z
+      .object({
+        description: z.string().max(240).nullable().optional(),
+        isDefault: z.boolean().optional(),
+      })
+      .strict()
+      .parse(req.body ?? {});
+    const updated = await applicationRolesService.update({
+      applicationId: params.id,
+      name: params.name,
+      ...(body.description !== undefined && { description: body.description }),
+      ...(body.isDefault !== undefined && { isDefault: body.isDefault }),
+    });
+      return { success: true, data: updated };
+    },
+  );
+
+  app.delete(
+    '/:id/end-user-roles/:name',
+    { schema: { ...legacyRoleAlias, querystring: APPLICATION_ROLE_DELETE_QUERY } },
+    async (req) => {
+    const params = z.object({ id: z.string().min(1), name: z.string().min(1) }).parse(req.params);
+    const q = z.object({ reassignTo: z.string().min(1).max(40).optional() }).parse(req.query);
+    await ensureAppAccess(req, params.id, 'write');
+    const result = await applicationRolesService.remove({
+      applicationId: params.id,
+      name: params.name,
+      ...(q.reassignTo !== undefined && { reassignTo: q.reassignTo }),
+    });
+      return { success: true, data: result };
+    },
+  );
+
+  // ---------- Organization roles (org-scoped RBAC catalog) ----------
+  //
+  // The ORG-scoped twin of `/:id/application-roles` above. Feeds
+  // OrganizationMembership.role, which is per (organization, end-user), so a
+  // person in two organizations holds two independent values, unlike
+  // EndUser.role which is one value app-wide.
+  //
+  // Operators author the vocabulary here; org OWNERs/ADMINs assign it with
+  // their own end-user tokens via /api/v1/users/me/organizations/:id/members.
+  // End-users can read the catalog (GET /users/me/organizations/roles) but
+  // never write it, so no org member can mint a name that outranks their own.
+  //
+  // Every role carries a `baseRole` of OWNER/ADMIN/MEMBER. Rekey gates on the
+  // TIER; the name is the customer app's vocabulary and is never interpreted.
+
+  app.get(
+    '/:id/organization-roles',
+    {
+      schema: {
+        tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
+        summary: 'List the organization-role catalog for an Application',
+        description:
+          'Requires **read** access to this Application: OWNER/ADMIN, or a MEMBER holding ' +
+          'any grant on it. Returns the built-in OWNER / ADMIN / MEMBER plus any custom ' +
+          'roles. Readable whether or not `authConfig.organizationsEnabled` is set, because the ' +
+          'catalog is seeded on every Application so turning organizations on later never ' +
+          'lands on an empty vocabulary.',
+        response: {
+          200: okArray(
+            {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                description: { type: 'string', nullable: true },
+                baseRole: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                isDefault: { type: 'boolean' },
+                isBuiltIn: { type: 'boolean' },
+                disabled: {
+                  type: 'boolean',
+                  description:
+                    'Holders are refused (403 ORGANIZATION_ROLE_DISABLED) and the role cannot be newly assigned. Reversible.',
+                },
+                createdAt: { type: 'string', format: 'date-time' },
+                updatedAt: { type: 'string', format: 'date-time' },
+              },
+              required: [
+                'name',
+                'baseRole',
+                'isDefault',
+                'isBuiltIn',
+                'disabled',
+                'createdAt',
+                'updatedAt',
+              ],
+            },
+            'The catalog, built-ins first then alphabetical.',
+          ),
+          ...errs(APP_READ_ERRORS),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'read');
+      return { success: true, data: await organizationRolesService.list(id) };
+    },
+  );
+
+  app.post(
+    '/:id/organization-roles',
+    {
+      schema: {
+        tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
+        summary: 'Add a custom organization role',
+        description:
+          'Requires **write** access to this Application: OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it. Also requires `authConfig.organizationsEnabled`, since ' +
+          'there is no point authoring org vocabulary for an Application that cannot have orgs, ' +
+          'and refusing here is what surfaces the enable-organizations prompt in the panel ' +
+          'and over MCP.',
+        body: {
+          type: 'object',
+          required: ['name', 'baseRole'],
+          properties: {
+            name: {
+              type: 'string',
+              description:
+                'Lowercase letters/digits/hyphens/underscores, 2-40 chars. OWNER, ADMIN and ' +
+                'MEMBER are reserved.',
+            },
+            description: { type: 'string' },
+            baseRole: {
+              type: 'string',
+              enum: ['OWNER', 'ADMIN', 'MEMBER'],
+              description:
+                'The authority tier this role inherits. A `content-manager` on MEMBER can do ' +
+                'exactly what MEMBER can; Rekey never reads the name.',
+            },
+            isDefault: {
+              type: 'boolean',
+              description: 'Assign this role when an invitation omits one. Demotes the previous default.',
+            },
+          },
+        },
+        response: {
+          201: ok(            {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                description: { type: 'string', nullable: true },
+                baseRole: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                isDefault: { type: 'boolean' },
+                isBuiltIn: { type: 'boolean' },
+                createdAt: { type: 'string', format: 'date-time' },
+                updatedAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['name', 'baseRole', 'isDefault', 'isBuiltIn', 'createdAt', 'updatedAt'],
+            }, 'The created role.'),
+          ...errs({
+            400:
+              'ORGANIZATION_ROLE_NAME_INVALID: the name is not lowercase letters/digits/' +
+              'hyphens/underscores (2-40 chars, edges alphanumeric); or ' +
+              'ORGANIZATIONS_NOT_ENABLED: `authConfig.organizationsEnabled` is false on ' +
+              'this Application.',
+            ...APP_WRITE_ERRORS,
+            409:
+              'ORGANIZATION_ROLE_NAME_TAKEN: another role on this Application already uses ' +
+              'that name; or ORGANIZATION_ROLE_NAME_RESERVED: OWNER, ADMIN and MEMBER are ' +
+              'built in.',
+          }),
+        },
+      },
+    },
+    async (req, reply) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'write');
+      await requireOrganizationsEnabled(id);
+      const body = z
+        .object({
+          name: z.string().min(2).max(40),
+          description: z.string().max(240).optional(),
+          baseRole: z.enum(['OWNER', 'ADMIN', 'MEMBER']),
+          isDefault: z.boolean().optional(),
+        })
+        .strict()
+        .parse(req.body);
+      const created = await organizationRolesService.create({
+        applicationId: id,
+        name: body.name,
+        baseRole: body.baseRole,
+        ...(body.description !== undefined && { description: body.description }),
+        ...(body.isDefault !== undefined && { isDefault: body.isDefault }),
+      });
+      void recordSecurityEvent({
+        type: 'app.organization_role_created',
+        actorType: 'operator',
+        actorId: req.tenantUser!.id,
+        tenantId: req.tenantId!,
+        applicationId: id,
+        ...requestContext(req),
+        metadata: { name: created.name, baseRole: created.baseRole },
+      });
+      return reply.status(201).send({ success: true, data: created });
+    },
+  );
+
+  app.patch(
+    '/:id/organization-roles/:name',
+    {
+      schema: {
+        tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
+        summary: 'Edit an organization role (description, tier, default flag)',
+        description:
+          'Requires **write** access to this Application. The NAME is immutable, because ' +
+          'memberships reference it by value and a rename would orphan every row holding it; delete with ' +
+          '`reassignTo` is the rename path. A built-in role cannot be re-tiered.',
+        response: {
+          200: ok(            {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                description: { type: 'string', nullable: true },
+                baseRole: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                isDefault: { type: 'boolean' },
+                isBuiltIn: { type: 'boolean' },
+                createdAt: { type: 'string', format: 'date-time' },
+                updatedAt: { type: 'string', format: 'date-time' },
+              },
+              required: ['name', 'baseRole', 'isDefault', 'isBuiltIn', 'createdAt', 'updatedAt'],
+            }, 'The updated role.'),
+          ...errs({
+            400:
+              'ORGANIZATION_ROLE_BUILT_IN_IMMUTABLE: cannot change the base tier of OWNER, ' +
+              'ADMIN or MEMBER; or ORGANIZATIONS_NOT_ENABLED.',
+            409:
+              'ORGANIZATION_ROLE_RETIER_ORPHANS_OWNERS: disabling this role, or moving it off ' +
+              "the OWNER tier, would leave some organization's only owner unable to act.",
+            ...APP_WRITE_ERRORS,
+            404: 'ORGANIZATION_ROLE_NOT_FOUND: no role with that name on this Application.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const params = z.object({ id: z.string().min(1), name: z.string().min(1) }).parse(req.params);
+      await ensureAppAccess(req, params.id, 'write');
+      await requireOrganizationsEnabled(params.id);
+      const body = z
+        .object({
+          description: z.string().max(240).nullable().optional(),
+          baseRole: z.enum(['OWNER', 'ADMIN', 'MEMBER']).optional(),
+          isDefault: z.boolean().optional(),
+          disabled: z.boolean().optional(),
+        })
+        .strict()
+        .parse(req.body ?? {});
+      const updated = await organizationRolesService.update({
+        applicationId: params.id,
+        name: params.name,
+        ...(body.description !== undefined && { description: body.description }),
+        ...(body.baseRole !== undefined && { baseRole: body.baseRole }),
+        ...(body.isDefault !== undefined && { isDefault: body.isDefault }),
+        ...(body.disabled !== undefined && { disabled: body.disabled }),
+      });
+      void recordSecurityEvent({
+        type: 'app.organization_role_updated',
+        actorType: 'operator',
+        actorId: req.tenantUser!.id,
+        tenantId: req.tenantId!,
+        applicationId: params.id,
+        ...requestContext(req),
+        metadata: { name: updated.name, baseRole: updated.baseRole },
+      });
+      return { success: true, data: updated };
+    },
+  );
+
+  app.delete(
+    '/:id/organization-roles/:name',
+    {
+      schema: {
+        tags: ['Tenant · Organizations'],
+        security: [{ tenantSession: [] }],
+        summary: 'Delete a custom organization role; ?reassignTo=name moves holders in one transaction',
+        description:
+          'Requires **write** access to this Application. Refuses on built-ins and on the ' +
+          'default role. Memberships AND pending invitations are counted as in-use: an ' +
+          'invitation stores the role name and is redeemed later, so leaving one behind would ' +
+          'fail at accept time.',
+        querystring: {
+          type: 'object',
+          properties: { reassignTo: { type: 'string', minLength: 1, maxLength: 40 } },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                removed: { type: 'boolean', enum: [true] },
+                reassignedMemberships: { type: 'integer' },
+                reassignedInvitations: { type: 'integer' },
+              },
+              required: ['removed', 'reassignedMemberships', 'reassignedInvitations'],
+            },
+            'Confirmation of removal.',
+          ),
+          ...errs({
+            400:
+              'ORGANIZATION_ROLE_BUILT_IN_IMMUTABLE: OWNER, ADMIN and MEMBER are permanent; or ' +
+              'ORGANIZATION_ROLE_IS_DEFAULT: mark another role default first; or ' +
+              'ORGANIZATION_ROLE_IN_USE: memberships or pending invitations still reference ' +
+              'it and no `reassignTo` was given; or ORGANIZATION_ROLE_REASSIGN_SELF; or ' +
+              'ORGANIZATION_ROLE_REASSIGN_TARGET_UNKNOWN; or ' +
+              'ORGANIZATION_ROLE_REASSIGN_DEMOTES_OWNER: the role carries OWNER authority ' +
+              'and the target does not, which would leave organizations ownerless.',
+            ...APP_WRITE_ERRORS,
+            404: 'ORGANIZATION_ROLE_NOT_FOUND: no role with that name on this Application.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const params = z.object({ id: z.string().min(1), name: z.string().min(1) }).parse(req.params);
+      const q = z.object({ reassignTo: z.string().min(1).max(40).optional() }).parse(req.query);
+      await ensureAppAccess(req, params.id, 'write');
+      await requireOrganizationsEnabled(params.id);
+      const result = await organizationRolesService.remove({
+        applicationId: params.id,
+        name: params.name,
+        ...(q.reassignTo !== undefined && { reassignTo: q.reassignTo }),
+      });
+      void recordSecurityEvent({
+        type: 'app.organization_role_deleted',
+        actorType: 'operator',
+        actorId: req.tenantUser!.id,
+        tenantId: req.tenantId!,
+        applicationId: params.id,
+        ...requestContext(req),
+        metadata: {
+          name: params.name,
+          ...(q.reassignTo !== undefined && { reassignedTo: q.reassignTo }),
+        },
       });
       return { success: true, data: result };
     },
@@ -5769,10 +6667,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                       id: { type: 'string' },
                       endUserId: { type: 'string' },
                       email: { type: 'string', format: 'email' },
-                      role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                      role: { type: 'string' },
+                      baseRole: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
                       createdAt: { type: 'string', format: 'date-time' },
                     },
-                    required: ['id', 'endUserId', 'email', 'role', 'createdAt'],
+                    required: ['id', 'endUserId', 'email', 'role', 'baseRole', 'createdAt'],
                   },
                 },
                 invitations: {
@@ -5783,7 +6682,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                     properties: {
                       id: { type: 'string' },
                       email: { type: 'string', format: 'email' },
-                      role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                      role: { type: 'string' },
                       expiresAt: { type: 'string', format: 'date-time' },
                       createdAt: { type: 'string', format: 'date-time' },
                     },
@@ -5825,6 +6724,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             endUserId: m.endUserId,
             email: m.email,
             role: m.role,
+            baseRole: m.baseRole,
             createdAt: m.createdAt.toISOString(),
           })),
           invitations: r.invitations.map((i) => ({
@@ -6051,10 +6951,15 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         },
         body: {
           type: 'object',
-          required: ['endUserId', 'role'],
+          required: ['endUserId'],
           properties: {
             endUserId: { type: 'string', minLength: 1 },
-            role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+            // A catalog NAME, not a tier. This was left as the old 3-value enum
+            // when organization roles became a catalog, which made the handler's
+            // own widened parse unreachable: Ajv rejected `content-manager` at
+            // the route boundary, so the operator surface could not assign any
+            // custom role while the end-user surface could.
+            role: { type: 'string', minLength: 1, maxLength: 40 },
           },
         },
         response: {
@@ -6066,10 +6971,19 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                 organizationId: { type: 'string' },
                 endUserId: { type: 'string' },
                 email: { type: 'string', format: 'email' },
-                role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                role: { type: 'string' },
+                baseRole: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
                 createdAt: { type: 'string', format: 'date-time' },
               },
-              required: ['id', 'organizationId', 'endUserId', 'email', 'role', 'createdAt'],
+              required: [
+                'id',
+                'organizationId',
+                'endUserId',
+                'email',
+                'role',
+                'baseRole',
+                'createdAt',
+              ],
             },
             'The created membership.',
           ),
@@ -6087,13 +7001,16 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const params = z.object({ id: z.string().min(1), orgId: z.string().min(1) }).parse(req.params);
       await ensureAppAccess(req, params.id, 'write');
       const body = z
-        .object({ endUserId: z.string().min(1), role: z.enum(['OWNER', 'ADMIN', 'MEMBER']) })
+        // A catalog NAME, not a fixed tier. Existence is checked by the service
+        // (400 ORGANIZATION_ROLE_UNKNOWN). Operator authority skips the role
+        // hierarchy, not the catalog.
+        .object({ endUserId: z.string().min(1), role: z.string().min(1).max(40).optional() })
         .parse(req.body);
       const m = await organizationsService.adminAddMember({
         applicationId: params.id,
         organizationId: params.orgId,
         endUserId: body.endUserId,
-        role: body.role,
+        ...(body.role !== undefined && { role: body.role }),
       });
       return reply.status(201).send({
         success: true,
@@ -6103,6 +7020,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           endUserId: m.endUserId,
           email: m.email,
           role: m.role,
+          baseRole: m.baseRole,
           createdAt: m.createdAt.toISOString(),
         },
       });
@@ -6127,7 +7045,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         body: {
           type: 'object',
           required: ['role'],
-          properties: { role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] } },
+          properties: { role: { type: 'string', minLength: 1, maxLength: 40 } },
         },
         response: {
           200: ok(
@@ -6137,10 +7055,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                 id: { type: 'string' },
                 organizationId: { type: 'string' },
                 endUserId: { type: 'string' },
-                role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                role: { type: 'string' },
+                baseRole: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
                 createdAt: { type: 'string', format: 'date-time' },
               },
-              required: ['id', 'organizationId', 'endUserId', 'role', 'createdAt'],
+              required: ['id', 'organizationId', 'endUserId', 'role', 'baseRole', 'createdAt'],
             },
             'The membership, with `role` updated.',
           ),
@@ -6158,7 +7077,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         .object({ id: z.string().min(1), orgId: z.string().min(1), euid: z.string().min(1) })
         .parse(req.params);
       await ensureAppAccess(req, params.id, 'write');
-      const body = z.object({ role: z.enum(['OWNER', 'ADMIN', 'MEMBER']) }).parse(req.body);
+      const body = z.object({ role: z.string().min(1).max(40) }).parse(req.body);
       const m = await organizationsService.adminSetMemberRole({
         applicationId: params.id,
         organizationId: params.orgId,
@@ -6172,6 +7091,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           organizationId: m.organizationId,
           endUserId: m.endUserId,
           role: m.role,
+          baseRole: m.baseRole,
           createdAt: m.createdAt.toISOString(),
         },
       };

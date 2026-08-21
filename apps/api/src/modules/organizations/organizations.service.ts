@@ -9,12 +9,24 @@
  *          └─ OrganizationMembership[]  (which EndUsers belong, with role)
  *          └─ OrganizationInvitation[]  (pending invites)
  *
- * Role rules (intentionally close to Clerk's contract):
+ * Roles are per-Application catalog NAMES (`OrganizationRoleDef`), each
+ * carrying a `baseRole` of OWNER / ADMIN / MEMBER. Everything in this file
+ * gates on the BASE tier and never on the name, so an app can define
+ * `content-manager` (baseRole MEMBER) and every invariant below still holds
+ * without this module learning the word.
+ *
+ * Base-tier rules (intentionally close to Clerk's contract):
  *   - OWNER: invite anyone, change anyone's role, remove anyone, transfer
- *     ownership. There must always be at least one OWNER per Org.
+ *     ownership. There must always be at least one OWNER-tier member per Org.
  *   - ADMIN: manage anyone below OWNER — so ADMINs can add, re-role and remove
  *     other ADMINs as well as MEMBERs (see `canManage`).
  *   - MEMBER: read-only.
+ *
+ * Two different credentials author the two halves. The catalog (which names
+ * exist) is operator-authored via the tenant JWT. Assignment (who holds which
+ * name) is org-authored: an OWNER/ADMIN acting with their own end-user access
+ * token on `PATCH /:id/members/:euid` and `POST /:id/invitations`. Nothing here
+ * requires an operator to hand out a role.
  *
  * `authConfig.organizationsEnabled` gates org **creation** only
  * (`ensureOrgsEnabled` has one call site, in `create`). Turning the toggle off
@@ -31,11 +43,17 @@
  * every request.
  */
 
-import type { Organization, OrganizationMembership, OrganizationRole } from '@prisma/client';
+import type {
+  Organization,
+  OrganizationBaseRole,
+  OrganizationMembership,
+  Prisma,
+} from '@prisma/client';
 import { createHash, randomBytes } from 'node:crypto';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
+import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const INVITATION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
@@ -53,14 +71,16 @@ function ensureOrgsEnabled(application: { authConfig: unknown }): void {
 }
 
 /**
- * Role-level write authorisation. `caller` is the role of the operator
- * making the change; `target` is the role being assigned or removed.
+ * Role-level write authorisation, on BASE tiers only. `caller` is the tier of
+ * the member making the change; `target` is the tier being assigned or removed.
+ * Callers resolve names to tiers before reaching here, so a custom role can
+ * never sidestep the ladder by being spelled differently.
  *
- *   OWNER → can assign/remove any role
+ *   OWNER → can assign/remove any tier
  *   ADMIN → can assign/remove MEMBER and ADMIN only
  *   MEMBER → can do nothing
  */
-function canManage(caller: OrganizationRole, target: OrganizationRole): boolean {
+function canManage(caller: OrganizationBaseRole, target: OrganizationBaseRole): boolean {
   if (caller === 'OWNER') return true;
   if (caller === 'ADMIN') return target !== 'OWNER';
   return false;
@@ -84,7 +104,10 @@ export interface MembershipDto {
   id: string;
   organizationId: string;
   endUserId: string;
-  role: OrganizationRole;
+  /** A catalog name: the app's vocabulary ("editor"), not a fixed enum. */
+  role: string;
+  /** The tier that name maps to. What every Rekey-side gate compares. */
+  baseRole: OrganizationBaseRole;
   createdAt: Date;
 }
 
@@ -92,7 +115,7 @@ export interface InvitationDto {
   id: string;
   organizationId: string;
   email: string;
-  role: OrganizationRole;
+  role: string;
   expiresAt: Date;
   acceptedAt: Date | null;
   revokedAt: Date | null;
@@ -111,14 +134,38 @@ function shape(o: Organization): OrganizationDto {
   };
 }
 
-function shapeMembership(m: OrganizationMembership): MembershipDto {
+function shapeMembership(m: OrganizationMembership, baseRole: OrganizationBaseRole): MembershipDto {
   return {
     id: m.id,
     organizationId: m.organizationId,
     endUserId: m.endUserId,
     role: m.role,
+    baseRole,
     createdAt: m.createdAt,
   };
+}
+
+/**
+ * Serialise every membership change in one organization.
+ *
+ * The last-owner guard is check-then-act: count the owner-tier members, then
+ * demote or remove one. Two concurrent demotions against an organization with
+ * exactly two owners both read 2, both pass, and both commit, leaving zero.
+ * Taking a row lock over the organization's memberships first makes the second
+ * transaction wait for the first to commit, so its count sees the new reality.
+ *
+ * `FOR UPDATE` needs raw SQL because Prisma has no lock clause. The lock is
+ * taken on `organization_memberships` rows for this organization, which is the
+ * same set the count reads and the write touches.
+ */
+async function withOrganizationMembershipLock<T>(
+  organizationId: string,
+  fn: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM organization_memberships WHERE organization_id = ${organizationId} FOR UPDATE`;
+    return fn(tx);
+  });
 }
 
 export const organizationsService = {
@@ -154,6 +201,8 @@ export const organizationsService = {
             ...(args.metadata !== undefined && { metadata: args.metadata as never }),
           },
         });
+        // The built-in OWNER row is seeded on every Application and cannot be
+        // deleted, so this name always resolves.
         const membership = await tx.organizationMembership.create({
           data: {
             organizationId: org.id,
@@ -161,7 +210,7 @@ export const organizationsService = {
             role: 'OWNER',
           },
         });
-        return { organization: shape(org), membership: shapeMembership(membership) };
+        return { organization: shape(org), membership: shapeMembership(membership, 'OWNER') };
       });
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
@@ -182,15 +231,22 @@ export const organizationsService = {
     endUserId: string;
     take?: number;
     skip?: number;
-  }): Promise<Array<OrganizationDto & { role: OrganizationRole }>> {
-    const rows = await prisma.organizationMembership.findMany({
-      where: { endUserId: args.endUserId, organization: { applicationId: args.application.id } },
-      include: { organization: true },
-      orderBy: { createdAt: 'asc' },
-      ...(args.take !== undefined ? { take: args.take } : {}),
-      ...(args.skip !== undefined ? { skip: args.skip } : {}),
-    });
-    return rows.map((r) => ({ ...shape(r.organization), role: r.role }));
+  }): Promise<Array<OrganizationDto & { role: string; baseRole: OrganizationBaseRole }>> {
+    const [rows, bases] = await Promise.all([
+      prisma.organizationMembership.findMany({
+        where: { endUserId: args.endUserId, organization: { applicationId: args.application.id } },
+        include: { organization: true },
+        orderBy: { createdAt: 'asc' },
+        ...(args.take !== undefined ? { take: args.take } : {}),
+        ...(args.skip !== undefined ? { skip: args.skip } : {}),
+      }),
+      organizationRolesService.baseRoleMap(args.application.id),
+    ]);
+    return rows.map((r) => ({
+      ...shape(r.organization),
+      role: r.role,
+      baseRole: bases.get(r.role) ?? 'MEMBER',
+    }));
   },
 
   /** Total organizations `listMine` would return, ignoring take/skip. */
@@ -205,25 +261,24 @@ export const organizationsService = {
     application: { id: string };
     endUserId: string;
     organizationId: string;
-  }): Promise<OrganizationDto & { role: OrganizationRole }> {
-    const m = await prisma.organizationMembership.findUnique({
-      where: {
-        organizationId_endUserId: {
-          organizationId: args.organizationId,
-          endUserId: args.endUserId,
-        },
-      },
-      include: { organization: true },
+  }): Promise<OrganizationDto & { role: string; baseRole: OrganizationBaseRole }> {
+    // Deliberately delegated rather than repeating the lookup: this used to
+    // carry its own copy of the membership check, so the disabled-role refusal
+    // added to `requireMembership` did not apply here and a revoked member
+    // could still read the organization. One gate, one place.
+    const m = await this.requireMembership({
+      application: args.application,
+      actorEndUserId: args.endUserId,
+      organizationId: args.organizationId,
     });
-    if (!m || m.organization.applicationId !== args.application.id) {
-      throw new RekeyError({
-        statusCode: 403,
-        code: 'ORGANIZATION_NOT_MEMBER',
-        message: 'You are not a member of this organization.',
-        fix: 'Ask an OWNER for an invitation.',
-      });
-    }
-    return { ...shape(m.organization), role: m.role };
+    const organization = await prisma.organization.findUniqueOrThrow({
+      where: { id: m.organizationId },
+    });
+    return {
+      ...shape(organization),
+      role: m.role,
+      baseRole: await organizationRolesService.baseRoleOrLeast(args.application.id, m.role),
+    };
   },
 
   /** Metadata + name updates. OWNER or ADMIN (see `requireRole` below). */
@@ -254,14 +309,20 @@ export const organizationsService = {
     skip?: number;
   }): Promise<Array<MembershipDto & { email: string }>> {
     await this.requireMembership(args);
-    const rows = await prisma.organizationMembership.findMany({
-      where: { organizationId: args.organizationId },
-      include: { endUser: { select: { email: true } } },
-      orderBy: { createdAt: 'asc' },
-      ...(args.take !== undefined ? { take: args.take } : {}),
-      ...(args.skip !== undefined ? { skip: args.skip } : {}),
-    });
-    return rows.map((r) => ({ ...shapeMembership(r), email: r.endUser.email }));
+    const [rows, bases] = await Promise.all([
+      prisma.organizationMembership.findMany({
+        where: { organizationId: args.organizationId },
+        include: { endUser: { select: { email: true } } },
+        orderBy: { createdAt: 'asc' },
+        ...(args.take !== undefined ? { take: args.take } : {}),
+        ...(args.skip !== undefined ? { skip: args.skip } : {}),
+      }),
+      organizationRolesService.baseRoleMap(args.application.id),
+    ]);
+    return rows.map((r) => ({
+      ...shapeMembership(r, bases.get(r.role) ?? 'MEMBER'),
+      email: r.endUser.email,
+    }));
   },
 
   /**
@@ -292,15 +353,30 @@ export const organizationsService = {
     actorEndUserId: string;
     organizationId: string;
     email: string;
-    role: OrganizationRole;
+    /** Omit to use the Application's default organization role. */
+    role?: string | undefined;
   }): Promise<{ rawToken: string; invitation: InvitationDto }> {
     const actor = await this.requireMembership(args);
-    if (!canManage(actor.role, args.role)) {
+    // The target role is caller-supplied, so it goes through the strict
+    // resolver: an unknown name is a 400 here rather than an invitation that
+    // fails at accept time. The actor's own stored role uses the lenient one.
+    // Omitting it falls back to the catalog's default, which is what makes
+    // `isDefault` mean something on the invite path rather than only on
+    // operator add-member.
+    const target =
+      args.role === undefined
+        ? await organizationRolesService.getDefault(args.application.id)
+        : await organizationRolesService.require(args.application.id, args.role);
+    const actorBase = await organizationRolesService.baseRoleOrLeast(
+      args.application.id,
+      actor.role,
+    );
+    if (!canManage(actorBase, target.baseRole)) {
       throw new RekeyError({
         statusCode: 403,
         code: 'ORGANIZATION_ROLE_INSUFFICIENT',
-        message: `Your role (${actor.role}) cannot invite to ${args.role}.`,
-        fix: 'Ask an OWNER (or any role greater-than-or-equal to the target).',
+        message: `Your role (${actor.role}, tier ${actorBase}) cannot invite to ${target.name} (tier ${target.baseRole}).`,
+        fix: 'Ask an OWNER (or any role whose tier is greater-than-or-equal to the target).',
       });
     }
     const email = args.email.toLowerCase();
@@ -321,7 +397,7 @@ export const organizationsService = {
       data: {
         organizationId: args.organizationId,
         email,
-        role: args.role,
+        role: target.name,
         tokenHash: hashInviteToken(raw),
         expiresAt: new Date(Date.now() + INVITATION_LIFETIME_MS),
         invitedById: args.actorEndUserId,
@@ -414,6 +490,16 @@ export const organizationsService = {
           },
         },
       });
+      // The role may have been disabled between issuing and redeeming. Joining
+      // at a role that immediately refuses is worse than saying so.
+      if (!(await organizationRolesService.isUsable(args.application.id, inv.role))) {
+        throw new RekeyError({
+          statusCode: 400,
+          code: 'ORGANIZATION_ROLE_DISABLED',
+          message: `The role this invitation grants ("${inv.role}") is currently disabled.`,
+          fix: 'Ask an OWNER or ADMIN to re-invite you at a role that is enabled.',
+        });
+      }
       let membership: OrganizationMembership;
       if (existing) {
         membership = existing;
@@ -445,8 +531,11 @@ export const organizationsService = {
         where: { id: inv.id },
         data: { acceptedAt: new Date(), acceptedById: args.actorEndUserId },
       });
-      return shapeMembership(membership);
-    });
+      return membership;
+    }).then(async (membership) => shapeMembership(
+      membership,
+      await organizationRolesService.baseRoleOrLeast(args.application.id, membership.role),
+    ));
   },
 
   /** OWNER/ADMIN-only invitation revoke. Idempotent. */
@@ -487,7 +576,7 @@ export const organizationsService = {
     actorEndUserId: string;
     organizationId: string;
     targetEndUserId: string;
-    newRole: OrganizationRole;
+    newRole: string;
   }): Promise<MembershipDto> {
     const actor = await this.requireMembership(args);
     const target = await prisma.organizationMembership.findUnique({
@@ -506,38 +595,49 @@ export const organizationsService = {
         fix: 'List members to confirm.',
       });
     }
-    if (!canManage(actor.role, target.role) || !canManage(actor.role, args.newRole)) {
+    const newRoleDef = await organizationRolesService.require(args.application.id, args.newRole);
+    const [actorBase, targetBase] = await Promise.all([
+      organizationRolesService.baseRoleOrLeast(args.application.id, actor.role),
+      organizationRolesService.baseRoleOrLeast(args.application.id, target.role),
+    ]);
+    if (!canManage(actorBase, targetBase) || !canManage(actorBase, newRoleDef.baseRole)) {
       throw new RekeyError({
         statusCode: 403,
         code: 'ORGANIZATION_ROLE_INSUFFICIENT',
-        message: `Your role (${actor.role}) cannot change a ${target.role} to ${args.newRole}.`,
-        fix: 'OWNER role can manage anyone; ADMIN can manage MEMBER/ADMIN only.',
+        message: `Your role (${actor.role}, tier ${actorBase}) cannot change a ${target.role} to ${args.newRole}.`,
+        fix: 'OWNER tier can manage anyone; ADMIN can manage MEMBER/ADMIN tiers only.',
       });
     }
-    if (target.role === 'OWNER' && args.newRole !== 'OWNER') {
-      // Last-OWNER guard: refuse if no other OWNER exists.
-      const owners = await prisma.organizationMembership.count({
-        where: { organizationId: args.organizationId, role: 'OWNER' },
-      });
-      if (owners <= 1) {
-        throw new RekeyError({
-          statusCode: 409,
-          code: 'ORGANIZATION_LAST_OWNER',
-          message: 'Cannot demote the last OWNER. Promote another member to OWNER first.',
-          fix: 'Pick another member, set their role to OWNER, then retry this change.',
+    // Counted across every OWNER-TIER role name. An Application may define more
+    // than one (e.g. a custom `founder`), and counting only the literal 'OWNER'
+    // would let the final owner be demoted.
+    const ownerNames = await organizationRolesService.ownerRoleNames(args.application.id);
+    const demotesAnOwner = targetBase === 'OWNER' && newRoleDef.baseRole !== 'OWNER';
+    const updated = await withOrganizationMembershipLock(args.organizationId, async (tx) => {
+      if (demotesAnOwner) {
+        const owners = await tx.organizationMembership.count({
+          where: { organizationId: args.organizationId, role: { in: ownerNames } },
         });
+        if (owners <= 1) {
+          throw new RekeyError({
+            statusCode: 409,
+            code: 'ORGANIZATION_LAST_OWNER',
+            message: 'Cannot demote the last OWNER. Promote another member to OWNER first.',
+            fix: 'Pick another member, set their role to OWNER, then retry this change.',
+          });
+        }
       }
-    }
-    const updated = await prisma.organizationMembership.update({
-      where: {
-        organizationId_endUserId: {
-          organizationId: args.organizationId,
-          endUserId: args.targetEndUserId,
+      return tx.organizationMembership.update({
+        where: {
+          organizationId_endUserId: {
+            organizationId: args.organizationId,
+            endUserId: args.targetEndUserId,
+          },
         },
-      },
-      data: { role: args.newRole },
+        data: { role: args.newRole },
+      });
     });
-    return shapeMembership(updated);
+    return shapeMembership(updated, newRoleDef.baseRole);
   },
 
   /**
@@ -560,36 +660,46 @@ export const organizationsService = {
       },
     });
     if (!target) return { removed: false };
-    if (!canManage(actor.role, target.role) && actor.endUserId !== target.endUserId) {
+    const [actorBase, targetBase] = await Promise.all([
+      organizationRolesService.baseRoleOrLeast(args.application.id, actor.role),
+      organizationRolesService.baseRoleOrLeast(args.application.id, target.role),
+    ]);
+    if (!canManage(actorBase, targetBase) && actor.endUserId !== target.endUserId) {
       // Self-removal is allowed (= "leave org"); otherwise enforce the
       // role hierarchy.
       throw new RekeyError({
         statusCode: 403,
         code: 'ORGANIZATION_ROLE_INSUFFICIENT',
-        message: `Your role (${actor.role}) cannot remove a ${target.role}.`,
+        message: `Your role (${actor.role}, tier ${actorBase}) cannot remove a ${target.role}.`,
         fix: 'Self-removal is always allowed; otherwise OWNER manages anyone, ADMIN manages MEMBER.',
       });
     }
-    if (target.role === 'OWNER') {
-      const owners = await prisma.organizationMembership.count({
-        where: { organizationId: args.organizationId, role: 'OWNER' },
-      });
-      if (owners <= 1) {
-        throw new RekeyError({
-          statusCode: 409,
-          code: 'ORGANIZATION_LAST_OWNER',
-          message: 'Cannot remove the last OWNER. Transfer ownership first.',
-          fix: 'Promote another member to OWNER before leaving or being removed.',
+    // Counted across every OWNER-tier name, not the literal 'OWNER'. Guard and
+    // delete run under the same row lock as setMemberRole, so a concurrent
+    // demotion and removal cannot both see the same owner count and both win.
+    const ownerNames = await organizationRolesService.ownerRoleNames(args.application.id);
+    await withOrganizationMembershipLock(args.organizationId, async (tx) => {
+      if (targetBase === 'OWNER') {
+        const owners = await tx.organizationMembership.count({
+          where: { organizationId: args.organizationId, role: { in: ownerNames } },
         });
+        if (owners <= 1) {
+          throw new RekeyError({
+            statusCode: 409,
+            code: 'ORGANIZATION_LAST_OWNER',
+            message: 'Cannot remove the last OWNER. Transfer ownership first.',
+            fix: 'Promote another member to OWNER before leaving or being removed.',
+          });
+        }
       }
-    }
-    await prisma.organizationMembership.delete({
-      where: {
-        organizationId_endUserId: {
-          organizationId: args.organizationId,
-          endUserId: args.targetEndUserId,
+      await tx.organizationMembership.delete({
+        where: {
+          organizationId_endUserId: {
+            organizationId: args.organizationId,
+            endUserId: args.targetEndUserId,
+          },
         },
-      },
+      });
     });
     return { removed: true };
   },
@@ -607,7 +717,11 @@ export const organizationsService = {
     organizationId: string;
   }): Promise<{ removed: boolean }> {
     const membership = await this.requireMembership(args);
-    if (membership.role === 'OWNER') {
+    const base = await organizationRolesService.baseRoleOrLeast(
+      args.application.id,
+      membership.role,
+    );
+    if (base === 'OWNER') {
       throw new RekeyError({
         statusCode: 409,
         code: 'ORGANIZATION_OWNER_CANNOT_LEAVE',
@@ -649,6 +763,21 @@ export const organizationsService = {
         fix: 'Ask an OWNER for an invitation.',
       });
     }
+    // Revocation reaches EXISTING holders here. A disabled role stays on the
+    // membership so the operator can re-enable it and everyone resumes, but
+    // while it is off the member cannot act on the organization at all.
+    //
+    // Refused out loud rather than degraded to MEMBER: silently leaving someone
+    // with less authority than they had, and telling nobody, is how a
+    // revocation gets mistaken for a bug in the customer's app.
+    if (!(await organizationRolesService.isUsable(args.application.id, m.role))) {
+      throw new RekeyError({
+        statusCode: 403,
+        code: 'ORGANIZATION_ROLE_DISABLED',
+        message: `Your role in this organization ("${m.role}") is currently disabled.`,
+        fix: 'Ask an operator to re-enable the role, or an OWNER to move you to another one.',
+      });
+    }
     return m;
   },
 
@@ -669,24 +798,72 @@ export const organizationsService = {
       },
       include: { organization: { select: { applicationId: true } } },
     });
-    return !!m && m.organization.applicationId === args.applicationId;
+    if (!m || m.organization.applicationId !== args.applicationId) return false;
+    // Same rule as `requireMembership`, without the throw: this decides whether
+    // an org is used as the default billing subject, and a revoked member must
+    // not keep spending against it.
+    return organizationRolesService.isUsable(args.applicationId, m.role);
   },
 
-  /** Internal — assert the caller's role is in `allowed`. */
+  /**
+   * The caller's role INSIDE their active organization, for `GET /me`.
+   *
+   * `/me` used to return `activeOrganizationId` next to `EndUser.role`, and
+   * those two fields describe different axes: the id is org-scoped, the role is
+   * app-wide. An integrator reading `user.role` right after an org switch got
+   * the application-wide answer and had no signal that it was not the org one:
+   * the two roles sat at different distances, one field away versus one request
+   * away. This closes that: the org role travels with the org id.
+   *
+   * Returns null when there is no active org, or when membership lapsed since
+   * the token was minted. That mirrors `GET /billing/entitlements`, which
+   * degrades a stale `oid` to the personal view rather than 403-ing the call.
+   * An `oid` claim is a hint, never an authorization.
+   */
+  async activeRoleFor(args: {
+    applicationId: string;
+    endUserId: string;
+    organizationId: string | null | undefined;
+  }): Promise<{ role: string; baseRole: OrganizationBaseRole } | null> {
+    if (!args.organizationId) return null;
+    const m = await prisma.organizationMembership.findUnique({
+      where: {
+        organizationId_endUserId: {
+          organizationId: args.organizationId,
+          endUserId: args.endUserId,
+        },
+      },
+      include: { organization: { select: { applicationId: true } } },
+    });
+    if (!m || m.organization.applicationId !== args.applicationId) return null;
+    // A disabled role reports as no active organization, the same as a lapsed
+    // membership. Naming a role the holder cannot use would have every client
+    // render an authority they do not have.
+    if (!(await organizationRolesService.isUsable(args.applicationId, m.role))) return null;
+    return {
+      role: m.role,
+      baseRole: await organizationRolesService.baseRoleOrLeast(args.applicationId, m.role),
+    };
+  },
+
+  /** Internal. Asserts the caller's role TIER is in `allowed`. */
   async requireRole(
     args: {
       application: { id: string };
       actorEndUserId: string;
       organizationId: string;
     },
-    allowed: ReadonlyArray<OrganizationRole>,
+    allowed: ReadonlyArray<OrganizationBaseRole>,
   ): Promise<OrganizationMembership> {
     const m = await this.requireMembership(args);
-    if (!allowed.includes(m.role)) {
+    // Compare TIERS, not names. A member holding a custom `content-manager`
+    // role clears an ADMIN-tier gate iff that role's baseRole is ADMIN.
+    const base = await organizationRolesService.baseRoleOrLeast(args.application.id, m.role);
+    if (!allowed.includes(base)) {
       throw new RekeyError({
         statusCode: 403,
         code: 'ORGANIZATION_ROLE_INSUFFICIENT',
-        message: `This action requires one of: ${allowed.join(', ')}. Your role: ${m.role}.`,
+        message: `This action requires one of these tiers: ${allowed.join(', ')}. Your role: ${m.role} (tier ${base}).`,
         fix: 'Ask an OWNER (or any role with greater authority).',
       });
     }
@@ -747,7 +924,7 @@ export const organizationsService = {
     invitations: InvitationDto[];
   }> {
     const org = await this.adminLoadOrThrow(args);
-    const [members, invitations] = await Promise.all([
+    const [members, invitations, bases] = await Promise.all([
       prisma.organizationMembership.findMany({
         where: { organizationId: org.id },
         include: { endUser: { select: { email: true } } },
@@ -757,10 +934,14 @@ export const organizationsService = {
         where: { organizationId: org.id, acceptedAt: null, revokedAt: null },
         orderBy: { createdAt: 'desc' },
       }),
+      organizationRolesService.baseRoleMap(args.applicationId),
     ]);
     return {
       organization: shape(org),
-      members: members.map((m) => ({ ...shapeMembership(m), email: m.endUser.email })),
+      members: members.map((m) => ({
+        ...shapeMembership(m, bases.get(m.role) ?? 'MEMBER'),
+        email: m.endUser.email,
+      })),
       invitations: invitations.map(shapeInvitation),
     };
   },
@@ -877,19 +1058,28 @@ export const organizationsService = {
     applicationId: string;
     organizationId: string;
     endUserId: string;
-    role: OrganizationRole;
+    /** Omit to use the Application's default organization role. */
+    role?: string | undefined;
   }): Promise<MembershipDto & { email: string }> {
     await this.adminLoadOrThrow(args);
     const endUser = await this.adminAssertEndUserInApp(args.applicationId, args.endUserId);
+    // Operator authority skips the role HIERARCHY, not the catalog: an
+    // unknown name would still produce a membership no gate can resolve.
+    // Omitting the role uses the catalog default, matching the invitation path
+    // so `isDefault` means the same thing on both ways into an organization.
+    const roleDef =
+      args.role === undefined
+        ? await organizationRolesService.getDefault(args.applicationId)
+        : await organizationRolesService.require(args.applicationId, args.role);
     try {
       const m = await prisma.organizationMembership.create({
         data: {
           organizationId: args.organizationId,
           endUserId: args.endUserId,
-          role: args.role,
+          role: roleDef.name,
         },
       });
-      return { ...shapeMembership(m), email: endUser.email };
+      return { ...shapeMembership(m, roleDef.baseRole), email: endUser.email };
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
         throw new RekeyError({
@@ -908,9 +1098,10 @@ export const organizationsService = {
     applicationId: string;
     organizationId: string;
     endUserId: string;
-    role: OrganizationRole;
+    role: string;
   }): Promise<MembershipDto> {
     await this.adminLoadOrThrow(args);
+    const roleDef = await organizationRolesService.require(args.applicationId, args.role);
     const existing = await prisma.organizationMembership.findUnique({
       where: {
         organizationId_endUserId: {
@@ -936,7 +1127,7 @@ export const organizationsService = {
       },
       data: { role: args.role },
     });
-    return shapeMembership(updated);
+    return shapeMembership(updated, roleDef.baseRole);
   },
 
   /** Operator remove a member. Idempotent. */
@@ -987,7 +1178,7 @@ function shapeInvitation(i: {
   id: string;
   organizationId: string;
   email: string;
-  role: OrganizationRole;
+  role: string;
   expiresAt: Date;
   acceptedAt: Date | null;
   revokedAt: Date | null;

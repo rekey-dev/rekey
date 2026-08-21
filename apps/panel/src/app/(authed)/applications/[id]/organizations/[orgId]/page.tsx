@@ -2,7 +2,7 @@ import * as React from 'react';
 import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import { errorQuery, readErrorFlash, api, PanelApiError, type OrganizationDetail, type EndUserRow, type OrgBillingDto } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, type OrganizationDetail, type OrganizationRoleRow, type EndUserRow, type OrgBillingDto } from '@/lib/api';
 import type { Page } from '@/lib/paginate';
 import { Modal } from '@/components/Modal';
 import { ApiErrorText } from '@/components/api-error';
@@ -18,7 +18,14 @@ import { formatDate } from '@/lib/date';
 import { Banner } from '@/components/Banner';
 import { cookieSecure } from '@/lib/cookie-secure';
 
-const ROLES = ['OWNER', 'ADMIN', 'MEMBER'] as const;
+// Organization roles are a per-Application catalog, not this fixed list. These
+// three are only the built-ins every Application is seeded with, kept as a
+// fallback for the (impossible in practice) case where the catalog fetch
+// returns nothing. Rendering a member's role from a hardcoded list is a real
+// hazard: a &lt;select&gt; whose defaultValue matches no option silently falls back
+// to the FIRST option, so a member holding a custom role displayed as OWNER and
+// one Save promoted them for real.
+const BUILT_IN_ROLE_NAMES = ['OWNER', 'ADMIN', 'MEMBER'] as const;
 
 const inputCls =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
@@ -35,8 +42,19 @@ const ERR: Record<string, string> = {
   LICENSE_REVOKED: 'That license is revoked — its key cannot be revealed.',
 };
 
-function RoleBadge({ role }: { role: 'OWNER' | 'ADMIN' | 'MEMBER' }): React.JSX.Element {
-  const tone: BadgeTone = role === 'OWNER' ? 'brand' : role === 'ADMIN' ? 'info' : 'neutral';
+/**
+ * `role` is the catalog NAME shown to the operator; `tier` decides the colour.
+ * They differ for every custom role, so the tone must not be derived from the
+ * label.
+ */
+function RoleBadge({
+  role,
+  tier,
+}: {
+  role: string;
+  tier: 'OWNER' | 'ADMIN' | 'MEMBER';
+}): React.JSX.Element {
+  const tone: BadgeTone = tier === 'OWNER' ? 'brand' : tier === 'ADMIN' ? 'info' : 'neutral';
   return (
     <Badge tone={tone} mono>
       {role}
@@ -198,6 +216,37 @@ export default async function OrganizationDetailPage({
     method: 'GET',
     path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users?limit=100`,
   });
+  // The assignable vocabulary for this Application. NOT swallowed on failure:
+  // an empty catalog silently degrades this page to the three built-ins, and a
+  // member holding a custom role would then render as the first option in the
+  // list rather than their own role. Let the error surface instead.
+  const orgRoles = await api<OrganizationRoleRow[]>({
+    method: 'GET',
+    path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/organization-roles`,
+  });
+  // Disabled roles are excluded: assigning one is refused by the API, so
+  // offering it is a dead end the operator only discovers after submitting.
+  const assignable = orgRoles.filter((r) => !r.disabled);
+  const catalogNames =
+    assignable.length > 0 ? assignable.map((r) => r.name) : [...BUILT_IN_ROLE_NAMES];
+  const tierOf = (name: string): 'OWNER' | 'ADMIN' | 'MEMBER' =>
+    orgRoles.find((r) => r.name === name)?.baseRole ?? 'MEMBER';
+  /**
+   * The options for one member's role picker.
+   *
+   * Their CURRENT role is always included, even if the catalog no longer lists
+   * it. A `<select>` whose `defaultValue` matches no option does not render
+   * blank: the browser selects the FIRST option, so the row would claim the
+   * member holds whatever sorts first and one Save would make that true.
+   */
+  const roleOptionsFor = (current: string): string[] =>
+    catalogNames.includes(current) ? catalogNames : [current, ...catalogNames];
+  /** Why a member's own role is not in the assignable list, when it is not. */
+  const roleNote = (name: string): string => {
+    if (catalogNames.includes(name)) return '';
+    return orgRoles.some((r) => r.name === name) ? ' (disabled)' : ' (no longer defined)';
+  };
+
   const billing = await api<OrgBillingDto>({
     method: 'GET',
     path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/organizations/${encodeURIComponent(orgId)}/billing`,
@@ -261,7 +310,7 @@ export default async function OrganizationDetailPage({
         <SectionHeader
           title="Members"
           count={`(${members.length})`}
-          action={<AddMemberModal applicationId={id} orgId={orgId} candidates={candidates} error={addMemberError} errorDetail={errorDetail} errorFix={errorFix} />}
+          action={<AddMemberModal applicationId={id} orgId={orgId} candidates={candidates} roleNames={catalogNames} error={addMemberError} errorDetail={errorDetail} errorFix={errorFix} />}
         />
         {members.length === 0 ? (
           <EmptyState
@@ -286,8 +335,11 @@ export default async function OrganizationDetailPage({
                   <TD>
                     <form action={setMemberRole.bind(null, id, orgId, m.endUserId)} className="flex items-center gap-2">
                       <select name="role" defaultValue={m.role} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)]">
-                        {ROLES.map((r) => (
-                          <option key={r} value={r}>{r}</option>
+                        {roleOptionsFor(m.role).map((r) => (
+                          <option key={r} value={r}>
+                            {r}
+                            {roleNote(r)}
+                          </option>
                         ))}
                       </select>
                       <SubmitButton pendingLabel="Saving…" className="text-xs font-medium text-[var(--color-primary)] hover:underline disabled:opacity-60">Save</SubmitButton>
@@ -309,8 +361,10 @@ export default async function OrganizationDetailPage({
         </Table>
         )}
         <p className="text-xs text-[var(--color-muted-fg)]">
-          <RoleBadge role="OWNER" /> manage org + members · <RoleBadge role="ADMIN" /> manage members ·{' '}
-          <RoleBadge role="MEMBER" /> read-only. Operator changes here bypass the org role hierarchy.
+          <RoleBadge role="OWNER" tier="OWNER" /> manage org + members ·{' '}
+          <RoleBadge role="ADMIN" tier="ADMIN" /> manage members ·{' '}
+          <RoleBadge role="MEMBER" tier="MEMBER" /> read-only. Custom roles inherit one of these
+          tiers. Operator changes here bypass the org role hierarchy.
         </p>
       </section>
 
@@ -335,7 +389,7 @@ export default async function OrganizationDetailPage({
                 return (
                   <TR key={inv.id} hover>
                     <TD>{inv.email}</TD>
-                    <TD><RoleBadge role={inv.role} /></TD>
+                    <TD><RoleBadge role={inv.role} tier={tierOf(inv.role)} /></TD>
                     <TD muted className="text-xs">
                       {formatDate(inv.createdAt)}
                     </TD>
@@ -486,11 +540,14 @@ function AddMemberModal({
   applicationId,
   orgId,
   candidates,
+  roleNames,
   error, errorDetail, errorFix,
 }: {
   applicationId: string;
   orgId: string;
   candidates: EndUserRow[];
+  /** The Application's organization-role catalog, built-ins included. */
+  roleNames: string[];
   error?: string;
   errorDetail?: string;
   errorFix?: string;
@@ -527,7 +584,7 @@ function AddMemberModal({
             <label className="block space-y-1">
               <span className="text-xs font-medium">Role</span>
               <select name="role" defaultValue="MEMBER" className={inputCls}>
-                {ROLES.map((r) => (
+                {roleNames.map((r) => (
                   <option key={r} value={r}>{r}</option>
                 ))}
               </select>

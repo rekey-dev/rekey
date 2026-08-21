@@ -12,6 +12,14 @@ on:
         description: 'Run the payment-provider sandbox suite (needs repo secrets)'
         type: boolean
         default: true
+      # The escape hatch for the change detection in the `changes` job. A manual
+      # run is already unconditionally full, so this only exists to be explicit
+      # about it in the UI: if you are here because you do not trust what CI
+      # skipped, this is the button.
+      run_full:
+        description: 'Run every suite regardless of what changed'
+        type: boolean
+        default: true
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -23,6 +31,65 @@ concurrency:
 # time. Typecheck is split out because it is the fastest signal by far — a type
 # error surfaces in about a minute instead of after a full Next build.
 jobs:
+  # Which of the expensive jobs below can possibly be affected by this change.
+  #
+  # Test is ~14 minutes and used to run on every push, including ones that only
+  # touched prose. The rules live in a script rather than in `paths:` filters
+  # here for two reasons: `paths:` skips the whole WORKFLOW, which leaves a
+  # required check permanently pending, and the interesting cases are not
+  # path-shaped anyway (a comment-only edit inside apps/api is still a change to
+  # apps/api). See .github/scripts/changed-areas.mjs for the reasoning; the
+  # short version is that every uncertainty resolves toward running.
+  #
+  # Nothing cheap is gated on this. Config, OSS strip and Typecheck run
+  # unconditionally: they are 6s, 8s and 51s, and making them conditional would
+  # buy nothing while adding a way to be wrong. Typecheck in particular MUST
+  # stay unconditional, because it is what still catches a `@ts-expect-error`
+  # that the detector treats as an inert comment.
+  changes:
+    name: Detect affected areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      api: ${{ steps.detect.outputs.api }}
+      packages: ${{ steps.detect.outputs.packages }}
+      build: ${{ steps.detect.outputs.build }}
+      full: ${{ steps.detect.outputs.full }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The detector diffs against the MERGE BASE. With the default depth of
+          # 1 there is no merge base in the clone, the diff throws, and the
+          # script falls back to running everything. That is safe, but the
+          # feature would never once have worked. This repo is ~670 commits, so
+          # a full clone is a second or two.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with: { version: 9.12.0 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      # For `typescript`, which the detector uses to tell a comment edit from a
+      # real one by comparing ASTs rather than grepping the diff.
+      - run: pnpm install --frozen-lockfile
+
+      # The detector deciding NOT to run a suite is invisible when it is wrong:
+      # the suite simply never reports, and nobody notices until something
+      # ships broken. So its own rules are tested, here, before it is trusted.
+      - name: The detector's rules still hold
+        run: node .github/scripts/changed-areas.mjs --self-test
+
+      - name: Detect
+        id: detect
+        env:
+          CHANGED_BASE_REF: ${{ github.base_ref }}
+          CHANGED_PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          CHANGED_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          CHANGED_PR_TITLE: ${{ github.event.pull_request.title }}
+          CHANGED_FORCE_FULL: ${{ inputs.run_full }}
+        run: node .github/scripts/changed-areas.mjs | tee -a "$GITHUB_STEP_SUMMARY"
+
   # Static config invariants. No install, no database — a checkout and node.
   # Kept out of the typecheck job so it reports as its own red check: a
   # deployment file that cannot express a setting is a different failure from a
@@ -119,6 +186,13 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    needs: changes
+    # Skipped outright when neither suite can be affected. The steps inside are
+    # ALSO gated individually, because the common case is one side or the other:
+    # a change confined to one of the front-end workspaces needs its own suite
+    # and has no way to reach the API, and paying 14 minutes for that was the
+    # whole complaint.
+    if: needs.changes.outputs.api == 'true' || needs.changes.outputs.packages == 'true'
     # 45, not 20.
     #
     # A healthy run of this job is 9-11 minutes. The old ceiling left under 2x
@@ -184,6 +258,7 @@ jobs:
           PGPASSWORD=rekey psql -h localhost -U rekey -d rekey -c "CREATE DATABASE rekey_shadow;"
 
       - name: Verify migrations apply
+        if: needs.changes.outputs.api == 'true'
         run: |
           DATABASE_URL=postgresql://rekey:rekey@localhost:5432/rekey?schema=public \
             pnpm exec prisma migrate deploy --schema prisma/schema.prisma
@@ -197,6 +272,7 @@ jobs:
       # database and compares it to the datamodel. Exit 2 = they differ: run
       # `pnpm --filter @rekey.dev/api db:migrate` and commit the generated SQL.
       - name: Check schema.prisma matches its migrations
+        if: needs.changes.outputs.api == 'true'
         run: |
           pnpm exec prisma migrate diff \
             --from-migrations prisma/migrations \
@@ -213,6 +289,7 @@ jobs:
       # coverage report. It is the SAME single run, not an extra one, and it
       # stays sequential with the package tests below for the reason above.
       - name: Run API tests (with coverage)
+        if: needs.changes.outputs.api == 'true'
         env:
           TEST_DATABASE_URL: postgresql://rekey:rekey@localhost:5432/rekey_test?schema=public
           SUPER_ADMIN_KEY: test-admin-key-test-admin-key-test-admin-key
@@ -222,7 +299,10 @@ jobs:
       # Runs even when the thresholds fail — "what is the number now" is
       # exactly what you want in the summary when the gate is red.
       - name: Publish coverage summary
-        if: always()
+        # always(), so the number still lands in the summary when the coverage
+        # gate itself is what went red. Scoped to runs that actually ran the API
+        # suite, or it reports "no coverage" on every packages-only change.
+        if: always() && needs.changes.outputs.api == 'true'
         run: |
           if [ ! -f apps/api/coverage/coverage-summary.json ]; then
             echo "No coverage report was produced." >> "$GITHUB_STEP_SUMMARY"
@@ -247,7 +327,20 @@ jobs:
 
       # apps/api is not in this filter because the step above already ran it
       # directly, for coverage. One run, not two.
+      #
+      # panel, portal and admin ARE in it, as of this change. All three have had
+      # vitest suites and a `test` script for as long as they have existed, and
+      # none of them had ever run in CI: the filter listed only packages/* and
+      # the two commercial apps, so 19 test files were enforced by nothing but
+      # whoever remembered to run them locally. They stub `fetch` and cost
+      # seconds, exactly like the marketing suite already in this list.
+      #
+      # Adding them here is the whole change. `changed-areas.mjs` derives which
+      # paths count as "tested" by PARSING this filter list, so a front-end
+      # change now also flips `packages` and stops skipping the job it needs.
+      # That is why there is no second list to keep in sync.
       - name: Run package + app tests
+        if: needs.changes.outputs.packages == 'true'
         env:
           TEST_DATABASE_URL: postgresql://rekey:rekey@localhost:5432/rekey_test?schema=public
           SUPER_ADMIN_KEY: test-admin-key-test-admin-key-test-admin-key
@@ -255,10 +348,16 @@ jobs:
         run: >-
           pnpm exec turbo run test --concurrency=1
           --filter="./packages/*"
+          --filter=@rekey.dev/panel
+          --filter=@rekey.dev/portal
 
   build:
     name: Build
     runs-on: ubuntu-latest
+    needs: changes
+    # Nothing outside apps/ and packages/ compiles into an artifact, so a docs
+    # or migration-only change has nothing here to break.
+    if: needs.changes.outputs.build == 'true'
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -374,3 +473,39 @@ jobs:
           RAZORPAY_TEST_KEY_ID: ${{ secrets.RAZORPAY_TEST_KEY_ID }}
           RAZORPAY_TEST_KEY_SECRET: ${{ secrets.RAZORPAY_TEST_KEY_SECRET }}
         run: pnpm --filter @rekey.dev/api run test:providers
+
+  # ---------------------------------------------------------------------------
+  # One check to rule them all.
+  #
+  # Now that jobs skip, this matters: a SKIPPED job does not report success to
+  # branch protection, it reports nothing, so a rule requiring "Test" directly
+  # would leave every docs-only pull request waiting forever on a check that is
+  # never going to arrive. Requiring this job instead is immune to that, and to
+  # any later change in which jobs exist.
+  #
+  # (Branch protection is not enabled on this repository today; it needs a paid
+  # plan for private repos. This job exists so that turning it on later is one
+  # setting and not a debugging session.)
+  #
+  # `provider-sandbox` is deliberately absent: it talks to Stripe, PayPal and
+  # Razorpay over the network and can go red for reasons a contributor cannot
+  # fix. A required check that does that is a check people learn to ignore.
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [changes, config, oss-strip, typecheck, test, build]
+    steps:
+      - name: Every job passed or was deliberately skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          failed=0
+          for result in $RESULTS; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "::error::a job reported '$result'"; failed=1 ;;
+            esac
+          done
+          exit "$failed"

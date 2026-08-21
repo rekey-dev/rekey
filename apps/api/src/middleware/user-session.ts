@@ -74,7 +74,7 @@ export async function requireUserSession(
       statusCode: 401,
       code: 'USER_TOKEN_MISSING',
       message: 'This endpoint requires an X-Rekey-User-Token header (the user JWT).',
-      fix: 'After sign-in, pass the returned `token` to Rekey via the X-Rekey-User-Token header.',
+      fix: 'After sign-in, pass the returned `accessToken` to Rekey via the X-Rekey-User-Token header.',
     });
   }
 

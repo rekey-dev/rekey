@@ -30,7 +30,14 @@ import * as React from 'react';
 
 type Status = 'idle' | 'checking' | 'available' | 'taken' | 'invalid' | 'error';
 
-const SLUG_PATTERN = '^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$';
+// Two spellings of one pattern, and they must keep accepting the same strings.
+// The hyphen is escaped in SLUG_PATTERN because that string becomes the HTML
+// `pattern` attribute, which the browser compiles with the `v` flag: a bare `-`
+// after a range is an invalid character class there, and an invalid pattern is
+// DISCARDED, which silently removes client-side validation. SLUG_RE is a plain
+// literal with no `v` flag, where the bare hyphen is legal. Do not "tidy" one to
+// match the other, and do not build the attribute with new RegExp(_, 'v').
+const SLUG_PATTERN = '^[a-z0-9](?:[a-z0-9\\-]{0,38}[a-z0-9])?$';
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const DEBOUNCE_MS = 350;
 const STATUS_ID = 'slug-availability-status';

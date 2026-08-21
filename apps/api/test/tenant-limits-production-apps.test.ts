@@ -12,8 +12,14 @@
  *   3. Being over the line never takes an existing production app offline. The
  *      quota gates creation, exactly like maxActiveEndUsers.
  *
- * `Application.environment` is write-once, which is what makes counting at
- * creation sufficient — there is no promote-a-dev-app path to police.
+ * Counting at creation was once sufficient because `Application.environment`
+ * was write-once. It no longer is: promotion and re-enable are two further
+ * doors into the count, and both assert the same quota. Those doors are tested
+ * in app-lifecycle.test.ts; this file remains the creation-path contract.
+ *
+ * Note for anyone reading a `productionApps` figure here: since disabled
+ * production Applications stop counting, the number is RUNNING production
+ * Applications, not rows with `environment: PRODUCTION`.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

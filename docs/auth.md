@@ -16,7 +16,7 @@ Browser                  Customer's server                 Rekey
    │                            │  body: { email, password }   │
    │                            │ ────────────────────────────>│
    │                            │                              │
-   │                            │ <──── 201 { endUser, token, expiresAt }
+   │                            │ <──── 201 { endUser, accessToken, refreshToken }
    │                            │                              │
    │ <─── set cookie / token ───│                              │
    │                            │                              │
@@ -47,8 +47,11 @@ Creates a new EndUser in the calling Application.
   "success": true,
   "data": {
     "endUser": { "id": "...", "applicationId": "...", "email": "alice@example.com", "emailVerified": false, "metadata": { "name": "Alice" }, "createdAt": "..." },
-    "token": "<jwt>",
-    "expiresAt": "..."
+    "accessToken": "<jwt>",
+    "accessTokenExpiresAt": "...",
+    "refreshToken": "<opaque>",
+    "refreshTokenExpiresAt": "...",
+    "mfaRequired": false
   }
 }
 ```
@@ -107,6 +110,185 @@ claim's name, stays freely writable and is never emitted as a claim. See
 [oidc-provider.md](oidc-provider.md#where-profile-claims-come-from).
 
 SDK: `rekey.auth.updateCurrentUser(accessToken, { metadata })`.
+
+## OAuth sign-in and the redirect URI
+
+The redirect URI is the single most misconfigured value in Rekey, and it fails
+in a way that explains nothing: the provider bounces the browser to a URL your
+app does not serve, so you get a 404 with the provider's `code` sitting in the
+query string and no error naming the cause.
+
+**It is YOUR application's URL, never a Rekey one.** Rekey never receives the
+provider's redirect. The flow is:
+
+1. your app calls `POST /api/v1/auth/oauth/:provider/start` and gets an
+   `authorizationUrl`;
+2. it sends the browser there;
+3. the provider redirects the browser back to **the redirect URI you
+   registered**, which is a route on your own server;
+4. your server takes the `code` from that request and calls
+   `POST /api/v1/auth/oauth/:provider/callback`, which exchanges it and issues
+   Rekey tokens.
+
+Step 3 is the one that surprises people. Pointing the redirect URI at
+`api.rekey.dev`, or at a Rekey-hosted page, breaks the flow, because Rekey is
+not what the provider is redirecting to.
+
+### The same string has to appear in three places
+
+It is compared byte for byte, so a trailing slash, a missing `www.`, or `http`
+where you registered `https` is a hard failure:
+
+1. the provider's console (Google Cloud, Discord Developer Portal, ...);
+2. `redirectUri` on the provider's entry in the Application's OAuth config
+   (Panel → Application → Authentication → Sign-in providers);
+3. a route your app actually serves.
+
+### The shape rekey.dev itself uses
+
+There is no path Rekey requires; the route is yours to define, **on your own
+server**. The pattern below is what rekey.dev implements for itself, and the
+panel prefills it as a starting point. It is not a Rekey endpoint and there is
+nothing to call: substitute your own host and build the route yourself.
+
+```
+https://yourapp.example/api/auth/oauth/google/callback
+https://yourapp.example/api/auth/oauth/discord/callback
+```
+
+Note the provider name is IN the path, so each provider gets its own
+registered URI. Nothing requires that shape, and a single route reading the
+provider from a query parameter works too, but one URI per provider is what the
+provider consoles expect you to register, and it keeps the three-way match above
+a per-provider check rather than a shared one.
+
+### Checking it
+
+A correctly registered redirect URI returns a redirect (3xx) from your app, not
+a 404. The fastest check is to open the registered URL directly: a 404 means
+the string is registered against a route that does not exist, which is the
+failure above.
+
+For rekey.dev's own social sign-in, see
+[rekey-cloud-social-sign-in.md](rekey-cloud-social-sign-in.md), which names the
+exact values for that deployment.
+## Roles: two axes, and which one you want
+
+Rekey has **two independent role systems**. They are easy to confuse and the
+consequences of confusing them are not subtle, so the distinction is worth
+holding onto before you gate anything on a role.
+
+| | Application role | Organization role |
+|---|---|---|
+| Field | `EndUser.role` | `OrganizationMembership.role` |
+| Scoped to | (Application, end-user) | (organization, end-user) |
+| A person in two organizations | holds **one** value | holds **two independent** values |
+| Catalog | `/tenant/applications/:id/application-roles` | `/tenant/applications/:id/organization-roles` |
+| Shape | free-form name | free-form name + a `baseRole` tier |
+| Enforced by Rekey | **no**, it is data your app interprets | **yes**, the tier drives every org gate |
+| Who assigns it | operator only | an org OWNER/ADMIN, with their own end-user token |
+
+The application role answers *"is this person staff of my whole app?"*. It is
+the same value in every organization they belong to, and Rekey never reads it.
+No endpoint changes behaviour based on it. It exists so you can stamp a value on
+a user and read it back.
+
+The organization role answers *"what are they inside **this** agency?"*. This is
+the one you want for team permissions. Rekey does enforce it.
+
+> **The mistake to avoid.** `if (user.role === 'admin')` after an org switch
+> reads the *application* role and will be identical in every organization the
+> user belongs to. For the organization-scoped answer read
+> `activeOrganizationBaseRole` from `GET /me`, or the `baseRole` on the
+> membership.
+
+### Organization role names and tiers
+
+Organization roles are a per-Application catalog. Every Application is seeded
+with three built-ins (`OWNER`, `ADMIN`, `MEMBER`), and an operator can define
+more:
+
+```json
+{ "name": "content-manager", "baseRole": "MEMBER", "description": "Drafts and edits content" }
+```
+
+`baseRole` is the authority tier, one of OWNER / ADMIN / MEMBER. **Rekey gates on
+the tier and never on the name.** A `content-manager` on tier MEMBER can do
+exactly what MEMBER can. The `canManage` ladder, the last-OWNER guard and the
+org-scoped billing writes all read the tier. The name is your vocabulary; what
+`content-manager` means beyond MEMBER is for your app to decide.
+
+The built-ins cannot be renamed, re-tiered or deleted. That is what keeps
+memberships created before the catalog existed resolving to the authority they
+always had.
+
+### Who does what
+
+Authoring the catalog and assigning from it are different acts with different
+credentials:
+
+- **Define** a role: operator, tenant JWT. Panel → Application → Organizations
+  → Organization roles, `POST /tenant/applications/:id/organization-roles`, or
+  the `create_organization_role` MCP tool. Requires
+  `authConfig.organizationsEnabled`.
+- **Assign** a role: an org OWNER/ADMIN, using **their own end-user access
+  token**. `PATCH /users/me/organizations/:id/members/:euid` and
+  `POST /users/me/organizations/:id/invitations`. No operator involved; the
+  `canManage` ladder applies to the tiers, so an ADMIN-tier member can hand out
+  ADMIN- and MEMBER-tier roles but not OWNER-tier ones.
+- **Discover** the names: any signed-in end-user, so an org-admin UI can
+  populate a role picker: `GET /api/v1/users/me/organizations/roles`.
+
+End-users can read the catalog but never write it. There is no path for an
+organization member to mint a role name that outranks their own.
+
+### Revoking a role
+
+`PATCH /tenant/applications/:id/organization-roles/:name` with
+`{"disabled": true}` refuses every holder immediately and blocks new
+assignment, while keeping the memberships so it can be undone. Prefer it to
+re-tiering (which degrades holders silently) or deleting (which needs somewhere
+to move everyone first). See
+[organization-roles.md](organization-roles.md#revoking-a-role).
+
+### Acting as an OpenID Connect provider for another app
+
+When this Application is the identity provider, `GET /api/v1/mcp/:slug/oauth/authorize`
+renders a built-in email + password page. That is right for a deployment with no
+front end of its own, and **a dead end for an Application whose users sign in
+with Google**: they have no password, so the only way through is a reset on an
+account that has none.
+
+Set `authConfig.hostedAuthorizeUrl` to your own login page and Rekey forwards
+the authorization request there instead, parameters untouched. Your page signs
+the user in however it likes, skips the prompt entirely if they already have a
+session, and finishes by calling
+`POST /api/v1/mcp/:slug/oauth/authorize/grant` with your secret key and the
+user's access token, then redirecting to the `redirect_uri` with the returned
+code.
+
+The API forwards only the standard authorization parameters, which are already
+public, and refuses to delegate to its own authorize path so a misconfiguration
+cannot loop. Delegation happens after the client, `redirect_uri` and scope
+checks, so a malformed request stays a protocol error rather than becoming your
+login screen's problem.
+
+### Reading the active organization's role
+
+`GET /api/v1/users/me/` and `GET /api/v1/auth/me` both return:
+
+```json
+{
+  "role": "user",
+  "activeOrganizationId": "org_...",
+  "activeOrganizationRole": "content-manager",
+  "activeOrganizationBaseRole": "MEMBER"
+}
+```
+
+`activeOrganizationRole` and `activeOrganizationBaseRole` are null when the
+session has no active organization, or when membership lapsed since the token
+was minted. A stale `oid` claim degrades to "no org", it never grants access.
 
 ## Tokens — access + refresh
 
@@ -261,11 +443,12 @@ The auth module enforces:
 
 ```ts
 // 1. user signs up via your form, server posts to Rekey
-const { endUser, token } = await rekey.auth.signUp({
+const { endUser, accessToken, refreshToken } = await rekey.auth.signUp({
   email: req.body.email,
   password: req.body.password,
 });
-// store token however your stack stores sessions
+// store accessToken however your stack stores sessions; keep refreshToken to
+// mint the next one when it expires
 
 // 2. on subsequent requests, look up the user
 const user = await rekey.auth.getCurrentUser(req.cookies.session);

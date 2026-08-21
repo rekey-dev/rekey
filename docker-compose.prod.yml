@@ -131,6 +131,11 @@ services:
       # would route traffic nowhere while every probe still passed.
       DATABASE_URL: postgresql://rekey:${POSTGRES_PASSWORD}@postgres:5432/rekey?schema=public
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      # How long one API process may reuse its snapshot of an Application's
+      # organization-role catalog. Writes invalidate locally and publish over
+      # Redis, so this is the backstop for a Redis outage, not the normal
+      # propagation path. 0 disables the cache. See docs/organization-roles.md.
+      ORG_ROLE_CACHE_TTL_MS: ${ORG_ROLE_CACHE_TTL_MS:-}
 
       # ── Secrets ──────────────────────────────────────────────────────────
       JWT_SECRET: ${JWT_SECRET}

@@ -55,9 +55,20 @@ export const providerNameSchema = z.enum(registryNames as [string, ...string[]])
 export function credentialDataSchema(module: ProviderModule): z.ZodType<Record<string, string>> {
   const shape: Record<string, z.ZodTypeAny> = {};
   for (const f of module.credentialSchema) {
-    shape[f.key] = f.optional
-      ? z.string().max(512).optional().default('')
-      : z.string().min(4).max(512);
+    // Every field is optional here, and deliberately WITHOUT a default, so the
+    // difference between "absent" and "present but empty" survives into the
+    // service. That distinction is the whole partial-edit rule:
+    //
+    //   absent            -> keep whatever is stored (edit one field, keep the rest)
+    //   present and empty -> clear it (what a blank optional field always meant)
+    //
+    // Collapsing absent to '' with `.default('')`, as this did, made a partial
+    // edit indistinguishable from a request to wipe every field it omitted.
+    // Requiredness is still enforced, by `credentialRulesSchema` in the
+    // credentials service, AFTER the stored values have been merged in, so a
+    // first-time configuration with a missing required field still fails, and
+    // an edit that omits it does not.
+    shape[f.key] = z.string().max(512).optional();
   }
   return z.object(shape) as unknown as z.ZodType<Record<string, string>>;
 }

@@ -11,6 +11,7 @@ import { CopyButton } from '@/components/CopyButton';
 import { ApiErrorText } from '@/components/api-error';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { Modal } from '@/components/Modal';
+import { Banner } from '@/components/Banner';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { EmptyState } from '@/components/EmptyState';
@@ -303,6 +304,24 @@ export default async function ApiKeysPage({
             Pass as <code>Authorization: Bearer &lt;key&gt;</code> from your server-side code via <code>@rekey.dev/node</code>.
           </p>
         </div>
+      )}
+
+      {/* Promotion deliberately does not touch existing keys: revoking them
+          would break the integration at the exact moment the operator goes
+          live. The cost is a cosmetic mismatch — production application, keys
+          labelled rp_test_ — which is confusing precisely because the prefix
+          is supposed to tell you what you are holding. Say so, rather than
+          leaving the operator to notice and mistrust it. Shown only on a
+          PROMOTED application (`promotedAt` set); one born production never
+          had a test-prefixed key to begin with. */}
+      {app.promotedAt != null && keys.some((k) => k.keyPrefix.startsWith('rp_test_')) && (
+        <Banner tone="info">
+          This application was promoted to production on{' '}
+          {new Date(app.promotedAt).toLocaleDateString(undefined, { dateStyle: 'medium' })}. Keys
+          minted before then still start with <code>rp_test_</code> and keep working exactly as
+          they did — the prefix is a label, not a capability. Mint a{' '}
+          <code>rp_live_</code> key and retire the old one when it suits you.
+        </Banner>
       )}
 
       <SectionHeader

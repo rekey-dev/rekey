@@ -60,6 +60,8 @@ import {
   type BillingMode,
 } from '../billing/credentials.service.js';
 import { tenantWorkspacesService } from '../tenant-workspaces/tenant-workspaces.service.js';
+import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
+import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import {
   accessibleApplicationIds,
   type OperatorTool,
@@ -166,7 +168,181 @@ function audit(
   });
 }
 
+
+/**
+ * Organization-role writes need organizations switched on for the Application.
+ *
+ * The refusal is the product surface, not just a guard: an agent asking to
+ * create `content-manager` on an Application with organizations off should be
+ * told to enable them (and how) rather than getting a role nobody can hold.
+ * Mirrors `requireOrganizationsEnabled` on the REST side.
+ */
+function assertOrganizationsEnabled(app: Application): void {
+  const config = AuthConfigSchema.parse(app.authConfig);
+  if (!config.organizationsEnabled) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'ORGANIZATIONS_NOT_ENABLED',
+      message: `Organizations are not enabled on "${app.slug}", so it has no use for custom organization roles.`,
+      fix: 'Call update_auth_config with { applicationId, organizationsEnabled: true } first, then retry.',
+    });
+  }
+}
+
 export const operatorWriteTools: OperatorTool[] = [
+  {
+    name: 'list_organization_roles',
+    description:
+      "List an application's ORGANIZATION role catalog: the role names assignable to a " +
+      'member of an organization. Each entry has a `baseRole` of OWNER/ADMIN/MEMBER, which ' +
+      'is the authority tier the name inherits and the only thing Rekey gates on. Note this ' +
+      'is a different axis from an end-user\'s application-wide `role` (see get_end_user): ' +
+      'application role is one value per user across the whole app, organization role is per ' +
+      '(organization, user). Readable even when organizations are disabled.',
+    inputSchema: {
+      type: 'object',
+      properties: { applicationId: { type: 'string', minLength: 1 } },
+      required: ['applicationId'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      const config = AuthConfigSchema.parse(app.authConfig);
+      const roles = await organizationRolesService.list(app.id);
+      return {
+        applicationId: app.id,
+        organizationsEnabled: config.organizationsEnabled === true,
+        ...(config.organizationsEnabled
+          ? {}
+          : {
+              note:
+                'Organizations are disabled on this application, so these roles cannot be ' +
+                'assigned yet. Call update_auth_config with organizationsEnabled: true to ' +
+                'turn the feature on.',
+            }),
+        roles,
+      };
+    },
+  },
+  {
+    name: 'create_organization_role',
+    description:
+      'Define a custom ORGANIZATION role on an application (e.g. "content-manager"). ' +
+      '`baseRole` picks the authority tier it inherits (OWNER, ADMIN or MEMBER), and Rekey ' +
+      'enforces permissions on that tier, never on the name, so a "content-manager" on tier ' +
+      'MEMBER can do exactly what MEMBER can. Requires organizations to be enabled on the ' +
+      'application. Names are lowercase (letters, digits, hyphens, underscores); OWNER, ' +
+      'ADMIN and MEMBER are reserved built-ins.',
+    write: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        applicationId: { type: 'string', minLength: 1 },
+        name: { type: 'string', minLength: 2, maxLength: 40 },
+        baseRole: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+        description: { type: 'string', maxLength: 240 },
+        isDefault: {
+          type: 'boolean',
+          description: 'Assign this role when an invitation omits one. Demotes the previous default.',
+        },
+      },
+      required: ['applicationId', 'name', 'baseRole'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      assertOrganizationsEnabled(app);
+      const created = await organizationRolesService.create({
+        applicationId: app.id,
+        name: String(args.name),
+        baseRole: args.baseRole as 'OWNER' | 'ADMIN' | 'MEMBER',
+        ...(args.description !== undefined && { description: String(args.description) }),
+        ...(args.isDefault !== undefined && { isDefault: args.isDefault === true }),
+      });
+      audit(ctx, 'app.organization_role_created', app.id, {
+        name: created.name,
+        baseRole: created.baseRole,
+      });
+      return created;
+    },
+  },
+  {
+    name: 'update_organization_role',
+    description:
+      "Edit an organization role's description, authority tier, or default flag. The NAME is " +
+      'immutable because memberships store it by value, so renaming means deleting with ' +
+      '`reassignTo` instead. A built-in role (OWNER/ADMIN/MEMBER) cannot be re-tiered. ' +
+      'Changing `baseRole` changes what every member already holding this role may do, in ' +
+      'every organization in the application.',
+    write: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        applicationId: { type: 'string', minLength: 1 },
+        name: { type: 'string', minLength: 1, maxLength: 40 },
+        baseRole: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+        description: { type: ['string', 'null'], maxLength: 240 },
+        isDefault: { type: 'boolean' },
+      },
+      required: ['applicationId', 'name'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      assertOrganizationsEnabled(app);
+      const updated = await organizationRolesService.update({
+        applicationId: app.id,
+        name: String(args.name),
+        ...(args.description !== undefined && {
+          description: args.description === null ? null : String(args.description),
+        }),
+        ...(args.baseRole !== undefined && {
+          baseRole: args.baseRole as 'OWNER' | 'ADMIN' | 'MEMBER',
+        }),
+        ...(args.isDefault !== undefined && { isDefault: args.isDefault === true }),
+      });
+      audit(ctx, 'app.organization_role_updated', app.id, {
+        name: updated.name,
+        baseRole: updated.baseRole,
+      });
+      return updated;
+    },
+  },
+  {
+    name: 'delete_organization_role',
+    description:
+      'Delete a custom organization role. Built-ins and the default role cannot be deleted. ' +
+      'If memberships or pending invitations still reference the role, pass `reassignTo` ' +
+      'with another role name, and holders are moved and the role dropped in one transaction. ' +
+      'Reassigning an OWNER-tier role to a lower tier is refused, because it would leave ' +
+      'organizations without an owner.',
+    write: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        applicationId: { type: 'string', minLength: 1 },
+        name: { type: 'string', minLength: 1, maxLength: 40 },
+        reassignTo: { type: 'string', minLength: 1, maxLength: 40 },
+      },
+      required: ['applicationId', 'name'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadAppInTenant(ctx, String(args.applicationId));
+      assertOrganizationsEnabled(app);
+      const result = await organizationRolesService.remove({
+        applicationId: app.id,
+        name: String(args.name),
+        ...(args.reassignTo !== undefined && { reassignTo: String(args.reassignTo) }),
+      });
+      audit(ctx, 'app.organization_role_deleted', app.id, {
+        name: String(args.name),
+        ...(args.reassignTo !== undefined && { reassignedTo: String(args.reassignTo) }),
+      });
+      return result;
+    },
+  },
+
   {
     name: 'create_usage_meter',
     description:
@@ -183,6 +359,14 @@ export const operatorWriteTools: OperatorTool[] = [
         slug: { type: 'string', minLength: 1, maxLength: 40 },
         name: { type: 'string', minLength: 1, maxLength: 120 },
         unit: { type: 'string', minLength: 1, maxLength: 40 },
+        creditsPerUnit: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 2147483647,
+          description:
+            'Credits charged per unit past the included quota. Omit to only COUNT usage ' +
+            'rather than charge for it.',
+        },
       },
       required: ['applicationId', 'slug', 'name', 'unit'],
       additionalProperties: false,
@@ -194,6 +378,9 @@ export const operatorWriteTools: OperatorTool[] = [
         slug: String(args.slug),
         name: String(args.name),
         unit: String(args.unit),
+        ...(args.creditsPerUnit !== undefined && {
+          creditsPerUnit: Number(args.creditsPerUnit),
+        }),
       });
       return { meter };
     },
@@ -507,14 +694,24 @@ export const operatorWriteTools: OperatorTool[] = [
       "Patch an application's auth configuration. Only the fields you pass change. " +
       'Use `mcpEnabled` to turn the per-app end-user MCP server on/off, `methods` to set ' +
       "the enabled sign-in methods (e.g. ['password','oauth']), `mfa` for the MFA policy, " +
-      'and `signupMode` to control public sign-up.',
+      'and `signupMode` to control public sign-up. It deliberately cannot turn this ' +
+      'application into a public OpenID Provider (`oidcEnabled`) or reopen client ' +
+      'registration (`dynamicClientRegistration`); those stay operator-console decisions.',
     write: true,
     inputSchema: {
       type: 'object',
       properties: {
         applicationId: { type: 'string', minLength: 1 },
         methods: { type: 'array', items: { type: 'string' } },
-        passwordMinLength: { type: 'integer', minimum: 6, maximum: 256 },
+        // Bounds copied from the PATCH /auth-config route so the two surfaces
+        // agree, not because this tool goes through it: the handler calls
+        // `applicationsService.updateAuthConfig` directly, and the only bound
+        // ENFORCED on this path is AuthConfigSchema's 8..1024. They used to be
+        // 6..256, which advertised 6 and 7 as valid when the shared schema
+        // refuses them outright. Anything between 129 and 1024 is still
+        // storable here and not over REST; narrowing what is advertised keeps
+        // an agent from opening that gap by accident.
+        passwordMinLength: { type: 'integer', minimum: 8, maximum: 128 },
         redirectUrls: { type: 'array', items: { type: 'string' } },
         appUrl: {
           type: ['string', 'null'],
@@ -522,10 +719,28 @@ export const operatorWriteTools: OperatorTool[] = [
             'Base URL of the customer application that transactional emails link back to. ' +
             'Null or "" clears it; with nothing resolvable the email CTA button is omitted.',
         },
+        hostedAuthorizeUrl: {
+          type: ['string', 'null'],
+          description:
+            "Where to send the browser for the sign-in half of this application's OpenID " +
+            'Connect flow. Unset, the API renders its own email + password page, which is a ' +
+            'dead end for users who sign in with Google and have no password. Null or "" ' +
+            'turns delegation back off. SECURITY: this is a redirect target in a live ' +
+            "sign-in flow, so only ever set it to a page the application's own operator " +
+            'controls. The API refuses to delegate to its own authorize endpoint.',
+        },
         organizationsEnabled: { type: 'boolean' },
         signupMode: { type: 'string', enum: ['public', 'secret_only', 'invite_only'] },
         mfa: { type: 'string', enum: ['off', 'optional', 'required'] },
         mcpEnabled: { type: 'boolean' },
+        tokenAlg: {
+          type: 'string',
+          enum: ['HS256', 'RS256'],
+          description:
+            'Signature alg for NEW end-user access tokens. RS256 tokens verify offline ' +
+            'against GET /.well-known/jwks.json; HS256 (default) requires the API. ' +
+            'Switching never breaks outstanding tokens, since the API verifies both.',
+        },
         passwordBreachCheckEnabled: { type: 'boolean' },
         sendVerificationEmailOnSignUp: {
           type: 'boolean',
@@ -551,6 +766,10 @@ export const operatorWriteTools: OperatorTool[] = [
         ...(args.appUrl !== undefined && {
           appUrl: args.appUrl === null ? null : String(args.appUrl),
         }),
+        ...(args.hostedAuthorizeUrl !== undefined && {
+          hostedAuthorizeUrl:
+            args.hostedAuthorizeUrl === null ? null : String(args.hostedAuthorizeUrl),
+        }),
         ...(args.organizationsEnabled !== undefined && {
           organizationsEnabled: args.organizationsEnabled === true,
         }),
@@ -559,6 +778,7 @@ export const operatorWriteTools: OperatorTool[] = [
         }),
         ...(args.mfa !== undefined && { mfa: args.mfa as 'off' | 'optional' | 'required' }),
         ...(args.mcpEnabled !== undefined && { mcpEnabled: args.mcpEnabled === true }),
+        ...(args.tokenAlg !== undefined && { tokenAlg: args.tokenAlg as 'HS256' | 'RS256' }),
         ...(args.passwordBreachCheckEnabled !== undefined && {
           passwordBreachCheckEnabled: args.passwordBreachCheckEnabled === true,
         }),
@@ -578,7 +798,14 @@ export const operatorWriteTools: OperatorTool[] = [
     name: 'create_plan',
     description:
       'Create a billing Plan on an application. `amount` is in the smallest currency unit ' +
-      '(e.g. cents). Defaults: currency USD, interval MONTH, kind SUBSCRIPTION.',
+      '(e.g. cents). Defaults: currency USD, interval MONTH, kind SUBSCRIPTION.\n\n' +
+      'Each `kind` needs its own fields, and the API refuses the plan without them:\n' +
+      '- SUBSCRIPTION: nothing extra. `interval` applies. Free trials are held in this ' +
+      'release and a plan cannot carry one.\n' +
+      '- CREDIT: `creditsAmount`. A one-off pack of credits, not a recurring charge.\n' +
+      '- LICENSE: `licenseKind`, plus `licenseDurationDays` for TIMED and ' +
+      '`licenseSeatsAllowed` for SEATS.\n' +
+      '- USAGE: `meterSlug` (see list_usage_meters) and `pricePerUnitCents`.',
     write: true,
     inputSchema: {
       type: 'object',
@@ -589,6 +816,61 @@ export const operatorWriteTools: OperatorTool[] = [
         amount: { type: 'integer', minimum: 0, maximum: 2147483647 },
         currency: { type: 'string', minLength: 3, maxLength: 3 },
         interval: { type: 'string', enum: ['MONTH', 'YEAR'] },
+        kind: {
+          type: 'string',
+          enum: ['SUBSCRIPTION', 'LICENSE', 'USAGE', 'CREDIT'],
+          description:
+            'Defaults to SUBSCRIPTION. Without this, a credit pack or a license cannot be ' +
+            'created at all, only a recurring subscription.',
+        },
+        creditsAmount: {
+          // 1, not 0. The service refuses `creditsAmount <= 0` with
+          // PLAN_CREDITS_AMOUNT_REQUIRED and the REST body says `minimum: 1`,
+          // so advertising 0 would tell an agent a value is valid and then
+          // refuse it — the exact defect this pass narrowed passwordMinLength
+          // to remove.
+          type: 'integer',
+          minimum: 1,
+          maximum: 2147483647,
+          description: 'CREDIT plans: how many credits the purchase grants. Required for that kind.',
+        },
+        licenseKind: {
+          type: 'string',
+          enum: ['PERPETUAL', 'TIMED', 'SEATS'],
+          description: 'LICENSE plans: required for that kind.',
+        },
+        licenseDurationDays: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 2147483647,
+          description: 'LICENSE plans with licenseKind TIMED: required for that combination.',
+        },
+        licenseSeatsAllowed: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 2147483647,
+          description: 'LICENSE plans with licenseKind SEATS: required for that combination.',
+        },
+        meterSlug: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 40,
+          description: 'USAGE plans: the usage meter this plan bills against. Required for that kind.',
+        },
+        pricePerUnitCents: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 2147483647,
+          description: 'USAGE plans: charge per metered unit past the included quota.',
+        },
+        metadata: {
+          type: 'object',
+          additionalProperties: true,
+          // Provider-reserved keys (stripe / paypal / razorpay) are stripped by
+          // the service: naming a price id here would otherwise make the plan
+          // charge for someone else's product.
+          description: 'Free-form operator metadata stored on the plan.',
+        },
       },
       required: ['applicationId', 'slug', 'name', 'amount'],
       additionalProperties: false,
@@ -604,15 +886,50 @@ export const operatorWriteTools: OperatorTool[] = [
         ...(args.interval !== undefined && {
           interval: args.interval as 'MONTH' | 'YEAR',
         }),
+        ...(args.kind !== undefined && {
+          kind: args.kind as 'SUBSCRIPTION' | 'LICENSE' | 'USAGE' | 'CREDIT',
+        }),
+        ...(args.creditsAmount !== undefined && { creditsAmount: Number(args.creditsAmount) }),
+        ...(args.licenseKind !== undefined && {
+          licenseKind: args.licenseKind as 'PERPETUAL' | 'TIMED' | 'SEATS',
+        }),
+        ...(args.licenseDurationDays !== undefined && {
+          licenseDurationDays: Number(args.licenseDurationDays),
+        }),
+        ...(args.licenseSeatsAllowed !== undefined && {
+          licenseSeatsAllowed: Number(args.licenseSeatsAllowed),
+        }),
+        ...(args.meterSlug !== undefined && { meterSlug: String(args.meterSlug) }),
+        ...(args.pricePerUnitCents !== undefined && {
+          pricePerUnitCents: Number(args.pricePerUnitCents),
+        }),
+        ...(args.metadata !== undefined && {
+          metadata: args.metadata as Record<string, unknown>,
+        }),
       });
-      audit(ctx, 'app.plan_created', app.id, { planSlug: plan.slug, amount: plan.amount });
+      audit(ctx, 'app.plan_created', app.id, {
+        planSlug: plan.slug,
+        amount: plan.amount,
+        kind: plan.kind,
+      });
       return {
         id: plan.id,
         slug: plan.slug,
         name: plan.name,
+        // Echo the kind and its per-kind field, so the caller can see that a
+        // credit pack really was created as a credit pack rather than silently
+        // defaulting to a subscription.
+        kind: plan.kind,
         amount: plan.amount,
         currency: plan.currency,
         interval: plan.interval,
+        creditsAmount: plan.creditsAmount,
+        trialDays: plan.trialDays,
+        licenseKind: plan.licenseKind,
+        licenseDurationDays: plan.licenseDurationDays,
+        licenseSeatsAllowed: plan.licenseSeatsAllowed,
+        meterSlug: plan.meterSlug,
+        pricePerUnitCents: plan.pricePerUnitCents,
         active: plan.active,
       };
     },
@@ -624,7 +941,9 @@ export const operatorWriteTools: OperatorTool[] = [
       "subscriptions keep billing, but no new sign-ups. This is how you retire a plan — you " +
       "CANNOT change a plan's price in place (the price is registered with the payment provider " +
       'and is immutable), so to change pricing you archive the old plan here and create a ' +
-      'replacement with create_plan. Reversible.',
+      'replacement with create_plan UNDER A DIFFERENT SLUG. Archiving does not release the slug: ' +
+      'it is the identifier integrations pass to checkout, so reusing it is refused with ' +
+      'PLAN_SLUG_TAKEN. Reversible.',
     write: true,
     inputSchema: {
       type: 'object',
@@ -649,8 +968,9 @@ export const operatorWriteTools: OperatorTool[] = [
       "Edit a plan's ENTITLEMENTS ONLY — its display name, LICENSE seats/duration, or CREDIT " +
       'amount. You CANNOT change price, currency, or interval here: those are registered with ' +
       'the payment provider (Stripe/PayPal/Razorpay) and are immutable. To change pricing, ' +
-      'ARCHIVE this plan (set_plan_active active=false) and CREATE a replacement (create_plan) — ' +
-      'existing subscribers keep their old price, new sign-ups get the new plan.',
+      'ARCHIVE this plan (set_plan_active active=false) and CREATE a replacement (create_plan) ' +
+      'under a DIFFERENT slug, because archiving does not release the old one. Existing ' +
+      'subscribers keep their old price, new sign-ups get the new plan.',
     write: true,
     inputSchema: {
       type: 'object',

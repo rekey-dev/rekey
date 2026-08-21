@@ -368,7 +368,8 @@ export const billingCredentialsService = {
     options?: { countries?: string[]; priority?: number; enabled?: boolean; mode?: BillingMode },
   ): Promise<void> {
     const module = requireModule(provider);
-    const parsed = credentialRulesSchema(module).safeParse(data);
+    const { merged, hadStored } = await this.mergeOverStored(applicationId, provider, data);
+    const parsed = credentialRulesSchema(module).safeParse(merged);
     if (!parsed.success) {
       const issue = parsed.error.issues[0]!;
       const fix = (issue as { params?: { fix?: string } }).params?.fix;
@@ -379,8 +380,97 @@ export const billingCredentialsService = {
         ...(fix !== undefined && { fix }),
       });
     }
-    module.validateCredentials?.(data);
-    await this.upsertRaw(applicationId, provider, data, options);
+    module.validateCredentials?.(merged);
+    // Preserve the stored mode on a partial edit. `resolveMode` falls back to
+    // 'test' for any provider without `detectMode` (PayPal has none), so an
+    // edit that omits `mode` used to relabel a live account as sandbox and
+    // point every call at the sandbox host. Only an explicit `mode`, or one the
+    // key material states, may change it.
+    const opts = { ...options };
+    if (hadStored && opts.mode === undefined) {
+      const existing = await prisma.billingCredentials.findUnique({
+        where: { applicationId_provider: { applicationId, provider } },
+        select: { mode: true },
+      });
+      if (existing) opts.mode = existing.mode === 'live' ? 'live' : 'test';
+    }
+    await this.upsertRaw(applicationId, provider, merged, opts);
+  },
+
+  /**
+   * Merge an edit over the stored credentials.
+   *
+   * A field that is ABSENT from the request keeps whatever is stored. A field
+   * that is PRESENT and empty is cleared, which is what a blank optional field
+   * has always meant (blanking Stripe's `webhookSecret` is how you drop a
+   * signing secret). Keeping those two cases distinct is the whole rule.
+   *
+   * The reason this exists: stored credentials are encrypted and never returned
+   * to the panel, so an edit form renders every input empty. Sending that form
+   * back overwrote each field with an empty string, so changing one URL meant
+   * re-fetching the API key from the provider dashboard.
+   *
+   * An earlier version of this keyed off `field.secret`, which was wrong twice
+   * over. It wiped non-secret fields that were merely omitted, including
+   * PayPal's `webhookId` (every inbound webhook then 503s), and it rested on
+   * the claim that non-secret fields "render with their current value". No
+   * endpoint returns credential values, so they render empty exactly like
+   * secrets do.
+   *
+   * Limits that keep this from being a hole:
+   *   - Only when a credential row already exists. First configuration has
+   *     nothing to merge, so a missing required field still fails.
+   *   - The merged result still goes through the full rules check, so a
+   *     carried-forward value that no longer satisfies the provider's pattern
+   *     is refused exactly like a freshly typed one.
+   *   - Nothing is returned to the caller: a value travels from the row,
+   *     through the merge, back into the ciphertext, and is never exposed.
+   */
+  async mergeOverStored(
+    applicationId: string,
+    provider: BillingProviderName,
+    data: Record<string, string | undefined>,
+  ): Promise<{ merged: Record<string, string>; hadStored: boolean }> {
+    const module = requireModule(provider);
+    const keys = module.credentialSchema.map((f) => f.key);
+    const absent = keys.filter((k) => data[k] === undefined);
+
+    const normalise = (source: Record<string, string | undefined>): Record<string, string> => {
+      const out: Record<string, string> = {};
+      for (const k of keys) out[k] = source[k] ?? '';
+      return out;
+    };
+
+    if (absent.length === 0) return { merged: normalise(data), hadStored: false };
+
+    const row = await prisma.billingCredentials.findUnique({
+      where: { applicationId_provider: { applicationId, provider } },
+      select: { ciphertext: true },
+    });
+    if (!row) return { merged: normalise(data), hadStored: false };
+
+    let stored: Record<string, unknown>;
+    try {
+      // `unwrap`, not a bare decrypt: rows backfilled from the old
+      // per-application ciphertext are wrapped, and a bare decrypt would carry
+      // nothing forward and then blame the operator for a key that is stored
+      // and working.
+      stored = unwrap(row.ciphertext, provider) as unknown as Record<string, unknown>;
+    } catch {
+      // Undecryptable stored credentials are a re-enter-everything situation.
+      // Carry nothing and let the normal required-field validation say so.
+      return { merged: normalise(data), hadStored: false };
+    }
+    if (stored === null || typeof stored !== 'object') {
+      return { merged: normalise(data), hadStored: false };
+    }
+
+    const merged: Record<string, string | undefined> = { ...data };
+    for (const k of absent) {
+      const prior = stored[k];
+      if (typeof prior === 'string') merged[k] = prior;
+    }
+    return { merged: normalise(merged), hadStored: true };
   },
 
   async upsertRaw(

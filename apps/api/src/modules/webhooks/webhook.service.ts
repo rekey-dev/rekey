@@ -196,6 +196,25 @@ export async function enqueueEvent(
   const endpoints = await listForEvent(client, args.applicationId, args.type);
   if (endpoints.length === 0) return [];
 
+  // A disabled Application dispatches nothing outbound. Deliberately placed
+  // AFTER the endpoint lookup, not before: the docblock notes that "no
+  // endpoint subscribed" is the common case and costs one indexed SELECT, so
+  // checking first would add a second SELECT to every event on every
+  // Application in the deployment to serve the rare frozen one. Here it costs
+  // nothing except on Applications that actually have subscribers.
+  //
+  // Dropped, not parked. There is no row to resume from and creating PENDING
+  // rows for a frozen Application would hand its subscribers a burst of stale
+  // events on the thaw — events describing a window in which, from the
+  // outside world's point of view, the Application was not running. The
+  // state change itself is still committed and still visible through the API;
+  // only the outbound notification is suppressed.
+  const application = await client.application.findUnique({
+    where: { id: args.applicationId },
+    select: { disabledAt: true },
+  });
+  if (application?.disabledAt != null) return [];
+
   const eventId = cuid();
   const envelope: WebhookEventEnvelope = {
     eventId,
@@ -418,6 +437,14 @@ export function setDeliveryScheduler(fn: DeliveryScheduler | null): void {
  * the active scheduler. This is the unit of work both the in-process timer and
  * the BullMQ worker invoke. Exported for the worker processor.
  */
+/**
+ * How long a delivery waits before re-checking whether its Application has
+ * been re-enabled. Long enough that a freeze of any length is cheap (one row
+ * read per delivery per interval), short enough that a thaw resumes promptly
+ * without anyone doing anything.
+ */
+const DISABLED_APP_PARK_MS = 5 * 60_000;
+
 export async function attemptDelivery(deliveryId: string): Promise<void> {
   // Atomic claim: only one caller (in-process timer OR the periodic poller)
   // may attempt a due delivery. The guarded update pushes `nextAttemptAt`
@@ -440,6 +467,32 @@ export async function attemptDelivery(deliveryId: string): Promise<void> {
     include: { endpoint: true },
   });
   if (!delivery || delivery.status !== 'PENDING') return;
+
+  // Deliveries already queued when the Application was frozen. `enqueueEvent`
+  // stops new ones; these are the ones already in flight.
+  //
+  // Parked, not failed and not dropped. Failing them would burn the retry
+  // budget on a condition that has nothing to do with the subscriber's
+  // endpoint, and would mark as permanently FAILED a delivery that would have
+  // succeeded — the operator would thaw the Application and find a wall of
+  // failures caused by their own maintenance. So: leave the row PENDING with
+  // its attempt count untouched and push `nextAttemptAt` out. The poller
+  // re-checks on that cadence and the delivery resumes, unharmed, on the thaw.
+  // Separate read rather than an `include`: WebhookDelivery carries a bare
+  // `applicationId` with no Prisma relation (there is no FK constraint on the
+  // column), so there is nothing to include. This is the background retry
+  // sweep, not a request path, and it runs only for rows that were already
+  // claimed, so one more indexed read is not a cost worth a schema change.
+  const deliveryApp = await prisma.application.findUnique({
+    where: { id: delivery.applicationId },
+    select: { disabledAt: true },
+  });
+  if (deliveryApp?.disabledAt != null) {
+    await safeUpdate(deliveryId, {
+      nextAttemptAt: new Date(Date.now() + DISABLED_APP_PARK_MS),
+    });
+    return;
+  }
 
   const body = JSON.stringify(delivery.payload);
   const sig = signWebhook({ body, secret: delivery.endpoint.secret });

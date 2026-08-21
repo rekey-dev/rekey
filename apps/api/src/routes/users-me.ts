@@ -31,6 +31,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { organizationsService } from '../modules/organizations/organizations.service.js';
 import { requirePublishableOrSecretKey, requireScope } from '../middleware/api-key-auth.js';
 import { requireUserSession } from '../middleware/user-session.js';
 import { RekeyError } from '../lib/error.js';
@@ -92,7 +93,30 @@ const END_USER_SELF_SCHEMA = {
             "The organization this session is acting for, from the token's `oid` claim. " +
             'Null when the session has no active organization.',
         },
-        role: { type: 'string', description: "The end-user's role within this Application." },
+        activeOrganizationRole: {
+          type: 'string',
+          nullable: true,
+          description:
+            "The caller's role NAME inside the active organization. Null when there is no " +
+            'active organization, or when membership lapsed since the token was minted. ' +
+            'NOTE: this is a different axis from the sibling `role` field, which is ' +
+            'application-wide and identical in every organization the user belongs to.',
+        },
+        activeOrganizationBaseRole: {
+          type: 'string',
+          enum: ['OWNER', 'ADMIN', 'MEMBER'],
+          nullable: true,
+          description:
+            'The authority tier `activeOrganizationRole` maps to. Gate organization ' +
+            'permissions on this, never on the role name and never on `role`.',
+        },
+        role: {
+          type: 'string',
+          description:
+            "The end-user's APPLICATION-wide role: one value per (Application, end-user), " +
+            'the same in every organization they belong to. For the organization-scoped role ' +
+            'see `activeOrganizationRole`.',
+        },
         updatedAt: { type: 'string', format: 'date-time' },
         erasedAt: {
           type: 'string',
@@ -102,7 +126,7 @@ const END_USER_SELF_SCHEMA = {
         },
         erasedBy: { type: 'string', nullable: true },
       },
-      required: ['activeOrganizationId', 'role', 'updatedAt'],
+      required: ['activeOrganizationId', 'activeOrganizationRole', 'activeOrganizationBaseRole', 'role', 'updatedAt'],
     },
   ],
 };
@@ -160,9 +184,19 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
       },
     },
     async (req) => {
+      const active = await organizationsService.activeRoleFor({
+        applicationId: req.application!.id,
+        endUserId: req.endUser!.id,
+        organizationId: req.activeOrganizationId,
+      });
       return {
         success: true,
-        data: { ...req.endUser!, activeOrganizationId: req.activeOrganizationId ?? null },
+        data: {
+          ...req.endUser!,
+          activeOrganizationId: req.activeOrganizationId ?? null,
+          activeOrganizationRole: active?.role ?? null,
+          activeOrganizationBaseRole: active?.baseRole ?? null,
+        },
       };
     },
   );
