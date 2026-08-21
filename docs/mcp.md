@@ -188,6 +188,7 @@ being handed a long-lived secret to paste.
 | `recent_failed_webhook_deliveries` | last-N FAILED outbound deliveries |
 | `application_health` | per-app payment success rate (30d) + outbound webhook success rate (24h), sorted by failure count |
 | `get_end_user` | one end-user: verification state, app environment, current subscription |
+| `list_organization_roles` | an application's organization-role catalog + each role's `baseRole` tier. Also reports `organizationsEnabled`, and when it is false returns a note naming `update_auth_config`, so an agent asking about roles on an app without organizations gets the next step rather than an empty list |
 
 No read tool returns refresh tokens, password hashes, license keys, or provider
 credentials.
@@ -199,7 +200,21 @@ and re-checked on `tools/call`:
 
 `create_application`, `update_auth_config`, `create_plan`, `update_plan`,
 `set_plan_active`, `create_webhook_endpoint`, `update_webhook_endpoint`,
-`invite_member`, `revoke_invitation`, `change_member_role`, `remove_member`.
+`invite_member`, `revoke_invitation`, `change_member_role`, `remove_member`,
+`create_organization_role`, `update_organization_role`,
+`delete_organization_role`.
+
+The three `*_organization_role` tools author an application's **organization**
+role vocabulary: the names a member can hold inside one organization, each
+mapped to an OWNER/ADMIN/MEMBER tier that Rekey enforces on. They refuse with
+`ORGANIZATIONS_NOT_ENABLED` when the application has organizations switched
+off, and the `fix` names `update_auth_config` so the agent can offer to turn
+the feature on rather than dead-ending.
+
+Note the axis: `change_member_role` above is a **workspace** (operator) role.
+Assigning an *organization* role to an end-user is not an operator action at
+all. An org OWNER/ADMIN does it from your app with their own end-user session.
+There is deliberately no MCP tool for it.
 
 Two more are flagged `admin`, needing `mcp:operator:admin` rather than plain
 write: `configure_billing_provider` (the secret travels through the MCP client)

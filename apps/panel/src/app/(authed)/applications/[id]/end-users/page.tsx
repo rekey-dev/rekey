@@ -4,9 +4,8 @@ import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
 import { ApiErrorText } from '@/components/api-error';
 import type { Page } from '@/lib/paginate';
 import { redirect } from 'next/navigation';
-import { errorQuery, readErrorFlash, api, PanelApiError, type EndUserRow, type EndUserRoleRow, type OrganizationRow } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, type EndUserRow, type ApplicationRoleRow, type OrganizationRow } from '@/lib/api';
 import { Modal } from '@/components/Modal';
-import { ConfirmButton } from '@/components/ConfirmButton';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
@@ -129,57 +128,6 @@ async function deleteUser(applicationId: string, euid: string): Promise<void> {
   redirect(`/applications/${applicationId}/end-users`);
 }
 
-// ─── Role-catalog actions ────────────────────────────────────────────
-
-async function createRole(applicationId: string, formData: FormData): Promise<void> {
-  'use server';
-  const name = String(formData.get('name') ?? '').trim();
-  const description = String(formData.get('description') ?? '').trim();
-  const isDefault = formData.get('isDefault') === 'on';
-  if (!name) redirect(`/applications/${applicationId}/end-users?error=missing&newRole=1`);
-  try {
-    await api({
-      method: 'POST',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/end-user-roles`,
-      body: { name, ...(description ? { description } : {}), isDefault },
-    });
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/end-users?${await errorQuery(err, { newRole: '1' })}`);
-    }
-    throw err;
-  }
-  redirect(`/applications/${applicationId}/end-users?roleCreated=${encodeURIComponent(name)}`);
-}
-
-async function setRoleDefault(applicationId: string, name: string): Promise<void> {
-  'use server';
-  await api({
-    method: 'PATCH',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/end-user-roles/${encodeURIComponent(name)}`,
-    body: { isDefault: true },
-  });
-  redirect(`/applications/${applicationId}/end-users`);
-}
-
-async function deleteRole(applicationId: string, name: string, formData: FormData): Promise<void> {
-  'use server';
-  const reassignTo = String(formData.get('reassignTo') ?? '').trim();
-  const qs = reassignTo ? `?reassignTo=${encodeURIComponent(reassignTo)}` : '';
-  try {
-    await api({
-      method: 'DELETE',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/end-user-roles/${encodeURIComponent(name)}${qs}`,
-    });
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/end-users?${await errorQuery(err, { deleteRole: name })}`);
-    }
-    throw err;
-  }
-  redirect(`/applications/${applicationId}/end-users?roleDeleted=${encodeURIComponent(name)}`);
-}
-
 // ─── Errors ─────────────────────────────────────────────────────────
 
 const ERR: Record<string, string> = {
@@ -273,10 +221,12 @@ export default async function EndUsersPage({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users?${qs.toString()}`,
     }),
-    // Role catalog: still a bare array — this endpoint is not paginated.
-    api<EndUserRoleRow[]>({
+    // Role catalog, for the role pickers in the new-user and edit-user modals.
+    // Managing the catalog itself moved to the Roles tab. Bare array: this
+    // endpoint is not paginated.
+    api<ApplicationRoleRow[]>({
       method: 'GET',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-user-roles`,
+      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/application-roles`,
     }),
     // Organization picker for the new-user modal — first page only, never paged.
     api<Page<OrganizationRow>>({
@@ -296,75 +246,6 @@ export default async function EndUsersPage({
           Organizations tab.
         </Banner>
       )}
-
-      {/* ─── Roles section ─────────────────────────── */}
-      <section className="space-y-3">
-        <SectionHeader
-          title="Roles"
-          count={`(${roles.length})`}
-          description={
-            <>
-              The catalog of roles end-users can hold. New sign-ups get the
-              <strong className="text-[var(--color-fg)]"> default</strong> role automatically.
-              End-users can&apos;t change their own role — only operators can, via the panel.
-            </>
-          }
-          action={<NewRoleModal applicationId={id} error={newRoleError} errorDetail={errorDetail} errorFix={errorFix} />}
-        />
-
-        <Table minWidth="min-w-[40rem]">
-          <THead>
-            <TR>
-              <TH>Name</TH>
-              <TH>Description</TH>
-              <TH>Default</TH>
-              <TH>Holders</TH>
-              <TH align="right"> </TH>
-            </TR>
-          </THead>
-          <TBody>
-            {roles.map((r) => {
-              const holders = users.filter((u) => u.role === r.name).length;
-              return (
-                <TR key={r.id} hover>
-                  <TD mono>{r.name}</TD>
-                  <TD muted className="text-xs">{r.description ?? '—'}</TD>
-                  <TD className="text-xs">
-                    {r.isDefault ? (
-                      <Badge tone="brand">★ default</Badge>
-                    ) : (
-                      <form action={setRoleDefault.bind(null, id, r.name)}>
-                        <SubmitButton
-                          pendingLabel="Saving…"
-                          className="text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline disabled:opacity-60"
-                        >
-                          Make default
-                        </SubmitButton>
-                      </form>
-                    )}
-                  </TD>
-                  <TD muted className="text-xs">{holders}</TD>
-                  <TD align="right">
-                    {r.isDefault ? (
-                      <span className="text-xs text-[var(--color-faint-fg)]">(default)</span>
-                    ) : (
-                      <DeleteRoleControl
-                        applicationId={id}
-                        role={r}
-                        holders={holders}
-                        allRoles={roles}
-                        error={deleteRoleName === r.name ? error : undefined}
-                        errorDetail={errorDetail}
-                        errorFix={errorFix}
-                      />
-                    )}
-                  </TD>
-                </TR>
-              );
-            })}
-          </TBody>
-        </Table>
-      </section>
 
       {/* ─── End-users section ─────────────────────── */}
       <section className="space-y-3">
@@ -533,127 +414,6 @@ export default async function EndUsersPage({
 
 // ─── Modals ─────────────────────────────────────────────────────────
 
-/**
- * Per-row "Delete role" control. If nobody holds the role, renders a plain
- * ConfirmButton. If users hold it, opens a Modal that asks the operator to
- * pick a target role for bulk reassignment — atomic on the server.
- */
-function DeleteRoleControl({
-  applicationId,
-  role,
-  holders,
-  allRoles,
-  error, errorDetail, errorFix,
-}: {
-  applicationId: string;
-  role: EndUserRoleRow;
-  holders: number;
-  allRoles: EndUserRoleRow[];
-  error?: string;
-  errorDetail?: string;
-  errorFix?: string;
-}): React.JSX.Element {
-  if (holders === 0) {
-    return (
-      <form action={deleteRole.bind(null, applicationId, role.name)} className="inline">
-        <ConfirmButton confirm={`Delete role "${role.name}"? It's removed from the catalog immediately and can no longer be assigned. This cannot be undone.`}>Delete</ConfirmButton>
-      </form>
-    );
-  }
-  const others = allRoles.filter((r) => r.name !== role.name);
-  const defaultTarget = others.find((r) => r.isDefault) ?? others[0];
-  return (
-    <Modal
-      modalKey="deleteRole"
-      modalValue={role.name}
-      title={`Delete "${role.name}"?`}
-      description={`${holders} end-user${holders === 1 ? '' : 's'} currently hold this role. Pick a role to move them to — the reassign + delete happens in one transaction.`}
-      trigger="Delete"
-      triggerClassName="text-xs text-red-600 dark:text-red-400 hover:underline cursor-pointer"
-    >
-      <form action={deleteRole.bind(null, applicationId, role.name)} className="space-y-3">
-        {error && (
-          <Banner tone="error">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
-          </Banner>
-        )}
-        <Field
-          label="Reassign holders to"
-          required
-          hint={`All ${holders} user${holders === 1 ? '' : 's'} currently with role "${role.name}" will be moved to the role you pick.`}
-        >
-          <select name="reassignTo" required defaultValue={defaultTarget?.name ?? ''} className={inputCls}>
-            {others.map((r) => (
-              <option key={r.id} value={r.name}>
-                {r.name}{r.isDefault ? ' (default)' : ''}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <SubmitButton
-          pendingLabel="Deleting…"
-          className="rounded-md bg-red-600 hover:bg-red-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
-        >
-          Reassign &amp; delete
-        </SubmitButton>
-      </form>
-    </Modal>
-  );
-}
-
-function NewRoleModal({
-  applicationId,
-  error, errorDetail, errorFix,
-}: {
-  applicationId: string;
-  error?: string;
-  errorDetail?: string;
-  errorFix?: string;
-}): React.JSX.Element {
-  return (
-    <Modal
-      modalKey="newRole"
-      title="Add a role"
-      description="Create a new role end-users can be assigned to. Names must match the pattern lowercase-with-hyphens. Mark as default to make this the role new sign-ups receive automatically."
-      trigger="+ Add role"
-      triggerClassName="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-surface-muted)] whitespace-nowrap"
-    >
-      <form action={createRole.bind(null, applicationId)} className="space-y-3">
-        {error && (
-          <Banner tone="error">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
-          </Banner>
-        )}
-        <Field label="Name" required hint="Lowercase letters, digits, hyphens, underscores (2–40).">
-          <input
-            type="text"
-            name="name"
-            required
-            autoFocus
-            pattern="^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$"
-            placeholder="admin"
-            className={`${inputCls} font-mono`}
-          />
-        </Field>
-        <Field label="Description" hint="Optional — shown to other operators in this list.">
-          <input
-            type="text"
-            name="description"
-            maxLength={240}
-            placeholder="Full access including billing"
-            className={inputCls}
-          />
-        </Field>
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" name="isDefault" className="h-4 w-4 rounded border-[var(--color-border)]" />
-          <span className="text-xs">Make this the default role for new sign-ups</span>
-        </label>
-        <SubmitButton pendingLabel="Adding role…">Add role</SubmitButton>
-      </form>
-    </Modal>
-  );
-}
-
 function NewUserModal({
   applicationId,
   roles,
@@ -661,7 +421,7 @@ function NewUserModal({
   error, errorDetail, errorFix,
 }: {
   applicationId: string;
-  roles: EndUserRoleRow[];
+  roles: ApplicationRoleRow[];
   organizations: OrganizationRow[];
   error?: string;
   errorDetail?: string;
@@ -750,7 +510,7 @@ function EditUserModal({
 }: {
   applicationId: string;
   user: EndUserRow;
-  roles: EndUserRoleRow[];
+  roles: ApplicationRoleRow[];
   error?: string;
   errorDetail?: string;
   errorFix?: string;
@@ -773,7 +533,7 @@ function EditUserModal({
         )}
         <Field
           label="Role"
-          hint="Pick from the role catalog. Add new roles in the Roles section above."
+          hint="Pick from the role catalog. Add or edit roles on the Roles tab."
         >
           <select name="role" defaultValue={user.role} required className={inputCls}>
             {roles.map((r) => (

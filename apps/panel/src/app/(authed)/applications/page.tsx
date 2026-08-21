@@ -14,11 +14,14 @@ import { OnboardingChecklist, type OnboardingStep } from '@/components/Onboardin
 import { ReadyToGoLive } from '@/components/ReadyToGoLive';
 import { Banner } from '@/components/Banner';
 import { EnvironmentBadge } from '@/components/EnvironmentBadge';
+import { ApplicationStatusBadges } from '@/components/ApplicationStatusBadges';
+import { authConfigVisible, signInReachable } from '@/lib/auth-config';
 
 /**
- * `environment` is immutable once the Application exists — there is no endpoint
- * that changes it. Anything we don't recognise falls back to the API's own
- * default rather than being forwarded, so a tampered form can't 400 the create.
+ * `environment` is chosen at create and afterwards moves in ONE direction only,
+ * once, via `POST /:id/promote` (#475) — no config route accepts the field.
+ * Anything we don't recognise falls back to the API's own default rather than
+ * being forwarded, so a tampered form can't 400 the create.
  */
 function parseEnvironment(raw: FormDataEntryValue | null): ApplicationRow['environment'] {
   return raw === 'PRODUCTION' || raw === 'STAGING' ? raw : 'DEVELOPMENT';
@@ -163,7 +166,10 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
       label: 'Configure an auth method',
       description: 'Pick how end-users sign in — password, OAuth, passkeys.',
       href: firstApp ? `/applications/${firstApp.id}/auth` : createHref,
-      done: apps.some((a) => (a.authConfig.methods ?? []).length > 0),
+      // `signInReachable`, not a methods count: an OAuth-only application has
+      // no primary method and is fully configured. Counting methods called it
+      // unconfigured while the row's badges called it healthy, on one screen.
+      done: apps.some((a) => authConfigVisible(a) && signInReachable(a)),
       hint: requiresAppHint,
     },
     {
@@ -337,7 +343,19 @@ export default async function ApplicationsPage({
       ) : (
         <ul className="space-y-2.5">
           {apps.map((a) => {
-            const methodCount = (a.authConfig.methods ?? []).length;
+            // Three states, and they are different answers. Redacted for an
+            // APP_BILLING operator (absent `methods` is the only signal) means
+            // say nothing. Zero methods with OAuth configured is an OAuth-only
+            // application, which is configured, not broken — reporting "0 auth
+            // methods" beside a badge component calling it healthy was the same
+            // contradiction in the other direction.
+            const methodSummary = !authConfigVisible(a)
+              ? null
+              : a.authConfig.methods.length > 0
+                ? `${a.authConfig.methods.length} auth method${a.authConfig.methods.length === 1 ? '' : 's'}`
+                : signInReachable(a)
+                  ? 'OAuth only'
+                  : 'No auth method';
             return (
               <li key={a.id}>
                 <Link
@@ -348,13 +366,12 @@ export default async function ApplicationsPage({
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <span className="font-medium text-[var(--color-fg)]">{a.name}</span>
                       <EnvironmentBadge environment={a.environment} />
+                      <ApplicationStatusBadges app={a} />
                     </div>
                     <div className="mt-0.5 truncate font-mono text-xs text-[var(--color-muted-fg)]">{a.slug}</div>
                   </div>
                   <div className="flex shrink-0 items-center gap-3 text-xs text-[var(--color-muted-fg)]">
-                    <span>
-                      {methodCount} auth method{methodCount === 1 ? '' : 's'}
-                    </span>
+                    {methodSummary !== null && <span>{methodSummary}</span>}
                     <span
                       aria-hidden="true"
                       className="text-[var(--color-faint-fg)] transition-transform group-hover:translate-x-0.5"

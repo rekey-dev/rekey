@@ -16,29 +16,29 @@
  * transaction.
  */
 
-import type { EndUserRole } from '@prisma/client';
+import type { ApplicationRole } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 
 const NAME_RE = /^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$/;
 
-export const endUserRolesService = {
-  async list(applicationId: string): Promise<EndUserRole[]> {
-    return prisma.endUserRole.findMany({
+export const applicationRolesService = {
+  async list(applicationId: string): Promise<ApplicationRole[]> {
+    return prisma.applicationRole.findMany({
       where: { applicationId },
       orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
     });
   },
 
-  async getDefault(applicationId: string): Promise<EndUserRole> {
-    const def = await prisma.endUserRole.findFirst({
+  async getDefault(applicationId: string): Promise<ApplicationRole> {
+    const def = await prisma.applicationRole.findFirst({
       where: { applicationId, isDefault: true },
     });
     if (!def) {
       // No default configured — fall back to any role with name "user", or
       // the first one. The bootstrap should always have created one but a
       // panel operator could have ended up here by deleting it.
-      const any = await prisma.endUserRole.findFirst({
+      const any = await prisma.applicationRole.findFirst({
         where: { applicationId },
         orderBy: { createdAt: 'asc' },
       });
@@ -60,7 +60,7 @@ export const endUserRolesService = {
    * touches EndUser.role.
    */
   async assertExists(applicationId: string, name: string): Promise<void> {
-    const exists = await prisma.endUserRole.findUnique({
+    const exists = await prisma.applicationRole.findUnique({
       where: { applicationId_name: { applicationId, name } },
       select: { id: true },
     });
@@ -78,12 +78,12 @@ export const endUserRolesService = {
    * Seed the bootstrap `user` role for a freshly-created Application. Idempotent.
    *
    * Currently UNCALLED: `applicationsService.create` inlines the equivalent
-   * `tx.endUserRole.create` inside its own transaction. Kept because it is the
+   * `tx.applicationRole.create` inside its own transaction. Kept because it is the
    * idempotent form — reach for it if a backfill or repair path ever needs to
    * guarantee the default role exists without knowing whether it already does.
    */
   async seedDefault(tx: typeof prisma, applicationId: string): Promise<void> {
-    await tx.endUserRole.upsert({
+    await tx.applicationRole.upsert({
       where: { applicationId_name: { applicationId, name: 'user' } },
       create: {
         applicationId,
@@ -100,7 +100,7 @@ export const endUserRolesService = {
     name: string;
     description?: string;
     isDefault?: boolean;
-  }): Promise<EndUserRole> {
+  }): Promise<ApplicationRole> {
     const name = input.name.trim();
     if (!NAME_RE.test(name)) {
       throw new RekeyError({
@@ -114,13 +114,13 @@ export const endUserRolesService = {
     return prisma.$transaction(async (tx) => {
       // If marking this as default, demote the existing default first.
       if (input.isDefault) {
-        await tx.endUserRole.updateMany({
+        await tx.applicationRole.updateMany({
           where: { applicationId: input.applicationId, isDefault: true },
           data: { isDefault: false },
         });
       }
       try {
-        return await tx.endUserRole.create({
+        return await tx.applicationRole.create({
           data: {
             applicationId: input.applicationId,
             name,
@@ -147,8 +147,8 @@ export const endUserRolesService = {
     name: string;
     description?: string | null;
     isDefault?: boolean;
-  }): Promise<EndUserRole> {
-    const role = await prisma.endUserRole.findUnique({
+  }): Promise<ApplicationRole> {
+    const role = await prisma.applicationRole.findUnique({
       where: { applicationId_name: { applicationId: args.applicationId, name: args.name } },
     });
     if (!role) {
@@ -161,12 +161,12 @@ export const endUserRolesService = {
     }
     return prisma.$transaction(async (tx) => {
       if (args.isDefault === true && !role.isDefault) {
-        await tx.endUserRole.updateMany({
+        await tx.applicationRole.updateMany({
           where: { applicationId: args.applicationId, isDefault: true },
           data: { isDefault: false },
         });
       }
-      return tx.endUserRole.update({
+      return tx.applicationRole.update({
         where: { id: role.id },
         data: {
           ...(args.description !== undefined && { description: args.description }),
@@ -194,7 +194,7 @@ export const endUserRolesService = {
     reassignTo?: string;
   }): Promise<{ removed: boolean; reassigned: number }> {
     const { applicationId, name, reassignTo } = args;
-    const role = await prisma.endUserRole.findUnique({
+    const role = await prisma.applicationRole.findUnique({
       where: { applicationId_name: { applicationId, name } },
     });
     if (!role) {
@@ -233,7 +233,7 @@ export const endUserRolesService = {
           fix: 'Pick a different `reassignTo` target.',
         });
       }
-      const target = await prisma.endUserRole.findUnique({
+      const target = await prisma.applicationRole.findUnique({
         where: { applicationId_name: { applicationId, name: reassignTo } },
         select: { id: true },
       });
@@ -255,7 +255,7 @@ export const endUserRolesService = {
         });
         reassigned = result.count;
       }
-      await tx.endUserRole.delete({ where: { id: role.id } });
+      await tx.applicationRole.delete({ where: { id: role.id } });
       return { removed: true, reassigned };
     });
   },

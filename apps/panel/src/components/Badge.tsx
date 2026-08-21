@@ -39,15 +39,19 @@ export function Badge({
   dot = false,
   mono = false,
   className = '',
+  title,
 }: {
   children: React.ReactNode;
   tone?: BadgeTone;
   dot?: boolean;
   mono?: boolean;
   className?: string;
+  /** Native tooltip. For a badge whose label is a summary of something longer. */
+  title?: string;
 }): React.JSX.Element {
   return (
     <span
+      title={title}
       className={[
         'inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium whitespace-nowrap',
         mono ? 'font-mono text-[11px]' : '',

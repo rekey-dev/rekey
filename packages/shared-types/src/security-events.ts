@@ -56,6 +56,18 @@ export const SECURITY_EVENT_LABEL = {
   'app.sessions_rotated': 'App sessions rotated (kill-switch)',
   'app.public_key.rotated': 'Publishable key rotated',
   'app.portal_config_updated': 'Hosted portal settings updated',
+  // Lifecycle. All three are workspace-billing-relevant as well as
+  // operationally significant: promotion consumes a production slot and cannot
+  // be undone, and disable/enable release and re-take one.
+  'app.promoted': 'Application promoted to production',
+  'app.disabled': 'Application disabled',
+  'app.enabled': 'Application re-enabled',
+  // Organization-role catalog. Worth a trail on its own: a role's `baseRole` is
+  // what every org gate compares, so re-tiering one silently changes what every
+  // member holding it may do across every organization in the Application.
+  'app.organization_role_created': 'Organization role created',
+  'app.organization_role_updated': 'Organization role updated',
+  'app.organization_role_deleted': 'Organization role deleted',
   'app.ip_blocked': 'Request blocked by IP allowlist',
   'app.origin_blocked': 'Request blocked by CORS origin allowlist',
 
@@ -73,6 +85,11 @@ export const SECURITY_EVENT_LABEL = {
   'app.coupon_created': 'Coupon created',
   'app.coupon_updated': 'Coupon updated',
   'app.subscription_canceled': 'Subscription canceled by operator',
+  // A bespoke deal being written or withdrawn: an operator changed what ONE
+  // subscription grants, deviating it from its plan. Worth its own trail entry
+  // because it changes commercial terms for a single customer without touching
+  // any plan, so nothing in the plan history records that it happened.
+  'app.subscription_entitlements_overridden': 'Subscription entitlements overridden',
   // A subscription activated with no payment provider behind it — an invoice,
   // a bank transfer, a comped account. It is the one billing write that
   // CREATES entitlement on somebody's say-so rather than following money the

@@ -763,7 +763,7 @@ export const tenantAuthService = {
         statusCode: 401,
         code: 'REFRESH_TOKEN_REVOKED',
         message: 'This session was revoked.',
-        fix: 'Sign in again. Other sessions for this operator are unaffected.',
+        fix: 'Sign in again. Either this session was signed out, or a reuse of one of its tokens elsewhere revoked the whole family.',
       });
     }
     if (outcome.kind === 'expired') {

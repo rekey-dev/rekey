@@ -14,6 +14,7 @@
 
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
+import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 import { generatePublicKey } from '../../lib/keys.js';
 import { assertProductionAppQuota } from '../../lib/tenant-limits.js';
 import {
@@ -49,9 +50,10 @@ export interface CreateApplicationInput {
    * the Application may hold; it drives the API-key prefix and is the unit
    * deployments are billed and quota'd by.
    *
-   * **Set here or never.** There is no update path for this field, by design:
-   * see the note on `AppEnvironment` in schema.prisma. To "go live", create a
-   * PRODUCTION Application.
+   * Creating it PRODUCTION consumes a production slot immediately. Creating it
+   * DEVELOPMENT or STAGING costs nothing and is reversible in one direction:
+   * `promote` moves it to PRODUCTION later, asserting the same quota. There is
+   * no path back down. See the note on `AppEnvironment` in schema.prisma.
    */
   environment?: AppEnvironment | undefined;
   /**
@@ -113,6 +115,80 @@ function listWhere(tenantId?: string, ids?: string[]): Prisma.ApplicationWhereIn
     // grants only sees the granted Applications.
     ...(ids !== undefined && { id: { in: ids } }),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle helpers (promote / disable / enable)
+// ---------------------------------------------------------------------------
+
+/**
+ * The same 404 from every lifecycle path, worded the same way.
+ *
+ * Route handlers reach these methods through `ensureAppAccess`, which has
+ * already proved the Application exists in the caller's workspace and returns
+ * its own non-disclosing 404 when it does not. So this fires only on a genuine
+ * race (deleted between the check and the act) or an admin-key caller. It
+ * keeps the same code as `ensureAppAccess` so a client switching on `code`
+ * sees one answer to "no such application", not two.
+ */
+function applicationNotFound(applicationId: string): RekeyError {
+  return new RekeyError({
+    statusCode: 404,
+    code: 'APPLICATION_NOT_FOUND',
+    message: `Application "${applicationId}" not found.`,
+    fix: 'List applications with GET /api/v1/tenant/applications.',
+  });
+}
+
+/**
+ * 409 for "you cannot promote a frozen application", from both the pre-lock
+ * check and the lost-race path. One function so the two cannot drift: they
+ * describe the same state and an operator hitting either has the same next
+ * step.
+ */
+function applicationDisabledForPromote(slug: string): RekeyError {
+  return new RekeyError({
+    statusCode: 409,
+    code: 'APPLICATION_DISABLED',
+    message: `Application "${slug}" is disabled and cannot be promoted.`,
+    fix: 'Enable the application first, then promote it. Promoting it while disabled would consume a production slot for an application that serves no traffic.',
+  });
+}
+
+/** 409 for "this is already production", from both the pre-check and the lost-race path. */
+function alreadyPromoted(slug: string): RekeyError {
+  return new RekeyError({
+    statusCode: 409,
+    code: 'ALREADY_PROMOTED',
+    message: `Application "${slug}" is already in the production environment.`,
+    fix: 'Promotion is one-way and happens once. There is nothing further to do, and there is no way to move an application back out of production.',
+  });
+}
+
+/**
+ * Postgres advisory lock namespace for workspace production-slot arbitration.
+ * Arbitrary, and only has to stay distinct from any other advisory-lock user
+ * this codebase grows. Nothing else takes an advisory lock today.
+ */
+const SLOT_LOCK_NAMESPACE = 4711;
+
+/**
+ * Serialise everything that consumes a production slot within one workspace.
+ *
+ * Transaction-scoped, so it releases on commit and on rollback alike and
+ * cannot be leaked by a throw between here and the end of the transaction.
+ * `hashtext` maps the cuid tenant id into the int4 the two-argument form
+ * wants; a hash collision between two workspaces costs one of them a brief
+ * wait on a lock it did not need, and nothing else.
+ *
+ * Both `promote` and `enable` must take this. A lock only one door takes
+ * serialises nothing.
+ */
+async function lockWorkspaceSlots(
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(${SLOT_LOCK_NAMESPACE}::int, hashtext(${tenantId}))`;
 }
 
 export const applicationsService = {
@@ -213,8 +289,22 @@ export const applicationsService = {
         // only when the caller asked for PRODUCTION — the column defaults to
         // DEVELOPMENT, so an omitted `environment` is never billable and must
         // not be blocked.
+        //
+        // The lock is the SAME one `promote` and `enable` take, and it has to
+        // be. There are three doors into the production count and a lock that
+        // only two of them take serialises nothing: two concurrent creates
+        // would race each other, and a create would race a promote, either way
+        // overshooting a ceiling that has no demote and no delete to correct
+        // it. This was missed when promotion was added, because the lock was
+        // reasoned about as "the thing promotion needs" rather than as the
+        // thing the COUNT needs.
+        //
+        // Taken only on the PRODUCTION branch, so ordinary application
+        // creation — the overwhelmingly common case, and the one that runs
+        // during onboarding — is never serialised behind a workspace lock.
         if (input.environment === 'PRODUCTION') {
-          await assertProductionAppQuota(input.tenantId, tx);
+          await lockWorkspaceSlots(tx, input.tenantId);
+          await assertProductionAppQuota(input.tenantId, 'create', tx);
         }
         const app = await tx.application.create({
           data: {
@@ -230,7 +320,7 @@ export const applicationsService = {
             billingConfig: billingConfig as object,
           },
         });
-        await tx.endUserRole.create({
+        await tx.applicationRole.create({
           data: {
             applicationId: app.id,
             name: 'user',
@@ -238,6 +328,11 @@ export const applicationsService = {
             isDefault: true,
           },
         });
+        // Organization roles are seeded even when `organizationsEnabled` is
+        // false. The toggle gates org CREATION, not the vocabulary, and seeding
+        // here means flipping it on later never lands an operator on an
+        // Application whose memberships reference names no catalog defines.
+        await organizationRolesService.seedBuiltIns(tx, app.id);
         return app;
       });
     } catch (e) {
@@ -273,6 +368,12 @@ export const applicationsService = {
        * their call-to-action button rather than render a dead one.
        */
       appUrl?: string | null | undefined;
+      /**
+       * Where to send the browser for the sign-in half of this Application's
+       * own OIDC authorize flow. `null` (or `''`) CLEARS it, which is how an
+       * operator turns the delegation back off and gets the built-in page back.
+       */
+      hostedAuthorizeUrl?: string | null | undefined;
       organizationsEnabled?: boolean | undefined;
       signupEnabled?: boolean | undefined;
       signupMode?: 'public' | 'secret_only' | 'invite_only' | undefined;
@@ -320,8 +421,16 @@ export const applicationsService = {
     // reject it and leave the operator unable to remove a stale URL.
     const clearAppUrl = cleaned.appUrl === null || cleaned.appUrl === '';
     if (clearAppUrl) delete cleaned.appUrl;
+    // Same treatment, same reason: `hostedAuthorizeUrl` has no default, so
+    // clearing it must be expressible and must not reach the schema as a
+    // non-URL, which would reject the whole patch and strand the operator with
+    // a delegation they cannot switch off.
+    const clearHostedAuthorize =
+      cleaned.hostedAuthorizeUrl === null || cleaned.hostedAuthorizeUrl === '';
+    if (clearHostedAuthorize) delete cleaned.hostedAuthorizeUrl;
     const merged: Record<string, unknown> = { ...current, ...cleaned };
     if (clearAppUrl) delete merged.appUrl;
+    if (clearHostedAuthorize) delete merged.hostedAuthorizeUrl;
     const next = AuthConfigSchema.parse(merged);
     return prisma.application.update({
       where: { id: args.applicationId },
@@ -478,6 +587,195 @@ export const applicationsService = {
    * usage/credits roll-up. Powers the per-app Overview tiles. All counts are
    * scoped to `applicationId`; no cross-application leakage.
    */
+  /**
+   * Promote a DEVELOPMENT or STAGING Application into PRODUCTION.
+   *
+   * The one permitted mutation of `environment`, and the only code path that
+   * writes it after create. PRODUCTION is terminal: there is no demote, and no
+   * caller may ask for one.
+   *
+   * Consumes a production slot, so it asserts `maxProductionApps` exactly as
+   * `create` does. Refuses a disabled Application rather than promoting it into
+   * a frozen state: that would spend a slot on something serving no traffic,
+   * and re-enabling first costs nothing.
+   *
+   * **Touches no API keys.** Every key minted before this call keeps its
+   * `rp_test_` prefix and keeps working — the prefix is a label for the human
+   * pasting it, not a capability, and `requireApiKey` accepts both forms
+   * identically (see middleware/api-key-auth.ts). Revoking them here would
+   * break the customer's integration at the exact moment they went live, which
+   * is the worst available timing. The panel prompts for a rotation instead.
+   *
+   * @param actorId TenantUser who promoted, for the audit breadcrumb. Null for
+   *                admin-key and system callers, which have no TenantUser.
+   */
+  async promote(applicationId: string, actorId?: string | null): Promise<Application> {
+    return prisma.$transaction(async (tx) => {
+      const app = await tx.application.findUnique({
+        where: { id: applicationId },
+        select: { id: true, tenantId: true, environment: true, disabledAt: true, slug: true },
+      });
+      if (!app) throw applicationNotFound(applicationId);
+
+      if (app.disabledAt !== null) throw applicationDisabledForPromote(app.slug);
+      if (app.environment === 'PRODUCTION') {
+        throw alreadyPromoted(app.slug);
+      }
+
+      // Serialise promotion and re-enable per workspace.
+      //
+      // This is the first raw SQL in apps/api, so it owes an explanation. The
+      // quota check is check-then-act, and lib/tenant-limits.ts argues at
+      // length that a small overshoot under concurrency is acceptable. That
+      // argument was written for end-user sign-ups, where an overshoot
+      // self-corrects on the next request. It does not transfer here: two
+      // promotions racing the last slot both succeed, and because there is no
+      // demote, the workspace is left permanently over its ceiling with no
+      // mechanism that ever brings it back. The payoff for winning that race
+      // deliberately is a free production slot forever, so "rare" is not a
+      // defence.
+      //
+      // The objection tenant-limits raises to locking — that it would
+      // serialise the hottest write path in the product — does not apply.
+      // Promotion happens a handful of times per workspace ever. Nothing on a
+      // request-serving path takes this lock; the only contenders are two
+      // operators clicking the same button, which is exactly the case being
+      // closed.
+      //
+      // Transaction-scoped (`_xact_`), so it releases on commit OR rollback and
+      // cannot be leaked by a throw. The 4711 namespace keeps the key space
+      // distinct from any future advisory-lock user.
+      await lockWorkspaceSlots(tx, app.tenantId);
+      await assertProductionAppQuota(app.tenantId, 'promote', tx);
+
+      // Conditional update, not a plain one. Belt and braces behind the lock:
+      // if the guard above is ever reordered or the lock is ever dropped, a
+      // second promotion of the SAME row still cannot double-write, because
+      // the predicate no longer matches. A zero count means someone else won
+      // the race, which is a 409, not a crash.
+      //
+      // `disabledAt: null` is in the predicate, not just in the 409 check
+      // above. That check reads the row BEFORE the lock is taken, so a
+      // `disable` committing in between would otherwise leave this update
+      // promoting an Application the endpoint explicitly refuses to promote —
+      // PRODUCTION and frozen. No quota invariant breaks (a disabled app holds
+      // no slot and `enable` re-asserts), but it is a state we say cannot
+      // happen, and saying so is worth nothing if the write does not enforce
+      // it. Both preconditions now hold at the moment of the write, not at the
+      // moment they were read.
+      const updated = await tx.application.updateMany({
+        where: { id: applicationId, environment: { not: 'PRODUCTION' }, disabledAt: null },
+        data: {
+          environment: 'PRODUCTION',
+          promotedAt: new Date(),
+          promotedBy: actorId ?? null,
+        },
+      });
+      if (updated.count === 0) {
+        // Two predicates can miss, so the error has to say which one did.
+        // Re-read rather than assume: reporting ALREADY_PROMOTED to an operator
+        // whose application was disabled underneath them sends them looking for
+        // a promotion that never happened.
+        const now = await tx.application.findUnique({
+          where: { id: applicationId },
+          select: { environment: true, disabledAt: true },
+        });
+        if (now?.disabledAt != null) throw applicationDisabledForPromote(app.slug);
+        throw alreadyPromoted(app.slug);
+      }
+
+      return tx.application.findUniqueOrThrow({ where: { id: applicationId } });
+    });
+  },
+
+  /**
+   * Freeze an Application. Rekey has no Application delete; this is what
+   * stands in for one.
+   *
+   * **Never fails on quota, and never fails on state.** It frees a production
+   * slot rather than consuming one, and a freeze an operator can be refused is
+   * not a freeze — this is the button people reach for precisely when an
+   * Application is already misbehaving. Disabling an already-disabled
+   * Application is a no-op that returns the row unchanged, including its
+   * original `disabledAt` and reason: the first freeze is the one that
+   * happened, and a retried request must not rewrite that history.
+   *
+   * Deliberately does NOT bump `tokenGeneration`. Revoking every end-user
+   * session would make the freeze partly irreversible — the thaw could not
+   * give those sessions back — and reversibility is the entire feature.
+   * End-user tokens stop working anyway, because both API-key middlewares
+   * refuse the Application at the door.
+   */
+  async disable(
+    applicationId: string,
+    opts?: { reason?: string | undefined; actorId?: string | null | undefined },
+  ): Promise<Application> {
+    const app = await prisma.application.findUnique({
+      where: { id: applicationId },
+      select: { id: true, disabledAt: true },
+    });
+    if (!app) throw applicationNotFound(applicationId);
+    if (app.disabledAt !== null) {
+      return prisma.application.findUniqueOrThrow({ where: { id: applicationId } });
+    }
+
+    // Conditional: two concurrent disables must not have the second overwrite
+    // the first one's timestamp, reason and actor.
+    await prisma.application.updateMany({
+      where: { id: applicationId, disabledAt: null },
+      data: {
+        disabledAt: new Date(),
+        disabledBy: opts?.actorId ?? null,
+        disabledReason: opts?.reason ?? null,
+      },
+    });
+    return prisma.application.findUniqueOrThrow({ where: { id: applicationId } });
+  },
+
+  /**
+   * Thaw a disabled Application.
+   *
+   * The asymmetric half of the pair, and the one that can be refused. A
+   * disabled PRODUCTION Application does not count against
+   * `maxProductionApps` — that is what makes `disable` a usable substitute for
+   * the delete Rekey does not have — so re-enabling one CONSUMES a slot and
+   * must assert the quota. Without that assert, disable-then-enable would
+   * launder an unlimited number of running production Applications past the
+   * ceiling, and the ceiling would mean nothing.
+   *
+   * DEVELOPMENT and STAGING Applications are never counted, so they always
+   * enable.
+   *
+   * Idempotent on an already-enabled Application: it is in the requested state,
+   * and no quota is charged for a slot it already holds.
+   */
+  async enable(applicationId: string): Promise<Application> {
+    return prisma.$transaction(async (tx) => {
+      const app = await tx.application.findUnique({
+        where: { id: applicationId },
+        select: { id: true, tenantId: true, environment: true, disabledAt: true },
+      });
+      if (!app) throw applicationNotFound(applicationId);
+      if (app.disabledAt === null) {
+        return tx.application.findUniqueOrThrow({ where: { id: applicationId } });
+      }
+
+      if (app.environment === 'PRODUCTION') {
+        // Same lock as `promote`, and it must be the same lock: promote and
+        // enable are two doors into one count, and a lock that only one of
+        // them takes serialises nothing.
+        await lockWorkspaceSlots(tx, app.tenantId);
+        await assertProductionAppQuota(app.tenantId, 'enable', tx);
+      }
+
+      await tx.application.updateMany({
+        where: { id: applicationId, disabledAt: { not: null } },
+        data: { disabledAt: null, disabledBy: null, disabledReason: null },
+      });
+      return tx.application.findUniqueOrThrow({ where: { id: applicationId } });
+    });
+  },
+
   async stats(applicationId: string): Promise<ApplicationStats> {
     // Confirm the app exists (404s with a clear error rather than returning
     // an all-zero card for a typo'd id).

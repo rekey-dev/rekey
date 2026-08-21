@@ -96,6 +96,11 @@ export function AppNav({
       label: 'Users',
       children: [
         { seg: 'end-users', label: 'End-users' },
+        // Both role catalogs live here rather than on the two pages they
+        // govern. Splitting them put the word "roles" on End-users and on
+        // Organizations meaning different things, with no place to see the
+        // difference; one page carries the distinction and both tables.
+        { seg: 'roles', label: 'Roles' },
         { seg: 'organizations', label: 'Organizations' },
         { seg: 'activity', label: 'Activity' },
       ],
@@ -157,6 +162,7 @@ export function AppNav({
         { seg: 'webhooks', label: 'Webhooks' },
         { seg: 'requests', label: 'Requests' },
         { seg: 'access', label: 'Access' },
+        { seg: 'lifecycle', label: 'Lifecycle' },
         { seg: 'email', label: 'Email' },
       ],
     },

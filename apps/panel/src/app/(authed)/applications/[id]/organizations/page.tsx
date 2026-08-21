@@ -67,6 +67,21 @@ const ERR: Record<string, string> = {
   END_USER_NOT_FOUND: 'The chosen owner is not an end-user of this application.',
   ORGANIZATION_NOT_FOUND: 'Organization not found — it may have already been deleted.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage organizations.',
+  ORGANIZATIONS_NOT_ENABLED:
+    'Enable organizations for this application (Auth settings) before defining organization roles.',
+  ORGANIZATION_ROLE_NAME_INVALID:
+    'Role name must be 2–40 lowercase letters, digits, hyphens or underscores, starting and ending alphanumeric.',
+  ORGANIZATION_ROLE_NAME_TAKEN: 'A role with that name already exists in this application.',
+  ORGANIZATION_ROLE_NAME_RESERVED: 'OWNER, ADMIN and MEMBER are built in. Pick a different name.',
+  ORGANIZATION_ROLE_NOT_FOUND: 'Role not found. It may have already been deleted.',
+  ORGANIZATION_ROLE_IS_DEFAULT: 'Mark another role as the default before deleting this one.',
+  ORGANIZATION_ROLE_BUILT_IN_IMMUTABLE: 'OWNER, ADMIN and MEMBER cannot be re-tiered or deleted.',
+  ORGANIZATION_ROLE_IN_USE:
+    'Members or pending invitations still hold this role. Choose a role to move them to.',
+  ORGANIZATION_ROLE_REASSIGN_SELF: 'Pick a different role to move holders to.',
+  ORGANIZATION_ROLE_REASSIGN_TARGET_UNKNOWN: 'That target role does not exist in this application.',
+  ORGANIZATION_ROLE_REASSIGN_DEMOTES_OWNER:
+    'This role carries OWNER authority and the target does not, so organizations would be left without an owner.',
 };
 
 // ─── Page ────────────────────────────────────────────────────────────
@@ -120,7 +135,12 @@ export default async function OrganizationsPage({
               individuals. Optional, and distinct from your workspace members. End-users create +
               manage these from your app via the SDK
               (<code className="font-mono text-xs">rekey.organizations.*</code>); you can also
-              provision and curate them here.
+              provision and curate them here. The roles a member can hold inside an organization
+              are configured on the{' '}
+              <Link href={`/applications/${id}/roles`} className="underline hover:no-underline">
+                Roles
+              </Link>{' '}
+              tab.
             </>
           }
           action={<NewOrgModal applicationId={id} endUsers={endUsers} error={newOrgError} errorDetail={errorDetail} errorFix={errorFix} />}
@@ -213,6 +233,7 @@ export default async function OrganizationsPage({
           hasMore={page.hasMore}
         />
       </section>
+
     </div>
   );
 }
@@ -264,7 +285,7 @@ function NewOrgModal({
             type="text"
             name="slug"
             required
-            pattern="^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$"
+            pattern="^[a-z0-9](?:[a-z0-9\-]{0,38}[a-z0-9])?$"
             placeholder="acme"
             className={`${inputCls} font-mono`}
           />

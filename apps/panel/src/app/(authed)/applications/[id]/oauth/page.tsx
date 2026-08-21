@@ -9,6 +9,7 @@ import { SavedBanner } from '@/components/SavedBanner';
 import { PageHeader } from '@/components/PageHeader';
 import { Card } from '@/components/Card';
 import { Badge } from '@/components/Badge';
+import { CopyButton } from '@/components/CopyButton';
 
 type ProviderName =
   | 'google'
@@ -144,6 +145,49 @@ export default async function OAuthPage({
   const app = await getApplication(id);
   const configured = (app.oauthConfig ?? {}) as Record<string, { clientId: string; redirectUri: string; issuerUrl?: string }>;
 
+  /**
+   * A concrete redirect URI to suggest, derived from the Application's own
+   * configured origin.
+   *
+   * The panel cannot KNOW this value: the route belongs to the operator's app
+   * and the path is theirs to choose. But "type a URL you have not been told
+   * the shape of" is how the commonest failure happens: registering
+   * `https://yourapp.com/oauth/callback` when the app actually serves
+   * `/api/auth/oauth/<provider>/callback` returns a 404 with the provider's
+   * `code` sitting in the query string and nothing to explain it.
+   *
+   * So: offer the shape rekey.dev itself uses, on the origin this Application
+   * already declares, and label it a suggestion rather than the answer.
+   *
+   * The precedence is NOT invented here. It mirrors `apps/api/src/lib/
+   * app-url.ts`, which answers the same question for transactional email
+   * links: the operator-set `appUrl` wins, and the ORIGIN of
+   * `redirectUrls[0]` is the sanctioned inference behind it ("already the
+   * customer's own app, vetted by the operator as the post-sign-in redirect
+   * allowlist"). Deriving from `redirectUrls` alone, as this first did, skips
+   * the field an operator explicitly set and can suggest a different host
+   * than the one they nominated.
+   *
+   * Null when neither resolves. A suggestion built from nothing would be a
+   * placeholder domain, and the rule next door in the auth config is explicit
+   * that a link pointing somewhere wrong is worse than no link.
+   */
+  const appOrigin = (() => {
+    const candidates = [app.authConfig?.appUrl, app.authConfig?.redirectUrls?.[0]];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      try {
+        const url = new URL(candidate);
+        if (url.protocol !== 'https:' && url.protocol !== 'http:') continue;
+        return url.origin;
+      } catch {
+        // Unparseable jsonb value: fall through to the next rung rather than
+        // trusting it, same as normalise() does API-side.
+      }
+    }
+    return null;
+  })();
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -153,6 +197,35 @@ export default async function OAuthPage({
       />
 
       {saved && <SavedBanner message={`${saved} configuration saved.`} />}
+
+      {/* The redirect URI is the single commonest thing to get wrong here, and
+          it fails in a way that explains nothing: the provider bounces the
+          browser to a URL the app does not serve, so the operator sees a 404
+          carrying a `code` query parameter. Stating the rule once, at the top,
+          costs a paragraph and saves that. */}
+      <div
+        role="note"
+        className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-4 py-3 text-sm text-[var(--color-muted-fg)]"
+      >
+        <span className="font-medium text-[var(--color-fg)]">
+          The redirect URI must be identical in three places.
+        </span>{' '}
+        The provider&apos;s console, the field below, and a route your own app
+        actually serves. It is <strong>your</strong> app&apos;s URL, never a Rekey one:
+        the provider sends the browser back to your server, which then hands Rekey
+        the <code className="font-mono text-xs">code</code>. Providers compare the
+        string byte for byte, so a trailing slash or a <code className="font-mono text-xs">www.</code>
+        {' '}is a hard failure.
+        {appOrigin && (
+          <>
+            {' '}Following the pattern rekey.dev itself uses, that would be{' '}
+            <code className="font-mono text-xs text-[var(--color-fg)]">
+              {appOrigin}/api/auth/oauth/&lt;provider&gt;/callback
+            </code>
+            .
+          </>
+        )}
+      </div>
 
       {Object.keys(configured).length === 0 && (
         <p className="text-sm text-[var(--color-muted-fg)]">
@@ -200,6 +273,9 @@ export default async function OAuthPage({
                     applicationId={id}
                     provider={p}
                     existing={cfg ?? null}
+                    suggestedRedirectUri={
+                      appOrigin ? `${appOrigin}/api/auth/oauth/${p.name}/callback` : null
+                    }
                     error={reopenError}
                     errorDetail={errorDetail}
                     errorFix={errorFix}
@@ -239,11 +315,14 @@ function ConfigForm({
   applicationId,
   provider,
   existing,
+  suggestedRedirectUri,
   error, errorDetail, errorFix,
 }: {
   applicationId: string;
   provider: ProviderInfo;
   existing: { clientId: string; redirectUri: string; issuerUrl?: string } | null;
+  /** Concrete value to offer, or null when no origin is configured yet. */
+  suggestedRedirectUri: string | null;
   error?: string;
   errorDetail?: string;
   errorFix?: string;
@@ -295,10 +374,33 @@ function ConfigForm({
           type="url"
           name="redirectUri"
           required
-          defaultValue={existing?.redirectUri ?? ''}
-          placeholder="https://yourapp.com/oauth/callback"
+          defaultValue={existing?.redirectUri ?? suggestedRedirectUri ?? ''}
+          placeholder={suggestedRedirectUri ?? `https://yourapp.com/api/auth/oauth/${provider.name}/callback`}
           className={inputCls}
         />
+        {/* Prefilled, not just hinted. An operator who has to compose this
+            string from a description is the one who registers
+            `/oauth/callback` and gets a 404 carrying the provider's `code`.
+            Copyable because the SAME string has to be pasted into the
+            provider's console, and retyping is where the trailing slash and
+            the stray `www.` come from. */}
+        {/* Explicitly conditional wording. The origin is INFERRED from the
+            Application's own settings, and the callback can legitimately live
+            on a different host than the one an operator nominated for
+            sign-in redirects. A suggestion presented as the answer would be
+            confidently wrong for those deployments, which is worse than the
+            silent 404 this whole change exists to prevent. */}
+        {suggestedRedirectUri && !existing && (
+          <p className="mt-1 flex items-center gap-2 text-xs text-[var(--color-muted-fg)]">
+            <span>
+              If your app serves this route, register it at {provider.label} too:
+            </span>
+            <code className="truncate font-mono text-[0.7rem] text-[var(--color-fg)]">
+              {suggestedRedirectUri}
+            </code>
+            <CopyButton value={suggestedRedirectUri} label="Copy" />
+          </p>
+        )}
       </Field>
 
       {provider.needsIssuerUrl && (

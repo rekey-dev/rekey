@@ -79,8 +79,34 @@ export async function planCheckoutReadiness(
   for (const plan of plans) {
     const blockers: PlanBlocker[] = [];
     for (const { provider } of enabled) {
-      const blocker = getModule(provider)?.planCheckoutBlocker?.(plan);
+      const module = getModule(provider);
+      const blocker = module?.planCheckoutBlocker?.(plan);
       if (blocker) blockers.push({ provider, ...blocker });
+
+      // A trial is only honoured by a provider that declares it can express
+      // one. `resolveCheckoutTrial` refuses the checkout outright otherwise —
+      // correctly, since charging today for something advertised as free is the
+      // worse outcome — but that refusal reaches the BUYER, not the operator.
+      //
+      // This matters per provider, not per application: with Stripe global and
+      // Razorpay for IN, a plan with a trial sells fine in the US and is
+      // unbuyable in India, and the router decides which. That is exactly the
+      // "fine through one provider and dead through another" case this module
+      // exists to surface, so it belongs here rather than as a create-time
+      // refusal that would also block an operator who is mid-way through
+      // setting providers up.
+      if ((plan.trialDays ?? 0) > 0 && module?.capabilities.trials !== true) {
+        blockers.push({
+          provider,
+          code: 'PLAN_TRIAL_UNSUPPORTED',
+          message:
+            `${module?.display.label ?? provider} cannot start a subscription in a free trial, ` +
+            `and this plan offers ${plan.trialDays}. Buyers routed to it are refused at checkout.`,
+          fix:
+            'Remove the trial from this plan, or make sure buyers who would reach this ' +
+            'provider are routed to one that supports trials.',
+        });
+      }
     }
     out.set(plan.id, { ready: blockers.length === 0, blockers });
   }

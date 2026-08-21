@@ -78,9 +78,85 @@ export function hasProviderRegistration(plan: Pick<Plan, 'metadata'>): boolean {
  * stripping can't be forgotten in one of them.
  */
 function mergeMetadata(plan: Plan, incoming: Record<string, unknown>): Record<string, unknown> {
-  const patch = { ...incoming };
+  return {
+    ...((plan.metadata ?? {}) as Record<string, unknown>),
+    ...stripProviderMetadata(incoming),
+  };
+}
+
+/**
+ * Drop the provider-reserved keys from operator-supplied metadata.
+ *
+ * Split out of `mergeMetadata` because CREATE has nothing to merge against and
+ * so never called it, which is how the one writer that needed this most ended
+ * up without it. Every path that lets an operator name metadata goes through
+ * one of these two functions.
+ */
+function stripProviderMetadata(
+  incoming: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const patch = { ...(incoming ?? {}) };
   for (const reserved of PROVIDER_METADATA_KEYS) delete patch[reserved];
-  return { ...((plan.metadata ?? {}) as Record<string, unknown>), ...patch };
+  return patch;
+}
+
+const MAX_TRIAL_DAYS = 365;
+
+/**
+ * Validate and normalise a trial length to what the column should hold.
+ *
+ * `null` means no trial, which is the ONLY encoding for it — `0` and `null`
+ * must not both end up in the column meaning the same thing, or the same plan
+ * reads back differently depending on which surface created it.
+ *
+ * Bounds enforced here rather than only in the route's zod, because the MCP
+ * `create_plan` tool reaches this service directly and the MCP dispatcher does
+ * not validate arguments against a tool's `inputSchema`. Without this, an agent
+ * could store 3650 (Stripe rejects any `trial_period_days` over 730, so the
+ * BUYER discovers it at checkout), a negative (which slipped past the
+ * SUBSCRIPTION-only check, since that tested `> 0`), or 14.5 (a Prisma Int
+ * error, i.e. a 500 where a 400 belongs).
+ */
+function normaliseTrialDays(value: number | undefined): number | null {
+  if (value === undefined) return null;
+  if (!Number.isInteger(value) || value < 0 || value > MAX_TRIAL_DAYS) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'PLAN_TRIAL_INVALID',
+      message: `\`trialDays\` must be a whole number of days between 0 and ${MAX_TRIAL_DAYS}, not ${value}.`,
+      fix: `Send a whole number up to ${MAX_TRIAL_DAYS}, or 0 for no trial.`,
+    });
+  }
+  // HELD FOR 2.1.0. The write path works; what is missing is everything that
+  // makes a trial safe to sell.
+  //
+  // Two independent release reviews found two ways it loses money, and neither
+  // is in this function's reach:
+  //
+  //   * `entitlementsService.provision` has no trial gate, and checkout calls it
+  //     on `checkout.session.completed`. A SUBSCRIPTION plan carrying `trialDays`
+  //     AND a CREDIT or LICENSE entitlement materialises those on day 0, before
+  //     any money moves, and `provision` has no inverse. Cancel before the first
+  //     invoice and keep them.
+  //   * nothing records that a buyer has already trialled. The subscription key
+  //     is (application, end-user, plan), so a cancelled row is reused and the
+  //     trial is granted again, without limit. `docs/specs/trial-eligibility.md`
+  //     is the design for that limit and states it is not built.
+  //
+  // Refused here rather than reverted to the pre-#474 behaviour, because that
+  // behaviour was to accept the field, report 201, and silently drop it, which
+  // is the defect #474 existed to fix. An operator who asks for a trial is now
+  // told they cannot have one yet. Zero and absent stay legal so a plan that
+  // somehow carries one can still be cleared.
+  if (value > 0) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'PLAN_TRIAL_UNAVAILABLE',
+      message: 'Free trials are not available in this release.',
+      fix: 'Create the plan without `trialDays`. Trials are held until per-buyer eligibility exists, because a trial can currently be taken repeatedly and can hand over credits or a licence key before the first payment. Tracked in docs/specs/trial-eligibility.md.',
+    });
+  }
+  return null;
 }
 
 export interface CreatePlanInput {
@@ -100,6 +176,18 @@ export interface CreatePlanInput {
   pricePerUnitCents?: number;
   // CREDIT-kind config — required when kind = CREDIT.
   creditsAmount?: number;
+  /**
+   * Free-trial length in days for a SUBSCRIPTION plan. Omitted or 0 means no
+   * trial.
+   *
+   * This field was missing from this interface while the route validated it,
+   * documented it, and spread it into `create` — so it was silently dropped on
+   * the way in, `Plan.trialDays` was never written by any surface, and
+   * `resolveCheckoutTrial` read `plan.trialDays ?? 0` and therefore always
+   * decided "no trial". Every buyer of a plan advertised with a free trial was
+   * charged immediately. The whole trial module was unreachable code.
+   */
+  trialDays?: number;
   metadata?: Record<string, unknown>;
 }
 
@@ -243,6 +331,26 @@ export const plansService = {
       }
     }
 
+    const trialDays = normaliseTrialDays(input.trialDays);
+
+    // A trial only means something for a recurring charge. `checkout-trial.ts`
+    // already refuses one on a one-off purchase and its comment says the case
+    // is "Rejected at plan creation too" — which was not true of any layer that
+    // could be reached, because `trialDays` never made it this far. It is true
+    // here now, so the claim and the code agree.
+    //
+    // Enforced HERE and not only in the route's zod, because the MCP
+    // `create_plan` tool calls this service directly and the MCP dispatcher
+    // validates nothing against a tool's `inputSchema`.
+    if (trialDays !== null && kind !== 'SUBSCRIPTION') {
+      throw new RekeyError({
+        statusCode: 400,
+        code: 'PLAN_TRIAL_NOT_APPLICABLE',
+        message: `A ${kind}-kind plan cannot have a trial: there is no recurring charge for it to convert into.`,
+        fix: 'Drop `trialDays`, or create this plan as SUBSCRIPTION.',
+      });
+    }
+
     const application: Application = await applicationsService.get(input.applicationId);
 
     // Decided BEFORE the insert, because it decides what state the insert
@@ -281,7 +389,25 @@ export const plansService = {
           ...(input.meterSlug !== undefined && { meterSlug: input.meterSlug }),
           ...(input.pricePerUnitCents !== undefined && { pricePerUnitCents: input.pricePerUnitCents }),
           ...(input.creditsAmount !== undefined && { creditsAmount: input.creditsAmount }),
-          metadata: (input.metadata ?? {}) as never,
+          trialDays,
+          // Provider-reserved keys stripped HERE, not by the callers.
+          //
+          // `mergeMetadata` says it is "shared by every writer so the stripping
+          // can't be forgotten in one of them", and it was forgotten in this
+          // one: create wrote the operator's metadata verbatim. A plan created
+          // with `{stripe: {priceId: 'price_of_something_else'}}` is treated as
+          // already registered — `ensurePlanRegistered` returns the stored id
+          // without minting anything, `hasProviderRegistration` reports true,
+          // and `createCheckoutSession` charges that price while the row, the
+          // pricing page and the receipt all show this plan's `amount`. That is
+          // the "way to charge for somebody else's product" the constant's own
+          // docstring warns about, and it also freezes the plan forever, since
+          // every repair is refused with PLAN_PRICE_IMMUTABLE.
+          //
+          // Reachable from the REST plans route, and now from the MCP
+          // `create_plan` tool, which advertises `metadata` and validates
+          // nothing. Fixed at the single write rather than at each caller.
+          metadata: stripProviderMetadata(input.metadata) as never,
         },
       });
     } catch (e) {
@@ -314,7 +440,7 @@ export const plansService = {
           fix: broken
             ? `That plan exists but is not registered with the payment provider, so it is off the public catalogue. Fix the provider credentials if they were the problem, then repair it in place: PATCH /api/v1/tenant/applications/${input.applicationId}/plans/${input.slug} to correct name/price, and POST .../plans/${input.slug}/register to retry registration. You do not need a new slug.`
             : archived
-              ? `The slug is a public identifier your integration passes to checkout and reads back off a subscription, so it stays reserved after archiving — otherwise a new plan would inherit the old one's meaning for every caller still using it. Either reactivate that plan and edit it in place (Panel → Plans → Reactivate, then Edit), or pick a different slug for the new one.`
+              ? `The slug is a public identifier your integration passes to checkout and reads back off a subscription, so it stays reserved after archiving; otherwise a new plan would inherit the old one's meaning for every caller still using it. Pick a different slug for the new plan. Reactivating the archived one and editing it in place (Panel → Plans → Reactivate, then Edit) works for its name and entitlements, but NOT for its price once it has registered with a provider, which is the usual reason for creating a replacement.`
               : 'Pick a different slug, or edit the existing plan with PATCH /api/v1/tenant/applications/:id/plans/:slug.',
         });
       }
@@ -445,10 +571,30 @@ export const plansService = {
       amount?: number;
       currency?: string;
       interval?: PlanInterval;
+      /**
+       * Free-trial length in days. `0` CLEARS the trial (stored as null), which
+       * is the only way to withdraw an offer that is already advertised, so it
+       * has to be expressible. Unlike price, this is editable after provider
+       * registration: the trial is applied per checkout session, not baked into
+       * the immutable Price object.
+       */
+      trialDays?: number;
       metadata?: Record<string, unknown>;
     },
   ): Promise<Plan> {
     const plan = await this.getBySlug(applicationId, slug);
+    // Same rule as create, applied to the row's ACTUAL kind rather than the
+    // patch's, since `kind` is not editable here.
+    const nextTrialDays =
+      patch.trialDays !== undefined ? normaliseTrialDays(patch.trialDays) : undefined;
+    if (nextTrialDays !== undefined && nextTrialDays !== null && plan.kind !== 'SUBSCRIPTION') {
+      throw new RekeyError({
+        statusCode: 400,
+        code: 'PLAN_TRIAL_NOT_APPLICABLE',
+        message: `Plan "${slug}" is ${plan.kind}-kind, so a trial has no recurring charge to convert into.`,
+        fix: 'Drop `trialDays`, or move the trial to a SUBSCRIPTION plan.',
+      });
+    }
     if (patch.active === true) assertActivatable(applicationId, plan);
 
     const pricePatched =
@@ -458,7 +604,7 @@ export const plansService = {
         statusCode: 409,
         code: 'PLAN_PRICE_IMMUTABLE',
         message: `Plan "${slug}" is already registered with a payment provider, so its price cannot be changed.`,
-        fix: 'A provider price object is immutable once created. Retire this plan (PATCH with {"active": false}) and create a replacement at the new price. Price edits are only accepted on a plan that has never registered.',
+        fix: 'A provider price object is immutable once created. Retire this plan (PATCH with {"active": false}) and create a replacement at the new price, under a DIFFERENT slug: archiving does not release the old one, because your integration passes it to checkout and reads it back off a subscription. Price edits are only accepted on a plan that has never registered.',
       });
     }
     if (patch.amount !== undefined && patch.amount < 0) {
@@ -481,6 +627,7 @@ export const plansService = {
         ...(patch.amount !== undefined && { amount: patch.amount }),
         ...(patch.currency !== undefined && { currency: patch.currency.toUpperCase() }),
         ...(patch.interval !== undefined && { interval: patch.interval }),
+        ...(nextTrialDays !== undefined && { trialDays: nextTrialDays }),
         ...(metadata !== undefined && { metadata: metadata as object }),
       },
     });

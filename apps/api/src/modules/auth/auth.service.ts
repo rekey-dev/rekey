@@ -79,7 +79,7 @@ import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { assertNoReservedMetadataKey } from '../../lib/oidc-profile.js';
 import { assertSignupAllowed, signupAllowed, type AuthKind } from '../../lib/signup-policy.js';
 import { assertEndUserQuota } from '../../lib/tenant-limits.js';
-import { endUserRolesService } from '../end-user-roles/end-user-roles.service.js';
+import { applicationRolesService } from '../application-roles/application-roles.service.js';
 import { mfaService } from '../mfa/mfa.service.js';
 import { emailService } from '../email/email.service.js';
 import { resolveAppUrl, buildTokenUrl , assertAllowedTokenUrl } from '../../lib/app-url.js';
@@ -559,7 +559,7 @@ export const authService = {
     // Look up the Application's default end-user role. New sign-ups always
     // start in the default role — operators can promote later via the
     // tenant PATCH endpoint.
-    const defaultRole = await endUserRolesService.getDefault(input.application.id);
+    const defaultRole = await applicationRolesService.getDefault(input.application.id);
 
     let endUser: EndUser;
     try {
@@ -1521,7 +1521,7 @@ export const authService = {
       // Throwing here rolls the token consume back too, so a link rejected for
       // quota stays usable and works once the workspace has room again.
       await assertEndUserQuota(input.application.tenantId, tx);
-      const defaultRole = await endUserRolesService.getDefault(input.application.id);
+      const defaultRole = await applicationRolesService.getDefault(input.application.id);
       try {
         return await tx.endUser.create({
           data: {

@@ -489,6 +489,7 @@ describe('WEBHOOK_EVENTS registry', () => {
       'subscription.activated',
       'subscription.canceled',
       'subscription.past_due',
+      'subscription.entitlements_updated',
       'payment.succeeded',
       'payment.failed',
       'dunning.case_opened',

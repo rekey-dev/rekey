@@ -500,6 +500,40 @@ export async function sendEmail(
   input: SendInput,
   meta?: SendLogMeta,
 ): Promise<SendOutcome> {
+  // A disabled Application sends no mail. Its end-user-facing routes are
+  // already refused at both API-key middlewares, so in practice this catches
+  // the callers that are NOT request-driven — dunning escalation, subscription
+  // lifecycle mail, anything on a timer — which would otherwise keep mailing
+  // an operator's customers about a product that is switched off.
+  //
+  // The outcome is `error`, and the choice matters more than it looks.
+  // `no_transport` is the documented "your server forwards the token" contract
+  // (see the note below): auth flows take that branch by handing the RAW token
+  // back in the JSON response body. Returning it here would turn disabling an
+  // Application into a token-disclosure path. `error` is the branch where
+  // callers withhold the token, which is the correct behaviour for a send that
+  // was deliberately not attempted, and it is already handled by every
+  // existing consumer — no fourth union member, so no consumer goes unaudited.
+  //
+  // Still logged, with the real reason in the outcome, because "why did my
+  // customer not get this mail" must be answerable from the email log rather
+  // than by reading this function.
+  if (application.disabledAt !== null) {
+    const outcome: SendOutcome = {
+      kind: 'error',
+      message: 'Not sent: this application is disabled. Re-enable it to resume sending.',
+    };
+    await recordLog({
+      tenantId: application.tenantId,
+      applicationId: application.id,
+      to: input.to,
+      subject: input.subject,
+      eventKey: meta?.eventKey ?? null,
+      outcome,
+    });
+    return outcome;
+  }
+
   const creds = resolveCredentials(application);
   const cfg = emailConfig(application);
 

@@ -333,6 +333,14 @@ export default async function PlansPage({
       p.registrationStatus !== 'PENDING' &&
       p.registrationStatus !== 'FAILED',
   );
+  // The subset the per-row Register button is actually offered for. That button
+  // is withheld when the only blocker is NO_BILLING_PROVIDER, since with nothing
+  // configured the call can only come back 400. The banner's remedy text has to
+  // follow the same rule or it names a control that is not on screen, which is
+  // exactly the state the banner exists to explain.
+  const registerable = unbuyable.filter(
+    (p) => !(p.checkout?.blockers ?? []).some((b) => b.code === 'NO_BILLING_PROVIDER'),
+  );
 
   return (
     <div className="space-y-5">
@@ -374,11 +382,19 @@ export default async function PlansPage({
               </li>
             ))}
           </ul>
-          <p className="mt-2 text-xs">
-            Plans register with the payment provider when they are created, so a plan created
-            before you connected one was never registered and connecting it afterwards does not
-            repair them. Use <strong>Register</strong> on each row, or recreate them.
-          </p>
+          {registerable.length > 0 ? (
+            <p className="mt-2 text-xs">
+              Plans register with the payment provider when they are created, so a plan created
+              before you connected one was never registered and connecting it afterwards does not
+              repair them. Use <strong>Register</strong> on each row, or recreate them.
+            </p>
+          ) : (
+            <p className="mt-2 text-xs">
+              Connect a billing provider on the <strong>Providers</strong> tab first. Until one is
+              configured there is nothing to register these plans with, so <strong>Register</strong>{' '}
+              is not offered on the rows below.
+            </p>
+          )}
         </Banner>
       )}
 

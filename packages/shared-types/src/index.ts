@@ -283,6 +283,32 @@ export const AuthConfigSchema = z.object({
    * neighbour here. No migration needed.
    */
   appUrl: z.string().url().optional(),
+  /**
+   * Where to send the browser for the sign-in half of THIS Application acting
+   * as an OpenID Connect provider (`/api/v1/mcp/:slug/oauth/authorize`).
+   *
+   * Unset, the API renders its own built-in sign-in + consent page, which
+   * accepts an email and a password. That is the right default for a
+   * deployment with no front end of its own, and the wrong one for an
+   * Application whose users never set a password because they sign in with
+   * Google or GitHub: they arrive at a form they cannot satisfy, and the only
+   * way through is a password reset on an account that has no password.
+   *
+   * Set it, and the API redirects there with the authorization request
+   * untouched, and the Application's own login page handles it. That page
+   * already has whatever sign-in methods the Application offers, and already
+   * knows whether this browser is signed in, so a user with a live session is
+   * not asked to authenticate a second time. When it is satisfied who the user
+   * is, it calls `POST /api/v1/mcp/:slug/oauth/authorize/grant` with its
+   * secret key and the user's access token, and redirects the browser to the
+   * `redirect_uri` with the returned code.
+   *
+   * Trust: operator-configured, same as `redirectUrls`, and the API forwards
+   * only the standard authorization parameters, which are already public. It
+   * must not point back at the API's own authorize endpoint; the API refuses
+   * to delegate to itself rather than bouncing the browser in a loop.
+   */
+  hostedAuthorizeUrl: z.string().url().optional(),
   /** If true, organisations / teams are enabled for this application. */
   organizationsEnabled: z.boolean().default(false),
   /**
@@ -570,6 +596,30 @@ export const ApplicationDtoSchema = z.object({
    * that assumes its presence is wrong. Narrow before use.
    */
   environment: AppEnvironmentSchema.optional(),
+  /**
+   * When this Application was PROMOTED into production, or null/absent.
+   *
+   * Null on a PRODUCTION Application means it was created production rather
+   * than promoted into it. `environment` cannot distinguish the two, and only
+   * one of them is an event with a date.
+   *
+   * Optional for the same reason `environment` is: the tenant surfaces return
+   * it, `GET /api/v1/me` does not, and a client that assumes its presence is
+   * wrong until every deployment ships it. Narrow before use.
+   */
+  promotedAt: z.string().datetime().nullable().optional(),
+  /**
+   * Set while the Application is frozen; null or absent when it is running.
+   *
+   * A disabled Application refuses every end-user request with
+   * `403 APPLICATION_DISABLED`, serves no hosted portal, and sends no mail or
+   * webhooks. Nothing is deleted and no session is revoked, so re-enabling
+   * restores it exactly. A disabled PRODUCTION Application also stops counting
+   * against the workspace's `maxProductionApps`.
+   */
+  disabledAt: z.string().datetime().nullable().optional(),
+  /** The operator's own note recorded at the freeze. Never shown to end-users. */
+  disabledReason: z.string().nullable().optional(),
   publicKey: z.string(),
   authConfig: AuthConfigSchema,
   billingConfig: BillingConfigSchema,
@@ -1323,8 +1373,41 @@ export type ConsumeCreditsResultDto = z.infer<typeof ConsumeCreditsResultDtoSche
 // Organizations — end-user teams (gated by AuthConfig.organizationsEnabled)
 // ============================================================================
 
-export const OrganizationRoleSchema = z.enum(['OWNER', 'ADMIN', 'MEMBER']);
+/**
+ * The authority tier Rekey itself enforces. Every organization role name maps
+ * onto exactly one of these, and every server-side gate (the canManage
+ * ladder, the last-OWNER guard, org-scoped billing writes) compares the TIER.
+ * Compare against this, not against `role`, when deciding what a member may do.
+ */
+export const OrganizationBaseRoleSchema = z.enum(['OWNER', 'ADMIN', 'MEMBER']);
+export type OrganizationBaseRole = z.infer<typeof OrganizationBaseRoleSchema>;
+
+/**
+ * An organization role NAME, drawn from the Application's catalog.
+ *
+ * Was a fixed `z.enum(['OWNER','ADMIN','MEMBER'])`. It is now a string because
+ * operators can define their own names (`editor`, `content-manager`) against a
+ * base tier. The three built-ins still exist on every Application and still
+ * spell exactly the same, so every previously-valid value remains valid. A
+ * client that switches exhaustively over the old union must now handle names
+ * it does not know, which is the point of the catalog.
+ *
+ * `GET /api/v1/users/me/organizations/roles` lists what an Application accepts.
+ */
+export const OrganizationRoleSchema = z.string().min(1).max(40);
 export type OrganizationRole = z.infer<typeof OrganizationRoleSchema>;
+
+/** One row of an Application's organization-role catalog. */
+export const OrganizationRoleDefDtoSchema = z.object({
+  name: z.string(),
+  description: z.string().nullable().optional(),
+  baseRole: OrganizationBaseRoleSchema,
+  /** Assigned when an invitation or operator add-member omits a role. */
+  isDefault: z.boolean(),
+  /** True for OWNER / ADMIN / MEMBER. Cannot be renamed, re-tiered or deleted. */
+  isBuiltIn: z.boolean(),
+});
+export type OrganizationRoleDefDto = z.infer<typeof OrganizationRoleDefDtoSchema>;
 
 export const OrganizationDtoSchema = z.object({
   id: z.string(),
@@ -1337,8 +1420,10 @@ export const OrganizationDtoSchema = z.object({
 export type OrganizationDto = z.infer<typeof OrganizationDtoSchema>;
 
 export const OrganizationWithRoleDtoSchema = OrganizationDtoSchema.extend({
-  /** The calling user's role in this organization. */
+  /** The calling user's role NAME in this organization. */
   role: OrganizationRoleSchema,
+  /** The tier that name maps to. Gate on this, not on `role`. */
+  baseRole: OrganizationBaseRoleSchema,
 });
 export type OrganizationWithRoleDto = z.infer<typeof OrganizationWithRoleDtoSchema>;
 
@@ -1348,6 +1433,7 @@ export const OrganizationMemberDtoSchema = z.object({
   endUserId: z.string(),
   email: z.string(),
   role: OrganizationRoleSchema,
+  baseRole: OrganizationBaseRoleSchema,
   createdAt: z.string().datetime(),
 });
 export type OrganizationMemberDto = z.infer<typeof OrganizationMemberDtoSchema>;
@@ -1518,6 +1604,16 @@ export const WEBHOOK_EVENTS = [
     name: 'subscription.past_due',
     description:
       'A Subscription transitioned to PAST_DUE (payment failed / retrying). Payload: `data.subscription`.',
+  },
+  {
+    name: 'subscription.entitlements_updated',
+    description:
+      'What a Subscription GRANTS changed without its status changing — an operator wrote ' +
+      '`entitlementOverrides` on it. Emitted only when the resolved entitlements actually ' +
+      'differ, so a no-op write announces nothing. Payload: `data.subscription`, identical in ' +
+      'shape to `subscription.activated`, with `entitlements` already merged. Subscribe to this ' +
+      'if you project entitlements onto state of your own: a status-only subscription will ' +
+      'never hear about a bespoke deal being adjusted.',
   },
   {
     name: 'payment.succeeded',

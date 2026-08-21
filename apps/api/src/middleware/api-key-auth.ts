@@ -46,6 +46,30 @@ declare module 'fastify' {
 const SECRET_KEY_PREFIXES = ['rp_live_', 'rp_test_'] as const;
 const PUBLISHABLE_KEY_PREFIX = 'rp_pub_';
 
+/**
+ * The refusal a disabled Application returns to every end-user-facing caller.
+ *
+ * Shared by both middlewares so the two doors cannot drift into two different
+ * answers for one state. 403, not 401: the credential presented is genuine and
+ * re-presenting a better one changes nothing, which is precisely what 403
+ * means and 401 does not.
+ *
+ * The message is read by an operator's developer, not by an end-user, so it
+ * names the actual cause rather than hiding behind a generic outage. Nothing
+ * is disclosed by it: the caller already holds a valid key for this
+ * Application, so they are entitled to know its state.
+ */
+export function applicationDisabled(): RekeyError {
+  return new RekeyError({
+    statusCode: 403,
+    code: 'APPLICATION_DISABLED',
+    message:
+      'This application is disabled. It is not serving authentication, billing or any ' +
+      'other end-user request, and no data has been deleted.',
+    fix: 'A workspace operator can re-enable it in Panel → Application → Settings. If it is in the production environment, re-enabling needs a free production slot in the workspace.',
+  });
+}
+
 export async function requireApiKey(
   request: FastifyRequest,
   _reply: FastifyReply,
@@ -111,6 +135,14 @@ export async function requireApiKey(
       fix: 'This key is dead — mint a new one under a current application.',
     });
   }
+
+  // Disabled Applications refuse every end-user-facing request. Checked before
+  // the IP allowlist because "this application is switched off" is the more
+  // fundamental fact and the more useful thing to be told: an operator
+  // debugging a 403 should not first be sent to audit an allowlist that is not
+  // the problem. Operator routes do NOT pass through here and stay open, which
+  // is what makes the freeze reversible.
+  if (application.disabledAt !== null) throw applicationDisabled();
 
   // Per-Application IP allowlist (server-side secret keys only — this is the
   // secret-key middleware; public keys never reach here). When the app has set
@@ -243,6 +275,10 @@ export async function requirePublishableOrSecretKey(
       fix: `Use the current publishable key (rp_pub_…) from Panel → Application on ${env.API_URL} — a key from another Rekey deployment is unknown here, so check the origin your client points at as well as the key. If you just rotated, redeploy clients with the new key before the grace window ends.`,
     });
   }
+
+  // Same gate as the secret-key path, in the same position relative to the
+  // allowlist check, for the same reason. See `applicationDisabled`.
+  if (application.disabledAt !== null) throw applicationDisabled();
 
   // Per-app CORS origin allowlist. When the tenant has declared origins, a
   // publishable request must carry a matching `Origin` header — this is the

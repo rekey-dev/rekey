@@ -13,6 +13,7 @@
  *
  *   POST   /api/v1/users/me/organizations                            create
  *   GET    /api/v1/users/me/organizations                            list-mine
+ *   GET    /api/v1/users/me/organizations/roles                      assignable role catalog
  *   GET    /api/v1/users/me/organizations/:id                        get
  *   PATCH  /api/v1/users/me/organizations/:id                        update (name/metadata)
  *   GET    /api/v1/users/me/organizations/:id/members                list members
@@ -31,6 +32,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { organizationsService } from './organizations.service.js';
+import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 import { authService } from '../auth/auth.service.js';
 import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
@@ -64,13 +66,26 @@ const ORG_MEMBERSHIP_CORE_PROPERTIES = {
   id: { type: 'string' },
   organizationId: { type: 'string' },
   endUserId: { type: 'string' },
-  role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+  role: {
+    type: 'string',
+    description:
+      'A role NAME from this Application\'s organization-role catalog. `OWNER`, `ADMIN` and ' +
+      '`MEMBER` are built in; an operator can define more (e.g. `content-manager`). ' +
+      'GET /api/v1/users/me/organizations/roles lists the assignable names.',
+  },
+  baseRole: {
+    type: 'string',
+    enum: ['OWNER', 'ADMIN', 'MEMBER'],
+    description:
+      'The authority tier the role name maps to. Rekey gates on this, never on the name. ' +
+      'Compare against it if you need to know what a custom role can actually do.',
+  },
 } as const;
 
 const OrgMembershipCore: JsonSchema = {
   type: 'object',
   properties: ORG_MEMBERSHIP_CORE_PROPERTIES,
-  required: ['id', 'organizationId', 'endUserId', 'role'],
+  required: ['id', 'organizationId', 'endUserId', 'role', 'baseRole'],
 };
 
 const OrgMembershipWithCreatedAt: JsonSchema = {
@@ -79,7 +94,7 @@ const OrgMembershipWithCreatedAt: JsonSchema = {
     ...ORG_MEMBERSHIP_CORE_PROPERTIES,
     createdAt: { type: 'string', format: 'date-time' },
   },
-  required: ['id', 'organizationId', 'endUserId', 'role', 'createdAt'],
+  required: ['id', 'organizationId', 'endUserId', 'role', 'baseRole', 'createdAt'],
 };
 
 const RemovedFlag: JsonSchema = {
@@ -88,7 +103,13 @@ const RemovedFlag: JsonSchema = {
   required: ['removed'],
 };
 
-const OrgRoleZ = z.enum(['OWNER', 'ADMIN', 'MEMBER']);
+/**
+ * A role NAME, not a fixed tier. Existence is checked against the
+ * Application's catalog in the service (400 ORGANIZATION_ROLE_UNKNOWN), which
+ * is the only place that can know which names an operator has defined. The
+ * bound here mirrors the catalog's own name limit.
+ */
+const OrgRoleZ = z.string().min(1).max(40);
 
 const CreateOrgBody = z.object({
   name: z.string().min(1).max(120),
@@ -103,7 +124,8 @@ const UpdateOrgBody = z.object({
 
 const InviteBody = z.object({
   email: z.string().email().max(254),
-  role: OrgRoleZ,
+  /** Optional. Falls back to the Application's default organization role. */
+  role: OrgRoleZ.optional(),
 });
 
 const ChangeRoleBody = z.object({
@@ -212,11 +234,84 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
       return {
         success: true,
         data: paged(
-          rows.map((r) => ({ ...shapeOrg(r), role: r.role })),
+          rows.map((r) => ({ ...shapeOrg(r), role: r.role, baseRole: r.baseRole })),
           total,
           take,
           skip,
         ),
+      };
+    },
+  );
+
+  // The role catalog, readable by any signed-in end-user of the Application.
+  //
+  // An org OWNER/ADMIN assigns roles with their OWN access token (PATCH
+  // /:id/members/:euid, POST /:id/invitations) with no operator in that loop,
+  // so their UI needs to know which names exist to populate a picker. Without this
+  // the only way to discover a custom role name would be to guess it.
+  //
+  // Deliberately not membership-gated: the catalog is Application-level
+  // vocabulary, identical for every organization, and reveals nothing about who
+  // belongs to what. Registered before `/:id` for readability; Fastify's router
+  // prefers the static segment regardless of order.
+  app.get(
+    '/roles',
+    {
+      schema: {
+        tags: ['Public · Organizations'],
+        summary: 'List the organization roles assignable in this Application',
+        description:
+          'Returns the Application\'s organization-role catalog: the built-in OWNER / ADMIN / ' +
+          'MEMBER plus any custom roles the operator defined. `baseRole` is the authority tier ' +
+          'a name maps to. Rekey gates on the tier, never on the name, so a custom ' +
+          '`content-manager` on tier MEMBER can do exactly what MEMBER can. Use `name` when ' +
+          'assigning a role; use `baseRole` when deciding what a member is allowed to do.',
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        response: {
+          200: ok(
+            {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string' },
+                  description: { type: 'string', nullable: true },
+                  baseRole: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+                  isDefault: {
+                    type: 'boolean',
+                    description: 'Assigned when an invitation omits a role.',
+                  },
+                  isBuiltIn: {
+                    type: 'boolean',
+                    description: 'True for OWNER / ADMIN / MEMBER. Cannot be renamed or deleted.',
+                  },
+                  disabled: {
+                    type: 'boolean',
+                    description:
+                      'Currently revoked: holders are refused and it cannot be assigned. Filter these out of a role picker.',
+                  },
+                },
+                required: ['name', 'baseRole', 'isDefault', 'isBuiltIn', 'disabled'],
+              },
+            },
+            'The assignable organization roles for this Application.',
+          ),
+          ...errs(ORG_AUTH_ERRORS),
+        },
+      },
+    },
+    async (req) => {
+      const roles = await organizationRolesService.list(req.application!.id);
+      return {
+        success: true,
+        data: roles.map((r) => ({
+          name: r.name,
+          description: r.description,
+          baseRole: r.baseRole,
+          isDefault: r.isDefault,
+          isBuiltIn: r.isBuiltIn,
+          disabled: r.disabled,
+        })),
       };
     },
   );
@@ -244,7 +339,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         endUserId: req.endUser!.id,
         organizationId: id,
       });
-      return { success: true, data: { ...shapeOrg(row), role: row.role } };
+      return { success: true, data: { ...shapeOrg(row), role: row.role, baseRole: row.baseRole } };
     },
   );
 
@@ -349,10 +444,15 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         summary: 'Invite a user (OWNER + ADMIN). Returns the raw token once.',
         body: {
           type: 'object',
-          required: ['email', 'role'],
+          required: ['email'],
           properties: {
             email: { type: 'string', format: 'email', maxLength: 254 },
-            role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+            role: {
+              type: 'string',
+              description:
+                'A role name from the catalog (GET /users/me/organizations/roles). Built-ins: ' +
+                "OWNER, ADMIN, MEMBER. Omit to use the Application's default role.",
+            },
           },
         },
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
@@ -391,7 +491,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         actorEndUserId: req.endUser!.id,
         organizationId: id,
         email: body.email,
-        role: body.role,
+        ...(body.role !== undefined && { role: body.role }),
       });
       return reply.status(201).send({
         success: true,
@@ -460,7 +560,14 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         body: {
           type: 'object',
           required: ['role'],
-          properties: { role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] } },
+          properties: {
+            role: {
+              type: 'string',
+              description:
+                'A role name from the catalog (GET /users/me/organizations/roles). Built-ins: ' +
+                'OWNER, ADMIN, MEMBER.',
+            },
+          },
         },
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         response: {
@@ -491,6 +598,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         success: true,
         data: {
           id: result.id,
+          baseRole: result.baseRole,
           organizationId: result.organizationId,
           endUserId: result.endUserId,
           role: result.role,
@@ -704,6 +812,7 @@ export async function organizationsAcceptInvitationRoutes(app: FastifyInstance):
             organizationId: result.organizationId,
             endUserId: result.endUserId,
             role: result.role,
+            baseRole: result.baseRole,
             createdAt: result.createdAt.toISOString(),
           },
         },
@@ -752,7 +861,14 @@ function shapeOrgWithMembership(args: {
     createdAt: Date;
     updatedAt: Date;
   };
-  membership: { id: string; organizationId: string; endUserId: string; role: string; createdAt: Date };
+  membership: {
+    id: string;
+    organizationId: string;
+    endUserId: string;
+    role: string;
+    baseRole: string;
+    createdAt: Date;
+  };
 }): Record<string, unknown> {
   return {
     organization: shapeOrg(args.organization),
@@ -761,6 +877,7 @@ function shapeOrgWithMembership(args: {
       organizationId: args.membership.organizationId,
       endUserId: args.membership.endUserId,
       role: args.membership.role,
+      baseRole: args.membership.baseRole,
       createdAt: args.membership.createdAt.toISOString(),
     },
   };

@@ -396,6 +396,34 @@ export function getApplication(id: string): Promise<ApplicationRow> {
   return apiGet<ApplicationRow>(`/api/v1/tenant/applications/${encodeURIComponent(id)}`);
 }
 
+/**
+ * The active workspace's ceilings and what is used against them.
+ *
+ * An ABSENT key under `limits` means unlimited for that resource — the default
+ * for every workspace, and the state of every self-host that never sets one.
+ * Never read a missing key as zero: doing so would disable the promote control
+ * on every unlimited workspace, which is most of them.
+ *
+ * This is a hint for rendering, never the enforcement. The API re-checks every
+ * quota on the acting endpoint, so a stale or wrong reading here produces a
+ * clear 403, not a bypass.
+ */
+export function getWorkspaceLimits(): Promise<WorkspaceLimitsDto> {
+  return apiGet<WorkspaceLimitsDto>('/api/v1/tenant/workspace/limits');
+}
+
+export interface WorkspaceLimitsDto {
+  limits: {
+    maxProductionApps?: number | null;
+    maxActiveEndUsers?: number | null;
+  };
+  usage: {
+    /** Production applications that are RUNNING — not disabled. */
+    productionApps: number;
+    activeEndUsers: number;
+  };
+}
+
 /** The signed-in operator + their memberships. Memoised per request. */
 export function getMe(): Promise<MeDto> {
   return apiGet<MeDto>('/api/v1/tenant/auth/me');
@@ -422,6 +450,21 @@ export interface ApplicationRow {
    * which billing credentials the app may hold.
    */
   environment: 'PRODUCTION' | 'STAGING' | 'DEVELOPMENT';
+  /**
+   * When this application was PROMOTED into production, or null. Null on a
+   * production application means it was created production rather than
+   * promoted — the two are different events and only one has a date.
+   */
+  promotedAt?: string | null;
+  /**
+   * Set while the application is frozen. A disabled application refuses every
+   * end-user request, serves no hosted portal and sends no mail, while every
+   * operator surface (including this panel) stays fully readable. Nothing is
+   * deleted; re-enabling restores it exactly.
+   */
+  disabledAt?: string | null;
+  /** The operator's own note recorded at the time of the freeze. */
+  disabledReason?: string | null;
   publicKey: string;
   /** Previous publishable key during a rotation grace window (null otherwise). */
   previousPublicKey?: string | null;
@@ -431,6 +474,8 @@ export interface ApplicationRow {
     methods: string[];
     passwordMinLength: number;
     redirectUrls: string[];
+    /** Base URL of the operator's own app. Canonical; redirectUrls infers it. */
+    appUrl?: string;
     signupEnabled?: boolean;
     signupMode?: 'public' | 'secret_only' | 'invite_only';
     mfa?: 'off' | 'optional' | 'required';
@@ -728,7 +773,13 @@ export interface EndUserRow {
   createdAt: string;
 }
 
-export interface EndUserRoleRow {
+/**
+ * One row of an Application's APPLICATION-role catalog, which governs
+ * `EndUser.role`: one value per (Application, end-user), identical in every
+ * organization that user belongs to. The org-scoped twin is
+ * `OrganizationRoleRow`.
+ */
+export interface ApplicationRoleRow {
   id: string;
   applicationId: string;
   name: string;
@@ -749,18 +800,43 @@ export interface OrganizationRow {
   updatedAt: string;
 }
 
+/**
+ * One row of an Application's ORGANIZATION-role catalog.
+ *
+ * Distinct from an end-user's application-wide role (`EndUserRow.role`), which
+ * is one value per (Application, end-user). This one is per (organization,
+ * end-user), so the same person can be `editor` in one agency and `OWNER` in
+ * another. `baseRole` is the tier the API enforces on; `name` is your own
+ * vocabulary and is never interpreted.
+ */
+export interface OrganizationRoleRow {
+  name: string;
+  description: string | null;
+  baseRole: 'OWNER' | 'ADMIN' | 'MEMBER';
+  isDefault: boolean;
+  isBuiltIn: boolean;
+  /** Revoked: holders are refused and it cannot be assigned. Reversible. */
+  disabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface OrganizationMemberRow {
   id: string;
   endUserId: string;
   email: string;
-  role: 'OWNER' | 'ADMIN' | 'MEMBER';
+  /** A catalog name. Not the 3-value tier; see OrganizationRoleRow. */
+  role: string;
+  /** The tier that name maps to. Drive any permission display off this. */
+  baseRole: 'OWNER' | 'ADMIN' | 'MEMBER';
   createdAt: string;
 }
 
 export interface OrganizationInvitationRow {
   id: string;
   email: string;
-  role: 'OWNER' | 'ADMIN' | 'MEMBER';
+  /** A catalog name. */
+  role: string;
   expiresAt: string;
   createdAt: string;
 }

@@ -47,7 +47,12 @@ import { enqueueEvent, type WebhookDbClient } from '../../webhooks/webhook.servi
 export type SubscriptionEventType =
   | 'subscription.activated'
   | 'subscription.canceled'
-  | 'subscription.past_due';
+  | 'subscription.past_due'
+  // The one member that is not a status transition. `enqueueSubscriptionEvent`
+  // needs no branch for it: the payload it builds already carries entitlements
+  // resolved through `resolveForSubscription`, which already applies overrides,
+  // so this event is the existing shape with different news in it.
+  | 'subscription.entitlements_updated';
 
 export type PaymentEventType = 'payment.succeeded' | 'payment.failed';
 

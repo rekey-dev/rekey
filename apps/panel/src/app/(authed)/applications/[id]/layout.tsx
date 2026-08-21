@@ -4,6 +4,7 @@ import { getApplication } from '@/lib/api';
 import { AppNav } from '@/components/AppNav';
 import { CopyButton } from '@/components/CopyButton';
 import { EnvironmentBadge } from '@/components/EnvironmentBadge';
+import { Banner } from '@/components/Banner';
 
 export default async function ApplicationDetailLayout({
   children,
@@ -26,8 +27,9 @@ export default async function ApplicationDetailLayout({
         </Link>
         <div className="mt-0.5 flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h1 className="text-xl font-semibold tracking-tight text-[var(--color-fg)]">{app.name}</h1>
-          {/* Fixed at creation, so it belongs in the identity row next to the
-              slug rather than on a settings tab that implies it is editable. */}
+          {/* In the identity row rather than on a settings tab: it is what the
+              application IS. It is now promotable (once, one-way) from the
+              Lifecycle tab, but it is still not a field you edit in place. */}
           <EnvironmentBadge environment={app.environment} />
           <span className="font-mono text-xs text-[var(--color-muted-fg)]">{app.slug}</span>
           {/* --color-muted-fg, not --color-faint-fg: this is a value the
@@ -43,6 +45,22 @@ export default async function ApplicationDetailLayout({
       </header>
 
       <AppNav id={id} billingEnabled={app.billingConfig.enabled} />
+
+      {/* In the LAYOUT, not on one page. A disabled application looks entirely
+          normal on every tab — the plans are there, the end-users are there,
+          the keys are there — and an operator debugging "why is sign-in
+          failing" would otherwise have to guess to visit Lifecycle. It renders
+          above the tab content on all of them. */}
+      {app.disabledAt != null && (
+        <Banner tone="warning">
+          <strong>This application is disabled</strong> and is refusing all end-user requests.
+          Everything below is intact and unchanged.{' '}
+          <Link href={`/applications/${id}/lifecycle`} className="underline underline-offset-2">
+            Enable it
+          </Link>{' '}
+          to resume traffic.
+        </Banner>
+      )}
 
       <div>{children}</div>
     </section>

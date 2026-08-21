@@ -46,6 +46,9 @@ import type {
   OrganizationInvitationDto,
   OrganizationMemberDto,
   OrganizationWithRoleDto,
+  OrganizationRoleDefDto,
+  OrganizationRole,
+  OrganizationBaseRole,
   PlanDto,
   ProvidersListDto,
   RekeyErrorShape,
@@ -106,9 +109,11 @@ export type {
   ConsumeCreditsResultDto,
   OrganizationDto,
   OrganizationWithRoleDto,
+  OrganizationRoleDefDto,
   OrganizationMemberDto,
   OrganizationInvitationDto,
   OrganizationRole,
+  OrganizationBaseRole,
   LicenseDto,
   LicenseStatusType,
   LicenseVerifyResultDto,
@@ -1256,8 +1261,32 @@ class OrganizationsClient {
   create(
     accessToken: string,
     input: { name: string; slug: string; metadata?: Record<string, unknown> },
-  ): Promise<{ organization: OrganizationDto; membership: { id: string; role: 'OWNER' } }> {
+  ): Promise<{
+    organization: OrganizationDto;
+    membership: { id: string; role: 'OWNER'; baseRole: 'OWNER' };
+  }> {
     return this.client.send('POST', '/api/v1/users/me/organizations/', input, {
+      'X-Rekey-User-Token': accessToken,
+    });
+  }
+
+  /**
+   * List the organization roles assignable in this Application.
+   *
+   * Returns the built-in OWNER / ADMIN / MEMBER plus any custom roles the
+   * operator defined (`editor`, `content-manager`, …). Call this to populate a
+   * role picker. An org OWNER/ADMIN assigns roles with their own session via
+   * `setMemberRole` / `invite`, so their UI needs to know which names exist.
+   *
+   * `baseRole` is the authority tier a name maps to. Gate your own features on
+   * that, never on the name: Rekey enforces the tier and treats the name as
+   * opaque, so a `content-manager` on tier MEMBER can do exactly what MEMBER
+   * can and nothing more.
+   *
+   * Bounded by construction, being an operator-curated catalog, so it is not paged.
+   */
+  listRoles(accessToken: string): Promise<OrganizationRoleDefDto[]> {
+    return this.client.send('GET', '/api/v1/users/me/organizations/roles', undefined, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -1324,7 +1353,11 @@ class OrganizationsClient {
   invite(
     accessToken: string,
     organizationId: string,
-    input: { email: string; role: 'OWNER' | 'ADMIN' | 'MEMBER' },
+    /**
+     * `role` is a catalog NAME from `listRoles()`, not a fixed tier. Omit it to
+     * use the Application's default organization role.
+     */
+    input: { email: string; role?: OrganizationRole },
   ): Promise<{ invitation: OrganizationInvitationDto; token: string }> {
     return this.client.send(
       'POST',
@@ -1356,12 +1389,15 @@ class OrganizationsClient {
     accessToken: string,
     organizationId: string,
     targetEndUserId: string,
-    input: { role: 'OWNER' | 'ADMIN' | 'MEMBER' },
+    /** `role` is a catalog NAME from `listRoles()`, not a fixed tier. */
+    input: { role: OrganizationRole },
   ): Promise<{
     id: string;
     organizationId: string;
     endUserId: string;
-    role: 'OWNER' | 'ADMIN' | 'MEMBER';
+    role: OrganizationRole;
+    /** The tier the name maps to. Gate your own features on this. */
+    baseRole: OrganizationBaseRole;
   }> {
     return this.client.send(
       'PATCH',

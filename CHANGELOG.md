@@ -4,6 +4,233 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.1.0
+
+A minor release. Additive: nothing that worked in 2.0.0 stops working. Four
+things to know before you take it:
+
+- **TypeScript.** `OrganizationRole` widens from a three-value union to
+  `string`, so an exhaustive `switch` over it now needs a default case. The
+  three-value type is still exported, as `OrganizationBaseRole`.
+- **Billing credential edits.** `PUT /billing-credentials/:provider` now
+  distinguishes an ABSENT field from a field sent as an empty string. Absent
+  keeps the stored value; empty still clears it. If you were relying on a
+  partial body to blank the fields it omitted, it no longer does that.
+- **Free trials are held.** A plan cannot carry `trialDays` in this release: a
+  non-zero value is refused with `PLAN_TRIAL_UNAVAILABLE`, on the REST routes and
+  through MCP alike. The field became writable during this cycle and two release
+  reviews then found two ways it loses money, so it is held rather than shipped:
+  a trial can currently be taken repeatedly by the same buyer, and a plan
+  carrying both a trial and a CREDIT or LICENSE entitlement hands those over
+  before the first payment. Setting it to `0`, and creating plans without it,
+  are unaffected. `docs/specs/trial-eligibility.md` tracks what has to exist
+  first.
+
+- **Webhook event names.** `subscription.entitlements_updated` joins the
+  catalog. `WebhookEventType` is an open string union so it keeps compiling, but
+  an exhaustive `switch` over `z.infer<typeof WebhookEventTypeSchema>` gains a
+  case. Nothing is delivered to an endpoint that has not subscribed to it.
+
+### Added
+
+- **An application can be promoted to production, and frozen when you would
+  rather delete it.** `environment` stops being write-once: `POST
+  /tenant/applications/:id/promote` moves DEVELOPMENT or STAGING to PRODUCTION,
+  one way and once. Keys minted beforehand keep their `rp_test_` prefix and keep
+  working, because the prefix is a label rather than a gate; revoking them would
+  break an integration at the moment it went live.
+
+  `POST /tenant/applications/:id/disable` is the reversible freeze standing in
+  for the delete Rekey does not have. A disabled application refuses all
+  end-user traffic at both API-key middlewares, serves no hosted portal, and
+  dispatches no webhook, transactional email or dunning escalation, while every
+  operator surface stays readable, because a freeze you cannot see into is a
+  freeze you cannot undo. Nothing is deleted and `tokenGeneration` is untouched,
+  so a token issued before the freeze still works after it.
+
+  The two share one invariant: PRODUCTION-and-not-disabled applications must
+  never exceed `maxProductionApps`. A disabled production application stops
+  counting, which is what makes disable a usable substitute for delete, and
+  re-enabling one consumes a slot and can be refused. All three doors into that
+  count take a per-workspace advisory lock, because check-then-act let
+  concurrent creates walk past the limit.
+
+- **Per-subscription entitlement overrides.** `PATCH
+  /tenant/applications/:id/subscriptions/:subId/entitlement-overrides`
+  (billing-write) writes `Subscription.entitlementOverrides` as a sparse merge,
+  with `null` removing an override. This is how you sell one customer a bespoke
+  deal without minting a plan for one buyer.
+
+  `entitlementOverrides` decided what a subscription granted and was read in
+  five places and written in none, so the documented remedy for a negotiated
+  allowance required SQL against production.
+
+  Overrides merge over the plan's rows on every resolve, so FEATURE flags and
+  USAGE allowances change at once. **Already-materialised grants do not
+  backdate**: CREDIT is granted once per period against an idempotency anchor,
+  so raising an allowance mid-period applies at the next renewal, and a licence
+  already issued keeps the `seatsAllowed` it was issued with.
+
+  New webhook event `subscription.entitlements_updated`, emitted only when the
+  resolved entitlements actually change.
+
+- **The applications list says which applications are not serving anyone.**
+  Every row rendered identically apart from its environment, so "which of these
+  is actually live?" meant opening each one. Rows now carry a badge when an
+  application is disabled, when nobody can sign in (no auth method and no OAuth
+  provider), or when a hosted portal is pinned to a DNS-unverified custom
+  domain. Configuration is deliberately not badged: `invite_only` and
+  `secret_only` are postures a whole workspace adopts, and badging them would
+  chip every row while distinguishing none.
+
+- **Organization roles are now a per-Application catalog, not a fixed enum.**
+  `OWNER` / `ADMIN` / `MEMBER` are still there, seeded on every Application and
+  undeletable, but an operator can now define their own names against a base tier:
+
+  ```json
+  { "name": "content-manager", "baseRole": "MEMBER", "description": "Drafts and edits content" }
+  ```
+
+  Rekey enforces the **tier**, never the name. A `content-manager` on tier
+  MEMBER can do exactly what MEMBER can; the `canManage` ladder, the last-OWNER
+  guard and the org-scoped billing writes all read `baseRole`. What the name
+  means beyond that is your application's business.
+
+  Authoring the catalog is operator-only (panel → Application → Organizations,
+  `POST /tenant/applications/:id/organization-roles`, or the new
+  `create_organization_role` / `update_organization_role` /
+  `delete_organization_role` MCP tools; requires
+  `authConfig.organizationsEnabled`). **Assigning** a role is unchanged and
+  still belongs to the organization: an OWNER/ADMIN does it with their own
+  end-user token via `PATCH /users/me/organizations/:id/members/:euid`.
+
+- `GET /api/v1/users/me/organizations/roles` returns the assignable role names on
+  the end-user credential, so an org-admin UI can populate a role picker.
+  `rekey.organizations.listRoles()` in the Node SDK.
+
+- `GET /api/v1/users/me/` and `GET /api/v1/auth/me` now also return
+  `activeOrganizationRole` and `activeOrganizationBaseRole`. Both are null with
+  no active organization, or when membership lapsed since the token was minted.
+
+- An invitation may now **omit** `role`, in which case it lands on the
+  Application's default organization role.
+
+- Organization-role changes are audited: `app.organization_role_created`,
+  `app.organization_role_updated`, `app.organization_role_deleted`.
+
+- `ORGANIZATION_ROLE_RETIER_ORPHANS_OWNERS` (409) refuses moving a custom role
+  off the OWNER tier while some organization's only owner holds it. A re-tier
+  changes no membership row, so the per-member last-owner guard never runs;
+  without this an operator could leave organizations with nobody able to manage
+  members or authorize a charge.
+
+### Fixed
+
+- **An entitlement override could not un-cap a metered plan.** Quantity was
+  validated with `Number.isFinite` and nothing else, so four values stored
+  happily and then did the wrong thing at resolve time.
+
+  The worst was a USAGE quota of `0`. Included quota only counts as a cap when
+  the quantity is above zero **or** the row carries a `creditsPerUnit`; an
+  unpriced hard cap overridden to `0`, which reads as "no free units", has
+  neither, so the resolver reported the meter as unmetered. Tightening a plan
+  removed its limit.
+
+  Also refused now: a negative quantity, which did the same; a fraction or a
+  value past 2147483647, which stored here and then threw against the 32-bit
+  column inside provisioning at the *next* renewal, surfacing weeks later as a
+  retrying 500 on the renewal webhook; and a CREDIT quantity of `0`, which did
+  not mean "no credits this period" but "the grant never runs".
+
+  Every one of these was already refused for a *plan*. The override path now
+  delegates to the same per-kind validator rather than restating its rules, so
+  the two cannot drift again.
+
+- **Four error strings sent operators into a refusal.** A registered plan's
+  price is immutable, so changing it means archiving the plan and creating a
+  replacement. `PLAN_PRICE_IMMUTABLE`'s fix, the MCP `set_plan_active` and
+  `update_plan` tool descriptions all said exactly that and none of them
+  mentioned that the replacement needs a **different slug**, because archiving
+  deliberately does not release the old one. Following any of them literally
+  ended in `PLAN_SLUG_TAKEN`. An MCP agent following the tool text hit it every
+  time.
+
+  All four now name the slug requirement. `PLAN_SLUG_TAKEN`'s own archived-case
+  fix was half wrong in the other direction: it offered "reactivate and edit it
+  in place", which cannot change a price on a registered plan, which is the
+  usual reason for wanting a replacement. It now says so.
+
+- **A modal no longer discards what you typed when you click outside it.**
+  Every panel dialog closed on any backdrop click, so a stray click next to the
+  card threw away a half-filled form with no warning and no undo. A dialog you
+  have started filling in now ignores the backdrop, and Esc asks before
+  discarding. An untouched dialog still closes on both, and the close button
+  always closes.
+
+- **Editing a billing provider no longer forces you to retype its secret.**
+  Stored credentials are encrypted and never sent to the panel, so every input
+  in the edit dialog renders empty; submitting it overwrote each stored value
+  with an empty string and was rejected, which meant changing a webhook URL
+  required fetching the API key from the provider dashboard again. The dialog
+  said "leaving a secret blank keeps the existing value" and could not do it.
+
+  Now it can. A field omitted from the request keeps its stored value; a field
+  sent as an explicit empty string is still cleared. First-time configuration
+  still requires every field, a supplied key still rotates, and a
+  carried-forward value still faces the provider's pattern check.
+
+  Two consequences worth naming, both of which the first attempt at this got
+  wrong. A partial edit no longer relabels the account's mode: for a provider
+  whose keys do not state their environment (PayPal), an edit that omitted
+  `mode` would have marked a live account as sandbox and pointed every call at
+  the sandbox host. And non-secret fields are carried forward too, so a partial
+  edit no longer drops PayPal's `webhookId` and 503s every inbound webhook.
+
+- Two concurrent member changes can no longer both pass the last-owner guard.
+  The guard counted owners and then wrote, so two demotions racing on an
+  organization with exactly two owners both saw two, both passed, and both
+  committed, leaving zero. Guard and write now run in one transaction behind a
+  row lock.
+
+### Performance
+
+- The organization-role catalog is cached per Application on a short TTL, with
+  every write invalidating it after commit. It was read on nearly every
+  org-scoped request despite being operator-authored and near-immutable.
+  Membership rows are not cached, so a role change for a PERSON still takes
+  effect immediately.
+
+### Changed
+
+- **The panel, portal and admin test suites now run in CI.** All three have had
+  a vitest suite for as long as they have existed and none of them had ever run:
+  the filter listed only `packages/*` and two apps, and the job was gated on
+  areas a front-end change does not touch, so such a pull request showed
+  `Test: SKIPPED` beside a green `CI: SUCCESS`. Nineteen files were enforced by
+  whoever remembered to run them locally. Self-hosters running the workflow get
+  the same coverage.
+
+- **`OrganizationMembership.role` and `OrganizationInvitation.role` are now
+  strings**, holding a catalog name. Every previously valid value still spells
+  the same and still works, so no stored data changes. TypeScript consumers that
+  switched exhaustively over the old
+  `OrganizationRole = 'OWNER' | 'ADMIN' | 'MEMBER'` union will now see a
+  `string`: handle the default case. The old union is still exported, as
+  `OrganizationBaseRole`, and remains the right type for the tier.
+
+- The end-user role catalog is renamed **application role**. The model is
+  `ApplicationRole`, the table `application_roles`, and the operator route
+  `/tenant/applications/:id/application-roles`. The old `/end-user-roles` path
+  still works. The public `EndUser.role` field and the `END_USER_ROLE_*` error
+  codes are **unchanged**: they are wire contract.
+
+  The rename exists because there are now two role axes and the old name said
+  nothing about which one it governed. `EndUser.role` is app-wide: one value
+  per (Application, end-user), identical in every organization that user belongs
+  to, and Rekey never acts on it. `OrganizationMembership.role` is per
+  (organization, end-user), and is the one Rekey enforces. See
+  [docs/auth.md → Roles](docs/auth.md#roles-two-axes-and-which-one-you-want).
+
 ## 2.0.0
 
 The first stable release. The release-candidate series ends here; `latest` on

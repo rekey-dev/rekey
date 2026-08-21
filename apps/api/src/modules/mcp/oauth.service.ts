@@ -104,14 +104,26 @@ function jwksUri(): string {
 
 /**
  * Resolve an Application by slug, asserting the caller's surface is switched on.
- * Throws 404 when the app is missing OR the toggle is off — we don't disclose
- * which, so a disabled app is indistinguishable from a missing one.
+ * Throws 404 when the Application is missing, when the surface toggle is off,
+ * or when the Application itself is disabled — we don't disclose which, so all
+ * three are indistinguishable to an anonymous caller.
+ *
+ * ("disabled app" in the original wording of this comment meant a switched-off
+ * MCP/OIDC surface, written before `Application.disabledAt` existed. Both
+ * senses now apply and both produce the same 404.)
  */
 async function resolveApp(
   slug: string,
   wanted: 'mcp' | 'oidc' | 'either',
 ): Promise<Application> {
-  const app = await prisma.application.findUnique({ where: { slug } });
+  const found = await prisma.application.findUnique({ where: { slug } });
+  // A disabled Application is treated as a missing one on this surface, and
+  // the non-disclosure the docblock above describes does the rest: the MCP and
+  // OIDC discovery endpoints are unauthenticated and internet-facing, so
+  // "exists but switched off" and "does not exist" must look identical to an
+  // anonymous prober. Folding it in here rather than adding a branch keeps
+  // that property automatic for both surfaces and any third one added later.
+  const app = found && found.disabledAt === null ? found : null;
   const cfg = app ? AuthConfigSchema.parse(app.authConfig) : null;
   const enabled =
     cfg === null

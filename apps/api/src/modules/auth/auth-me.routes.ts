@@ -20,6 +20,8 @@ import { RekeyError } from '../../lib/error.js';
 import { verifyUserAccessTokenAnyAlg, peekTokenApplicationId } from '../../lib/jwt.js';
 import { prisma } from '../../lib/prisma.js';
 import { authService } from './auth.service.js';
+import { applicationDisabled } from '../../middleware/api-key-auth.js';
+import { organizationsService } from '../organizations/organizations.service.js';
 import { ok, errs, ref } from '../../lib/openapi.js';
 
 const TOKEN_HEADER = 'x-rekey-user-token';
@@ -69,9 +71,28 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
                         "The organization this session is acting for, from the token's `oid` " +
                         'claim. Null when the session has no active organization.',
                     },
+                    activeOrganizationRole: {
+                      type: 'string',
+                      nullable: true,
+                      description:
+                        "The caller's role NAME inside the active organization. Null when " +
+                        'there is no active organization, or when membership lapsed since ' +
+                        'the token was minted. A different axis from the sibling `role`.',
+                    },
+                    activeOrganizationBaseRole: {
+                      type: 'string',
+                      enum: ['OWNER', 'ADMIN', 'MEMBER'],
+                      nullable: true,
+                      description:
+                        'The authority tier `activeOrganizationRole` maps to. Gate ' +
+                        'organization permissions on this, never on the role name.',
+                    },
                     role: {
                       type: 'string',
-                      description: "The end-user's role within this Application.",
+                      description:
+                        "The end-user's APPLICATION-wide role: one value per (Application, " +
+                        'end-user), identical in every organization they belong to. For the ' +
+                        'organization-scoped role see `activeOrganizationRole`.',
                     },
                     updatedAt: { type: 'string', format: 'date-time' },
                     erasedAt: {
@@ -83,7 +104,13 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
                     },
                     erasedBy: { type: 'string', nullable: true },
                   },
-                  required: ['activeOrganizationId', 'role', 'updatedAt'],
+                  required: [
+                    'activeOrganizationId',
+                    'activeOrganizationRole',
+                    'activeOrganizationBaseRole',
+                    'role',
+                    'updatedAt',
+                  ],
                 },
               ],
             },
@@ -101,7 +128,7 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
           statusCode: 401,
           code: 'USER_TOKEN_MISSING',
           message: 'This endpoint requires an X-Rekey-User-Token header (the user JWT).',
-          fix: 'After sign-in, pass the returned `token` via the X-Rekey-User-Token header.',
+          fix: 'After sign-in, pass the returned `accessToken` via the X-Rekey-User-Token header.',
         });
       }
 
@@ -119,9 +146,21 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
       if (!appId) throw invalid;
       const application = await prisma.application.findUnique({
         where: { id: appId },
-        select: { id: true, tokenGeneration: true },
+        select: { id: true, tokenGeneration: true, disabledAt: true },
       });
       if (!application) throw invalid;
+      // This plugin deliberately takes no API key, so it does not inherit the
+      // freeze check both key middlewares perform. Without this line it was the
+      // one end-user route a disabled Application still answered: sign-in and
+      // refresh were refused, and a token minted before the freeze kept reading
+      // the holder's full record here until it expired.
+      //
+      // That is not merely a leak with a 15-minute window. `disable` justifies
+      // NOT bumping `tokenGeneration` on the grounds that existing tokens stop
+      // working anyway "because both API-key middlewares refuse the Application
+      // at the door" — which was false for this door, so the reasoning that
+      // makes the freeze safe depended on a check that was not here.
+      if (application.disabledAt !== null) throw applicationDisabled();
       const claims = await verifyUserAccessTokenAnyAlg(
         presented,
         application.id,
@@ -130,7 +169,20 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
       if (!claims) throw invalid;
 
       const endUser = await authService.getById(claims.applicationId, claims.sub);
-      return { success: true, data: { ...endUser, activeOrganizationId: claims.oid ?? null } };
+      const active = await organizationsService.activeRoleFor({
+        applicationId: claims.applicationId,
+        endUserId: claims.sub,
+        organizationId: claims.oid,
+      });
+      return {
+        success: true,
+        data: {
+          ...endUser,
+          activeOrganizationId: claims.oid ?? null,
+          activeOrganizationRole: active?.role ?? null,
+          activeOrganizationBaseRole: active?.baseRole ?? null,
+        },
+      };
     },
   );
 }

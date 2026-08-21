@@ -63,9 +63,10 @@ export async function portalConfigRoutes(app: FastifyInstance): Promise<void> {
           ...errs({
             400: 'VALIDATION_ERROR — the slug exceeds 120 characters.',
             404:
-              'PORTAL_NOT_FOUND — no application with that slug, or it has not opted into the ' +
-              'hosted portal (the same response either way, so a disabled portal cannot be ' +
-              'told apart from a non-existent slug).',
+              'PORTAL_NOT_FOUND — no application with that slug, the application has not ' +
+              'opted into the hosted portal, or the application itself is disabled (the same ' +
+              'response in all three cases, so none can be told apart from a non-existent ' +
+              'slug).',
             429: 'RATE_LIMITED — too many requests. Honour the Retry-After header.',
           }),
         },
@@ -74,7 +75,10 @@ export async function portalConfigRoutes(app: FastifyInstance): Promise<void> {
     async (req) => {
       const { slug } = SlugParam.parse(req.params);
       const application = await prisma.application.findUnique({ where: { slug } });
-      if (!application || !application.hostedPortalEnabled) {
+      // `disabledAt` joins the existing non-disclosure: a disabled Application
+      // serves no portal, and this endpoint is unauthenticated, so it must not
+      // become an oracle for which slugs exist and are merely switched off.
+      if (!application || !application.hostedPortalEnabled || application.disabledAt !== null) {
         throw new RekeyError({
           statusCode: 404,
           code: 'PORTAL_NOT_FOUND',

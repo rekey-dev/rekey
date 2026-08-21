@@ -43,6 +43,19 @@ export const env = createEnv({
     // explicitly. Only NODE_ENV=test skips the queue (single-process suite).
     REDIS_URL: z.string().url().default('redis://localhost:6379'),
 
+    // How long one process may reuse its snapshot of an Application's
+    // organization-role catalog (name -> tier, and whether a role is disabled).
+    //
+    // Writes invalidate immediately in the process that made them AND publish
+    // to the other processes over Redis, so the TTL is a backstop, not the
+    // normal propagation path: it only matters if Redis is unreachable at the
+    // moment of a change. 0 disables the cache entirely and reads the catalog
+    // on every request, which is what to set if you would rather not think
+    // about it at all.
+    //
+    // See docs/organization-roles.md for when to lower it.
+    ORG_ROLE_CACHE_TTL_MS: z.coerce.number().int().min(0).max(300_000).default(5_000),
+
     JWT_SECRET: z.string().min(32),
 
     // Optional RS256 private key (PKCS#8 or PKCS#1 PEM) for end-user access

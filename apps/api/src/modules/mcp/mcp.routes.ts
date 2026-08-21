@@ -297,6 +297,32 @@ const SCOPE_DESCRIPTIONS: Record<string, string> = {
  * so widening `form-action` to it grants nothing the flow did not already
  * permit. The nonce is per-response.
  */
+/**
+ * Where an Application wants the sign-in half of its own OIDC authorize flow to
+ * happen, if it has said.
+ *
+ * Returns null when unset, when the value does not parse, or when it points
+ * back at this API's own authorize path. That last case is the one worth
+ * naming: an operator who pastes the API's authorize URL in here would
+ * otherwise create a redirect loop that looks like the browser hanging, and the
+ * failure would arrive during a customer's sign-in rather than when the setting
+ * was saved.
+ */
+function hostedAuthorizeTarget(application: { authConfig: unknown }, slug: string): URL | null {
+  const raw = (application.authConfig as { hostedAuthorizeUrl?: unknown } | null)
+    ?.hostedAuthorizeUrl;
+  if (typeof raw !== 'string' || raw === '') return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  if (url.pathname.startsWith(`/api/v1/mcp/${slug}/oauth/authorize`)) return null;
+  return url;
+}
+
 function authorizePageCsp(redirectUri: string, nonce: string): string {
   let formAction = "'self'";
   try {
@@ -736,6 +762,23 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       // login form that hands back a token covering something else.
       const granted = grantScopes(application, q.data.scope);
       if (granted === '') return redirectError('invalid_scope');
+
+      // Hand the sign-in half to the Application's own page when it has one.
+      // Deliberately AFTER the client, redirect_uri and scope checks above: a
+      // malformed authorization request must fail here as a protocol error,
+      // not become someone else's login screen rendering a confusing state.
+      //
+      // The whole query string is forwarded verbatim, so the page receives the
+      // request exactly as the client sent it and can hand it straight back to
+      // `/oauth/authorize/grant`.
+      const hosted = hostedAuthorizeTarget(application, slug);
+      if (hosted) {
+        for (const [k, v] of Object.entries(q.data)) {
+          if (typeof v === 'string' && v !== '') hosted.searchParams.set(k, v);
+        }
+        return reply.redirect(hosted.toString());
+      }
+
       return reply
         .header('content-security-policy', authorizePageCsp(q.data.redirect_uri, pageNonce))
         .type('text/html')

@@ -222,7 +222,7 @@ export function PlanCreateForm({
             required
             placeholder="pro_monthly"
             autoFocus
-            pattern="^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$"
+            pattern="^[a-z0-9](?:[a-z0-9_\-]{0,38}[a-z0-9])?$"
             className={`${inputCls} font-mono`}
           />
         </Field>

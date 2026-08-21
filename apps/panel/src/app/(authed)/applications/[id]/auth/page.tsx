@@ -53,6 +53,7 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
   // unchanged is what lets an operator remove a stale value; the API treats
   // '' and null identically.
   const appUrl = String(formData.get('appUrl') ?? '').trim();
+  const hostedAuthorizeUrl = String(formData.get('hostedAuthorizeUrl') ?? '').trim();
 
   try {
     await api({
@@ -71,6 +72,7 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
         tokenAlg,
         redirectUrls,
         appUrl,
+        hostedAuthorizeUrl,
       },
     });
   } catch (err) {
@@ -137,6 +139,8 @@ export default async function AuthMethodsPage({
     (app.authConfig as { tokenAlg?: string }).tokenAlg === 'RS256' ? 'RS256' : 'HS256';
   const redirectUrls = app.authConfig.redirectUrls ?? [];
   const appUrl = (app.authConfig as { appUrl?: string }).appUrl ?? '';
+  const hostedAuthorizeUrl =
+    (app.authConfig as { hostedAuthorizeUrl?: string }).hostedAuthorizeUrl ?? '';
   // What emails would actually link to today if the operator saves nothing:
   // the origin of the first redirect URL. Shown as the placeholder so the
   // inferred fallback is visible rather than a surprise.
@@ -312,6 +316,41 @@ export default async function AuthMethodsPage({
                 name="appUrl"
                 defaultValue={appUrl}
                 placeholder={inferredAppUrl ?? 'https://app.yourcompany.com'}
+                className={`${inputCls} w-full font-mono`}
+              />
+            </Field>
+
+            <Field
+              label="Your own sign-in page for OpenID Connect"
+              hint={
+                <>
+                  Only relevant when this application acts as an{' '}
+                  <strong>OpenID Connect provider</strong> for another app. Blank, Rekey renders
+                  its own sign-in page, which accepts an <strong>email and password</strong>.
+                  {' '}
+                  <strong>
+                    If your users sign in with Google or GitHub, that page is a dead end for them
+                  </strong>
+                  : they have no password, so the only way through is a reset on an account that
+                  has none.
+                  {' '}
+                  Point this at your own login page and Rekey forwards the request there instead,
+                  with the parameters untouched. Your page signs the user in however it likes, and
+                  a user who is <em>already signed in</em> is not asked again. It finishes by
+                  calling{' '}
+                  <code className="font-mono text-xs">
+                    POST /api/v1/mcp/{app.slug}/oauth/authorize/grant
+                  </code>{' '}
+                  with your secret key and the user&apos;s access token, then redirects to the
+                  returned code.
+                </>
+              }
+            >
+              <input
+                type="url"
+                name="hostedAuthorizeUrl"
+                defaultValue={hostedAuthorizeUrl}
+                placeholder="https://app.yourcompany.com/oauth/authorize"
                 className={`${inputCls} w-full font-mono`}
               />
             </Field>

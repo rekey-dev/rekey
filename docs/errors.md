@@ -74,7 +74,7 @@ The complete list of codes the API emits today, grouped by domain. This list is 
 | `ROUTE_NOT_FOUND` | 404 | No route matches the method + path. | Check the path against `/docs` (OpenAPI). Usually a typo or a missing trailing segment. |
 | `METHOD_NOT_ALLOWED` | 405 | The path exists but not for this verb (e.g. `GET` on an MCP JSON-RPC endpoint). | Read the `Allow` header. |
 | `BAD_REQUEST` | 400 | The route's JSON-schema validation failed (the `message` names the field and the constraint, e.g. `body/amount must be <= 100000000000`), or the JSON body didn't parse. Also the catch-all for any Fastify-native 4xx without a code of its own. | Compare the request body/query against the route schema in `/docs`. Money fields cap at 10^11 minor units and counts at the `int4` range — a value past those is refused here rather than 500-ing at the database. |
-| `VALIDATION_ERROR` | 400 | A handler's own schema parse failed — as opposed to the route-level one that raises `BAD_REQUEST`. Carries an **`issues`** array of `{ path, message }` (max 10). This is what the config `PATCH` endpoints answer for an **unrecognised key**: `auth-config`, `billing-config`, `portal`, `access`, `end-user-roles` and `usage-meters` all reject keys they don't know rather than accepting the request and ignoring them, so a typo like `mfaa` for `mfa` can no longer report success while changing nothing. | Read `issues` — it names the offending keys verbatim (`Unrecognized key(s) in object: 'mfaa'`). |
+| `VALIDATION_ERROR` | 400 | A handler's own schema parse failed — as opposed to the route-level one that raises `BAD_REQUEST`. Carries an **`issues`** array of `{ path, message }` (max 10). This is what the config `PATCH` endpoints answer for an **unrecognised key**: `auth-config`, `billing-config`, `portal`, `access`, `application-roles` and `usage-meters` all reject keys they don't know rather than accepting the request and ignoring them, so a typo like `mfaa` for `mfa` can no longer report success while changing nothing. | Read `issues` — it names the offending keys verbatim (`Unrecognized key(s) in object: 'mfaa'`). |
 | `INVALID_BODY` | 400 | The JSON body contains a **NUL byte** (`\u0000`), anywhere — nested objects, array entries, or object *keys*. Postgres cannot store it, so it is refused at the edge instead of surfacing as a 500. The guard runs ahead of routing, so a NUL body on a path that doesn't exist answers 400 rather than 404; a clean body on an unknown path still 404s. | Strip `\u0000` from the value before sending. It is almost always a truncation bug or a probe, not data you meant to store. |
 | `INVALID_QUERY` | 400 | Same, for a `%00` sequence in the URL's query string. | Remove the `%00` from the request URL. |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | The request body's `Content-Type` isn't JSON on an endpoint that only takes JSON. Form-encoded bodies are accepted **only** on the MCP OAuth endpoints, where RFC 6749/7662 require them. | Send `Content-Type: application/json`. A form-encoded body used to parse and then fail validation as a missing field — this is that mistake, reported honestly. |
@@ -104,13 +104,18 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `PANEL_URL_NOT_CONFIGURED` | 503 | Operator MCP consent needs `PANEL_URL`, which has no default — a default would send your operators to Rekey's panel. | Set `PANEL_URL` to your panel origin on the API and restart. |
 | `ADMIN_IP_NOT_ALLOWED` | 403 | This deployment sets `ADMIN_IP_ALLOWLIST` and the request came from an address outside it. Raised *before* the key is examined, so it says nothing about whether the key was valid. | Call from an allowed address, or add yours to `ADMIN_IP_ALLOWLIST` and restart the API. Behind a proxy, check `TRUSTED_PROXIES` — otherwise every request appears to come from the proxy. |
 | `TENANT_NOT_FOUND` | 404 | Tenant id doesn't exist (admin routes, workspace lookups). | List tenants with `GET /api/v1/admin/tenants`. |
-| `TENANT_QUOTA_EXCEEDED` | 403 | Creating a **new** end-user would put the workspace over a limit set in `Tenant.limits` (see [concepts.md → Workspace limits](concepts.md#workspace-limits)). Existing end-users are unaffected — sign-in never returns this. | Raise the ceiling via `PUT /api/v1/admin/tenants/:id/limits` (super-admin only), or free capacity by deleting/erasing end-users. |
+| `TENANT_QUOTA_EXCEEDED` | 403 | An action would put the workspace over a limit set in `Tenant.limits` (see [concepts.md → Workspace limits](concepts.md#workspace-limits)). Three actions raise it: creating a **new** end-user (`maxActiveEndUsers`), and creating, promoting or re-enabling a **production application** (`maxProductionApps`). Existing end-users are unaffected — sign-in never returns this — and production applications already running are never taken offline by it. | Read the `fix` on the response: it differs per action and names the applications currently holding the production slots. Free capacity (erase end-users; disable a production application), or ask a super-admin to raise the ceiling via `PUT /api/v1/admin/tenants/:id/limits`. |
 | `INVALID_TENANT_LIMITS` | 400 | The `PUT /api/v1/admin/tenants/:id/limits` body has an unknown key or an out-of-range value. Unknown keys are rejected rather than ignored, so a typo can't silently leave a workspace uncapped. | Send only documented limit keys; `{}` clears every limit. |
 
 ### API keys & request auth
 
 | Code | HTTP | When | How to handle |
 |---|---|---|---|
+| `APPLICATION_DISABLED` | 403 | The application is disabled. Every end-user-facing request is refused on both the secret-key and publishable-key surfaces; the hosted portal answers as though the slug does not exist. Also returned (409) when promoting a disabled application. Nothing has been deleted and no session was revoked. | A workspace operator re-enables it in Panel → Application → Lifecycle, or `DELETE /api/v1/tenant/applications/:id/disable`. Re-enabling a *production* application needs a free production slot. |
+| `ALREADY_PROMOTED` | 409 | `POST /api/v1/tenant/applications/:id/promote` on an application already in the production environment. Promotion is one-way and happens once. | Nothing to do. There is no way to move an application back out of production. |
+| `ENTITLEMENT_OVERRIDE_INVALID` | 400 | A per-subscription entitlement override would have been stored and then silently ignored, or worse, at resolve time: a malformed `KIND:key`; a CREDIT/LICENSE/USAGE key the plan does not carry (only FEATURE overrides may introduce a new entitlement); a value of the wrong shape for its kind; a quantity that is not a whole number in `0…2147483647` (the columns are 32-bit, and a fraction or a larger number is refused by the database at the next renewal rather than here); or a quantity its kind cannot carry — CREDIT must be positive, a SEATS licence needs at least one seat, and a USAGE row with no included units must carry a `creditsPerUnit`, since a quota of zero with no price reads as *uncapped* rather than as zero. | Read the `fix`, which names which it was. For a key the plan lacks, add the entitlement first via `PUT /api/v1/tenant/applications/:id/plans/:slug/entitlements`, then override its quantity. |
+| `PLAN_TRIAL_UNAVAILABLE` | 400 | A plan create or update asked for a non-zero `trialDays`. Free trials are held in this release: the write path works, but a buyer can take the same trial repeatedly and a plan carrying both a trial and a CREDIT or LICENSE entitlement materialises those before the first payment. | Create the plan without `trialDays`, or set it to `0` to clear an existing one. See `docs/specs/trial-eligibility.md` for what has to exist before the hold lifts. |
+| `TENANT_ROLE_INSUFFICIENT` on `/promote` or `/disable` | 403 | The three application-lifecycle routes require the **workspace OWNER**. An ADMIN role and an `APP_ADMIN` grant are both insufficient — unlike every other application mutation, which the ordinary write grant covers. | Ask the workspace owner to promote, disable or re-enable the application. |
 | `API_KEY_MISSING` | 401 | Public-API call had no `Authorization: Bearer <secretKey>` header. | Send the Application secret key (`rp_live_…` / `rp_test_…`). |
 | `API_KEY_INVALID` | 401 | Bearer credential is unknown / revoked / expired / wrong type (e.g. a public key or admin key sent to the public API). Single code on purpose — refusing to identify the kind of mistake stops credential-probing. | Mint a fresh secret key and check you're using the right credential type (see [api-keys.md](api-keys.md)). |
 | `API_KEY_SCOPE_INSUFFICIENT` | 403 | The key's `scopes` don't cover this endpoint. | Mint a key with the needed scope (or `*`). |
@@ -130,7 +135,7 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `APPLICATION_NOT_FOUND` | 404 | Application id or slug doesn't exist (or isn't in your workspace). | Verify the id/slug; list applications for your tenant. |
 | `APPLICATION_SLUG_INVALID` | 400 | Slug fails the URL-safe regex. | Lowercase alphanumerics and hyphens. |
 | `APPLICATION_SLUG_TAKEN` | 409 | Slug already exists. | Pick another slug. |
-| `PORTAL_NOT_FOUND` | 404 | Hosted-portal config lookup for a slug/domain with no portal enabled. | Enable the portal in Panel → Application → Portal, or check the URL. |
+| `PORTAL_NOT_FOUND` | 404 | Hosted-portal config lookup for a slug/domain with no portal enabled. | Enable billing on the Application first (the Portal tab is hidden until you do), then turn it on in Panel → Application → Billing → Portal, or check the URL. |
 | `PORTAL_DOMAIN_TAKEN` | 409 | The custom portal hostname is already claimed by another Application. | Pick a different hostname. |
 
 ### Auth — end-user sessions & passwords
@@ -176,6 +181,8 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `MAGIC_LINK_INVALID` / `MAGIC_LINK_USED` / `MAGIC_LINK_EXPIRED` / `MAGIC_LINK_WRONG_APPLICATION` | 401 | End-user magic-link token unknown / consumed / expired / cross-Application. | Request a new magic link. |
 | `MAGIC_LINK_STALE` | 401 | Magic-link token issued for a different email than is currently on the account. | Request a new magic link. |
 | `EMAIL_EVENT_UNKNOWN` | 404 | Tenant email-template route given an unknown event key. | Use one of the documented email event keys. |
+| `AUTH_URL_INVALID` | 400 | A `resetUrl` / `verifyUrl` / `signInUrl` you passed isn't a parseable absolute URL. (`signInUrl` is the magic-link destination; not to be confused with the React `<SignIn>` `magicLinkUrl` prop, which is a form action.) | Pass an absolute URL on an origin this Application has registered. |
+| `AUTH_URL_NOT_ALLOWED` | 400 | The URL parsed but is either not `http(s)`, or its origin is not one this Application declared. The allowed set is `authConfig.appUrl` plus `authConfig.redirectUrls` — and a freshly created Application has **neither**, so the first `requestPasswordReset({ resetUrl })` of a new integration lands here. | Add the origin to the Application's redirect URLs (Panel → Application → Authentication → Methods) or set its App URL. The link is emailed carrying a live login token, so an unrecognised destination is refused rather than sent. |
 
 ### MFA (end-user and operator)
 
@@ -227,6 +234,12 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `MCP_GRANT_INVALID_CLIENT` | 400 | Consent named an unknown `client_id`, or a `redirect_uri` that client never registered. Deliberately not a redirect — we don't bounce to an unvalidated URI. | The client must complete RFC 7591 registration first. |
 | `MCP_GRANT_PKCE_REQUIRED` | 400 | `code_challenge_method` wasn't `S256`. | Use PKCE with S256; `plain` is not accepted. |
 | `TENANT_MEMBERSHIP_REQUIRED` | 403 | Operator-MCP consent chose a workspace the signed-in operator doesn't belong to. | Pick a workspace from your memberships. |
+| `OAUTH_CLIENT_NOT_FOUND` | 404 | Operator-facing OAuth-client management named a client id this Application doesn't have. | List the registered clients to get a current id. |
+| `OAUTH_TOKEN_EXCHANGE_FAILED` | 502 | The upstream identity provider refused the authorization-code exchange. The provider's own `error` code is forwarded in the message; its free-text `error_description` deliberately is not. | `invalid_grant` means the code was already used, expired, or was issued for a different client or redirect URI — start the sign-in again. Otherwise check client id, redirect URI and issuer against what the provider expects. |
+| `INVALID_GRANT_REQUEST` | 400 | Operator-MCP OAuth: unknown `client_id`, or a `redirect_uri` not registered for it. | Register the client and its exact redirect URI at `POST /oauth/register`. |
+| `SESSION_HANDOFF_FORBIDDEN` | 403 | A publishable key tried to hand off a session. Publishable keys ship in browsers, so this is refused by key kind, not by scope. | Call it from your server with the Application secret key. |
+| `OIDC_ASSERTION_INVALID` | 401 | An operator ID-Token assertion (one-click handoff) failed validation, or was replayed. These are single-use and short-lived. | Start the sign-in again from the site that sent the operator here. |
+| `OIDC_ASSERTION_NOT_CONFIGURED` | 404 | This deployment doesn't accept ID-Token assertions. | Set `OPERATOR_OIDC_ISSUER` and `OPERATOR_OIDC_CLIENT_ID` to opt in. |
 
 ### Billing — checkout, providers, credentials
 
@@ -251,6 +264,31 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `BILLING_PROVIDER_UNKNOWN` | 400 | A provider name that isn't in the module registry at all (distinct from `BILLING_PROVIDER_NOT_AVAILABLE`, which is a real provider this Application hasn't enabled). | Use a registered provider name. |
 | `BILLING_DISCOUNT_UNSUPPORTED` | 400 | Checkout carried a `couponCode`, but the provider it routed to cannot apply a discount on that flow (PayPal and Razorpay: recurring subscriptions). Nothing is charged and nothing is redeemed. | Retry without the coupon, or pass an explicit `provider` that supports it — see `capabilities.discounts` in `GET /billing/providers`. |
 | `SUBSCRIPTION_NOT_FOUND` | 404 | Subscription id unknown in this Application/workspace. | List subscriptions to get a valid id. |
+| `BILLING_CHECKOUT_RACE` | 409 | Two checkouts for the same account raced and another one bound the subscription to a provider first. Serialised deliberately so concurrent checkouts cannot reach two processors. | Retry. The retry is sent to the same provider as the checkout that won. |
+| `BILLING_ORGANIZATION_NOT_ACCEPTED` | 400 | Checkout named an organization, but this Application bills individual users (`billingSubject: user`). | Drop the organization from the call, or switch the Application to organization billing. |
+| `BILLING_PROVIDER_REFUSED` | 502 | The provider rejected the operation. The provider's own error name is forwarded when it sends one. | `INSTRUMENT_DECLINED` means the customer's payment method was declined and they should use another. Otherwise check the Application's billing credentials and retry; the full provider response is in the server log. |
+| `BILLING_TRIAL_NOT_APPLICABLE` | 400 | The plan carries a trial but the purchase is one-off, so there is no subscription for the trial to convert into. | Remove the trial from the plan, or make it a subscription plan. |
+| `BILLING_TRIAL_UNSUPPORTED` | 400 | The plan offers a free trial and the routed provider cannot start a subscription in one. | Route the plan to a provider that supports trials, or remove the trial. |
+| `BILLING_SUBJECT_CHANGE_BLOCKED` | 409 | Switching an Application between user-billing and organization-billing while live subscriptions exist on the current subject. Blocked because the change would strand them. | Cancel or migrate the named subscriptions first, then change the subject. |
+| `SUBSCRIPTION_PERIOD_END_IN_PAST` | 400 | An operator-granted subscription was given a period end earlier than now. | Pass a future end date, or omit it for an open-ended grant. |
+
+### Billing — refunds & unapplied payments
+
+An **unapplied payment** is money that arrived without Rekey being able to attribute it to a subscription. Each one is a case an operator resolves: refund it, or extend the payer's subscription.
+
+| Code | HTTP | When | How to handle |
+|---|---|---|---|
+| `UNAPPLIED_PAYMENT_NOT_FOUND` | 404 | No unapplied payment with that id in this Application. | Reload the list. The id may belong to another Application, or the case may have been removed with its payment. |
+| `UNAPPLIED_PAYMENT_ALREADY_RESOLVED` | 409 | The case was already resolved. Refused rather than repeated, because resolving twice would refund or grant twice. | Reload the list to see the current state. |
+| `UNAPPLIED_PAYMENT_UNATTRIBUTED` | 409 | Rekey could not work out which customer the payment came from, so it cannot extend anyone. | Find the payer in the provider dashboard using the charge id, then either refund them there and dismiss the case, or extend their subscription from their end-user page. |
+| `UNAPPLIED_PAYMENT_NO_SUBSCRIPTION` | 409 | The payer has no subscription to extend. | Refund the payment instead, or create a subscription for them first and then extend it. |
+| `BILLING_PAYMENT_NOT_REFUNDABLE` | 409 | The payment has no provider charge id, so Rekey has nothing to ask the provider to refund. | Refund it in the provider dashboard directly, then dismiss the case with a note saying so. |
+| `BILLING_REFUND_UNSUPPORTED` | 409 | Rekey cannot issue refunds through this provider. | Refund it in the provider dashboard directly, then dismiss the case with a note saying so. |
+| `BILLING_REFUND_AMOUNT_EXCEEDED` | 400 | The requested amount is more than the un-refunded remainder of the payment. | Lower the amount, or leave it blank to refund everything that remains. |
+| `BILLING_PAYMENT_ALREADY_REFUNDED` | 409 | The provider has already refunded this charge in full. | Nothing to do: the buyer has their money. Resolve the case as refunded. |
+| `BILLING_REFUND_ALREADY_REQUESTED` | 409 | This exact refund was already sent to the provider. Refused because a second one would pay the buyer twice. | Check the payment in the provider dashboard for the outcome. |
+| `BILLING_REFUND_WINDOW_CLOSED` | 409 | The provider will not refund a payment this old (Razorpay caps at 6 months). | The provider cannot move this money back. Settle with the buyer another way, or extend their entitlements instead and resolve the case that way. |
+| `BILLING_REFUND_REJECTED` | 502 | The provider refused the refund. A charge outside its window, or one whose funding source is gone, lands here. | Check the charge in the provider dashboard; it has to be settled with the buyer another way. |
 
 ### Billing — plans & entitlements
 
@@ -269,6 +307,9 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `PLAN_ENTITLEMENT_INVALID` | 400 | Entitlement row fails validation for its kind. | Match the entitlement schema for the kind. |
 | `PLAN_ENTITLEMENT_NOT_FOUND` | 404 | Entitlement id not on this plan. | List the plan's entitlements. |
 | `DEFAULT_PLAN_NOT_FOUND` | 400 | Setting an Application's free-tier `defaultPlanSlug` to a plan that doesn't exist or isn't active. | Pass an existing active plan slug, or `null` to clear it. |
+| `NO_BILLING_PROVIDER` | — | **Checkout blocker**, not an HTTP error: appears in a plan's `checkout.blockers[]` when the Application has no provider configured, so nothing can be bought. | Connect Stripe, PayPal or Razorpay on the Billing tab. Plans created before that need registering afterwards. |
+| `PLAN_NOT_REGISTERED` | — | **Checkout blocker**: the plan has no provider price behind it, so a buyer sent to checkout is refused. Plans register when they are created, so this is a plan that existed before the credentials did. | Repair it in place with `POST /api/v1/tenant/applications/:id/plans/:slug/register`. |
+| `PLAN_REGISTRATION_FAILED` | — | **Checkout blocker**: the provider refused to register the plan, so it has no price. The provider's objection is carried in the message. | Fix what the provider objected to, then retry with `POST /api/v1/tenant/applications/:id/plans/:slug/register`. |
 
 ### Coupons
 
@@ -299,6 +340,12 @@ Selected mutating routes accept an `Idempotency-Key` header for safe blind retri
 | `USAGE_METER_SLUG_TAKEN` | 409 | Meter slug already exists. | Pick another slug. |
 | `USAGE_QUOTA_EXCEEDED` | 402 | Record would exceed the subject's included quota (record-time hard cap). | Upsell: prompt an upgrade or credit purchase; don't retry the same record. |
 | `USAGE_SUBJECT_AMBIGUOUS` | 400 | Both `endUserId` and `organizationId` passed. | Pass at most one. |
+| `USAGE_CHARGE_TOO_LARGE` | 400 | Quantity multiplied by the meter's `creditsPerUnit` exceeds the maximum chargeable amount. Refused at the edge rather than overflowing the ledger. | Record the usage in smaller batches, or lower the meter price. |
+| `USAGE_IDEMPOTENCY_KEY_REUSED` | 409 | The record's idempotency key was already spent against the credit ledger. Keys are namespaced per meter, so this means a direct credits call already used it. | Use a fresh idempotency key for this usage record. |
+| `USAGE_METER_PRICE_INVALID` | 400 | `creditsPerUnit` is not a non-negative whole number of credits (or `null`). | Use a whole number like `1`, or `null` to stop charging for the meter. |
+| `USAGE_NEGATIVE_ON_PRICED_METER` | 400 | A negative quantity was recorded on a **priced** meter. Corrections that move money have to be auditable, so they can't ride in as negative usage. | Refund the credits with an explicit credits adjustment, which records who did it and why. |
+| `USAGE_OCCURRED_AT_IN_FUTURE` | 400 | `occurredAt` is in the future. | Record usage as it happens, or omit `occurredAt` to use the current time. |
+| `USAGE_OCCURRED_AT_TOO_OLD` | 400 | `occurredAt` predates the current quota period, so it cannot be attributed to it. | Record usage within the calendar month it happened in. Backfilling an earlier period is an operator correction, not a record. |
 
 ### Credits (prepaid)
 
@@ -323,13 +370,13 @@ Note: the public `licenses.verify` endpoint **never throws for an invalid key** 
 
 | Code | HTTP | When | How to handle |
 |---|---|---|---|
-| `ORGANIZATIONS_NOT_ENABLED` | 400 | Org endpoints called but orgs are off for the Application. | Enable organizations in the panel. |
+| `ORGANIZATIONS_NOT_ENABLED` | 400 | Org endpoints called, or a custom organization role authored, while orgs are off for the Application. | Enable organizations in the panel (Application → Auth), `PATCH /tenant/applications/:id/auth-config` with `organizationsEnabled: true`, or the `update_auth_config` MCP tool. |
 | `ORGANIZATION_NOT_FOUND` | 404 | Org id unknown in this Application. | Check the id via `organizations.listMine`. |
 | `ORGANIZATION_NOT_MEMBER` | 403 | Caller isn't a member of the org. | Only members can read/act; invite them first. |
-| `ORGANIZATION_ROLE_INSUFFICIENT` | 403 | Caller's role can't perform this action. | Requires OWNER/ADMIN (per action). |
+| `ORGANIZATION_ROLE_INSUFFICIENT` | 403 | Caller's role **tier** can't perform this action. Compared on `baseRole`, not on the role name, so a custom role named `studio-lead` on tier MEMBER is refused exactly like MEMBER. | Requires an OWNER- or ADMIN-tier role (per action). |
 | `ORGANIZATION_ALREADY_MEMBER` | 409 | Inviting/adding someone already in the org. | Treat as success in UI. |
 | `ORGANIZATION_MEMBER_NOT_FOUND` | 404 | Target user isn't a member. | Refresh the member list. |
-| `ORGANIZATION_LAST_OWNER` | 409 | Demote/remove attempt against the only OWNER. | Promote another member to OWNER first. |
+| `ORGANIZATION_LAST_OWNER` | 409 | Demote/remove attempt against the only OWNER-**tier** member. Counted across every role whose `baseRole` is OWNER, not just the built-in `OWNER`. | Promote another member to an OWNER-tier role first. |
 | `ORGANIZATION_OWNER_CANNOT_LEAVE` | 409 | An OWNER tried to leave (payment + benefits are tied to the owner). | Transfer ownership first. |
 | `ORGANIZATION_SLUG_INVALID` / `ORGANIZATION_SLUG_TAKEN` | 400 / 409 | Slug fails the regex / collides. | Fix or change the slug. |
 | `ORGANIZATION_INVITATION_NOT_FOUND` | 404 | Invitation token/id unknown. | Re-issue the invitation. |
@@ -337,7 +384,35 @@ Note: the public `licenses.verify` endpoint **never throws for an invalid key** 
 | `ORGANIZATION_INVITATION_WRONG_APPLICATION` | 401 | Invitation belongs to a different Application. | Fix the credential mix-up. |
 | `ORGANIZATION_INVITATION_EMAIL_MISMATCH` | 403 | The signed-in user's email is not the address the invitation names. Invite links travel by email or chat and can be forwarded, so acceptance is bound to the invited address. | Sign in as the invited address, or have an OWNER / ADMIN re-invite the address in hand. |
 
-### End-user roles
+### Organization roles (the org-scoped catalog)
+
+Per (organization, end-user). See the two-axis table in
+[auth.md → Roles](auth.md#roles-two-axes-and-which-one-you-want) for why these
+are distinct from the application roles below.
+
+| Code | HTTP | When | How to handle |
+|---|---|---|---|
+| `ORGANIZATION_ROLE_UNKNOWN` | 400 | A role name was assigned that this Application's catalog doesn't define. | `GET /users/me/organizations/roles` lists the assignable names. |
+| `ORGANIZATION_ROLE_NOT_FOUND` | 404 | Editing/deleting a role name that doesn't exist. | List the catalog to confirm the name. |
+| `ORGANIZATION_ROLE_NAME_INVALID` | 400 | Name fails the regex (lowercase, 2–40 chars, alphanumeric edges). | Fix the name. |
+| `ORGANIZATION_ROLE_NAME_TAKEN` | 409 | Role name collision within the Application. | Pick another name. |
+| `ORGANIZATION_ROLE_NAME_RESERVED` | 409 | Tried to create `OWNER`, `ADMIN` or `MEMBER` (case-insensitive). | Those three are built in; pick a distinct name and set `baseRole` to the tier you wanted. |
+| `ORGANIZATION_ROLE_BUILT_IN_IMMUTABLE` | 400 | Re-tiering or deleting a built-in. | Built-ins are permanent. Create a custom role instead. |
+| `ORGANIZATION_ROLE_IS_DEFAULT` | 400 | Deleting the Application's default organization role. | Mark another role default first. |
+| `ORGANIZATION_ROLE_IN_USE` | 400 | Deleting a role that memberships or **pending invitations** still reference, with no `reassignTo`. | Pass `reassignTo`, which moves holders and drops the role in one transaction. |
+| `ORGANIZATION_ROLE_REASSIGN_SELF` / `ORGANIZATION_ROLE_REASSIGN_TARGET_UNKNOWN` | 400 | Reassign target is the role being deleted / unknown. | Pick a valid target role. |
+| `ORGANIZATION_ROLE_DISABLED` | 403 / 400 | **403** on an organization-scoped request from someone whose role has been disabled. **400** when a disabled role is assigned, or an invitation naming one is redeemed. The role stays on the membership, so re-enabling restores the holder. | Ask an operator to re-enable the role, or an OWNER to move you to another one. |
+| `ORGANIZATION_ROLE_RETIER_ORPHANS_OWNERS` | 409 | Disabling a custom role, or moving it off the OWNER tier, when some organization's only owner holds it. Neither a re-tier nor a disable changes a membership row, so the per-member last-OWNER guard never runs and this is the only thing standing between the edit and an ownerless organization. | Give those organizations another OWNER-tier member first, or create a second OWNER-tier role and move them to it. |
+| `ORGANIZATION_ROLE_REASSIGN_DEMOTES_OWNER` | 400 | Bulk-reassigning an OWNER-tier role to a lower tier, which would leave organizations with no owner. The per-member last-OWNER guard does not sit on this path. | Pick a target whose `baseRole` is also OWNER, or move those members individually first. |
+| `NO_ORGANIZATION_ROLES` | 500 | Application has no organization roles at all (invariant breach). | Contact support. The three built-ins are seeded with the Application. |
+
+### Application roles (the app-wide catalog)
+
+One value per (Application, end-user), governing `EndUser.role`. Served at
+`/tenant/applications/:id/application-roles`; the former `/end-user-roles` path
+still works. The `END_USER_ROLE_*` codes below are **unchanged**. They are wire
+contract that integrations match on, and were left alone deliberately when the
+route was renamed.
 
 | Code | HTTP | When | How to handle |
 |---|---|---|---|
@@ -388,6 +463,7 @@ Two directions — see the "Webhooks — two directions" section of [billing.md]
 | `APP_GRANT_MEMBER_ONLY` | 400 | Tried to set a per-application grant on an OWNER/ADMIN membership. | Grants only scope MEMBER roles — OWNER/ADMIN already have full access. Demote to MEMBER first if scoping is wanted. |
 | `APP_GRANT_NOT_FOUND` | 404 | Deleting a grant that doesn't exist on that membership. | List grants via GET /tenant/workspace/members/:id/grants. |
 | `MAGIC_LINK_TOKEN_INVALID` / `MAGIC_LINK_TOKEN_USED` / `MAGIC_LINK_TOKEN_EXPIRED` | 401 | Operator magic-link token failures (note: end-user codes drop the `_TOKEN`). | Request a new link. |
+| `OPERATOR_NOT_FOUND` | 404 | Granting workspace access named an email with no operator account. This route grants access to an **existing** operator; it does not create one. | Have them register first, or send a workspace invitation instead. |
 
 ### Operator personal-access-tokens (PATs)
 

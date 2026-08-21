@@ -171,7 +171,7 @@ model TenantMembership {
 }
 
 // Per-application role a workspace MEMBER can be granted (roadmap #8).
-enum ApplicationRole {
+enum ApplicationGrantRole {
   APP_ADMIN   // Full read/write on the granted Application
   APP_BILLING // Read (auth config redacted) + write on billing/plans/coupons/credits only
   APP_VIEWER  // Read-only on the granted Application
@@ -194,7 +194,7 @@ model ApplicationGrant {
   id                 String          @id @default(cuid())
   tenantMembershipId String          @map("tenant_membership_id")
   applicationId      String          @map("application_id")
-  role               ApplicationRole
+  role               ApplicationGrantRole
   createdAt          DateTime        @default(now()) @map("created_at")
 
   membership  TenantMembership @relation(fields: [tenantMembershipId], references: [id], onDelete: Cascade)
@@ -389,16 +389,40 @@ model TenantApiToken {
 // billing/credentials.service.ts for what is enforced instead: the stored
 // mode may not contradict the key material.
 //
-// **Fixed at creation. There is no code path that updates it** — it is written
-// in applicationsService.create and nowhere else. Creating a second
-// Application costs nothing and is the operation people actually want: the
-// live app and the rehearsal app are different things, not one thing in two
-// states. A mutable field would have needed one guard on promotion, another on
-// demotion, and a third wherever a future write path appeared.
+// **Write-once at creation until 2026-08-20; now narrowly mutable in ONE
+// direction.** The only permitted transition is DEVELOPMENT|STAGING ->
+// PRODUCTION, performed by `applicationsService.promote` and by nothing else.
+// PRODUCTION is terminal: there is no demote, and the service refuses every
+// other transition rather than silently ignoring it.
+//
+// The old rule was that creating a second Application costs nothing, so going
+// live meant creating a live Application rather than mutating a rehearsal one.
+// That reasoning was sound about isolation and wrong about people. An operator
+// who has spent a fortnight wiring an application up — API keys in three
+// deployments, OAuth redirect URIs registered with four providers, webhook
+// endpoints, plans, email templates, an end-user table — cannot "just create a
+// second one", and the create form's environment select commits them forever
+// on their first day, before they know which of these applications is the real
+// one. Promotion is the recovery path for a decision made too early.
+//
+// The objection the old comment raised was that a mutable field needs a guard
+// on promotion, another on demotion, and a third on every future write path.
+// Only the first of those is real here, because the other two do not exist:
+// demotion is refused and there is no other write path. What the objection got
+// right, and what remains true, is that `maxProductionApps` counts PRODUCTION
+// Applications, so a second door into PRODUCTION is a second door into the
+// quota. `promote` therefore asserts that quota exactly as `create` does. See
+// lib/tenant-limits.ts.
 //
 // STAGING and DEVELOPMENT are mechanically identical (same key prefix, no
 // other branch); they differ only so operators can name what a deployment is
-// for.
+// for. Both are equally promotable.
+//
+// Note what promotion does NOT do: it does not touch existing API keys. Keys
+// minted before the promotion keep their `rp_test_` prefix and keep working,
+// because the prefix is a label and `requireApiKey` accepts both forms
+// identically. Revoking them would break the customer's integration at the
+// exact moment they went live, which is the worst possible timing for it.
 enum AppEnvironment {
   PRODUCTION
   STAGING
@@ -461,6 +485,51 @@ model Application {
   // Application — the per-app "log everyone out now" kill-switch. Not a secret;
   // a plain monotonic counter.
   tokenGeneration Int      @default(1) @map("token_generation")
+
+  // --- Lifecycle: promotion + the disable switch. See docs/specs/app-lifecycle.md ---
+
+  // When this Application was promoted into PRODUCTION, and the TenantUser who
+  // did it. NULL means it was never promoted, which for a PRODUCTION row means
+  // it was BORN production at create time. That distinction is the whole point
+  // of the column: `environment == PRODUCTION` cannot tell the two apart, and
+  // the billing-relevant question ("when did this workspace start running a
+  // production app") only has an answer for one of them.
+  //
+  // `promotedBy` is a bare TenantUser id, not a relation: it is an audit
+  // breadcrumb, and a real FK would either block removing an operator from the
+  // workspace or null out the history when they leave. Neither is wanted.
+  promotedAt      DateTime? @map("promoted_at")
+  promotedBy      String?   @map("promoted_by")
+
+  // The reversible freeze. Rekey has no Application delete, and this is what
+  // stands in for one.
+  //
+  // A disabled Application refuses ALL end-user-facing traffic — both API-key
+  // middlewares return 403 APPLICATION_DISABLED, the hosted portal answers as
+  // though the slug does not exist, and no outbound webhook, transactional
+  // email or dunning escalation is dispatched. Every OPERATOR surface stays
+  // fully open, deliberately: a freeze you cannot see into is a freeze you
+  // cannot undo.
+  //
+  // Nothing is destroyed. In particular this does NOT bump `tokenGeneration`,
+  // so an end-user access token issued before the freeze is still valid after
+  // the thaw. Re-enabling restores the Application to exactly the state it was
+  // frozen in — that reversibility is the feature, not a detail of it.
+  //
+  // QUOTA: a disabled PRODUCTION Application does not count against
+  // `maxProductionApps`. The ceiling is on production Applications that are
+  // RUNNING, not on lifetime promotions, so disabling frees a slot and
+  // re-enabling must re-assert the quota and may be refused. The predicate
+  // lives in exactly one place, `countProductionApps` in lib/tenant-limits.ts;
+  // anything that counts production Applications for money must go through it
+  // rather than filtering on `environment` alone.
+  //
+  // `disabledReason` is the operator's own note to their future self, shown in
+  // the panel and never to an end-user. `disabledBy` is an audit breadcrumb on
+  // the same terms as `promotedBy`.
+  disabledAt      DateTime? @map("disabled_at")
+  disabledBy      String?   @map("disabled_by")
+  disabledReason  String?   @map("disabled_reason")
   // Per-Application network access controls.
   // ipAllowlist: CIDRs / bare IPs (v4+v6). When non-empty, server-side secret
   // key (rp_live_/rp_test_) requests must originate from an allowed IP — enforced
@@ -504,7 +573,8 @@ model Application {
   licenses            License[]
   usageMeters         UsageMeter[]
   billingCredentials  BillingCredentials[]
-  endUserRoles        EndUserRole[]
+  applicationRoles    ApplicationRole[]
+  organizationRoles   OrganizationRoleDef[]
   emailTemplates      EmailTemplate[]
   emailLogs           EmailLog[]
   webhookEndpoints    WebhookEndpoint[]
@@ -683,19 +753,74 @@ model EmailVerificationToken {
 // customer-side code that targets Clerk's `Organization` model lifts
 // with minimal change.
 //
-// Three roles today: OWNER (manage org + members + ownership transfer),
-// ADMIN (manage members below OWNER), MEMBER (read-only). The role-name
-// space is fixed for now — opening it to per-Application catalog
-// (mirroring `EndUserRole`) is a follow-up if customers need it.
+// Roles are a per-Application CATALOG (`OrganizationRoleDef`), not a fixed
+// enum. Each catalog row carries a free-form `name` plus a `baseRole` of
+// OWNER / ADMIN / MEMBER. Rekey enforces its own invariants (the `canManage`
+// ladder, the last-OWNER guard, org-scoped billing writes) on the BASE role
+// only; the name is the customer app's vocabulary and Rekey never interprets
+// it. So an agency CMS can ship `editor` and `reviewer` roles that both sit on
+// baseRole MEMBER, and this service still knows neither may demote an OWNER.
+//
+// Every Application is seeded with three built-in rows (`OWNER`, `ADMIN`,
+// `MEMBER`, each mapped to its own base role), so the pre-catalog wire values
+// keep working verbatim. Built-ins cannot be renamed or deleted.
+//
+// Membership/invitation `role` is therefore a String (a catalog name), not an
+// enum. Existing rows already hold `OWNER`/`ADMIN`/`MEMBER`, which are exactly
+// the seeded built-in names, so no data changes shape.
 //
 // Gated by `authConfig.organizationsEnabled`. When disabled, all org
 // routes refuse with `ORGANIZATIONS_NOT_ENABLED`.
 // ============================================================================
 
-enum OrganizationRole {
+/// The authority ladder Rekey itself enforces. Every catalog role maps onto
+/// one of these; this is NOT the role name an app sees on a membership.
+enum OrganizationBaseRole {
   OWNER
   ADMIN
   MEMBER
+}
+
+/// Per-Application catalog of organization role names. The org-scoped twin of
+/// `ApplicationRole` (which is app-wide). Uniqueness per Application stops
+/// typo'd duplicates; `baseRole` is what every Rekey-side gate reads.
+model OrganizationRoleDef {
+  id            String               @id @default(cuid())
+  applicationId String               @map("application_id")
+  name          String
+  description   String?
+  /// Authority tier. Drives canManage, the last-OWNER guard and billing gates.
+  baseRole      OrganizationBaseRole @map("base_role")
+  /// Assigned when an invitation or operator add-member omits a role.
+  /// Exactly one per Application, enforced in the service rather than the
+  /// schema: a partial unique index would block the two-step swap the panel does.
+  isDefault     Boolean              @default(false) @map("is_default")
+  /// True for the three seeded rows. Immutable name, undeletable, and the
+  /// only rows guaranteed to exist on every Application.
+  isBuiltIn     Boolean              @default(false) @map("is_built_in")
+  /// Revocation switch. A disabled role stays in the catalog and stays on the
+  /// memberships that hold it, but every organization-scoped request from a
+  /// holder is refused (403 ORGANIZATION_ROLE_DISABLED) and the role cannot be
+  /// newly assigned.
+  ///
+  /// This is the answer to "take this role's power away NOW". Re-tiering it
+  /// downward is not: that silently leaves holders with less authority and
+  /// tells nobody, and deleting it needs somewhere to move everyone first.
+  /// Disabling is reversible, is visible on the row, and refuses out loud.
+  ///
+  /// An OWNER-tier role cannot be disabled while it is some organization's
+  /// only route to an owner, for the same reason it cannot be re-tiered or
+  /// bulk-reassigned downward: the organization would have nobody able to
+  /// manage members or authorize a charge, and no way to fix it from inside.
+  disabled      Boolean              @default(false)
+  createdAt     DateTime             @default(now()) @map("created_at")
+  updatedAt     DateTime             @updatedAt @map("updated_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, name])
+  @@index([applicationId])
+  @@map("organization_roles")
 }
 
 model Organization {
@@ -729,12 +854,21 @@ model Organization {
 }
 
 model OrganizationMembership {
-  id             String           @id @default(cuid())
-  organizationId String           @map("organization_id")
-  endUserId      String           @map("end_user_id")
-  role           OrganizationRole
-  createdAt      DateTime         @default(now()) @map("created_at")
-  updatedAt      DateTime         @updatedAt @map("updated_at")
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  endUserId      String   @map("end_user_id")
+  /// An `OrganizationRoleDef.name` in this org's Application. Deliberately NOT
+  /// FK-enforced, which is a choice rather than a limitation: Postgres could
+  /// express it by denormalising `application_id` onto this table and adding a
+  /// composite FK to `organization_roles(application_id, name)`, whose unique
+  /// index already exists. We decline the extra column, and pay for it with
+  /// application-level guarding: every write path resolves the name through the
+  /// catalog, and role deletion either reassigns holders or refuses, both inside
+  /// one transaction. Revisit this if role RENAME is ever wanted, since
+  /// `ON UPDATE CASCADE` is the clean way to get it and is unavailable today.
+  role           String
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   endUser      EndUser      @relation(fields: [endUserId], references: [id], onDelete: Cascade)
@@ -745,19 +879,20 @@ model OrganizationMembership {
 }
 
 model OrganizationInvitation {
-  id             String           @id @default(cuid())
-  organizationId String           @map("organization_id")
+  id             String    @id @default(cuid())
+  organizationId String    @map("organization_id")
   /** Operator-supplied invitee email. Lowercased on storage. */
   email          String
-  role           OrganizationRole
+  /// An `OrganizationRoleDef.name`. See the note on OrganizationMembership.role.
+  role           String
   /** Hash-only storage; raw shown once. SHA-256. */
-  tokenHash      String           @unique @map("token_hash")
-  expiresAt      DateTime         @map("expires_at")
-  acceptedAt     DateTime?        @map("accepted_at")
-  acceptedById   String?          @map("accepted_by_id")
-  revokedAt      DateTime?        @map("revoked_at")
-  invitedById    String           @map("invited_by_id")
-  createdAt      DateTime         @default(now()) @map("created_at")
+  tokenHash      String    @unique @map("token_hash")
+  expiresAt      DateTime  @map("expires_at")
+  acceptedAt     DateTime? @map("accepted_at")
+  acceptedById   String?   @map("accepted_by_id")
+  revokedAt      DateTime? @map("revoked_at")
+  invitedById    String    @map("invited_by_id")
+  createdAt      DateTime  @default(now()) @map("created_at")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
@@ -857,7 +992,13 @@ model MagicLinkToken {
 // Names are free-form strings (no enum) — the SaaS pattern is "give the
 // app its own vocabulary": editor / viewer / superadmin / billing-only
 // etc. We just guarantee uniqueness within the Application.
-model EndUserRole {
+/// Per-Application, app-wide role catalog for end-users. Governs
+/// `EndUser.role`, which is one value per (Application, EndUser) and is
+/// deliberately NOT organization-scoped. The org-scoped axis is
+/// `OrganizationRoleDef` + `OrganizationMembership.role`. Named
+/// `ApplicationRole` (was `EndUserRole`) so the scope is legible at the
+/// call site and the two axes cannot be confused.
+model ApplicationRole {
   id            String   @id @default(cuid())
   applicationId String   @map("application_id")
   name          String
@@ -870,7 +1011,7 @@ model EndUserRole {
 
   @@unique([applicationId, name])
   @@index([applicationId])
-  @@map("end_user_roles")
+  @@map("application_roles")
 }
 
 // Per-Application, per-provider billing credentials. One row per (app, provider).

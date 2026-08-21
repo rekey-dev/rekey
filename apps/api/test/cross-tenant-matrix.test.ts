@@ -70,6 +70,24 @@ const PROBES: Probe[] = [
     method: 'DELETE',
     suffix: '/oauth-clients/some-client-id',
   },
+  // Lifecycle. All three mutate an Application in ways another workspace must
+  // never reach: `promote` spends a production slot out of the OWNER's quota,
+  // and `disable` takes a live product offline. A missing scope check here
+  // would let anyone holding an application id switch off someone else's
+  // product, which is the highest-impact write in the whole table.
+  // A subscription id is a cuid an operator of another workspace could hold, and
+  // this route rewrites what that subscription GRANTS — the commercial terms of
+  // someone else's customer. The scope lives in the service's query; this proves
+  // it.
+  {
+    subResource: 'subscriptions',
+    method: 'PATCH',
+    suffix: '/subscriptions/some-subscription-id/entitlement-overrides',
+    payload: { 'FEATURE:x': 1 },
+  },
+  { subResource: 'promote', method: 'POST', suffix: '/promote' },
+  { subResource: 'disable', method: 'POST', suffix: '/disable', payload: {} },
+  { subResource: 'disable', method: 'DELETE', suffix: '/disable' },
   { subResource: 'auth-config', method: 'PATCH', suffix: '/auth-config', payload: {} },
   { subResource: 'billing-config', method: 'PATCH', suffix: '/billing-config', payload: {} },
   // The encrypted Stripe/PayPal/Razorpay keys. Worst possible omission.
@@ -93,10 +111,13 @@ const PROBES: Probe[] = [
   { subResource: 'email-credentials', method: 'DELETE', suffix: '/email-credentials' },
   { subResource: 'email-logs', method: 'GET', suffix: '/email-logs' },
   { subResource: 'email-templates', method: 'GET', suffix: '/email-templates' },
-  { subResource: 'end-user-roles', method: 'GET', suffix: '/end-user-roles' },
+  // Was `end-user-roles`, which is still served as a hidden alias and so no
+  // longer appears in the route table this test reads.
+  { subResource: 'application-roles', method: 'GET', suffix: '/application-roles' },
   { subResource: 'end-users', method: 'GET', suffix: '/end-users' },
   { subResource: 'licenses', method: 'GET', suffix: '/licenses' },
   { subResource: 'oauth-config', method: 'DELETE', suffix: '/oauth-config/google' },
+  { subResource: 'organization-roles', method: 'GET', suffix: '/organization-roles' },
   { subResource: 'organizations', method: 'GET', suffix: '/organizations' },
   { subResource: 'payments', method: 'GET', suffix: '/payments' },
   { subResource: 'plans', method: 'GET', suffix: '/plans' },
