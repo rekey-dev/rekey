@@ -6,7 +6,7 @@
  * opaque origin, which is a string, so the guard passes and the constructor
  * throws an uncaught `ERR_INVALID_URL`. Every action from that client answers
  * 500, and because the action never resolves, `useFormStatus().pending` never
- * clears — the submit button sits on "Saving…" until the operator reloads.
+ * clears, the submit button sits on "Saving…" until the operator reloads.
  *
  * Reproduced against the panel's OAuth provider form, where it presented as
  * "save does nothing and stays saving forever", and confirmed on a second,

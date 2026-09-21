@@ -3,7 +3,7 @@
 /**
  * "Get started" checklist card for new workspaces. The *state* is computed
  * server-side (the applications page derives it from data it already fetches
- * or can fetch cheaply) and passed in as props — this component only owns the
+ * or can fetch cheaply) and passed in as props, this component only owns the
  * dismissal, which persists per-workspace in localStorage (server-side
  * persistence would need a new API endpoint; deliberately skipped).
  *
@@ -16,7 +16,7 @@
  */
 
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { Badge } from '@/components/Badge';
 
 export interface OnboardingStep {
@@ -32,7 +32,7 @@ export interface OnboardingStep {
   pill?: string;
   /**
    * Optional muted hint under the description, e.g. "Requires an application".
-   * States a soft prerequisite without disabling the row — the step stays
+   * States a soft prerequisite without disabling the row, the step stays
    * clickable and its `href` routes to the prerequisite. Shown only while the
    * step is actionable (not `done`).
    */
@@ -61,7 +61,7 @@ export function OnboardingChecklist({
     try {
       localStorage.setItem(storageKey, '1');
     } catch {
-      /* private mode — dismissal just won't persist */
+      /* private mode, dismissal just won't persist */
     }
     setVisible(false);
   }

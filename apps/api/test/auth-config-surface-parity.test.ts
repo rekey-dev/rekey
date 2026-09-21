@@ -11,7 +11,7 @@
  *      `additionalProperties: false`, so a key missing here still works and is
  *      merely invisible to everyone generating a client.
  *   4. The `update_auth_config` operator MCP tool: what an agent can set. Its
- *      `additionalProperties: false` is ADVISORY, not enforced — the schema is
+ *      `additionalProperties: false` is ADVISORY, not enforced, the schema is
  *      only advertised in `tools/list` and `tenant-mcp-server.ts` never
  *      validates arguments against it. So a key missing here is not refused,
  *      it is dropped by the handler, and the caller is told the write
@@ -99,7 +99,7 @@ const NOT_IN_MCP: Record<string, string> = {
  * Narrowed by assertion rather than by `as never`. A blanket cast satisfies any
  * declared return type, so if `inputSchema` were ever renamed or nested this
  * would still compile and then fail inside the describe body with
- * `Object.keys(undefined)` — a TypeError where a named assertion should be.
+ * `Object.keys(undefined)`, a TypeError where a named assertion should be.
  */
 function mcpToolProperties(name: string): Record<string, unknown> {
   const tool = operatorWriteTools.find((t) => t.name === name);

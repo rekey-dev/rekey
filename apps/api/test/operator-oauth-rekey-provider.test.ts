@@ -1,5 +1,5 @@
 /**
- * "Sign in with <this deployment>" — an operator OAuth provider that is really
+ * "Sign in with <this deployment>", an operator OAuth provider that is really
  * the generic `oidc` implementation pointed at one of the deployment's own
  * Applications.
  *
@@ -8,12 +8,12 @@
  *
  *   1. Reporting itself CONFIGURED without an issuer. A client id and secret
  *      with nowhere to point produce a provider that renders a button and then
- *      fails at the redirect — worse than not offering it.
+ *      fails at the redirect, worse than not offering it.
  *
  *   2. Granting authority of its own. It must not become a way around
  *      `OPERATOR_SIGNUP_MODE`: someone who merely holds an account on the
  *      issuer is not thereby an operator of this deployment. On Rekey Cloud
- *      that is the whole security model — buyers get an operator account when
+ *      that is the whole security model, buyers get an operator account when
  *      provisioning creates one, which happens only after they have paid.
  */
 
@@ -50,7 +50,7 @@ describe('the `rekey` operator OAuth provider', () => {
   });
 
   it('still lists the providers that ARE configured', () => {
-    // Guards against the new entry breaking the list for everyone else —
+    // Guards against the new entry breaking the list for everyone else,
     // `configuredProviders` filters on credentials, and adding a third provider
     // that returns null must not shorten the array for google/github.
     const available = tenantOAuthService.configuredProviders();

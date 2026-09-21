@@ -14,8 +14,11 @@
  * `to_access`, audience-bound like `mcp_access`, no MFA challenge step (the
  * authorize page already collects the password + workspace pick), one-hour
  * lifetime paired with a refresh token (TenantMcpRefreshToken). Signing key
- * is JWT_SECRET directly — no per-operator kill-switch counter today;
- * revocation happens via the refresh-token chain (revoke + reuse-detect).
+ * is JWT_SECRET directly. Revocation: the refresh-token chain (revoke +
+ * reuse-detect), plus `TenantUser.sessionsInvalidBefore`. A password change or
+ * reset, sign-out everywhere, or panel refresh-token reuse revokes every MCP
+ * refresh token the operator holds and stamps them, and bearer-auth.ts refuses
+ * an access token whose `iat` predates the stamp.
  */
 
 import jwt from 'jsonwebtoken';
@@ -31,7 +34,7 @@ export interface OperatorMcpAccessClaims {
   cid: string;
   /** MCP resource URL (audience binding). */
   aud: string;
-  /** Granted scopes — space-separated per RFC 6749, but we issue a single scope today. */
+  /** Granted scopes, space-separated per RFC 6749, but we issue a single scope today. */
   scope: string;
   iat: number;
   exp: number;
@@ -52,7 +55,7 @@ export interface IssueOperatorMcpAccessArgs {
 /**
  * Sign and return an operator MCP access token.
  *
- * `typ: 'op_mcp_access'` is the discriminator — refusing any other typ in
+ * `typ: 'op_mcp_access'` is the discriminator, refusing any other typ in
  * `verifyOperatorMcpAccessToken` stops a panel session JWT from ever
  * authenticating against the operator MCP endpoint and vice-versa.
  */

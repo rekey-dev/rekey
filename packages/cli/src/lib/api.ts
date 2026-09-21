@@ -14,7 +14,7 @@ import { fail, type OutputContext } from './output.js';
  * Every `/api/v1/admin/*` list endpoint takes the same two params and answers
  * with `{items, page}`. Before 2.0.0-rc.3 they answered with a bare array and
  * the CLI could neither page nor tell the operator that it had been handed a
- * window rather than the set — `rekey apps list` printed 50 of 90 and said
+ * window rather than the set, `rekey apps list` printed 50 of 90 and said
  * nothing.
  */
 export function withListOptions(command: Command): Command {

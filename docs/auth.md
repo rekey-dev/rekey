@@ -290,14 +290,49 @@ login screen's problem.
 session has no active organization, or when membership lapsed since the token
 was minted. A stale `oid` claim degrades to "no org", it never grants access.
 
+## Devices
+
+A native, desktop or CLI client can bind the session it mints to the machine
+it runs on by sending `device: { fingerprint, label }` on any session-minting
+endpoint. The session then carries a `dev` claim, the refresh chain is bound
+to that device, and the number of active devices per end-user can be capped by
+the `max_devices` entitlement on the plan. Browser SDKs never send it and see
+no change. See [devices.md](devices.md).
+
 ## Tokens — access + refresh
 
 Sign-up and sign-in return **two** tokens, used for different jobs:
 
 | Token | Format | Lifetime | Where to send | What it's for |
 |---|---|---|---|---|
-| **Access** | JWT (HS256 default; RS256 opt-in) | 15 minutes | `X-Rekey-User-Token` header | Identifies the end-user on every per-user call (e.g. `GET /users/me`) |
-| **Refresh** | Opaque base64url, 32 bytes random | 30 days, sliding | `body.refreshToken` of `POST /auth/refresh` | Mints a fresh access + refresh pair when the access expires |
+| **Access** | JWT (HS256 default; RS256 opt-in) | 15 minutes by default (`END_USER_ACCESS_TOKEN_TTL_SECONDS`, up to 24 hours) | `X-Rekey-User-Token` header | Identifies the end-user on every per-user call (e.g. `GET /users/me`) |
+| **Refresh** | Opaque base64url, 32 bytes random | 30 days by default (`END_USER_REFRESH_TOKEN_TTL_DAYS`, up to 365), sliding | `body.refreshToken` of `POST /auth/refresh` | Mints a fresh access + refresh pair when the access expires |
+
+Both lifetimes are deployment settings, not per-Application ones. Sliding
+means each refresh issues a fresh full window, so a client stays signed in as
+long as it refreshes at least once per window; size the window to the longest
+gap between uses (a desktop app opened monthly wants 60 or 90 days) and keep
+the access token short, since a revoked session keeps acting until its next
+refresh re-checks it. Every sign-in and refresh response carries
+`accessTokenExpiresAt` and `refreshTokenExpiresAt`, so a client never has
+to know the configured values.
+
+A long access lifetime does not extend a session somebody ended, and ending
+one session does not end the others. A password change or reset, sign-out
+everywhere and refresh-token reuse detection end every session, so they stamp
+the user: an access token minted before the stamp is refused on its next use.
+Revoking a single session (the user's or an operator's) or releasing or
+blocking a device ends only that session: its access token carries a `sid`
+claim naming the session and a `dev` claim naming the device, and the API
+refuses it once that session is revoked or that device is no longer ACTIVE,
+while the user's other sessions keep working without a refresh. Both refusals
+are `401 USER_TOKEN_INVALID` with a message naming the cause, the code SDKs
+refresh on; the ended session's refresh then answers `REFRESH_TOKEN_REVOKED`.
+Access tokens minted before the `sid` claim existed run to their expiry.
+
+An offline verifier (`verifyAccessToken` in `@rekey.dev/node`, or your own
+JWKS check) sees none of this: a locally verified token stays valid until it
+expires. Call the API when immediate revocation matters.
 
 ### The access JWT
 
@@ -318,11 +353,11 @@ Sign-up and sign-in return **two** tokens, used for different jobs:
 
 ### Sign-out
 
-`POST /auth/sign-out` revokes the presented refresh token. Idempotent — unknown tokens return 200 (no enumeration). The access token paired with the refresh remains valid until its 15-minute expiry; clear it client-side for full logout.
+`POST /auth/sign-out` revokes the presented refresh token. Idempotent — unknown tokens return 200 (no enumeration). The access token paired with the refresh remains valid until its expiry (`accessTokenExpiresAt`; 15 minutes by default); clear it client-side for full logout.
 
 ### Sign-out everywhere
 
-`POST /auth/sign-out-everywhere` (requires user JWT) revokes **every** refresh token for the calling user. Use cases: "log out all devices" button, suspected compromise, after a password change, etc.
+`POST /auth/sign-out-everywhere` (requires user JWT) revokes **every** refresh token for the calling user and stamps the user, so every access token they hold, the caller's included, is refused on its next use. That covers MCP and OIDC grants too: their refresh tokens are revoked with the rest, and an MCP access token issued before the stamp is refused by the MCP endpoint, `/oauth/userinfo`, and reported inactive by `/oauth/introspect`. A password change or reset and refresh-token reuse do the same. Revoking a single session does not touch MCP grants. Use cases: "log out all devices" button, suspected compromise, after a password change, etc.
 
 ## Password management
 
@@ -360,7 +395,7 @@ Headers: Authorization: Bearer rp_live_…  +  X-Rekey-User-Token: <jwt>
 ```
 
 - Verifies `currentPassword` first — wrong returns `INVALID_CREDENTIALS`.
-- On success, every refresh token for the user is revoked. The caller's *current* access token stays valid until its 15-min expiry.
+- On success, every refresh token for the user is revoked. Access tokens minted before the call, the caller's own included, are refused on their next use.
 
 ### What's still deliberately not here
 
@@ -368,11 +403,42 @@ Headers: Authorization: Bearer rp_live_…  +  X-Rekey-User-Token: <jwt>
 
 Replay-chain revocation and sign-out-everywhere both shipped — see the refresh-token bullets above and `POST /auth/sign-out-everywhere`.
 
+## Server-side lookup with a secret key
+
+Your own backend often holds a secret key but not the user's token — a
+licence server, a support tool, a migration script. Two routes answer "who is
+this" without a session, secret key only (the publishable key is refused, so a
+browser can never enumerate accounts through them):
+
+- `GET /api/v1/users?email=` — exact, case-insensitive match in the calling
+  Application. SDK: `rekey.users.getByEmail(email)`.
+- `GET /api/v1/users/:id` — by id, scoped to the Application. SDK:
+  `rekey.users.get(id)`.
+
+Both return the same shape as `GET /users/me`. For what that user is entitled
+to, `GET /api/v1/billing/entitlements/for-user?endUserId=` returns the same
+union as `/billing/entitlements` (SDK: `rekey.billing.getEntitlementsFor(id)`).
+
+## Migrating users from another auth system
+
+`POST /api/v1/users/import` (secret key, `auth:write`; SDK
+`rekey.users.import(users)`) takes up to 500 users per call: email, the
+password hash your current system holds, whether the address was verified, a
+role, metadata, and any OAuth identities already linked so a Google or
+Discord user is not re-prompted.
+
+Hashes are accepted as **argon2id** or **bcrypt** (`$2a$`, `$2b$`, `$2y$`)
+and verified as-is at sign-in. Rekey never creates bcrypt hashes; an imported
+one is upgraded to argon2id on the user's first successful sign-in, the one
+moment the plaintext is in hand. Existing addresses are skipped, never
+updated — an import is not a way to overwrite a live account's password — and
+the whole batch is validated before any row is written.
+
 ## Operator end-user management
 
 Operators manage end-users from the panel (or the `/api/v1/tenant/applications/:id/end-users*` routes): seed users manually, edit role/metadata/verified flag, grant credits, impersonate (audited, 5-minute token), and delete.
 
-Impersonation is bounded twice over. It is **revocable** — `POST /api/v1/tenant/applications/:id/end-users/:euid/impersonate/end` stamps `endedAt` on every open audit row for that user and invalidates the tokens they issued on the spot (`IMPERSONATION_SESSION_ENDED`), for any operator, not just the one who started it. And it **cannot change credentials**: password change, MFA setup/disable and passkey enrolment/removal answer 403 `IMPERSONATION_ACTION_FORBIDDEN` for an impersonated session, because those survive the five-minute token permanently and the user cannot tell who made them. Everything else the user can do — reads, billing, organizations, profile edits — is unchanged.
+Impersonation is bounded twice over. It is **revocable**: `POST /api/v1/tenant/applications/:id/end-users/:euid/impersonate/end` stamps `endedAt` on every open audit row for that user and invalidates the tokens they issued on the spot (`IMPERSONATION_SESSION_ENDED`), for any operator, not just the one who started it. And it **cannot change credentials or mint a session**: password change, MFA setup/disable, passkey enrolment/removal, linking or unlinking an OAuth provider, the MCP session handoff, and the two routes that re-mint a token pair (`POST /users/me/organizations/:id/switch` and `POST /users/me/organizations/clear-active-organization`) answer 403 `IMPERSONATION_ACTION_FORBIDDEN` for an impersonated session. Each of those would outlive the five-minute token: a re-minted pair is an ordinary 30-day session with no `imp` claim, which would keep working after the impersonation ended. Everything else the user can do (reads, billing, organization membership, profile edits) is unchanged.
 
 ### Data export (DSAR)
 
@@ -390,7 +456,7 @@ DELETE /api/v1/tenant/applications/:id/end-users/:euid?erasure=true
 → { erased: true, erasedAt, alreadyErased }
 ```
 
-Operator-initiated erasure for GDPR Art. 17 / CCPA delete requests. Unlike a plain `DELETE` (which cascade-removes the user **and** their financial records), erasure **tombstones** the user — hard-deleting PII/auth material while **retaining anonymized financial records** for accounting / legal-retention obligations. A tombstoned user can never authenticate again (every auth path rejects with `END_USER_ERASED`, HTTP 410). OWNER/ADMIN only; recorded as an `end_user.erased` security event and emits a `user.erased` outbound webhook. In the panel: end-user detail page → danger zone → "Erase (GDPR)" (type the email to confirm).
+Operator-initiated erasure for GDPR Art. 17 / CCPA delete requests. Unlike a plain `DELETE` (which cascade-removes the user **and** their financial records), erasure **tombstones** the user — hard-deleting PII/auth material while **retaining anonymized financial records** for accounting / legal-retention obligations. A tombstoned user can never authenticate again (every auth path rejects with `END_USER_ERASED`, HTTP 410), and nothing can be granted to one. Workspace **OWNER only** — as is the plain `DELETE`, which is the more destructive of the two and was the weaker-gated one until 2.2. Recorded as an `end_user.erased` security event and emits a `user.erased` outbound webhook. In the panel: end-user detail page → Data &amp; privacy tab → "Erase (GDPR)" (type the email to confirm).
 
 The full per-model cascade guarantee (delete / anonymize / retain) lives in **[docs/data-erasure.md](data-erasure.md)**.
 

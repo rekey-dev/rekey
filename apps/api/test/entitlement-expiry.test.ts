@@ -3,7 +3,7 @@
  * if nobody opens the portal.
  *
  * #336 made "cancel at period end" work for subscriptions with no payment
- * provider — the row stays ACTIVE with `cancelAt` set, and `expireIfDue`
+ * provider, the row stays ACTIVE with `cancelAt` set, and `expireIfDue`
  * terminates it lazily when someone reads it through
  * `billingService.getCurrentSubscription`.
  *
@@ -11,7 +11,7 @@
  * never goes through that read.** `entitlements.service.ts` queries the
  * subscription table directly, so it saw a row that was still nominally
  * ACTIVE and kept granting features, credits and usage allowance past the
- * date the buyer had cancelled — until some unrelated portal load happened to
+ * date the buyer had cancelled, until some unrelated portal load happened to
  * flip it. Rekey Cloud's subscriptions are all provider-less, so this was all
  * of them.
  *
@@ -132,7 +132,7 @@ describe('a lapsed scheduled cancellation stops entitling', () => {
       data: { cancelAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) },
     });
 
-    // Cancelled, but not yet lapsed — they paid for this time.
+    // Cancelled, but not yet lapsed, they paid for this time.
     expect(await features(liveKey, session.accessToken)).toHaveProperty('pro_reports', true);
   });
 
@@ -155,7 +155,7 @@ describe('a lapsed scheduled cancellation stops entitling', () => {
 
   it('stops granting for a provider-backed row too, once its date has passed', async () => {
     // This asserted the opposite until the PayPal cancellation work. The
-    // asymmetry was deliberate — a provider-backed subscription is terminated
+    // asymmetry was deliberate, a provider-backed subscription is terminated
     // by the provider's webhook, and cutting access off here would pre-empt the
     // authority on whether the money actually stopped.
     //
@@ -165,7 +165,7 @@ describe('a lapsed scheduled cancellation stops entitling', () => {
     // open locally (`applySubscriptionStatusMirror` refuses to let PayPal's own
     // CANCELLED event shorten it). No later event exists to terminate the row,
     // so the carve-out kept granting a cancelled subscription's entitlements
-    // indefinitely — this file's own defect, one provider over.
+    // indefinitely, this file's own defect, one provider over.
     //
     // Safe because `cancelAt` on a provider-backed row is only written after
     // the provider confirmed the cancellation, or mirrored from the provider's

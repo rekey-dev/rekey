@@ -1,5 +1,5 @@
 /**
- * Offset paging for panel list pages — how "is there a next page?" is answered.
+ * Offset paging for panel list pages, how "is there a next page?" is answered.
  *
  * ## Where the answer comes from now
  *
@@ -10,14 +10,14 @@
  *
  * ## What this replaces (twice over)
  *
- * 1. `<Pager>` originally inferred `hasMore = count === pageSize` — right until
+ * 1. `<Pager>` originally inferred `hasMore = count === pageSize`, right until
  *    a result set is an exact multiple of the page size, then confidently
  *    wrong: 25 end-users at 25/page rendered a "Next →" onto a page reading
  *    "No results".
  * 2. That was replaced by an over-fetch: ask for `pageSize + 1` rows, and if
  *    the extra one arrives there is a next page. Correct, but it could not work
- *    at the panel's largest page size — `limit` is capped at 100 and 100/page
- *    would have needed `limit=101` — so the broken inference survived there.
+ *    at the panel's largest page size, `limit` is capped at 100 and 100/page
+ *    would have needed `limit=101`, so the broken inference survived there.
  *    It also could not answer "of how many?", because a bare array carries no
  *    total.
  *

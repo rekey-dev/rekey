@@ -11,8 +11,8 @@
  */
 
 /**
- * Advance `base` by one billing interval. `interval` follows `Plan.interval`
- * — 'YEAR' adds 12 months, anything else (incl. null/'MONTH') adds 1 month.
+ * Advance `base` by one billing interval. `interval` follows `Plan.interval`,
+ * 'YEAR' adds 12 months, anything else (incl. null/'MONTH') adds 1 month.
  * Time-of-day is preserved; the day-of-month is clamped to the target
  * month's length. All arithmetic is UTC.
  */

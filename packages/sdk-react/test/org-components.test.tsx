@@ -1,5 +1,5 @@
 /**
- * Organization widgets — <OrganizationSwitcher>, <CreateOrganization>,
+ * Organization widgets, <OrganizationSwitcher>, <CreateOrganization>,
  * <OrganizationProfile>.
  *
  * Load-bearing behavior:
@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import {
   OrganizationSwitcher,
   CreateOrganization,
@@ -53,7 +53,7 @@ describe('<OrganizationSwitcher> — personal vs org billing', () => {
 
   /**
    * BUG PROBE: per-org billing with NO teams yet. The user cannot switch (there
-   * is nothing to switch to) — the only correct path is "create a team". A live
+   * is nothing to switch to), the only correct path is "create a team". A live
    * "Switch" button here submits orgId="" which clears the active org, i.e. a
    * dead/misleading control. We assert the desired behavior: no dead Switch.
    */
@@ -97,8 +97,8 @@ describe('<OrganizationProfile> — viewer role gating', () => {
   // The two ids are DELIBERATELY different, and deliberately not
   // interchangeable-looking. `OrganizationMemberDto` carries both: `id` is the
   // membership row, `endUserId` is the user the mutation endpoints address.
-  // The old fixture used a single `id: 'eu_1'` — an end-user-shaped value in
-  // the membership slot — which is how a component posting `m.id` into the
+  // The old fixture used a single `id: 'eu_1'`, an end-user-shaped value in
+  // the membership slot, which is how a component posting `m.id` into the
   // `endUserId` field looked correct in every assertion for two releases.
   const members: OrgMember[] = [
     { id: 'om_1', endUserId: 'eu_1', email: 'owner@x.com', role: 'OWNER' },
@@ -119,7 +119,7 @@ describe('<OrganizationProfile> — viewer role gating', () => {
     // Invite form carries email + role.
     expect(container.querySelector('input[name="email"]')).not.toBeNull();
     expect(screen.getByRole('button', { name: /^invite$/i })).not.toBeNull();
-    // Manage controls present — one Remove per member.
+    // Manage controls present, one Remove per member.
     expect(screen.getAllByRole('button', { name: /remove/i }).length).toBe(members.length);
     // Role-change selects carry the endUserId hidden field.
     expect(container.querySelector('input[name="endUserId"]')).not.toBeNull();

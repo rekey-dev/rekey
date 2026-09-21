@@ -2,8 +2,8 @@
  * OpenAPI / Swagger setup.
  *
  * Two consumers:
- *   1. **Humans** — open `/docs` in a browser to explore the API.
- *   2. **AI agents** — fetch `/docs/json` for a machine-readable schema.
+ *   1. **Humans**, open `/docs` in a browser to explore the API.
+ *   2. **AI agents**, fetch `/docs/json` for a machine-readable schema.
  *
  * Keep `tags` consistent ("Admin · Tenants", "Admin · Applications", etc.) so
  * the docs UI groups routes intuitively. Every route should have at minimum
@@ -12,7 +12,7 @@
  * **Security schemes are a contract, not decoration.** There is deliberately NO
  * top-level `security` default: six different credentials guard this API and no
  * single one is a sane fallback, so a route with no `security` would silently
- * inherit a lie. Instead every route states its own `security` — including
+ * inherit a lie. Instead every route states its own `security`, including
  * `security: []` for genuinely public routes, so "public" is asserted rather
  * than inferred from an omission.
  *
@@ -20,7 +20,7 @@
  * `[{ apiKey: [] }, { publishableKey: [] }]` means "secret key OR publishable
  * key", while `[{ apiKey: [], userToken: [] }]` means "secret key AND the
  * end-user JWT". OpenAPI cannot express role or grant requirements
- * (`requireTenantRole`, `ensureAppAccess`, API-key scopes) — those belong in the
+ * (`requireTenantRole`, `ensureAppAccess`, API-key scopes), those belong in the
  * route's `description`.
  */
 
@@ -35,14 +35,14 @@ import { registerOpenApiComponents } from './openapi.js';
  * The version the published document announces itself as.
  *
  * Derived, not hardcoded. It was a string literal until 2.0.0-rc.3 and had gone
- * three minor versions stale — the document served at `/docs/json` said `1.1.1`
+ * three minor versions stale, the document served at `/docs/json` said `1.1.1`
  * while we were cutting 2.0.0, which every client generator, registry, and
  * integrator diffing against the previous release would have believed.
  *
  * `@rekey.dev/shared-types` is the right source: the CHANGELOG states the
  * packages share one version and release together with the API, panel, and
  * portal, so its `package.json` IS the release version. (`apps/api`'s own
- * package.json is `0.0.0` — it is private and never published.) `createRequire`
+ * package.json is `0.0.0`, it is private and never published.) `createRequire`
  * rather than an import attribute so this resolves identically from `src/` under
  * tsx and from `dist/` under node, without depending on the build layout.
  *
@@ -56,7 +56,7 @@ const { version: RELEASE_VERSION } = createRequire(import.meta.url)(
 export async function registerSwagger(app: FastifyInstance): Promise<void> {
   // Shared response components (`components.schemas`) + the pass-through
   // serializer that keeps those schemas documentation rather than a filter.
-  // Must run on the root instance before any route plugin registers — see
+  // Must run on the root instance before any route plugin registers, see
   // lib/openapi.ts for the full reasoning.
   registerOpenApiComponents(app);
 
@@ -64,7 +64,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
     // Name `components.schemas` entries after the schema's own `$id`.
     // @fastify/swagger's default numbers them `def-0`, `def-1`, … which makes
     // every generated client type anonymous and reshuffles on every route
-    // change — a diffable, stable document needs real names.
+    // change, a diffable, stable document needs real names.
     refResolver: {
       buildLocalReference(json, _baseUri, _fragment, i) {
         return typeof json.$id === 'string' ? json.$id : `def-${i}`;
@@ -78,28 +78,28 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
           'integer minor units (cents). Every error carries a `code`, human `message`, ' +
           'and a `fix`.\n\n' +
           '## Which credential do I send?\n\n' +
-          'Six different credentials guard this API. Each route documents its own — ' +
+          'Six different credentials guard this API. Each route documents its own, ' +
           'read the padlock, not this list. In short:\n\n' +
-          '- **Publishable key** (`rp_pub_…`, `Authorization: Bearer`) — the browser ' +
+          '- **Publishable key** (`rp_pub_…`, `Authorization: Bearer`), the browser ' +
           'credential. Safe to ship in client-side JavaScript. Accepted on the ' +
           'public-bootstrap surface (sign-in/up, magic link, passkeys, OAuth start, ' +
           'plan/subscription reads, checkout, organizations). Restricted by the ' +
           "Application's origin allowlist rather than kept secret.\n" +
           '- **Application secret key** (`rp_live_…` / `rp_test_…`, `Authorization: ' +
-          'Bearer`) — the server-side credential. Accepted everywhere the publishable ' +
+          'Bearer`), the server-side credential. Accepted everywhere the publishable ' +
           'key is, plus the privileged surface it cannot reach (usage, credits, ' +
           'licenses, coupon redemption, session/user administration). Never ship it to ' +
           'a browser.\n' +
-          '- **End-user JWT** (`X-Rekey-User-Token`) — sent *in addition to* one of ' +
+          '- **End-user JWT** (`X-Rekey-User-Token`), sent *in addition to* one of ' +
           'the two keys above on routes that act on behalf of a signed-in end user. ' +
           'You get it from the `token` in a sign-in response.\n' +
-          '- **Operator session** (`Authorization: Bearer` access token) — for the ' +
+          '- **Operator session** (`Authorization: Bearer` access token), for the ' +
           'panel/operator surface under `/api/v1/tenant/*`.\n' +
-          '- **Operator PAT** (`rp_op_…`, `Authorization: Bearer`) — long-lived operator ' +
+          '- **Operator PAT** (`rp_op_…`, `Authorization: Bearer`), long-lived operator ' +
           'token for scripts and agents.\n' +
-          '- **Super-admin key** (`SUPER_ADMIN_KEY`, `Authorization: Bearer`) — the ' +
+          '- **Super-admin key** (`SUPER_ADMIN_KEY`, `Authorization: Bearer`), the ' +
           'self-host bootstrap credential, for `/api/v1/admin/*` only.\n\n' +
-          'Provider webhook ingress routes take **no** credential at all — the ' +
+          'Provider webhook ingress routes take **no** credential at all, the ' +
           'provider signature is the authentication.',
         version: RELEASE_VERSION,
       },
@@ -109,7 +109,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
       // `http://localhost:3030`, which every self-hosted deployment then served
       // from its own `/docs`. Swagger UI's "Try it out" posts to the selected
       // server, so an operator pasting their own key into their own docs page
-      // sent that credential to a host they had never chosen — the same shape
+      // sent that credential to a host they had never chosen, the same shape
       // as the `@rekey.dev/astro` fallback removed in this release, on a
       // surface where the credential is typed in by hand.
       //
@@ -122,11 +122,11 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
             type: 'http',
             scheme: 'bearer',
             description:
-              '**What:** the self-host bootstrap admin credential — a single shared ' +
+              '**What:** the self-host bootstrap admin credential, a single shared ' +
               'secret, not tied to any workspace or Application.\n\n' +
               '**Where from:** the `SUPER_ADMIN_KEY` environment variable you set on the ' +
               'API deployment.\n\n' +
-              '**Where used:** `/api/v1/admin/*` only. Server-side only — this key can ' +
+              '**Where used:** `/api/v1/admin/*` only. Server-side only, this key can ' +
               'read and write every tenant on the deployment, so treat it like a root ' +
               'password. `requireApiKey` and the operator guards all reject it.',
           },
@@ -137,7 +137,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
             description:
               '**What:** an Application-scoped **secret** key. Full server-side authority ' +
               'over that one Application. The `rp_test_` / `rp_live_` prefix follows the ' +
-              "Application's `environment` and is descriptive only — nothing branches on " +
+              "Application's `environment` and is descriptive only, nothing branches on " +
               'it. Isolation is the Application boundary.\n\n' +
               '**Where from:** Panel → Application → API Keys (shown once at mint time). ' +
               'Used by `@rekey.dev/node`.\n\n' +
@@ -146,7 +146,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
               '`billing:write`, `webhooks:read`); when a route needs a specific scope its ' +
               'description says so. May also be restricted by the ' +
               "Application's IP allowlist.\n\n" +
-              '**Never** put this in browser or mobile-client code — use the publishable ' +
+              '**Never** put this in browser or mobile-client code, use the publishable ' +
               'key there.',
           },
           publishableKey: {
@@ -154,7 +154,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
             scheme: 'bearer',
             bearerFormat: 'rp_pub_…',
             description:
-              '**What:** the Application **publishable** key — a browser-safe credential. ' +
+              '**What:** the Application **publishable** key, a browser-safe credential. ' +
               'It identifies the Application and asserts "legitimate public client"; it ' +
               'grants nothing on its own (sign-in still needs the password or passkey, ' +
               'license verify still needs the license key).\n\n' +
@@ -165,10 +165,10 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
               '**Where from:** Panel → Application (displayed alongside the secret key). ' +
               'Rotating it leaves the previous key valid for a grace window so clients ' +
               'can redeploy.\n\n' +
-              '**Where used:** only the public-bootstrap surface — routes guarded by ' +
+              '**Where used:** only the public-bootstrap surface, routes guarded by ' +
               '`requirePublishableOrSecretKey`. A `requireApiKey` route rejects it with 401 ' +
               '`API_KEY_INVALID`; operator and admin routes use their own credentials and ' +
-              'their own codes. API-key scopes do not apply to it — route membership ' +
+              'their own codes. API-key scopes do not apply to it, route membership ' +
               'is the gate. Where it does reach self-service billing or account ' +
               'management, the end-user\'s own token is required alongside it and is ' +
               'what authorizes the call; it never reaches administrative writes or ' +
@@ -179,13 +179,13 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
             in: 'header',
             name: 'X-Rekey-User-Token',
             description:
-              '**What:** the end-user access JWT — proof that a specific end user of your ' +
+              '**What:** the end-user access JWT, proof that a specific end user of your ' +
               'Application is signed in. It is a *second* credential: send it **together ' +
               'with** the publishable or secret key in `Authorization`, never instead of ' +
               'one.\n\n' +
               '**Where from:** the `token` field returned by sign-in, sign-up, ' +
               'magic-link/OAuth/passkey completion, or `POST /api/v1/auth/refresh`.\n\n' +
-              '**Where used:** every route that acts on behalf of the signed-in user — ' +
+              '**Where used:** every route that acts on behalf of the signed-in user, ' +
               '`/api/v1/users/me`, subscriptions and payment methods, organizations, MFA ' +
               'enrollment, coupon redemption. The JWT carries its issuing ' +
               '`applicationId` and must match the Application the key resolved to, so a ' +
@@ -195,25 +195,25 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
             type: 'http',
             scheme: 'bearer',
             description:
-              '**What:** an **operator** (workspace-member) session access token — the ' +
+              '**What:** an **operator** (workspace-member) session access token, the ' +
               'credential the Rekey panel uses. Scoped to one workspace plus the ' +
               "operator's live role in it (OWNER / ADMIN / MEMBER).\n\n" +
               '**Where from:** `POST /api/v1/tenant/auth/sign-in` (or the passkey / OAuth ' +
               'equivalents) returns `accessToken`; refresh it at ' +
-              '`POST /api/v1/tenant/auth/refresh`. Short-lived — for scripts and agents ' +
+              '`POST /api/v1/tenant/auth/refresh`. Short-lived, for scripts and agents ' +
               'prefer an operator PAT.\n\n' +
               '**Where used:** the operator surface under `/api/v1/tenant/*`. Workspace ' +
               'membership and role are re-read from the database on every request, so a ' +
               'downgrade or removal takes effect immediately. Routes that additionally ' +
               'demand OWNER/ADMIN, or a per-Application grant, say so in their ' +
-              'description — OpenAPI cannot express that here.',
+              'description, OpenAPI cannot express that here.',
           },
           operatorPat: {
             type: 'http',
             scheme: 'bearer',
             bearerFormat: 'rp_op_…',
             description:
-              '**What:** an operator **personal access token** — a long-lived stand-in ' +
+              '**What:** an operator **personal access token**, a long-lived stand-in ' +
               'for an operator session, for scripts, CI, and AI agents. Bound to one ' +
               'operator and one workspace, and carries its own scope list ' +
               '(`read`, `keys:mint`, `mcp:operator:write`, …) that is default-deny.\n\n' +
@@ -231,7 +231,7 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
               '(`/api/v1/tenant/mcp`). The guard accepts **either** an operator PAT ' +
               '(`rp_op_…`, which must carry the `read` scope) **or** an OAuth-issued ' +
               "access JWT (`typ: op_mcp_access`) minted by this deployment's operator-MCP " +
-              'authorization server. One bearer at a time — credentials are not chained.\n\n' +
+              'authorization server. One bearer at a time, credentials are not chained.\n\n' +
               '**Where from:** mint a PAT at `POST /api/v1/tenant/auth/api-tokens`, or let ' +
               'your MCP client run the OAuth flow starting at ' +
               '`GET /api/v1/tenant/mcp/oauth/authorize`.\n\n' +
@@ -246,11 +246,11 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
             description:
               "**What:** an **end-user** MCP access JWT (`typ: mcp_access`), scoped to one " +
               'Application and one of its end users. Distinct from `mcpAccessToken`, which is ' +
-              'the operator-facing MCP credential — do not mix them up.\n\n' +
+              'the operator-facing MCP credential, do not mix them up.\n\n' +
               '**Where from:** the OAuth 2.1 + PKCE flow this deployment hosts per Application ' +
               'at `/api/v1/mcp/{slug}/oauth/authorize` → `/oauth/token`. An MCP client ' +
               '(e.g. a custom connector) drives it; the end user signs in and consents.\n\n' +
-              '**Where used:** `POST /api/v1/mcp/{slug}` only. Read-only — it exposes that ' +
+              '**Where used:** `POST /api/v1/mcp/{slug}` only. Read-only, it exposes that ' +
               "user's own profile, subscription, and usage. Invalidated by the Application's " +
               'session kill-switch (`tokenGeneration`) like any other end-user token.',
           },

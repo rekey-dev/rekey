@@ -4,8 +4,8 @@
  * `lib/api.ts` had no deadline on its fetch, so a request that never got its
  * headers back sat on undici's default of five minutes. An operator saw that as
  * "saving goes blank and works if I refresh": while a server action's redirect
- * is in flight Next renders `null` for the page subtree — not loading.tsx, not
- * error.tsx — so a hung fetch on the far side of that redirect is an empty page
+ * is in flight Next renders `null` for the page subtree, not loading.tsx, not
+ * error.tsx, so a hung fetch on the far side of that redirect is an empty page
  * held open for as long as the socket stays quiet. The record was written. Only
  * the render never arrived.
  *
@@ -96,7 +96,7 @@ describe('a request that never answers', () => {
     vi.stubGlobal('fetch', async () => {
       throw timeoutError();
     });
-    const { api, PanelApiError } = await import('../src/lib/api.js');
+    const { api } = await import('../src/lib/api.js');
 
     const err = (await api({
       method: 'PUT',

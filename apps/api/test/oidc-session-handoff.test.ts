@@ -13,8 +13,8 @@
  * a publishable key must not reach it, a token from another Application must
  * not be honoured, a secret key must not mint codes on an Application it does
  * not belong to, and an impersonated session must not be handed on. The code
- * it produces must be indistinguishable from an interactive one — single-use,
- * PKCE-bound, 60 seconds — which is checked by redeeming it.
+ * it produces must be indistinguishable from an interactive one, single-use,
+ * PKCE-bound, 60 seconds, which is checked by redeeming it.
  *
  * Domain tables truncate before each test, so each case bootstraps its own
  * operator + app.
@@ -110,7 +110,7 @@ describe('app-authorised session handoff', () => {
     });
 
     // Seeded through the operator route because `requireEmailVerification` is
-    // on — public sign-up deliberately returns no session in that mode.
+    // on, public sign-up deliberately returns no session in that mode.
     const euEmail = `eu-${slug}@example.com`;
     const created = await app.inject({
       method: 'POST',
@@ -190,7 +190,7 @@ describe('app-authorised session handoff', () => {
     expect(code).toBeTruthy();
     expect(expires_in).toBe(60);
 
-    // Redeemed at the ordinary token endpoint — no special path.
+    // Redeemed at the ordinary token endpoint, no special path.
     const tok = await app.inject({
       method: 'POST',
       url: `/api/v1/mcp/${fx.slug}/oauth/token`,
@@ -206,8 +206,8 @@ describe('app-authorised session handoff', () => {
     const body = tok.json() as Record<string, string>;
     expect(body.id_token).toBeTruthy();
 
-    const claims = jwt.decode(body.id_token) as Record<string, unknown>;
-    // `sub` is the EndUser id — the identity the panel will federate on.
+    const claims = jwt.decode(body.id_token!) as Record<string, unknown>;
+    // `sub` is the EndUser id, the identity the panel will federate on.
     expect(claims.sub).toBe(fx.euId);
     expect(claims.aud).toBe(fx.clientId);
     expect(claims.email).toBe(fx.euEmail);
@@ -285,7 +285,7 @@ describe('app-authorised session handoff', () => {
     const { challenge } = pkce();
     const res = await handoff(fx, { challenge, key: fx.publishableKey });
     expect(res.statusCode).toBe(401);
-    // Refused by `requireApiKey` on the prefix, before the handler — the
+    // Refused by `requireApiKey` on the prefix, before the handler, the
     // browser-shipped credential can never reach this endpoint.
     expect((res.json().error as { code: string }).code).toBe('API_KEY_INVALID');
   });
@@ -317,7 +317,7 @@ describe('app-authorised session handoff', () => {
     // tokens are HS256-signed with a key derived per Application, so A's token
     // fails B's signature check before anything reads its `applicationId`
     // claim. The cross-application guard is therefore cryptographic here and
-    // the claim comparison in `requireUserSession` is defence in depth — this
+    // the claim comparison in `requireUserSession` is defence in depth, this
     // asserts the stronger of the two actually fires.
     expect((res.json().error as { code: string }).code).toBe('USER_TOKEN_INVALID');
   });

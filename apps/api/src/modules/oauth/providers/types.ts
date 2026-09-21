@@ -31,13 +31,13 @@ export interface OAuthProviderConfig {
 
 export interface BuildAuthUrlInput {
   config: OAuthProviderConfig;
-  /** Opaque CSRF state — we round-trip it through the provider. */
+  /** Opaque CSRF state, we round-trip it through the provider. */
   state: string;
   /** Optional scope override. Falls back to provider default. */
   scopes?: string[];
   /**
    * PKCE verifier (RFC 7636). The provider derives the `code_challenge` from
-   * it and only sends one if the issuer advertises S256 — see `oidc.ts`. The
+   * it and only sends one if the issuer advertises S256, see `oidc.ts`. The
    * CALLER owns this value and must present the same one at exchange, so it
    * has to survive the redirect; storing it against `state` is what the
    * operator OAuth service does.
@@ -50,7 +50,7 @@ export interface ExchangeInput {
   /** The `code` query param returned to our callback URL. */
   code: string;
   /**
-   * PKCE verifier — must be the same value whose challenge was sent on
+   * PKCE verifier, must be the same value whose challenge was sent on
    * authorize. Was declared here long before anything sent one; `oidc.ts` now
    * does, when the issuer advertises S256.
    */
@@ -68,7 +68,7 @@ export interface OAuthIdentityResult {
    *
    * **Load-bearing for auto-link.** The OAuth service refuses to link a
    * new provider account to an existing EndUser by email unless this is
-   * true — an attacker who controls an unverified email at a provider
+   * true, an attacker who controls an unverified email at a provider
    * could otherwise hijack an existing password account by signing in
    * with OAuth and claiming the same email.
    *
@@ -79,7 +79,7 @@ export interface OAuthIdentityResult {
 }
 
 export interface OAuthProvider {
-  /** Stable name — `"google"`, `"github"`, … */
+  /** Stable name, `"google"`, `"github"`, … */
   readonly name: string;
   buildAuthUrl(input: BuildAuthUrlInput): string;
   exchange(input: ExchangeInput): Promise<OAuthIdentityResult>;

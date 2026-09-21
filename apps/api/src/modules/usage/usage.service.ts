@@ -1,12 +1,12 @@
 /**
- * Usage tracking — meters + records.
+ * Usage tracking, meters + records.
  *
  * A `UsageMeter` is a named counter scoped to an Application
  * ("api_calls", "storage_gb_hours"). The customer's app reports
  * increments via POST /api/v1/usage/record. We aggregate via SUM on read.
  *
  * `record` DOES enforce the subject's plan-included quota synchronously, via
- * `entitlementsService` — over the allowance it rejects with 402
+ * `entitlementsService`, over the allowance it rejects with 402
  * `USAGE_QUOTA_EXCEEDED` rather than recording. What is still absent is
  * *overage invoicing*: nothing bills for consumption beyond the included quota,
  * so metered pricing means "cap and refuse", not "charge for what you used".
@@ -23,7 +23,7 @@ const SLUG_RE = /^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$/;
 /**
  * Enforcement window for an included usage quota: the **calendar month (UTC)**
  * of the record's timestamp. Chosen over the subscription billing period for
- * the MVP — predictable for customers ("10k calls/month"), provider-agnostic,
+ * the MVP, predictable for customers ("10k calls/month"), provider-agnostic,
  * and needs no per-sub period bookkeeping. Returns [start, end).
  */
 function monthWindowUtc(at: Date): { start: Date; end: Date } {
@@ -132,7 +132,7 @@ export const usageService = {
 
   /**
    * Hard-delete a meter. Cascades to UsageRecords. Operators should usually
-   * archive (setActive(false)) instead — delete is for cleanup of meters
+   * archive (setActive(false)) instead, delete is for cleanup of meters
    * that were created in error and have no production traffic.
    */
   async remove(applicationId: string, slug: string): Promise<void> {
@@ -195,9 +195,9 @@ export const usageService = {
     // A correction (negative quantity) against a priced meter would run the
     // billing arithmetic backwards and mint credits. The public route already
     // refuses negatives, but the service is callable from inside the API and
-    // must not depend on its caller for that.
-    // Cheap pre-check on the meter; the plan rate is resolved later, so a
-    // negative against a plan-priced meter is refused there by the same rule.
+    // must not depend on its caller for that. This is only the cheap pre-check
+    // on the meter's own rate; the plan rate is resolved later and refuses a
+    // negative against a plan-priced meter by the same rule.
     if (args.quantity < 0 && meter.creditsPerUnit != null) {
       throw new RekeyError({
         statusCode: 400,
@@ -210,7 +210,7 @@ export const usageService = {
     // Idempotency (BUG-2): a retried record with the same (meter, key) must NOT
     // double-count. Cheap pre-check returns the original row before any quota
     // work; the unique (meterId, idempotencyKey) constraint closes the race
-    // (two concurrent first-time replays) — the loser catches P2002 below.
+    // (two concurrent first-time replays), the loser catches P2002 below.
     if (args.idempotencyKey !== undefined) {
       const prior = await prisma.usageRecord.findUnique({
         where: {
@@ -233,8 +233,8 @@ export const usageService = {
     // meter: exhaust this month, stamp the record into a quiet earlier month,
     // and it lands inside an unspent quota instead of costing credits.
     //
-    // A small backdate is legitimate — a queue drained late, a clock a few
-    // seconds off — so this clamps rather than refuses, and only for the
+    // A small backdate is legitimate, a queue drained late, a clock a few
+    // seconds off, so this clamps rather than refuses, and only for the
     // window that matters. Future timestamps are refused outright: they move
     // consumption into a quota nobody has paid for yet.
     if (args.occurredAt) {
@@ -275,7 +275,7 @@ export const usageService = {
     };
 
     // On a concurrent first-time replay the unique (meterId, idempotencyKey)
-    // fires P2002 for the loser — resolve it to the winning row so the caller
+    // fires P2002 for the loser, resolve it to the winning row so the caller
     // still gets the idempotent result instead of a 500.
     const onConflictReturnExisting = async (e: unknown): Promise<UsageRecord> => {
       if (args.idempotencyKey !== undefined && (e as { code?: string }).code === 'P2002') {
@@ -298,7 +298,7 @@ export const usageService = {
       // Charging requires BOTH a price and an explicitly configured quota.
       //
       // `includedQuotaFor` returns null for "no USAGE entitlement with a
-      // positive quantity was found" — which is also what a subject with no
+      // positive quantity was found", which is also what a subject with no
       // plan at all looks like, and what a legacy USAGE plan looks like, since
       // those synthesize `quantity: null`. Reading null as "quota of zero"
       // would start charging every one of them from the first unit, silently,
@@ -340,7 +340,7 @@ export const usageService = {
             const billable = Math.max(0, args.quantity - remainingIncluded);
 
             if (billable > 0) {
-              // Past the quota. An unpriced meter still stops here — that was
+              // Past the quota. An unpriced meter still stops here, that was
               // the only behaviour before pricing existed, and a meter with no
               // price has no way to charge for the excess.
               if (rate == null) {
@@ -365,8 +365,8 @@ export const usageService = {
                   fix: 'Record the usage in smaller batches, or lower the meter price.',
                 });
               }
-              // A rate of zero is a legitimate configuration — "metered, but
-              // free" — and `consume` rejects a non-positive amount, so asking
+              // A rate of zero is a legitimate configuration, "metered, but
+              // free", and `consume` rejects a non-positive amount, so asking
               // it to debit nothing turns every record into a 400.
               if (cost === 0) {
                 return tx.usageRecord.create({
@@ -377,7 +377,7 @@ export const usageService = {
               // BLOCKER: the result carries `applied`, and false means the
               // ledger already had this key so NO debit happened. Stamping
               // creditsCharged on the record anyway would write a billing
-              // artifact claiming money moved when it did not — and the key is
+              // artifact claiming money moved when it did not, and the key is
               // reachable by any caller of POST /credits/consume, which holds
               // the same `billing:write` scope. A genuine retry never reaches
               // here: the usage pre-check returns the prior record first.

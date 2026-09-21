@@ -6,7 +6,7 @@
  *     calls one anyway (no silent execution);
  *   - a write credential held by an OWNER/ADMIN can create + modify workspace
  *     config, and the change really lands;
- *   - write tools re-scope by tenant — another workspace's applicationId is
+ *   - write tools re-scope by tenant, another workspace's applicationId is
  *     indistinguishable from a non-existent one (no cross-tenant write);
  *   - role gating: write scope alone is not enough; the role must clear the
  *     tool's minimum (MEMBER is refused).
@@ -19,6 +19,7 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
 import { handleOperatorMcpMessage } from '../src/modules/tenant-mcp/tenant-mcp-server.js';
+import { UNRESTRICTED } from '../src/lib/operator-scopes.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
 
 interface OperatorSession {
@@ -115,7 +116,7 @@ describe('Operator MCP write tools', () => {
     // The gap this closes: create_plan could only make a priced plan, and the
     // tool named update_plan patches Plan columns rather than the entitlement
     // table. So an agent could produce a plan, be told it succeeded, and have
-    // it gate nothing — discovered only when a real user hit a locked feature.
+    // it gate nothing, discovered only when a real user hit a locked feature.
     const op = await makeOperator('ent');
     const token = await mintPat(op, ['read', 'applications:write']);
 
@@ -197,7 +198,7 @@ describe('Operator MCP write tools', () => {
     const row = await prisma.application.findUnique({ where: { id: appId } });
     expect(row?.tenantId).toBe(op.tenantId);
 
-    // update_auth_config — flip mcpEnabled on
+    // update_auth_config, flip mcpEnabled on
     const updated = readToolResult(
       (await rpc(token, 'tools/call', {
         name: 'update_auth_config',
@@ -219,7 +220,7 @@ describe('Operator MCP write tools', () => {
     expect(plan.isError).toBe(false);
     expect((plan.data as { amount: number }).amount).toBe(1500);
 
-    // create_webhook_endpoint — secret shown once
+    // create_webhook_endpoint, secret shown once
     const hook = readToolResult(
       (await rpc(token, 'tools/call', {
         name: 'create_webhook_endpoint',
@@ -315,7 +316,11 @@ describe('Operator MCP write tools', () => {
       tenantUserId: 'tu_member',
       tenantId: 't_member',
       role: 'MEMBER' as const,
+      scopes: UNRESTRICTED,
       canWrite: true,
+      // Stated, not omitted. `undefined` was falsy so behaviour matched, but the
+      // shape diverged from what `bearer-auth` actually builds.
+      canAdmin: false,
     };
     const list = (await handleOperatorMcpMessage(memberCtx, {
       jsonrpc: '2.0',
@@ -337,7 +342,7 @@ describe('Operator MCP write tools', () => {
   describe('the READ tools that live in this file are grant-scoped, like their REST twins', () => {
     // `list_plans`, `list_plan_entitlements`, `list_usage_meters` and
     // `list_api_keys` are declared here, next to the writes, but they carry
-    // neither `write` nor `admin` nor a `minRole` — so the dispatcher's role
+    // neither `write` nor `admin` nor a `minRole`, so the dispatcher's role
     // gate does not apply to them and any MEMBER may call them. They resolved
     // their Application through a helper that checked the WORKSPACE and not the
     // caller's per-application grants, so a MEMBER with zero grants could read
@@ -347,7 +352,7 @@ describe('Operator MCP write tools', () => {
     // seam between them.
     async function memberWithoutGrants(slug: string): Promise<{
       ctx: { tenantUserId: string; tenantId: string; role: 'MEMBER'; canWrite: boolean;
-             tenantMembershipId: string };
+             tenantMembershipId: string; scopes: typeof UNRESTRICTED };
       applicationId: string;
       membershipId: string;
       ownerToken: string;
@@ -379,6 +384,9 @@ describe('Operator MCP write tools', () => {
           role: 'MEMBER' as const,
           canWrite: false,
           tenantMembershipId: membership.id,
+          // Explicit: the membership ceiling is unrestricted, so the GRANT is
+          // the only thing these cases exercise. Omitted scopes now fail closed.
+          scopes: UNRESTRICTED,
         },
         applicationId,
         membershipId: membership.id,
@@ -410,7 +418,7 @@ describe('Operator MCP write tools', () => {
         // A REAL plan, so `list_plan_entitlements` reaches the grant check
         // instead of dying on PLAN_NOT_FOUND. Without it that one case passed
         // for the wrong reason: unfixed it still set `isError`, and only the
-        // error WORDING separated pass from fail — reword the service's
+        // error WORDING separated pass from fail, reword the service's
         // message and the test silently stops testing anything.
         await app.inject({
           method: 'POST',
@@ -436,7 +444,7 @@ describe('Operator MCP write tools', () => {
 
     it('threads the grant through the REAL auth path, not just direct dispatch', async () => {
       // The cases above hand-build the tool context, which means they set
-      // `tenantMembershipId` themselves — the very field the grant check needs.
+      // `tenantMembershipId` themselves, the very field the grant check needs.
       // `accessibleApplicationIds` fails CLOSED without it, so a regression in
       // how `bearer-auth.ts` or `tenant-mcp.routes.ts` populate it would deny
       // every granted MEMBER in production while those tests stayed green.
@@ -462,7 +470,7 @@ describe('Operator MCP write tools', () => {
 
       // A PAT is scoped to the ACTIVE workspace and gated by the role held
       // THERE, so this member has to switch into the owner's workspace before a
-      // PAT would be of any use against it — and once switched, the mint is
+      // PAT would be of any use against it, and once switched, the mint is
       // refused: `operator-tokens.routes.ts` allows only OWNER/ADMIN.
       //
       // That leaves OAuth as the only credential a MEMBER can bring to MCP, and
@@ -497,7 +505,7 @@ describe('Operator MCP write tools', () => {
         .then((r) => (r.json() as { client_id: string }).client_id);
 
       // The member consents for the OWNER's workspace, which they are a member
-      // of. `grantScopes` hands out write on request regardless of role — the
+      // of. `grantScopes` hands out write on request regardless of role, the
       // dispatcher's role gate is what stops them using it.
       const grant = await app.inject({
         method: 'POST',

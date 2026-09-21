@@ -1,5 +1,5 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { api, type DunningCaseRow, getApplication } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { formatDateTime } from '@/lib/date';
@@ -7,22 +7,21 @@ import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
 import type { Page } from '@/lib/paginate';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
-import { Badge } from '@/components/Badge';
 import { StatusPill } from '@/components/StatusPill';
 import { EmptyState } from '@/components/EmptyState';
 import { BillingModeBanner } from '@/components/BillingModeBanner';
 
 /**
- * Dunning — failed-payment recovery cases. One case per subscription's trip
+ * Dunning, failed-payment recovery cases. One case per subscription's trip
  * through PAST_DUE: reminder emails at day 0/3/7, exhaustion (subscription
  * canceled) at day 14 without recovery. The provider drives the actual card
- * retries — this table is the operator's visibility into recovery state.
+ * retries, this table is the operator's visibility into recovery state.
  */
 
 const STATUSES = ['OPEN', 'RECOVERED', 'EXHAUSTED', 'CANCELED'] as const;
 type DunningStatus = (typeof STATUSES)[number];
 
-/** Friendly labels for display — the raw enum still goes to the API. */
+/** Friendly labels for display, the raw enum still goes to the API. */
 const STATUS_LABEL: Record<DunningStatus, string> = {
   OPEN: 'Open',
   RECOVERED: 'Recovered',
@@ -57,7 +56,7 @@ export default async function DunningPage({
       <div className="space-y-5">
         <SectionHeader
           title="Dunning"
-          description="Dunning recovers failed payments — Rekey emails the customer and tracks recovery automatically."
+          description="Dunning recovers failed payments. Rekey emails the customer and tracks recovery automatically."
         />
         <BillingDisabledState applicationId={id} />
       </div>
@@ -105,7 +104,7 @@ export default async function DunningPage({
       <SectionHeader
         title="Dunning"
         count={`(${cases.length === 0 ? 0 : `${offset + 1}–${offset + cases.length}`})`}
-        description="Dunning recovers failed payments — Rekey emails the customer and tracks recovery automatically. A case opens when a subscription goes past due, reminders go out on day 0/3/7, and the subscription is canceled on day 14 without recovery. Card retries themselves are driven by the billing provider."
+        description="Dunning recovers failed payments. Rekey emails the customer and tracks recovery automatically. A case opens when a subscription goes past due, reminders go out on day 0/3/7, and the subscription is canceled on day 14 without recovery. Card retries themselves are driven by the billing provider."
       />
 
       {!dunningEnabled && (
@@ -114,7 +113,7 @@ export default async function DunningPage({
           className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-4 py-3 text-sm text-[var(--color-muted-fg)]"
         >
           <span className="font-medium text-[var(--color-fg)]">Failed-payment recovery is off.</span>{' '}
-          Past-due subscriptions get no reminder emails and aren’t auto-cancelled — the provider’s own
+          Past-due subscriptions get no reminder emails and aren’t auto-cancelled, though the provider’s own
           retries still run.{' '}
           {cases.length > 0 &&
             'The cases below opened while it was on and finish on their existing schedule. '}
@@ -129,7 +128,7 @@ export default async function DunningPage({
       )}
 
       {/* When dunning is off and there are no in-flight cases, don't render the
-          filter + table scaffolding — an empty cases table reads as if the
+          filter + table scaffolding, an empty cases table reads as if the
           feature were active. Show a disabled state instead. Existing cases (a
           turn-off mid-flight) still render so the operator keeps visibility. */}
       {!dunningEnabled && cases.length === 0 ? (
@@ -170,7 +169,7 @@ export default async function DunningPage({
             href={basePath}
             className="px-1 py-2 text-sm text-[var(--color-muted-fg)] hover:text-[var(--color-fg)]"
           >
-            filtered — clear
+            filtered (clear)
           </a>
         )}
       </form>
@@ -181,7 +180,7 @@ export default async function DunningPage({
           description={
             filtered
               ? 'Try clearing the status filter.'
-              : 'Nothing in recovery — a case appears here when a subscription payment fails and the subscription goes past due.'
+              : 'Nothing in recovery. A case appears here when a subscription payment fails and the subscription goes past due.'
           }
         />
       ) : (

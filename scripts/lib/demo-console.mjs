@@ -10,25 +10,25 @@
  *   1. Both walkthroughs have to cut from a terminal to a REAL BROWSER (the
  *      Next.js app signing a user up, the operator panel showing that user).
  *      asciinema cannot film a browser, so those videos would have to be two
- *      recordings stitched in ffmpeg — two clocks, two frame rates, a seam.
+ *      recordings stitched in ffmpeg, two clocks, two frame rates, a seam.
  *      Rendering the terminal into the same Playwright page means one
  *      continuous take, and the cut to the live app is just a `page.goto`.
  *   2. It is a second toolchain (a Rust binary and a Python package) that
  *      nobody has installed, on top of the ffmpeg + Playwright the repo
  *      already requires for `pnpm demo:record`.
- *   3. Its visual language — a real font, a real cursor, a real palette — is
+ *   3. Its visual language, a real font, a real cursor, a real palette, is
  *      not the panel walkthrough's, and these three videos sit on the same
  *      site. Here the caption bar, the colours and the encoder settings are
  *      literally the same code.
  *
  * The commands are REAL. `run()` spawns the process, waits for it, and streams
  * its actual stdout/stderr into the pane. Nothing on screen is typed prose
- * pretending to be output — if `npm install` prints a different summary
+ * pretending to be output, if `npm install` prints a different summary
  * tomorrow, the next recording shows the different summary.
  *
  * SECRETS. Every string that reaches the DOM goes through `redact()` at one
  * choke point (`push`), which masks Application keys and JWTs. Unlike the panel
- * video — which has to blur a value the panel itself renders — the secret is
+ * video, which has to blur a value the panel itself renders, the secret is
  * never in the document at all, so there is no frame to catch it in. The CSS
  * blur rule is kept anyway, injected before first paint, as a second line of
  * defence for anything a subprocess might print that the pattern misses.
@@ -62,7 +62,7 @@ const esc = (s) =>
  *
  * Deliberately NOT an `addInitScript`. Both walkthroughs navigate away to a
  * real application mid-take, and an init script would keep re-asserting
- * `html,body{background:#100d0c}` into that app's document — repainting the
+ * `html,body{background:#100d0c}` into that app's document, repainting the
  * customer's own app in the terminal's colours, on camera. It ships inside the
  * shell document instead, which `setContent` delivers atomically with the
  * markup, so there is still no unstyled first frame.
@@ -107,7 +107,7 @@ const CONSOLE_CSS = `
 /**
  * Hide Next.js's floating dev indicator.
  *
- * It pins itself to the bottom-left corner — exactly where the caption bar is —
+ * It pins itself to the bottom-left corner, exactly where the caption bar is,
  * and sat on top of the step number for the whole panel section of the first
  * cut. The demo app turns it off properly via `devIndicators: false` in its own
  * config; the operator panel is a real app in this repository and its config is
@@ -115,7 +115,7 @@ const CONSOLE_CSS = `
  *
  * This removes something that exists only in `next dev`. A deployed panel has
  * no such badge, so hiding it makes the recording MORE representative, not
- * less — it is the one thing on screen that a viewer could not reproduce.
+ * less, it is the one thing on screen that a viewer could not reproduce.
  */
 export const HIDE_DEV_OVERLAY_INIT = () => {
   const ensure = () => {
@@ -193,7 +193,7 @@ const KEYWORDS =
   /\b(import|from|export|default|const|let|async|await|function|return|class|implements|new|throw|if|else|try|catch|typeof|extends|interface|type|as)\b/g;
 
 /**
- * Tokenize the line FIRST, then emit — never run replacements over markup this
+ * Tokenize the line FIRST, then emit, never run replacements over markup this
  * function already produced.
  *
  * The chained-`String.replace` version of this was subtly broken in a way worth
@@ -201,7 +201,7 @@ const KEYWORDS =
  * rewrote the `class` inside the `<span class="str">` that the string pass had
  * just inserted, producing `<span <span class="kw">class</span>="str">`. The
  * browser parsed that as a malformed tag, swallowed the opening `<span `, and
- * rendered a literal `class="str">` in the middle of every import line — on
+ * rendered a literal `class="str">` in the middle of every import line, on
  * camera, in the first cut.
  */
 function tint(line) {
@@ -222,7 +222,7 @@ function tint(line) {
     const ch = src[i];
     const rest = src.slice(i);
 
-    // Comment — runs to end of line, nothing inside it is tinted further.
+    // Comment, runs to end of line, nothing inside it is tinted further.
     // `src[i - 1] !== ':'` keeps `http://…` out of it; a .env file full of URLs
     // otherwise renders as one long grey comment from the scheme onwards.
     if ((rest.startsWith('//') && src[i - 1] !== ':') || ch === '#') {

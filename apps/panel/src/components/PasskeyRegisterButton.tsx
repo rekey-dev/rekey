@@ -5,7 +5,7 @@
  *
  * Server-actions pass us the options + expectedChallenge; we drive the
  * authenticator via @simplewebauthn/browser then post the response back.
- * Stays a thin client glue layer — verification + persistence live on the
+ * Stays a thin client glue layer, verification + persistence live on the
  * API side.
  */
 
@@ -50,7 +50,7 @@ export function PasskeyRegisterButton({ start, complete }: Props): React.JSX.Ele
       await complete(fd);
     } catch (e: unknown) {
       // A redirect (e.g. revalidate + navigate on success) surfaces as a
-      // NEXT_REDIRECT error — re-throw so it isn't shown as a failure.
+      // NEXT_REDIRECT error, re-throw so it isn't shown as a failure.
       if (isRedirectError(e)) throw e;
       const msg =
         e instanceof Error && e.message

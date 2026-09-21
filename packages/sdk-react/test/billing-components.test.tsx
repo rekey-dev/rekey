@@ -1,5 +1,5 @@
 /**
- * Billing widgets — <PricingTable> + <CheckoutButton>.
+ * Billing widgets, <PricingTable> + <CheckoutButton>.
  *
  * The load-bearing behavior here is the org-billing gate: when an app bills
  * per-team and the user has no active team, checkout will fail server-side, so
@@ -69,6 +69,75 @@ describe('<PricingTable> — price formatting', () => {
   it('labels the credit-pack CTA "Buy" rather than the upgrade label', () => {
     render(<PricingTable plans={[CREDIT]} checkoutAction={noop} />);
     expect(screen.getByRole('button', { name: 'Buy' })).not.toBeNull();
+  });
+});
+
+describe('<PricingTable> trial eligibility', () => {
+  // The whole point of the eligibility endpoint: render "Start 14 days free"
+  // or "Choose" from the ANSWER, so the buyer finds out at the button rather
+  // than at a 409 BILLING_TRIAL_ALREADY_USED after they commit.
+  const ELIGIBLE = [{ planSlug: 'pro_monthly', trialDays: 14, eligible: true }];
+  const REDEEMED = [{ planSlug: 'pro_monthly', trialDays: 14, eligible: false }];
+
+  it('offers the trial when this buyer is eligible', () => {
+    render(<PricingTable plans={[PRO]} checkoutAction={noop} trialEligibility={ELIGIBLE} />);
+    expect(screen.getByRole('button', { name: /start 14 days free/i })).not.toBeNull();
+  });
+
+  it('shows the ordinary CTA when the buyer has already used their trial', () => {
+    // Advertising a trial here is exactly what gets refused at checkout.
+    render(<PricingTable plans={[PRO]} checkoutAction={noop} trialEligibility={REDEEMED} />);
+    expect(screen.queryByRole('button', { name: /free/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /choose/i })).not.toBeNull();
+  });
+
+  it('leaves the table unchanged when no eligibility is supplied', () => {
+    // Backward compatibility: every existing caller passes nothing, and a plan
+    // "having" a trial is not a statement that THIS buyer may start it.
+    render(<PricingTable plans={[PRO]} checkoutAction={noop} />);
+    expect(screen.getByRole('button', { name: /choose/i })).not.toBeNull();
+  });
+
+  it('does not promise a trial from trialDays alone, with no answer for the buyer', () => {
+    const withTrial: PricingPlan = { ...PRO, trialDays: 14 };
+    render(<PricingTable plans={[withTrial]} checkoutAction={noop} />);
+    expect(screen.queryByRole('button', { name: /free/i })).toBeNull();
+  });
+
+  it('says "1 day" rather than "1 days"', () => {
+    render(
+      <PricingTable
+        plans={[PRO]}
+        checkoutAction={noop}
+        trialEligibility={[{ planSlug: 'pro_monthly', trialDays: 1, eligible: true }]}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Start 1 day free' })).not.toBeNull();
+  });
+
+  it('marks only the plan the answer names', () => {
+    const { container } = render(
+      <PricingTable plans={[PRO, CREDIT]} checkoutAction={noop} trialEligibility={ELIGIBLE} />,
+    );
+    expect(screen.getByRole('button', { name: /start 14 days free/i })).not.toBeNull();
+    // The credit pack keeps its own CTA; it was not in the answer.
+    expect(screen.getByRole('button', { name: 'Buy' })).not.toBeNull();
+    // And the trial CTA is still a real checkout form carrying the plan slug.
+    const trialInput = container.querySelector('input[name="planSlug"][value="pro_monthly"]');
+    expect(trialInput?.closest('form')).not.toBeNull();
+  });
+
+  it('still suppresses the CTA for the current plan', () => {
+    render(
+      <PricingTable
+        plans={[PRO]}
+        checkoutAction={noop}
+        currentPlanSlug="pro_monthly"
+        trialEligibility={ELIGIBLE}
+      />,
+    );
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(screen.queryByText(/current plan/i)).not.toBeNull();
   });
 });
 

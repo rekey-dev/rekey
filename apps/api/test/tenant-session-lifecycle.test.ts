@@ -1,5 +1,5 @@
 /**
- * Operator session lifecycle — everything that happens to a panel session
+ * Operator session lifecycle, everything that happens to a panel session
  * after sign-in.
  *
  * `tenant-auth.test.ts` covers sign-up / sign-in / invitations / workspace
@@ -7,16 +7,17 @@
  * rotation and its reuse detection, sign-out, the session list and its
  * per-session revoke, sign-out-everywhere, forgot/reset-password, and
  * change-password. Those are the routes that decide whether a stolen operator
- * token stays useful — the panel is a workspace-takeover surface.
+ * token stays useful, the panel is a workspace-takeover surface.
  *
  * `TENANT_SESSION_INVALID` (middleware/tenant-session.ts) is asserted here too:
  * it is the refusal every one of these routes leans on and nothing pinned it.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { invalidateOperatorAuth } from '../src/lib/operator-auth-cache.js';
 
 interface Session {
   user: { id: string; email: string };
@@ -61,7 +62,7 @@ describe('operator session lifecycle', () => {
     return r.json().data as Session;
   }
 
-  function me(accessToken: string): ReturnType<typeof app.inject> {
+  function me(accessToken: string): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'GET',
       url: '/api/v1/tenant/auth/me',
@@ -69,7 +70,7 @@ describe('operator session lifecycle', () => {
     });
   }
 
-  function refresh(refreshToken: string): ReturnType<typeof app.inject> {
+  function refresh(refreshToken: string): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'POST',
       url: '/api/v1/tenant/auth/refresh',
@@ -113,6 +114,40 @@ describe('operator session lifecycle', () => {
     })).toBe(0);
   });
 
+  // tenant_refresh_tokens allows one live row per session (unique partial
+  // index, migration 20260915120000). Racing refreshes must still resolve to
+  // one winner and REUSED for the rest, never a unique violation as a 500.
+  it('concurrent refreshes of one token: one winner, the rest REUSED, never a 500', async () => {
+    const s = await signUp(uniqueEmail('race'));
+
+    const results = await Promise.all(Array.from({ length: 8 }, () => refresh(s.refreshToken)));
+    expect(results.filter((r) => r.statusCode === 200)).toHaveLength(1);
+    for (const r of results.filter((x) => x.statusCode !== 200)) {
+      expect(r.statusCode).toBe(401);
+      expect(r.json().error.code).toBe('REFRESH_TOKEN_REUSED');
+    }
+    expect(await prisma.tenantRefreshToken.count({
+      where: { tenantUserId: s.user.id, replacedById: null, revokedAt: null },
+    })).toBeLessThanOrEqual(1);
+  });
+
+  it('the database refuses a second live operator row in one session', async () => {
+    const s = await signUp(uniqueEmail('one-head'));
+    const head = await prisma.tenantRefreshToken.findFirstOrThrow({
+      where: { tenantUserId: s.user.id, replacedById: null, revokedAt: null },
+    });
+    await expect(
+      prisma.tenantRefreshToken.create({
+        data: {
+          tenantUserId: s.user.id,
+          tokenHash: `dup-${head.id}`,
+          expiresAt: head.expiresAt,
+          sessionId: head.sessionId,
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'P2002' });
+  });
+
   it('refresh with an unknown token is REFRESH_TOKEN_INVALID, not a 500', async () => {
     const res = await refresh('rp_op_not_a_real_refresh_token');
     expect(res.statusCode).toBe(401);
@@ -143,7 +178,7 @@ describe('operator session lifecycle', () => {
     expect(out.statusCode).toBe(200);
     expect((out.json().data as { signedOut: boolean }).signedOut).toBe(true);
 
-    // The refresh is dead — but as a REVOKED token, not a reused one. The
+    // The refresh is dead, but as a REVOKED token, not a reused one. The
     // operator signed this device out themselves; replaying its token is the
     // device not having noticed, not an attacker holding a spent link in the
     // chain (which is `REFRESH_TOKEN_REUSED`, and does cascade).
@@ -224,7 +259,7 @@ describe('operator session lifecycle', () => {
     // The kept session still refreshes...
     expect((await refresh(b.refreshToken)).statusCode).toBe(200);
     // ...and the revoked one does not, as a deliberate revocation rather than
-    // reuse — so it does not take the survivor with it. See the next test.
+    // reuse, so it does not take the survivor with it. See the next test.
     const dead = await refresh(a.refreshToken);
     expect(dead.statusCode).toBe(401);
     expect(dead.json().error.code).toBe('REFRESH_TOKEN_REVOKED');
@@ -251,7 +286,7 @@ describe('operator session lifecycle', () => {
 
     // The revoked device does not know it was revoked; its next scheduled
     // refresh replays a now-revoked token. That used to read as chain
-    // compromise and revoke EVERY token for the operator — including the
+    // compromise and revoke EVERY token for the operator, including the
     // session they deliberately kept, which is the opposite of what "revoke
     // this device" says. `refresh` now separates the two histories a revoked
     // token can have (see the `replacedById` branch in tenant-auth.service):
@@ -289,6 +324,51 @@ describe('operator session lifecycle', () => {
         where: { tenantUserId: first.user.id, revokedAt: null },
       }),
     ).toBe(0);
+  });
+
+  it('revoking one session refuses its access token; the other session keeps working without a refresh', async () => {
+    const email = uniqueEmail('sid');
+    const a = await signUp(email);
+    const b = await signIn(email);
+    // Past the sign-in second, so a regression back to the per-operator stamp
+    // (compared at second granularity) would refuse B and fail this test.
+    await new Promise((r) => setTimeout(r, 1_100));
+
+    const sessions = (
+      await app.inject({
+        method: 'GET',
+        url: '/api/v1/tenant/auth/sessions',
+        headers: { authorization: `Bearer ${b.accessToken}` },
+      })
+    ).json().data as { items: Array<{ id: string }> };
+    const oldest = sessions.items[sessions.items.length - 1]!;
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/tenant/auth/sessions/${oldest.id}`,
+      headers: { authorization: `Bearer ${b.accessToken}` },
+    });
+    expect(del.statusCode).toBe(200);
+
+    const refused = await me(a.accessToken);
+    expect(refused.statusCode).toBe(401);
+    expect(refused.json().error.code).toBe('TENANT_SESSION_INVALID');
+    expect((await me(b.accessToken)).statusCode).toBe(200);
+  });
+
+  it('a password change still refuses the access tokens of every operator session', async () => {
+    const email = uniqueEmail('sid-pw');
+    const a = await signUp(email);
+    const b = await signIn(email);
+    await new Promise((r) => setTimeout(r, 1_100));
+    const changed = await app.inject({
+      method: 'POST',
+      url: '/api/v1/tenant/auth/change-password',
+      headers: { authorization: `Bearer ${a.accessToken}` },
+      payload: { currentPassword: 'pw-one-two-three', newPassword: 'a-new-and-longer-pass-7q2x' },
+    });
+    expect(changed.statusCode).toBe(200);
+    expect((await me(a.accessToken)).statusCode).toBe(401);
+    expect((await me(b.accessToken)).statusCode).toBe(401);
   });
 
   it('an operator cannot revoke another operator\'s session', async () => {
@@ -380,7 +460,7 @@ describe('operator session lifecycle', () => {
     });
     // No enumeration oracle: 200 either way, and nothing that reveals the miss.
     //
-    // `delivered` is asserted because it is the field that *did* reveal it —
+    // `delivered` is asserted because it is the field that *did* reveal it,
     // this test checked only `resetToken` while the body next to it answered
     // `false` for a miss and `true` for a hit. See
     // test/auth-hardening-operator.test.ts for the both-sides comparison.
@@ -445,8 +525,13 @@ describe('operator session lifecycle', () => {
     expect((await me(s.accessToken)).statusCode).toBe(200);
 
     await prisma.tenantUser.delete({ where: { id: s.user.id } });
+    // Nothing in the API deletes an operator today, so this delete goes round
+    // it, and round the auth cache (lib/operator-auth-cache.ts) too. A deletion
+    // path added later must invalidate exactly like this, or the deleted
+    // operator keeps working for up to OPERATOR_AUTH_CACHE_TTL_MS.
+    invalidateOperatorAuth(s.user.id);
 
-    // The JWT still verifies — the DB re-check is what closes the door.
+    // The JWT still verifies, the DB re-check is what closes the door.
     const res = await me(s.accessToken);
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('TENANT_SESSION_INVALID');

@@ -77,7 +77,7 @@ export function MemberRoleSelect({
         <p className="mt-1 text-sm text-[var(--color-muted-fg)]">
           {email} will have <strong>{next}</strong> access to this workspace.
           {next === 'OWNER'
-            ? ' Owners can manage billing, members, and every application — grant this only to people you fully trust.'
+            ? ' Owners can manage billing, members, and every application. Grant this only to people you fully trust.'
             : ''}
         </p>
         <div className="mt-4 flex items-center justify-end gap-2">

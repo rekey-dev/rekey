@@ -37,7 +37,7 @@ Add `--json` to any command for machine-readable output.
 
 ## Status
 
-Phase 2.0 scaffold. Everything below in "Implemented" is real and wired to the API; everything under "Planned" **does not exist yet** — invoking it prints commander's unknown-command error.
+Ships with the 2.2.0 release line. Everything below in "Implemented" is real and wired to the API; everything under "Planned" **does not exist yet**, invoking it prints commander's unknown-command error.
 
 ### Implemented
 
@@ -48,8 +48,14 @@ All commands talk to the **admin surface** (`/api/v1/admin/*`) and need `REKEY_U
 | `rekey version` | Print the CLI version. No env needed. `rekey --version` / `-V` print the same thing; the subcommand is the one that honours `--json`. |
 | `rekey doctor` | Config + connectivity diagnosis (`/health` probe, env checks). Run this first. |
 | `rekey init` | One-shot bootstrap: create tenant → application → first API key. With `--json` the document is `{ tenant, application, apiKey }` at the top level — no `success`/`data` envelope on the success path — so the secret is at **`apiKey.rawKey`**, printed exactly once. (The `{ success: false, error }` envelope appears only on failure, on stderr.) |
-| `rekey apps list \| get <id> \| create` | Application CRUD. |
-| `rekey plans list \| create \| set-active` | Plan management (`--amount` is the smallest currency unit — integer). |
+| `rekey apps list \| get <id> \| create` | Application CRUD. `create` takes `--environment PRODUCTION\|STAGING\|DEVELOPMENT`, which fixes the key prefix (`rp_live_` / `rp_test_`) and defaults to DEVELOPMENT. |
+| `rekey plans list \| create \| set-active` | Plan management (`--amount` is the smallest currency unit, an integer). `create` makes **SUBSCRIPTION** plans only, see below. |
+
+#### `plans create` is subscription-only
+
+The super-admin route behind it implements SUBSCRIPTION plans and nothing else. This command used to carry `--kind`, `--license-kind`, `--meter-slug`, `--credits-amount` and friends; the route discarded them and answered 201, so `--kind LICENSE` reported success and created a subscription. Those flags are refused now, and the route rejects an unknown key instead of dropping it.
+
+Create LICENSE, USAGE and CREDIT plans in the panel, or with `POST /api/v1/tenant/applications/:id/plans` and an operator token, which implements every kind (and `trialDays`).
 
 ### Planned (not yet implemented)
 

@@ -3,12 +3,12 @@
  *
  * The hosted portal serves the end-users of ANY opted-in Application, resolved
  * by the `<slug>` in the URL (portal.rekey.dev/<slug>). It holds **no
- * per-app secret key** — it identifies each app by fetching that app's PUBLIC
+ * per-app secret key**, it identifies each app by fetching that app's PUBLIC
  * config (incl. its publishable key) and authorizes users with their own token.
  *
- *   REKEY_URL      — base URL of the Rekey API (server-side fetches + the
+ *   REKEY_URL     , base URL of the Rekey API (server-side fetches + the
  *                      publishable-key client both hit this).
- *   PORTAL_BASE_URL  — public URL of this portal (checkout return URLs).
+ *   PORTAL_BASE_URL , public URL of this portal (checkout return URLs).
  *                      Required in production: a wrong value sends a paying
  *                      customer somewhere that isn't this portal AFTER their
  *                      card is charged, so it fails loud rather than guessing.
@@ -25,7 +25,7 @@ export function rekeyApiUrl(): string {
 }
 
 /**
- * Public base URL of this portal — used to build checkout success/cancel URLs.
+ * Public base URL of this portal, used to build checkout success/cancel URLs.
  *
  * No production fallback. This value is handed to the payment provider as the
  * place to send the customer back to once they have paid; a localhost default

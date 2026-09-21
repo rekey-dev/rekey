@@ -1,8 +1,8 @@
 /**
  * The two cancellation questions, kept apart.
  *
- * `cancelsAtPeriodEnd` was a prediction about an action not yet taken — "if I
- * cancel now, do they keep the rest of the period?" — with a name everyone
+ * `cancelsAtPeriodEnd` was a prediction about an action not yet taken, "if I
+ * cancel now, do they keep the rest of the period?", with a name everyone
  * read as a state: "is this already ending?". It returns true for every
  * healthy ACTIVE subscriber, so the misreading hides the cancel control from
  * exactly the people who could use it, and labels a PAST_DUE subscriber's

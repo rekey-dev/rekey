@@ -1,5 +1,5 @@
 /**
- * Unapplied payments — a succeeded charge that matches no local subscription
+ * Unapplied payments, a succeeded charge that matches no local subscription
  * must be recorded AND surfaced as a case, for every provider.
  *
  * The Razorpay half is a deliberate behaviour change, not a new feature on top
@@ -7,7 +7,7 @@
  * unmatched Razorpay payment entirely: no Payment row, no case, no log of the
  * money anywhere. The flag preserved the posture of the old bespoke handler
  * rather than protecting anything, and the cost of keeping it is that a
- * Razorpay buyer's money can arrive and leave no trace at all — which an
+ * Razorpay buyer's money can arrive and leave no trace at all, which an
  * operator cannot refund, because they cannot see it.
  *
  * These call the applier directly. The webhook routes are covered elsewhere;
@@ -49,7 +49,7 @@ beforeAll(async () => {
  * `beforeEach` rather than `beforeAll`.
  *
  * `test/setup.ts` truncates every domain table before each test, so a fixture
- * built once in `beforeAll` is gone by the time the first test runs — it
+ * built once in `beforeAll` is gone by the time the first test runs, it
  * surfaces as a foreign-key violation inside the applier, several layers from
  * the cause. Creating the rows outright (rather than through sign-up +
  * create-application) also makes the OWNER membership explicit, which is what
@@ -164,7 +164,7 @@ describe('a succeeded payment with no local subscription', () => {
     });
     expect(payments).toHaveLength(1);
     const cases = await prisma.unappliedPayment.findMany({
-      where: { paymentId: payments[0].id },
+      where: { paymentId: payments[0]!.id },
     });
     // Two cases for one payment would show the operator the same money twice
     // and let them refund it twice.

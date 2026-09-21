@@ -1,7 +1,7 @@
 /**
  * PKCE on the generic OIDC provider.
  *
- * Without this the provider could not talk to any issuer that requires PKCE —
+ * Without this the provider could not talk to any issuer that requires PKCE,
  * which OAuth 2.1 mandates, which Okta/Auth0/Keycloak default to, and which
  * Rekey's OWN Applications enforce: their authorize schema requires
  * `code_challenge`, so "sign in with one of your own Applications" failed
@@ -69,7 +69,7 @@ describe('OidcProvider PKCE', () => {
 
     const q = new URL(url).searchParams;
     expect(q.get('code_challenge_method')).toBe('S256');
-    // The challenge must be the hash, never the verifier — sending the verifier
+    // The challenge must be the hash, never the verifier, sending the verifier
     // in the redirect would hand an interceptor the very secret PKCE exists to
     // withhold.
     const expected = createHash('sha256').update(verifier, 'ascii').digest('base64url');
@@ -94,7 +94,7 @@ describe('OidcProvider PKCE', () => {
   });
 
   it('still sends the standard parameters alongside PKCE', async () => {
-    // Guards against the PKCE insert displacing something — the regression that
+    // Guards against the PKCE insert displacing something, the regression that
     // would break every existing OIDC deployment.
     stubDiscovery(doc({ code_challenge_methods_supported: ['S256'] }));
     const url = await new OidcProvider().buildAuthUrlAsync({

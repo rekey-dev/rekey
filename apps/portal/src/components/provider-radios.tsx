@@ -1,7 +1,7 @@
 /**
  * "Pay with…" radio group for the checkout confirm dialog. Plain uncontrolled
  * radios so the browser submits the checked one as `provider` in the form's
- * FormData — zero client JS. The first provider (the geo router's top pick) is
+ * FormData, zero client JS. The first provider (the geo router's top pick) is
  * checked by default. Rendered only when an app has more than one provider; with
  * one (or none) the server-side router picks automatically.
  */

@@ -3,7 +3,7 @@
  *
  * The request-log feature flushes its in-memory buffer in a Fastify `onClose`
  * hook so the last batch survives a deploy/restart. That hook only runs if
- * something calls `app.close()` — Node does NOT do this on SIGTERM by default.
+ * something calls `app.close()`, Node does NOT do this on SIGTERM by default.
  * `registerGracefulShutdown` is the missing trigger.
  *
  * These tests drive the shutdown path directly (via the function it returns)
@@ -40,7 +40,7 @@ describe('registerGracefulShutdown', () => {
     await app.ready();
 
     const appId = `shutdown-flush-${Date.now()}`;
-    // Enqueue a row WITHOUT flushing — it lives only in the in-memory buffer,
+    // Enqueue a row WITHOUT flushing, it lives only in the in-memory buffer,
     // exactly the state the process would be in when a SIGTERM lands.
     recordApiRequest({
       method: 'GET',
@@ -50,7 +50,7 @@ describe('registerGracefulShutdown', () => {
       applicationId: appId,
     });
 
-    // Precondition: nothing persisted yet — the row is buffer-only.
+    // Precondition: nothing persisted yet, the row is buffer-only.
     expect(
       await prisma.apiRequestLog.count({ where: { applicationId: appId } }),
     ).toBe(0);
@@ -78,7 +78,7 @@ describe('registerGracefulShutdown', () => {
 
     await shutdown('SIGTERM');
     // Second invocation (e.g. SIGINT after SIGTERM, or a repeated signal) must
-    // not re-run app.close() — which would reject on an already-closed app.
+    // not re-run app.close(), which would reject on an already-closed app.
     await expect(shutdown('SIGINT')).resolves.toBeUndefined();
     expect(onShutdownComplete).toHaveBeenCalledOnce();
   });

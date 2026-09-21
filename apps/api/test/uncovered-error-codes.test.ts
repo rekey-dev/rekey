@@ -2,18 +2,18 @@
  * Error codes whose *behaviour* mattered and was unasserted.
  *
  * The suite defines 234 distinct `code:` values and asserted about 60% of
- * them. Chasing the percentage would be busywork — most of the rest are
+ * them. Chasing the percentage would be busywork, most of the rest are
  * validation strings. These are the ones where the code is the contract: an
  * SDK, the panel, or a customer's own error handling branches on it, and
  * getting it wrong is a security or money outcome rather than a typo.
  *
  * Each case here also pins the *behaviour behind* the code, not just its
- * spelling — an expired magic link must not mint a session, a taken OAuth
+ * spelling, an expired magic link must not mint a session, a taken OAuth
  * identity must not be re-pointed, an inactive coupon must not discount.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { registerOAuthProvider } from '../src/modules/oauth/providers/index.js';
@@ -40,7 +40,7 @@ describe('uncovered error codes', () => {
 
   afterAll(async () => {
     // The OAuth registry is process-global and this file overwrites 'google'.
-    // singleFork shares it with every other file — restore it.
+    // singleFork shares it with every other file, restore it.
     registerOAuthProvider(new GoogleProvider());
     await app.close();
   });
@@ -205,7 +205,7 @@ describe('uncovered error codes', () => {
       const data = r.json().data as { accessToken: string; endUser: { id: string } };
       return { accessToken: data.accessToken, id: data.endUser.id };
     }
-    function link(accessToken: string): ReturnType<typeof app.inject> {
+    function link(accessToken: string): Promise<LightMyRequestResponse> {
       return app.inject({
         method: 'POST',
         url: '/api/v1/auth/oauth/google/link/complete',
@@ -226,7 +226,7 @@ describe('uncovered error codes', () => {
     expect(stolen.statusCode).toBe(409);
     expect(stolen.json().error.code).toBe('OAUTH_IDENTITY_TAKEN');
 
-    // The identity still belongs to the first user — the refusal is what
+    // The identity still belongs to the first user, the refusal is what
     // stops "sign in with Google" becoming an account-takeover primitive.
     const identity = await prisma.oAuthIdentity.findFirstOrThrow({
       where: { provider: 'google', providerAccountId: sharedGoogleAccountId },
@@ -281,7 +281,7 @@ describe('uncovered error codes', () => {
     function validate(
       f: Bootstrapped & { userToken: string },
       code: string,
-    ): ReturnType<typeof app.inject> {
+    ): Promise<LightMyRequestResponse> {
       return app.inject({
         method: 'POST',
         url: '/api/v1/billing/coupons/validate',
@@ -296,7 +296,7 @@ describe('uncovered error codes', () => {
     it('COUPON_INACTIVE: a deactivated coupon stops discounting', async () => {
       const f = await couponFixture('cinactive');
       await createCoupon(f, { code: 'OFF20', discountType: 'PERCENT', amountOff: 2000 });
-      // Active first — otherwise "refused" proves nothing about the flag.
+      // Active first, otherwise "refused" proves nothing about the flag.
       expect((await validate(f, 'OFF20')).statusCode).toBe(200);
 
       const off = await app.inject({
@@ -338,7 +338,7 @@ describe('uncovered error codes', () => {
     it('COUPON_CURRENCY_MISMATCH: a fixed-amount coupon is not applied across currencies', async () => {
       const f = await couponFixture('ccurrency');
       // The plan is priced in USD; this coupon is denominated in EUR. Applying
-      // it anyway would take 500 *cents* off a dollar price — a silent
+      // it anyway would take 500 *cents* off a dollar price, a silent
       // mispricing, which is exactly why the code exists.
       await createCoupon(f, {
         code: 'EUR5',
@@ -374,7 +374,7 @@ describe('uncovered error codes', () => {
     // JSON schema pins `scopes.items` to the OPERATOR_TOKEN_SCOPES enum, so
     // Fastify rejects the body before the handler runs and the service-level
     // code is unreachable over HTTP. It is defence in depth for any non-HTTP
-    // caller of `operatorTokensService.mint` — covered directly below. Pinned
+    // caller of `operatorTokensService.mint`, covered directly below. Pinned
     // here so nobody "fixes" this to the service code without first removing
     // the schema enum.
     expect(res.json().error.code).toBe('BAD_REQUEST');
@@ -389,7 +389,7 @@ describe('uncovered error codes', () => {
     });
 
     // Silently dropping the unknown entry would produce a token with FEWER
-    // scopes than asked for — the caller would believe it can mint keys and
+    // scopes than asked for, the caller would believe it can mint keys and
     // find out in production. Fail closed instead.
     await expect(
       operatorTokensService.mint({
@@ -450,7 +450,7 @@ describe('uncovered error codes', () => {
     expect(ghost.statusCode).toBe(404);
     expect(ghost.json().error.code).toBe('PLAN_ENTITLEMENT_NOT_FOUND');
 
-    // Real id, wrong plan — the check is `row.planId !== planId`, not just
+    // Real id, wrong plan, the check is `row.planId !== planId`, not just
     // existence, so this is the case that actually exercises the guard.
     const wrongPlan = await app.inject({
       method: 'DELETE',

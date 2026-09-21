@@ -1,9 +1,9 @@
 'use client';
 
 /**
- * Live preview for the coupon "Amount" field — formats the cents/percent
+ * Live preview for the coupon "Amount" field, formats the cents/percent
  * value as the operator types so the cents-vs-dollars ambiguity is
- * removed (UX-AUDIT MEDIUM #20).
+ * removed.
  *
  * Wraps the inputs as a controlled trio so we can render the preview
  * underneath. Same input semantics as before: `amountOff` is the number

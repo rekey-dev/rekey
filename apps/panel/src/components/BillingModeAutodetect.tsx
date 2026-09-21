@@ -3,10 +3,9 @@
 /**
  * Watches the API-key / key-id input within the billing-credentials form
  * and flips the sibling `<select name="mode">` to `live` or `test` based
- * on the prefix (sk_live_, sk_test_, rzp_live_, rzp_test_, …). Resolves
- * UX-AUDIT MEDIUM #23 — first-time operators previously pasted `sk_live`
- * while the mode silently stayed at `test`, storing the key in the wrong
- * mode.
+ * on the prefix (sk_live_, sk_test_, rzp_live_, rzp_test_, …). First-time
+ * operators previously pasted `sk_live` while the mode silently stayed at
+ * `test`, storing the key in the wrong mode.
  *
  * Pure progressive enhancement: lookup happens via the parent <form>'s
  * elements collection. Operator can still override the auto-pick.
@@ -14,13 +13,13 @@
 
 import * as React from 'react';
 
-/** Default input names to watch — covers Stripe (apiKey) and Razorpay (keyId). */
+/** Default input names to watch, covers Stripe (apiKey) and Razorpay (keyId). */
 const WATCH_NAMES = ['apiKey', 'keyId'];
 
 export function BillingModeAutodetect({
   /**
    * Credential input names to watch. Registry-driven callers (the P4
-   * discovery-rendered forms) pass every credential field key — inputs whose
+   * discovery-rendered forms) pass every credential field key, inputs whose
    * values never carry a `_live_`/`_test_` marker simply never flip the mode.
    */
   names = WATCH_NAMES,

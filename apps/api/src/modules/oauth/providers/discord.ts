@@ -1,7 +1,7 @@
 import { StaticOAuth2Provider } from './_oauth2-base.js';
 
 /**
- * Discord OAuth 2.0 — uses /users/@me to fetch identity.
+ * Discord OAuth 2.0, uses /users/@me to fetch identity.
  *
  * Discord uses `verified` (not `email_verified`) on the user object.
  */

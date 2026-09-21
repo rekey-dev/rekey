@@ -1,11 +1,11 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { EmptyState } from './EmptyState';
 
 /**
  * Shared "billing is off" placeholder for the billing-group pages (plans,
  * coupons, licenses, payments, usage, dunning). The Billing tab group is
- * hidden while billing is disabled, but the routes stay reachable by URL —
+ * hidden while billing is disabled, but the routes stay reachable by URL,
  * instead of an empty table, point the operator at the master switch.
  * Mirrors the guard the Revenue page already renders.
  */

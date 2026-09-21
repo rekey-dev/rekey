@@ -3,7 +3,7 @@
  *
  * setup → confirm → (sign-in challenges fire from now on)
  *
- * The sign-in MFA challenge is NOT here — sign-in lives in `modules/auth`. An
+ * The sign-in MFA challenge is NOT here, sign-in lives in `modules/auth`. An
  * enrolled user gets an `mfaChallengeToken` instead of a session, exchanged at
  * `POST /api/v1/auth/mfa-verify`. So no session exists until the second factor
  * passes.
@@ -24,12 +24,13 @@ import { requireUserSession } from '../../middleware/user-session.js';
 import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
 import { ok, okFlag, errs } from '../../lib/openapi.js';
+import { CREDENTIAL_BODY_LIMIT } from '../../lib/body-limits.js';
 
 const CodeBody = z.object({ code: z.string().min(1).max(64) });
 
 /**
  * Errors from `requirePublishableOrSecretKey` + `requireScope('auth:write')` +
- * `requireUserSession` — every route in this module runs all three as
+ * `requireUserSession`, every route in this module runs all three as
  * `onRequest` hooks.
  */
 const USER_SESSION_ERRORS = {
@@ -49,7 +50,7 @@ const USER_SESSION_ERRORS = {
 
 /**
  * Added on every mutating route (all but GET /status) by the module's
- * `preHandler` hook — `refuseWhileImpersonating`.
+ * `preHandler` hook, `refuseWhileImpersonating`.
  */
 const IMPERSONATION_DESC =
   "IMPERSONATION_ACTION_FORBIDDEN — an impersonated session cannot change this account's " +
@@ -73,14 +74,14 @@ function assertMfaEnabled(application: Application): void {
 export async function mfaRoutes(app: FastifyInstance): Promise<void> {
   // Accepts the publishable key, like `POST /auth/mfa-verify` (the sign-in MFA
   // challenge) already does. `requireUserSession` is the authorizer for every
-  // route here — each one acts only on `req.endUser`. Secret-only enrollment
+  // route here, each one acts only on `req.endUser`. Secret-only enrollment
   // meant a browser-only app could be *challenged* for MFA it could never
   // *enroll*, and `authConfig.mfa='required'` hard-stopped those users.
   app.addHook('onRequest', requirePublishableOrSecretKey);
   app.addHook('onRequest', requireScope('auth:write'));
   app.addHook('onRequest', requireUserSession);
   // Every mutating route here rebinds or removes the user's second factor, and
-  // the effect outlives the 5-minute impersonation token permanently — an
+  // the effect outlives the 5-minute impersonation token permanently, an
   // operator could point the victim's MFA at their own authenticator and the
   // victim would see only "my 2FA changed". `/status` stays readable; it is the
   // question a support session is actually asking.
@@ -133,11 +134,12 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/setup',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       // Rate-limited like the other code-bearing routes here: once a factor is
       // enrolled this accepts a `code`, so it becomes a guessing surface.
       config: { rateLimit: authRateLimit(10) },
       // `code` is optional (first-time setup sends none), so a browser caller
-      // may POST no body. Same normalisation as /disable — see the note there
+      // may POST no body. Same normalisation as /disable, see the note there
       // for why declaring `schema.body` alone would 400 every existing SDK.
       preValidation: async (req) => {
         if (req.body === undefined || req.body === null) req.body = {};
@@ -151,7 +153,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
         summary: 'Mint a new TOTP secret + 10 backup codes (one-time-show). Not enrolled until /setup-confirm.',
         description:
           'When MFA is **already enrolled**, browser callers (publishable key) must send ' +
-          '`code` — a current TOTP or an unused backup code. Re-running setup resets ' +
+          '`code`, a current TOTP or an unused backup code. Re-running setup resets ' +
           'enrollment, so without that guard a stolen access token could rebind the second ' +
           'factor to an authenticator the attacker controls, which is the same outcome ' +
           '/mfa/disable refuses. First-time setup requires nothing, and server-side callers ' +
@@ -165,12 +167,12 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
             {
               type: 'object',
               properties: {
-                otpauthUrl: { type: 'string', description: 'otpauth:// URI — render as a QR code.' },
+                otpauthUrl: { type: 'string', description: 'otpauth:// URI, render as a QR code.' },
                 backupCodes: {
                   type: 'array',
                   items: { type: 'string' },
                   description:
-                    'Plaintext one-time backup codes. Shown exactly ONCE — only their SHA-256 ' +
+                    'Plaintext one-time backup codes. Shown exactly ONCE, only their SHA-256 ' +
                     'hashes are stored, so they cannot be recovered later.',
                 },
                 warning: { type: 'string' },
@@ -189,7 +191,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       assertMfaEnabled(req.application!);
-      // Only for a browser caller, and only over a COMPLETED enrollment —
+      // Only for a browser caller, and only over a COMPLETED enrollment,
       // matching `mfaService.disable`'s posture field for field. `verify`
       // returns false for `enrolledAt: null`, so demanding a code
       // unconditionally would make restarting an abandoned enrollment
@@ -214,7 +216,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
       }
       const result = await mfaService.setup({
         endUser: { ...req.endUser!, passwordHash: null } as never,
-        // Keep "Rekey" branded — could be made app-aware via Application.name later.
+        // Keep "Rekey" branded, could be made app-aware via Application.name later.
         issuer: 'Rekey',
       });
       return reply.status(201).send({
@@ -232,7 +234,8 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/setup-confirm',
     {
-      // Code-guessing surface — tight HTTP cap layered on top of the Redis
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
+      // Code-guessing surface, tight HTTP cap layered on top of the Redis
       // per-credential limiter (which fails open when Redis is down).
       config: { rateLimit: authRateLimit(10) },
       schema: {
@@ -272,7 +275,8 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/challenge',
     {
-      // Code-guessing surface — tight HTTP cap layered on top of the Redis
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
+      // Code-guessing surface, tight HTTP cap layered on top of the Redis
       // per-credential limiter (which fails open when Redis is down).
       config: { rateLimit: authRateLimit(10) },
       schema: {
@@ -282,7 +286,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
           { apiKey: [], userToken: [] },
         ],
         summary: 'Verify a TOTP or backup code (step-up auth). Returns { ok: bool }.',
-        description: 'Backup codes are single-use — consumed on success.',
+        description: 'Backup codes are single-use, consumed on success.',
         body: {
           type: 'object',
           required: ['code'],
@@ -290,7 +294,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
         },
         response: {
           // Not okFlag(): unlike the other routes here, a wrong code is a
-          // normal 200 `{ok: false}`, not an error — okFlag()'s `ok` is
+          // normal 200 `{ok: false}`, not an error, okFlag()'s `ok` is
           // pinned to the literal `true`.
           200: ok(
             {
@@ -298,7 +302,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
               properties: { ok: { type: 'boolean' } },
               required: ['ok'],
             },
-            'Whether the code verified. Backup codes are single-use — consumed on success.',
+            'Whether the code verified. Backup codes are single-use, consumed on success.',
           ),
           ...errs({
             ...USER_SESSION_ERRORS,
@@ -321,9 +325,10 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/disable',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       // `code` is optional, so a caller with nothing to send may POST with no
-      // body at all — which is exactly what `disableMfa(accessToken)` in
+      // body at all, which is exactly what `disableMfa(accessToken)` in
       // @rekey.dev/node does (it passes `undefined`, so the transport sets neither
       // Content-Type nor body). Declaring `schema.body` makes Fastify validate
       // `undefined` against `{type:'object'}` and answer 400 "body must be
@@ -341,7 +346,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
         ],
         summary: 'Disable MFA for the current user',
         description:
-          'Browser callers (publishable key) must send `code` — a current TOTP or an unused backup code. ' +
+          'Browser callers (publishable key) must send `code`, a current TOTP or an unused backup code. ' +
           'Server-side callers using an Application secret key are not required to, preserving the original contract.',
         body: {
           type: 'object',

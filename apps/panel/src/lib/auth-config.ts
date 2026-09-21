@@ -5,9 +5,9 @@ import type { ApplicationRow } from './api';
  * that display it. Pure, no rendering.
  *
  * They live together because the applications list renders THREE statements
- * about one application from the same payload — the onboarding checklist's
+ * about one application from the same payload, the onboarding checklist's
  * "configure an auth method" step, the row's method count, and the row's status
- * badges — and each held its own rule. For an OAuth-only application the three
+ * badges, and each held its own rule. For an OAuth-only application the three
  * disagreed on one screen: the checklist called it unconfigured, the row read
  * "0 auth methods", and the badges called it healthy.
  */
@@ -34,7 +34,7 @@ export function authConfigVisible(app: Pick<ApplicationRow, 'authConfig'>): bool
 }
 
 /**
- * Can anybody sign in at all — a primary method, or an OAuth provider?
+ * Can anybody sign in at all, a primary method, or an OAuth provider?
  *
  * Empty `methods` is NOT the same as "no sign-in": `AuthConfigSchema` documents
  * it as an OAuth-only application, and `updateAuthConfig` names removing
@@ -43,10 +43,8 @@ export function authConfigVisible(app: Pick<ApplicationRow, 'authConfig'>): bool
  * `methods: ['password']`), so this is always a half-finished setup.
  *
  * One rule, three callers: the badge, the onboarding checklist's "configure an
- * auth method" step, and the row's method count. They disagreed before this
- * existed — an OAuth-only application had the checklist calling it unconfigured,
- * the row reading "0 auth methods", and the badges calling it healthy, all on
- * one screen.
+ * auth method" step, and the row's method count. See the module docblock for
+ * why they used to disagree.
  */
 export function signInReachable(
   app: Pick<ApplicationRow, 'authConfig' | 'oauthConfig'>,

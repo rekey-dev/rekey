@@ -1,12 +1,12 @@
 /**
- * Per-subscription entitlement overrides — the write path.
+ * Per-subscription entitlement overrides, the write path.
  *
  * `Subscription.entitlementOverrides` decides what a subscription actually
  * grants: `entitlements.service.ts` merges it over the plan's rows on every
  * resolve. Until this module existed it was read in five places and written in
  * none, so the documented way to sell a bespoke deal without minting a private
  * plan ("raising that allowance means setting `entitlementOverrides` on the
- * subscription" — the hosted commercial layer) required SQL
+ * subscription", the hosted commercial layer) required SQL
  * against production.
  *
  * ## The rule every validation here follows
@@ -14,7 +14,7 @@
  * **The resolver silently drops what it cannot use.** `applyOverrides` ignores
  * a non-finite quantity, never matches a malformed key, and only ADDs rows for
  * `FEATURE:`. Each of those is a value an operator can store, believe they
- * sold, and never deliver — with nothing anywhere reporting a problem.
+ * sold, and never deliver, with nothing anywhere reporting a problem.
  *
  * So this module refuses what the read path would ignore. Every rule below
  * exists because the alternative is not an error but a silence.
@@ -58,7 +58,7 @@ const OVERRIDE_KEY_RE = new RegExp(`^(${KINDS.join('|')}):[A-Za-z0-9_.:-]{0,64}$
  *
  * A plan created with a legacy `kind` and no explicit entitlement rows is
  * resolved by `synthesizeLegacy`, which emits a single row with `key: ''`. Its
- * lookup key is therefore `"CREDIT:"` — and that is the only key an override
+ * lookup key is therefore `"CREDIT:"`, and that is the only key an override
  * could use to reach it. Requiring at least one character refused exactly the
  * one form that works, with a message saying it "never matches an entitlement",
  * which was the precise opposite of true.
@@ -74,7 +74,7 @@ const OVERRIDE_KEY_RE = new RegExp(`^(${KINDS.join('|')}):[A-Za-z0-9_.:-]{0,64}$
  * Same reasoning as `METADATA_MAX_BYTES` and the same failure it avoids: the
  * merge is sparse and additive, so a stream of small patches is exactly how you
  * would grow this without any single request looking large. 8 KB is far above
- * any real deal — a few dozen `KIND:key` entries — and far below the size at
+ * any real deal, a few dozen `KIND:key` entries, and far below the size at
  * which it starts to matter that this blob is inlined into every webhook
  * payload for the subscription and re-resolved on `GET /billing/entitlements`,
  * which customer apps call on page load.
@@ -97,7 +97,7 @@ export interface PatchOverridesInput {
 
 export interface PatchOverridesResult {
   subscription: Subscription;
-  /** Plan ⊕ overrides — what this subscriber now holds. */
+  /** Plan ⊕ overrides, what this subscriber now holds. */
   entitlements: ResolvedEntitlement[];
   /** True when the resolved entitlements differ from before the write. */
   changed: boolean;
@@ -135,8 +135,8 @@ function currentOverrides(value: Prisma.JsonValue | null): Record<string, unknow
  * Stable, order-insensitive shape of a resolved entitlement set, for deciding
  * whether a write actually changed anything.
  *
- * Compares what the entitlement GRANTS — value, quantity, price-per-unit,
- * licence kind, rollover — and not object identity or array order, because
+ * Compares what the entitlement GRANTS, value, quantity, price-per-unit,
+ * licence kind, rollover, and not object identity or array order, because
  * `applyOverrides` appends added FEATURE rows at the end and a set that merely
  * reordered has not changed what the customer holds.
  */
@@ -168,7 +168,7 @@ export const entitlementOverridesService = {
     }
 
     // One transaction around read, write and announce. `enqueueSubscriptionEvent`
-    // does no network I/O — it writes delivery ROWS — so the event either
+    // does no network I/O, it writes delivery ROWS, so the event either
     // commits with the change that caused it or not at all. The alternative,
     // announcing after the commit, drops the event whenever the process dies in
     // between and leaves a consumer projecting entitlements that have moved.
@@ -177,7 +177,7 @@ export const entitlementOverridesService = {
 
       // A dead subscription is not a deal to adjust.
       //
-      // `resolveForSubscription` does NOT gate on status — it answers "what do
+      // `resolveForSubscription` does NOT gate on status, it answers "what do
       // this subscription's plan and overrides describe", which is the right
       // question for a live one. So without this guard, editing a CANCELED or
       // EXPIRED subscription resolves its full entitlement set, reports
@@ -185,7 +185,7 @@ export const entitlementOverridesService = {
       // entitlements for something nobody is paying for.
       //
       // Downstream that is not cosmetic. A consumer projecting entitlements
-      // onto its own state has no status to check — the payload is a set of
+      // onto its own state has no status to check, the payload is a set of
       // entitlements and a plan slug, and cancellation does not change the plan
       // row. Rekey Cloud would write the paid ceiling back onto a churned
       // customer's workspace, and nothing would ever emit again to remove it.
@@ -206,8 +206,8 @@ export const entitlementOverridesService = {
 
       // Resolved BEFORE the write, so "did this change anything" is answered
       // against what the subscriber actually held rather than against the
-      // stored blob. Two different blobs can grant the same thing — removing an
-      // override that merely restated the plan's own value is the common case —
+      // stored blob. Two different blobs can grant the same thing, removing an
+      // override that merely restated the plan's own value is the common case,
       // and it is the grant that consumers care about.
       const before = await entitlementsService.resolveForSubscription(sub, tx).catch(() => []);
 
@@ -233,7 +233,7 @@ export const entitlementOverridesService = {
         where: { id: subscriptionId },
         // An empty object is stored as NULL rather than `{}`. Both resolve
         // identically, and NULL is what a subscription that never had an
-        // override looks like — so removing the last one returns the row to a
+        // override looks like, so removing the last one returns the row to a
         // state indistinguishable from never having been touched, instead of
         // leaving a tombstone that reads as "someone configured something".
         data: {
@@ -324,10 +324,27 @@ function mergePatch(
       // `parseFeatureValue` under the old type and quietly becomes something
       // else: "yes" on a BOOL row parses as `false` (only the exact string
       // "true" is truthy there), and `true` on an INT row parses to null, which
-      // a consumer then treats as an absent allowance. Both are silent — the
+      // a consumer then treats as an absent allowance. Both are silent, the
       // write succeeds, the webhook fires, and the customer gets the opposite
       // of what was sold. This is the one silent-drop path in `applyOverrides`
       // that the other rules here do not already cover.
+      // The empty string is not a value, and it is the one shape this module
+      // could accept while the resolver ignored it -- which is the exact
+      // invariant the module exists to hold ("the write path refuses what the
+      // read path would ignore", docs/specs/entitlement-overrides.md).
+      //
+      // It parses, so it is not null, but every `if (features.x)` gate reads it
+      // as absent, and the plan-level `validate` refuses `''` outright, so a
+      // plan can never carry one. Removing an override is `null`, which is
+      // already handled above; `''` is what somebody sends when they mean that
+      // and guess.
+      if (value === '') {
+        throw invalid(
+          `The value for "${key}" is an empty string, which resolves to nothing.`,
+          'Send `null` to remove this override and let the plan value apply again. An empty string is not a feature value: it survives parsing but every consumer reads it as absent, and a plan cannot carry one either.',
+        );
+      }
+
       const row = planRows.get(key);
       if (row && row.valueType !== null) {
         assertFitsValueType(key, row.valueType, value);
@@ -367,7 +384,7 @@ function mergePatch(
     // Per-kind semantics, delegated rather than restated.
     //
     // `entitlementsService.validate` already encodes every rule that makes a
-    // quantity meaningful — CREDIT must be positive, a SEATS licence needs at
+    // quantity meaningful, CREDIT must be positive, a SEATS licence needs at
     // least one seat, and a USAGE row with no included units must carry a price
     // "because an entitlement granting no units and costing nothing is
     // indistinguishable from not having one". Those rules guard the PLAN and
@@ -395,6 +412,30 @@ function mergePatch(
       throw e;
     }
 
+    // A licence quantity means seats and nothing else. `validate` constrains it
+    // only for SEATS, so a quantity on a PERPETUAL or TIMED row passed every
+    // check and is read by no Rekey code at all (it is still on the wire, so an integrator may be reading it): `provision` uses it for seats,
+    // and the licence services never look at it otherwise. That is the shape
+    // this module exists to refuse, stored, reported sold, delivered nowhere.
+    if (row.kind === 'LICENSE' && row.licenseKind !== 'SEATS') {
+      // Branched, because one `fix` cannot serve both. `validate` requires a
+      // `licenseKind` on every LICENSE row and `synthesizeLegacy` only emits one
+      // when the plan has it, so the kind is never null here.
+      //
+      // The TIMED advice deliberately does NOT say "edit the plan's
+      // `licenseDurationDays`". That is a column on `Plan`, so following it
+      // changes the term for every subscriber on that plan -- the "mint a
+      // private plan for one buyer" outcome this module exists to avoid -- and
+      // it would not even help the customer in front of the operator, because
+      // `provision` extends an existing TIMED licence only at the next renewal.
+      throw invalid(
+        `"${key}" is a ${row.licenseKind} licence, so it has no seat count to override.`,
+        row.licenseKind === 'TIMED'
+          ? 'A licence quantity is its number of seats, and only a SEATS licence has one. A TIMED licence has a term, not seats, and its length is a plan-level property that applies to every subscriber on the plan; there is no per-subscription term override. Drop the quantity from this patch, or sell seats by giving the plan a SEATS licence entitlement.'
+          : 'A licence quantity is its number of seats, and only a SEATS licence has one. A PERPETUAL licence has neither seats nor a term. Drop the quantity from this patch, or sell seats by giving the plan a SEATS licence entitlement.',
+      );
+    }
+
     next[key] = quantity;
   }
 
@@ -405,7 +446,7 @@ function mergePatch(
  * Refuse a FEATURE value that its plan row's `valueType` cannot carry.
  *
  * `BOOL` is the sharp one: `parseFeatureValue` treats ONLY the exact string
- * "true" as true, so every other value — "yes", "1", 1 — reads as `false`. An
+ * "true" as true, so every other value, "yes", "1", 1, reads as `false`. An
  * operator switching a flag on with "yes" would switch it off and be told the
  * write succeeded.
  *

@@ -6,7 +6,7 @@
  * the default for that (Application, eventKey) pair; deleting the row
  * reverts back to here.
  *
- * Templates are deliberately plain and inbox-safe — table layout, inline
+ * Templates are deliberately plain and inbox-safe, table layout, inline
  * styles, no external CSS, no images. Each one declares the variables it
  * uses; the renderer only substitutes registered names (see `events.ts`).
  */
@@ -22,7 +22,7 @@ export interface DefaultTemplate {
   text?: string;
 }
 
-// Shared shell — single-column layout that renders predictably in Gmail,
+// Shared shell, single-column layout that renders predictably in Gmail,
 // Outlook, Apple Mail. Brand-stripped on purpose; operators customise.
 function shell(bodyHtml: string): string {
   return `<!doctype html>
@@ -47,7 +47,7 @@ ${bodyHtml}
  *
  * The guard is not decoration. `renderTemplate` substitutes an unresolvable
  * `{{var}}` with the empty string, so an unguarded button renders as
- * `<a href="">Get started</a>` — a link to nowhere, sitting in a real
+ * `<a href="">Get started</a>`, a link to nowhere, sitting in a real
  * customer's inbox looking clickable. A missing button is honest; a dead
  * one is not. Pass the bare variable name, e.g. `cta('appUrl', 'Get started')`.
  */

@@ -1,5 +1,6 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
+import { RecordHeader } from '@/components/RecordHeader';
 import { notFound, redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { errorQuery, readErrorFlash, api, PanelApiError, type OrganizationDetail, type OrganizationRoleRow, type EndUserRow, type OrgBillingDto } from '@/lib/api';
@@ -13,6 +14,7 @@ import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
 import { StatusPill } from '@/components/StatusPill';
 import { EmptyState } from '@/components/EmptyState';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
 import { Banner } from '@/components/Banner';
@@ -39,7 +41,7 @@ const ERR: Record<string, string> = {
   ORGANIZATION_MEMBER_NOT_FOUND: 'That end-user is not a member.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage organizations.',
   LICENSE_NOT_FOUND: 'That pooled license no longer exists for this org.',
-  LICENSE_REVOKED: 'That license is revoked — its key cannot be revealed.',
+  LICENSE_REVOKED: 'That license is revoked, so its key cannot be revealed.',
 };
 
 /**
@@ -61,9 +63,6 @@ function RoleBadge({
     </Badge>
   );
 }
-
-
-// ─── Actions ─────────────────────────────────────────────────────────
 
 const orgBase = (appId: string, orgId: string): string =>
   `/api/v1/tenant/applications/${encodeURIComponent(appId)}/organizations/${encodeURIComponent(orgId)}`;
@@ -149,7 +148,7 @@ async function updateOrg(applicationId: string, orgId: string, formData: FormDat
 /**
  * Mint + reveal the raw key for an org-pooled license. Org license keys are
  * issued during provisioning and stored hash-only, so the raw value is never
- * readable afterwards — this rotates the key to deliver a fresh one (shown
+ * readable afterwards, this rotates the key to deliver a fresh one (shown
  * once). Rotating resets the key and clears existing activations, so it's
  * confirmed before submit.
  */
@@ -182,8 +181,6 @@ async function revealOrgLicenseKey(
     throw err;
   }
 }
-
-// ─── Page ────────────────────────────────────────────────────────────
 
 export default async function OrganizationDetailPage({
   params,
@@ -260,23 +257,37 @@ export default async function OrganizationDetailPage({
 
   return (
     <div className="space-y-6">
-      <header className="space-y-1.5">
-        <Link
-          href={`/applications/${id}/organizations`}
-          className="inline-flex items-center gap-1 rounded text-xs text-[var(--color-muted-fg)] transition-colors hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
-        >
-          ← All organizations
-        </Link>
-        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h2 className="text-lg font-semibold tracking-tight text-[var(--color-fg)]">{org.name}</h2>
-          <Badge tone="neutral" mono>{org.slug}</Badge>
-          <span className="text-xs text-[var(--color-muted-fg)]">
+      {/* One of four detail pages that each hand-rolled this same header with
+          their own back link. The trail replaces the link, it says where you
+          are as well as how to leave, and the Organizations sub-tab above is
+          already highlighted, so a bare "← All organizations" was navigation
+          to somewhere visible. */}
+      <RecordHeader
+        crumbs={[
+          { label: 'Organizations', href: `/applications/${id}/organizations` },
+          { label: org.name },
+        ]}
+        title={
+          <>
+            <span className="min-w-0 truncate">{org.name}</span>
+            <Badge tone="neutral" mono>
+              {org.slug}
+            </Badge>
+          </>
+        }
+        meta={
+          <>
+            <span className="font-mono">{org.id}</span>
+            <span aria-hidden="true" className="px-1.5 text-[var(--color-faint-fg)]">
+              ·
+            </span>
             created {formatDate(org.createdAt)}
-          </span>
+          </>
+        }
+        action={
           <EditOrgModal applicationId={id} orgId={orgId} name={org.name} metadata={metadataPretty} error={editOrgError} errorDetail={errorDetail} errorFix={errorFix} />
-        </div>
-        <p className="font-mono text-xs text-[var(--color-muted-fg)]">{org.id}</p>
-      </header>
+        }
+      />
 
       {error && !addMemberError && !editOrgError && (
         <Banner tone="error">
@@ -288,7 +299,7 @@ export default async function OrganizationDetailPage({
         <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-500/60 dark:bg-amber-950/60 space-y-2">
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-              Pooled license key (shown once — copy now)
+              Pooled license key (shown once, copy now)
             </p>
             <CopyButton value={reveal} label="Copy key" />
           </div>
@@ -299,7 +310,7 @@ export default async function OrganizationDetailPage({
             Hand this to the organization. The team's machines validate with{' '}
             <code className="font-mono">POST /api/v1/licenses/verify</code>.
             {revealReset > 0 && (
-              <> {revealReset} existing activation{revealReset === 1 ? '' : 's'} were reset — any machine on the old key must re-verify.</>
+              <> {revealReset} existing activation{revealReset === 1 ? '' : 's'} were reset, so any machine on the old key must re-verify.</>
             )}
           </p>
         </div>
@@ -333,7 +344,7 @@ export default async function OrganizationDetailPage({
                 <TR key={m.id} hover>
                   <TD>{m.email}</TD>
                   <TD>
-                    <form action={setMemberRole.bind(null, id, orgId, m.endUserId)} className="flex items-center gap-2">
+                    <ActionForm action={setMemberRole.bind(null, id, orgId, m.endUserId)} className="flex items-center gap-2">
                       <select name="role" defaultValue={m.role} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)]">
                         {roleOptionsFor(m.role).map((r) => (
                           <option key={r} value={r}>
@@ -343,17 +354,17 @@ export default async function OrganizationDetailPage({
                         ))}
                       </select>
                       <SubmitButton pendingLabel="Saving…" className="text-xs font-medium text-[var(--color-primary)] hover:underline disabled:opacity-60">Save</SubmitButton>
-                    </form>
+                    </ActionForm>
                   </TD>
                   <TD muted className="text-xs">
                     {formatDate(m.createdAt)}
                   </TD>
                   <TD align="right">
-                    <form action={removeMember.bind(null, id, orgId, m.endUserId)} className="inline">
+                    <ActionForm action={removeMember.bind(null, id, orgId, m.endUserId)} className="inline">
                       <ConfirmButton confirm={`Remove ${m.email} from "${org.name}"? Their end-user account is not deleted.`}>
                         Remove
                       </ConfirmButton>
-                    </form>
+                    </ActionForm>
                   </TD>
                 </TR>
               ))}
@@ -472,7 +483,7 @@ export default async function OrganizationDetailPage({
           {billing.licenses.length > 0 && (
             <div className="space-y-2">
               <div className="text-xs text-[var(--color-muted-fg)]">
-                Pooled licenses <span className="text-[var(--color-faint-fg)]">— seats shared by the team</span>
+                Pooled licenses <span className="text-[var(--color-faint-fg)]">(seats shared by the team)</span>
               </div>
               <Table minWidth="min-w-[44rem]">
                 <THead>
@@ -499,14 +510,14 @@ export default async function OrganizationDetailPage({
                       </TD>
                       <TD align="right">
                         {l.status === 'ACTIVE' && (
-                          <form action={revealOrgLicenseKey.bind(null, id, orgId, l.id)} className="inline">
+                          <ActionForm action={revealOrgLicenseKey.bind(null, id, orgId, l.id)} className="inline">
                             <ConfirmButton
                               variant="subtle"
-                              confirm={`Reveal the key for ${l.keyPrefix}…? This mints a NEW key (shown once) and resets any existing activations — machines on the old key must re-verify. Org keys are stored hash-only, so this is the only way to obtain one.`}
+                              confirm={`Reveal the key for ${l.keyPrefix}…? This mints a NEW key (shown once) and resets any existing activations, so machines on the old key must re-verify. Org keys are stored hash-only, so this is the only way to obtain one.`}
                             >
                               Reveal key
                             </ConfirmButton>
-                          </form>
+                          </ActionForm>
                         )}
                       </TD>
                     </TR>
@@ -514,7 +525,7 @@ export default async function OrganizationDetailPage({
                 </TBody>
               </Table>
               <p className="text-[11px] text-[var(--color-faint-fg)]">
-                Keys are stored hash-only. “Reveal key” mints a fresh key and shows it once — use it to deliver the org its key.
+                Keys are stored hash-only. “Reveal key” mints a fresh key and shows it once. Use it to deliver the org its key.
               </p>
             </div>
           )}
@@ -533,8 +544,6 @@ export default async function OrganizationDetailPage({
     </div>
   );
 }
-
-// ─── Modals ──────────────────────────────────────────────────────────
 
 function AddMemberModal({
   applicationId,
@@ -560,7 +569,7 @@ function AddMemberModal({
       trigger="+ Add member"
       triggerClassName="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-surface-muted)] whitespace-nowrap"
     >
-      <form action={addMember.bind(null, applicationId, orgId)} className="space-y-3">
+      <ActionForm action={addMember.bind(null, applicationId, orgId)} className="space-y-3">
         {error && (
           <Banner tone="error">
             <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
@@ -594,7 +603,7 @@ function AddMemberModal({
             </SubmitButton>
           </>
         )}
-      </form>
+      </ActionForm>
     </Modal>
   );
 }
@@ -622,7 +631,7 @@ function EditOrgModal({
       trigger="Edit"
       triggerClassName="text-xs text-[var(--color-fg)] font-medium hover:underline cursor-pointer"
     >
-      <form action={updateOrg.bind(null, applicationId, orgId)} className="space-y-3">
+      <ActionForm action={updateOrg.bind(null, applicationId, orgId)} className="space-y-3">
         {error && (
           <Banner tone="error">
             <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
@@ -640,7 +649,7 @@ function EditOrgModal({
         <SubmitButton pendingLabel="Saving…">
           Save changes
         </SubmitButton>
-      </form>
+      </ActionForm>
     </Modal>
   );
 }

@@ -100,6 +100,8 @@ Docs (`docs/`):
 | [react-components.md](docs/react-components.md) | The drop-in React component library |
 | [billing.md](docs/billing.md) · [billing-providers.md](docs/billing-providers.md) · [coupons.md](docs/coupons.md) | Plans, checkout, providers, discounts |
 | [webhooks.md](docs/webhooks.md) | Outbound events, signature verification, retries |
+| [devices.md](docs/devices.md) | Device-bound sessions, the `max_devices` entitlement, licence seats |
+| [external-billing.md](docs/external-billing.md) | Bring your own billing: an inbound-only provider fed by your own system's events |
 | [portal.md](docs/portal.md) | Hosted customer self-service billing portal |
 | [errors.md](docs/errors.md) | Error envelope + the complete code reference |
 | [jwks.md](docs/jwks.md) · [oidc-provider.md](docs/oidc-provider.md) · [tenant-auth.md](docs/tenant-auth.md) · [mcp.md](docs/mcp.md) · [data-erasure.md](docs/data-erasure.md) | Everything else |

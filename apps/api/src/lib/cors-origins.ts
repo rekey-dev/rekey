@@ -28,14 +28,14 @@ const TTL_MS = 30_000;
  * calling the API.
  *
  * Two changes bound it. The `where` skips applications that contribute nothing
- * to the union — no CORS origins registered AND no hosted portal — which is
+ * to the union, no CORS origins registered AND no hosted portal, which is
  * most of them, because `corsOrigins` is opt-in configuration. And the read is
  * paged with a cursor, so peak memory is one page rather than the whole table.
  *
  * MAX_APPS is a real, lossy ceiling: past it, later applications' origins are
  * simply not in the union and their browser requests are refused. That is
- * deliberate — an unbounded read of a multi-tenant table on a 30s timer is the
- * worse failure — and the number is far above any plausible deployment. The
+ * deliberate, an unbounded read of a multi-tenant table on a 30s timer is the
+ * worse failure, and the number is far above any plausible deployment. The
  * warning below is what tells an operator they have reached it.
  */
 const APPS_PAGE_SIZE = 1_000;
@@ -86,7 +86,7 @@ async function load(): Promise<void> {
     }
     cursor = page[page.length - 1]!.id;
   }
-  // The shared hosted-portal host serves every opted-in app from one origin —
+  // The shared hosted-portal host serves every opted-in app from one origin,
   // when this deployment runs one at all (PUBLIC_PORTAL_URL has no default).
   const portalOrigin = portalBaseOrigin();
   if (anyPortal && portalOrigin) next.add(portalOrigin);
@@ -99,7 +99,7 @@ export async function primeCorsOrigins(): Promise<void> {
   await load();
 }
 
-/** Force an immediate reload — call after a tenant mutates its origins. */
+/** Force an immediate reload, call after a tenant mutates its origins. */
 export async function refreshCorsOrigins(): Promise<void> {
   await load();
 }

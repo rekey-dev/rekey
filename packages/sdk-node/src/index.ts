@@ -1,9 +1,9 @@
 /**
- * @rekey.dev/node — server SDK for Rekey.
+ * @rekey.dev/node, server SDK for Rekey.
  *
  * One client instance per Application. Construct with the Application's
  * secret key (`rp_live_…` or `rp_test_…`) and the URL of your Rekey
- * deployment. Never ship the secret key to the browser — for browser code
+ * deployment. Never ship the secret key to the browser, for browser code
  * use `@rekey.dev/react` with the Application's public key instead.
  *
  * @example Smoke-test your credentials
@@ -29,7 +29,6 @@ import type {
   JwksDto,
   ChangePasswordRequest,
   CheckoutResultDto,
-  CouponDto,
   ConsumeCreditsRequest,
   ConsumeCreditsResultDto,
   CreateCheckoutRequest,
@@ -39,6 +38,12 @@ import type {
   ForgotPasswordRequest,
   ForgotPasswordResultDto,
   LicenseVerifyResultDto,
+  LicenseDeactivateRequest,
+  LicenseDeactivateResultDto,
+  DeviceDto,
+  EndUserDeviceDto,
+  TrialEligibilityDto,
+  DeviceStatusType,
   MfaVerifyRequest,
   OAuthAuthServerMetadata,
   OAuthIntrospectionResponse,
@@ -55,6 +60,7 @@ import type {
   ResetPasswordRequest,
   SignInOutcomeDto,
   SignInRequest,
+  DeviceBindingRequest,
   SignUpRequest,
   SubscriptionDto,
   UsageAggregateDto,
@@ -65,7 +71,7 @@ import type {
 
 // The canonical error class lives in shared-types; import it for internal use
 // and re-export below so @rekey.dev/node's public surface is unchanged. The
-// `/error` subpath is the zod-free module the class actually lives in — same
+// `/error` subpath is the zod-free module the class actually lives in, same
 // class object the barrel re-exports, so `instanceof` is identical.
 import { RekeyError } from '@rekey.dev/shared-types/error';
 
@@ -78,6 +84,7 @@ export type {
   MfaVerifyRequest,
   SignInOutcomeDto,
   SignInRequest,
+  DeviceBindingRequest,
   SignUpRequest,
   RefreshRequest,
   ForgotPasswordRequest,
@@ -98,6 +105,17 @@ export type {
   BillingProviderInfoDto,
   ValidateCouponRequest,
   ValidateCouponResultDto,
+  // `billing.getProviders()` already returned these nested on
+  // BillingProviderInfoDto; naming the capabilities type is what lets a caller
+  // write a function that takes one (`canRunTrials(caps)`) without reaching
+  // into the transitive shared-types dependency.
+  BillingProviderCapabilities,
+  // `billing.getTrialEligibility()` resolves to these. Without them, the only
+  // way to type a pricing page's trial answers was to import from the BROWSER
+  // package or from shared-types directly.
+  TrialEligibilityDto,
+  TrialEligibilityItemDto,
+  TrialPolicyType,
   CouponDiscountTypeValue,
   PlanIntervalType,
   PlanKindType,
@@ -117,6 +135,16 @@ export type {
   LicenseDto,
   LicenseStatusType,
   LicenseVerifyResultDto,
+  LicenseActivationDto,
+  LicenseDeactivateRequest,
+  LicenseDeactivateResultDto,
+  DeviceDto,
+  // What `devices.listMine()` / `devices.releaseMine()` resolve to (an
+  // end-user sees no operator notes and no IP), and the `details` payload on
+  // the DEVICE_LIMIT_REACHED refusal those two methods exist to answer.
+  EndUserDeviceDto,
+  DeviceLimitDetails,
+  DeviceStatusType,
   UsageRecordDto,
   UsageAggregateDto,
   SubscriptionStatusType,
@@ -135,8 +163,8 @@ export type {
  * Default per-request deadline, in milliseconds. Matches the timeout the Rekey
  * API itself uses when it POSTs your outbound webhooks.
  *
- * Without a deadline the effective timeout is undici's `headersTimeout` — five
- * minutes — so a single unreachable Rekey deployment can pin one of your
+ * Without a deadline the effective timeout is undici's `headersTimeout`, five
+ * minutes, so a single unreachable Rekey deployment can pin one of your
  * request handlers for that long. Ten seconds is long enough for any endpoint
  * this SDK calls and short enough to fail a page instead of hanging it.
  */
@@ -146,13 +174,13 @@ export const DEFAULT_TIMEOUT_MS = 10_000;
 export interface RekeyConfig {
   /** Base URL of the Rekey API. e.g. `https://rekey.example.com` */
   apiUrl: string;
-  /** Secret key for one Application — `rp_live_…` or `rp_test_…`. Never ship to the browser. */
+  /** Secret key for one Application, `rp_live_…` or `rp_test_…`. Never ship to the browser. */
   secretKey: string;
   /** Optional fetch override (test stubs, custom keep-alive agents, etc.). */
   fetch?: typeof fetch;
   /**
    * Deadline for every request this client makes, in milliseconds.
-   * Default {@link DEFAULT_TIMEOUT_MS} (10 000). Pass `0` to disable — only do
+   * Default {@link DEFAULT_TIMEOUT_MS} (10 000). Pass `0` to disable, only do
    * that if something upstream of you already bounds the call.
    *
    * On expiry the promise rejects with a `RekeyError` whose code is
@@ -160,7 +188,7 @@ export interface RekeyConfig {
    */
   timeoutMs?: number | undefined;
   /**
-   * Client-wide abort signal — aborting it cancels every in-flight request
+   * Client-wide abort signal, aborting it cancels every in-flight request
    * (server shutdown, request-scoped cancellation). Composed with, not
    * replaced by, any per-call `signal`.
    */
@@ -173,7 +201,7 @@ export interface RekeyConfig {
  * addable without a new overload.
  */
 export interface RekeyRequestOptions {
-  /** JSON request body. Omit for GET/DELETE — a present body sets `Content-Type`. */
+  /** JSON request body. Omit for GET/DELETE, a present body sets `Content-Type`. */
   body?: unknown;
   /** Extra headers, merged over the SDK's own (`Authorization`, `Content-Type`). */
   headers?: Record<string, string> | undefined;
@@ -191,12 +219,12 @@ export interface RekeyCallOptions {
   signal?: AbortSignal | undefined;
 }
 
-// RekeyError is the shared class (imported above) — re-exported so the public
+// RekeyError is the shared class (imported above), re-exported so the public
 // API name is preserved and `instanceof` is consistent with @rekey.dev/react.
 export { RekeyError };
 
 /**
- * Outbound webhook event registry — the events Rekey can POST to your app
+ * Outbound webhook event registry, the events Rekey can POST to your app
  * (verify them with `verifyWebhookSignature` below). `WEBHOOK_EVENTS` carries
  * `{ name, description }` pairs for introspection/autocomplete;
  * `KNOWN_WEBHOOK_EVENTS` is just the names. Mirrors the API's registry exactly.
@@ -205,7 +233,7 @@ export { RekeyError };
  * ```ts
  * import { WEBHOOK_EVENTS, isKnownWebhookEvent, type WebhookEventEnvelope } from '@rekey.dev/node';
  *
- * for (const e of WEBHOOK_EVENTS) console.log(`${e.name} — ${e.description}`);
+ * for (const e of WEBHOOK_EVENTS) console.log(`${e.name}, ${e.description}`);
  *
  * const event = req.body as WebhookEventEnvelope; // after verifyWebhookSignature(...)
  * if (event.type === 'subscription.activated') unlockPlan(event.data);
@@ -219,7 +247,7 @@ export type { WebhookEventType, WebhookEventEnvelope } from '@rekey.dev/shared-t
  * this subscriber the rest of the period they paid for?
  *
  * Exported because a cancel confirmation has to say which outcome the customer
- * is about to get, and it has to say so BEFORE the call — there is no response
+ * is about to get, and it has to say so BEFORE the call, there is no response
  * to read it off. It is the same function the API decides from, not a
  * description of it, so a UI built on it cannot promise a behaviour the server
  * does not have. See its docblock for the cases that still end immediately.
@@ -250,26 +278,30 @@ export class Rekey {
 
   /** Operations on the calling Application itself. */
   public readonly applications: ApplicationsClient;
-  /** Auth operations — sign-in, sign-up, sessions, passkeys, magic-link. */
+  /** Auth operations, sign-in, sign-up, sessions, passkeys, magic-link. */
   public readonly auth: AuthClient;
-  /** Billing operations — plans, checkout, subscriptions, coupons. */
+  /** Billing operations, plans, checkout, subscriptions, coupons. */
   public readonly billing: BillingClient;
-  /** End-user organizations — create, invite, members, role changes. */
+  /** End-user organizations, create, invite, members, role changes. */
   public readonly organizations: OrganizationsClient;
   /** License key verification + activation. */
   public readonly licenses: LicensesClient;
-  /** Usage metering — record events, aggregate windows. */
+  /** Devices, list and release the machines an end-user signs in from. */
+  public readonly devices: DevicesClient;
+  /** End-users, lookup by id or email, bulk import. */
+  public readonly users: UsersClient;
+  /** Usage metering, record events, aggregate windows. */
   public readonly usage: UsageClient;
-  /** Prepaid credits — balance reads, idempotent drawdown, ledger. */
+  /** Prepaid credits, balance reads, idempotent drawdown, ledger. */
   public readonly credits: CreditsClient;
-  /** MCP — validate Rekey-issued MCP tokens from your own MCP server. */
+  /** MCP, validate Rekey-issued MCP tokens from your own MCP server. */
   public readonly mcp: McpClient;
 
   constructor(config: RekeyConfig) {
     if (!config.apiUrl) {
       // Name the Cloud value outright. There is no default and there should
-      // not be one — a wrong default would silently point a self-hosted
-      // deployment's traffic at somebody else's API — but "requires apiUrl"
+      // not be one, a wrong default would silently point a self-hosted
+      // deployment's traffic at somebody else's API, but "requires apiUrl"
       // alone leaves a Rekey Cloud customer with no way to find out what to
       // put, because every example in the docs reads as a placeholder.
       throw new RekeyError({
@@ -298,13 +330,15 @@ export class Rekey {
     this.billing = new BillingClient(this);
     this.organizations = new OrganizationsClient(this);
     this.licenses = new LicensesClient(this);
+    this.devices = new DevicesClient(this);
+    this.users = new UsersClient(this);
     this.usage = new UsageClient(this);
     this.credits = new CreditsClient(this);
     this.mcp = new McpClient(this);
   }
 
   /**
-   * A clone of this client with different call options — the per-call knob for
+   * A clone of this client with different call options, the per-call knob for
    * every wrapped method.
    *
    * Each namespace method (`billing.getPlans()`, `auth.signIn()`, …) has a
@@ -324,7 +358,7 @@ export class Rekey {
    * });
    * ```
    *
-   * Cheap — it rebuilds the namespace objects, holds no connections, and
+   * Cheap, it rebuilds the namespace objects, holds no connections, and
    * shares the same `fetch`.
    */
   with(options: RekeyCallOptions): Rekey {
@@ -343,7 +377,7 @@ export class Rekey {
    * Call a Rekey endpoint this SDK does not wrap yet.
    *
    * This is a **supported** escape hatch, not an internal: when the API grows a
-   * route before the SDK does, use this instead of hand-rolling `fetch` — you
+   * route before the SDK does, use this instead of hand-rolling `fetch`, you
    * keep the auth header, the `{ success, data }` unwrapping, the `RekeyError`
    * mapping (including transport failures) and the deadline. It takes an
    * options object precisely so a future knob does not need a new overload.
@@ -380,6 +414,26 @@ export class Rekey {
     extraHeaders?: Record<string, string> | undefined,
     options?: RekeyCallOptions,
   ): Promise<T> {
+    return (await this.sendWithStatus<T>(method, path, body, extraHeaders, options)).data;
+  }
+
+  /**
+   * @internal Same request as {@link send}, but keeps the HTTP status.
+   *
+   * Almost every endpoint encodes its whole answer in the body, which is why
+   * `send` throws the status away. `POST /billing/subscribe` does not: it
+   * returns the same Subscription under 201 (it just activated the free tier)
+   * and under 200 (the caller already had it, nothing was written). Dropping
+   * the status there would make "you are now on the free tier" and "you already
+   * were" indistinguishable to the caller.
+   */
+  async sendWithStatus<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    extraHeaders?: Record<string, string> | undefined,
+    options?: RekeyCallOptions,
+  ): Promise<{ data: T; status: number }> {
     const res = await this.fetchWithDeadline(
       `${this.apiUrl}${path}`,
       {
@@ -419,11 +473,11 @@ export class Rekey {
       });
     }
 
-    return (json as { success: true; data: T }).data;
+    return { data: (json as { success: true; data: T }).data, status: res.status };
   }
 
   /**
-   * @internal Raw request for the non-enveloped OAuth/MCP endpoints — returns
+   * @internal Raw request for the non-enveloped OAuth/MCP endpoints, returns
    * the parsed JSON as-is (those endpoints emit standard OAuth shapes, not the
    * `{ success, data }` envelope). Throws `RekeyError` on non-2xx, mapping
    * the OAuth `{ error, error_description }` body when present.
@@ -464,7 +518,7 @@ export class Rekey {
   /**
    * @internal The one place `fetch` is called. Applies the deadline, composes
    * the caller's signals, and turns anything the transport throws into a
-   * `RekeyError` — without this, `ECONNREFUSED` escaped as a bare `TypeError`
+   * `RekeyError`, without this, `ECONNREFUSED` escaped as a bare `TypeError`
    * and slipped straight through the documented
    * `catch (e) { if (e instanceof RekeyError) … }` pattern.
    */
@@ -526,7 +580,7 @@ export class Rekey {
 interface Deadline {
   signal: AbortSignal | undefined;
   timeoutMs: number;
-  /** The deadline's own signal — set only when a finite timeout applies. */
+  /** The deadline's own signal, set only when a finite timeout applies. */
   timer: AbortSignal | undefined;
   /** Caller-supplied signals (client-wide and per-call). */
   callerSignals: AbortSignal[];
@@ -568,7 +622,7 @@ function transportError(
     return new RekeyError({
       code: 'REQUEST_ABORTED',
       message: `${where} was aborted by the caller's AbortSignal.`,
-      fix: 'This is your own cancellation — swallow it, or check the signal you passed to `signal` / `Rekey.with({ signal })`.',
+      fix: 'This is your own cancellation, swallow it, or check the signal you passed to `signal` / `Rekey.with({ signal })`.',
       cause,
     });
   }
@@ -594,7 +648,7 @@ function transportError(
 
 /**
  * MCP helpers for customers running their OWN MCP server behind Rekey auth.
- * The hosted MCP server (account tools) is consumed by MCP clients directly —
+ * The hosted MCP server (account tools) is consumed by MCP clients directly,
  * this client is for the "bring your own MCP server" path: validate incoming
  * Rekey-issued tokens, and read the OAuth metadata.
  */
@@ -649,7 +703,7 @@ class ApplicationsClient {
 
   /**
    * Verify credentials and fetch the calling Application. Use this as your
-   * SDK smoke test — if it returns, your secret key is good and you're
+   * SDK smoke test, if it returns, your secret key is good and you're
    * pointed at the right Rekey deployment.
    *
    * @example
@@ -674,7 +728,7 @@ class AuthClient {
    * (e.g. `getCurrentUser(accessToken)`) and a `refreshToken` to renew it.
    *
    * Unless the Application turns `authConfig.sendVerificationEmailOnSignUp`
-   * off, Rekey also emails the verification link — best-effort, so it never
+   * off, Rekey also emails the verification link, best-effort, so it never
    * fails the sign-up, and `sendVerificationEmail` re-sends on demand.
    *
    * @example
@@ -683,7 +737,7 @@ class AuthClient {
    *   email: 'alice@example.com',
    *   password: 'correct-horse-battery-staple',
    * });
-   * // store both in your session — the access token expires in 15 minutes
+   * // store both in your session, the access token expires in 15 minutes
    * ```
    *
    * @throws {RekeyError} `EMAIL_ALREADY_EXISTS` (409) if the email is taken in this Application.
@@ -703,14 +757,14 @@ class AuthClient {
    *     Prompt the user for their TOTP / backup code and call
    *     `mfaVerify({ mfaChallengeToken, code })` to receive a real session.
    *
-   * **Branch on `result.mfaRequired` before reading `accessToken`** — the
+   * **Branch on `result.mfaRequired` before reading `accessToken`**, the
    * MFA-required branch has no session tokens.
    *
-   * @throws {RekeyError} `INVALID_CREDENTIALS` (401) — single code on purpose.
+   * @throws {RekeyError} `INVALID_CREDENTIALS` (401), single code on purpose.
    *   Don't try to distinguish wrong-email from wrong-password from the SDK side either.
    * @throws {RekeyError} `EMAIL_NOT_VERIFIED` (403) when the Application sets
    *   `authConfig.requireEmailVerification` and the user hasn't confirmed their
-   *   address. The password was correct — prompt for the emailed link (or call
+   *   address. The password was correct, prompt for the emailed link (or call
    *   `sendVerificationEmail`), not for the password again.
    */
   signIn(input: SignInRequest): Promise<SignInOutcomeDto> {
@@ -750,19 +804,23 @@ class AuthClient {
   }
 
   /**
-   * Consume a magic-link token. Returns `SignInOutcome` — branch on
+   * Consume a magic-link token. Returns `SignInOutcome`, branch on
    * `mfaRequired` before reading `accessToken`. For MFA-enrolled users
    * the response carries `mfaChallengeToken` and you must complete via
    * `mfaVerify(...)`.
    */
-  verifyMagicLink(input: { token: string }): Promise<SignInOutcomeDto> {
+  verifyMagicLink(input: {
+    token: string;
+    /** Bind the session to a device, see docs/devices.md. */
+    device?: { fingerprint: string; label?: string };
+  }): Promise<SignInOutcomeDto> {
     return this.client.send('POST', '/api/v1/auth/magic-link/verify', input);
   }
 
   /**
    * Begin a passkey authentication ceremony. Returns the WebAuthn options
    * to forward to the browser (`navigator.credentials.get(...)`) along
-   * with `expectedChallenge` — bind the challenge to your session and
+   * with `expectedChallenge`, bind the challenge to your session and
    * pass both back via `verifyPasskeyAuthentication(...)`.
    */
   startPasskeyAuthentication(input?: { email?: string }): Promise<{
@@ -774,12 +832,14 @@ class AuthClient {
 
   /**
    * Complete a passkey authentication. Returns the same `SignInOutcome`
-   * shape as `signIn` — but passkeys are themselves a strong factor, so
+   * shape as `signIn`, but passkeys are themselves a strong factor, so
    * `mfaRequired` will always be `false` in practice.
    */
   verifyPasskeyAuthentication(input: {
     response: unknown;
     expectedChallenge: string;
+    /** Bind the session to a device, see docs/devices.md. */
+    device?: { fingerprint: string; label?: string };
   }): Promise<SignInOutcomeDto> {
     return this.client.send('POST', '/api/v1/auth/passkey/authenticate/complete', input);
   }
@@ -815,7 +875,7 @@ class AuthClient {
   /**
    * List the user's registered passkeys, newest first.
    *
-   * Returns `{items, page}` — `page.total` is the number of passkeys the user
+   * Returns `{items, page}`, `page.total` is the number of passkeys the user
    * has, independent of the window served.
    */
   listPasskeys(
@@ -846,7 +906,7 @@ class AuthClient {
   }
 
   // End-user organization / team methods live on `rekey.organizations.*`
-  // (OrganizationsClient) — the canonical, fuller surface. The earlier
+  // (OrganizationsClient), the canonical, fuller surface. The earlier
   // duplicates here (createOrganization / listMyOrganizations /
   // inviteToOrganization / acceptOrganizationInvitation) were removed to
   // avoid two divergent copies of the same endpoints.
@@ -865,7 +925,7 @@ class AuthClient {
   }
 
   /**
-   * Update the end-user behind a presented access token — their OWN record,
+   * Update the end-user behind a presented access token, their OWN record,
    * and only ever their own: the token identifies the subject, so there is no
    * user id to pass and no way to aim this at anyone else.
    *
@@ -902,22 +962,30 @@ class AuthClient {
 
   /**
    * Exchange a refresh token for a fresh {access, refresh} pair. The presented
-   * refresh is revoked atomically — call this **once** and store the new
+   * refresh is revoked atomically, call this **once** and store the new
    * `refreshToken` from the response immediately.
    *
    * @throws {RekeyError} `REFRESH_TOKEN_REUSED` (401) if you replay an already-used token.
    *   This is a strong signal the original was leaked; treat as compromise.
    * @throws {RekeyError} `REFRESH_TOKEN_EXPIRED` (401) after the 30-day refresh window.
    */
-  refresh(refreshToken: string): Promise<AuthResultDto> {
-    // /auth/refresh returns the same shape as /auth/mfa-verify — always a
+  refresh(
+    refreshToken: string,
+    options: { device?: DeviceBindingRequest } = {},
+  ): Promise<AuthResultDto> {
+    // /auth/refresh returns the same shape as /auth/mfa-verify, always a
     // full session (refresh requires a prior MFA-verified session by
-    // definition).
-    return this.client.send('POST', '/api/v1/auth/refresh', { refreshToken });
+    // definition). `device` identifies the machine presenting the token: a
+    // chain bound at sign-in refuses a different fingerprint, and an unbound
+    // one becomes bound (docs/devices.md).
+    return this.client.send('POST', '/api/v1/auth/refresh', {
+      refreshToken,
+      ...(options.device && { device: options.device }),
+    });
   }
 
   /**
-   * Revoke a refresh token. Idempotent — no-op for unknown tokens. The
+   * Revoke a refresh token. Idempotent, no-op for unknown tokens. The
    * access token paired with this refresh remains valid until its short
    * (15 min) expiry; for true "log out everywhere" semantics, also clear
    * the access token from your client.
@@ -927,14 +995,14 @@ class AuthClient {
   }
 
   /**
-   * Request a password reset for an email. Always succeeds — never tells you
+   * Request a password reset for an email. Always succeeds, never tells you
    * whether the email exists.
    *
    * **Branch on the result.** When the Application has an email transport
    * (BYO Resend/SMTP, or a deployment-wide `RESEND_DEFAULT_API_KEY`) Rekey sends
    * the mail itself and `resetToken` is null. With no transport it falls back to
-   * the original contract and hands the raw token to you — a secret-key caller
-   * only — so you can deliver it with your own provider.
+   * the original contract and hands the raw token to you, a secret-key caller
+   * only, so you can deliver it with your own provider.
    *
    * @example
    * ```ts
@@ -962,7 +1030,7 @@ class AuthClient {
 
   /**
    * Authenticated password change. Pass the user's *current* access token.
-   * On success, every refresh token for the user is revoked — other devices
+   * On success, every refresh token for the user is revoked, other devices
    * are signed out.
    */
   changePassword(accessToken: string, input: ChangePasswordRequest): Promise<{ ok: true }> {
@@ -973,8 +1041,8 @@ class AuthClient {
 
   /**
    * Revoke every refresh token for the calling user. "Sign out of all
-   * devices." The caller's access token remains valid until 15-min expiry
-   * — clear it client-side for full logout.
+   * devices." The caller's access token remains valid until 15-min expiry,
+   * clear it client-side for full logout.
    */
   signOutEverywhere(accessToken: string): Promise<{ revokedCount: number }> {
     return this.client.send(
@@ -1004,7 +1072,7 @@ class AuthClient {
   }
 
   /**
-   * Re-send a verification link to an address, with **no session** — the
+   * Re-send a verification link to an address, with **no session**, the
    * sessionless sibling of `sendVerificationEmail`.
    *
    * This is the route for a user locked out by
@@ -1012,17 +1080,17 @@ class AuthClient {
    * session `sendVerificationEmail` needs, so a user whose first mail never
    * arrived cannot ask for another. Takes the address instead of a token.
    *
-   * **Branch on the result**, exactly as with `requestPasswordReset` — the
+   * **Branch on the result**, exactly as with `requestPasswordReset`, the
    * contract is the same one. It never throws for an unknown address and never
    * discloses whether the address exists, is already verified, or was mailed:
    * a publishable-key caller gets one constant body whatever happened. A
-   * secret-key caller — this SDK — gets the real outcome, and the raw
+   * secret-key caller, this SDK, gets the real outcome, and the raw
    * `verificationToken` when the Application has no email transport configured,
    * so you can deliver it with your own provider.
    *
    * Pass `verifyUrl` containing `{token}` to template the link target. Unlike
    * `sendVerificationEmail`, nothing is sent and no token is minted when no
-   * link can be built at all — pass `verifyUrl`, or set the Application URL
+   * link can be built at all, pass `verifyUrl`, or set the Application URL
    * (Panel → Application → Auth). Mailing a locked-out user a verification
    * message with no button in it helps nobody.
    *
@@ -1076,7 +1144,7 @@ class AuthClient {
     });
   }
 
-  /** Revoke one session by id. Idempotent — `{ revoked: false }` if it isn't this user's. */
+  /** Revoke one session by id. Idempotent, `{ revoked: false }` if it isn't this user's. */
   revokeSession(accessToken: string, sessionId: string): Promise<{ revoked: boolean }> {
     return this.client.send(
       'DELETE',
@@ -1090,7 +1158,7 @@ class AuthClient {
   //
   // The login-step verification is `mfaVerify(...)` above. These manage the
   // user's own TOTP enrollment + step-up challenges. Gated by the
-  // Application's `authConfig.mfa` policy — calls return `MFA_NOT_ENABLED`
+  // Application's `authConfig.mfa` policy, calls return `MFA_NOT_ENABLED`
   // (403) when the policy is "off".
 
   /** MFA enrollment status for the current user, plus the Application's policy. */
@@ -1107,7 +1175,7 @@ class AuthClient {
   /**
    * Begin TOTP enrollment: mints a secret (as an `otpauthUrl` for the QR) and
    * 10 single-show backup codes. **Not enrolled until `confirmMfaSetup(...)`.**
-   * Only SHA-256 hashes of the backup codes are stored — show them once.
+   * Only SHA-256 hashes of the backup codes are stored, show them once.
    */
   mfaSetup(accessToken: string): Promise<{
     otpauthUrl: string;
@@ -1128,7 +1196,7 @@ class AuthClient {
 
   /**
    * Verify a TOTP or backup code as a step-up check (does NOT issue a session).
-   * Backup codes are single-use — consumed on success. Returns `{ ok }`.
+   * Backup codes are single-use, consumed on success. Returns `{ ok }`.
    */
   mfaChallenge(accessToken: string, code: string): Promise<{ ok: boolean }> {
     return this.client.send('POST', '/api/v1/auth/mfa/challenge', { code }, {
@@ -1163,14 +1231,21 @@ class AuthClient {
 
   /**
    * Exchange the provider `code` for a Rekey session. Returns a
-   * `SignInOutcome` — branch on `mfaRequired` before reading `accessToken`.
+   * `SignInOutcome`, branch on `mfaRequired` before reading `accessToken`.
    * Verify the `state` CSRF value yourself before calling.
    */
-  completeOAuth(provider: string, code: string): Promise<SignInOutcomeDto> {
+  completeOAuth(
+    provider: string,
+    code: string,
+    options?: {
+      /** Bind the session to a device, see docs/devices.md. */
+      device?: { fingerprint: string; label?: string };
+    },
+  ): Promise<SignInOutcomeDto> {
     return this.client.send(
       'POST',
       `/api/v1/auth/oauth/${encodeURIComponent(provider)}/callback`,
-      { code },
+      { code, ...(options?.device && { device: options.device }) },
     );
   }
 
@@ -1203,7 +1278,7 @@ class AuthClient {
   }
 
   /**
-   * Complete an OAuth link — attaches the provider identity to the current
+   * Complete an OAuth link, attaches the provider identity to the current
    * user. Refuses on unverified provider emails (account-takeover guard) or
    * when the provider account already belongs to a different user.
    */
@@ -1240,7 +1315,7 @@ class AuthClient {
  *
  * Re-exported from `@rekey.dev/shared-types` so the SDK, the API and the panel
  * all name one shape. Every list method returns {@link Paged}, whose `page`
- * tells you whether there is another window — you no longer have to infer it
+ * tells you whether there is another window, you no longer have to infer it
  * by asking for one row more than you need.
  */
 export type { ListPage, PageMeta, Paged } from '@rekey.dev/shared-types';
@@ -1347,7 +1422,7 @@ class OrganizationsClient {
   }
 
   /**
-   * Invite a user. Returns the raw token ONCE — surface via your own
+   * Invite a user. Returns the raw token ONCE, surface via your own
    * email/share channel. OWNER + ADMIN only.
    */
   invite(
@@ -1411,7 +1486,7 @@ class OrganizationsClient {
    * Remove a member (or self). Refuses removing the last OWNER.
    *
    * Idempotent: `removed` is `false` when the target was not a member (e.g.
-   * already removed) — a no-op removal is not an error. Branch on `removed`
+   * already removed), a no-op removal is not an error. Branch on `removed`
    * rather than assuming it is always `true`.
    */
   removeMember(
@@ -1429,7 +1504,7 @@ class OrganizationsClient {
 
   /**
    * Self-leave. An OWNER cannot leave (payment + benefits are tied to the
-   * owner — `ORGANIZATION_OWNER_CANNOT_LEAVE`); transfer ownership via support
+   * owner, `ORGANIZATION_OWNER_CANNOT_LEAVE`); transfer ownership via support
    * first, or demote yourself to ADMIN if there is another OWNER.
    */
   leave(accessToken: string, organizationId: string): Promise<{ removed: boolean }> {
@@ -1465,7 +1540,7 @@ class OrganizationsClient {
 
   /**
    * Make `organizationId` the active org for this session (member-only).
-   * Returns a fresh {accessToken, refreshToken} pair carrying the active org —
+   * Returns a fresh {accessToken, refreshToken} pair carrying the active org,
    * **store both**. Subsequent entitlement reads (`billing.getEntitlements`)
    * then default to this org's view + shared pool without passing
    * `organizationId` explicitly. The active org survives token refresh until
@@ -1481,7 +1556,7 @@ class OrganizationsClient {
   }
 
   /**
-   * Clear the active org — switch the session back to the personal pool.
+   * Clear the active org, switch the session back to the personal pool.
    * Returns a fresh token pair (no active org); **store both**.
    */
   clearActive(accessToken: string): Promise<AuthResultDto> {
@@ -1500,7 +1575,7 @@ class LicensesClient {
   /**
    * Verify a license key + record an activation for this machine. Call
    * once at app startup; you'll get a deterministic body (`ok=false` for
-   * invalid licenses — never an HTTP error — so your software can loop
+   * invalid licenses, never an HTTP error, so your software can loop
    * on the result without try/catch noise).
    *
    * `machineFingerprint` should be a stable identifier you derive client-
@@ -1524,6 +1599,183 @@ class LicensesClient {
   }): Promise<LicenseVerifyResultDto> {
     return this.client.send('POST', '/api/v1/licenses/verify', input);
   }
+
+  /**
+   * Give back the seat this machine holds; call it before a re-image or on
+   * uninstall so the next machine can verify. Same deterministic body as
+   * `verify`; `released: false` means the machine held no seat.
+   *
+   * @example
+   * ```ts
+   * await rekey.licenses.deactivate({ key, machineFingerprint });
+   * ```
+   */
+  deactivate(input: LicenseDeactivateRequest): Promise<LicenseDeactivateResultDto> {
+    return this.client.send('POST', '/api/v1/licenses/deactivate', input);
+  }
+}
+
+/**
+ * End-users' devices (docs/devices.md), both surfaces.
+ *
+ * `list` / `release` are the SERVER surface: secret key only, addressed by
+ * end-user id, because they read and mutate OTHER users' devices.
+ *
+ * `listMine` / `releaseMine` are the END-USER surface, the one
+ * `DEVICE_LIMIT_REACHED` tells you to offer. They take that user's own access
+ * token and act only on their own devices, so they are what a "your signed-in
+ * machines" screen calls, and what lets a user release a machine themselves
+ * instead of contacting support.
+ */
+class DevicesClient {
+  constructor(private readonly client: Rekey) {}
+
+  /** An end-user's devices, newest activity first. Optional `status` filter. */
+  list(
+    endUserId: string,
+    options: { status?: DeviceStatusType; limit?: number; offset?: number } = {},
+  ): Promise<Paged<DeviceDto>> {
+    const q = new URLSearchParams({ endUserId });
+    if (options.status) q.set('status', options.status);
+    if (options.limit !== undefined) q.set('limit', String(options.limit));
+    if (options.offset !== undefined) q.set('offset', String(options.offset));
+    return this.client.send('GET', `/api/v1/devices?${q.toString()}`);
+  }
+
+  /** Release a device: gives its slot back and revokes every session on it. */
+  release(deviceId: string, endUserId: string): Promise<{ device: DeviceDto; sessionsRevoked: number }> {
+    return this.client.send('POST', `/api/v1/devices/${encodeURIComponent(deviceId)}/release`, { endUserId });
+  }
+
+  /**
+   * The calling end-user's OWN devices, newest activity first.
+   *
+   * `GET /api/v1/users/me/devices`, authorized by the user's access token
+   * rather than by an end-user id. Operator notes (`blockedReason`) and IPs are
+   * not on this surface, which is why it resolves to `EndUserDeviceDto`.
+   *
+   * The device the current session is bound to is the one whose `id` matches
+   * the access token's `dev` claim (see {@link VerifiedAccessTokenClaims}), so
+   * a "your devices" screen can mark "this device" without a second call.
+   *
+   * @example
+   * ```ts
+   * const { items } = await rekey.devices.listMine(accessToken, { status: 'ACTIVE' });
+   * ```
+   */
+  listMine(
+    accessToken: string,
+    options: { status?: DeviceStatusType; limit?: number; offset?: number } = {},
+  ): Promise<Paged<EndUserDeviceDto>> {
+    const q = new URLSearchParams();
+    if (options.status) q.set('status', options.status);
+    if (options.limit !== undefined) q.set('limit', String(options.limit));
+    if (options.offset !== undefined) q.set('offset', String(options.offset));
+    const query = q.toString();
+    return this.client.send(
+      'GET',
+      `/api/v1/users/me/devices/${query ? `?${query}` : ''}`,
+      undefined,
+      { 'X-Rekey-User-Token': accessToken },
+    );
+  }
+
+  /**
+   * Release one of the calling end-user's own devices.
+   *
+   * This is the flow `DEVICE_LIMIT_REACHED` names: that refusal carries
+   * `details.limit` and `details.devices` (typed as `DeviceLimitDetails`), so
+   * you can show the user their machines and release one here rather than
+   * leaving them at a dead end.
+   *
+   * Gives the slot back and revokes every session minted on that device,
+   * INCLUDING the current one when it is the same device, so treat a release of
+   * `claims.dev` as a sign-out. Idempotent for an already-released device; a
+   * BLOCKED device refuses with `DEVICE_BLOCKED` (only an operator can unblock).
+   *
+   * @example
+   * ```ts
+   * try {
+   *   await rekey.auth.signIn({ email, password, device: { fingerprint } });
+   * } catch (e) {
+   *   if (e instanceof RekeyError && e.code === 'DEVICE_LIMIT_REACHED') {
+   *     const { devices } = e.details as DeviceLimitDetails;
+   *     // …let the user pick one, then, with a token from a session that has one:
+   *     await rekey.devices.releaseMine(accessToken, devices[0]!.id);
+   *   }
+   * }
+   * ```
+   */
+  releaseMine(
+    accessToken: string,
+    deviceId: string,
+  ): Promise<{ device: EndUserDeviceDto; sessionsRevoked: number }> {
+    return this.client.send(
+      'DELETE',
+      `/api/v1/users/me/devices/${encodeURIComponent(deviceId)}`,
+      undefined,
+      { 'X-Rekey-User-Token': accessToken },
+    );
+  }
+}
+
+/**
+ * Server-side end-user lookup (secret key only). `/users/me` answers "who is
+ * this token"; these answer "who is this id / email" for a backend that holds
+ * no token.
+ */
+class UsersClient {
+  constructor(private readonly client: Rekey) {}
+
+  /** Exact, case-insensitive email match in the calling Application. Throws END_USER_NOT_FOUND. */
+  getByEmail(email: string): Promise<EndUserDto> {
+    return this.client.send('GET', `/api/v1/users?email=${encodeURIComponent(email)}`);
+  }
+
+  /** By id, scoped to the calling Application. Throws END_USER_NOT_FOUND. */
+  get(endUserId: string): Promise<EndUserDto> {
+    return this.client.send('GET', `/api/v1/users/${encodeURIComponent(endUserId)}`);
+  }
+
+  /**
+   * Import up to 500 users from another auth system in one call. Password
+   * hashes (argon2id or bcrypt) are stored as given and verified as-is at
+   * sign-in; bcrypt is upgraded to argon2id on first success. Existing
+   * addresses are skipped, never updated.
+   *
+   * @example
+   * ```ts
+   * const { created, skipped } = await rekey.users.import([
+   *   { email: 'a@example.com', passwordHash: '$2b$10$…', emailVerified: true },
+   *   { email: 'b@example.com', oauthIdentities: [{ provider: 'google', providerAccountId: '1234' }] },
+   * ]);
+   * ```
+   */
+  import(users: ImportUserInput[]): Promise<ImportUsersResult> {
+    return this.client.send('POST', '/api/v1/users/import', { users });
+  }
+}
+
+export interface ImportUserInput {
+  email: string;
+  /** `$argon2id$…` or `$2a$`/`$2b$`/`$2y$…`. Omit for OAuth-only users. */
+  passwordHash?: string;
+  emailVerified?: boolean;
+  role?: string;
+  metadata?: Record<string, unknown>;
+  oauthIdentities?: Array<{ provider: string; providerAccountId: string; email?: string }>;
+}
+
+export interface ImportUsersResult {
+  created: Array<{ id: string; email: string }>;
+  skipped: Array<{ email: string; reason: string }>;
+  /**
+   * OAuth identities that were NOT linked because the provider account is
+   * already attached to another end-user in this Application. The user was
+   * still created; their sign-in through that provider lands on the OTHER
+   * account until one of the two is fixed.
+   */
+  unlinked: Array<{ email: string; provider: string; providerAccountId: string }>;
 }
 
 class UsageClient {
@@ -1570,7 +1822,7 @@ class UsageClient {
 }
 
 /**
- * A credit subject — pass `endUserId` for a personal balance, or
+ * A credit subject, pass `endUserId` for a personal balance, or
  * `organizationId` for a shared org pool (owner+beneficiary billing).
  */
 export type CreditSubject = { endUserId: string } | { organizationId: string };
@@ -1583,11 +1835,11 @@ function creditSubjectQuery(subject: CreditSubject): URLSearchParams {
 }
 
 /**
- * Prepaid credits — the "lead pack" / pay-as-you-go drawdown model. The
+ * Prepaid credits, the "lead pack" / pay-as-you-go drawdown model. The
  * customer's backend grants credits (by selling a CREDIT-kind plan, which
  * grants automatically on payment) and draws them down per unit consumed.
  *
- * All calls are server-to-server (secret key) and scoped to a `CreditSubject` —
+ * All calls are server-to-server (secret key) and scoped to a `CreditSubject`,
  * an end-user's personal balance, or an organization's shared pool.
  */
 class CreditsClient {
@@ -1603,7 +1855,7 @@ class CreditsClient {
    * `code: "CREDITS_INSUFFICIENT"` (HTTP 402) when the balance is too low.
    *
    * Pass `idempotencyKey` (e.g. the lead id) so a retried call never
-   * double-charges — a repeat returns the original result with `applied: false`.
+   * double-charges, a repeat returns the original result with `applied: false`.
    */
   consume(input: ConsumeCreditsRequest & CreditSubject): Promise<ConsumeCreditsResultDto> {
     return this.client.send('POST', '/api/v1/credits/consume', input);
@@ -1626,7 +1878,7 @@ class CreditsClient {
   }
 }
 
-/** What an end-user (or org) is entitled to right now — from active subs. */
+/** What an end-user (or org) is entitled to right now, from active subs. */
 export interface EntitlementsDto {
   /** Feature flags + numeric limits, keyed by code. Gate your app on these. */
   features: Record<string, boolean | number | string>;
@@ -1649,12 +1901,12 @@ export interface EntitlementsDto {
  *
  * This is deliberately `createRequire` and not a bare `require`. The package is
  * `"type": "module"` with ESM-only `exports`, so in the built `dist` a bare
- * `require` is simply not defined — `verifyWebhookSignature` and the RS256 path
+ * `require` is simply not defined, `verifyWebhookSignature` and the RS256 path
  * of `verifyAccessToken` threw `ReferenceError: require is not defined` for
  * every consumer who installed from npm, in every published version.
  *
  * It went unnoticed because `node -e` defines `globalThis.require`, so the
- * failure does not reproduce in a one-liner — only in a real `.mjs`, `.cjs`, or
+ * failure does not reproduce in a one-liner, only in a real `.mjs`, `.cjs`, or
  * `"type": "module"` package, which is to say only in real use. The tests
  * exercise the TypeScript source rather than the built ESM artifact, so they
  * never saw it either.
@@ -1665,7 +1917,7 @@ export interface EntitlementsDto {
  */
 function nodeCrypto(): typeof import('node:crypto') {
   // `process.getBuiltinModule` (Node 22.3+, and this package's floor is 22)
-  // resolves a builtin synchronously with NO static import — which is the
+  // resolves a builtin synchronously with NO static import, which is the
   // whole point. The previous fix used `createRequire`, correct for CJS
   // interop but imported from 'node:module' at module scope, so merely
   // IMPORTING the package failed on edge runtimes with
@@ -1691,7 +1943,7 @@ function nodeCrypto(): typeof import('node:crypto') {
  * default 300) AND (b) the signature matches a constant-time compare.
  *
  * Use against the `X-Rekey-Signature` header and the raw request body
- * BYTES (not the parsed JSON — any reserialization breaks the HMAC).
+ * BYTES (not the parsed JSON, any reserialization breaks the HMAC).
  *
  * @example
  * ```ts
@@ -1746,16 +1998,37 @@ export function verifyWebhookSignature(args: {
 
 /** Verified claims of an RS256 end-user access token. */
 export interface VerifiedAccessTokenClaims {
-  /** Always `"eu_access"` — other token types are refused. */
+  /** Always `"eu_access"`, other token types are refused. */
   typ: 'eu_access';
   /** EndUser id. */
   sub: string;
-  /** Application the token is bound to — check it against YOUR application id. */
+  /** Application the token is bound to, check it against YOUR application id. */
   applicationId: string;
   /** Active organization id, when the session is acting as an org. */
   oid?: string;
   /** Operator id when this is an impersonation session (treat with care). */
   imp?: string;
+  /**
+   * Refresh-token family this access token belongs to, the `sid` claim.
+   *
+   * Optional because the API only mints it when the session flow supplies one
+   * (see `issueUserAccessToken`), so treat an absent `sid` as "this deployment
+   * or flow did not bind one", never as a session that ended.
+   *
+   * Offline verification cannot see a revocation, the whole point of not
+   * calling the API. Use this to correlate a token with your own record of the
+   * session, so you can drop one you already know is gone.
+   */
+  sid?: string;
+  /**
+   * Device this session is bound to, the `dev` claim. Present only when the
+   * sign-in bound a device.
+   *
+   * This is the id that matches a row from `devices.listMine()`, so a client
+   * can mark "this device" in its own device list, and the id to pass to
+   * `devices.releaseMine()` to sign the CURRENT machine out.
+   */
+  dev?: string;
   /** App `tokenGeneration` at mint time (the API checks this; offline can't). */
   gen?: number;
   iat: number;
@@ -1767,7 +2040,7 @@ export interface VerifyAccessTokenOptions {
    * The Application this token must belong to. **Required.**
    *
    * This helper verifies RS256 tokens against the deployment's JWKS, and the
-   * RS256 keypair is deployment-wide — `SigningKey` has no `applicationId`
+   * RS256 keypair is deployment-wide, `SigningKey` has no `applicationId`
    * column, and `eu_access` tokens carry no `iss`/`aud`. So a token minted for
    * ANY Application on the same deployment is cryptographically valid here.
    * Without this, a multi-app self-host accepts another Application's end-user
@@ -1775,24 +2048,24 @@ export interface VerifyAccessTokenOptions {
    *
    * (The HS256 default path is not affected: that key is derived per
    * Application as `HMAC-SHA256(JWT_SECRET, applicationId:tokenGeneration)`, so
-   * a foreign token fails the signature. This is the RS256 opt-in only — which
+   * a foreign token fails the signature. This is the RS256 opt-in only, which
    * is exactly the path this function exists for.)
    *
    * Required rather than optional-with-a-warning: a security check nobody is
    * forced to make is one most callers will not make, and the docblock used to
-   * tell them to compare `claims.applicationId` afterwards — which made the
+   * tell them to compare `claims.applicationId` afterwards, which made the
    * shortest correct path the insecure one. 2.0.0 is not out yet, so this
    * breaks rc callers rather than a stable contract.
    */
   applicationId: string;
   /**
-   * URL of the deployment's JWKS — `https://<your-rekey>/.well-known/jwks.json`.
+   * URL of the deployment's JWKS, `https://<your-rekey>/.well-known/jwks.json`.
    * Fetched lazily and cached in-process for `cacheTtlMs` (default 5 minutes);
    * an unknown `kid` triggers one immediate refetch so freshly rotated keys
    * are picked up without waiting out the TTL.
    */
   jwksUrl?: string;
-  /** Pre-fetched key set — skips all network access. Takes precedence over `jwksUrl`. */
+  /** Pre-fetched key set, skips all network access. Takes precedence over `jwksUrl`. */
   jwks?: JwksDto;
   /** Optional fetch override (test stubs, custom agents). */
   fetch?: typeof fetch;
@@ -1814,7 +2087,7 @@ export interface VerifyAccessTokenOptions {
 
 const jwksCache = new Map<string, { jwks: JwksDto; fetchedAt: number }>();
 
-/** @internal Test hook — drop cached JWKS responses. */
+/** @internal Test hook, drop cached JWKS responses. */
 export function _clearJwksCacheForTests(): void {
   jwksCache.clear();
 }
@@ -1880,14 +2153,14 @@ async function loadJwks(
 }
 
 /**
- * Verify an end-user ACCESS token **offline** — no round-trip to the Rekey
+ * Verify an end-user ACCESS token **offline**, no round-trip to the Rekey
  * API. Works only for Applications that opted into RS256 tokens
  * (`authConfig.tokenAlg = "RS256"`, Panel → Application → Auth); the default
  * HS256 tokens are symmetric and can only be verified by the API itself
  * (use `rekey.auth.getCurrentUser(token)` for those).
  *
  * Checks performed (same posture as the API's verifier):
- *   - header `alg` must be `RS256` and `kid` must exist in the JWKS —
+ *   - header `alg` must be `RS256` and `kid` must exist in the JWKS,
  *     a strict allowlist, immune to alg-confusion;
  *   - RSA-SHA256 signature against that public key;
  *   - `exp` in the future, `typ === "eu_access"` (refresh/MFA/MCP tokens
@@ -1896,6 +2169,11 @@ async function loadJwks(
  * What it CANNOT check offline: the app's `tokenGeneration` kill-switch and
  * user deletion. The 15-minute access lifetime bounds both; for hard
  * revocation guarantees keep using `auth.getCurrentUser`.
+ *
+ * Nor can it see any server-side revocation: a locally verified token stays
+ * valid until it expires, even after sign-out everywhere, a password change,
+ * a session revoke or a device release. Call the API when immediate
+ * revocation matters.
  *
  * Node-only (uses `node:crypto`). Returns the verified claims; throws
  * `RekeyError` on any failure.
@@ -1919,10 +2197,10 @@ async function loadJwks(
  * it moved inside: the shortest correct path should not be the one nobody
  * takes.
  *
- * @throws {RekeyError} `TOKEN_ALG_NOT_RS256` — token is HS256 (app hasn't opted in) or another alg.
- * @throws {RekeyError} `TOKEN_KID_UNKNOWN` — `kid` not in the JWKS (forged, or key deleted).
- * @throws {RekeyError} `USER_TOKEN_EXPIRED` — `exp` passed; refresh the session.
- * @throws {RekeyError} `USER_TOKEN_INVALID` — malformed, bad signature, or wrong `typ`.
+ * @throws {RekeyError} `TOKEN_ALG_NOT_RS256`, token is HS256 (app hasn't opted in) or another alg.
+ * @throws {RekeyError} `TOKEN_KID_UNKNOWN`, `kid` not in the JWKS (forged, or key deleted).
+ * @throws {RekeyError} `USER_TOKEN_EXPIRED`, `exp` passed; refresh the session.
+ * @throws {RekeyError} `USER_TOKEN_INVALID`, malformed, bad signature, or wrong `typ`.
  */
 export async function verifyAccessToken(
   token: string,
@@ -1950,7 +2228,7 @@ export async function verifyAccessToken(
     throw invalid('The token header/payload is not valid base64url JSON.');
   }
 
-  // Strict alg allowlist — this helper verifies RS256 ONLY. HS256 tokens are
+  // Strict alg allowlist, this helper verifies RS256 ONLY. HS256 tokens are
   // symmetric (the verifying key can also MINT tokens), so they are never
   // verified client-side.
   if (header.alg !== 'RS256') {
@@ -1982,10 +2260,10 @@ export async function verifyAccessToken(
     });
   }
 
-  // Lazy-load node:crypto (same posture as verifyWebhookSignature) — keeps
+  // Lazy-load node:crypto (same posture as verifyWebhookSignature), keeps
   // the import graph clean for bundlers that tree-shake this helper away.
   const { createPublicKey, verify } = nodeCrypto();
-  let signatureOk = false;
+  let signatureOk: boolean;
   try {
     const publicKey = createPublicKey({ key: { kty: jwk.kty, n: jwk.n, e: jwk.e }, format: 'jwk' });
     signatureOk = verify(
@@ -1999,7 +2277,7 @@ export async function verifyAccessToken(
   }
   if (!signatureOk) throw invalid('The token signature does not verify against the JWKS key.');
 
-  // Claims — mirror the API's verifier: typ is load-bearing, exp is enforced.
+  // Claims, mirror the API's verifier: typ is load-bearing, exp is enforced.
   if (payload.typ !== 'eu_access') {
     throw invalid(`Token typ is ${JSON.stringify(payload.typ)}, expected "eu_access".`);
   }
@@ -2009,7 +2287,7 @@ export async function verifyAccessToken(
 
   // Bind the token to ONE Application. The signing key is deployment-wide and
   // `eu_access` carries no `iss`/`aud`, so a token minted for a different
-  // Application on the same deployment is cryptographically valid here — on a
+  // Application on the same deployment is cryptographically valid here, on a
   // multi-app self-host that means accepting someone else's end-user as your
   // own. The API does compare this server-side; the SDK left it to the caller
   // and documented it as a follow-up step, which made the shortest correct
@@ -2035,11 +2313,11 @@ class BillingClient {
   constructor(private readonly client: Rekey) {}
 
   /**
-   * List the calling Application's active plans. Public — pricing pages
+   * List the calling Application's active plans. Public, pricing pages
    * typically render straight from this. Application API key only; no
    * user JWT needed.
    *
-   * `amount` is in the smallest currency unit (cents/paise/sen) — never
+   * `amount` is in the smallest currency unit (cents/paise/sen), never
    * a float. Format on display: `${amount / 100} ${currency}`.
    */
   getPlans(page?: ListPage): Promise<Paged<PlanDto>> {
@@ -2053,7 +2331,7 @@ class BillingClient {
    * Pass the user's access token (the SDK puts it in `X-Rekey-User-Token`).
    *
    * `opts.includeEnded` falls back to the most recent CANCELED/EXPIRED
-   * subscription **only when the answer would otherwise be null** — for a
+   * subscription **only when the answer would otherwise be null**, for a
    * billing page that has to tell a former subscriber what they were on and
    * when it ended, rather than showing them the same blank state as somebody
    * who never subscribed. It can never replace a live subscription, so it is
@@ -2080,13 +2358,22 @@ class BillingClient {
   /**
    * Start a hosted-checkout session. Returns the URL to redirect the user
    * to and the local PENDING Subscription row. Subscription activation
-   * happens via the provider's webhook — not synchronously here.
+   * happens via the provider's webhook, not synchronously here.
    *
    * Pass `couponCode` to apply a discount. The whole checkout fails if the
    * coupon doesn't validate (typed `RekeyError` with the precise reason).
    *
+   * A buyer who has already used their free trial is refused with
+   * `BILLING_TRIAL_ALREADY_USED` (409). The escape hatch is
+   * `allowWithoutTrial: true` AND a fresh `Idempotency-Key`, but send it only
+   * after the buyer has been told they are paying today. Read
+   * {@link getTrialEligibility} and render the paid price instead of retrying
+   * blindly: a buyer who merely abandoned a trial checkout still reads
+   * `eligible: true`, and acknowledging on their behalf charges them today for
+   * the trial the next checkout was about to grant.
+   *
    * If the Application's billing subject is **org** (Panel → Application →
-   * Billing → Subject), an individual can't hold a subscription — you MUST
+   * Billing → Subject), an individual can't hold a subscription, you MUST
    * pass `organizationId` of a team the user owns/admins. Omitting it throws
    * `RekeyError` `code: "BILLING_ORGANIZATION_REQUIRED"`.
    *
@@ -2111,6 +2398,103 @@ class BillingClient {
   }
 
   /**
+   * Put the calling end-user on the Application's free tier
+   * (`billingConfig.defaultPlanSlug`). No payment provider is involved and none
+   * needs to be configured: the plan costs nothing.
+   *
+   * This is how a freemium product hands a new signup their included credits,
+   * licence or quota. `defaultPlanSlug` alone covers only the read-time half
+   * (feature flags and included usage); CREDIT and LICENSE entitlements are
+   * stateful and need a real subscription, which is what this creates.
+   *
+   * **Idempotent**, and the answer says which happened: `activated: true` is a
+   * first activation (201, `subscription.activated` emitted), `activated:
+   * false` means they were already entitled and nothing was written,
+   * re-provisioned or re-announced.
+   *
+   * Pass `organizationId` on an org-billed Application; the caller must be an
+   * OWNER or ADMIN of it. Omit it and the session's active organization is used.
+   *
+   * @throws {RekeyError} `BILLING_NO_FREE_PLAN` (404) when the Application
+   * nominates no default plan; `BILLING_FREE_PLAN_NOT_FREE` (409) when that
+   * plan charges money, use {@link createCheckout} instead;
+   * `BILLING_FREE_TIER_ALREADY_CLAIMED` (409) when the plan grants credits or a
+   * licence and this caller already claimed it for a different beneficiary.
+   *
+   * @example
+   * ```ts
+   * const { subscription, activated } = await rekey.billing.subscribe(accessToken);
+   * if (activated) welcomeWithStarterCredits(subscription);
+   * ```
+   */
+  async subscribe(
+    accessToken: string,
+    input: { organizationId?: string } = {},
+  ): Promise<{ subscription: SubscriptionDto; activated: boolean }> {
+    const { data, status } = await this.client.sendWithStatus<SubscriptionDto>(
+      'POST',
+      '/api/v1/billing/subscribe',
+      { ...(input.organizationId !== undefined && { organizationId: input.organizationId }) },
+      { 'X-Rekey-User-Token': accessToken },
+    );
+    // 201 = activated now, 200 = already on it. The body is the same row in
+    // both cases, so the status is the only place this distinction lives.
+    return { subscription: data, activated: status === 201 };
+  }
+
+  /**
+   * Whether THIS buyer may start each plan's free trial, under the
+   * Application's `trialPolicy`.
+   *
+   * Read this before offering a trial: a buyer who is not eligible should be
+   * shown the paid price, not a trial that checkout refuses with
+   * `BILLING_TRIAL_ALREADY_USED`. Feed the result straight into
+   * `<PricingTable trialEligibility={…}>` from `@rekey.dev/react`.
+   *
+   * **Advisory.** The authoritative decision is taken under a lock at checkout,
+   * so two tabs can both read `eligible: true` and only one gets the trial.
+   * Treat a 409 at checkout as normal, not as a contradiction.
+   *
+   * **Provider-dependent.** `PLAN_TRIAL_MISCONFIGURED` can be the resolved
+   * provider's answer, so the response echoes `provider`; re-read this when the
+   * buyer changes processor. Pass `country` (ISO 3166-1 alpha-2) to steer the
+   * geo router the way {@link getProviders} does.
+   *
+   * @example
+   * ```ts
+   * const { items, policy } = await rekey.billing.getTrialEligibility(accessToken);
+   * const pro = items.find((i) => i.planSlug === 'pro');
+   * const label = pro?.eligible ? `Start ${pro.trialDays} days free` : 'Subscribe';
+   * ```
+   */
+  getTrialEligibility(
+    accessToken: string,
+    opts?: {
+      organizationId?: string;
+      planSlug?: string;
+      limit?: number;
+      offset?: number;
+      country?: string;
+    },
+  ): Promise<TrialEligibilityDto> {
+    const q = new URLSearchParams();
+    if (opts?.organizationId) q.set('organizationId', opts.organizationId);
+    if (opts?.planSlug) q.set('planSlug', opts.planSlug);
+    if (opts?.limit !== undefined) q.set('limit', String(opts.limit));
+    if (opts?.offset !== undefined) q.set('offset', String(opts.offset));
+    const query = q.toString();
+    return this.client.send(
+      'GET',
+      `/api/v1/billing/trial-eligibility${query ? `?${query}` : ''}`,
+      undefined,
+      {
+        'X-Rekey-User-Token': accessToken,
+        ...(opts?.country ? { 'x-country': opts.country.toUpperCase() } : {}),
+      },
+    );
+  }
+
+  /**
    * Validate a coupon for the current user against a plan, *without*
    * applying it. Render "$50 off" on a pricing page before submit.
    *
@@ -2131,7 +2515,7 @@ class BillingClient {
   /**
    * List the billing providers configured + enabled for this Application,
    * in the order the geo router would prefer them. Forward the end-user's
-   * `country` (ISO 3166-1 alpha-2) when you have it — the panel/SDK will
+   * `country` (ISO 3166-1 alpha-2) when you have it, the panel/SDK will
    * surface India-specific providers (Razorpay) for IN-country users, etc.
    *
    * Returns the resolved country (echoed back from the server's view of
@@ -2145,7 +2529,7 @@ class BillingClient {
   }
 
   /**
-   * Resolve the calling end-user's current entitlements — feature flags +
+   * Resolve the calling end-user's current entitlements, feature flags +
    * limits, the live credit balance, and the raw entitlement list, unioned
    * across their active subscriptions (and subscriptions of orgs they belong
    * to). Pass `{ organizationId }` (member-only) for that org's view + shared
@@ -2167,9 +2551,26 @@ class BillingClient {
   }
 
   /**
+   * The same union as `getEntitlements`, for an end-user you name rather than
+   * one whose token you hold. Secret key only, for a licence server, a
+   * support tool or a batch job.
+   *
+   * @example
+   * ```ts
+   * const { features } = await rekey.billing.getEntitlementsFor(endUserId);
+   * if (features.max_devices !== undefined) capDevices(features.max_devices);
+   * ```
+   */
+  getEntitlementsFor(endUserId: string, opts?: { organizationId?: string }): Promise<EntitlementsDto> {
+    const q = new URLSearchParams({ endUserId });
+    if (opts?.organizationId) q.set('organizationId', opts.organizationId);
+    return this.client.send('GET', `/api/v1/billing/entitlements/for-user?${q.toString()}`);
+  }
+
+  /**
    * Cancel the calling end-user's current subscription.
    *
-   * Defaults to cancelling **at period end** — the user keeps what they paid
+   * Defaults to cancelling **at period end**, the user keeps what they paid
    * for until the period they already bought runs out. A provider-backed
    * subscription therefore stays ACTIVE with `cancelAt` set, and the provider
    * webhook is what eventually terminates it; read `cancelAt` on the returned
@@ -2177,7 +2578,7 @@ class BillingClient {
    * `{ atPeriodEnd: false }` to end it immediately, forfeiting the remainder.
    *
    * PENDING checkouts (and anything with no provider-side record) are
-   * cancelled locally straight away regardless of the flag — there is nothing
+   * cancelled locally straight away regardless of the flag, there is nothing
    * at the provider to schedule against.
    *
    * Pass `organizationId` when the subscription belongs to a team; the caller

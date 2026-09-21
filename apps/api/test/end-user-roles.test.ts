@@ -1,5 +1,5 @@
 /**
- * Per-Application end-user role catalog —
+ * Per-Application end-user role catalog,
  * `/api/v1/tenant/applications/:id/end-user-roles`.
  *
  * A per-app RBAC surface with four operations and, until now, no test. It is
@@ -13,7 +13,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 
@@ -82,7 +82,7 @@ describe('end-user role catalog', () => {
     return `/api/v1/tenant/applications/${f.applicationId}/end-user-roles${suffix}`;
   }
 
-  function list(f: Fixture): ReturnType<typeof app.inject> {
+  function list(f: Fixture): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'GET',
       url: url(f),
@@ -90,7 +90,7 @@ describe('end-user role catalog', () => {
     });
   }
 
-  function create(f: Fixture, payload: Record<string, unknown>): ReturnType<typeof app.inject> {
+  function create(f: Fixture, payload: Record<string, unknown>): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'POST',
       url: url(f),
@@ -237,7 +237,7 @@ describe('end-user role catalog', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('END_USER_ROLE_IS_DEFAULT');
 
-    // Still there — the refusal is not cosmetic.
+    // Still there, the refusal is not cosmetic.
     const names = ((await list(f)).json().data as Array<{ name: string }>).map((r) => r.name);
     expect(names).toContain('user');
   });

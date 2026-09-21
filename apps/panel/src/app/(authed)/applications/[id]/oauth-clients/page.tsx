@@ -2,19 +2,19 @@
  * OAuth clients registered AGAINST this Application.
  *
  * The opposite direction from the "Sign-in providers" tab next door. That one
- * is outbound — which external providers this Application's own users may sign
+ * is outbound, which external providers this Application's own users may sign
  * in with, and it asks for a client id and secret issued by Google or GitHub.
  * This one is inbound: other software registering itself with this Application
  * as its authorization server.
  *
  * Confusing the two is easy and was: the provider form asks for a secret, and
- * an Application acting as an IdP never issues one — registration here mints a
+ * an Application acting as an IdP never issues one, registration here mints a
  * PUBLIC client that authenticates with PKCE. There is nothing to paste into
  * that form for this purpose, and no way to tell from the old labels.
  *
  * Registration is unauthenticated by design (RFC 7591) and on by default,
  * because MCP clients self-register. Until this page there was no way to see
- * what had registered, no way to remove one, and no way to close registration —
+ * what had registered, no way to remove one, and no way to close registration,
  * so the toggle lives here, next to the consequence.
  */
 
@@ -23,6 +23,7 @@ import { redirect } from 'next/navigation';
 import { api, getApplication } from '@/lib/api';
 import { CopyButton } from '@/components/CopyButton';
 import { SectionHeader } from '@/components/Card';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
 
@@ -87,14 +88,14 @@ export default async function OAuthClientsPage({
   const registrationOpen =
     (app.authConfig as { dynamicClientRegistration?: boolean }).dynamicClientRegistration !== false;
 
-  // A failed read must not take the page down — the toggle is the control an
+  // A failed read must not take the page down, the toggle is the control an
   // operator reaches for when something has gone wrong, and it does not depend
   // on the list.
   let clients: RegisteredClient[] = [];
   let total = 0;
   let listError: string | null = null;
   try {
-    // Paged envelope, not a bare array — registrations accumulate. One page of
+    // Paged envelope, not a bare array, registrations accumulate. One page of
     // 100 is plenty to look at; `total` tells us when to say there are more
     // rather than silently showing a truncated list.
     const res = await api<{ items: RegisteredClient[]; page?: { total?: number } }>({
@@ -146,14 +147,14 @@ export default async function OAuthClientsPage({
               )}
             </p>
           </div>
-          <form action={setRegistrationOpen.bind(null, id, !registrationOpen)} className="shrink-0">
+          <ActionForm action={setRegistrationOpen.bind(null, id, !registrationOpen)} className="shrink-0">
             <SubmitButton
               pendingLabel="Saving…"
               className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-surface-muted)]"
             >
               {registrationOpen ? 'Close registration' : 'Open registration'}
             </SubmitButton>
-          </form>
+          </ActionForm>
         </div>
       </section>
 
@@ -197,17 +198,17 @@ export default async function OAuthClientsPage({
                   Registered {new Date(c.createdAt).toLocaleDateString()}
                 </p>
               </div>
-              {/* No confirmation step: revoking is recoverable — the client
-                  re-registers, or you register it again — and a modal on a
+              {/* No confirmation step: revoking is recoverable, the client
+                  re-registers, or you register it again, and a modal on a
                   reversible action trains people to click through modals. */}
-              <form action={revokeClient.bind(null, id, c.clientId)} className="shrink-0">
+              <ActionForm action={revokeClient.bind(null, id, c.clientId)} className="shrink-0">
                 <SubmitButton
                   pendingLabel="Revoking…"
                   className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm text-[var(--color-danger-fg,inherit)] hover:bg-[var(--color-surface-muted)]"
                 >
                   Revoke
                 </SubmitButton>
-              </form>
+              </ActionForm>
             </li>
           ))}
         </ul>

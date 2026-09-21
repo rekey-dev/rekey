@@ -9,6 +9,7 @@ import {
   PanelApiError,
   readErrorFlash,
 } from '@/lib/api';
+import { ActionForm } from '@/components/ActionForm';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { ApiErrorText } from '@/components/api-error';
@@ -121,7 +122,7 @@ export default async function LifecyclePage({
 
   // Fetched only when the role can read it, NOT fetched-and-caught.
   // `/workspace/limits` is OWNER/ADMIN, but this whole tab is reachable by any
-  // MEMBER holding a grant on the application — and `api()` turns a 403 on a
+  // MEMBER holding a grant on the application, and `api()` turns a 403 on a
   // GET into `forbidden()`, which replaces the entire page. Requesting it
   // unconditionally therefore broke the tab outright for exactly the people who
   // never needed the number: a non-owner's promote state is 'not-owner' before
@@ -158,7 +159,7 @@ export default async function LifecyclePage({
       {sp.promoted === '1' && (
         <SavedBanner
           params={['promoted']}
-          message="Promoted to production. Existing API keys still work but are labelled rp_test_ — mint a live key on the API keys tab when convenient."
+          message="Promoted to production. Existing API keys still work but are labelled rp_test_. Mint a live key on the API keys tab when convenient."
         />
       )}
       {sp.disabled === '1' && (
@@ -181,7 +182,7 @@ export default async function LifecyclePage({
           <strong>This application is disabled.</strong> It refuses every end-user request, serves
           no hosted portal, and sends no email or webhooks. All data is intact and every setting is
           unchanged. Disabled {fmt(app.disabledAt)}
-          {app.disabledReason ? ` — ${app.disabledReason}` : ''}.
+          {app.disabledReason ? `: ${app.disabledReason}` : ''}.
         </Banner>
       )}
 
@@ -202,7 +203,7 @@ export default async function LifecyclePage({
               when the answer is yes, and especially when it is no.
 
               Rendered only when we actually fetched it. A MEMBER cannot read
-              workspace limits, and `used` falls back to 0 for them — printing
+              workspace limits, and `used` falls back to 0 for them, printing
               this line anyway would tell them the workspace runs zero
               production applications with no limit, which is a fabricated
               number, not a degraded one. Say nothing rather than something
@@ -231,7 +232,7 @@ export default async function LifecyclePage({
 
             {promoteState.kind === 'app-disabled' && (
               <p className="text-xs text-[var(--color-muted-fg)]">
-                Enable this application before promoting it — promoting it while disabled would
+                Enable this application before promoting it. Promoting it while disabled would
                 consume a production slot for something serving no traffic.
               </p>
             )}
@@ -244,13 +245,13 @@ export default async function LifecyclePage({
                 <strong>No production slots free.</strong> This workspace is already running its
                 limit of {promoteState.max} production application
                 {promoteState.max === 1 ? '' : 's'}. Disable a production application you are no
-                longer running to free its slot, or contact support to raise the limit — it cannot
+                longer running to free its slot, or contact support to raise the limit. It cannot
                 be raised from the panel.
               </Banner>
             )}
 
             {promoteState.kind === 'available' && (
-              <form action={promote.bind(null, id)}>
+              <ActionForm action={promote.bind(null, id)}>
                 <TypedConfirmButton
                   expected={app.slug}
                   title="Promote to production?"
@@ -269,7 +270,7 @@ export default async function LifecyclePage({
                   confirmLabel="Promote"
                   triggerClassName="inline-flex items-center rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
                 />
-              </form>
+              </ActionForm>
             )}
           </div>
         </div>
@@ -295,8 +296,8 @@ export default async function LifecyclePage({
                 Takes this application offline. Every end-user request is refused, the hosted portal
                 stops answering, and no email, webhook or dunning escalation is sent. <strong>
                   Nothing is deleted and no session is revoked
-                </strong>{' '}
-                — enabling it again restores everything.
+                </strong>.{' '}
+                Enabling it again restores everything.
                 {isProduction
                   ? ' Frees this application’s production slot; taking it back later needs a free slot.'
                   : ''}{' '}
@@ -308,10 +309,10 @@ export default async function LifecyclePage({
           {!isOwner ? (
             <p className="mt-3 text-xs font-medium text-[var(--color-muted-fg)]">
               Only the workspace owner can {isDisabled ? 'enable' : 'disable'} an application. Your
-              role is {me.activeRole.toLowerCase()} — ask an owner to do this.
+              role is {me.activeRole.toLowerCase()}, so ask an owner to do this.
             </p>
           ) : isDisabled ? (
-            <form action={enable.bind(null, id)} className="mt-3">
+            <ActionForm action={enable.bind(null, id)} className="mt-3">
               <ConfirmButton
                 title="Enable this application?"
                 confirm={
@@ -324,9 +325,9 @@ export default async function LifecyclePage({
               >
                 Enable application
               </ConfirmButton>
-            </form>
+            </ActionForm>
           ) : (
-            <form action={disable.bind(null, id)} className="mt-3 space-y-2">
+            <ActionForm action={disable.bind(null, id)} className="mt-3 space-y-2">
               <label
                 className="block text-xs font-medium text-[var(--color-fg)]"
                 htmlFor="reason"
@@ -347,7 +348,7 @@ export default async function LifecyclePage({
                 triggerLabel="Disable application"
                 confirmLabel="Disable"
               />
-            </form>
+            </ActionForm>
           )}
         </div>
       </div>

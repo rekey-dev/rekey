@@ -7,7 +7,7 @@
  *   3. From now on, sign-in returns `mfaRequired` + an `mfaChallengeToken`
  *      instead of a session; the client completes it at
  *      POST /api/v1/auth/mfa-verify { mfaChallengeToken, code }. (Not
- *      /mfa/challenge — that route needs an existing session and is step-up for
+ *      /mfa/challenge, that route needs an existing session and is step-up for
  *      sensitive actions, not sign-in completion.)
  *
  * Backup codes are consumed by removing the matching hash from the stored array.
@@ -30,7 +30,7 @@ import { emitDetached } from '../webhooks/webhook.service.js';
 interface SetupResult {
   /** otpauth:// URI for QR. The customer's app turns this into a QR code. */
   otpauthUrl: string;
-  /** Plaintext backup codes — show ONCE, then forget. Only hashes are stored. */
+  /** Plaintext backup codes, show ONCE, then forget. Only hashes are stored. */
   backupCodes: string[];
 }
 
@@ -43,7 +43,7 @@ export const mfaService = {
    * **The `update` branch un-enrolls an enrolled user.** That is what makes
    * this route a credential change rather than a setup step: calling it resets
    * `enrolledAt: null`, so the user's real authenticator stops counting and a
-   * secret the caller chose takes its place — reaching the same end as
+   * secret the caller chose takes its place, reaching the same end as
    * `/mfa/disable` without passing its guard. The route demands a current
    * factor from browser callers for exactly that reason; see `mfa.routes.ts`.
    */
@@ -96,7 +96,7 @@ export const mfaService = {
     }
     const { base32 } = decryptJson<{ base32: string }>(cred.secretCiphertext);
     if (!verifyTotp(base32, args.code)) {
-      // 422 (not 401): this is enrollment confirmation — the caller is already
+      // 422 (not 401): this is enrollment confirmation, the caller is already
       // authenticated, only the submitted TOTP is wrong. 401 would signal an
       // invalid session/credential and trip client-side "log out" handling.
       throw new RekeyError({
@@ -113,7 +113,7 @@ export const mfaService = {
     });
 
     // Security-critical confirmation: notify the user that 2FA was turned
-    // on. Fire-and-forget — a delivery failure must not block enrollment.
+    // on. Fire-and-forget, a delivery failure must not block enrollment.
     const endUser = await prisma.endUser.findUnique({
       where: { id: args.endUserId },
       select: { email: true },
@@ -142,14 +142,14 @@ export const mfaService = {
 
   /**
    * Verify a TOTP or backup code at sign-in time. Returns true on success.
-   * Backup codes are single-use — consumed on accept.
+   * Backup codes are single-use, consumed on accept.
    */
   async verify(args: { endUserId: string; code: string }): Promise<boolean> {
     const cred = await prisma.mfaCredential.findUnique({
       where: { endUserId: args.endUserId },
     });
     if (!cred || !cred.enrolledAt) return false;
-    // Per-credential throttle via the Redis brute-force limiter — throws 429
+    // Per-credential throttle via the Redis brute-force limiter, throws 429
     // if too many recent failures. Bounds distributed (multi-IP) TOTP guessing
     // that a per-IP rate limit alone wouldn't catch.
     const mfaScope = `eu:mfa:${args.endUserId}`;
@@ -196,7 +196,7 @@ export const mfaService = {
   }): Promise<void> {
     // Only demand a factor when one is actually enrolled. `verify` returns
     // false for a credential with enrolledAt=null, so requiring a code
-    // unconditionally turned "cancel a half-finished enrollment" into a 401 —
+    // unconditionally turned "cancel a half-finished enrollment" into a 401,
     // disable used to be a successful no-op there.
     const enrolled = await prisma.mfaCredential.findUnique({
       where: { endUserId: args.endUserId },
@@ -206,7 +206,7 @@ export const mfaService = {
       // Keeps the historical MFA_CODE_INVALID code and message: clients switch on
       // it, and this route has always demanded specifically a code. The shared
       // `assertStepUp` in lib/step-up.ts is the generalised version used by
-      // passkey enrollment, which additionally accepts the account password —
+      // passkey enrollment, which additionally accepts the account password,
       // that is deliberately NOT accepted here. Someone who has stolen a session
       // and knows the password should not be able to strip the factor that exists
       // precisely to survive both.
@@ -237,7 +237,7 @@ export const mfaService = {
     return { enabled: true, remainingBackupCodes: stored.length };
   },
 
-  /** True if this end-user has MFA enrolled — used by sign-in to gate the session. */
+  /** True if this end-user has MFA enrolled, used by sign-in to gate the session. */
   async isEnrolled(endUserId: string): Promise<boolean> {
     const cred = await prisma.mfaCredential.findUnique({ where: { endUserId } });
     return Boolean(cred?.enrolledAt);

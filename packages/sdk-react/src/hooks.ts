@@ -16,7 +16,7 @@ import { useRekeyContext } from './context.js';
  * ```tsx
  * const { user, loading } = useUser();
  * if (loading) return <Spinner />;
- * // Narrow on `user`, not `signedIn` — the boolean is a sibling field and
+ * // Narrow on `user`, not `signedIn`, the boolean is a sibling field and
  * // does not narrow the union for TypeScript.
  * if (!user) return <a href="/sign-in">Sign in</a>;
  * return <p>Hi {user.email}</p>;

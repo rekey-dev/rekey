@@ -7,7 +7,7 @@
  * server broke" rather than "that input is not allowed".
  *
  *   1. A NUL byte (`\u0000`) inside any JSON string. Postgres cannot store one
- *      in a text column — `22021 invalid byte sequence for encoding "UTF8"` —
+ *      in a text column, `22021 invalid byte sequence for encoding "UTF8"`,
  *      and 19 routes turned that into a 500, including operator sign-up, which
  *      needs no credential at all. A guard for exactly this already existed for
  *      the query string; the body simply never got one.
@@ -16,14 +16,14 @@
  *      written with a floor and no ceiling, so `9007199254740991` passed
  *      validation and Postgres answered `22003 value out of range`.
  *
- * Neither is a privilege escalation — the audit confirmed the authorization
+ * Neither is a privilege escalation, the audit confirmed the authorization
  * model held throughout. They matter because an unauthenticated caller can
  * drive the error rate at will, and because a 400 that names the field is the
  * difference between a caller fixing their own request and a caller filing a
  * bug.
  *
  * These assert the refusal is a 400 with a machine-readable code, not merely
- * "not a 500" — a route that started 404ing would otherwise pass.
+ * "not a 500", a route that started 404ing would otherwise pass.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -131,7 +131,7 @@ describe('input hygiene', () => {
       // does not exist gets 400 rather than 404. That is the intended
       // ordering: the body is malformed whether or not a handler exists, and
       // answering 400 first means the guard never has to know which routes
-      // parse a body. It leaks nothing — the response is identical for real
+      // parse a body. It leaks nothing, the response is identical for real
       // and imaginary paths.
       const bad = await app.inject({
         method: 'POST',
@@ -179,7 +179,7 @@ describe('input hygiene', () => {
       });
 
       // 400 from the schema, not the 404 this route would otherwise give for
-      // an end-user that does not exist — proof the bound is enforced at the
+      // an end-user that does not exist, proof the bound is enforced at the
       // edge rather than after a database round trip.
       expect(res.statusCode).toBe(400);
     });

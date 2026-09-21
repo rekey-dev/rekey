@@ -1,5 +1,5 @@
 /**
- * Theming system — the appearance contract every widget exposes.
+ * Theming system, the appearance contract every widget exposes.
  *
  * Two mechanisms must keep working or every integrator's branding breaks:
  *   1. `appearance.variables` → inline `--rekey-*` CSS custom properties on the
@@ -129,8 +129,8 @@ describe('stylesheet', () => {
   /**
    * This used to assert one `#rekey-react-styles` in `document.head`, put
    * there by an effect. The effect never runs when the components are
-   * rendered server-only — Astro without a client directive got correct
-   * markup and no styling — so the sheet is rendered into the tree instead.
+   * rendered server-only, Astro without a client directive got correct
+   * markup and no styling, so the sheet is rendered into the tree instead.
    * The contract that changed is where it lives, not whether it is there.
    */
   it('renders the rules with the component, not from an effect', () => {

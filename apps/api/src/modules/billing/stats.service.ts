@@ -1,15 +1,15 @@
 /**
  * Per-application billing/revenue stats for the operator panel's Billing
- * Overview tab — GET /tenant/applications/:id/billing/stats.
+ * Overview tab, GET /tenant/applications/:id/billing/stats.
  *
- * Pure READ aggregations, computed on demand (operator page loads only —
+ * Pure READ aggregations, computed on demand (operator page loads only,
  * same posture as `admin-metrics`). Everything is grouped/aggregated DB-side;
  * no per-row reads.
  *
  * MRR definition (mirrors `admin-metrics`'s computeMrrCents, scoped to one
  * app): sum of plan.amount over ACTIVE subscriptions, with YEAR plans
  * normalized to monthly via floor(amount / 12) per subscription. Only
- * `kind: SUBSCRIPTION` plans count — USAGE (metered), CREDIT (prepaid
+ * `kind: SUBSCRIPTION` plans count, USAGE (metered), CREDIT (prepaid
  * packs) and LICENSE (one-time / perpetual key sales) aren't recurring
  * subscription revenue and are excluded.
  *
@@ -18,7 +18,7 @@
  * (largest MRR); `mixedCurrencies` flags when other currencies were present
  * so the panel can say the figure is partial.
  *
- * Scope: one Application. Isolation is the Application boundary — an app's
+ * Scope: one Application. Isolation is the Application boundary, an app's
  * environment (PRODUCTION / STAGING / DEVELOPMENT) tells you how to read
  * these numbers, but it does not guarantee them: a development app may hold
  * live credentials, so check the credential mode rather than the environment
@@ -85,7 +85,7 @@ export const billingStatsService = {
         where: { applicationId, createdAt: { gte: since30d } },
       }),
       // MRR: one group per plan (bounded by the app's plan catalog), priced
-      // below — never a per-subscription read.
+      // below, never a per-subscription read.
       prisma.subscription.groupBy({
         by: ['planId'],
         where: { applicationId, status: 'ACTIVE' },
@@ -100,7 +100,7 @@ export const billingStatsService = {
         where: { applicationId, createdAt: { gte: since30d } },
         _count: { _all: true },
       }),
-      // Monthly SUCCEEDED revenue, bucketed by UTC calendar month in SQL —
+      // Monthly SUCCEEDED revenue, bucketed by UTC calendar month in SQL,
       // one round-trip, no row loading (same shape as the signup-trend query
       // in applications.service.ts). `created_at` is a naive timestamp stored
       // as UTC, so date_trunc buckets by UTC month directly.
@@ -126,7 +126,7 @@ export const billingStatsService = {
         })
       : [];
     const planById = new Map(plans.map((p) => [p.id, p]));
-    // Never sum across currencies — accumulate per currency, report the
+    // Never sum across currencies, accumulate per currency, report the
     // dominant one and flag the rest (see module doc).
     const mrrByCurrency = new Map<string, number>();
     for (const g of activeByPlan) {

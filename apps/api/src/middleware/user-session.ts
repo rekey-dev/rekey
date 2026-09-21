@@ -7,7 +7,7 @@
  * `Authorization`, which carries the Application secret key).
  *
  * **Cross-application guard.** The JWT carries `applicationId`. We require
- * it match the Application that the calling secret key resolved to —
+ * it match the Application that the calling secret key resolved to,
  * otherwise a token issued by Application A could be replayed against
  * Application B's data, breaking tenant isolation.
  *
@@ -19,10 +19,11 @@ import { RekeyError } from '../lib/error.js';
 import { verifyUserAccessTokenAnyAlg } from '../lib/jwt.js';
 import { prisma } from '../lib/prisma.js';
 import { authService, type PublicEndUser } from '../modules/auth/auth.service.js';
+import { sessionIssuedBefore } from '../lib/session-stamp.js';
 
 /** Who is really behind an impersonated session. Set only for `imp` tokens. */
 export interface ImpersonationContext {
-  /** `impersonation_audits.id` — the row that can end this session. */
+  /** `impersonation_audits.id`, the row that can end this session. */
   auditId: string;
   /** TenantUser id of the operator acting as the end-user. */
   operatorUserId: string;
@@ -42,6 +43,13 @@ declare module 'fastify' {
      */
     activeOrganizationId?: string;
     /**
+     * The device this session is bound to, from the token's `dev` claim, or
+     * undefined for sessions minted without a fingerprint. A claim, not an
+     * authorization: a route that must trust it resolves the `devices` row
+     * and checks `status`, the way `oid` is re-confirmed against membership.
+     */
+    deviceId?: string;
+    /**
      * Present when this session is an OPERATOR impersonating the end-user
      * rather than the end-user themselves. Read by
      * `refuseWhileImpersonating` (middleware/impersonation.ts) to keep an
@@ -58,7 +66,7 @@ export async function requireUserSession(
   _reply: FastifyReply,
 ): Promise<void> {
   if (!request.application) {
-    // Programming error — this hook must run after `requireApiKey`.
+    // Programming error, this hook must run after `requireApiKey`.
     throw new RekeyError({
       statusCode: 500,
       code: 'INTERNAL_ERROR',
@@ -79,7 +87,7 @@ export async function requireUserSession(
   }
 
   // Accepts HS256 (per-app derived key, the default) AND RS256 (deployment
-  // JWKS key) — dispatched on the token header with a strict per-alg
+  // JWKS key), dispatched on the token header with a strict per-alg
   // allowlist; see verifyUserAccessTokenAnyAlg for the confusion-resistance
   // contract.
   const claims = await verifyUserAccessTokenAnyAlg(
@@ -97,7 +105,7 @@ export async function requireUserSession(
   }
 
   if (claims.applicationId !== request.application.id) {
-    // The token was issued by a different Application — refuse to act on it
+    // The token was issued by a different Application, refuse to act on it
     // even if the JWT signature is valid. This is the cross-tenant guard.
     throw new RekeyError({
       statusCode: 401,
@@ -111,7 +119,7 @@ export async function requireUserSession(
   // that row is its revocation handle. Resolving it here is what makes the
   // session endable: an operator token used to be un-stoppable for its whole
   // 5-minute life because nothing on the request path ever looked at the audit
-  // trail — `endedAt` was documented in the schema and written by no code path.
+  // trail, `endedAt` was documented in the schema and written by no code path.
   //
   // A token carrying `imp` without a resolvable, still-open row is refused
   // rather than downgraded to an ordinary session. Both refusals are
@@ -131,7 +139,7 @@ export async function requireUserSession(
       audit.endUserId !== claims.sub ||
       audit.applicationId !== request.application.id ||
       // The DB row is the authority on WHO is impersonating, not the claim.
-      // Forging `imp` needs the app signing key, so this is defence in depth —
+      // Forging `imp` needs the app signing key, so this is defence in depth,
       // but the whole point of resolving the row is that the audit trail and
       // the live session cannot disagree about who is acting.
       audit.operatorUserId !== claims.imp
@@ -141,20 +149,52 @@ export async function requireUserSession(
     request.impersonation = { auditId: claims.impid, operatorUserId: audit.operatorUserId };
   }
 
-  const endUser = await authService.getById(request.application.id, claims.sub);
+  const { endUser, sessionsInvalidBefore, sessionEnded } = await authService.getByIdForSession(
+    request.application.id,
+    claims.sub,
+    claims,
+  );
+  // A token minted before the user's last password change, reset, sign-out
+  // everywhere or refresh-token reuse is refused now rather than at its
+  // expiry. Those end every session, and the stamp is per user. Compared at
+  // second granularity (`iat` is seconds), so a token minted in the same
+  // second as the stamp, which is the pair the password-change response
+  // itself hands back, survives.
+  if (sessionIssuedBefore(claims, sessionsInvalidBefore)) {
+    throw new RekeyError({
+      statusCode: 401,
+      code: 'USER_TOKEN_INVALID',
+      message: 'This access token predates a password change, sign-out everywhere, or a revocation of every session.',
+      fix: 'Sign in again.',
+    });
+  }
+  // Only THIS session ended: revoked on its own, or its device released or
+  // blocked. The user's other sessions are untouched, which is why this is
+  // decided by the token's `sid` and `dev` rather than the per-user stamp.
+  // Same code the SDKs treat as "refresh me"; the refresh then answers
+  // REFRESH_TOKEN_REVOKED, a terminal verdict for this one session only.
+  if (sessionEnded) {
+    throw new RekeyError({
+      statusCode: 401,
+      code: 'USER_TOKEN_INVALID',
+      message: 'This access token belongs to a session that was revoked, or to a device that was released or blocked.',
+      fix: 'Refresh the session; if its refresh token was revoked too, sign in again.',
+    });
+  }
 
   request.endUser = endUser;
+  if (claims.dev) request.deviceId = claims.dev;
 
   // The `oid` claim says which organization was active when the token was
   // minted, which is not the same as which one is active now: removing a member
   // does not and should not invalidate their access token. So the claim goes
   // stale, and until it expired `GET /users/me` kept reporting a removed
-  // organization as active — a UI driving "current team" off that response
+  // organization as active, a UI driving "current team" off that response
   // showed the wrong team and then 403'd on every call inside it.
   //
   // Same principle as the impersonation check above: the DB row is the
   // authority, the claim is a hint. Resolving it here rather than in each
-  // handler means every consumer gets a value that is true right now —
+  // handler means every consumer gets a value that is true right now,
   // `billing.routes.ts` was already paying for this check itself, which is why
   // authorization held; its check now becomes defence in depth rather than the
   // only thing standing between a removed member and org-scoped data.
@@ -164,7 +204,7 @@ export async function requireUserSession(
   // an otherwise valid token.
   if (claims.oid) {
     // Straight at the `@@unique([organizationId, endUserId])` index, so this is
-    // one indexed lookup on requests that carry an org — not a scan, and not
+    // one indexed lookup on requests that carry an org, not a scan, and not
     // paid at all by sessions without one. The application check is belt and
     // braces: end-users are already per-Application, so a foreign org cannot
     // contain this one.
@@ -179,7 +219,7 @@ export async function requireUserSession(
 }
 
 /**
- * One error for every reason an impersonation token is no longer usable —
+ * One error for every reason an impersonation token is no longer usable,
  * ended, unknown, or bound to a different subject. Splitting them would let a
  * caller probe audit-row ids.
  */

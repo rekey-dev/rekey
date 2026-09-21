@@ -1,6 +1,6 @@
 {
   "name": "@rekey.dev/nextjs",
-  "version": "2.1.0",
+  "version": "2.2.0-rc.1",
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
@@ -36,6 +36,11 @@
       "import": "./dist/cookies.js",
       "default": "./dist/cookies.js"
     },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "import": "./dist/errors.js",
+      "default": "./dist/errors.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -45,9 +50,10 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "echo \"(eslint not yet wired)\"",
-    "test": "tsc -p tsconfig.json && vitest run"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "lint": "eslint .",
+    "test": "tsc -p tsconfig.test.json && vitest run",
+    "lint:fix": "eslint . --fix --fix-type problem,suggestion,layout"
   },
   "keywords": [
     "next.js",

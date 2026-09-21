@@ -2,7 +2,7 @@
  * A cancelled subscription has to survive the page reload that follows it.
  *
  * `GET /billing/subscription` filters to ACTIVE / PAST_DUE / PENDING, so the
- * moment a subscription reaches CANCELED the endpoint answers `null` — the
+ * moment a subscription reaches CANCELED the endpoint answers `null`, the
  * same `null` it gives somebody who has never subscribed at all. A portal
  * cannot tell those two apart, so it says the only thing it can: "you are on
  * the free plan". A paying customer cancels, reloads, and their plan, their
@@ -94,7 +94,7 @@ describe('GET /billing/subscription?includeEnded', () => {
     });
 
     // A plan per extra subscription. `(application_id, end_user_id, plan_id)`
-    // is unique, so one user cannot hold two rows on the same plan — the first
+    // is unique, so one user cannot hold two rows on the same plan, the first
     // subscription uses the named plan above and every later one gets its own.
     let extraPlans = 0;
     const makeSubscription = async (
@@ -150,7 +150,7 @@ describe('GET /billing/subscription?includeEnded', () => {
     const { liveKey, session, plan, makeSubscription, read } = await fixture('sh-history');
     const created = await makeSubscription('ACTIVE', periodEnd);
 
-    // Cancel immediately — the shape that produces a terminal row on the spot.
+    // Cancel immediately, the shape that produces a terminal row on the spot.
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/subscription/cancel',
@@ -168,7 +168,7 @@ describe('GET /billing/subscription?includeEnded', () => {
     expect(remembered?.status).toBe('CANCELED');
     expect(remembered?.cancelAt).not.toBeNull();
 
-    // And it is the same subscription, so the plan is still resolvable — which
+    // And it is the same subscription, so the plan is still resolvable, which
     // is what lets the page say "your Standard subscription ended on <date>"
     // rather than "you are on the free plan".
     const row = await prisma.subscription.findUniqueOrThrow({ where: { id: created.id } });
@@ -237,7 +237,7 @@ describe('GET /billing/subscription?includeEnded', () => {
     await makeSubscription('CANCELED', new Date(Date.now() - 5 * 24 * 60 * 60 * 1000));
 
     expect(await read()).toBeNull();
-    // And explicitly off stays off — a `false` that switched the flag ON would
+    // And explicitly off stays off, a `false` that switched the flag ON would
     // be the classic truthy-string coercion bug.
     expect(await read('?includeEnded=false')).toBeNull();
   });

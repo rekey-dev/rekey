@@ -1,12 +1,12 @@
 /**
  * Regressions for the auth-surface hardening that landed in
- * 2.0.0-rc.1 — the `PATCH /users/me` self-service route, the OpenID Provider,
+ * 2.0.0-rc.1, the `PATCH /users/me` self-service route, the OpenID Provider,
  * and the two email-verification switches, which merged within an hour of each
  * other and whose INTERACTION is where most of this came from.
  *
  * Every case here was reproduced against a running server before it was fixed.
  * They are written as "this exact request used to work, and must not" rather
- * than as coverage of the fix, because the fix is not the invariant — the
+ * than as coverage of the fix, because the fix is not the invariant, the
  * refusal is. Each `it` names the finding it belongs to.
  *
  * Domain tables truncate before each test, so each case bootstraps its own
@@ -20,6 +20,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { PROFILE_METADATA_CLAIMS, OIDC_METADATA_NAMESPACE } from '../src/lib/oidc-profile.js';
+import { METADATA_MAX_BYTES } from '../src/lib/metadata-limit.js';
 
 const PASSWORD = 'pw-one-two-three';
 const REDIRECT = 'http://localhost:9876/cb';
@@ -212,7 +213,7 @@ describe('auth security review (2.0.0-rc.1)', () => {
       const body = res.json();
       expect(body.data).toBeUndefined();
 
-      // The account exists — the refusal is of the session, not the sign-up —
+      // The account exists, the refusal is of the session, not the sign-up,
       // and no refresh chain was opened.
       const user = await prisma.endUser.findFirstOrThrow({
         where: { applicationId: fx.appId, email: 'fresh@example.com' },
@@ -224,8 +225,8 @@ describe('auth security review (2.0.0-rc.1)', () => {
     it('the verification mail goes out even with the auto-send switch off', async () => {
       // Otherwise the two settings together mint accounts nobody can reach:
       // no session to re-send from, and no link ever posted. (The first half of
-      // that is no longer true — POST /auth/resend-verification needs no
-      // session — but a link the user never received is still the wrong
+      // that is no longer true, POST /auth/resend-verification needs no
+      // session, but a link the user never received is still the wrong
       // default, so this invariant stands.)
       //
       // `appUrl` because a send with no resolvable link is skipped outright
@@ -364,7 +365,7 @@ describe('auth security review (2.0.0-rc.1)', () => {
       const clientId = await registerClient(fx);
 
       // The exact payload from the report. Writing the claim NAMES at the top
-      // level is still allowed — they are the app's own fields — so the write
+      // level is still allowed, they are the app's own fields, so the write
       // succeeds and simply is not an identity assertion.
       const patched = await app.inject({
         method: 'PATCH',
@@ -487,7 +488,7 @@ describe('auth security review (2.0.0-rc.1)', () => {
 
     it('a request naming NO scope still falls back to mcp:account', async () => {
       // The fallback exists for pre-OIDC MCP clients that send no `scope`
-      // parameter at all. That case keeps working — it is the only one.
+      // parameter at all. That case keeps working, it is the only one.
       const fx = await bootstrap({ mcpEnabled: true });
       const clientId = await registerClient(fx);
       await seedUser(fx, 'no-scope@example.com');
@@ -653,8 +654,10 @@ describe('auth security review (2.0.0-rc.1)', () => {
   describe('6 — the metadata ceiling applies to every writer', () => {
     it('sign-up refuses an oversized blob instead of storing it forever', async () => {
       const fx = await bootstrap();
+      // Just past the 16 KiB ceiling, and still inside SIGN_UP_BODY_LIMIT, so
+      // the handler is the one that refuses and can say exactly why.
       const res = await signUp(fx, 'fat-signup@example.com', {
-        metadata: { blob: 'x'.repeat(200 * 1024) },
+        metadata: { blob: 'x'.repeat(METADATA_MAX_BYTES + 1024) },
       });
       // Used to store 204,811 bytes and permanently brick that user's own
       // PATCH route: the cap is measured post-merge, so every later write
@@ -664,6 +667,24 @@ describe('auth security review (2.0.0-rc.1)', () => {
       expect(
         await prisma.endUser.count({
           where: { applicationId: fx.appId, email: 'fat-signup@example.com' },
+        }),
+      ).toBe(0);
+    });
+
+    it('a grossly oversized blob is refused at the HTTP layer, before the handler', async () => {
+      const fx = await bootstrap();
+      // Past SIGN_UP_BODY_LIMIT (#555): the route caps its body well under the
+      // global 1 MiB, so a 200 KB blob never reaches the metadata check. A
+      // different code for a different remedy: 413 says the request is too
+      // big to read, 400 says this field will never fit. Neither stores a row.
+      const res = await signUp(fx, 'huge-signup@example.com', {
+        metadata: { blob: 'x'.repeat(200 * 1024) },
+      });
+      expect(res.statusCode).toBe(413);
+      expect(res.json().error.code).toBe('PAYLOAD_TOO_LARGE');
+      expect(
+        await prisma.endUser.count({
+          where: { applicationId: fx.appId, email: 'huge-signup@example.com' },
         }),
       ).toBe(0);
     });
@@ -843,7 +864,7 @@ describe('auth security review (2.0.0-rc.1)', () => {
       // `PROFILE_METADATA_CLAIMS` is sourced from `EndUser.metadata`. If any of
       // these names entered it, an operator (or, before finding 3, an end-user)
       // could put `typ: "mcp_access"` and another Application's `applicationId`
-      // into an ID Token — which is signed by the same deployment and would
+      // into an ID Token, which is signed by the same deployment and would
       // then pass `verifyMcpAccessToken`. That is cross-application account
       // takeover, gated today by this list and nothing else.
       const forbidden = ['typ', 'applicationId', 'gen', 'sub', 'iss', 'aud', 'exp', 'iat', 'scope'];

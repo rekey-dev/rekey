@@ -1,13 +1,13 @@
 import { defineConfig } from 'vitest/config';
 
 /**
- * The provider sandbox harness — a SEPARATE vitest project, deliberately not
+ * The provider sandbox harness, a SEPARATE vitest project, deliberately not
  * part of `pnpm test`.
  *
  * Everything under `test-providers/` makes real network calls to a payment
  * provider's sandbox. Folding that into the default suite would trade the one
- * property the default suite has to keep — that it is fast and that a red run
- * means the code is wrong — for coverage that only exists on machines holding
+ * property the default suite has to keep, that it is fast and that a red run
+ * means the code is wrong, for coverage that only exists on machines holding
  * credentials. So: its own config, its own setup (no fake providers), its own
  * database, and its own script (`pnpm test:providers`).
  *
@@ -19,7 +19,7 @@ export default defineConfig({
     include: ['test-providers/**/*.test.ts'],
     environment: 'node',
     globals: false,
-    // One process, one database, truncation between tests — the same reason
+    // One process, one database, truncation between tests, the same reason
     // the default suite is serial, plus a second: a shared provider sandbox
     // has account-wide rate limits and an account-wide event feed that the
     // suites page through.

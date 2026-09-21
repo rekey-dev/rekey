@@ -3,7 +3,7 @@
  * sale must always leave a `Payment` row behind.
  *
  * Both halves were broken in opposite directions, and neither is visible from
- * the checkout response — the DTO reported the right discount throughout. Only
+ * the checkout response, the DTO reported the right discount throughout. Only
  * the rows written after the provider's webhook tell the truth, so that is
  * what these assert.
  *
@@ -12,7 +12,7 @@
  *     invoice) nor PayPal (`PAYMENT.CAPTURE.COMPLETED` was registered but had
  *     no case) produces a payment event for a one-off. So a `maxRedemptions: 1`
  *     coupon discounted the first checkout, granted the credits, recorded no
- *     redemption — and then discounted the next one, and the next, forever. The
+ *     redemption, and then discounted the next one, and the next, forever. The
  *     same gap meant one-time revenue had no `Payment` row at all.
  *   - **Recurring purchases redeemed EVERY period.** The provider coupon is
  *     `duration: 'once'` and only ever cuts invoice #1, but every renewal
@@ -260,7 +260,7 @@ describe('coupon redemption is recorded once per purchase', () => {
     it('writes nothing for an unpaid session', async () => {
       // A delayed-notification method completes the session before the money
       // arrives. `checkout.session.async_payment_succeeded` is what says it
-      // did, and we do not consume it — so record nothing rather than a
+      // did, and we do not consume it, so record nothing rather than a
       // payment that may never settle.
       const sessionId = await checkoutSessionId({ planSlug: 'pack', provider: 'stripe' });
 
@@ -316,7 +316,7 @@ describe('coupon redemption is recorded once per purchase', () => {
       expect(await redemptions()).toBe(1);
 
       // The money leg arrives separately, and used to fall through to
-      // `default: return null` — registered with PayPal, handled nowhere.
+      // `default: return null`, registered with PayPal, handled nowhere.
       const capture = await firePaypal('PAYMENT.CAPTURE.COMPLETED', {
         id: 'CAP-pack-1',
         custom_id: `${applicationId}:${endUserId}`,
@@ -329,7 +329,7 @@ describe('coupon redemption is recorded once per purchase', () => {
         where: { providerPaymentId: 'CAP-pack-1' },
       });
       expect(payment).toMatchObject({ status: 'SUCCEEDED', amount: 4000, endUserId });
-      // The capture must not redeem a SECOND time — same purchase.
+      // The capture must not redeem a SECOND time, same purchase.
       expect(await redemptions()).toBe(1);
       // ...and must not grant a second pack of credits either.
       expect(await creditsService.getBalance(applicationId, { endUserId })).toBe(100);
@@ -366,7 +366,7 @@ describe('coupon redemption is recorded once per purchase', () => {
       await fireInvoice(providerSubId, 'in_first', 'subscription_create');
       expect(await redemptions()).toBe(1);
 
-      // The provider coupon was `duration: 'once'` — this invoice was charged
+      // The provider coupon was `duration: 'once'`, this invoice was charged
       // at full price, so it buys no redemption. It used to record one anyway,
       // and the operator's coupon stats multiplied one discount by the number
       // of periods the customer stayed.
@@ -380,7 +380,7 @@ describe('coupon redemption is recorded once per purchase', () => {
       // The reproduced failure: `maxRedemptionsPerUser: 1` is a completely
       // normal configuration, the renewal redeemed a SECOND time, the limit
       // check threw from inside the payment transaction, and the whole renewal
-      // rolled back — 500 to Stripe, money collected, no Payment row, no
+      // rolled back, 500 to Stripe, money collected, no Payment row, no
       // status or period mirror, no entitlement re-provision, no dunning
       // recovery, and a poison event retried until the provider gave up.
       await createCoupon({
@@ -404,7 +404,7 @@ describe('coupon redemption is recorded once per purchase', () => {
         status: 'ACTIVE',
       });
       expect(await redemptions()).toBe(1);
-      // The delivery was not merely swallowed — nothing failed at all.
+      // The delivery was not merely swallowed, nothing failed at all.
       const events = await prisma.webhookEvent.findMany({ where: { applicationId } });
       expect(events.every((e) => e.processingError === null)).toBe(true);
     });
@@ -412,16 +412,16 @@ describe('coupon redemption is recorded once per purchase', () => {
     it('a redemption that genuinely cannot be recorded never rolls back the money', async () => {
       // Same class of failure reached from the other side: the webhook that
       // would record the redemption finds the coupon exhausted. The purchase
-      // still has to be recorded in full — an operator's coupon books being one
+      // still has to be recorded in full, an operator's coupon books being one
       // row short is not a reason to discard a charge the provider has already
       // taken.
       //
       // Reaching it takes a bit of setup now, and that is the point: a checkout
       // RESERVES its slot, so the ordinary "somebody else consumed the last
       // redemption while this buyer was paying" cannot happen any more. What is
-      // still reachable is a sale with no reservation to confirm — one whose
+      // still reachable is a sale with no reservation to confirm, one whose
       // reservation aged out, or a provider flow that never came through our
-      // checkout — so the reservation is dropped here to model exactly that.
+      // checkout, so the reservation is dropped here to model exactly that.
       await createCoupon({
         code: 'racey',
         discountType: 'PERCENT',
@@ -457,7 +457,7 @@ describe('coupon redemption is recorded once per purchase', () => {
       expect(
         (await prisma.payment.findFirstOrThrow({ where: { providerPaymentId: 'in_racey' } })).status,
       ).toBe('SUCCEEDED');
-      // Still exactly the one that was there before — refused, not doubled.
+      // Still exactly the one that was there before, refused, not doubled.
       expect(await redemptions()).toBe(1);
     });
 
@@ -481,7 +481,7 @@ describe('coupon redemption is recorded once per purchase', () => {
 
   it('stamps the discount on the redemption so operator totals cannot be restated later', async () => {
     // The total used to be read back off `Subscription.metadata.discountAmount`
-    // at display time — a value the buyer's NEXT checkout on the same plan
+    // at display time, a value the buyer's NEXT checkout on the same plan
     // overwrites, so history changed under the operator.
     await createCoupon({ code: 'stamped', discountType: 'PERCENT', amountOff: 4000 });
     const sessionId = await checkoutSessionId({ planSlug: 'pack', couponCode: 'stamped', provider: 'stripe' });

@@ -10,7 +10,7 @@
  * `email=…&password=…`). Nothing in the API returned 415, so the one class of
  * mistake HTTP has a dedicated status for was reported as a payload bug.
  *
- * `text/plain` had the same shape for a different reason — Fastify parses it by
+ * `text/plain` had the same shape for a different reason, Fastify parses it by
  * default, so a JSON payload sent with the wrong header became a string and then
  * failed validation as "not an object".
  *
@@ -55,7 +55,7 @@ export async function rejectUnsupportedMediaType(
   _reply: FastifyReply,
 ): Promise<void> {
   if (!METHODS_WITH_BODY.has(req.method)) return;
-  // No route matched — let the 404 win rather than pre-empting it with a 415.
+  // No route matched, let the 404 win rather than pre-empting it with a 415.
   if (req.routeOptions?.url === undefined) return;
   if (!hasBody(req)) return;
 

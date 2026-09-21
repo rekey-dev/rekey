@@ -1,5 +1,5 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { api, type ApiRequestLogRow } from '@/lib/api';
 import type { Page } from '@/lib/paginate';
 import { RequestLogTable } from '@/components/RequestLogTable';
@@ -9,7 +9,7 @@ import { Pager, readPageSize } from '@/components/Pager';
 /**
  * Per-Application request log. Inbound calls to this app's public API with its
  * secret key, newest first. Captured best-effort by a global response hook and
- * capped per app by a periodic pruner — a convenience tail for "what's hitting
+ * capped per app by a periodic pruner, a convenience tail for "what's hitting
  * my API right now", not a billing-grade audit trail.
  */
 
@@ -29,7 +29,7 @@ export default async function RequestsPage({
   if (offset) qs.set('offset', String(offset));
 
   // `page.total` counts what the pruner has left for this Application, not
-  // every request it has ever served — the route is a capped convenience tail.
+  // every request it has ever served, the route is a capped convenience tail.
   // It is still the real answer to "is there another page", which the old
   // `{requests: […]}` wrapper could not give at all.
   const { items: requests, page } = await api<Page<ApiRequestLogRow>>({
@@ -42,7 +42,7 @@ export default async function RequestsPage({
       <div>
         <h2 className="text-base font-medium">Requests</h2>
         <p className="text-sm text-neutral-600 dark:text-neutral-500 mt-1">
-          API calls your backend made to Rekey — useful for debugging your integration. Method,
+          API calls your backend made to Rekey, useful for debugging your integration. Method,
           route, status, and latency per request, newest first. Captured best-effort and capped to
           the most recent requests; informational, not a billing-grade audit trail.
         </p>

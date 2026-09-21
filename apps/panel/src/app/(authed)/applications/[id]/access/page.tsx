@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { errorQuery, readErrorFlash, api, PanelApiError, getApplication } from '@/lib/api';
+import { ActionForm } from '@/components/ActionForm';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { ApiErrorText } from '@/components/api-error';
 import { SavedBanner } from '@/components/SavedBanner';
@@ -58,7 +59,7 @@ const ERR: Record<string, string> = {
 
 // `placeholder:` is the point of this class list. The example values in these
 // two boxes render in the SAME mono face as a real entry, and measured at
-// 7.4:1 they were no dimmer than configured text — on a security page, an
+// 7.4:1 they were no dimmer than configured text, on a security page, an
 // empty IP allowlist looked exactly like one containing 10.0.0.0/8. Faint +
 // italic makes the distinction visible without a second glance; the explicit
 // state line below each box makes it unambiguous.
@@ -67,7 +68,7 @@ const textareaCls =
 
 /**
  * Affirmative "what is in force right now" line, matching how the API-keys page
- * already states its origin rule ("No origin allowlist set — any website can
+ * already states its origin rule ("No origin allowlist set, any website can
  * use this key"). An empty security control has to say what it means, not just
  * be empty.
  */
@@ -126,7 +127,7 @@ export default async function AccessPage({
       {rotated !== undefined && (
         <SavedBanner
           params={['rotated']}
-          message={`Sessions rotated — every end-user access token is now invalid and ${rotated} refresh token(s) were revoked.`}
+          message={`Sessions rotated. Every end-user access token is now invalid and ${rotated} refresh token(s) were revoked.`}
         />
       )}
       {error && (
@@ -135,7 +136,7 @@ export default async function AccessPage({
         </Banner>
       )}
 
-      <form
+      <ActionForm
         action={saveAccess.bind(null, id)}
         className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] divide-y divide-[var(--color-border)]"
       >
@@ -150,8 +151,8 @@ export default async function AccessPage({
           </p>
           <StateLine
             configured={app.ipAllowlist ?? []}
-            emptyLabel="No IP allowlist set — secret keys may be used from any address."
-            setLabel={(n) => `${n} ${n === 1 ? 'entry' : 'entries'} in force — secret keys are refused from anywhere else.`}
+            emptyLabel="No IP allowlist set, so secret keys may be used from any address."
+            setLabel={(n) => `${n} ${n === 1 ? 'entry' : 'entries'} in force, so secret keys are refused from anywhere else.`}
           />
           <textarea
             id="ipAllowlist"
@@ -167,13 +168,13 @@ export default async function AccessPage({
             CORS origins (browser)
           </label>
           <p className="text-xs text-[var(--color-muted-fg)]">
-            One origin per line — scheme + host + optional port, no path (e.g.{' '}
+            One origin per line: scheme + host + optional port, no path (e.g.{' '}
             <code>https://app.example.com</code>). The API allows these origins for browser calls.
           </p>
           <StateLine
             configured={app.corsOrigins ?? []}
-            emptyLabel="No origin allowlist set — any website can make browser calls with this app's publishable key."
-            setLabel={(n) => `${n} ${n === 1 ? 'origin' : 'origins'} allowed — browser calls from anywhere else are refused.`}
+            emptyLabel="No origin allowlist set, so any website can make browser calls with this app's publishable key."
+            setLabel={(n) => `${n} ${n === 1 ? 'origin' : 'origins'} allowed, so browser calls from anywhere else are refused.`}
           />
           <textarea
             id="corsOrigins"
@@ -184,13 +185,13 @@ export default async function AccessPage({
             className={textareaCls}
           />
         </div>
-        {/* Same footer as Auth methods — this page originated the in-card save
+        {/* Same footer as Auth methods, this page originated the in-card save
             pattern; it now also gets the dirty indicator and the route-change
             guard, so the two security pages behave identically. */}
         <div className="px-5 py-3">
           <StickyFormFooter hint="Applies to new requests immediately." />
         </div>
-      </form>
+      </ActionForm>
 
       <div className="rounded-xl border border-red-300 dark:border-red-800 bg-red-50/40 dark:bg-red-950/30">
         <div className="flex items-start justify-between gap-4 px-5 py-4">
@@ -203,15 +204,15 @@ export default async function AccessPage({
               app and revokes all refresh tokens. Use after a leak or incident. Irreversible.
             </p>
           </div>
-          <form action={rotateSessions.bind(null, id)} className="shrink-0">
+          <ActionForm action={rotateSessions.bind(null, id)} className="shrink-0">
             <TypedConfirmButton
               expected={app.slug}
               title="Force-logout all end-users?"
-              description="Every live end-user access token for this application is invalidated and all refresh tokens are revoked — every user must sign in again. This cannot be undone."
+              description="Every live end-user access token for this application is invalidated and all refresh tokens are revoked, so every user must sign in again. This cannot be undone."
               triggerLabel="Rotate sessions"
               confirmLabel="Rotate sessions"
             />
-          </form>
+          </ActionForm>
         </div>
       </div>
     </div>

@@ -1,6 +1,6 @@
 import * as React from 'react';
 import type { Metadata } from 'next';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { publicPost, PanelApiError } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
@@ -92,7 +92,7 @@ export default async function ResetPasswordPage({
         <input type="hidden" name="token" value={token} />
         {/* The reset token doesn't reveal the account email server-side, so we
             can't offer a hidden autoComplete="username" field here without an
-            API change — password managers fall back to prompting. */}
+            API change, password managers fall back to prompting. */}
         <PasswordConfirmFields inputClassName={INPUT_BASE} />
         <SubmitButton pendingLabel="Saving password…" className="w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60 disabled:cursor-not-allowed">
           Set new password

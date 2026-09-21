@@ -1,27 +1,27 @@
 'use client';
 
 /**
- * Root error boundary for the panel's UNAUTHED routes.
+ * Root error boundary for the panel's unauthenticated routes.
  *
- * `(authed)/error.tsx` has covered the signed-in surface since WP15, but it is
- * scoped to that route group — nothing below `/login`, `/sign-up`,
- * `/accept-invite`, `/magic-link`, `/mfa-verify`, `/forgot-password`,
- * `/reset-password` or `/mcp-consent` had a boundary at all. Those routes are
- * not quiet: every one of them talks to the API through `publicGet`/`publicPost`,
- * which throw a `PanelApiError` on any non-2xx.
+ * `(authed)/error.tsx` only covers the signed-in route group. Nothing below
+ * `/login`, `/sign-up`, `/accept-invite`, `/magic-link`, `/mfa-verify`,
+ * `/forgot-password`, `/reset-password` or `/mcp-consent` had a boundary,
+ * even though each talks to the API through `publicGet`/`publicPost`, which
+ * throw a `PanelApiError` on any non-2xx.
  *
- * `/mcp-consent/review` is the one that hurts. It resolves the OAuth request
- * mid-consent; an API hiccup there dropped the operator onto Next's default
- * error page in the middle of an authorization flow started by an external MCP
- * client, with no way back into the flow and no indication of what to do.
+ * `/mcp-consent/review` is the case that matters most: it resolves an OAuth
+ * request mid-consent, so an API hiccup there used to drop the operator onto
+ * Next's default error page mid-authorization, with no way back into the flow.
  *
- * Kept separate from `(authed)/error.tsx` rather than merged: this one cannot
- * offer "Back to applications" (the visitor may not be signed in) and must not
- * assume the panel chrome exists around it.
+ * Kept separate from `(authed)/error.tsx`: this one cannot offer "Back to
+ * applications" (the visitor may not be signed in) and must not assume the
+ * panel chrome exists around it.
  */
 
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
+import { ApiBusyNotice, useRetry } from '@/components/ApiBusyNotice';
+import { parseBusyDigest } from '@/lib/api-busy';
 
 export default function RootError({
   error,
@@ -35,6 +35,19 @@ export default function RootError({
     console.error(error);
   }, [error]);
 
+  // `reset()` alone re-renders from the payload the router already holds,
+  // which still contains the error, so "Try again" could never succeed on a
+  // Server Component failure. Refresh first, in the same transition.
+  const retry = useRetry(reset);
+  const busy = parseBusyDigest(error.digest);
+  if (busy) {
+    return (
+      <main className="min-h-screen grid place-items-center px-6 bg-[var(--color-bg)]">
+        <ApiBusyNotice busy={busy} reset={reset} className="w-full max-w-md" />
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen grid place-items-center px-6 bg-[var(--color-bg)]">
       <div className="w-full max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-10 text-center space-y-3">
@@ -47,7 +60,7 @@ export default function RootError({
         <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
           <button
             type="button"
-            onClick={() => reset()}
+            onClick={retry}
             className="rounded-md bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
           >
             Try again

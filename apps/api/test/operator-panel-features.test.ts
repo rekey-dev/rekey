@@ -6,7 +6,7 @@
  *   - GET /tenant/security-events (from/to filters + ?format=csv export)
  *
  * Rows that normally arrive via provider webhooks (payments, subscriptions,
- * redemptions, security events) are seeded directly with prisma — the writers
+ * redemptions, security events) are seeded directly with prisma, the writers
  * are covered by their own suites; these tests exercise the read/aggregate
  * surface the panel consumes.
  */
@@ -148,7 +148,7 @@ describe('operator panel features', () => {
     expect(rows[0]!.endUserEmail).toBe('payer-opf@example.com');
     expect(rows[1]!.endUserEmail).toBeNull();
 
-    // Status filter — the count narrows with the rows.
+    // Status filter, the count narrows with the rows.
     const failed = await app.inject({
       method: 'GET',
       url: `/api/v1/tenant/applications/${b.applicationId}/payments?status=FAILED`,
@@ -231,7 +231,7 @@ describe('operator panel features', () => {
       'opf-sort-mid',
       'opf-sort-low',
     ]);
-    // status ascending — Postgres enums sort by definition order
+    // status ascending, Postgres enums sort by definition order
     // (PENDING < SUCCEEDED < FAILED < REFUNDED), not lexicographically.
     expect((await list('?sort=status&order=asc')).map((r) => r.providerPaymentId)).toEqual([
       'opf-sort-high',
@@ -436,7 +436,7 @@ describe('operator panel features', () => {
     // PERCENT redemption: the discount is stamped on the REDEMPTION row when
     // it is recorded. It used to be read back off the linked subscription's
     // metadata at display time, which the buyer's next checkout on the same
-    // plan overwrites — so an operator's historical totals were restated by
+    // plan overwrites, so an operator's historical totals were restated by
     // later, unrelated activity.
     const plan = await prisma.plan.create({
       data: { applicationId: b.applicationId, slug: 'opf-coup', name: 'Coup', amount: 999 },
@@ -561,7 +561,7 @@ describe('operator panel features', () => {
     expect(csv.body).toContain('"operator.sign_in"');
     expect(csv.body).toContain('"203.0.113.7"');
     expect(csv.body).toContain('"app.api_key.created"');
-    // actorType filter applied — the end_user event is excluded.
+    // actorType filter applied, the end_user event is excluded.
     expect(csv.body).not.toContain('"user.signed_in"');
   });
 });

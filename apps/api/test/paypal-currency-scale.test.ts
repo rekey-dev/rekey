@@ -1,7 +1,7 @@
 /**
  * PayPal reports and accepts amounts in the currency's own units, so the scale
  * factor is part of the amount's meaning. Getting it wrong is a clean 100×,
- * straight into the operator's revenue figures — and on the currencies PayPal
+ * straight into the operator's revenue figures, and on the currencies PayPal
  * takes no decimals on, it also makes checkout creation fail outright.
  *
  * The set is PayPal's, not ISO 4217's, because they disagree: ISO calls ISK
@@ -43,7 +43,7 @@ describe('outbound: integer minor units to the string PayPal expects', () => {
   it('a zero-decimal plan is sent without a decimal point', () => {
     // A ¥5000 plan stores amount = 5000, because the yen IS the minor unit. It
     // used to be sent as "50.00": a hundredth of the price, AND a decimal
-    // point PayPal rejects for JPY — so the checkout failed rather than merely
+    // point PayPal rejects for JPY, so the checkout failed rather than merely
     // undercharging.
     expect(paypalMajorString(5000, 'JPY')).toBe('5000');
     expect(paypalMajorString(5000, 'HUF')).toBe('5000');

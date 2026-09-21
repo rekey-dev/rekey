@@ -6,7 +6,7 @@
  * of `lib/webauthn.ts` but parameterized by the tenant user rather than
  * an Application.
  *
- * **User verification is required**, matching `lib/webauthn.ts` — see the
+ * **User verification is required**, matching `lib/webauthn.ts`, see the
  * "User verification is REQUIRED" section there for the reasoning. It applies
  * at least as strongly on this side: `tenantPasskeysService.authenticateComplete`
  * mints an operator session outright, so an assertion with the UV bit clear
@@ -40,7 +40,7 @@ export function panelRpConfig(): PanelRpConfig {
   const rpId = process.env.PANEL_WEBAUTHN_RP_ID;
   const rpOriginsRaw = process.env.PANEL_WEBAUTHN_RP_ORIGINS;
 
-  // Explicit config wins — full control over rpId + the accepted origins.
+  // Explicit config wins, full control over rpId + the accepted origins.
   if (rpId && rpOriginsRaw) {
     const rpOrigins = rpOriginsRaw
       .split(',')
@@ -69,7 +69,7 @@ export function panelRpConfig(): PanelRpConfig {
     statusCode: 400,
     code: 'WEBAUTHN_NOT_CONFIGURED',
     message:
-      'Panel-side WebAuthn is not configured — operator passkey ceremonies cannot run.',
+      'Panel-side WebAuthn is not configured, operator passkey ceremonies cannot run.',
     fix: 'Set CORS_ALLOWED_ORIGINS to the panel origin (e.g. https://panel.example.com), or set PANEL_WEBAUTHN_RP_ID + PANEL_WEBAUTHN_RP_ORIGINS explicitly.',
   });
 }

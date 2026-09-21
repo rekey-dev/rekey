@@ -2,23 +2,26 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Design tokens — see /design.md at the repo root for the rationale.
-   Use these in className via `bg-[var(--color-primary)]`,
-   `border-[var(--color-border)]`, etc. */
+/* Design tokens. Use these in className via `bg-[var(--color-primary)]`,
+   `border-[var(--color-border)]`, etc.
+
+   This block used to cite /design.md at the repo root. There is no such file
+   and there never has been, so the rationale lives in the comments below and
+   on the components that spend these tokens. */
 
 :root {
   color-scheme: light;
 
-  /* Brand — teal, matching the marketing site (rekey-* palette).
+  /* Brand: teal, matching the marketing site (rekey-* palette).
      Semantic error/danger states stay red (red-* utilities in components). */
   --color-primary: #0d9488;        /* rekey-600 (teal) */
-  --color-primary-hover: #14b8a6;  /* rekey-500 — hover BRIGHTENS, see note */
+  --color-primary-hover: #14b8a6;  /* rekey-500, hover BRIGHTENS, see note */
   /* Label on a --color-primary fill. Ink, not white.
      White on the brand teal has never cleared WCAG AA: measured in-page at
      14px/500 it is 2.49:1 on dark's #14b8a6 and 3.74:1 on light's #0d9488
      (AA text needs 4.5:1; even the large-text exemption needs 3:1). That is
-     every primary CTA in the panel — Create application, New API key, New
-     end-user, Save changes, Enable billing, Mint key — while the destructive
+     every primary CTA in the panel (Create application, New API key, New
+     end-user, Save changes, Enable billing, Mint key) while the destructive
      button sat at 4.83:1 and passed, so the most-used control had the worst
      contrast in the product.
      Ink on the same unchanged teal measures 5.29:1 (light) and 7.95:1 (dark).
@@ -32,7 +35,7 @@
   --color-primary-soft: #ccfbf1;   /* rekey-100 */
   --color-primary-soft-fg: #115e59;/* rekey-800 */
 
-  /* Surfaces — cream-first, matching the marketing site. */
+  /* Surfaces: cream-first, matching the marketing site. */
   --color-bg: #f9f5f3;             /* cream (marketing surface) */
   --color-surface: #ffffff;        /* white cards on cream */
   --color-surface-muted: #f3ede7;  /* warm muted */
@@ -44,7 +47,7 @@
   --color-faint-fg: #a59f99;       /* warm faint */
 }
 
-/* Dark theme — applied when <html> has the `.dark` class (set by ThemeToggle /
+/* Dark theme, applied when <html> has the `.dark` class (set by ThemeToggle /
    the layout init script). "system" resolves to this class via matchMedia, so
    we don't also need a prefers-color-scheme block. */
 .dark {

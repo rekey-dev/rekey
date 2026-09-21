@@ -1,10 +1,10 @@
 /**
- * Real Stripe BillingProvider — uses the official `stripe` SDK with the
+ * Real Stripe BillingProvider, uses the official `stripe` SDK with the
  * Application's BYO API key.
  *
  * Picked by `getProviderForApplication` when the Application has BYO Stripe
  * credentials (apiKey + webhookSecret). Without them the factory throws
- * `BILLING_CREDENTIALS_NOT_CONFIGURED` — there is no fallback.
+ * `BILLING_CREDENTIALS_NOT_CONFIGURED`, there is no fallback.
  *
  * Tests don't call this against api.stripe.com; they substitute a fake from
  * `test/fakes/billing-providers.ts`. To exercise this class for real, set up
@@ -115,22 +115,22 @@ export class RealStripeProvider implements BillingProvider {
 
   /**
    * Mint a one-shot Stripe Coupon for this checkout and return the
-   * `discounts` array a Checkout Session takes. Both modes accept it —
+   * `discounts` array a Checkout Session takes. Both modes accept it,
    * `payment` applies it to the session total, `subscription` to the invoice.
    *
    * `amount_off`, never `percent_off`. Rekey has already resolved a PERCENT
    * coupon against the plan and written that integer to
    * `Subscription.metadata.discountAmount` (and it is what the operator sees
    * in the coupon stats). Handing Stripe the percentage instead lets it
-   * recompute against its own base — proration, tax — and what the buyer is
+   * recompute against its own base, proration, tax, and what the buyer is
    * charged silently stops matching what we recorded and redeemed.
    *
    * `duration: 'once'` for the same reason exactly one redemption is
    * recorded: the code buys the first invoice, not every invoice. `'forever'`
    * would hand out a permanent price cut our books never knew about.
    *
-   * Minted per checkout and capped — `max_redemptions: 1` plus a short
-   * `redeem_by` — so an abandoned checkout cannot leave a live, reusable
+   * Minted per checkout and capped, `max_redemptions: 1` plus a short
+   * `redeem_by`, so an abandoned checkout cannot leave a live, reusable
    * discount sitting in the operator's Stripe account.
    */
   private async createDiscount(
@@ -150,10 +150,10 @@ export class RealStripeProvider implements BillingProvider {
           rekeyCouponCode: discount.code,
         },
       });
-    } catch (e) {
+  } catch {
       // Stripe refusing the coupon is a coupon problem, and it is the buyer
       // who is standing in front of it. Left raw it surfaced as an opaque 500
-      // — indistinguishable from Rekey being down — so the one thing the
+      //, indistinguishable from Rekey being down, so the one thing the
       // caller could act on (drop the code and buy at full price) never
       // reached them.
       throw new RekeyError({
@@ -170,13 +170,13 @@ export class RealStripeProvider implements BillingProvider {
    * Delete an ad-hoc coupon whose Checkout Session was never created.
    *
    * Ad-hoc coupons are minted BEFORE the session, because the session takes
-   * the coupon id — so a session that fails to create leaves a live, usable
+   * the coupon id, so a session that fails to create leaves a live, usable
    * discount object behind that nothing will ever reference. Best-effort: the
    * checkout has already failed and the caller's error is the one worth
    * reporting, so a failed cleanup must not replace it.
    *
    * Abandonment by the BUYER (session created, never paid) is not cleaned up
-   * here and deliberately so — the session may still be completed. Those
+   * here and deliberately so, the session may still be completed. Those
    * coupons are bounded instead by `max_redemptions: 1` and `redeem_by`.
    */
   private async discardDiscount(couponId: string | undefined): Promise<void> {
@@ -195,7 +195,7 @@ export class RealStripeProvider implements BillingProvider {
       // refused used to be committed active anyway, so it sat on the pricing
       // page until a buyer clicked it and arrived here. `plansService` now
       // keeps such a plan off the catalogue, and a legacy row from before that
-      // fix still lands here — with a named 409 and the operator's repair
+      // fix still lands here, with a named 409 and the operator's repair
       // instead of the bare `Error` that became "An unexpected error occurred",
       // 500, and a cause visible only in a server log.
       throw planNotRegisteredError({
@@ -227,7 +227,7 @@ export class RealStripeProvider implements BillingProvider {
         },
         subscription_data: {
           // Stripe runs the clock and charges when it ends, reporting
-          // `trialing` until then — which `mapStripeSubStatus` now surfaces as
+          // `trialing` until then, which `mapStripeSubStatus` now surfaces as
           // TRIALING instead of folding into ACTIVE.
           ...(input.trial && { trial_period_days: input.trial.days }),
           metadata: {
@@ -250,7 +250,7 @@ export class RealStripeProvider implements BillingProvider {
   }
 
   async createOneTimeCheckout(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
-    // One-off charge — `mode: 'payment'`, inline price_data (no recurring
+    // One-off charge, `mode: 'payment'`, inline price_data (no recurring
     // Price). `checkout.session.completed` fires on success and our existing
     // webhook handler grants credits / issues the license by plan.kind.
     //
@@ -338,13 +338,13 @@ export class RealStripeProvider implements BillingProvider {
    * `payment_intent` and NOTHING else, but the column holds four different id
    * kinds depending on which event wrote the row:
    *
-   *   `pi_` — checkout.session.completed, when the session had one    (direct)
-   *   `ch_` — never written today, but a charge id is refundable      (direct)
-   *   `in_` — invoice.payment_succeeded, i.e. EVERY RENEWAL           (resolve)
-   *   `cs_` — checkout.session.completed with no payment intent yet   (resolve)
+   *   `pi_`, checkout.session.completed, when the session had one    (direct)
+   *   `ch_`, never written today, but a charge id is refundable      (direct)
+   *   `in_`, invoice.payment_succeeded, i.e. EVERY RENEWAL           (resolve)
+   *   `cs_`, checkout.session.completed with no payment intent yet   (resolve)
    *
-   * So the ids for renewals — the majority of payments any live application
-   * has — are the ones the API rejects. Passing the stored id through
+   * So the ids for renewals, the majority of payments any live application
+   * has, are the ones the API rejects. Passing the stored id through
    * unexamined would refuse most real refunds with Stripe's own opaque
    * "No such payment_intent" rather than anything an operator could act on.
    *
@@ -384,7 +384,7 @@ export class RealStripeProvider implements BillingProvider {
       statusCode: 409,
       code: 'BILLING_PAYMENT_NOT_REFUNDABLE',
       message: `Rekey does not recognise "${providerPaymentId}" as a Stripe id it can refund.`,
-      fix: 'Refund this one in the Stripe dashboard directly, and open an issue with the id — Rekey should have been able to resolve it.',
+      fix: 'Refund this one in the Stripe dashboard directly, and open an issue with the id, Rekey should have been able to resolve it.',
     });
   }
 
@@ -413,7 +413,7 @@ export class RealStripeProvider implements BillingProvider {
           statusCode: 409,
           code: 'BILLING_PAYMENT_ALREADY_REFUNDED',
           message: 'Stripe has already refunded this charge in full.',
-          fix: 'Nothing to do — the buyer has their money. Resolve the case as refunded.',
+          fix: 'Nothing to do, the buyer has their money. Resolve the case as refunded.',
         });
       }
       throw new RekeyError({
@@ -437,7 +437,7 @@ export class RealStripeProvider implements BillingProvider {
 
   async cancelSubscription(input: CancelSubscriptionInput): Promise<void> {
     if (!input.subscription.providerSubId) {
-      // Local PENDING subscription that never made it to Stripe — nothing to cancel.
+      // Local PENDING subscription that never made it to Stripe, nothing to cancel.
       return;
     }
     if (input.atPeriodEnd === false) {

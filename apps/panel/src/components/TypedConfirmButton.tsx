@@ -18,6 +18,7 @@
  */
 
 import * as React from 'react';
+import { useActionPending } from './ActionForm';
 import { ModalHeader, dialogChromeCls } from '@/components/Modal';
 
 interface Props {
@@ -49,7 +50,7 @@ export function TypedConfirmButton({
 
   // Unique per instance. The ids used to be the literal strings
   // "typed-confirm-title" / "typed-confirm-desc", and the End-users list renders
-  // one of these per row — so every dialog on the page shared the same ids and
+  // one of these per row, so every dialog on the page shared the same ids and
   // `aria-labelledby` resolved to the FIRST row's heading. Screen-reader users
   // deleting row 12 heard row 1's name.
   const baseId = React.useId();
@@ -71,16 +72,23 @@ export function TypedConfirmButton({
     // Close dialog first so the form submit isn't blocked by the modal layer.
     dialogRef.current?.close();
     // Let the button's default submit behaviour propagate to the parent
-    // form on the next tick. Returning here is enough — the click handler
+    // form on the next tick. Returning here is enough, the click handler
     // doesn't preventDefault; the button is type="submit" inside the
     // parent <form action={…}>.
   };
+
+  // The trigger is what stays on screen while the parent form's action runs;
+  // `aria-busy` is also what `<RefreshAfterAction>` waits on, which is why
+  // this must not come straight from `useFormStatus`: a stuck true would
+  // block that refresh for good. See `ActionForm.tsx`.
+  const pending = useActionPending();
 
   return (
     <>
       <button
         type="button"
         onClick={open}
+        aria-busy={pending || undefined}
         className={
           triggerClassName ?? 'text-xs text-red-600 dark:text-red-400 hover:underline'
         }
@@ -91,7 +99,7 @@ export function TypedConfirmButton({
         ref={dialogRef}
         aria-labelledby={titleId}
         aria-describedby={descId}
-        // Same chrome as every other modal — see the note on `dialogChromeCls`.
+        // Same chrome as every other modal, see the note on `dialogChromeCls`.
         className={dialogChromeCls('sm')}
         onClick={(e) => {
           if (e.target === dialogRef.current) close();

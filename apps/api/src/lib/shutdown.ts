@@ -2,7 +2,7 @@
  * Graceful shutdown wiring for the standalone server.
  *
  * `buildApp()` registers `onClose` hooks that are load-bearing for a clean
- * stop — most importantly a final `flushApiRequestLogs()` so the last buffered
+ * stop, most importantly a final `flushApiRequestLogs()` so the last buffered
  * batch of request logs isn't lost on deploy/restart, plus the Redis `quit()`
  * and the flush/prune interval clears. Those hooks ONLY run if something calls
  * `app.close()`. Node does NOT do this on a process signal by default: an
@@ -11,14 +11,14 @@
  * the onClose hooks never fire and the final batch is silently dropped.
  *
  * This registers SIGTERM/SIGINT handlers that:
- *   1. `app.close()` — stops accepting connections, drains in-flight requests,
+ *   1. `app.close()`, stops accepting connections, drains in-flight requests,
  *      and runs every `onClose` hook (flush, Redis quit, interval clears).
- *   2. `prisma.$disconnect()` — releases pooled DB connections so we don't leak
+ *   2. `prisma.$disconnect()`, releases pooled DB connections so we don't leak
  *      a server-side session for the duration of the linger.
  *
  * Idempotent: a second signal arriving mid-shutdown is ignored rather than
  * kicking off a second `app.close()` (which would reject). Best-effort: a hook
- * that throws is logged but never blocks exit — a stuck shutdown that hangs
+ * that throws is logged but never blocks exit, a stuck shutdown that hangs
  * past the orchestrator's grace period just gets SIGKILL'd, which is strictly
  * worse than exiting now.
  */
@@ -43,7 +43,7 @@ export interface RegisterGracefulShutdownOptions {
  *
  * Returns the shutdown function so callers (and tests) can trigger the same
  * path without sending a real signal. The returned function is safe to call
- * repeatedly — only the first invocation does work.
+ * repeatedly, only the first invocation does work.
  */
 export function registerGracefulShutdown(
   app: FastifyInstance,

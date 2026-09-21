@@ -9,8 +9,8 @@ import { env } from '../config/env.js';
 
 /**
  * Origin of the shared hosted-portal host, or null when this deployment does
- * not run one. PUBLIC_PORTAL_URL has no default — a Rekey default would have
- * pointed a self-hoster's END USERS at our infrastructure — so "unset" is a
+ * not run one. PUBLIC_PORTAL_URL has no default, a Rekey default would have
+ * pointed a self-hoster's END USERS at our infrastructure, so "unset" is a
  * real state meaning "no hosted portal here", not a misconfiguration.
  */
 export function portalBaseOrigin(): string | null {

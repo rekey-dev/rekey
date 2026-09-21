@@ -1,5 +1,5 @@
 /**
- * Tenant billing stats endpoint — GET /tenant/applications/:id/billing/stats.
+ * Tenant billing stats endpoint, GET /tenant/applications/:id/billing/stats.
  *
  * Seeds subscriptions + payments directly (deterministic dates) and asserts:
  *   - subscription counters (active / past-due / canceled+new in 30d),
@@ -99,7 +99,7 @@ describe('GET /tenant/applications/:id/billing/stats', () => {
       }),
     ]);
 
-    // One end-user per subscription — (applicationId, endUserId, planId) is unique.
+    // One end-user per subscription, (applicationId, endUserId, planId) is unique.
     const eu = async (n: number): Promise<string> =>
       (await prisma.endUser.create({ data: { applicationId, email: `bs-${n}@example.com` } })).id;
 
@@ -169,7 +169,7 @@ describe('GET /tenant/applications/:id/billing/stats', () => {
     // Everything seeded "now" except the backdated old-canceled row: 5 active
     // + 1 past-due + 1 recent-canceled = 7.
     expect(stats.newSubscriptionsLast30d).toBe(7);
-    // 2×1000 (MONTH) + floor(10000/12)=833 (YEAR) — CREDIT + USAGE excluded.
+    // 2×1000 (MONTH) + floor(10000/12)=833 (YEAR), CREDIT + USAGE excluded.
     expect(stats.mrrCents).toBe(2833);
     expect(stats.mrrCurrency).toBe('USD');
     expect(stats.mixedCurrencies).toBe(false);
@@ -192,7 +192,7 @@ describe('GET /tenant/applications/:id/billing/stats', () => {
     });
     const stats = res.json().data as BillingStats;
 
-    // Dominant currency only — NOT 2833 + 500.
+    // Dominant currency only, NOT 2833 + 500.
     expect(stats.mrrCents).toBe(2833);
     expect(stats.mrrCurrency).toBe('USD');
     expect(stats.mixedCurrencies).toBe(true);
@@ -224,7 +224,7 @@ describe('GET /tenant/applications/:id/billing/stats', () => {
     expect(stats.monthlyRevenue[11]!.month).toBe(monthRef(0).key);
     expect(stats.monthlyRevenue[0]!.month).toBe(monthRef(11).key);
 
-    // The 7000 payment lands in its month's bucket — alone (the FAILED 4242 in
+    // The 7000 payment lands in its month's bucket, alone (the FAILED 4242 in
     // the same month is excluded, the recent ones can't be 2 months back).
     const twoBack = stats.monthlyRevenue.find((m) => m.month === monthRef(2).key);
     expect(twoBack?.amountCents).toBe(7000);

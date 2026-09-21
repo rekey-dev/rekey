@@ -1,8 +1,11 @@
 import * as React from 'react';
 import { Suspense } from 'react';
+import { randomUUID } from 'node:crypto';
 import { redirect } from 'next/navigation';
-import { cookies } from 'next/headers';
-import { ACCESS_COOKIE, REFRESH_COOKIE, api, clearSessionCookies, setSessionCookies, publicPost, PanelApiError, type AuthResponse, getMe } from '@/lib/api';
+import { cookies, headers } from 'next/headers';
+import { landedFromServerAction } from '@/lib/action-landing';
+import { RefreshAfterAction } from '@/components/RefreshAfterAction';
+import { ACCESS_COOKIE, REFRESH_COOKIE, api, clearSessionCookies, setSessionCookies, publicPost, PanelApiError, type AuthResponse, getMe, getWorkspaceCreationOpen } from '@/lib/api';
 import { Sidebar } from '@/components/Sidebar';
 import { MobileSidebar } from '@/components/MobileSidebar';
 import { CommandPalette } from '@/components/CommandPalette';
@@ -19,7 +22,7 @@ import { AnalyticsEvent } from '@/lib/analytics';
 //
 // The mechanism is a guard in Next's client router. While a redirect from a
 // server action is in flight, RedirectBoundary renders `null` for the whole
-// subtree — not loading.tsx, not error.tsx, literally an empty page. Normally
+// subtree, not loading.tsx, not error.tsx, literally an empty page. Normally
 // nobody sees that window, because the router seeds its prefetch cache with
 // the RSC payload the action just rendered and the transition commits on the
 // spot. But it only seeds when the action didn't revalidate; calling
@@ -27,19 +30,53 @@ import { AnalyticsEvent } from '@/lib/analytics';
 // network for a fresh payload, and the page is blank for the whole round-trip
 // (vercel/next.js#73317).
 //
-// Dropping revalidatePath costs us nothing, because there was never a cache
-// for it to clear. This layout awaits cookies(), which makes every authed
-// route dynamic — no Full Route Cache entry exists. `src/lib/api.ts` fetches
-// with `cache: 'no-store'` — no Data Cache entries either. And the router
-// wipes its client-side prefetch cache after *any* server action that returns
-// flight data, revalidated or not. The one genuine cache in the panel is the
-// 15-second dependency-banner probe in `api.ts`, which nothing here was
-// invalidating on purpose anyway.
+// There is no server cache for it to clear anyway. This layout awaits
+// cookies(), which makes every authed route dynamic, so no Full Route Cache
+// entry exists, and `src/lib/api.ts` fetches with `cache: 'no-store'`, so no
+// Data Cache entries either.
 //
-// So: in this app, `revalidatePath` + `redirect` in the same action is all
-// cost and no benefit. If you need an action to refresh data *without*
-// navigating, keep revalidatePath and return a result instead of redirecting
-// — the super-admin dashboard's operator-invites actions use that shape.
+// What CAN be stale after a write is the client router's prefetch cache, and
+// an earlier version of this comment was wrong about it. In Next 15.5.18
+// (`client/components/router-reducer/reducers/server-action-reducer.js`):
+//
+//   1. The action response already contains the redirect destination, rendered
+//      by Next after the action ran (`createRedirectRenderResult` in
+//      `server/app-render/action-handler.js`). That payload replaces the
+//      router's segment cache. The page you land on is fresh either way.
+//   2. With no revalidation, that payload is seeded into the EXISTING prefetch
+//      cache (`createSeededPrefetchCacheEntry({ prefetchCache:
+//      state.prefetchCache })`) and the existing cache is kept. With
+//      `staleTimes.dynamic: 30` every page visited in the last 30 seconds is
+//      still in there, holding its pre-write render. (Nothing is prefetched
+//      any more, see `components/Link.tsx`, but visits are cached the same
+//      way.) Go back to the Overview tab after a save on Subscriptions and you
+//      see the old one.
+//   3. With revalidation the seed is skipped and the prefetch cache is emptied,
+//      which is fresh but blank (the bug above).
+//
+// So neither setting of revalidatePath gives both. The panel takes 2 and closes
+// its gap on the client: when this render is the destination of an action
+// redirect (`landedFromServerAction`), it mounts `<RefreshAfterAction>` with a
+// fresh id, which calls `router.refresh()` once. A refresh keeps the current UI
+// on screen while it refetches, never goes through RedirectBoundary, and empties
+// the prefetch cache (`reducers/refresh-reducer.js`).
+//
+// The cost is one extra render of the WHOLE tree (every layout plus the page,
+// five or six API calls on an end-user tab) per action, so `lib/refresh-once.ts`
+// makes sure it is one per action: retried only when Next discarded it (a
+// committed refresh unmounts the component), at most three tries, and not
+// until the landing page has finished streaming and no form is submitting.
+// It still fires when the operator has already moved to another tab, because
+// that tab may be served from the router cache with its pre-write render. The version before that
+// re-ran on every URL change while mounted, and on a production build it was
+// sometimes discarded outright by a navigation or the flag-stripping
+// `history.replaceState` racing it, leaving the stale cache in place.
+// `test/action-landing.test.ts` pins every runtime fact above against the
+// installed Next, and `test/refresh-once.test.ts` pins the scheduling rules.
+//
+// If you need an action to refresh data *without* navigating, call
+// revalidatePath and return a result instead of redirecting; the super-admin
+// dashboard's operator-invites actions use that shape.
 
 async function signOut(): Promise<void> {
   'use server';
@@ -61,7 +98,7 @@ async function switchWorkspace(formData: FormData): Promise<void> {
     path: '/api/v1/tenant/auth/switch-workspace',
     body: { tenantId },
   });
-  await setSessionCookies({ accessToken: result.accessToken, refreshToken: result.refreshToken });
+  await setSessionCookies(result);
   redirect('/applications?e=ws_switched');
 }
 
@@ -78,7 +115,7 @@ async function createWorkspace(formData: FormData): Promise<void> {
     });
   } catch (err) {
     // A POST does not trigger the `forbidden()` interrupt (that is GET-only),
-    // so an uncaught refusal here renders the segment error boundary — a
+    // so an uncaught refusal here renders the segment error boundary, a
     // generic "something went wrong" with a Try again button that can never
     // succeed. The deployment switch is a legitimate, permanent answer, so it
     // has to read as one. The affordance is normally hidden (see
@@ -95,7 +132,7 @@ async function createWorkspace(formData: FormData): Promise<void> {
     path: '/api/v1/tenant/auth/switch-workspace',
     body: { tenantId: created.id },
   });
-  await setSessionCookies({ accessToken: switched.accessToken, refreshToken: switched.refreshToken });
+  await setSessionCookies(switched);
   redirect('/applications?e=ws_created');
 }
 
@@ -106,6 +143,7 @@ export default async function AuthedLayout({
 }): Promise<React.JSX.Element> {
   const jar = await cookies();
   if (!jar.get(ACCESS_COOKIE)?.value) redirect('/login');
+  const actionId = landedFromServerAction(await headers()) ? randomUUID() : null;
 
   // Operator MCP consent resumes here. The /mcp-consent page (outside this
   // group) bounces an unauthenticated operator to /login after stashing the
@@ -114,25 +152,18 @@ export default async function AuthedLayout({
   // how they signed in. /mcp-consent reads the params back out of the cookie.
   if (jar.get('mcp_consent_pending')?.value) redirect('/mcp-consent/review');
 
-  const me = await getMe();
-  const active = me.memberships.find((m) => m.tenantId === me.activeTenantId);
-
-  // Don't offer a door that will not open. A deployment can switch additional
-  // workspace creation off (`WORKSPACE_CREATION=disabled`) — Rekey Cloud does,
-  // because there provisioning is brokered by billing against the plan's paid
-  // allowance rather than being self-serve.
+  // In parallel: they were awaited one after the other, which put two API
+  // round-trips in series in front of every authed page's first byte. The
+  // creation mode is also cached across requests (see
+  // `getWorkspaceCreationOpen`), so on most renders it costs nothing at all.
   //
-  // Fails OPEN, matching `fetchSignupMode` on the sign-up page and
-  // `canManageApps` on the applications page: if the probe itself fails we
-  // still render the affordance and let the server refuse, because hiding a
-  // capability the operator actually has is the worse error. The refusal is
-  // handled properly in `createWorkspace` above either way.
-  const canCreateWorkspace = await api<{ mode: 'open' | 'disabled' }>({
-    method: 'GET',
-    path: '/api/v1/tenant/workspace/creation-mode',
-  })
-    .then((d) => d.mode !== 'disabled')
-    .catch(() => true);
+  // Don't offer a door that will not open. A deployment can switch additional
+  // workspace creation off (`WORKSPACE_CREATION=disabled`), Rekey Cloud does,
+  // because there provisioning is brokered by billing against the plan's paid
+  // allowance rather than being self-serve. The probe fails OPEN; see
+  // `getWorkspaceCreationOpen` for why.
+  const [me, canCreateWorkspace] = await Promise.all([getMe(), getWorkspaceCreationOpen()]);
+  const active = me.memberships.find((m) => m.tenantId === me.activeTenantId);
 
   return (
     <div className="min-h-screen flex flex-col md:flex-row bg-neutral-50 dark:bg-neutral-950">
@@ -161,7 +192,7 @@ export default async function AuthedLayout({
       {/* `overflow-x-clip`, not `overflow-x-hidden`. `hidden` makes this a
           scroll container (the y axis is forced to `auto`), and because <main>
           is never height-constrained it is a scroll container that can never
-          scroll — which silently breaks `position: sticky` for everything
+          scroll, which silently breaks `position: sticky` for everything
           inside it, since sticky resolves against the nearest scrolling
           ancestor. `clip` gives the same "don't let wide content widen the
           page" behaviour without creating that box, so the sticky save footer
@@ -170,7 +201,7 @@ export default async function AuthedLayout({
         {/* Renders nothing unless a backing service is actually unreachable.
             Suspended on its own: it is an async component rendered directly in
             the layout, so without a boundary the layout cannot flush until the
-            probe resolves — and `loading.tsx` only wraps {children}, so a slow
+            probe resolves, and `loading.tsx` only wraps {children}, so a slow
             probe meant a blank page instead of the skeleton on every Data Cache
             miss. Losing the banner is an acceptable failure; holding every
             authed page behind it is not. */}
@@ -179,8 +210,18 @@ export default async function AuthedLayout({
         </Suspense>
         {children}
       </main>
-      {/* Cmd+K palette — a client island; available on every authed page. */}
+      {/* Cmd+K palette, a client island; available on every authed page. */}
       <CommandPalette />
+      {/* Only on the render a server action redirected to; see the comment at
+          the top of this file. Last in the tree so its effect runs after the
+          page's own. The id is per action: the component refreshes at most
+          once per id, and the key remounts it even when two actions land on
+          the same URL back to back. */}
+      {actionId !== null && (
+        <Suspense key={actionId} fallback={null}>
+          <RefreshAfterAction actionId={actionId} />
+        </Suspense>
+      )}
     </div>
   );
 }

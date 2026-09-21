@@ -1,6 +1,6 @@
 import * as React from 'react';
-import Link from 'next/link';
-import { api, type BillingStatsRow, type DunningCaseRow, type PaymentRow, getApplication } from '@/lib/api';
+import Link from '@/components/Link';
+import { api, type BillingStatsRow, type DunningCaseRow, type PaymentRow, getApplication, unlessBusy } from '@/lib/api';
 import { emptyPage, type Page } from '@/lib/paginate';
 import { formatMoney } from '@/lib/format';
 import { formatDateTime } from '@/lib/date';
@@ -10,7 +10,7 @@ import { StatusPill } from '@/components/StatusPill';
 import { EmptyState } from '@/components/EmptyState';
 
 /**
- * Billing Overview — the Billing group's landing tab. Revenue/subscription
+ * Billing Overview, the Billing group's landing tab. Revenue/subscription
  * stat tiles fed by GET /tenant/applications/:id/billing/stats, a 12-month
  * revenue chart (inline SVG, same no-deps approach as the app overview's
  * sign-up trend), and the most recent payments with a link to the full
@@ -36,7 +36,7 @@ export default async function BillingOverviewPage({
         />
         <EmptyState
           title="Billing is disabled for this application"
-          description="Turn billing on and configure a provider to start selling plans — revenue stats will appear here."
+          description="Turn billing on and configure a provider to start selling plans. Revenue stats will appear here."
           action={
             <Link
               href={`/applications/${id}/billing`}
@@ -54,13 +54,13 @@ export default async function BillingOverviewPage({
   // useful if one fails.
   const [stats, paymentPage, dunningPage] = await Promise.all([
     api<BillingStatsRow>({ method: 'GET', path: `${basePath}/billing/stats` }).catch(() => null),
-    api<Page<PaymentRow>>({ method: 'GET', path: `${basePath}/payments?limit=8` }).catch(() =>
+    api<Page<PaymentRow>>({ method: 'GET', path: `${basePath}/payments?limit=8` }).catch(unlessBusy(() =>
       emptyPage<PaymentRow>(8),
-    ),
+    )),
     api<Page<DunningCaseRow>>({
       method: 'GET',
       path: `${basePath}/dunning?status=OPEN&limit=100`,
-    }).catch(() => emptyPage<DunningCaseRow>(100)),
+    }).catch(unlessBusy(() => emptyPage<DunningCaseRow>(100))),
   ]);
 
   const recentPayments = paymentPage.items;
@@ -89,7 +89,7 @@ export default async function BillingOverviewPage({
             href={`/applications/${id}/plans`}
             footer={
               stats.mixedCurrencies
-                ? `${stats.mrrCurrency} plans only — other currencies excluded`
+                ? `${stats.mrrCurrency} plans only, other currencies excluded`
                 : 'Recurring plans, yearly normalized to monthly'
             }
           />
@@ -123,7 +123,7 @@ export default async function BillingOverviewPage({
         </div>
       )}
 
-      {/* Revenue over the last 12 months — the headline graph. */}
+      {/* Revenue over the last 12 months, the headline graph. */}
       {stats && (
         <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
           <div className="flex items-baseline justify-between gap-2">
@@ -141,7 +141,7 @@ export default async function BillingOverviewPage({
         </section>
       )}
 
-      {/* Recent payments — a short tail; the Payments tab has filters + paging. */}
+      {/* Short tail here; the Payments tab has filters + paging. */}
       <section className="space-y-3">
         <div className="flex items-baseline justify-between gap-2">
           <h3 className="text-sm font-medium">Recent payments</h3>
@@ -206,7 +206,7 @@ export default async function BillingOverviewPage({
   );
 }
 
-/** Compact metric tile — same pattern as the app Overview page's tiles. */
+/** Compact metric tile, same pattern as the app Overview page's tiles. */
 function StatTile({
   title,
   value,
@@ -239,7 +239,7 @@ function StatTile({
 }
 
 /**
- * Inline SVG bar chart for the 12-month revenue series. No chart library —
+ * Inline SVG bar chart for the 12-month revenue series. No chart library,
  * same approach as the overview page's sign-up AreaChart. One bar per month,
  * scaled to the series max; months render even when zero so gaps are visible.
  */
@@ -304,7 +304,7 @@ function RevenueBarChart({
       </div>
       {total === 0 && (
         <p className="mt-2 text-xs text-[var(--color-muted-fg)]">
-          No settled revenue yet — successful payments will chart here month by month.
+          No settled revenue yet. Successful payments will chart here month by month.
         </p>
       )}
     </div>

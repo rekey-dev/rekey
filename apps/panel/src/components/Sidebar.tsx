@@ -1,22 +1,24 @@
 'use client';
 
 /**
- * Global sidebar for the operator panel — workspace switcher up top, global
+ * Global sidebar for the operator panel, workspace switcher up top, global
  * nav links, then the user account + sign-out at the bottom. Per-app
  * navigation is rendered as a *secondary* sidebar inside the app layout
  * (apps/[id]/layout.tsx), not here, so the global sidebar stays predictable
  * across every page.
  *
  * Active link styling uses next/navigation's pathname. Anything starting
- * with the link's `href` highlights — works for nested routes like
+ * with the link's `href` highlights, works for nested routes like
  * `/applications/<id>/...` matching the "Applications" link.
  */
 
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
+import { LinkPending } from '@/components/LinkPending';
 import { usePathname } from 'next/navigation';
 import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 import { ThemeToggle } from './ThemeToggle';
+import { ActionForm } from './ActionForm';
 import { SubmitButton } from './SubmitButton';
 import { openCommandPalette } from './CommandPalette';
 
@@ -30,7 +32,7 @@ interface NavItem {
   href: string;
   label: string;
   icon: React.JSX.Element;
-  /** Optional hover tooltip — for items whose label needs a one-line gloss. */
+  /** Optional hover tooltip, for items whose label needs a one-line gloss. */
   title?: string;
   /**
    * Hide this item below this role.
@@ -38,7 +40,7 @@ interface NavItem {
    * The nav used to list every destination to everyone, which was survivable
    * only because the pages behind them happened to be readable by everyone.
    * Once the workspace audit surfaces were lowered to an ADMIN floor, a MEMBER
-   * was left with links that navigate to a 403 — the worst version of a
+   * was left with links that navigate to a 403, the worst version of a
    * permission error, because the product itself suggested the click.
    *
    * Gating the nav is presentation, not enforcement: the API is the only thing
@@ -180,7 +182,7 @@ const NAV: NavSection[] = [
         href: '/account/mcp',
         label: 'Operator MCP',
         icon: ICONS.apiKey,
-        title: 'MCP (Model Context Protocol) — let AI agents read your workspace.',
+        title: 'MCP (Model Context Protocol): let AI agents read your workspace.',
       },
     ],
   },
@@ -264,7 +266,7 @@ export function Sidebar({
                   <span className={active ? 'text-[var(--color-primary)]' : 'text-[var(--color-faint-fg)]'}>
                     {item.icon}
                   </span>
-                  {item.label}
+                  <LinkPending>{item.label}</LinkPending>
                 </Link>
               );
             })}
@@ -275,7 +277,7 @@ export function Sidebar({
       <div className="border-t border-[var(--color-border)] px-3 py-3 min-w-0 space-y-2">
         <div title={userEmail} className="text-xs text-[var(--color-muted-fg)] truncate">{userEmail}</div>
         <div className="flex items-center gap-2">
-          <form action={signOutAction}>
+          <ActionForm action={signOutAction}>
             <SubmitButton
               pendingLabel="Signing out…"
               className="inline-flex items-center gap-2 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)] disabled:opacity-60"
@@ -283,7 +285,7 @@ export function Sidebar({
               {ICONS.signout}
               Sign out
             </SubmitButton>
-          </form>
+          </ActionForm>
           <ThemeToggle />
         </div>
       </div>

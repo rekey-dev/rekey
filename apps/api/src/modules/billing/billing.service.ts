@@ -1,21 +1,21 @@
 /**
- * Billing service — public surface used by `@rekey.dev/node`.
+ * Billing service, public surface used by `@rekey.dev/node`.
  *
  * Core operations:
  *   - listActivePlans(application)        → public plan catalogue
  *   - getCurrentSubscription(app, eu)     → that user's active sub, if any
  *   - createCheckoutSession(app, eu, slug, urls) → returns provider URL
  *
- * Plus the self-service reads and the cancel path the hosted portal drives —
+ * Plus the self-service reads and the cancel path the hosted portal drives,
  * see the exported object at the bottom of the file for the full list.
  *
  * Subscription activation, payment recording, and status transitions all
- * happen via webhook events from the provider — *not* synchronously here.
+ * happen via webhook events from the provider, *not* synchronously here.
  * The local `Subscription` row is created in `PENDING` state at checkout
  * and flips to `ACTIVE` when the webhook fires (see the provider modules'
  * `translate` + the shared appliers in `webhooks/apply.ts`).
  *
- * The one exception is a deliberate super-admin GRANT — a sale settled by
+ * The one exception is a deliberate super-admin GRANT, a sale settled by
  * invoice, bank transfer or fiat of the deployment owner, where no provider
  * event is ever coming. That lives in `grant.service.ts` and goes through the
  * same provisioner and the same outbox, so everything downstream of an
@@ -30,19 +30,48 @@ import { plansService } from '../plans/plans.service.js';
 import { couponsService } from '../coupons/coupons.service.js';
 import { resolveCheckoutDiscount } from './checkout-discount.js';
 import { resolveCheckoutTrial } from './checkout-trial.js';
+import { isOneTimePlan } from './plan-kind.js';
+import {
+  checkTrialEligibility,
+  releaseTrial,
+  reserveTrial,
+  bindTrialToSession,
+  trialAlreadyUsed,
+  trialSubjectKey,
+} from './trial-eligibility.service.js';
+
 import {
   buildCheckoutSessionMetadata,
   CHECKOUT_SESSION_LIFETIME_MS,
 } from './checkout-sessions.js';
 import { getProviderForApplication, pickProvider } from './providers/index.js';
+import { getModule } from './providers/registry.js';
 import { billingCredentialsService, type BillingProviderName } from './credentials.service.js';
 import { BillingConfigSchema, cancelEffect, isEntitlingStatus, ENTITLING_SUBSCRIPTION_STATUSES } from '@rekey.dev/shared-types';
 import { enqueueSubscriptionEvent } from './webhooks/billing-events.js';
 import { kickDeliveries } from '../webhooks/webhook.service.js';
+/**
+ * "$99.00" for a refusal message, or null when the plan has no flat amount.
+ *
+ * The refusal has to name what the buyer WILL be charged, because the whole
+ * point of refusing instead of charging is that the buyer was shown a free
+ * trial. A vague refusal sends the operator back to the dashboard to work out
+ * the number themselves.
+ */
+function priceLabel(plan: { amount: number | null; currency: string | null }): string | null {
+  if (plan.amount === null || plan.amount === 0) return null;
+  const currency = plan.currency ?? 'USD';
+  try {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(plan.amount / 100);
+  } catch {
+    // An unrecognised currency code must not turn a refusal into a 500.
+    return `${(plan.amount / 100).toFixed(2)} ${currency}`;
+  }
+}
 
 /**
  * End-user-facing payment row (GET /api/v1/billing/payments). A deliberate
- * projection — internal correlation ids (providerPaymentId) and raw metadata
+ * projection, internal correlation ids (providerPaymentId) and raw metadata
  * stay server-side; `receiptUrl` is surfaced when a provider receipt link was
  * stamped onto the payment's metadata (`receiptUrl` / `receipt_url`).
  */
@@ -81,7 +110,7 @@ function receiptUrlFromMetadata(metadata: unknown): string | null {
   const m = metadata as Record<string, unknown>;
   const candidate = m.receiptUrl ?? m.receipt_url;
   if (typeof candidate !== 'string') return null;
-  // Only http(s) links leave the API — a metadata key is operator-writable,
+  // Only http(s) links leave the API, a metadata key is operator-writable,
   // so refuse javascript:/data: and other schemes outright.
   return /^https?:\/\//i.test(candidate) ? candidate : null;
 }
@@ -97,14 +126,14 @@ function receiptUrlFromMetadata(metadata: unknown): string | null {
  *
  * ## Provider-backed rows expire here too
  *
- * This used to refuse them outright — the provider's webhook was the source of
+ * This used to refuse them outright, the provider's webhook was the source of
  * truth and this must not race it. That reasoning assumed every provider can
  * schedule a cancellation. PayPal cannot: its only cancel is immediate, so a
  * period-end request cancels the agreement now and the paid period is held open
  * locally instead (see `applySubscriptionStatusMirror`, which declines to let
  * PayPal's own CANCELLED event shorten it). Nothing else would ever end those
- * rows — PayPal has already said everything it is going to say about that
- * subscription — so they would stay ACTIVE and entitled indefinitely.
+ * rows, PayPal has already said everything it is going to say about that
+ * subscription, so they would stay ACTIVE and entitled indefinitely.
  *
  * Racing the provider is safe in the direction that matters. Both sides write
  * the same terminal state, and the `status: 'ACTIVE'` guard below means only
@@ -116,18 +145,23 @@ function receiptUrlFromMetadata(metadata: unknown): string | null {
  *
  * Lazy rather than scheduled, deliberately: the row is read on every
  * entitlement resolution and every portal load, so the expiry happens the
- * first time anyone asks — no new job, no new Redis key, nothing to run in a
+ * first time anyone asks, no new job, no new Redis key, nothing to run in a
  * self-host that has neither. The cost is that a subscription nobody looks at
  * stays nominally ACTIVE in the table until someone does, which is invisible
- * because nothing consults it in the meantime — and, since the provider-side
+ * because nothing consults it in the meantime, and, since the provider-side
  * cancellation already happened, costs the operator a little unbilled access
  * rather than costing the buyer a charge.
  *
  * The update is conditional on the row still being ACTIVE, so two concurrent
- * readers cannot both flip it and emit two `subscription.canceled` events —
+ * readers cannot both flip it and emit two `subscription.canceled` events,
  * `updateMany` reports how many rows it actually changed, and only the winner
  * enqueues.
  */
+/** A provider that only receives events and can be asked for nothing. */
+function isInboundOnlyProvider(provider: string | null): boolean {
+  return provider !== null && getModule(provider)?.capabilities.checkout === false;
+}
+
 async function expireIfDue(sub: Subscription): Promise<Subscription> {
   const now = new Date();
 
@@ -138,7 +172,7 @@ async function expireIfDue(sub: Subscription): Promise<Subscription> {
     // `grantSubscription` writes no provider and a `currentPeriodEnd`, and
     // nothing will ever renew that row, so an elapsed term is final. Entitlement
     // resolution already stops honouring it (see `stillEntitling`), but the row
-    // itself stayed ACTIVE — leaving the panel and the portal reporting an
+    // itself stayed ACTIVE, leaving the panel and the portal reporting an
     // active subscription to someone who has no access, which reads as a bug in
     // the entitlement check rather than a term that ended.
     //
@@ -148,7 +182,7 @@ async function expireIfDue(sub: Subscription): Promise<Subscription> {
     // paid for.
     //
     // Checked AFTER `cancelAt`, deliberately. A subscription whose scheduled
-    // cancellation has come due is CANCELED — somebody cancelled it — and a
+    // cancellation has come due is CANCELED, somebody cancelled it, and a
     // grant carries a `currentPeriodEnd` too, so testing the term first
     // relabelled every cancelled grant as EXPIRED. The more specific fact wins.
     //
@@ -175,14 +209,14 @@ async function expireIfDue(sub: Subscription): Promise<Subscription> {
   }
 
   // Money that arrived AFTER the cancellation date means this subscription was
-  // restarted, not left to lapse — do not expire it, clear the stale date.
+  // restarted, not left to lapse, do not expire it, clear the stale date.
   //
   // "ACTIVE with a `cancelAt` in the past" has two causes and the row alone
   // cannot tell them apart: a scheduled cancellation whose date has come, and a
   // resubscribe that reused the cancelled row (unique on
   // `(applicationId, endUserId, planId)`) and carried the old date forward.
   // Reactivation now clears `cancelAt` at every seam, so new rows cannot reach
-  // the second state — but rows POISONED BEFORE THIS SHIPPED still exist, and
+  // the second state, but rows POISONED BEFORE THIS SHIPPED still exist, and
   // to them the expiry above would look overdue. It would then cancel a
   // subscription the buyer had paid for, on the next portal load, which is the
   // very harm this work exists to stop.
@@ -192,10 +226,18 @@ async function expireIfDue(sub: Subscription): Promise<Subscription> {
   // agreement is cancelled outright at request time, Stripe's
   // `cancel_at_period_end` bills nothing after the period, and a row with no
   // provider never charges at all.
-  const paidSinceCancellation = await prisma.payment.findFirst({
-    where: { subscriptionId: sub.id, status: 'SUCCEEDED', createdAt: { gt: sub.cancelAt! } },
-    select: { id: true },
-  });
+  //
+  // Not for a subscription an inbound-only provider created. Its payments are
+  // bookkeeping the sender posts on its own schedule, so a charge recorded
+  // after the cancellation date says nothing about whether the subscription
+  // was restarted; a sender that restarts one says so with an activation
+  // carrying a later period end, which clears the schedule explicitly.
+  const paidSinceCancellation = isInboundOnlyProvider(sub.provider)
+    ? null
+    : await prisma.payment.findFirst({
+        where: { subscriptionId: sub.id, status: 'SUCCEEDED', createdAt: { gt: sub.cancelAt! } },
+        select: { id: true },
+      });
   if (paidSinceCancellation) {
     return prisma.subscription.update({
       where: { id: sub.id },
@@ -240,7 +282,7 @@ export const billingService = {
   },
 
   /**
-   * The active subscription for the caller — their own by default, or an
+   * The active subscription for the caller, their own by default, or an
    * organization's when `opts.organizationId` is given (org-billed apps). The
    * caller's membership/role is checked at the route layer before this runs.
    *
@@ -250,7 +292,7 @@ export const billingService = {
    * subscription reaches CANCELED or EXPIRED. That made a paid customer's
    * history unrecoverable: a portal reading this a day after a cancellation
    * got the same `null` as someone who had never subscribed at all, and could
-   * only say "you are on the free plan" — no plan, no end date, no way back.
+   * only say "you are on the free plan", no plan, no end date, no way back.
    * The only record was the cancel call's own response, which is gone as soon
    * as the page reloads.
    *
@@ -271,27 +313,89 @@ export const billingService = {
     endUser: EndUser,
     opts?: { organizationId?: string; includeEnded?: boolean },
   ): Promise<Subscription | null> {
+    // `beneficiaryOrgId: null` is load-bearing. `endUserId` is required on every
+    // Subscription, so an org-beneficiary row also carries the buyer's personal
+    // id; without this the org row matches a personal lookup, and the query is
+    // newest-first, so the org purchase shadows the buyer's own subscription.
+    // Callers that cancel what this returns would then cancel the org's.
+    // `createCheckoutSession` has always scoped its own lookup this way.
     const subject = opts?.organizationId
       ? { beneficiaryOrgId: opts.organizationId }
-      : { endUserId: endUser.id };
+      : { endUserId: endUser.id, beneficiaryOrgId: null };
 
-    const sub = await prisma.subscription.findFirst({
+    // Entitled rows first, and only then an unpaid checkout. Newest-first
+    // across all four statuses let a PENDING row shadow a live plan: a free
+    // subscriber who opened a paid checkout and closed the tab read as
+    // "pending" from then on, every entitlement gate built on this answer
+    // refused them, and a cancel aimed at their plan landed on the abandoned
+    // checkout instead. A checkout nobody finished is not what somebody is on.
+    //
+    // TRIALING is live: omitting it would show a trialist no subscription at
+    // all, on the page whose whole job is to say what they are on.
+    //
+    // Among live rows, a free plan is the fallback, never the answer while
+    // anything else is live. Recency cannot
+    // decide it: checkout reuses the (app, end-user, plan) row, so a buyer who
+    // opened a paid checkout, backed out, joined the free tier and paid later
+    // holds a paid row CREATED before the free one. Newest-first read them as
+    // free, offered the upgrade they had already bought, and cancelled the
+    // free row while the paid one kept billing.
+    //
+    // A row that lapses on this very read (`expireIfDue`) does not end the
+    // search either, or the first read after a paid term ends would report
+    // "ended" while the free tier is still live underneath it.
+    const liveRows = await prisma.subscription.findMany({
       where: {
         applicationId: application.id,
-        // TRIALING is live: omitting it would show a trialist no subscription
-        // at all, on the page whose whole job is to say what they are on.
-        status: { in: ['ACTIVE', 'TRIALING', 'PAST_DUE', 'PENDING'] },
+        status: { in: ['ACTIVE', 'TRIALING', 'PAST_DUE'] },
         ...subject,
       },
       orderBy: { createdAt: 'desc' },
     });
-    if (sub) return expireIfDue(sub);
+    if (liveRows.length > 0) {
+      // A row counts as the fallback when its plan costs nothing on both axes,
+      // or is today's `defaultPlanSlug`. The price is a property of the row's
+      // own plan, so renaming or clearing the default does not bring the
+      // shadowing back for buyers still holding the old $0 rows.
+      const freeSlug = BillingConfigSchema.safeParse(application.billingConfig).data?.defaultPlanSlug;
+      const plans = await prisma.plan.findMany({
+        where: { id: { in: [...new Set(liveRows.map((row) => row.planId))] } },
+        select: { id: true, slug: true, amount: true, pricePerUnitCents: true },
+      });
+      const fallbackPlanIds = new Set(
+        plans
+          .filter(
+            (plan) =>
+              (plan.amount === 0 && plan.pricePerUnitCents === null) || plan.slug === freeSlug,
+          )
+          .map((plan) => plan.id),
+      );
+      const ranked = [
+        ...liveRows.filter((row) => !fallbackPlanIds.has(row.planId)),
+        ...liveRows.filter((row) => fallbackPlanIds.has(row.planId)),
+      ];
+      let lapsed: Subscription | undefined;
+      for (const row of ranked) {
+        const read = await expireIfDue(row);
+        if (isEntitlingStatus(read.status)) return read;
+        lapsed ??= read;
+      }
+      // Everything live lapsed on this read. Report the one that mattered
+      // most, as the single-row version of this always did.
+      if (lapsed) return lapsed;
+    }
+
+    const pending = await prisma.subscription.findFirst({
+      where: { applicationId: application.id, status: 'PENDING', ...subject },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (pending) return pending;
     if (!opts?.includeEnded) return null;
 
     // Newest first by `createdAt`, matching the live query: for someone who
     // subscribed, cancelled, subscribed again and cancelled again, the honest
     // "what happened to your subscription" is the most recent one they took
-    // out — not the oldest row that happens to carry a canceledAt.
+    // out, not the oldest row that happens to carry a canceledAt.
     return prisma.subscription.findFirst({
       where: {
         applicationId: application.id,
@@ -330,6 +434,15 @@ export const billingService = {
     /** Beneficiary org (owner+beneficiary). The route asserts the caller is an
      *  OWNER/ADMIN of it before passing it here. Null/absent = bill the owner. */
     beneficiaryOrgId?: string;
+    /**
+     * Proceed at full price for a buyer who has already used their free trial.
+     *
+     * A request-level acknowledgement, not a setting: it belongs at the call
+     * site that rendered the price, because that is the only place that knows
+     * what the buyer was shown. Without it an ineligible buyer is refused with
+     * `BILLING_TRIAL_ALREADY_USED` rather than silently charged.
+     */
+    allowWithoutTrial?: boolean;
   }): Promise<{
     url: string;
     subscription: Subscription;
@@ -339,7 +452,7 @@ export const billingService = {
     provider: BillingProviderName;
   }> {
     // When the Application bills per organization (owner+beneficiary), a
-    // checkout MUST name a beneficiary org — an individual can't hold the sub.
+    // checkout MUST name a beneficiary org, an individual can't hold the sub.
     // Surface a clear hint instead of silently creating a user-subject sub
     // (the mistake an AI agent / new integrator makes first).
     const billingConfig = BillingConfigSchema.parse(input.application.billingConfig);
@@ -362,7 +475,7 @@ export const billingService = {
     // That is what makes the uniqueness defect in #431 reachable at all.
     // `Subscription` is unique on `(applicationId, endUserId, planId)` with no
     // beneficiary in the key, so a buyer's personal subscription to a plan and
-    // an org-billed subscription to the SAME plan are ONE ROW — whichever
+    // an org-billed subscription to the SAME plan are ONE ROW, whichever
     // arrived second silently took the other's place, and the subscription it
     // replaced kept billing at its processor with nothing local naming it.
     // Refusing the mixed state is the fix; widening the constraint would only
@@ -386,13 +499,12 @@ export const billingService = {
       });
     }
 
-    // CREDIT packs + perpetual (non-TIMED) licenses are one-off purchases —
+    // CREDIT packs + perpetual (non-TIMED) licenses are one-off purchases,
     // route them through the provider's one-time payment flow so they DON'T
     // create a recurring subscription. TIMED licenses + SUBSCRIPTION plans
     // recur. Fulfillment (credit grant / license issue) still lands on the
     // payment-completed webhook either way.
-    const isOneTime =
-      plan.kind === 'CREDIT' || (plan.kind === 'LICENSE' && plan.licenseKind !== 'TIMED');
+    const isOneTime = isOneTimePlan(plan);
 
     let couponContext: { couponId: string; code: string; discountAmount: number } | null = null;
     if (input.couponCode) {
@@ -706,7 +818,7 @@ export const billingService = {
 
     // The row this checkout will upsert, read for its metadata and its status
     // further down (a live provider session must not be stranded, and an
-    // entitled row keeps its dates through an upgrade) — and, immediately
+    // entitled row keeps its dates through an upgrade), and, immediately
     // below, for whose subscription it actually is.
     //
     // The provider-switch guard that used to sit here, keyed on this same
@@ -743,7 +855,7 @@ export const billingService = {
     //
     // This was covered by ACCIDENT until the provider binding above existed.
     // The guard that used to sit right here compared `existing.provider !==
-    // providerName`, which also refused the rewrite — but only when the router
+    // providerName`, which also refused the rewrite, but only when the router
     // happened to disagree, and pinning now makes the two agree by
     // construction for every bound buyer. Fixing the reported axis removed the
     // cover on this one, so the refusal has to be stated rather than fall out.
@@ -751,8 +863,8 @@ export const billingService = {
     // Only an ENTITLING row is protected. A PENDING one is a checkout nobody
     // completed: refusing over it would offer a remedy ("cancel it") that does
     // not exist, which is precisely the shape of refusal this change had to
-    // remove once already for one-off purchases. The narrower hole it leaves —
-    // the earlier subject pays, the later subject is entitled — is the same
+    // remove once already for one-off purchases. The narrower hole it leaves,
+    // the earlier subject pays, the later subject is entitled, is the same
     // one two open sessions on a single row already carry, and it closes for
     // good with #431.
     if (
@@ -778,7 +890,7 @@ export const billingService = {
     // Take the coupon's slot BEFORE the provider mints the discount, and hold
     // it until the payment settles. `validate` above is advisory only: it
     // counts rows that the payment webhook writes, and that webhook is up to a
-    // session-lifetime away — so the ceiling was being enforced against rows
+    // session-lifetime away, so the ceiling was being enforced against rows
     // that did not exist yet, and five checkouts on a `maxRedemptions: 1`
     // coupon charged five discounts. The reservation is what makes the limit
     // bound the DISCOUNTS rather than the bookkeeping. See coupons.service.ts.
@@ -794,22 +906,13 @@ export const billingService = {
         : null;
 
     const provider = await getProviderForApplication(input.application, providerName);
-    const checkoutInput = {
-      application: { id: input.application.id, slug: input.application.slug },
-      endUser: input.endUser,
-      plan,
-      successUrl: input.successUrl,
-      cancelUrl: input.cancelUrl,
-      // The discount goes to the PROCESSOR, not just onto our own rows. It
-      // used to stop at `couponContext` below, so every coupon ever applied
-      // charged the buyer full price while we recorded a discount and
-      // redeemed the code.
-      ...(discount !== null && { discount }),
-      // Same seam, same lesson: the trial has to reach the PROCESSOR. It is
-      // the provider that runs the clock and converts the trial into a
-      // charge, so a trial that stops at our own rows charges the buyer today.
-      ...(trial !== null && { trial }),
-    };
+    // The EFFECTIVE trial, which is not the plan's trial. Whether this buyer
+    // may have one is decided under the trial lock below (#477), so the input
+    // handed to the provider is assembled after that transaction commits
+    // rather than here. Building it here and mutating it later would mean the
+    // object crossing the lock boundary was not the object that was decided.
+    let effectiveTrial: { days: number } | null = trial;
+    let trialReservationId: string | null = null;
     // ---- Serialise the binding decision (#437) -------------------------
     //
     // Everything above is read-then-act with nothing holding the two together,
@@ -826,7 +929,7 @@ export const billingService = {
     //     case. You cannot lock a row that does not exist yet.
     //   * The uniqueness constraint. `(applicationId, endUserId, planId)`
     //     already collapses two racing checkouts on the SAME plan into one row
-    //     — that case is genuinely safe today. The one that bills twice is two
+    //    , that case is genuinely safe today. The one that bills twice is two
     //     DIFFERENT plans, where the keys differ and nothing collides. An
     //     index cannot serialise a decision, only reject a duplicate.
     //   * Wrapping the whole method in a transaction. The provider network
@@ -842,8 +945,8 @@ export const billingService = {
     //
     // The claim is not decoration, and the reason is worth stating precisely.
     // The lock alone serialises the two requests, but the winner does not
-    // write its real row until AFTER the lock has been released — the provider
-    // call sits in between — so a loser that acquires the lock in that window
+    // write its real row until AFTER the lock has been released, the provider
+    // call sits in between, so a loser that acquires the lock in that window
     // still finds nothing and proceeds. Measured with the claim removed and
     // the lock kept: two concurrent checkouts happened to be safe, ten were
     // not, and still split across both processors. Claiming the row before the
@@ -855,13 +958,13 @@ export const billingService = {
     //
     // Skipped entirely for a one-off purchase. A credit pack or a perpetual
     // licence creates no billing relationship, so there is no binding to race
-    // over and nothing to claim — and running it anyway REFUSED a legitimate
+    // over and nothing to claim, and running it anyway REFUSED a legitimate
     // one-off from a buyer who happened to hold a recurring subscription
     // elsewhere, because this re-check filters the candidate ROWS by kind but
     // cannot see the kind of the purchase being made.
     // Placed as LATE as possible while still preceding the provider call.
     // It sat right after the provider was picked, which is before the discount
-    // and trial refusals — so a checkout refused for an unsupported coupon
+    // and trial refusals, so a checkout refused for an unsupported coupon
     // left a claimed PENDING row behind, and that row binds the buyer. The
     // window this has to close is the provider round-trip; everything before
     // it is local and fast.
@@ -869,6 +972,73 @@ export const billingService = {
     let claimCreatedRow = false;
     if (!isOneTime) await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${bindingLockKey}, 0))`;
+
+      // ---- One trial per buyer (#477) ---------------------------------
+      //
+      // A SECOND advisory lock, always taken after the binding one so the pair
+      // cannot deadlock. Re-keying the binding lock to the billing subject
+      // instead, the obvious-looking simplification, would break #437 on an
+      // org-billed application: everything the binding lock protects filters on
+      // `endUserId`, so one buyer opening concurrent checkouts for two
+      // different orgs would take two different locks and both would claim.
+      //
+      // Reachable only when the plan actually offers a trial this provider can
+      // express, so a plan without one reads nothing new and can refuse nothing
+      // new. `trial !== null` also implies `!isOneTime`: resolveCheckoutTrial
+      // refuses a trial on a one-off purchase before this point.
+      if (trial !== null) {
+        const subjectKey = trialSubjectKey({
+          billingSubject: billingConfig.billingSubject,
+          endUserId: input.endUser.id,
+          beneficiaryOrgId: input.beneficiaryOrgId ?? null,
+        });
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`rekey:trial:${input.application.id}:${subjectKey}`}, 0))`;
+
+        const eligibility = await checkTrialEligibility(tx, {
+          applicationId: input.application.id,
+          subjectKey,
+          planId: plan.id,
+          policy: billingConfig.trialPolicy,
+        });
+
+        if (!eligibility.eligible) {
+          // Refuse rather than silently charge. The page said free; a provider
+          // that charges today is a dispute, not a rendering bug, and that the
+          // buyer is a repeat trialist does not make the surprise acceptable.
+          // The way through is an acknowledgement from the call site that
+          // rendered the price.
+          if (!input.allowWithoutTrial) {
+            const blockedPlan = eligibility.blockedBy
+              ? await tx.plan.findUnique({
+                  where: { id: eligibility.blockedBy.planId },
+                  select: { slug: true },
+                })
+              : null;
+            throw trialAlreadyUsed({
+              planSlug: plan.slug,
+              ...(blockedPlan?.slug !== undefined && { blockedByPlanSlug: blockedPlan.slug }),
+              ...(priceLabel(plan) !== null && { priceLabel: priceLabel(plan)! }),
+            });
+          }
+          // Acknowledged: buy at full price. No reservation, because no slot is
+          // being taken, this buyer already spent theirs.
+          effectiveTrial = null;
+        } else {
+          // Take the slot BEFORE the provider call, exactly as the coupon slot
+          // is taken: the provider-side trial goes live the instant the session
+          // is created and stays payable for that session's whole life.
+          const reserved = await reserveTrial(tx, {
+            applicationId: input.application.id,
+            subjectKey,
+            endUserId: input.endUser.id,
+            organizationId: input.beneficiaryOrgId ?? null,
+            planId: plan.id,
+            trialDays: trial.days,
+            expiresAt: new Date(Date.now() + CHECKOUT_SESSION_LIFETIME_MS),
+          });
+          trialReservationId = reserved.id;
+        }
+      }
 
       const existingBeforeClaim = await tx.subscription.findUnique({
         where: {
@@ -903,13 +1073,13 @@ export const billingService = {
               // `expireIfDue` is lazy and this query does not run it, so
               // without this clause the same state answers checkout
               // differently depending on whether an unrelated read happened
-              // first — and here it answered by refusing a legitimate sale.
+              // first, and here it answered by refusing a legitimate sale.
               OR: [{ cancelAt: null }, { cancelAt: { gt: new Date() } }],
             },
             {
               // A live checkout somebody else opened. Same session clock the
               // binder read uses, and the same exclusion of the row THIS
-              // checkout writes — otherwise a buyer retrying their own
+              // checkout writes, otherwise a buyer retrying their own
               // checkout would be refused by their own previous attempt.
               status: 'PENDING',
               updatedAt: { gt: new Date(Date.now() - CHECKOUT_SESSION_LIFETIME_MS) },
@@ -925,7 +1095,7 @@ export const billingService = {
         // Retryable on purpose, and worded that way. The buyer double-clicked;
         // the other click won and bound them. Retrying now reads the binding
         // above and routes them to the SAME processor, which is the outcome
-        // they wanted — so this must not read like a dead end.
+        // they wanted, so this must not read like a dead end.
         throw new RekeyError({
           statusCode: 409,
           code: 'BILLING_CHECKOUT_RACE',
@@ -963,6 +1133,26 @@ export const billingService = {
       claimCreatedRow = existingBeforeClaim === null;
     });
 
+    const checkoutInput = {
+      application: { id: input.application.id, slug: input.application.slug },
+      endUser: input.endUser,
+      plan,
+      successUrl: input.successUrl,
+      cancelUrl: input.cancelUrl,
+      // The discount goes to the PROCESSOR, not just onto our own rows. It
+      // used to stop at `couponContext` below, so every coupon ever applied
+      // charged the buyer full price while we recorded a discount and
+      // redeemed the code.
+      ...(discount !== null && { discount }),
+      // Same seam, same lesson: the trial has to reach the PROCESSOR. It is
+      // the provider that runs the clock and converts the trial into a
+      // charge, so a trial that stops at our own rows charges the buyer today.
+      // `effectiveTrial`, not `trial`: an ineligible repeat trialist who passed
+      // `allowWithoutTrial` buys at full price, and the provider must be told
+      // that rather than starting a clock we already refused.
+      ...(effectiveTrial !== null && { trial: effectiveTrial }),
+    };
+
     let session;
     try {
       session = isOneTime
@@ -970,13 +1160,17 @@ export const billingService = {
         : await provider.createCheckoutSession(checkoutInput);
     } catch (e) {
       // No session means no discount was minted, so the slot goes straight
-      // back rather than sitting out its 24-hour expiry — a reservation that
+      // back rather than sitting out its 24-hour expiry, a reservation that
       // outlives the checkout it was for is a denial-of-discount against the
       // next buyer.
       if (reservation) await couponsService.releaseReservation(reservation.reservationId);
+      // Same reasoning for the trial slot: no session means no provider-side
+      // trial was minted, so the slot goes straight back rather than sitting
+      // out its session-lifetime expiry and refusing this buyer's next attempt.
+      if (trialReservationId) await releaseTrial(prisma, trialReservationId);
       // Same reasoning for the binding claim (#437): the row exists only to
       // hold this buyer's provider across the window below, and the checkout
-      // it was claimed for has just failed. Left behind it would BIND them —
+      // it was claimed for has just failed. Left behind it would BIND them,
       // an unpaid PENDING row pinning them to a processor they never reached,
       // so their next checkout elsewhere is refused by a sale that never
       // happened. Deleted only when this call created it; an existing row is
@@ -1001,7 +1195,7 @@ export const billingService = {
       // `audience: 'end-user'`. This is the public checkout surface: the caller
       // is the operator's CUSTOMER. Rethrowing raw gave them `500
       // INTERNAL_ERROR / "share this request id with support"` for somebody
-      // else's misconfigured Stripe account — or, when the provider error
+      // else's misconfigured Stripe account, or, when the provider error
       // happened to carry a 4xx `.statusCode`, the operator's key fragment.
       throw providerError({
         provider: providerName,
@@ -1015,14 +1209,20 @@ export const billingService = {
     if (reservation) {
       await couponsService.bindReservationToSession(reservation.reservationId, session.sessionId);
     }
+    if (trialReservationId) {
+      // Two steps for the same reason the coupon reservation needs two: the
+      // reservation predates the session id. This is what the confirmation
+      // looks the redemption up by.
+      await bindTrialToSession(prisma, trialReservationId, session.sessionId);
+    }
 
     // Upsert by (applicationId, endUserId, planId): if the user already started
     // checkout for this same plan and bailed, reuse that PENDING row instead
     // of creating a parallel one.
     //
     // The metadata REMEMBERS the earlier sessions rather than overwriting them.
-    // Overwriting stranded any still-live provider session — a Stripe Checkout
-    // Session stays completable for ~24h — so a buyer who reopened checkout and
+    // Overwriting stranded any still-live provider session, a Stripe Checkout
+    // Session stays completable for ~24h, so a buyer who reopened checkout and
     // then went back and paid on the first tab matched no local row: 200 OK,
     // row still PENDING, no payment, no redemption, no trace of a real sale.
     // See checkout-sessions.ts.
@@ -1056,9 +1256,9 @@ export const billingService = {
         provider: providerName,
         // An ALREADY-PAYING row is not reset to PENDING. Opening a checkout is
         // not an event that removes entitlement, and this unconditionally made
-        // it one: an ACTIVE subscriber who merely pressed Upgrade — or typed a
+        // it one: an ACTIVE subscriber who merely pressed Upgrade, or typed a
         // coupon into the form the account page now shows *existing*
-        // subscribers — was downgraded on the spot. PENDING is not an
+        // subscribers, was downgraded on the spot. PENDING is not an
         // entitling status, so their portal showed them as unsubscribed and
         // every entitlement gate started refusing, without a single provider
         // event having happened. The provider's webhook is what moves a paying
@@ -1068,8 +1268,8 @@ export const billingService = {
         // previous cancellation's dates go with it. `(applicationId,
         // endUserId, planId)` is unique, so a resubscribe REUSES the cancelled
         // row, and a `cancelAt` left on it survives all the way through to the
-        // live subscription — where it makes the account panel show
-        // "Cancelling — ends <a past date>", hide the Cancel button, and turn
+        // live subscription, where it makes the account panel show
+        // "Cancelling, ends <a past date>", hide the Cancel button, and turn
         // the cancel endpoint into a 200-OK no-op while the provider keeps
         // charging. An ENTITLED row keeps its dates: someone pressing Upgrade
         // mid-period has not withdrawn a cancellation they scheduled.
@@ -1085,8 +1285,8 @@ export const billingService = {
     // rides on `subscription.metadata.couponBySession`, and `webhooks/apply.ts`
     // confirms the reservation when the provider says the purchase completed.
     // Recording a settled redemption here would be abusable in the other
-    // direction — apply a coupon, abandon checkout, and the per-user / global
-    // limit is exhausted for legitimate buyers — which is why the reservation
+    // direction, apply a coupon, abandon checkout, and the per-user / global
+    // limit is exhausted for legitimate buyers, which is why the reservation
     // expires on its own. See decisions.md 2026-05-19 and 2026-08-02.
 
     return {
@@ -1099,7 +1299,7 @@ export const billingService = {
 
   /**
    * The calling end-user's OWN payment history, newest first. Strictly
-   * scoped by `(applicationId, endUserId)` — there is no way to read another
+   * scoped by `(applicationId, endUserId)`, there is no way to read another
    * user's rows through this surface. Org-billed subscriptions keep the
    * owner as the payer (`Payment.endUserId`), so an org owner sees those
    * payments here too.
@@ -1149,8 +1349,8 @@ export const billingService = {
    *     end → the local row records `cancelAt = currentPeriodEnd` while staying
    *     ACTIVE, and any provider is told to stop at period end. The status
    *     flips to CANCELED when the provider's webhook announces the actual
-   *     termination (subscription.deleted / .updated), or — for a row with no
-   *     provider — when `expireIfDue` reads it after the date has passed.
+   *     termination (subscription.deleted / .updated), or, for a row with no
+   *     provider, when `expireIfDue` reads it after the date has passed.
    *   - Everything else (PENDING checkout that never activated, PAST_DUE, an
    *     explicit `atPeriodEnd: false`, or an ACTIVE sub with no known period
    *     end) → local status update to CANCELED now; the provider is still told
@@ -1158,7 +1358,7 @@ export const billingService = {
    *     `subscription.canceled`.
    *
    * Which of the two a given subscription gets is `cancelEffect` in
-   * `@rekey.dev/shared-types` — exported so a confirmation dialog can say it
+   * `@rekey.dev/shared-types`, exported so a confirmation dialog can say it
    * before the call rather than guessing.
    *
    * Idempotent: cancelling an already-pending-cancel sub returns it unchanged.
@@ -1178,13 +1378,13 @@ export const billingService = {
         statusCode: 404,
         code: 'SUBSCRIPTION_NOT_FOUND',
         message: 'You have no active subscription to cancel.',
-        fix: 'Nothing to do — the user is not subscribed (or the subscription is already canceled).',
+        fix: 'Nothing to do, the user is not subscribed (or the subscription is already canceled).',
       });
     }
 
     // Terminal already. `getCurrentSubscription` can hand this a row that
     // `expireIfDue` just wrote EXPIRED, and `cancelEffect('EXPIRED')` is
-    // 'immediate' — so without this the unconditional update rewrote a
+    // 'immediate', so without this the unconditional update rewrote a
     // terminal row to CANCELED and announced a cancellation that did not
     // happen. `cancelSubscriptionById` has always had this guard.
     if (sub.status === 'CANCELED' || sub.status === 'EXPIRED') return sub;
@@ -1195,7 +1395,7 @@ export const billingService = {
     // payment provider. It used to: `providerBacked` was part of this
     // predicate, so a subscription with no provider-side id fell through to
     // the immediate branch below and was CANCELED on the spot, with the free
-    // ceiling written the same moment — no refund, mid-period, while the
+    // ceiling written the same moment, no refund, mid-period, while the
     // caller had explicitly asked for period-end.
     //
     // That is not an edge case here. Rekey Cloud sells with
@@ -1224,7 +1424,7 @@ export const billingService = {
         application,
         sub.provider as BillingProviderName,
       );
-      // End-user-facing cancel — same audience rule as checkout above.
+      // End-user-facing cancel, same audience rule as checkout above.
       await withProviderErrors(
         {
           provider: sub.provider as string,
@@ -1259,7 +1459,7 @@ export const billingService = {
       };
     });
     kickDeliveries(deliveryIds);
-    // Self-service cancel while PAST_DUE — close the dunning case (silently).
+    // Self-service cancel while PAST_DUE, close the dunning case (silently).
     const { dunningService } = await import('./dunning.service.js');
     await dunningService.closeForCanceledSubscription(updated.id);
     return updated;
@@ -1268,7 +1468,7 @@ export const billingService = {
   /**
    * Operator-facing cancel of a SPECIFIC subscription by id (e.g. via the
    * operator MCP `cancel_subscription` tool). Mirrors `cancelCurrentSubscription`
-   * but targets one row instead of the end-user's "current" one — so it's
+   * but targets one row instead of the end-user's "current" one, so it's
    * unambiguous when a user has more than one subscription. The subscription
    * MUST belong to `application` (the caller resolves the application within
    * the operator's tenant first), so this can't reach across workspaces.
@@ -1292,11 +1492,11 @@ export const billingService = {
     if (sub.status === 'CANCELED' || sub.status === 'EXPIRED') return sub;
 
     const providerBacked = Boolean(sub.provider && sub.providerSubId);
-    // NOT `cancelEffect` — this path deliberately still requires a
+    // NOT `cancelEffect`, this path deliberately still requires a
     // provider. It used to also require `providerBacked`, on the stated ground
     // that a provider-less row scheduled from here could sit ACTIVE and
     // entitling indefinitely if nobody ever loaded that user's portal, because
-    // only `getCurrentSubscription` reaped it — and that "relaxing it needs the
+    // only `getCurrentSubscription` reaped it, and that "relaxing it needs the
     // expiry seam widened past getCurrentSubscription first".
     //
     // That seam has since been widened. `stillEntitling` filters
@@ -1307,7 +1507,7 @@ export const billingService = {
     // wrong against the buyer: on a deployment where subscriptions are granted
     // rather than checked out, `providerBacked` is false for every one of them,
     // so an operator pressing cancel ended the subscription immediately,
-    // mid-period, with no refund and entitlements gone the same second — while
+    // mid-period, with no refund and entitlements gone the same second, while
     // the self-service path on the identical row cancelled at period end. Two
     // operator-visible cancels disagreeing about the same subscription.
     //
@@ -1364,13 +1564,13 @@ export const billingService = {
    * Cancel every still-billing provider subscription belonging to an end-user.
    * Used by the operator end-user delete / GDPR-erasure paths so the provider
    * (Stripe/PayPal/Razorpay) stops billing a row we are about to remove or
-   * tombstone — otherwise the provider keeps charging a vanished user.
+   * tombstone, otherwise the provider keeps charging a vanished user.
    *
    * Cancels immediately (`atPeriodEnd: false`) at the provider for each
    * ACTIVE/PAST_DUE subscription that has a provider-side id. Same
    * `BillingProvider.cancelSubscription` path the portal cancel + dunning
    * exhaustion use. BEST-EFFORT: a provider error must NOT block the
-   * delete/erase — we log and continue, so the user is always removed. The
+   * delete/erase, we log and continue, so the user is always removed. The
    * local row's status is intentionally left untouched (the delete/erase
    * caller removes or tombstones it next).
    *
@@ -1396,6 +1596,22 @@ export const billingService = {
     let attempted = 0;
     let failed = 0;
     for (const sub of subs) {
+      // An inbound-only provider cannot be asked to stop; the sender learns
+      // of the deletion from `user.deleted` / `user.erased` and stops on its
+      // side. Locally the row is ended now, so the erased account does not
+      // sit in the active-subscription counts until the sender catches up.
+      if (isInboundOnlyProvider(sub.provider)) {
+        const now = new Date();
+        const deliveryIds = await prisma.$transaction(async (tx) => {
+          const { count } = await tx.subscription.updateMany({
+            where: { id: sub.id, status: { in: ['ACTIVE', 'TRIALING', 'PAST_DUE'] } },
+            data: { status: 'CANCELED', canceledAt: now, cancelAt: now },
+          });
+          return count > 0 ? enqueueSubscriptionEvent(tx, 'subscription.canceled', sub.id) : [];
+        });
+        kickDeliveries(deliveryIds);
+        continue;
+      }
       attempted += 1;
       try {
         const provider = await getProviderForApplication(

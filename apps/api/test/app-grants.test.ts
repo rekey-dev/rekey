@@ -1,5 +1,5 @@
 /**
- * Per-application team permissions (roadmap #8) — `ApplicationGrant`.
+ * Per-application team permissions (roadmap #8), `ApplicationGrant`.
  *
  * Covers:
  *   - a MEMBER with zero grants reaches NO Application (the 2.0.0-rc.3 default)
@@ -37,7 +37,7 @@ describe('per-application grants (ApplicationGrant)', () => {
 
   let n = 0;
   // The global rate limit is per-IP (100/min) and the app instance lives for
-  // the whole file — give each bootstrapped scenario its own source address
+  // the whole file, give each bootstrapped scenario its own source address
   // so the suite never trips 429s.
   let currentIp = '10.99.0.1';
   function inject(opts: Record<string, unknown>) {
@@ -132,7 +132,7 @@ describe('per-application grants (ApplicationGrant)', () => {
     const { memberToken, appA, appB } = await bootstrap();
 
     // Changed in 2.0.0-rc.3. This used to assert workspace-wide READ, on the
-    // grounds that members predating grants must not lose access — but zero
+    // grounds that members predating grants must not lose access, but zero
     // grants is also what accepting an invitation produces, so it made
     // "invite a contractor as MEMBER" mean "give them every Application".
     // The grandfather path is now an explicit column, asserted below.
@@ -166,7 +166,7 @@ describe('per-application grants (ApplicationGrant)', () => {
     });
     expect(plans.statusCode).toBe(404);
 
-    // Writes are 404 too — you cannot be told "insufficient role" about an
+    // Writes are 404 too, you cannot be told "insufficient role" about an
     // Application you are not allowed to know exists.
     const key = await inject({
       method: 'POST',
@@ -204,7 +204,7 @@ describe('per-application grants (ApplicationGrant)', () => {
       ).statusCode,
     ).toBe(200);
 
-    // Reads only — writes keep the exact 403 + code they had before grants.
+    // Reads only, writes keep the exact 403 + code they had before grants.
     const coupon = await inject({
       method: 'POST',
       url: `/api/v1/tenant/applications/${appA}/coupons`,
@@ -240,7 +240,7 @@ describe('per-application grants (ApplicationGrant)', () => {
       page: { total: number };
     };
     expect(granted.items.map((a) => a.id)).toEqual([appA]);
-    // The ungranted app is not counted either — `total` is filtered by the same
+    // The ungranted app is not counted either, `total` is filtered by the same
     // grant check as the rows.
     expect(granted.page.total).toBe(1);
 
@@ -358,7 +358,7 @@ describe('per-application grants (ApplicationGrant)', () => {
     expect(patchAuth.statusCode).toBe(403);
     expect(patchAuth.json().error.code).toBe('APP_ACCESS_DENIED');
 
-    // Billing credentials are infrastructure, not catalog — still 403.
+    // Billing credentials are infrastructure, not catalog, still 403.
     const creds = await inject({
       method: 'PUT',
       url: `/api/v1/tenant/applications/${appA}/billing-credentials/stripe`,
@@ -414,7 +414,7 @@ describe('per-application grants (ApplicationGrant)', () => {
     });
     expect(coupon.statusCode).toBe(201);
 
-    // The other app stays invisible — reads AND writes 404.
+    // The other app stays invisible, reads AND writes 404.
     const readB = await inject({
       method: 'GET',
       url: `/api/v1/tenant/applications/${appB}`,
@@ -511,11 +511,23 @@ describe('per-application grants (ApplicationGrant)', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ applicationId: appA, role: 'APP_BILLING' });
 
-    // Members list carries grants (this is how members see their own access).
-    const members = await inject({
+    // The members list carries grants for OWNER/ADMIN callers only. It used to
+    // carry them for every session, which was "how members see their own
+    // access", and also how a member read every colleague's grant matrix. A
+    // member's own access now comes from GET /me (scopes) and GET /:id
+    // (access.scopes); the roster shows them the people, not the permissions.
+    const asMember = await inject({
       method: 'GET',
       url: '/api/v1/tenant/workspace/members',
       headers: auth(memberToken),
+    });
+    const memberView = (asMember.json().data as { items: Array<Record<string, unknown>> }).items;
+    for (const m of memberView) expect(m).not.toHaveProperty('grants');
+
+    const members = await inject({
+      method: 'GET',
+      url: '/api/v1/tenant/workspace/members',
+      headers: auth(ownerToken),
     });
     const memberRows = (
       members.json().data as {

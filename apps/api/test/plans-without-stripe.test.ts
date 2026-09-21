@@ -4,14 +4,14 @@
  * `plansService.create` eagerly registers new plans against Stripe. While a
  * stub provider existed that call could never fail, so it was unconditional.
  * When the stubs were deleted it became a hard dependency: a PayPal-only or
- * Razorpay-only operator — or anyone who had not configured billing yet —
+ * Razorpay-only operator, or anyone who had not configured billing yet,
  * could no longer create a plan, and the error named Stripe, a provider they
  * had deliberately not set up.
  *
  * **Why this file exists separately.** `test/setup.ts` mocks
  * `getProviderForApplication` for the whole suite, so the ordinary
  * "create a plan" assertions in every other file would have passed happily
- * with the bug present — the fake never throws. Each test below is written so
+ * with the bug present, the fake never throws. Each test below is written so
  * the mock cannot absorb the failure:
  *
  *   - the first pins the REAL factory's behaviour via `importActual`, proving

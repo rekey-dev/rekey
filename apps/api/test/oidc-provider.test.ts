@@ -2,7 +2,7 @@
  * Per-Application OpenID Connect provider: discovery, ID Token, UserInfo.
  *
  * The grant itself (PKCE, single-use codes, redirect-URI binding) is covered by
- * mcp.test.ts — this file exercises the OIDC layer on top of it, and leans hard
+ * mcp.test.ts, this file exercises the OIDC layer on top of it, and leans hard
  * on the negative cases: scope enforcement, cross-application isolation, and
  * the two token-substitution shapes (an ID Token used as an access token, and
  * an access token from another grant).
@@ -65,7 +65,7 @@ describe('OIDC provider', () => {
   /**
    * An Application with the requested toggles, one registered public client and
    * one end-user carrying a display name under `metadata.oidc` (the reserved,
-   * operator-only namespace the `profile` claims are read from — Rekey has no
+   * operator-only namespace the `profile` claims are read from, Rekey has no
    * name column).
    *
    * `requireEmailVerification` defaults ON here because the `email` scope is
@@ -350,7 +350,7 @@ describe('OIDC provider', () => {
     expect(second.sub).toBe(first.sub);
 
     // A second Application with an end-user of the SAME email must not produce
-    // the same subject identifier — EndUser rows are per-application.
+    // the same subject identifier, EndUser rows are per-application.
     const other = await bootstrap();
     await seedEndUser(other, fx.euEmail);
     const otherTokens = await grant({ ...other, euEmail: fx.euEmail }, { scope: 'openid' });
@@ -376,7 +376,7 @@ describe('OIDC provider', () => {
   });
 
   it('drops unsupported and disabled scopes instead of granting them', async () => {
-    // MCP is OFF here — a client asking for it must not receive it.
+    // MCP is OFF here, a client asking for it must not receive it.
     const fx = await bootstrap({ oidcEnabled: true, mcpEnabled: false });
     const tokens = await grant(fx, { scope: 'openid email mcp:account admin superuser' });
     expect(tokens.scope).toBe('openid email');
@@ -438,7 +438,7 @@ describe('OIDC provider', () => {
     expect(refreshed.statusCode).toBe(200);
     const body = refreshed.json() as Record<string, string>;
     expect(body.id_token).toBeUndefined();
-    // The refreshed access token carries the ORIGINAL grant — not mcp:account.
+    // The refreshed access token carries the ORIGINAL grant, not mcp:account.
     expect(body.scope).toBe('openid email');
   });
 
@@ -515,7 +515,7 @@ describe('OIDC provider', () => {
   it('never passes non-standard metadata keys through as claims', async () => {
     // The fixture's end-user carries app-internal keys alongside the reserved
     // `oidc` namespace. `profile` must surface the standard claim names from
-    // inside that namespace and nothing else — passing the blob through would
+    // inside that namespace and nothing else, passing the blob through would
     // be the leak, and reading `name` from the TOP level (which is the app's
     // own field, and end-user-writable) would be the impersonation.
     const fx = await bootstrap();

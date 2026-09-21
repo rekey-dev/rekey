@@ -1,16 +1,16 @@
 /**
- * WORKSPACE_CREATION — deploy-time control of "an operator makes themselves
+ * WORKSPACE_CREATION, deploy-time control of "an operator makes themselves
  * another workspace".
  *
  * The gate exists because a per-workspace ceiling (DEFAULT_TENANT_LIMITS) is
- * worth nothing if any operator — including someone merely invited into a
- * team — can mint a fresh workspace with a fresh ceiling.
+ * worth nothing if any operator, including someone merely invited into a
+ * team, can mint a fresh workspace with a fresh ceiling.
  *
  * The assertions that make it safe to ship:
  *   1. Default 'open' is today's behaviour, so a self-host that never sets the
  *      variable notices nothing.
  *   2. It gates CREATION and nothing else. Reading, listing, switching and
- *      renaming stay open under 'disabled' — an operator who already has
+ *      renaming stay open under 'disabled', an operator who already has
  *      workspaces must keep working exactly as before.
  *   3. It is not the sign-up gate. A brand-new operator still gets their first
  *      workspace; who may register at all is OPERATOR_SIGNUP_MODE's job.
@@ -20,7 +20,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 
@@ -57,7 +57,7 @@ describe('WORKSPACE_CREATION', () => {
   function createWorkspace(
     accessToken: string,
     name: string,
-  ): ReturnType<FastifyInstance['inject']> {
+  ): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'POST',
       url: '/api/v1/tenant/workspace',
@@ -165,7 +165,7 @@ describe('WORKSPACE_CREATION', () => {
     });
     expect((disabled.json().data as { mode: string }).mode).toBe('disabled');
 
-    // The hint and the enforcement must agree — a panel that hides the button
+    // The hint and the enforcement must agree, a panel that hides the button
     // while the server still permits it (or the reverse) is the bug this pair
     // exists to prevent.
     expect((await createWorkspace(accessToken, 'Refused')).statusCode).toBe(403);

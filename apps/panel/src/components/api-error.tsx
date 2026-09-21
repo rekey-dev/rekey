@@ -3,9 +3,9 @@
  *
  * The panel used to keep a per-page `ERR` map of code → sentence and fall back
  * to "Something went wrong. Please try again." for anything unmapped. That
- * threw away an answer the API had already given precisely — a workspace at its
+ * threw away an answer the API had already given precisely, a workspace at its
  * application limit says which limit, what the current count is, and which
- * environments are exempt — and replaced it with a sentence carrying no
+ * environments are exempt, and replaced it with a sentence carrying no
  * information at all. Every limit or policy added to the API arrived in the
  * panel as a shrug.
  *
@@ -20,7 +20,7 @@
  * read as a non-sequitur.
  *
  * `detail` and `fix` come from `readErrorFlash`, which reads an httpOnly
- * cookie the panel itself wrote — not from the query string, where anyone
+ * cookie the panel itself wrote, not from the query string, where anyone
  * composing a link could have written them and had arbitrary text rendered
  * inside this banner. React escapes them either way, but escaping was never
  * the exposure here; provenance was.

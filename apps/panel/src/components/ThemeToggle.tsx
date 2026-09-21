@@ -13,7 +13,7 @@ import * as React from 'react';
 export type Theme = 'light' | 'dark' | 'system';
 export const THEME_KEY = 'rekey-theme';
 
-/** Inline-script body for the root layout — runs before paint to avoid FOUC. */
+/** Inline-script body for the root layout, runs before paint to avoid FOUC. */
 export const THEME_INIT = `(function(){try{var t=localStorage.getItem('${THEME_KEY}')||'system';var d=t==='dark'||(t==='system'&&window.matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.classList.toggle('dark',d);}catch(e){}})();`;
 
 function applyTheme(theme: Theme): void {
@@ -86,7 +86,7 @@ export function ThemeToggle(): React.JSX.Element {
       type="button"
       onClick={cycle}
       title={`Theme: ${label} (click to change)`}
-      aria-label={`Switch theme — currently ${label}`}
+      aria-label={`Switch theme, currently ${label}`}
       className="inline-flex items-center gap-2 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)]"
     >
       {ICON[theme]}

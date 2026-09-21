@@ -3,7 +3,7 @@
  *
  * The regression these pin: checkout validated the coupon, stamped
  * `discountAmount` on the Subscription, returned it in the response, and
- * redeemed the code when the payment landed — while handing the provider a
+ * redeemed the code when the payment landed, while handing the provider a
  * checkout input with no discount in it at all. Every coupon ever applied
  * charged the buyer full price. Asserting on the response DTO could never
  * have caught it, because the DTO was right; only what the PROVIDER received
@@ -227,7 +227,7 @@ describe('coupon discounts reach the provider', () => {
     it('refuses a full-price coupon on a one-time purchase', async () => {
       // Nowhere to land: no provider takes a zero-value one-off order, and
       // fulfilment hangs off the payment-succeeded webhook that would never
-      // fire — the buyer would pay nothing and receive nothing.
+      // fire, the buyer would pay nothing and receive nothing.
       await createCoupon({ code: 'freepack', discountType: 'PERCENT', amountOff: 10000 });
 
       const res = await checkout({ planSlug: 'pack', couponCode: 'freepack', provider: 'stripe' });

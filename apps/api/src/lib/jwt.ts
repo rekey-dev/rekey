@@ -3,16 +3,16 @@
  *
  * Token shapes (discriminated by `typ`):
  *
- *   "eu_access"        — full session access token.
+ *   "eu_access"       , full session access token.
  *                        { typ, sub, applicationId, iat, exp }
- *   "eu_mfa_challenge" — short-lived intermediate token issued at sign-in
+ *   "eu_mfa_challenge", short-lived intermediate token issued at sign-in
  *                        when MFA is required. Holds an unauthenticated
  *                        identity; can only be exchanged at /auth/mfa-verify
  *                        for a real access+refresh pair.
  *                        { typ, sub, applicationId, iat, exp }
  *
  * The `typ` claim is load-bearing. Verifiers refuse tokens of the wrong
- * type — an `eu_mfa_challenge` MUST NOT pass as an `eu_access`, and an
+ * type, an `eu_mfa_challenge` MUST NOT pass as an `eu_access`, and an
  * end-user access token MUST NOT pass as an operator token (those have
  * `typ = "to_access"`, see lib/tenant-jwt.ts).
  *
@@ -22,16 +22,16 @@
  * presented to Application B.
  *
  * Algorithms: HS256 with a per-app derived key by default. Applications can
- * opt into RS256 access tokens (`authConfig.tokenAlg = "RS256"`) — those are
+ * opt into RS256 access tokens (`authConfig.tokenAlg = "RS256"`), those are
  * signed with the deployment's JWKS key (lib/signing-keys.ts, published at
  * /.well-known/jwks.json) and carry `kid` + `gen`. Verifiers accept both via
- * `verifyUserAccessTokenAnyAlg` (strict per-alg dispatch — see its docblock).
+ * `verifyUserAccessTokenAnyAlg` (strict per-alg dispatch, see its docblock).
  * MFA-challenge, MCP, and impersonation tokens stay HS256 regardless.
  *
  * OIDC ID Tokens (`issueIdToken`) are the exception that is ALWAYS RS256: they
  * are read by third-party relying parties that only ever see our JWKS, never a
  * shared secret. They are assertions ABOUT an authentication, not credentials
- * for this API — nothing here verifies one.
+ * for this API, nothing here verifies one.
  */
 
 import jwt from 'jsonwebtoken';
@@ -52,20 +52,20 @@ import {
  *
  * Two properties fall out of this:
  *   1. **App-scoped crypto.** A token signed for Application A can't even be
- *      verified against Application B's key — isolation no longer rests solely
+ *      verified against Application B's key, isolation no longer rests solely
  *      on the `applicationId` claim check.
  *   2. **Instant per-app session kill-switch.** Bumping `Application.tokenGeneration`
  *      changes the derived key, so every previously-issued access/challenge
  *      token for that app fails verification immediately. The bump alone leaves
  *      refresh tokens usable, so `applicationsService.rotateSessions` (route
  *      `POST /tenant/applications/:id/rotate-sessions`) does both in ONE
- *      transaction — that is the full "log everyone out now" control; don't
- *      hand-roll the halves. No new key material lives at rest — only a
+ *      transaction, that is the full "log everyone out now" control; don't
+ *      hand-roll the halves. No new key material lives at rest, only a
  *      non-secret integer counter on the Application row.
  *
  * NB: after first deploy of this scheme, tokens minted under the old global
- * secret stop verifying — end-users transparently re-mint via refresh (the
- * 15-minute access token is short-lived and refresh tokens survive). A one-time
+ * secret stop verifying, end-users transparently re-mint via refresh (the
+ * access token is short-lived and refresh tokens survive). A one-time
  * blip, not a logout storm.
  */
 function appSigningKey(applicationId: string, tokenGeneration: number): string {
@@ -107,7 +107,7 @@ export interface EndUserClaims<TType extends EndUserTokenType = EndUserTokenType
   applicationId: string;
   /**
    * Impersonation marker. When present on an `eu_access` token, this
-   * TenantUser id originated the session — the operator is acting as
+   * TenantUser id originated the session, the operator is acting as
    * the EndUser at `sub`. Lifetime is forced to 5 minutes regardless of
    * caller; refresh is disabled. Used by audit + by routes that want
    * to gate "operator-impersonating" actions differently from "real user".
@@ -119,8 +119,8 @@ export interface EndUserClaims<TType extends EndUserTokenType = EndUserTokenType
    *
    * This is what makes an impersonation session **revocable**. Without it the
    * token was a bearer credential with no server-side handle at all: the audit
-   * row recorded that impersonation had started and nothing — no endpoint, no
-   * code path — could stop it, so `endedAt` was documented in the schema and
+   * row recorded that impersonation had started and nothing, no endpoint, no
+   * code path, could stop it, so `endedAt` was documented in the schema and
    * never written by anything. `requireUserSession` now resolves this id and
    * refuses the token once the row is ended, which turns the end-impersonation
    * endpoint into a real kill switch rather than a bookkeeping entry.
@@ -130,9 +130,9 @@ export interface EndUserClaims<TType extends EndUserTokenType = EndUserTokenType
    * Token-generation counter, present on RS256-signed tokens only. RS256 keys
    * are deployment-wide (not derived from `Application.tokenGeneration`), so
    * the per-app session kill-switch is preserved by embedding the generation
-   * as a claim — API-side verification rejects tokens whose `gen` doesn't
+   * as a claim, API-side verification rejects tokens whose `gen` doesn't
    * match the app's current counter. Offline (JWKS) verifiers can't see a
-   * bump; the 15-minute access lifetime bounds that window.
+   * bump; the access lifetime bounds that window.
    */
   gen?: number;
   /**
@@ -140,9 +140,27 @@ export interface EndUserClaims<TType extends EndUserTokenType = EndUserTokenType
    * read endpoints (e.g. GET /billing/entitlements) default the subject to it
    * instead of the personal pool. Set via POST /users/me/organizations/:id/switch
    * and persisted on the RefreshToken so it survives refresh. Membership is
-   * always re-confirmed server-side — a stale `oid` never grants access.
+   * always re-confirmed server-side, a stale `oid` never grants access.
    */
   oid?: string;
+  /**
+   * Device id the session is bound to (`devices.id`), present when the client
+   * identified itself at sign-in or refresh. A claim, not an authorization:
+   * `requireUserSession` surfaces it as `request.deviceId`, and anything that
+   * needs to trust it resolves the row and checks `status`, a device blocked
+   * after the token was minted is still blocked. The access lifetime
+   * bounds that window exactly as it does for `gen`.
+   */
+  dev?: string;
+  /**
+   * The session this access token belongs to (`refresh_tokens.session_id`,
+   * the refresh-token family). `requireUserSession` refuses the token once
+   * that session's newest refresh row is revoked, so revoking ONE session
+   * ends its access token early without touching the user's others. Absent
+   * on tokens minted before the claim existed (they run to their expiry) and
+   * on impersonation tokens, which have no refresh token.
+   */
+  sid?: string;
   iat: number;
   exp: number;
 }
@@ -150,16 +168,21 @@ export interface EndUserClaims<TType extends EndUserTokenType = EndUserTokenType
 export type UserSessionClaims = EndUserClaims<'eu_access'>;
 export type MfaChallengeClaims = EndUserClaims<'eu_mfa_challenge'>;
 
-// Short access lifetime — paired with a 30-day refresh token.
-const DEFAULT_ACCESS_LIFETIME_SECONDS = 15 * 60;
-// MFA challenge is even shorter — enough to scan a code, not enough to be useful if leaked.
+// Short access lifetime, paired with a 30-day refresh token.
+// Configurable per deployment (END_USER_ACCESS_TOKEN_TTL_SECONDS, default 15 minutes).
+const DEFAULT_ACCESS_LIFETIME_SECONDS = env.END_USER_ACCESS_TOKEN_TTL_SECONDS;
+// MFA challenge is even shorter, enough to scan a code, not enough to be useful if leaked.
 const DEFAULT_MFA_CHALLENGE_LIFETIME_SECONDS = 5 * 60;
 
 export interface IssueOptions {
-  /** Token lifetime in seconds. Defaults to 15 minutes for access; 5 for challenge. */
+  /** Token lifetime in seconds. Defaults to END_USER_ACCESS_TOKEN_TTL_SECONDS for access; 5 minutes for challenge. */
   lifetimeSeconds?: number;
   /** Active organization id → embedded as the `oid` claim (access tokens only). */
   activeOrganizationId?: string;
+  /** Bound device id → embedded as the `dev` claim (access tokens only). */
+  deviceId?: string;
+  /** Refresh-token family → embedded as the `sid` claim (access tokens only). */
+  sessionId?: string;
 }
 
 function signEndUserToken(
@@ -169,9 +192,18 @@ function signEndUserToken(
   tokenGeneration: number,
   lifetimeSeconds: number,
   activeOrganizationId?: string,
+  deviceId?: string,
+  sessionId?: string,
 ): { token: string; expiresAt: Date } {
   const token = jwt.sign(
-    { typ, sub: endUserId, applicationId, ...(activeOrganizationId && { oid: activeOrganizationId }) },
+    {
+      typ,
+      sub: endUserId,
+      applicationId,
+      ...(activeOrganizationId && { oid: activeOrganizationId }),
+      ...(deviceId && { dev: deviceId }),
+      ...(sessionId && { sid: sessionId }),
+    },
     appSigningKey(applicationId, tokenGeneration),
     { expiresIn: lifetimeSeconds, algorithm: 'HS256' },
   );
@@ -191,12 +223,14 @@ export function issueUserAccessToken(
     tokenGeneration,
     options.lifetimeSeconds ?? DEFAULT_ACCESS_LIFETIME_SECONDS,
     options.activeOrganizationId,
+    options.deviceId,
+    options.sessionId,
   );
 }
 
 /**
  * RS256 variant of `issueUserAccessToken`. Signs with the deployment's RSA
- * key (`kid` in the header, so verifiers — ours and offline JWKS consumers —
+ * key (`kid` in the header, so verifiers, ours and offline JWKS consumers,
  * can pick the right public key) and embeds the app's `tokenGeneration` as a
  * `gen` claim to preserve the per-app kill-switch (see `EndUserClaims.gen`).
  */
@@ -215,6 +249,8 @@ export function issueUserAccessTokenRS256(
       applicationId,
       gen: tokenGeneration,
       ...(options.activeOrganizationId && { oid: options.activeOrganizationId }),
+      ...(options.deviceId && { dev: options.deviceId }),
+      ...(options.sessionId && { sid: options.sessionId }),
     },
     key.privatePem,
     { expiresIn: lifetime, algorithm: 'RS256', keyid: key.kid },
@@ -225,7 +261,7 @@ export function issueUserAccessTokenRS256(
 /**
  * Issue an end-user ACCESS token honouring the Application's
  * `authConfig.tokenAlg` (HS256 default; RS256 = JWKS-verifiable). The single
- * entry point session flows should use — sign-in, refresh, org-switch all
+ * entry point session flows should use, sign-in, refresh, org-switch all
  * route through here so an app's opt-in applies uniformly.
  */
 export async function issueUserAccessTokenForApp(
@@ -300,7 +336,7 @@ export function issueMcpAccessToken(args: {
 
 /**
  * Verify an MCP access token. Requires the expected audience (the MCP resource
- * URL) to match — a token minted for app A's MCP resource won't verify against
+ * URL) to match, a token minted for app A's MCP resource won't verify against
  * app B's. Returns claims or null.
  */
 export function verifyMcpAccessToken(
@@ -332,22 +368,22 @@ export function verifyMcpAccessToken(
 /**
  * ID Token lifetime. Short on purpose: an ID Token is a statement that "this
  * user authenticated at auth_time", consumed by the relying party during the
- * callback it was minted for. Nothing re-presents it later — RPs mint their own
- * session from it — so a long window only widens the replay surface. Ten
+ * callback it was minted for. Nothing re-presents it later, RPs mint their own
+ * session from it, so a long window only widens the replay surface. Ten
  * minutes leaves generous room for clock skew on the RP side.
  */
 const ID_TOKEN_LIFETIME_SECONDS = 10 * 60;
 
 export interface IssueIdTokenArgs {
-  /** OIDC issuer — the per-Application authorization-server URL. */
+  /** OIDC issuer, the per-Application authorization-server URL. */
   issuer: string;
   /** `sub`. The EndUser id, which is already unique per Application. */
   endUserId: string;
   /** `aud`. The OAuth client the token was issued to. */
   clientId: string;
-  /** Deployment RSA key from lib/signing-keys.ts — the SAME key as the JWKS. */
+  /** Deployment RSA key from lib/signing-keys.ts, the SAME key as the JWKS. */
   key: ActiveSigningKey;
-  /** `auth_time` — when the end-user actually authenticated. */
+  /** `auth_time`, when the end-user actually authenticated. */
   authTime: Date;
   /** `nonce` from the authentication request, when the client sent one. */
   nonce?: string | undefined;
@@ -363,7 +399,7 @@ export interface IssueIdTokenArgs {
    * granted scopes allow; this function never reads the user record, so it
    * cannot leak a claim nobody asked for.
    *
-   * Structural claims are stripped — see `RESERVED_ID_TOKEN_CLAIMS`.
+   * Structural claims are stripped, see `RESERVED_ID_TOKEN_CLAIMS`.
    */
   claims?: Record<string, unknown> | undefined;
   lifetimeSeconds?: number;
@@ -375,7 +411,7 @@ export interface IssueIdTokenArgs {
  * Two groups, both load-bearing. The JWT/OIDC structural claims (`iss`, `sub`,
  * `aud`, …) are what a relying party's identity decision rests on. `typ`,
  * `applicationId` and `gen` are what `verifyMcpAccessToken` authenticates an
- * ACCESS token by — the three checks that stop an ID Token being presented as
+ * ACCESS token by, the three checks that stop an ID Token being presented as
  * one, which is otherwise a cross-application account takeover because both
  * come out of the same grant.
  *
@@ -411,11 +447,11 @@ const RESERVED_ID_TOKEN_CLAIMS = new Set([
  * `sub` is the EndUser id. That is stable for the life of the account and
  * scoped to one Application by construction (`EndUser` rows are per-app), so
  * the same human signing into two Applications on one deployment presents two
- * unrelated subject identifiers under two different issuers — a pairwise
+ * unrelated subject identifiers under two different issuers, a pairwise
  * pseudonym scheme would add nothing here.
  *
  * No `gen` claim (unlike RS256 access tokens): bumping `tokenGeneration` is a
- * session kill-switch, and an ID Token is not a session — it is a record of an
+ * session kill-switch, and an ID Token is not a session, it is a record of an
  * authentication that did happen, already consumed by the time a bump lands.
  */
 export function issueIdToken(args: IssueIdTokenArgs): { token: string; expiresAt: Date } {
@@ -448,7 +484,7 @@ export interface AssertedIdTokenClaims {
   sub: string;
   email: string;
   emailVerified: boolean;
-  /** Seconds since the epoch — when the ID Token stops being acceptable. */
+  /** Seconds since the epoch, when the ID Token stops being acceptable. */
   exp: number;
 }
 
@@ -458,7 +494,7 @@ export interface AssertedIdTokenClaims {
  * Only ever accepts tokens THIS deployment minted: the signature is checked
  * against the local JWKS by `kid`, so there is no remote key fetch and no
  * discovery document to poison. `issuer` and `audience` are supplied by
- * deployment config, never by the caller — a token that is valid for a
+ * deployment config, never by the caller, a token that is valid for a
  * different Application, or for a different client of the same Application,
  * must not become an operator session.
  *
@@ -522,7 +558,7 @@ export async function verifyOperatorAssertionIdToken(
 /**
  * `at_hash` (OIDC Core §3.1.3.6): base64url of the left-most half of the
  * SHA-256 digest of the ASCII access token. SHA-256 because the ID Token is
- * signed RS256 — the hash always follows the signing algorithm's digest.
+ * signed RS256, the hash always follows the signing algorithm's digest.
  */
 function accessTokenHash(accessToken: string): string {
   const digest = createHash('sha256').update(accessToken, 'ascii').digest();
@@ -588,10 +624,10 @@ function verifyEndUserToken<TType extends EndUserTokenType>(
 /**
  * Verify a presented end-user access token. Returns claims on success,
  * `null` on any failure (bad signature, expired, malformed, wrong typ).
- * Never throws — callers map `null` to a `RekeyError`.
+ * Never throws, callers map `null` to a `RekeyError`.
  *
  * **Refuses non-access typ.** An MFA challenge token (`eu_mfa_challenge`)
- * presented here returns `null` — it must be exchanged via /auth/mfa-verify
+ * presented here returns `null`, it must be exchanged via /auth/mfa-verify
  * first.
  */
 export function verifyUserAccessToken(
@@ -604,13 +640,13 @@ export function verifyUserAccessToken(
 
 /**
  * Verify a presented end-user access token of EITHER algorithm, dispatching
- * on the token header — with a strict allowlist per path (the header is
+ * on the token header, with a strict allowlist per path (the header is
  * attacker-controlled; it only ever selects between two fixed verifiers, it
  * never picks the key):
  *
  *   - `alg: "HS256"` → verified against the per-app derived secret, exactly
  *     as `verifyUserAccessToken` (algorithms pinned to HS256). Any `kid` the
- *     attacker puts in the header is ignored — HS256 never consults the JWKS,
+ *     attacker puts in the header is ignored, HS256 never consults the JWKS,
  *     so an HS256 token "claiming" an RSA kid cannot trick the verifier into
  *     using a public key as an HMAC secret.
  *   - `alg: "RS256"` → requires a `kid` that maps to one of OUR published
@@ -642,7 +678,7 @@ export async function verifyUserAccessTokenAnyAlg(
   if (header.alg === 'RS256') {
     if (typeof header.kid !== 'string' || header.kid.length === 0) return null;
     const publicPem = await getPublicKeyByKid(header.kid);
-    if (!publicPem) return null; // unknown kid — never verify against guessed keys
+    if (!publicPem) return null; // unknown kid, never verify against guessed keys
     try {
       const decoded = jwt.verify(token, publicPem, { algorithms: ['RS256'] });
       if (

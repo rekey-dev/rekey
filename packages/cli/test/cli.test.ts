@@ -1,5 +1,5 @@
 /**
- * CLI smoke tests — runs the compiled binary in subprocesses against a
+ * CLI smoke tests, runs the compiled binary in subprocesses against a
  * stub HTTP server, verifying stdout/stderr/exit-code shape and the
  * --json contract.
  *
@@ -56,17 +56,34 @@ interface StubServer {
   close: () => Promise<void>;
   reset: () => void;
   setResponse: (path: string, status: number, body: unknown) => void;
+  /**
+   * Every request the CLI actually made, in order.
+   *
+   * Asserting on the WIRE, not on the exit code. A command that sends a field
+   * the route silently discards still exits 0 and still prints a tick, which
+   * is the whole defect this file now covers: the only place the difference is
+   * visible is the request body.
+   */
+  requests: Array<{ key: string; body: unknown }>;
 }
 
 function startStubServer(): Promise<StubServer> {
   return new Promise((resolve) => {
     const responses = new Map<string, { status: number; body: unknown }>();
+    const requests: Array<{ key: string; body: unknown }> = [];
     const server: Server = createServer((req, res) => {
       const key = `${req.method} ${req.url}`;
-      const r = responses.get(key) ?? { status: 200, body: { success: true, data: {} } };
-      res.statusCode = r.status;
-      res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify(r.body));
+      let raw = '';
+      req.on('data', (chunk: Buffer) => {
+        raw += chunk.toString();
+      });
+      req.on('end', () => {
+        requests.push({ key, body: raw === '' ? undefined : JSON.parse(raw) });
+        const r = responses.get(key) ?? { status: 200, body: { success: true, data: {} } };
+        res.statusCode = r.status;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify(r.body));
+      });
     });
     server.listen(0, () => {
       const addr = server.address();
@@ -74,8 +91,12 @@ function startStubServer(): Promise<StubServer> {
       resolve({
         url: `http://127.0.0.1:${port}`,
         close: () => new Promise((res) => server.close(() => res())),
-        reset: () => responses.clear(),
+        reset: () => {
+          responses.clear();
+          requests.length = 0;
+        },
         setResponse: (key, status, body) => responses.set(key, { status, body }),
+        requests,
       });
     });
   });
@@ -142,7 +163,7 @@ describe('rekey CLI', () => {
     stub.reset();
     stub.setResponse('GET /api/v1/admin/applications', 200, {
       success: true,
-      // `{items, page}` — the list envelope every admin list endpoint returns.
+      // `{items, page}`, the list envelope every admin list endpoint returns.
       data: {
         items: [
           {
@@ -216,10 +237,151 @@ describe('rekey CLI', () => {
     expect(parsed.error.code).toBe('CLI_PLANS_AMOUNT_INVALID');
     expect(parsed.error.fix).toContain('integer');
   });
+
+  // ---------- plans create: flags this route cannot honour ----------
+  //
+  // `plans create` posts to the super-admin route, which builds SUBSCRIPTION
+  // plans only. It used to send `kind`, `licenseKind`, `creditsAmount` and the
+  // rest anyway; the route's schema dropped them and answered 201, so
+  // `--kind LICENSE --credits-amount 500` printed a tick for a SUBSCRIPTION
+  // plan. The CLI half of the fix is to refuse before the request is made.
+
+  const PLAN_ARGS = ['plans', 'create', '--app', 'app_1', '--slug', 'pro', '--name', 'Pro', '--amount', '999'];
+  const ENV = { REKEY_URL: '', SUPER_ADMIN_KEY: 'x'.repeat(40) };
+
+  it.each([
+    ['--kind', 'LICENSE'],
+    ['--kind', 'CREDIT'],
+    ['--license-kind', 'PERPETUAL'],
+    ['--license-duration-days', '365'],
+    ['--license-seats-allowed', '5'],
+    ['--meter-slug', 'api_calls'],
+    ['--price-per-unit-cents', '2'],
+    ['--credits-amount', '500'],
+  ])('plans create %s %s is refused before any request is sent', async (flag, value) => {
+    stub.reset();
+    const r = await runCli([...PLAN_ARGS, flag, value, '--json'], { ...ENV, REKEY_URL: stub.url });
+
+    expect(r.code).toBe(1);
+    const parsed = JSON.parse(r.stderr) as { error: { code: string; message: string; fix: string } };
+    expect(parsed.error.code).toBe('CLI_PLANS_KIND_UNSUPPORTED');
+    // The refusal has to say where the operation DOES work, or it is just a
+    // dead end with a code attached.
+    expect(parsed.error.fix).toContain('/api/v1/tenant/applications/:id/plans');
+    expect(parsed.error.message).toContain(flag);
+
+    // Nothing left the process. Before the fix this was a POST that came back
+    // 201 for the wrong plan.
+    expect(stub.requests).toEqual([]);
+  });
+
+  it('plans create sends only the fields the admin route implements', async () => {
+    stub.reset();
+    stub.setResponse('POST /api/v1/admin/applications/app_1/plans', 201, {
+      success: true,
+      data: {
+        id: 'pl_1',
+        applicationId: 'app_1',
+        slug: 'pro',
+        name: 'Pro',
+        amount: 999,
+        currency: 'USD',
+        interval: 'MONTH',
+        kind: 'SUBSCRIPTION',
+        active: true,
+      },
+    });
+
+    const r = await runCli([...PLAN_ARGS, '--json'], { ...ENV, REKEY_URL: stub.url });
+    expect(r.code).toBe(0);
+
+    const sent = stub.requests.find((q) => q.key === 'POST /api/v1/admin/applications/app_1/plans');
+    expect(sent).toBeDefined();
+    // `kind` included: the route is strict now, so sending even the correct
+    // "SUBSCRIPTION" would be a 400 rather than a harmless no-op.
+    expect(Object.keys(sent!.body as Record<string, unknown>).sort()).toEqual([
+      'amount',
+      'currency',
+      'interval',
+      'name',
+      'slug',
+    ]);
+  });
+
+  it('plans create --help does not advertise a flag that cannot work', async () => {
+    const r = await runCli(['plans', 'create', '--help']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('--amount');
+    for (const flag of ['--license-kind', '--meter-slug', '--credits-amount']) {
+      expect(r.stdout).not.toContain(flag);
+    }
+  });
+
+  // ---------- apps create --environment ----------
+
+  const APP_ARGS = ['apps', 'create', '--tenant', 'tn_1', '--name', 'A', '--slug', 'a'];
+
+  function stubAppCreate(environment: string): void {
+    stub.setResponse('POST /api/v1/admin/applications', 201, {
+      success: true,
+      data: {
+        id: 'app_2',
+        tenantId: 'tn_1',
+        name: 'A',
+        slug: 'a',
+        publicKey: 'rp_pub_a_xxx',
+        environment,
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+    });
+  }
+
+  it('apps create sends --environment, so a PRODUCTION app is creatable', async () => {
+    stub.reset();
+    stubAppCreate('PRODUCTION');
+
+    const r = await runCli([...APP_ARGS, '--environment', 'PRODUCTION', '--json'], {
+      ...ENV,
+      REKEY_URL: stub.url,
+    });
+    expect(r.code).toBe(0);
+
+    const sent = stub.requests.find((q) => q.key === 'POST /api/v1/admin/applications');
+    // The route has always accepted this field; the CLI never sent it, so
+    // every app it created was DEVELOPMENT with an rp_test_ key.
+    expect((sent!.body as { environment?: string }).environment).toBe('PRODUCTION');
+  });
+
+  it('apps create omits environment entirely when the flag is absent', async () => {
+    stub.reset();
+    stubAppCreate('DEVELOPMENT');
+
+    const r = await runCli([...APP_ARGS, '--json'], { ...ENV, REKEY_URL: stub.url });
+    expect(r.code).toBe(0);
+
+    const sent = stub.requests.find((q) => q.key === 'POST /api/v1/admin/applications');
+    // Not `environment: undefined`, and not a CLI-side default: the API owns
+    // what "unspecified" means.
+    expect(sent!.body as Record<string, unknown>).not.toHaveProperty('environment');
+  });
+
+  it('apps create rejects a value the API would not accept', async () => {
+    stub.reset();
+    const r = await runCli([...APP_ARGS, '--environment', 'prod', '--json'], {
+      ...ENV,
+      REKEY_URL: stub.url,
+    });
+
+    expect(r.code).toBe(1);
+    const parsed = JSON.parse(r.stderr) as { error: { code: string; message: string } };
+    expect(parsed.error.code).toBe('CLI_APPS_ENVIRONMENT_INVALID');
+    expect(parsed.error.message).toContain('PRODUCTION');
+    expect(stub.requests).toEqual([]);
+  });
 });
 
 /**
- * The CLI also declares `main` / `types` / `exports`, so it is importable — and
+ * The CLI also declares `main` / `types` / `exports`, so it is importable, and
  * it used to `program.parseAsync(process.argv)` at module scope. An importing
  * program had its OWN argv parsed by commander, which then printed help and
  * exited. Running is now gated on being the process entry point.

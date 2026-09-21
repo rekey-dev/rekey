@@ -6,13 +6,13 @@
  * `${issuerUrl}/.well-known/openid-configuration` for endpoint discovery.
  *
  * Per-Application config supplies the issuerUrl alongside clientId/secret/redirectUri.
- * Discovered endpoints are cached in-memory per (issuerUrl) with a 24h TTL —
+ * Discovered endpoints are cached in-memory per (issuerUrl) with a 24h TTL,
  * endpoint rotations are picked up within a day (or immediately on restart).
  */
 
 import { createHash } from 'node:crypto';
 import { decodeJwtPayload, emailFromClaims, fetchJsonWithTimeout } from './_oauth2-base.js';
-import { assertSafeUrl } from '../../../lib/ssrf-guard.js';
+import { assertSafeUrlResolved, pinnedFetchInit } from '../../../lib/ssrf-guard.js';
 import { RekeyError } from '../../../lib/error.js';
 import type {
   BuildAuthUrlInput,
@@ -29,15 +29,15 @@ interface DiscoveryDoc {
   /**
    * RFC 8414. When the issuer advertises S256 we send PKCE; when it says
    * nothing we do not. Reading the answer off discovery rather than making it
-   * a config flag means an issuer that REQUIRES PKCE — OAuth 2.1 mandates it,
-   * and Rekey's own Applications enforce it — works without anyone knowing to
+   * a config flag means an issuer that REQUIRES PKCE, OAuth 2.1 mandates it,
+   * and Rekey's own Applications enforce it, works without anyone knowing to
    * tick a box, and one that has never heard of it is unaffected.
    */
   code_challenge_methods_supported?: string[];
   /**
    * `['none']` means the issuer authenticates public clients by PKCE alone and
    * has no notion of a client secret. Sending one anyway is at best ignored and
-   * at worst a 401 — and demanding the operator invent one is worse than both.
+   * at worst a 401, and demanding the operator invent one is worse than both.
    */
   token_endpoint_auth_methods_supported?: string[];
 }
@@ -51,7 +51,7 @@ function challengeFor(verifier: string): string {
   return createHash('sha256').update(verifier, 'ascii').digest('base64url');
 }
 
-/** Does this issuer accept — and therefore expect — PKCE with S256? */
+/** Does this issuer accept, and therefore expect, PKCE with S256? */
 function wantsPkce(doc: DiscoveryDoc): boolean {
   return (doc.code_challenge_methods_supported ?? []).includes('S256');
 }
@@ -87,6 +87,86 @@ export function __resetForTests(): void {
   discoveryCache.clear();
 }
 
+/**
+ * A server clock a minute fast must not reject a token the issuer considers
+ * live. OIDC Core leaves the size of the allowance to the client; a minute is
+ * what the surrounding stack already grants elsewhere.
+ */
+const ID_TOKEN_CLOCK_SKEW_MS = 60_000;
+
+const stripTrailingSlash = (value: string): string => value.replace(/\/+$/, '');
+
+/**
+ * Does an advertised or asserted issuer answer for the one we configured?
+ *
+ * Exact after trailing slashes, with one documented exception: a multi-tenant
+ * Microsoft endpoint (`/common`, `/organizations`) answers discovery with the
+ * literal `{tenantid}` template, because which tenant it is only becomes known
+ * once a token exists. Everything but that segment must still match, so the
+ * template cannot widen the host or the path around it.
+ */
+function issuerAnswersFor(configured: string, advertised: string): boolean {
+  const want = stripTrailingSlash(configured);
+  const got = stripTrailingSlash(advertised);
+  if (want === got) return true;
+  if (!got.includes('{tenantid}')) return false;
+  const pattern = got
+    .split('{tenantid}')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('[^/]+');
+  return new RegExp(`^${pattern}$`).test(want);
+}
+
+/** Refusal for an identity the provider described in a way we cannot trust. */
+function refuseIdentity(what: string): never {
+  throw new RekeyError({
+    statusCode: 502,
+    code: 'OAUTH_ID_TOKEN_INVALID',
+    message: `The identity provider returned an identity that ${what}.`,
+    fix: 'Check the issuer URL and client id configured for this provider; the token must be issued by that issuer for that client.',
+  });
+}
+
+/** The claim checks an ID token must pass before its `sub` names an account. */
+function assertIdTokenClaims(
+  claims: Record<string, unknown>,
+  expected: { issuer: string; clientId: string },
+): void {
+  const sub = claims['sub'];
+  if (typeof sub !== 'string' || sub.length === 0) refuseIdentity('carries no subject');
+  const iss = claims['iss'];
+  // A `{tenantid}` template is resolved by the token's own `tid` before the
+  // comparison, so a multi-tenant configuration still pins the issuer exactly
+  // rather than accepting any tenant that happens to fit the shape.
+  const tid = claims['tid'];
+  const expectedIssuer =
+    typeof tid === 'string' && expected.issuer.includes('{tenantid}')
+      ? expected.issuer.replace('{tenantid}', tid)
+      : expected.issuer;
+  if (typeof iss !== 'string' || !issuerAnswersFor(iss, expectedIssuer)) {
+    refuseIdentity('names a different issuer');
+  }
+  const aud = claims['aud'];
+  const audiences = Array.isArray(aud) ? aud : [aud];
+  if (!audiences.includes(expected.clientId)) {
+    refuseIdentity('was issued for a different client');
+  }
+  // With more than one audience the token is usable at another party, so OIDC
+  // Core §3.1.3.7 requires `azp` to name the client it was actually minted for.
+  // Without this, a token issued to someone else that merely lists us in `aud`
+  // would pass.
+  if (audiences.length > 1 && claims['azp'] !== expected.clientId) {
+    refuseIdentity('was authorized for a different party');
+  }
+  // `exp` is seconds since the epoch. Coerced rather than type-checked because
+  // some issuers serialize it as a JSON string, which is a formatting quirk
+  // rather than a reason to refuse a sign-in.
+  const exp = Number(claims['exp']);
+  if (!Number.isFinite(exp) || exp * 1000 + ID_TOKEN_CLOCK_SKEW_MS <= Date.now()) {
+    refuseIdentity('has expired');
+  }
+}
+
 async function discover(issuerUrl: string): Promise<DiscoveryDoc> {
   const url = issuerUrl.replace(/\/$/, '') + '/.well-known/openid-configuration';
   const cached = discoveryCache.get(url);
@@ -94,11 +174,13 @@ async function discover(issuerUrl: string): Promise<DiscoveryDoc> {
   if (cached) discoveryCache.delete(url);
   const promise = (async (): Promise<DiscoveryDoc> => {
     // SSRF guard: `issuerUrl` is tenant-controlled (Application.oauthConfig).
-    // Reject internal/loopback/metadata targets before fetching.
-    await assertSafeUrl(url);
+    // Reject internal/loopback/metadata targets, and connect only to the
+    // addresses the guard approved so a rebinding record cannot swap in an
+    // internal one between the check and the connect (see pinnedFetchInit).
     const res = await fetchJsonWithTimeout(url, {
       headers: { Accept: 'application/json' },
       redirect: 'error',
+      ...pinnedFetchInit(await assertSafeUrlResolved(url)),
     });
     if (!res.ok) {
       throw new Error(`OIDC discovery failed for ${url}: HTTP ${res.status}`);
@@ -106,6 +188,15 @@ async function discover(issuerUrl: string): Promise<DiscoveryDoc> {
     const data = (res.data ?? {}) as Partial<DiscoveryDoc>;
     if (!data.authorization_endpoint || !data.token_endpoint || !data.issuer) {
       throw new Error(`OIDC discovery doc at ${url} missing required fields`);
+    }
+    // OIDC Discovery §4.3: the document must name the issuer it was fetched
+    // from. Without this the later ID token check is self-referential, it
+    // compares the token against a value the same document supplied, so a
+    // document that names someone else validates tokens from someone else.
+    if (!issuerAnswersFor(issuerUrl, data.issuer)) {
+      throw new Error(
+        `OIDC discovery doc at ${url} is issued by "${data.issuer}", not by the configured issuer`,
+      );
     }
     return data as DiscoveryDoc;
   })();
@@ -118,18 +209,13 @@ async function discover(issuerUrl: string): Promise<DiscoveryDoc> {
 export class OidcProvider implements OAuthProvider {
   readonly name = 'oidc';
 
-  // The auth URL build is async (needs discovery), but the OAuthProvider
-  // interface declares it sync. We satisfy the contract by doing the discovery
-  // *during exchange* and using a small server-side redirect for the auth step:
-  // — actually, since we control the call sites, the interface admits async by
-  // returning a Promise<string>. See type widening in the registry call.
+  // OAuthProvider declares buildAuthUrl sync, but OIDC needs discovery first.
+  // This sync entry point always throws; callers must use buildAuthUrlAsync.
+  // The registry's buildAuthUrl() helper is what dispatches to it.
   buildAuthUrl(input: BuildAuthUrlInput): string {
     if (!input.config.issuerUrl) {
       throw new Error('OIDC provider requires `issuerUrl` in the config.');
     }
-    // Synchronous variant: fetch discovery and throw if it isn't already in
-    // the cache. Callers should warm the cache (or accept the throw and retry
-    // — discovery is fast). We swap to async via the registry helper below.
     throw new Error(
       'OidcProvider.buildAuthUrl is async — use buildAuthUrlAsync instead. ' +
       'The registry caller in oauth.service.ts is the chokepoint.',
@@ -151,7 +237,7 @@ export class OidcProvider implements OAuthProvider {
     // Only when the issuer says it understands S256. An issuer that requires
     // PKCE rejects an authorize request without a challenge outright, and one
     // that has never heard of it must not receive parameters it did not ask
-    // for — so the discovery document decides, not a config flag.
+    // for, so the discovery document decides, not a config flag.
     if (input.codeVerifier && wantsPkce(doc)) {
       params.set('code_challenge', challengeFor(input.codeVerifier));
       params.set('code_challenge_method', 'S256');
@@ -181,25 +267,25 @@ export class OidcProvider implements OAuthProvider {
       tokenBody.set('code_verifier', input.codeVerifier);
     }
     // Discovered endpoints are attacker-influenceable too (a malicious
-    // discovery doc can point them anywhere) — validate before fetching.
-    await assertSafeUrl(doc.token_endpoint);
+    // discovery doc can point them anywhere), validate before fetching.
     const tokenRes = await fetchJsonWithTimeout(doc.token_endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
       body: tokenBody.toString(),
       redirect: 'error',
+      ...pinnedFetchInit(await assertSafeUrlResolved(doc.token_endpoint)),
     });
     if (!tokenRes.ok) {
       // The authorization server says why in the body (RFC 6749 §5.2:
       // `invalid_grant`, `invalid_client`, …). Throwing a bare Error discarded
       // it and surfaced every failure as an opaque 500, which is useless to the
-      // person stuck in the flow AND to the operator reading logs — the two
+      // person stuck in the flow AND to the operator reading logs, the two
       // audiences who need it most.
       //
       // The upstream `error` code is safe to pass on: it is a fixed OAuth
       // vocabulary describing OUR request, not the user's data, and it is what
       // distinguishes "that code was already used" from "this client is
-      // misconfigured". `error_description` is NOT forwarded — it is free text
+      // misconfigured". `error_description` is NOT forwarded, it is free text
       // from an operator-configured issuer.
       const body = (tokenRes.data ?? {}) as { error?: unknown; error_description?: unknown };
       const upstream = typeof body.error === 'string' ? body.error : null;
@@ -219,27 +305,40 @@ export class OidcProvider implements OAuthProvider {
 
     if (tokenData.id_token) {
       const claims = decodeJwtPayload(tokenData.id_token);
+      // The token came back over TLS from the issuer's own token endpoint in
+      // exchange for our code and client secret, so its signature is not
+      // re-verified here; the claims that bind it to THIS exchange are. An
+      // issuer that answers for a different issuer, for another client, with
+      // an expired token, or without a subject is not one to create an
+      // account from: an empty `sub` would fold every user of the provider
+      // onto one identity.
+      assertIdTokenClaims(claims, { issuer: doc.issuer, clientId: input.config.clientId });
       return {
-        providerAccountId: String(claims['sub'] ?? ''),
+        providerAccountId: String(claims['sub']),
         ...emailFromClaims(claims),
       };
     }
 
     if (doc.userinfo_endpoint && tokenData.access_token) {
-      await assertSafeUrl(doc.userinfo_endpoint);
       const userRes = await fetchJsonWithTimeout(doc.userinfo_endpoint, {
         headers: {
           Authorization: `Bearer ${tokenData.access_token}`,
           Accept: 'application/json',
         },
         redirect: 'error',
+        ...pinnedFetchInit(await assertSafeUrlResolved(doc.userinfo_endpoint)),
       });
       if (!userRes.ok) {
         throw new Error(`OIDC userinfo failed: HTTP ${userRes.status}`);
       }
       const data = (userRes.data ?? {}) as Record<string, unknown>;
+      // Same refusal as the ID token path, for the same reason: `String(
+      // undefined ?? '')` is an empty account id, and an empty account id
+      // folds every user of this provider onto one identity.
+      const sub = data['sub'];
+      if (typeof sub !== 'string' || sub.length === 0) refuseIdentity('carries no subject');
       return {
-        providerAccountId: String(data['sub'] ?? ''),
+        providerAccountId: sub,
         ...emailFromClaims(data),
       };
     }

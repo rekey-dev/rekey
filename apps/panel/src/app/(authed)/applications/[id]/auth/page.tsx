@@ -1,7 +1,8 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { errorQuery, readErrorFlash, api, PanelApiError, getApplication } from '@/lib/api';
+import { ActionForm } from '@/components/ActionForm';
 import { PageHeader } from '@/components/PageHeader';
 import { ApiErrorText } from '@/components/api-error';
 import { Card, SectionHeader } from '@/components/Card';
@@ -17,7 +18,7 @@ const PRIMARY_METHODS: Array<{ key: string; label: string; hint: string }> = [
   {
     key: 'magic_link',
     label: 'Magic link',
-    hint: "One-click sign-in via email — the SDK's auth.requestMagicLink() + verifyMagicLink(). Delivered through this app's configured email transport (set one on the Email tab; otherwise the raw token is returned to your server to send).",
+    hint: "One-click sign-in via email, using the SDK's auth.requestMagicLink() + verifyMagicLink(). Delivered through this app's configured email transport (set one on the Email tab; otherwise the raw token is returned to your server to send).",
   },
 ];
 
@@ -41,7 +42,13 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
   const sendVerificationEmailOnSignUp = formData.get('sendVerificationEmailOnSignUp') === 'on';
   const requireEmailVerification = formData.get('requireEmailVerification') === 'on';
   const oidcEnabled = formData.get('oidcEnabled') === 'on';
-  // Only ever HS256 or RS256 — anything else is a crafted form post, and the
+  // Same shape as `mfa` and `tokenAlg` above: a closed set, defaulted rather
+  // than trusted, because the value arrives from a form post.
+  const deviceBindingRaw = String(formData.get('deviceBinding') ?? 'optional');
+  const deviceBinding = (deviceBindingRaw === 'required' ? 'required' : 'optional') as
+    | 'optional'
+    | 'required';
+  // Only ever HS256 or RS256, anything else is a crafted form post, and the
   // API would reject it anyway. Falling back to HS256 keeps the default.
   const rawAlg = String(formData.get('tokenAlg') ?? '');
   const tokenAlg = rawAlg === 'RS256' ? 'RS256' : 'HS256';
@@ -49,7 +56,7 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
     .split('\n')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-  // Empty string is meaningful — it CLEARS the stored URL. Sending it through
+  // Empty string is meaningful, it CLEARS the stored URL. Sending it through
   // unchanged is what lets an operator remove a stale value; the API treats
   // '' and null identically.
   const appUrl = String(formData.get('appUrl') ?? '').trim();
@@ -69,6 +76,7 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
         sendVerificationEmailOnSignUp,
         requireEmailVerification,
         oidcEnabled,
+        deviceBinding,
         tokenAlg,
         redirectUrls,
         appUrl,
@@ -130,10 +138,10 @@ export default async function AuthMethodsPage({
     false;
   const requireEmailVerification =
     (app.authConfig as { requireEmailVerification?: boolean }).requireEmailVerification === true;
-  // Off by default, same as `requireEmailVerification` — an app saved before
+  // Off by default, same as `requireEmailVerification`, an app saved before
   // the field existed must read back as OFF, never as "we're already an IdP".
   const oidcEnabled = app.authConfig.oidcEnabled === true;
-  // HS256 unless explicitly RS256 — matches the schema default, so an app
+  // HS256 unless explicitly RS256, matches the schema default, so an app
   // saved before the field existed reads back what the API actually applies.
   const tokenAlg =
     (app.authConfig as { tokenAlg?: string }).tokenAlg === 'RS256' ? 'RS256' : 'HS256';
@@ -173,12 +181,12 @@ export default async function AuthMethodsPage({
         </p>
       )}
 
-      <form action={saveAuth.bind(null, id)} className="space-y-6">
-        {/* 1 — Sign-in methods: credential toggles + read-only OAuth summary. */}
+      <ActionForm action={saveAuth.bind(null, id)} className="space-y-6">
+        {/* 1, Sign-in methods: credential toggles + read-only OAuth summary. */}
         <section className="space-y-3">
           <SectionHeader
             title="Sign-in methods"
-            description="What end-users can authenticate with. OAuth providers are managed on their own tab — a provider counts as on once it's configured."
+            description="What end-users can authenticate with. OAuth providers are managed on their own tab. A provider counts as on once it's configured."
           />
           <Card padded={false} className="divide-y divide-[var(--color-border)]">
             {PRIMARY_METHODS.map((m) => (
@@ -210,7 +218,7 @@ export default async function AuthMethodsPage({
           </Card>
         </section>
 
-        {/* 2 — Sign-up & access: who can create accounts, org model. */}
+        {/* 2, Sign-up & access: who can create accounts, org model. */}
         <section className="space-y-3">
           <SectionHeader
             title="Sign-up & access"
@@ -224,7 +232,7 @@ export default async function AuthMethodsPage({
                   <>
                     Controls who can create new accounts, whatever the sign-up method (password,
                     magic link, or OAuth). <strong>Secret-key only</strong> means only your own
-                    server can create accounts — use it when you provision users yourself.{' '}
+                    server can create accounts. Use it when you provision users yourself.{' '}
                     <strong>Invite only</strong> blocks all new sign-ups. Existing users can always
                     sign in. Blocked attempts return a clear error code (e.g.{' '}
                     <code className="text-xs">SIGNUP_DISABLED</code>) your app can handle.
@@ -236,9 +244,9 @@ export default async function AuthMethodsPage({
                   defaultValue={signupMode}
                   className={`${inputCls} w-full sm:w-80`}
                 >
-                  <option value="public">Public — any key may create users</option>
-                  <option value="secret_only">Secret-key only — server-side sign-up</option>
-                  <option value="invite_only">Invite only — no public sign-up</option>
+                  <option value="public">Public: any key may create users</option>
+                  <option value="secret_only">Secret-key only: server-side sign-up</option>
+                  <option value="invite_only">Invite only: no public sign-up</option>
                 </select>
               </Field>
             </div>
@@ -249,10 +257,10 @@ export default async function AuthMethodsPage({
               hint={
                 <>
                   Emails new password sign-ups a confirmation link, in addition to the welcome
-                  email — you don&apos;t have to call{' '}
+                  email, so you don&apos;t have to call{' '}
                   <code className="text-xs">auth.sendVerificationEmail()</code> yourself. Sent
                   through this app&apos;s email transport (Email tab); with none configured nothing
-                  goes out and sign-up still succeeds. Magic-link and OAuth sign-ups skip it — those
+                  goes out and sign-up still succeeds. Magic-link and OAuth sign-ups skip it: those
                   addresses are already proven. Ignored while{' '}
                   <strong>Require a verified email</strong> is on: the link is then the only way
                   into a new account, so it always goes out.
@@ -275,7 +283,7 @@ export default async function AuthMethodsPage({
           </Card>
         </section>
 
-        {/* 3 — Application URL: the origin transactional emails link back to. */}
+        {/* 3, Application URL: the origin transactional emails link back to. */}
         <section className="space-y-3">
           <SectionHeader
             title="Your application"
@@ -303,7 +311,7 @@ export default async function AuthMethodsPage({
                       {' '}
                       With this blank and no redirect URLs set we can&apos;t build a link, so the
                       welcome email <strong>goes out without its button</strong> and the{' '}
-                      <strong>verification email isn&apos;t sent at all</strong> — its whole body is
+                      <strong>verification email isn&apos;t sent at all</strong>: its whole body is
                       a button, and a confirmation nobody can click is worse than none. Set this
                       before turning on <strong>Require a verified email</strong>.
                     </>
@@ -357,7 +365,7 @@ export default async function AuthMethodsPage({
           </Card>
         </section>
 
-        {/* 4 — Security policy: MFA, breach check, password rules, redirect allow-list. */}
+        {/* 4, Security policy: MFA, breach check, password rules, redirect allow-list. */}
         <section className="space-y-3">
           <SectionHeader
             title="Security policy"
@@ -373,7 +381,7 @@ export default async function AuthMethodsPage({
                 <>
                   Rejects passwords that have appeared in known data breaches, checked whenever a
                   user sets or changes one. Recommended on: passwords themselves never leave your
-                  server — only an anonymous partial hash is compared against the public breach
+                  server. Only an anonymous partial hash is compared against the public breach
                   database. Turn off only if this deployment can&apos;t reach the internet.
                 </>
               }
@@ -386,27 +394,27 @@ export default async function AuthMethodsPage({
               defaultChecked={requireEmailVerification}
               hint={
                 <>
-                  No session until the user clicks their verification link — sign-up, sign-in and
+                  No session until the user clicks their verification link. Sign-up, sign-in and
                   refresh all answer <code className="text-xs">EMAIL_NOT_VERIFIED</code> (403)
                   instead, so your app can say why. Sign-up still creates the account and always
                   sends the link.{' '}
-                  <strong>Applies to existing accounts the moment you save</strong> — anyone who
+                  <strong>Applies to existing accounts the moment you save</strong>: anyone who
                   never confirmed their address is signed out within 15 minutes and stays out until
                   they do, so make sure the verification email above is going out first. Give your
                   sign-in screen a &ldquo;send it again&rdquo; button on{' '}
                   <code className="text-xs">EMAIL_NOT_VERIFIED</code>, wired to{' '}
-                  <code className="text-xs">POST /api/v1/auth/resend-verification</code> — it takes
+                  <code className="text-xs">POST /api/v1/auth/resend-verification</code>. It takes
                   no session, which is the point. Magic-link sign-in passes the gate rather than
-                  skipping it — clicking the link proves the address, and it is recorded.{' '}
+                  skipping it: clicking the link proves the address, and it is recorded.{' '}
                   <strong>OAuth does not verify an address by itself</strong>: the account is
                   marked verified only when the provider asserts it (Google&apos;s{' '}
                   <code className="text-xs">email_verified</code>, GitHub&apos;s verified-emails
                   list, Discord&apos;s <code className="text-xs">verified</code>). A provider that
-                  asserts nothing — some generic OIDC servers, Microsoft consumer accounts — leaves
+                  asserts nothing (some generic OIDC servers, Microsoft consumer accounts) leaves
                   the account unverified, and that user hits this gate like any other. Trusting the
                   provider&apos;s claim and nothing more is deliberate: an address a provider will
                   not vouch for is one anybody could have registered.{' '}
-                  <strong>Required for the OpenID Connect `email` scope</strong> — while this is
+                  <strong>Required for the OpenID Connect `email` scope</strong>. While this is
                   off, an Application acting as an identity provider will not assert an address it
                   has no proof of, and omits <code className="text-xs">email</code> from its
                   discovery document.
@@ -431,7 +439,7 @@ export default async function AuthMethodsPage({
                   <code className="text-xs">openid</code> scope, and exposes{' '}
                   <code className="text-xs">/oauth/userinfo</code>. Relying parties self-register
                   themselves by default, so anyone who finds the issuer can put a password prompt
-                  on it — leave this off unless you actually want to be an identity provider.
+                  on it. Leave this off unless you actually want to be an identity provider.
                   Once your relying parties are registered, close registration on the{' '}
                   <strong>OAuth clients</strong> tab, where you can also see and revoke whatever
                   has registered. Independent of the MCP server switch on the
@@ -447,7 +455,7 @@ export default async function AuthMethodsPage({
               hint={
                 <>
                   <strong>HS256</strong> signs end-user access tokens with this deployment&apos;s
-                  shared secret — fine when only your own backend verifies them, because verifying
+                  shared secret. That is fine when only your own backend verifies them, because verifying
                   requires the secret. <strong>RS256</strong> signs with a keypair and publishes the
                   public half at <code className="text-xs">/.well-known/jwks.json</code>, so a third
                   party can verify a token without being able to mint one. This governs the
@@ -463,8 +471,8 @@ export default async function AuthMethodsPage({
                 defaultValue={tokenAlg}
                 className="w-full max-w-xs rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
               >
-                <option value="HS256">HS256 — shared secret (default)</option>
-                <option value="RS256">RS256 — public keypair, third parties can verify</option>
+                <option value="HS256">HS256: shared secret (default)</option>
+                <option value="RS256">RS256: public keypair, third parties can verify</option>
               </select>
             </Field>
 
@@ -488,16 +496,47 @@ export default async function AuthMethodsPage({
                 <>
                   Adds a second sign-in step using an authenticator app (with backup codes).{' '}
                   <strong>Optional</strong> lets each user decide; <strong>required</strong>{' '}
-                  enforces it for everyone — users who haven&apos;t set it up are asked to at their
+                  enforces it for everyone: users who haven&apos;t set it up are asked to at their
                   next sign-in (your app sees{' '}
                   <code className="text-xs">mfaEnrollmentRequired</code> and routes them to setup).
                 </>
               }
             >
               <select name="mfa" defaultValue={mfaPolicy} className={`${inputCls} w-full sm:w-72`}>
-                <option value="off">Off — end-users cannot enable 2FA</option>
-                <option value="optional">Optional — end-users may enable 2FA</option>
-                <option value="required">Required — force enrollment at sign-in</option>
+                <option value="off">Off: end-users cannot enable 2FA</option>
+                <option value="optional">Optional: end-users may enable 2FA</option>
+                <option value="required">Required: force enrollment at sign-in</option>
+              </select>
+            </Field>
+
+            {/* This setting exists on the schema, on the PATCH body, in the
+                published OpenAPI and in the operator MCP tool, and had no
+                control here, so device binding could only ever be switched on
+                over the API or by an agent, and a deployment driven from the
+                panel could not use the feature at all. The parity test that
+                keeps those four surfaces in step compares API artifacts only,
+                which is why the omission was silent. */}
+            <Field
+              label="Device binding"
+              hint={
+                <>
+                  Binds each session to the machine it was created on. The client sends an opaque
+                  fingerprint at sign-in; Rekey records a device, enforces the{' '}
+                  <code className="text-xs">max_devices</code> feature entitlement against it, and
+                  puts the device id in the token as the <code className="text-xs">dev</code> claim.{' '}
+                  <strong>Required</strong> refuses a sign-in that carries no fingerprint, so turn
+                  it on only once your clients send one. Otherwise every sign-in fails. Devices
+                  are listed and released per end-user under End-users.
+                </>
+              }
+            >
+              <select
+                name="deviceBinding"
+                defaultValue={app.authConfig.deviceBinding ?? 'optional'}
+                className={`${inputCls} w-full sm:w-72`}
+              >
+                <option value="optional">Optional: bind when a fingerprint is sent</option>
+                <option value="required">Required: refuse sign-in without a fingerprint</option>
               </select>
             </Field>
 
@@ -505,7 +544,7 @@ export default async function AuthMethodsPage({
               label="Redirect URLs"
               hint={
                 <>
-                  Where users can be sent back to after signing in — one URL per line, e.g.{' '}
+                  Where users can be sent back to after signing in. One URL per line, e.g.{' '}
                   <code className="text-xs">https://yourapp.com/callback</code>. Sign-in flows may
                   only redirect to addresses on this list, which stops attackers bouncing users to
                   look-alike sites. Invalid URLs are rejected on save.
@@ -527,7 +566,7 @@ export default async function AuthMethodsPage({
             the very bottom is a Save most of the page cannot see, and until now
             navigating away threw the edits out without a word. */}
         <StickyFormFooter hint="Changes apply to new sign-ins immediately." />
-      </form>
+      </ActionForm>
     </div>
   );
 }

@@ -7,14 +7,14 @@
  * event type OR the wildcard `"*"`.
  *
  * Customers should treat the wire payload's `eventId` field as the
- * idempotency key — retries from our delivery worker reuse the same id,
+ * idempotency key, retries from our delivery worker reuse the same id,
  * so deduping on the consumer side is one cheap upsert.
  */
 
 /**
  * Every event this deployment can emit. **One declaration, deliberately.**
  *
- * This used to be two — a string-literal union and a matching array — and
+ * This used to be two, a string-literal union and a matching array, and
  * nothing derived one from the other or checked that they agreed. That is a
  * trap with an unusually quiet failure: adding to the union alone type-checks
  * everywhere, and then `isKnownWebhookEvent` returns false for the new type, so
@@ -26,7 +26,7 @@
  * the two cannot disagree because there is no longer a second thing to keep in
  * step.
  *
- * `as const` is what makes that work — without it the array widens to
+ * `as const` is what makes that work, without it the array widens to
  * `string[]` and `WebhookEventType` becomes `string`, which would silently
  * disable the compile-time checking on every emit site in the codebase.
  */
@@ -36,7 +36,7 @@ export const KNOWN_WEBHOOK_EVENTS = [
   'user.deleted',
   // GDPR erasure (roadmap §10). Distinct from `user.deleted`: the end-user is
   // tombstoned (PII/auth hard-deleted, financial rows retained anonymized) and
-  // can never authenticate again — consumers should propagate the erasure to
+  // can never authenticate again, consumers should propagate the erasure to
   // their own copies of the user's PII. Payload: `data.user` (id + erasedAt).
   'user.erased',
   'session.revoked',
@@ -44,7 +44,7 @@ export const KNOWN_WEBHOOK_EVENTS = [
   'mfa.disabled',
   'password.changed',
   'email.verified',
-  // Billing lifecycle — emitted from the Stripe/PayPal inbound-webhook
+  // Billing lifecycle, emitted from the Stripe/PayPal inbound-webhook
   // handlers when LOCAL state actually transitions (a provider-event replay
   // that changes nothing emits nothing). A provider retry after a 5xx on our
   // side may still re-emit; consumers must dedupe on the envelope's eventId.
@@ -54,7 +54,7 @@ export const KNOWN_WEBHOOK_EVENTS = [
   // Not a status transition: what the subscription GRANTS changed, while the
   // subscription itself carried on. Emitted when an operator writes
   // `entitlementOverrides`, and only when the RESOLVED entitlements actually
-  // differ — a PATCH that restates the current deal announces nothing.
+  // differ, a PATCH that restates the current deal announces nothing.
   //
   // Exists because a consumer that projects entitlements onto its own state
   // (Rekey Cloud maps `FEATURE:max_production_apps` onto `Tenant.limits`) had
@@ -63,13 +63,29 @@ export const KNOWN_WEBHOOK_EVENTS = [
   'subscription.entitlements_updated',
   'payment.succeeded',
   'payment.failed',
-  // Dunning lifecycle — emitted by `modules/billing/dunning.service.ts` when a
+  // Dunning lifecycle, emitted by `modules/billing/dunning.service.ts` when a
   // failed-payment recovery case opens, recovers, or exhausts (day 14 →
   // subscription canceled). Same transition-only + eventId-dedupe contract as
   // the billing events above.
   'dunning.case_opened',
   'dunning.case_recovered',
   'dunning.case_exhausted',
+  // Devices, the machines an end-user signs in from (modules/devices). Emitted
+  // by the devices service after its transaction commits. `device.registered`
+  // fires for a NEW device and for a RELEASED one coming back (`data.reactivated`
+  // says which); a sign-in from an already-ACTIVE device announces nothing.
+  // `device.limit_reached` is the one event here with no device row behind it:
+  // the machine was refused, and `data.devices` lists the ACTIVE ones that
+  // filled the cap so a consumer can prompt the user to release one.
+  'device.registered',
+  'device.released',
+  'device.blocked',
+  'device.unblocked',
+  'device.limit_reached',
+  // A machine gave its license seat back (POST /licenses/deactivate or an
+  // operator release). `license.activated` is deliberately absent: verify is
+  // called at every launch, and announcing each one would be noise.
+  'license.deactivated',
 ] as const;
 
 /**

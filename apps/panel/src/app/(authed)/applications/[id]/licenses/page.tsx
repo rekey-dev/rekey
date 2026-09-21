@@ -6,6 +6,7 @@ import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { ApiErrorText } from '@/components/api-error';
 import { Modal } from '@/components/Modal';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
 import { CopyButton } from '@/components/CopyButton';
@@ -110,6 +111,51 @@ async function revokeLicense(applicationId: string, licenseId: string): Promise<
   redirect(`/applications/${applicationId}/licenses`);
 }
 
+/**
+ * One machine's hold on a seat. Distinct from a Device: an activation is keyed
+ * by `machineFingerprint` and capped by `seatsAllowed`, and it is created by
+ * key VERIFICATION rather than by sign-in. A machine that only ever verifies a
+ * key has an activation and no device, and takes no device slot. The two pools
+ * do not interact.
+ */
+interface ActivationRow {
+  id: string;
+  licenseId: string;
+  machineFingerprint: string;
+  label: string | null;
+  deviceId: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  releasedAt: string | null;
+}
+
+/**
+ * Give a seat back on the holder's behalf, a re-imaged laptop, a departed
+ * employee. The route has existed since the device series and nothing rendered
+ * it, so the only way to free a seat held by a machine that no longer exists
+ * was to rotate the key, which breaks every other machine using it.
+ */
+async function releaseActivation(
+  applicationId: string,
+  licenseId: string,
+  activationId: string,
+): Promise<void> {
+  'use server';
+  const back = `/applications/${applicationId}/licenses?activations=${encodeURIComponent(licenseId)}`;
+  try {
+    await api({
+      method: 'POST',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/licenses/${encodeURIComponent(licenseId)}/activations/${encodeURIComponent(activationId)}/release`,
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`${back}&${await errorQuery(err)}`);
+    }
+    throw err;
+  }
+  redirect(`${back}&released=1`);
+}
+
 const ERR: Record<string, string> = {
   missing: 'Pick an end-user.',
   END_USER_NOT_FOUND: 'That end-user does not belong to this application.',
@@ -136,6 +182,12 @@ export default async function LicensesPage({
   const reveal = (await cookies()).get('rekey_reveal_license')?.value;
   const PAGE_SIZE = readPageSize(sp);
   const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
+  // Which licence's activations to expand, if any. A query parameter rather
+  // than a modal per row: the activations of ONE licence are wanted at a time,
+  // and rendering a modal for every row would fetch every row's activations on
+  // page load.
+  const openActivations = typeof sp.activations === 'string' ? sp.activations : undefined;
+  const releasedOk = sp.released === '1';
 
   // Billing master switch off → point at the switch instead of an empty table.
   const app = await getApplication(id);
@@ -153,11 +205,22 @@ export default async function LicensesPage({
 
   const [licensePage, endUserPage] = await Promise.all([
     api<Page<LicenseRow>>({ method: 'GET', path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/licenses?limit=${PAGE_SIZE}&offset=${offset}` }),
-    // End-user picker for the issue-license modal — one window, never paged.
+    // End-user picker for the issue-license modal, one window, never paged.
     api<Page<EndUserRow>>({ method: 'GET', path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users?limit=100` }),
   ]);
   const { items: licenses, page } = licensePage;
   const endUsers = endUserPage.items;
+
+  // Only for the expanded licence, and only when it is on the page in front of
+  // us, an id from the querystring is user input, and the API would 404 a
+  // foreign one anyway, but there is no reason to ask.
+  const expanded = openActivations ? licenses.find((l) => l.id === openActivations) : undefined;
+  const activations = expanded
+    ? await api<Page<ActivationRow>>({
+        method: 'GET',
+        path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/licenses/${encodeURIComponent(expanded.id)}/activations?limit=100`,
+      }).catch(() => null)
+    : null;
 
   return (
     <div className="space-y-5">
@@ -165,7 +228,7 @@ export default async function LicensesPage({
         <div className="rounded-lg border-2 border-amber-300 dark:border-amber-500 bg-amber-50 dark:bg-amber-950 p-4 space-y-2">
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-              New license key (shown once — copy now)
+              New license key (shown once, copy now)
             </p>
             <CopyButton value={reveal} label="Copy key" />
           </div>
@@ -200,10 +263,10 @@ export default async function LicensesPage({
           >
             {endUsers.length === 0 ? (
               <p className="text-sm text-[var(--color-muted-fg)]">
-                No end-users yet — sign one up via your application's sign-up flow first.
+                No end-users yet. Sign one up via your application's sign-up flow first.
               </p>
             ) : (
-              <form action={issueLicense.bind(null, id)} className="space-y-3">
+              <ActionForm action={issueLicense.bind(null, id)} className="space-y-3">
                 {error && (
                   <Banner tone="error">
                     <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
@@ -255,7 +318,7 @@ export default async function LicensesPage({
                 </Field>
               </div>
                 <SubmitButton pendingLabel="Issuing license…">Issue license</SubmitButton>
-              </form>
+              </ActionForm>
             )}
           </Modal>
         }
@@ -301,21 +364,143 @@ export default async function LicensesPage({
                     <Badge tone={status.tone} dot>{status.label}</Badge>
                   </TD>
                   <TD align="right">
-                    {l.status === 'ACTIVE' && (
-                      <form action={revokeLicense.bind(null, id, l.id)}>
-                        <ConfirmButton
-                          confirm={`Revoke license ${l.keyPrefix}…? Activations using this key will fail immediately.`}
-                        >
-                          Revoke
-                        </ConfirmButton>
-                      </form>
-                    )}
+                    <div className="flex items-center justify-end gap-3">
+                      <a
+                        href={
+                          openActivations === l.id
+                            ? `/applications/${id}/licenses`
+                            : `/applications/${id}/licenses?activations=${encodeURIComponent(l.id)}`
+                        }
+                        className="text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline"
+                      >
+                        {openActivations === l.id ? 'Hide activations' : 'Activations'}
+                      </a>
+                      {l.status === 'ACTIVE' && (
+                        <ActionForm action={revokeLicense.bind(null, id, l.id)}>
+                          <ConfirmButton
+                            confirm={`Revoke license ${l.keyPrefix}…? Activations using this key will fail immediately.`}
+                          >
+                            Revoke
+                          </ConfirmButton>
+                        </ActionForm>
+                      )}
+                    </div>
                   </TD>
                 </TR>
               );
             })}
           </TBody>
         </Table>
+      )}
+
+      {expanded && (
+        <section className="space-y-3">
+          <SectionHeader
+            title={`Activations of ${expanded.keyPrefix}…`}
+            count={activations ? `(${activations.page.total})` : undefined}
+            description={
+              expanded.kind === 'SEATS'
+                ? `Machines holding a seat on this key. ${expanded.seatsAllowed ?? 0} allowed; released ones do not count.`
+                : 'Machines that have verified this key. Only SEATS licenses are seat-capped, so these are a record rather than a limit.'
+            }
+            action={
+              <a
+                href={`/applications/${id}/licenses`}
+                className="text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline"
+              >
+                Close
+              </a>
+            }
+          />
+
+          {releasedOk && <Banner tone="success">Seat released.</Banner>}
+
+          {activations === null ? (
+            <Banner tone="error">Could not load activations for this license.</Banner>
+          ) : activations.items.length === 0 ? (
+            <EmptyState
+              variant="inline"
+              title="No activations"
+              description="No machine has verified this key yet. An activation is created the first time POST /api/v1/licenses/verify succeeds with a machine fingerprint."
+            />
+          ) : (
+            <Table minWidth="min-w-[48rem]">
+              <THead>
+                <TR>
+                  <TH>Machine</TH>
+                  <TH>Status</TH>
+                  <TH>First seen</TH>
+                  <TH>Last seen</TH>
+                  <TH align="right"> </TH>
+                </TR>
+              </THead>
+              <TBody>
+                {activations.items.map((a) => (
+                  <TR key={a.id} hover>
+                    <TD>
+                      <div className="font-medium text-[var(--color-fg)]">
+                        {a.label ?? (
+                          <span className="font-normal text-[var(--color-muted-fg)]">
+                            unlabelled
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          title={a.machineFingerprint}
+                          className="font-mono text-[11px] text-[var(--color-muted-fg)]"
+                        >
+                          {a.machineFingerprint.length > 20
+                            ? `${a.machineFingerprint.slice(0, 20)}…`
+                            : a.machineFingerprint}
+                        </span>
+                        <CopyButton value={a.machineFingerprint} label="Copy" />
+                      </div>
+                    </TD>
+                    <TD>
+                      {a.releasedAt ? (
+                        <Badge tone="neutral">released</Badge>
+                      ) : (
+                        <Badge tone="success" dot>
+                          holding a seat
+                        </Badge>
+                      )}
+                    </TD>
+                    <TD muted className="whitespace-nowrap text-xs">
+                      {formatDate(a.firstSeenAt)}
+                    </TD>
+                    <TD muted className="whitespace-nowrap text-xs">
+                      {formatDate(a.lastSeenAt)}
+                    </TD>
+                    <TD align="right">
+                      {a.releasedAt === null && (
+                        <ActionForm action={releaseActivation.bind(null, id, expanded.id, a.id)}>
+                          <ConfirmButton
+                            variant="subtle"
+                            title="Release this seat?"
+                            confirm="The activation stops counting toward the seat limit. A later verify from the same machine reactivates it in place, taking a seat again only if one is free."
+                            confirmLabel="Release seat"
+                          >
+                            Release
+                          </ConfirmButton>
+                        </ActionForm>
+                      )}
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          )}
+
+          <p className="text-xs text-[var(--color-muted-fg)]">
+            An activation is not a device. It is keyed by a machine fingerprint and capped by this
+            key&apos;s <code className="font-mono">seatsAllowed</code>, and it is created by key
+            verification. A device is keyed by a session&apos;s{' '}
+            <code className="font-mono">dev</code> claim and capped by the{' '}
+            <code className="font-mono">max_devices</code> entitlement, and it is created by
+            sign-in. A machine can hold one, the other, or both.
+          </p>
+        </section>
       )}
 
       <Pager

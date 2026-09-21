@@ -24,7 +24,7 @@ import { Badge, type BadgeTone } from '@/components/Badge';
  *   - `apps/portal/src/components/status-badge.tsx` (customer-facing)
  *   - the super-admin dashboard’s Badge component
  *
- * They had drifted to the point of contradiction — `CANCELED` was grey in the
+ * They had drifted to the point of contradiction, `CANCELED` was grey in the
  * panel and the portal but RED in admin, on an app whose own `environmentTone`
  * docblock says it "reserves red for things that need attention"; `PAST_DUE`
  * was amber for the operator and red for the customer, so the same account
@@ -33,11 +33,11 @@ import { Badge, type BadgeTone } from '@/components/Badge';
  * Change a status here first, then mirror it.
  *
  * The tone vocabulary itself:
- *   success — a good resting state; nothing to do.
- *   warning — needs attention, has not failed yet. Recoverable.
- *   danger  — a failure or a revocation. Red is for things that are wrong,
+ *   success, a good resting state; nothing to do.
+ *   warning, needs attention, has not failed yet. Recoverable.
+ *   danger , a failure or a revocation. Red is for things that are wrong,
  *             never for things that merely ended.
- *   neutral — an ended or reversed state that is nobody's problem. `CANCELED`,
+ *   neutral, an ended or reversed state that is nobody's problem. `CANCELED`,
  *             `EXPIRED` and `REFUNDED` all live here: a customer choosing to
  *             leave is not a fault, and colouring it red trains operators to
  *             ignore red.
@@ -94,7 +94,7 @@ export function StatusPill({
   dot = true,
   className,
 }: {
-  /** The raw enum from the API — never pre-formatted by the caller. */
+  /** The raw enum from the API, never pre-formatted by the caller. */
   status: string;
   dot?: boolean;
   className?: string;

@@ -3,7 +3,7 @@
 /**
  * Submit button that confirms first via a styled <dialog>. Lives inside a
  * server-action <form>; the confirm button is a real type="submit" so the
- * form's action runs exactly as a plain submit would — only gated by an
+ * form's action runs exactly as a plain submit would, only gated by an
  * explicit confirmation. Used for money/irreversible actions in the portal
  * (cancel subscription, switch plan) so a single stray click can't trigger them.
  */
@@ -13,7 +13,7 @@ import { useFormStatus } from 'react-dom';
 
 /**
  * The dialog's two buttons. Split out so they can call `useFormStatus`, which
- * reports the pending state of the ancestor `<form>` — and only works from a
+ * reports the pending state of the ancestor `<form>`, and only works from a
  * component rendered inside it.
  *
  * Both are locked while the action is in flight. Previously neither was, and
@@ -22,7 +22,7 @@ import { useFormStatus } from 'react-dom';
  * or cancellation was still running. Two clicks, two checkout sessions.
  *
  * The dialog now stays up showing the pending label until the action's redirect
- * unmounts it — which is also the page's only feedback that anything happened.
+ * unmounts it, which is also the page's only feedback that anything happened.
  */
 function ConfirmActions({
   label,
@@ -85,7 +85,7 @@ export function ConfirmSubmit({
   size?: 'sm' | 'md';
   /**
    * Optional extra content rendered inside the dialog, between the message and
-   * the buttons — e.g. a provider picker whose inputs post with the form.
+   * the buttons, e.g. a provider picker whose inputs post with the form.
    */
   children?: React.ReactNode;
 }): React.JSX.Element {

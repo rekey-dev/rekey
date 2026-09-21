@@ -2,7 +2,7 @@
  * Hold a PKCE verifier across the provider redirect.
  *
  * The verifier is generated when we build the authorization URL and has to be
- * presented, unchanged, at the token exchange — but a full browser round-trip
+ * presented, unchanged, at the token exchange, but a full browser round-trip
  * to the identity provider happens in between. Something has to remember it.
  *
  * **It is stored server-side, keyed by the CSRF `state`, and never given to the
@@ -57,7 +57,7 @@ export async function rememberVerifier(state: string, verifier: string): Promise
 
 /**
  * Read and delete. Returns null when the flow is unknown, already completed, or
- * expired — all of which are the same thing to the caller: there is no verifier
+ * expired, all of which are the same thing to the caller: there is no verifier
  * to present, so an exchange that needs one must fail rather than proceed
  * without it.
  */
@@ -70,13 +70,13 @@ export async function takeVerifier(state: string): Promise<string | null> {
     memory.delete(key);
     return hit ? hit.verifier : null;
   }
-  // GETDEL is the atomic take — two concurrent callbacks for one state cannot
+  // GETDEL is the atomic take, two concurrent callbacks for one state cannot
   // both come away with the verifier.
   const value = await redis.getdel(key);
   return value ?? null;
 }
 
-/** Test seam — drop every stored verifier. */
+/** Test seam, drop every stored verifier. */
 export function __resetPkceStoreForTests(): void {
   memory.clear();
 }

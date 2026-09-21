@@ -5,14 +5,14 @@
  * `setSessionCookies` decided `secure` with
  * `process.env.NODE_ENV === 'production'`. A panel behind TLS whose NODE_ENV
  * was unset, or `staging`, or anything Next did not inline as exactly
- * `"production"`, handed the operator a session cookie with no `Secure` flag —
+ * `"production"`, handed the operator a session cookie with no `Secure` flag,
  * and that cookie is a workspace-admin credential, which a browser will then
  * replay over plain HTTP to anyone who can force one downgraded request.
  *
  * Nothing about that misconfiguration is visible: the panel works, the operator
  * signs in, and the only symptom is a session credential that is one downgrade
  * away from being read off the wire. So it needs a test, and the test has to
- * run with NODE_ENV set to something OTHER than 'production' — under vitest it
+ * run with NODE_ENV set to something OTHER than 'production', under vitest it
  * is 'test', which is exactly the case that used to fail.
  */
 

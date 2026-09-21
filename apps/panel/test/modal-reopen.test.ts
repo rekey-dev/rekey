@@ -4,7 +4,7 @@ import { modalFlag, modalFlagValue, shouldReopen } from '@/lib/modal-reopen';
 /**
  * Regression cover for a silent-failure class found by driving the panel:
  * a modal-hosted form whose server action failed, redirected back with a flag
- * the modal did not recognise, so the modal stayed shut — and since the error
+ * the modal did not recognise, so the modal stayed shut, and since the error
  * renders inside the `<dialog>`, a shut dialog renders nothing at all. Editing
  * an end-user with malformed metadata, or deleting a held role, produced a page
  * navigation with no message anywhere on screen.

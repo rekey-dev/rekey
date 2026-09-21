@@ -1,5 +1,5 @@
 /**
- * Dunning — failed-payment recovery cases (roadmap §5 v1).
+ * Dunning, failed-payment recovery cases (roadmap §5 v1).
  *
  * What Rekey does vs what the PROVIDER does:
  *   - The provider owns the actual re-charging. Stripe Smart Retries keeps
@@ -29,7 +29,7 @@
  *
  * Multi-replica safety: `processDueDunningCases` claims each due case with a
  * guarded `updateMany` that pushes `nextActionAt` forward (same pattern as
- * webhook.service's delivery claim) — two pollers can never double-process.
+ * webhook.service's delivery claim), two pollers can never double-process.
  */
 
 import type { FastifyBaseLogger } from 'fastify';
@@ -67,7 +67,7 @@ function nextActionAfter(openedAt: Date, remindersSent: number): Date {
 /**
  * Send reminder #n for a case via the per-app email system. Best-effort and
  * fire-and-forget from the caller's perspective: no transport configured →
- * logged as `no_transport` (the schedule still advances — the case is the
+ * logged as `no_transport` (the schedule still advances, the case is the
  * source of truth, not the inbox). The outcome is appended to
  * `metadata.reminders` for operator forensics.
  */
@@ -122,7 +122,7 @@ async function sendReminder(dunningCaseId: string, attempt: number): Promise<voi
 }
 
 /**
- * Open a case for a subscription that just went PAST_DUE — or, when one is
+ * Open a case for a subscription that just went PAST_DUE, or, when one is
  * already OPEN (provider retry failed again while in dunning), bump its
  * failure counters instead. Idempotent per OPEN case.
  *
@@ -157,7 +157,7 @@ async function openForPastDue(args: {
   // Opt-in gate (case creation only). Dunning is OFF by default; the operator
   // turns it on per app via billingConfig.dunningEnabled. We gate here rather
   // than at the callers so EXISTING OPEN cases (the `existing` branch above and
-  // processDueDunningCases) keep running — an in-flight recovery finishes even
+  // processDueDunningCases) keep running, an in-flight recovery finishes even
   // if dunning is disabled afterward.
   const app = await prisma.application.findUnique({
     where: { id: sub.applicationId },
@@ -172,7 +172,7 @@ async function openForPastDue(args: {
     return null;
   }
 
-  // Case row + its outbox row in one transaction — see webhooks/apply.ts.
+  // Case row + its outbox row in one transaction, see webhooks/apply.ts.
   const { created, deliveryIds } = await prisma.$transaction(async (tx) => {
     const row = await tx.dunningCase.create({
       data: {
@@ -193,7 +193,7 @@ async function openForPastDue(args: {
   });
 
   kickDeliveries(deliveryIds);
-  // Day-0 reminder — off the inbound-webhook critical path.
+  // Day-0 reminder, off the inbound-webhook critical path.
   void sendReminder(created.id, 1).catch((err) =>
     args.log?.warn({ err, dunningCaseId: created.id }, 'dunning day-0 reminder failed'),
   );
@@ -206,7 +206,7 @@ async function openForPastDue(args: {
 
 /**
  * Close the subscription's OPEN case, if any. RECOVERED announces
- * `dunning.case_recovered`; CANCELED (subscription died while in dunning —
+ * `dunning.case_recovered`; CANCELED (subscription died while in dunning,
  * user cancel, provider cancel) closes silently.
  */
 async function closeCase(
@@ -218,7 +218,7 @@ async function closeCase(
     select: { id: true },
   });
   if (!open) return;
-  // Guarded update — a concurrent closer/scheduler loses the race cleanly —
+  // Guarded update, a concurrent closer/scheduler loses the race cleanly,
   // with the outbox row in the same transaction, so the loser of that race
   // announces nothing and the winner cannot announce nothing.
   const deliveryIds = await prisma.$transaction(async (tx) => {
@@ -248,7 +248,7 @@ async function exhaustCase(dunningCaseId: string, log?: FastifyBaseLogger): Prom
   const sub: Subscription = dunningCase.subscription;
 
   // Best-effort provider-side cancel. A provider error must not stop the
-  // local exhaustion — the provider has already failed to collect for 14 days.
+  // local exhaustion, the provider has already failed to collect for 14 days.
   if (sub.provider && sub.providerSubId) {
     try {
       const { getProviderForApplication } = await import('./providers/index.js');
@@ -331,7 +331,7 @@ export async function processDueDunningCases(
   });
   let claimedCount = 0;
   for (const dunningCase of due) {
-    // Atomic claim — mirrors webhook.service.attemptDelivery. The 1s tolerance
+    // Atomic claim, mirrors webhook.service.attemptDelivery. The 1s tolerance
     // absorbs timer skew; a concurrent claimer's WHERE no longer matches.
     const claimed = await prisma.dunningCase.updateMany({
       where: {
@@ -384,9 +384,6 @@ export const dunningService = {
    * Hook for an actual failed-payment provider event (Stripe
    * `invoice.payment_failed`, PayPal `PAYMENT.SALE.DENIED/REVERSED`): opens a
    * case, or bumps `failedAttempts` on the already-OPEN one.
-   *
-   * @example
-   * await dunningService.recordPaymentFailure({ subscriptionId: sub.id, log });
    */
   async recordPaymentFailure(args: {
     subscriptionId: string;
@@ -403,9 +400,6 @@ export const dunningService = {
    * Hook for a pure PAST_DUE status mirror (Stripe `customer.subscription.updated`,
    * PayPal `BILLING.SUBSCRIPTION.SUSPENDED`): ensures a case is open without
    * inflating the failure counter.
-   *
-   * @example
-   * await dunningService.ensureCaseOpen({ subscriptionId: sub.id, log });
    */
   async ensureCaseOpen(args: { subscriptionId: string; log?: FastifyBaseLogger }): Promise<void> {
     await openForPastDue({
@@ -416,11 +410,8 @@ export const dunningService = {
   },
 
   /**
-   * A successful payment / reactivation arrived for the subscription — close
+   * A successful payment / reactivation arrived for the subscription, close
    * its OPEN case as RECOVERED (no-op when none is open).
-   *
-   * @example
-   * await dunningService.recoverForSubscription(sub.id);
    */
   async recoverForSubscription(subscriptionId: string): Promise<void> {
     await closeCase(subscriptionId, 'RECOVERED');
@@ -428,11 +419,8 @@ export const dunningService = {
 
   /**
    * The subscription was canceled (user, operator, or provider) while in
-   * dunning — close its OPEN case as CANCELED (no event; the accompanying
+   * dunning, close its OPEN case as CANCELED (no event; the accompanying
    * `subscription.canceled` already announced the cancellation).
-   *
-   * @example
-   * await dunningService.closeForCanceledSubscription(sub.id);
    */
   async closeForCanceledSubscription(subscriptionId: string): Promise<void> {
     await closeCase(subscriptionId, 'CANCELED');

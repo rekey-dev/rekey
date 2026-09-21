@@ -25,13 +25,13 @@
  * The audit drove Stripe over the network. Here the refusal is injected at the
  * registry seam `test/setup.ts` already mocks (`getProviderForApplication`), so
  * `plansService` runs its real code against a provider that throws exactly what
- * Stripe threw. The one place that would be vacuous — "checkout must not 500
- * when the price id is missing" — deliberately uses the REAL
+ * Stripe threw. The one place that would be vacuous, "checkout must not 500
+ * when the price id is missing", deliberately uses the REAL
  * `RealStripeProvider`, whose refusal happens before any socket is opened.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { RekeyError } from '../src/lib/error.js';
@@ -94,7 +94,7 @@ describe('plan provider registration is atomic and repairable', () => {
       })
       .then((r) => (r.json().data as { rawKey: string }).rawKey);
     // The Application has Stripe credentials, so plan creation registers
-    // eagerly — which is the code path the whole file is about.
+    // eagerly, which is the code path the whole file is about.
     await configureSandboxStripe(appId);
     ctx = { operator, appId, liveKey };
   });
@@ -103,7 +103,7 @@ describe('plan provider registration is atomic and repairable', () => {
 
   const createPlan = (
     body: Record<string, unknown>,
-  ): ReturnType<FastifyInstance['inject']> =>
+  ): Promise<LightMyRequestResponse> =>
     app.inject({
       method: 'POST',
       url: `/api/v1/tenant/applications/${ctx.appId}/plans`,
@@ -127,21 +127,21 @@ describe('plan provider registration is atomic and repairable', () => {
   }
 
   /** Create `brokenplan` against a provider that rejects it. Returns the reply. */
-  async function createRefusedPlan(): Promise<Awaited<ReturnType<FastifyInstance['inject']>>> {
+  async function createRefusedPlan(): Promise<Awaited<Promise<LightMyRequestResponse>>> {
     rejectNextRegistration();
     const res = await createPlan({ slug: 'brokenplan' });
     expect(res.statusCode).toBeGreaterThanOrEqual(400);
     return res;
   }
 
-  const listPublicPlans = (): ReturnType<FastifyInstance['inject']> =>
+  const listPublicPlans = (): Promise<LightMyRequestResponse> =>
     app.inject({
       method: 'GET',
       url: '/api/v1/billing/plans',
       headers: { authorization: `Bearer ${ctx.liveKey}` },
     });
 
-  const listOperatorPlans = (): ReturnType<FastifyInstance['inject']> =>
+  const listOperatorPlans = (): Promise<LightMyRequestResponse> =>
     app.inject({
       method: 'GET',
       url: `/api/v1/tenant/applications/${ctx.appId}/plans`,
@@ -158,7 +158,7 @@ describe('plan provider registration is atomic and repairable', () => {
     return (res.json().data as { accessToken: string }).accessToken;
   }
 
-  const checkout = (planSlug: string, userToken: string): ReturnType<FastifyInstance['inject']> =>
+  const checkout = (planSlug: string, userToken: string): Promise<LightMyRequestResponse> =>
     app.inject({
       method: 'POST',
       url: '/api/v1/billing/checkout',
@@ -174,11 +174,11 @@ describe('plan provider registration is atomic and repairable', () => {
 
   it('a plan whose provider registration is refused is never committed on sale', async () => {
     const created = await createRefusedPlan();
-    // The caller is told it failed — unchanged, and the point of the bug is
+    // The caller is told it failed, unchanged, and the point of the bug is
     // that this answer used to be a lie about the database.
     expect(created.statusCode).toBe(401);
 
-    // The row survives (the slug is not burned — see the repair test), but it
+    // The row survives (the slug is not burned, see the repair test), but it
     // is inactive and explicitly marked as unregistered.
     const row = await prisma.plan.findUniqueOrThrow({
       where: { applicationId_slug: { applicationId: ctx.appId, slug: 'brokenplan' } },
@@ -209,7 +209,7 @@ describe('plan provider registration is atomic and repairable', () => {
     // advertise a row a buyer can never reach.
     expect(publicPage.page.total).toBe(1);
 
-    // The operator list DOES show it, visibly broken rather than missing —
+    // The operator list DOES show it, visibly broken rather than missing,
     // a plan that silently vanished would be its own support ticket.
     const operatorList = await listOperatorPlans();
     const broken = (
@@ -245,8 +245,8 @@ describe('plan provider registration is atomic and repairable', () => {
   it('the operator repairs a refused plan in place, keeping the slug, and it sells', async () => {
     await createRefusedPlan();
 
-    // Re-creating is still refused — which is exactly why the repair path has
-    // to exist — but the refusal now names it instead of saying "pick a
+    // Re-creating is still refused, which is exactly why the repair path has
+    // to exist, but the refusal now names it instead of saying "pick a
     // different slug", which is not advice for a slug already on a price page.
     const dup = await createPlan({ slug: 'brokenplan' });
     expect(dup.statusCode).toBe(409);
@@ -293,7 +293,7 @@ describe('plan provider registration is atomic and repairable', () => {
       (publicList.json().data as { items: { slug: string }[] }).items.map((p) => p.slug),
     ).toContain('brokenplan');
 
-    // And a buyer can now actually check out — the end of the audit's sequence.
+    // And a buyer can now actually check out, the end of the audit's sequence.
     const buyer = await signUpBuyer();
     const bought = await checkout('brokenplan', buyer);
     expect(bought.statusCode).toBe(200);
@@ -359,7 +359,7 @@ describe('plan provider registration is atomic and repairable', () => {
     });
 
     // The REAL Stripe provider, not the fake: the fake would happily mint a
-    // session and the assertion would be vacuous. No socket is opened — the
+    // session and the assertion would be vacuous. No socket is opened, the
     // refusal happens before the first API call.
     vi.mocked(getProviderForApplication).mockImplementationOnce(
       async () => new RealStripeProvider({ apiKey: 'sk_test_ci_only', webhookSecret: 'whsec_x' }),
@@ -384,7 +384,7 @@ describe('plan provider registration is atomic and repairable', () => {
     // provider. Coupons do not: the provider-side discount is minted per
     // CHECKOUT (stripe-real.createDiscount) and discarded if the session fails,
     // so there is no coupon row that can be committed against a refusal. This
-    // asserts that property rather than describing it — a future eager
+    // asserts that property rather than describing it, a future eager
     // registration here would fail this test and get the same treatment plans
     // just got.
     vi.mocked(getProviderForApplication).mockClear();

@@ -13,7 +13,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, expect, describe, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 
@@ -36,7 +36,7 @@ describe('OPERATOR_SIGNUP_MODE', () => {
     delete process.env.OPERATOR_SIGNUP_MODE;
   });
 
-  function signUp(email: string, body: Record<string, unknown> = {}): Promise<import('light-my-request').Response> {
+  function signUp(email: string, body: Record<string, unknown> = {}): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'POST',
       url: '/api/v1/tenant/auth/sign-up',
@@ -44,7 +44,7 @@ describe('OPERATOR_SIGNUP_MODE', () => {
     });
   }
 
-  function mintInvite(body: Record<string, unknown> = {}): Promise<import('light-my-request').Response> {
+  function mintInvite(body: Record<string, unknown> = {}): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'POST',
       url: '/api/v1/admin/operator-invites',
@@ -197,7 +197,7 @@ describe('OPERATOR_SIGNUP_MODE', () => {
     const rawToken = minted.json().data.rawToken as string;
     const inviteId = minted.json().data.invite.id as string;
 
-    // Sign-up fails on duplicate email — the key must stay unused.
+    // Sign-up fails on duplicate email, the key must stay unused.
     const dup = await signUp('dupe@example.com', { inviteKey: rawToken });
     expect(dup.statusCode).toBe(409);
     expect(dup.json().error.code).toBe('EMAIL_ALREADY_EXISTS');

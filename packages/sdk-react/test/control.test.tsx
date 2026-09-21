@@ -1,14 +1,14 @@
 /**
- * Control components — the gating primitives that the whole security model
+ * Control components, the gating primitives that the whole security model
  * rests on. These decide whether a region of UI renders at all, so a regression
  * here silently leaks (or hides) protected UI.
  *
  * Covers:
  *   - <SignedIn> / <SignedOut> switching on auth state (and staying neutral
- *     while loading — never flash protected UI during resolution).
+ *     while loading, never flash protected UI during resolution).
  *   - <RekeyLoading> / <RekeyLoaded> mutual exclusivity.
- *   - <Protect> gating by feature flag, role, and predicate — allow vs deny vs
- *     fallback — including the fail-closed posture when authorization is absent.
+ *   - <Protect> gating by feature flag, role, and predicate, allow vs deny vs
+ *     fallback, including the fail-closed posture when authorization is absent.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';

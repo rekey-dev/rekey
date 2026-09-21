@@ -26,7 +26,7 @@ export default async function LoginPage({
   const mfaChallenge = typeof sp.mfa === 'string' ? sp.mfa : undefined;
   const lastEmail = typeof sp.email === 'string' ? sp.email : undefined;
 
-  // ---- MFA code step: sign-in succeeded, account is MFA-enrolled ----
+  // MFA code step: sign-in succeeded, account is MFA-enrolled.
   if (mfaChallenge) {
     return (
       <div className="mx-auto max-w-sm space-y-5 pt-10">

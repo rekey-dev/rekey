@@ -80,8 +80,8 @@ ARG NEXT_PUBLIC_APP_URL=
 # never default to Rekey's own property (a self-hosted panel would ship its
 # operators' behaviour to us), and NEXT_PUBLIC_PORTAL_URL must never default to
 # Rekey's hosted portal (a self-hoster would be shown someone else's origin as
-# the place to send THEIR customers). Our own deploy sets both explicitly in
-# docker-compose.panel.yml.
+# the place to send THEIR customers). Pass both as build args when you build
+# the panel image.
 ARG NEXT_PUBLIC_GA_MEASUREMENT_ID=
 ARG NEXT_PUBLIC_PORTAL_URL=
 ARG NEXT_PUBLIC_CHATWOOT_TOKEN=

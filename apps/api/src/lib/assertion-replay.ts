@@ -4,7 +4,7 @@
  * An operator assertion (POST /api/v1/tenant/auth/oidc/assert) travels through
  * the buyer's browser to get from the site that obtained it to the panel that
  * redeems it. It is signed and short-lived, but nothing in the OIDC ID Token
- * makes it single-use — there is no `jti` — so without this a token captured
+ * makes it single-use, there is no `jti`, so without this a token captured
  * in transit (browser history, a shared machine, an over-broad referrer) could
  * be replayed for the rest of its ten-minute life to mint another operator
  * session.
@@ -26,7 +26,7 @@ import { getRedis } from './redis.js';
 
 const KEY_PREFIX = 'assert:used:';
 
-/** Expiry-aware in-memory fallback. Test-only — see the module docblock. */
+/** Expiry-aware in-memory fallback. Test-only, see the module docblock. */
 const memory = new Map<string, number>();
 
 function sweepMemory(now: number): void {
@@ -40,7 +40,7 @@ function sweepMemory(now: number): void {
  *
  * A `false` return means the token has already been redeemed and this is a
  * replay. The claim is held until `expiresAtSec`, after which the token is
- * refused on its own `exp` anyway and the entry is dead weight — so the TTL is
+ * refused on its own `exp` anyway and the entry is dead weight, so the TTL is
  * exactly the token's remaining life, never longer.
  *
  * @throws when the store is unreachable. The caller must refuse the sign-in.
@@ -50,7 +50,7 @@ export async function claimAssertionOnce(
   expiresAtSec: number,
 ): Promise<boolean> {
   const ttlSec = Math.ceil(expiresAtSec - Date.now() / 1000);
-  // Already expired — the signature check will refuse it regardless, so there
+  // Already expired, the signature check will refuse it regardless, so there
   // is nothing to claim and no point storing a key with a non-positive TTL.
   if (ttlSec <= 0) return false;
 
@@ -65,13 +65,13 @@ export async function claimAssertionOnce(
     return true;
   }
 
-  // SET NX is the atomic claim — two concurrent redemptions of the same token
+  // SET NX is the atomic claim, two concurrent redemptions of the same token
   // cannot both win. Errors propagate (fail closed).
   const res = await redis.set(key, '1', 'EX', ttlSec, 'NX');
   return res === 'OK';
 }
 
-/** Test seam — drop every claim. */
+/** Test seam, drop every claim. */
 export function __resetAssertionReplayForTests(): void {
   memory.clear();
 }

@@ -4,7 +4,7 @@
  * This function decides whether `request.ip` is the real socket peer or
  * whatever a client wrote in X-Forwarded-For. Rate limits, account lockout,
  * and IP allowlists all key off that, and the setting it replaced trusted the
- * header from ANY peer — measured as 60/60 requests bypassing the limiter with
+ * header from ANY peer, measured as 60/60 requests bypassing the limiter with
  * a rotating XFF. So: no trust-everything option, and anything ambiguous
  * throws at boot instead of degrading silently.
  */
@@ -48,7 +48,7 @@ describe('trustProxyConfig', () => {
     expect(() => trustProxyConfig('invalid-cidr')).toThrow(/not an IP, CIDR/);
     expect(() => trustProxyConfig('10.0.0.999')).toThrow(/not an IP, CIDR/);
     expect(() => trustProxyConfig('10.0.0.0/8/16')).toThrow(/not an IP, CIDR/);
-    // One bad entry poisons the list — partial trust is not a safe fallback.
+    // One bad entry poisons the list, partial trust is not a safe fallback.
     expect(() => trustProxyConfig('10.0.0.1,nope')).toThrow(/nope/);
   });
 });

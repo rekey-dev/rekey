@@ -1,5 +1,5 @@
 /**
- * ProviderModule — the self-describing billing-provider contract
+ * ProviderModule, the self-describing billing-provider contract
  * (docs/specs/billing-provider-modules.md).
  *
  * One provider = one module under `providers/modules/<name>/` implementing
@@ -9,8 +9,8 @@
  *
  * The OUTBOUND side (`BillingProvider`, ./types.ts) predates this contract and
  * is untouched by it: providers are still constructed by the switch in
- * providers/index.ts. This file is the INBOUND half only — webhook
- * verification and event translation — which the three bespoke route/handler
+ * providers/index.ts. This file is the INBOUND half only, webhook
+ * verification and event translation, which the three bespoke route/handler
  * pairs previously each solved differently.
  */
 
@@ -34,7 +34,7 @@ export interface PlanCheckoutBlocker {
  * One credential input field. The generic credentials service (P3) builds
  * its zod schema from these; the panel (P4) renders the form from them.
  * `key` MUST match the JSON key stored in the encrypted credential blob
- * today — the whole point is zero data migration.
+ * today, the whole point is zero data migration.
  */
 export interface CredentialField {
   key: string;
@@ -47,13 +47,13 @@ export interface CredentialField {
   /** Shape validation ('sk_', 'whsec_', 'rzp_'…) with an operator-readable message. */
   pattern?: { prefix?: string; regex?: string; message: string };
   /**
-   * Marks the field that makes inbound webhooks verifiable — a signing
+   * Marks the field that makes inbound webhooks verifiable, a signing
    * secret (Stripe/Razorpay) or a provider-side webhook id (PayPal).
    * Unifies the webhookSecret-vs-webhookId divergence for
    * `hasWebhookConfigured` and the pipeline's 503 gate.
    *
    * AT MOST ONE field per module may carry this (registry-integrity test
-   * enforces it — the pipeline's gate checks a single field by design).
+   * enforces it, the pipeline's gate checks a single field by design).
    * `optional` on the same field refers to the initial credential save
    * only; an empty webhookRole field still 503s inbound webhooks until set.
    */
@@ -74,14 +74,14 @@ export interface RawWebhookReq {
 
 /**
  * Signature-verification outcome. A failure carries the error envelope
- * fields the pipeline turns into a 401 — modules never touch the reply.
+ * fields the pipeline turns into a 401, modules never touch the reply.
  */
 export type VerifyResult =
   | { ok: true }
   /**
    * `statusCode` defaults to 401 (the signature did not check out). A module
    * whose verification is ONLINE sets 503 when the failure was its inability
-   * to REACH the provider — a different fact, and one the provider must be
+   * to REACH the provider, a different fact, and one the provider must be
    * told correctly or it will disable the endpoint for our outage.
    */
   | { ok: false; statusCode?: number; code: string; message: string; fix?: string };
@@ -108,11 +108,11 @@ export type LocalSubscriptionStatus =
   | 'PENDING';
 
 interface DomainEventBase {
-  /** Provider's event id — the idempotency key stored in `webhook_events`. */
+  /** Provider's event id, the idempotency key stored in `webhook_events`. */
   providerEventId: string;
   /**
    * The Application this event targets. For Stripe this comes from payload
-   * `metadata.applicationId` (the historical scoping model — see
+   * `metadata.applicationId` (the historical scoping model, see
    * webhooks/AGENTS.md); for slug-scoped providers it's the route-resolved
    * application.
    */
@@ -123,7 +123,7 @@ interface DomainEventBase {
 
 export interface CheckoutCompletedEvent extends DomainEventBase {
   type: 'checkout.completed';
-  /** Provider checkout-session id — matches local `metadata.checkoutSessionId`. */
+  /** Provider checkout-session id, matches local `metadata.checkoutSessionId`. */
   checkoutSessionId: string;
   providerSubscriptionId: string | null;
   /**
@@ -135,7 +135,7 @@ export interface CheckoutCompletedEvent extends DomainEventBase {
   currentPeriodEnd?: Date;
   /**
    * Whether the activation provisions the subscription's FIRST period
-   * (anchor 'initial'). Default true — the historical checkout semantics.
+   * (anchor 'initial'). Default true, the historical checkout semantics.
    * PayPal's ACTIVATED port sets false so a reactivation provisions against
    * the CURRENT period anchor exactly as the bespoke handler did (for a
    * fresh activation `currentPeriodEnd` is null and both spellings anchor
@@ -151,7 +151,7 @@ export interface CheckoutCompletedEvent extends DomainEventBase {
    *
    * It exists because one-time revenue had no `Payment` row anywhere. Stripe
    * emits no invoice for `mode: 'payment'`, and the deployment's webhook
-   * registration subscribes to invoice events only — so a completed credit
+   * registration subscribes to invoice events only, so a completed credit
    * pack granted the credits and recorded no payment at all. Rather than
    * subscribe `payment_intent.succeeded` (which also fires for every invoice
    * payment, carries no link back to the local row, and would have to be
@@ -160,7 +160,7 @@ export interface CheckoutCompletedEvent extends DomainEventBase {
    */
   payment?: {
     providerPaymentId: string;
-    /** Smallest currency unit, passed through UNVALIDATED — see `safeAmount`. */
+    /** Smallest currency unit, passed through UNVALIDATED, see `safeAmount`. */
     amount: number | null | undefined;
     currency: string | null;
     description: string | null;
@@ -169,14 +169,14 @@ export interface CheckoutCompletedEvent extends DomainEventBase {
 
 /**
  * A one-time order the buyer approved but the provider does NOT capture
- * automatically (PayPal Orders v2 — capabilities.captureStep). The applier
+ * automatically (PayPal Orders v2, capabilities.captureStep). The applier
  * captures via the module's provider, then completes fulfillment (ACTIVE +
  * provision). Kept separate from `checkout.completed` because capture is a
  * provider API call and may legitimately leave the row PENDING.
  */
 export interface CheckoutApprovedEvent extends DomainEventBase {
   type: 'checkout.approved';
-  /** Provider order id — matches local `metadata.checkoutSessionId`. */
+  /** Provider order id, matches local `metadata.checkoutSessionId`. */
   checkoutSessionId: string;
   /** Registry name of the emitting module, for the capture provider lookup. */
   provider: string;
@@ -187,7 +187,7 @@ interface PaymentEventBase extends DomainEventBase {
   providerSubscriptionId: string | null;
   /**
    * Additional local-row matcher: providers whose checkout stored the
-   * provider object id in `metadata.checkoutSessionId` (Razorpay — the
+   * provider object id in `metadata.checkoutSessionId` (Razorpay, the
    * subscription id for recurring plans, the payment-link id for one-offs)
    * set this so events match rows that predate `providerSubId` persistence.
    * The appliers OR it with the `providerSubId` match; absent (Stripe,
@@ -196,13 +196,13 @@ interface PaymentEventBase extends DomainEventBase {
   checkoutSessionId?: string;
   /**
    * When true, the applier records nothing unless a local subscription
-   * matched (Razorpay's historical posture — its bespoke handler dropped
+   * matched (Razorpay's historical posture, its bespoke handler dropped
    * unmatched events instead of writing an unlinked Payment row). Absent
    * (Stripe, PayPal) an unmatched payment is still recorded, unlinked.
    */
   requireLocalSubscription?: boolean;
   /**
-   * Raw amount in the smallest currency unit, passed through UNVALIDATED —
+   * Raw amount in the smallest currency unit, passed through UNVALIDATED,
    * the applier's `safeAmount` gate (finite/integer/≥0/≤cap) decides whether
    * to record or log-and-drop, preserving the poisoned-row protections.
    */
@@ -225,7 +225,7 @@ export interface PaymentSucceededEvent extends PaymentEventBase {
    * New period anchor carried on the charge itself (Razorpay `current_end`).
    * `undefined` = leave the column untouched. Written INSIDE the payment
    * transaction (a committed charge must never be stranded from its period
-   * change), before the post-commit re-provision reads the row back — so the
+   * change), before the post-commit re-provision reads the row back, so the
    * renewal grant anchors on the NEW period, as the bespoke handler did.
    */
   currentPeriodEnd?: Date;
@@ -240,7 +240,7 @@ export interface PaymentRefundedEvent extends PaymentEventBase {
 }
 
 /**
- * Subscription status mirror. The `status` field is AUTHORITATIVE — appliers
+ * Subscription status mirror. The `status` field is AUTHORITATIVE, appliers
  * key every DB write, outbound emission, and dunning call off it; the event
  * `type` only picks the applier. This is deliberate: Stripe's
  * `customer.subscription.updated` can map to local statuses (EXPIRED,
@@ -257,14 +257,22 @@ export interface PaymentRefundedEvent extends PaymentEventBase {
 export interface SubscriptionStatusEvent extends DomainEventBase {
   type: 'subscription.activated' | 'subscription.canceled' | 'subscription.past_due';
   providerSubscriptionId: string;
-  /** See PaymentEventBase.checkoutSessionId — same OR-matcher, same rules. */
+  /** See PaymentEventBase.checkoutSessionId, same OR-matcher, same rules. */
   checkoutSessionId?: string;
-  status: LocalSubscriptionStatus;
+  /**
+   * Absent = leave the status column untouched and mirror only the timestamp
+   * fields. The one use is a cancellation SCHEDULED for a future date by a
+   * sender whose payload does not say what the subscription's status is now:
+   * inventing ACTIVE for it would resurrect a PAST_DUE row, announce a
+   * reactivation and close its dunning case as recovered. Every hosted
+   * module knows the real status and sets it.
+   */
+  status?: LocalSubscriptionStatus;
   currentPeriodEnd?: Date | null;
   /**
    * When the trial ends, for a subscription the provider is running a trial
    * on. Mirrored so the panel can say "trial ends in 4 days" and so a
-   * converted trial stays reportable — the status moves to ACTIVE, and
+   * converted trial stays reportable, the status moves to ACTIVE, and
    * without the date nothing records that the customer arrived via a trial.
    */
   trialEndsAt?: Date | null;
@@ -275,7 +283,7 @@ export interface SubscriptionStatusEvent extends DomainEventBase {
 /**
  * Advance the local billing period by one plan interval (calendar-aware).
  * First-class replacement for the PayPal-only `advanceBillingPeriod`
- * workaround — providers that never emit a period-rotation event
+ * workaround, providers that never emit a period-rotation event
  * (capabilities.periodRotationEvents: false) translate their renewal
  * payment into this. Stripe doesn't need it (subscription.updated carries
  * the new `current_period_end` directly).
@@ -296,11 +304,49 @@ export interface SubscriptionPeriodAdvancedEvent extends DomainEventBase {
 }
 
 /**
+ * A subscription sold somewhere Rekey did not run the checkout: the
+ * activate-or-create event.
+ *
+ * Every other event here names a row Rekey already holds, matched by a
+ * checkout session it issued or a provider subscription id it stored. A
+ * billing system Rekey never called has neither, so its activation has to
+ * carry what a checkout would have established: who bought (by end-user id,
+ * or by email, which the applier creates when unknown), which plan, and the
+ * sender's own subscription id so later status events find the row.
+ *
+ * Applied through `subscriptionGrantsService` with the provider bound onto
+ * the row, so the status mirror and the payment appliers work on it exactly
+ * as they do on a Stripe subscription. Posting it again is safe: a replay
+ * changes nothing, a later `currentPeriodEnd` is a renewal, a PAST_DUE row
+ * recovers, and a different plan under the same subscription id is a plan
+ * change (the old row is cancelled).
+ */
+export interface SubscriptionGrantedEvent extends DomainEventBase {
+  type: 'subscription.granted';
+  /** Registry name of the emitting module, stamped as `Subscription.provider`. */
+  provider: string;
+  /** The sender's subscription id, stamped as `providerSubId`. */
+  providerSubscriptionId: string;
+  planSlug: string;
+  subscriber: { endUserId: string } | { email: string; emailVerified?: boolean };
+  /** Beneficiary org, for Applications that bill per organization. */
+  organizationId?: string;
+  /**
+   * `undefined` = open-ended (a grant with no term), `null` = explicitly
+   * open-ended, a Date = the term. A Date in the past is stale news and the
+   * applier ignores the event.
+   */
+  currentPeriodEnd?: Date | null;
+  trialEndsAt?: Date | null;
+}
+
+/**
  * The normalized inbound event set. Modules translate provider payloads
  * into these; core (`webhooks/apply.ts`) owns what happens next. Status
  * maps and provider payload shapes die inside modules.
  */
 export type DomainBillingEvent =
+  | SubscriptionGrantedEvent
   | CheckoutCompletedEvent
   | CheckoutApprovedEvent
   | PaymentSucceededEvent
@@ -315,7 +361,7 @@ export interface TranslateCtx {
   /**
    * The route-resolved application id, for slug-scoped providers whose
    * payloads don't carry it. Null when translation happens outside the
-   * pipeline (compatibility shims). Stripe ignores it — its scoping model
+   * pipeline (compatibility shims). Stripe ignores it, its scoping model
    * reads payload metadata (never guess; see webhooks/AGENTS.md).
    */
   applicationId: string | null;
@@ -327,7 +373,7 @@ export interface TranslateCtx {
   providerEventId?: string;
 }
 
-/** Context threaded into `verify` — the credential row's test/live mode. */
+/** Context threaded into `verify`, the credential row's test/live mode. */
 export interface VerifyCtx {
   /** Sandbox vs live, for online verifiers with per-mode base URLs (PayPal). */
   mode: 'test' | 'live';
@@ -338,7 +384,7 @@ export interface VerifyCtx {
  * rationale; the registry CI test asserts `name` equals the directory name.
  */
 export interface ProviderModule {
-  /** 'stripe' — must equal the directory name under providers/modules/. */
+  /** 'stripe', must equal the directory name under providers/modules/. */
   name: string;
   display: {
     label: string;
@@ -347,12 +393,27 @@ export interface ProviderModule {
     /**
      * SUGGESTED geo-routing values, surfaced through the discovery projection so
      * the panel can pre-fill the credential form. `pickProvider` never reads
-     * these — it routes purely on what is stored on the credential row.
+     * these, it routes purely on what is stored on the credential row.
      */
     defaultCountries: string[];
     priority: number;
   };
   capabilities: {
+    /**
+     * Whether buyers can be sent to this provider to pay.
+     *
+     * Every hosted processor says true. An inbound-only module says false:
+     * it fronts a billing system Rekey never calls, which reports what it
+     * sold by posting events. The geo router skips such a module, the
+     * public provider list omits it, and `getProviderForApplication` hands
+     * back a provider whose outbound calls refuse with a named error.
+     *
+     * Required rather than optional-and-fail-closed like `trials`: the
+     * three built-in modules predate the field and all host a checkout,
+     * and a required boolean makes a new module state the fact rather
+     * than inherit a default in either direction.
+     */
+    checkout: boolean;
     /** Supports one-time checkouts. */
     oneTime: boolean;
     /** Needs an explicit capture step (PayPal Orders v2). */
@@ -364,7 +425,7 @@ export interface ProviderModule {
     /**
      * Signature check calls the provider's API (PayPal). Drives the
      * pipeline's CENTRALIZED test-skip: only online verification is skipped
-     * under NODE_ENV=test — offline HMAC providers verify even in tests
+     * under NODE_ENV=test, offline HMAC providers verify even in tests
      * (tests sign their fixtures).
      */
     onlineVerify: boolean;
@@ -373,7 +434,7 @@ export interface ProviderModule {
      * Split by flow because these are genuinely different API surfaces: a
      * provider whose one-off charge amount is ours to set discounts that
      * trivially, and may still have no way to take a single-period discount
-     * on a recurring subscription (PayPal, Razorpay — see their descriptors).
+     * on a recurring subscription (PayPal, Razorpay, see their descriptors).
      *
      * OPTIONAL, and absent means **cannot**. The field postdates the three
      * built-in modules and the contract is on its way to third parties
@@ -389,7 +450,7 @@ export interface ProviderModule {
      * OPTIONAL, and absent means **cannot**, for the same reason as
      * `discounts`: a module that says nothing must not be handed a trial it
      * will silently drop. Dropping one charges the buyer today for something
-     * the pricing page told them was free for fourteen days — a chargeback and
+     * the pricing page told them was free for fourteen days, a chargeback and
      * a support ticket, not a rendering bug.
      *
      * Not split by flow: a trial only makes sense on a recurring subscription.
@@ -397,7 +458,7 @@ export interface ProviderModule {
      */
     trials?: boolean;
     discounts?: {
-      /** One-off charges — CREDIT packs and perpetual LICENSE purchases. */
+      /** One-off charges, CREDIT packs and perpetual LICENSE purchases. */
       oneTime: boolean;
       /** A FIRST-PERIOD-ONLY discount on a recurring subscription. */
       recurring: boolean;
@@ -412,7 +473,7 @@ export interface ProviderModule {
      * back before anything fails.
      *
      * A module that declares this MUST implement `refundPayment` on its
-     * provider — `provider-refunds.test.ts` asserts the two agree, so the
+     * provider, `provider-refunds.test.ts` asserts the two agree, so the
      * declaration cannot drift away from the capability.
      */
     refunds?: {
@@ -422,7 +483,7 @@ export interface ProviderModule {
        * Days after the charge beyond which the provider refuses to refund it,
        * or `null` where none is documented.
        *
-       * ADVISORY, for warning an operator early — the provider is the only
+       * ADVISORY, for warning an operator early, the provider is the only
        * authority and will refuse on its own. Treating this as the truth would
        * be wrong in both directions: it is approximate where a provider states
        * the limit in months rather than days, and a provider can refuse a
@@ -449,7 +510,7 @@ export interface ProviderModule {
    * the common one over MCP, where creating an application and a plan is two
    * quick calls and pasting a provider secret is a trip to another surface.
    *
-   * OPTIONAL, and absent means **no blocker** — the deliberate opposite of the
+   * OPTIONAL, and absent means **no blocker**, the deliberate opposite of the
    * fail-closed reading `trials` and `discounts` take, because the two
    * directions cost different things here. This method does not gate a
    * checkout; `createCheckoutSession` still refuses on its own. It only decides
@@ -468,26 +529,26 @@ export interface ProviderModule {
    * `sk_live_`/`sk_test_`, Razorpay `rzp_live_`/`rzp_test_`).
    *
    * Tri-state on purpose:
-   *   - `'test'` / `'live'` — the credential says which it is. **Authoritative.**
+   *   - `'test'` / `'live'`, the credential says which it is. **Authoritative.**
    *     `credentials.service` stores this and rejects any contradicting
    *     operator-supplied label; an operator cannot relabel a live key as
-   *     test, because the label is not what the provider SDK reads — the key
+   *     test, because the label is not what the provider SDK reads, the key
    *     is. A label allowed to disagree with the key would make everything
    *     downstream of `mode` a lie: the panel's test/live badge, the revenue
    *     stats, dunning, and PayPal's sandbox-vs-live base-URL choice.
-   *   - `null` — the shape carries no marker and we genuinely cannot tell.
+   *   - `null`, the shape carries no marker and we genuinely cannot tell.
    *     Only then does an explicit `mode` decide, defaulting to `'test'`.
    *
    * Omit the hook entirely when the provider's credentials never carry a
    * marker (PayPal: a sandbox client id is indistinguishable from a live one).
-   * Returning `'test'` for "unrecognised" would be a lie with teeth — it is
+   * Returning `'test'` for "unrecognised" would be a lie with teeth, it is
    * exactly the conflation that let a live key be stored as test.
    */
   detectMode?(creds: Record<string, string>): 'test' | 'live' | null;
   // NO `createProvider` here. The spec sketched one so a module could own its
   // outbound construction too, but the switch in providers/index.ts
   // (`getProviderForApplication`) was never migrated onto it, so all three
-  // implementations sat unreachable for the life of the contract — a second,
+  // implementations sat unreachable for the life of the contract, a second,
   // silently-diverging way to build a provider. If the factory is ever moved
   // into the modules, add it back then, with a call site.
   webhook: {

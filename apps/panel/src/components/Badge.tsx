@@ -2,8 +2,8 @@ import * as React from 'react';
 
 /**
  * Small status/label pill. Consolidates the ad-hoc badge styling scattered
- * across pages — role chips, verified/pending dots, invite status, email send
- * status — into one tonal primitive.
+ * across pages, role chips, verified/pending dots, invite status, email send
+ * status, into one tonal primitive.
  *
  * Tones use a soft tint fill + a readable foreground that clears WCAG AA in
  * both themes (the `/10` fill keeps the chip quiet; the text carries the

@@ -1,9 +1,9 @@
 /**
- * POST /sign-out — and GET, but only from this site.
+ * POST /sign-out, and GET, but only from this site.
  *
  * Clears the panel session cookies and redirects to /login. Best-effort revoke
  * of the refresh token API-side so the token can't be re-used by anyone who
- * somehow lifted it. Idempotent — unknown tokens 200.
+ * somehow lifted it. Idempotent, unknown tokens 200.
  *
  * ## Why GET survives here when admin's sign-out is POST-only
  *
@@ -15,18 +15,18 @@
  *
  * The panel can't simply copy the POST-only answer, because a GET here is
  * load-bearing: Next 15 forbids cookie writes from a Server Component, so when
- * `api()` finds an expired session mid-render it `redirect()`s to this route —
+ * `api()` finds an expired session mid-render it `redirect()`s to this route,
  * a browser navigation, which is a GET. Making GET a 405 would strand every
  * expired session on a 405 page instead of signing it out.
  *
  * So the guard is `Sec-Fetch-Site` rather than the method. That header is set
  * by the browser, cannot be spoofed by page JavaScript, and states exactly the
- * thing we care about — who initiated this request:
+ * thing we care about, who initiated this request:
  *
- *   - `same-origin` — our own redirect, our own link, our own form. Allow.
- *   - `same-site`   — another rekey.dev host. Allow.
- *   - `none`        — typed in the address bar or opened from a bookmark. Allow.
- *   - `cross-site`  — an `<img>`, `<iframe>`, `<script>`, `fetch()`, or link on
+ *   - `same-origin`, our own redirect, our own link, our own form. Allow.
+ *   - `same-site`  , another rekey.dev host. Allow.
+ *   - `none`       , typed in the address bar or opened from a bookmark. Allow.
+ *   - `cross-site` , an `<img>`, `<iframe>`, `<script>`, `fetch()`, or link on
  *                     someone else's page. This is the attack, and the ONLY
  *                     case we reject.
  *
@@ -34,7 +34,7 @@
  * `Sec-Fetch-Site`, so a request without it is a non-browser client (curl, a
  * health check, a test), which by definition is not being cross-site forged.
  *
- * POST is accepted unconditionally — it is already structurally CSRF-safe here
+ * POST is accepted unconditionally, it is already structurally CSRF-safe here
  * (no cross-site form can be auto-submitted by an `<img>`, and the session
  * cookies are `SameSite=lax`, which withholds them from cross-site POSTs), and
  * it is the method any future sign-out button should use.
@@ -60,7 +60,7 @@ async function signOut(req: NextRequest): Promise<Response> {
     ? `/login?reason=${encodeURIComponent(reason)}`
     : '/login';
   // Emit a RELATIVE Location so the browser resolves it against the public URL
-  // it's on (panel.rekey.dev) — NOT `req.url`, which behind a proxy is the
+  // it's on (panel.rekey.dev), NOT `req.url`, which behind a proxy is the
   // internal bind address (e.g. 0.0.0.0:3031). Same pattern as the magic-link /
   // oauth-callback handlers. NextResponse.redirect requires an absolute URL, so
   // set the Location header directly.

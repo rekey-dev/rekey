@@ -17,7 +17,7 @@
  *
  * ## What it enforces
  *
- * 1. The document parses as valid OpenAPI 3.0 — via a real validator
+ * 1. The document parses as valid OpenAPI 3.0, via a real validator
  *    (`@apidevtools/swagger-parser`), not our own reading of the spec.
  * 2. Every operation declares at least one 2xx response carrying a content
  *    schema. The list of operations allowed to lack one is `UNCOVERED`, which
@@ -26,13 +26,13 @@
  *    cannot fail does not exist.
  * 4. No list operation declares a bare array as its `data`. A bare array
  *    cannot report `total`, so a caller cannot tell a full page from a
- *    silently truncated one — the defect the functional audit found on 17
+ *    silently truncated one, the defect the functional audit found on 17
  *    operations. `{items, page}` (helper: `okPage`) is the shape.
  * 5. `components.schemas` is non-empty and every `$ref` resolves.
  *
  * ## When this fails on your PR
  *
- * You added a route without a `response` block. Add one — `apps/api/src/lib/
+ * You added a route without a `response` block. Add one, `apps/api/src/lib/
  * openapi.ts` documents the helpers, and
  * `apps/api/src/modules/applications/applications.routes.ts` is the worked
  * example. Do not add your route to `UNCOVERED`.
@@ -63,7 +63,7 @@ interface Operation {
  * about the route, not about this test.
  */
 const UNCOVERED: ReadonlySet<string> = new Set<string>([
-  // (empty — every operation declares a response schema)
+  // (empty, every operation declares a response schema)
 ]);
 
 /**
@@ -72,7 +72,7 @@ const UNCOVERED: ReadonlySet<string> = new Set<string>([
  * have no 2xx *content* schema to check.
  */
 const NON_JSON_SUCCESS: ReadonlySet<string> = new Set<string>([
-  // These three have no 2xx because they have no 2xx code path — not because
+  // These three have no 2xx because they have no 2xx code path, not because
   // nobody got round to modelling one. Each was read to confirm it.
   //
   // The two MCP GETs answer `reply.code(405)` unconditionally: the surface is
@@ -91,7 +91,7 @@ const NON_JSON_SUCCESS: ReadonlySet<string> = new Set<string>([
  *
  * `GET /health/live` is the only route in the API carrying
  * `config: { rateLimit: false }`. It touches no dependency, reads no input,
- * and takes no credential, so it cannot 429, 4xx or 503 — it is the liveness
+ * and takes no credential, so it cannot 429, 4xx or 503, it is the liveness
  * probe, and a liveness probe that can fail for reasons other than the process
  * being dead is not one. Declaring a decorative 429 here to satisfy the check
  * below would be a lie that costs a container restart during an incident.
@@ -107,7 +107,7 @@ const NO_ERROR_RESPONSE: ReadonlySet<string> = new Set<string>([
  * The health probes answer a container orchestrator, which reads a status code
  * and at most a flat body naming the failed dependency. The provider webhook
  * receivers answer Stripe, PayPal and Razorpay, whose retry logic reads the
- * status code — wrapping those in our envelope would change a contract three
+ * status code, wrapping those in our envelope would change a contract three
  * external systems already depend on, to no one's benefit.
  */
 const NON_ENVELOPE_ERRORS: ReadonlySet<string> = new Set<string>([
@@ -121,14 +121,14 @@ const NON_ENVELOPE_ERRORS: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
- * Collections bounded by construction — a fixed registry, a one-shot mint, an
+ * Collections bounded by construction, a fixed registry, a one-shot mint, an
  * Application's own configured providers. These cannot grow with tenant usage,
  * so there is nothing to truncate and no `total` worth reporting.
  *
  * Anything backed by a table that grows does NOT belong here: use `okPage`.
  */
 const ALLOWED_BARE_ARRAYS: ReadonlySet<string> = new Set<string>([
-  // One row per OAuth provider the end-user has actually linked — at most the
+  // One row per OAuth provider the end-user has actually linked, at most the
   // number of providers the Application configures.
   'GET /api/v1/auth/oauth/identities → 200',
   // Active keys per Application are capped at MAX_KEYS_PER_APP (25) at mint
@@ -235,7 +235,7 @@ describe('published OpenAPI document', () => {
 
   it('parses and validates as OpenAPI', async () => {
     // `validate` runs the structural metaschema AND resolves every $ref.
-    // It mutates its input, so hand it a deep copy — later assertions read the
+    // It mutates its input, so hand it a deep copy, later assertions read the
     // un-dereferenced document on purpose (they check that refs point at
     // components, which dereferencing would erase).
     await expect(
@@ -244,7 +244,7 @@ describe('published OpenAPI document', () => {
   });
 
   it('announces the version we are actually shipping', () => {
-    // This was hardcoded `1.1.1` while 2.0.0 was being cut — three minor
+    // This was hardcoded `1.1.1` while 2.0.0 was being cut, three minor
     // versions stale, on the artefact integrators diff between releases. It is
     // now derived from @rekey.dev/shared-types (the version the packages, API,
     // panel and portal all share), and pinned here against the CHANGELOG so a
@@ -259,7 +259,15 @@ describe('published OpenAPI document', () => {
       new URL('../../../CHANGELOG.md', import.meta.url),
       'utf8',
     );
-    const latestHeading = /^## (.+)$/m.exec(changelog)?.[1]?.trim();
+    // The TOP heading, with no exemption. RELEASE.md says an `## Unreleased`
+    // heading is unrepresentable: the CHANGELOG's first `## ` heading IS the
+    // next version, so a pull request adding an entry after a release has
+    // shipped bumps the seven package versions in the same change. Skipping a
+    // heading named `unreleased` here would pin the spec to an OLDER release
+    // than the one the document describes, which is the exact lie this test
+    // was written to catch.
+    const latestHeading = [...changelog.matchAll(/^## (.+)$/gm)]
+      .map((m) => m[1]!.trim())[0];
     expect(
       latestHeading,
       `the top CHANGELOG heading is "${latestHeading}" but the document announces "${version}" — ` +
@@ -270,7 +278,7 @@ describe('published OpenAPI document', () => {
   it('defines shared components rather than inlining the envelope 276 times', () => {
     const names = Object.keys(spec.components?.schemas ?? {});
     expect(names.length).toBeGreaterThan(0);
-    // The envelope and its parts must be components — that is the entire point
+    // The envelope and its parts must be components, that is the entire point
     // of "define it once".
     expect(names).toEqual(expect.arrayContaining(['ErrorResponse', 'RekeyError', 'PageMeta']));
     // Auto-generated placeholder names mean the refResolver regressed; every
@@ -326,7 +334,7 @@ describe('published OpenAPI document', () => {
         if (!hasContentSchema(response)) continue;
         const data = envelopeData(response.content['application/json']?.schema, spec);
         if (data?.type !== 'array') continue;
-        // Bounded-by-construction collections are allowed — they cannot
+        // Bounded-by-construction collections are allowed, they cannot
         // truncate because they are not backed by a growing table.
         bare.push(`${o.id} → ${status}`);
       }
@@ -340,7 +348,7 @@ describe('published OpenAPI document', () => {
     ).toEqual([]);
 
     // The allow-list may only shrink, and it shrinks by an operation moving to
-    // `okPage` — at which point its entry here is dead weight that would later
+    // `okPage`, at which point its entry here is dead weight that would later
     // be read as permission for a *different* route to go bare. Every entry
     // must still name a live bare-array operation.
     const stale = [...ALLOWED_BARE_ARRAYS].filter((entry) => !bare.includes(entry));
@@ -359,7 +367,7 @@ describe('published OpenAPI document', () => {
     // that could not validate against their own declaration:
     //
     //   - `GET /users/me` and `GET /auth/me` were `allOf: [EndUser(closed),
-    //     {required: [activeOrganizationId]}]` — unsatisfiable by construction.
+    //     {required: [activeOrganizationId]}]`, unsatisfiable by construction.
     //   - `GET /tenant/applications/:id` returned 15 fields `Application` does
     //     not declare.
     //
@@ -387,13 +395,13 @@ describe('published OpenAPI document', () => {
   });
 
   it('covers the whole surface', () => {
-    // A blunt floor so a refactor that deletes half the routes — or half the
-    // schemas — is loud rather than quietly green.
+    // A blunt floor so a refactor that deletes half the routes, or half the
+    // schemas, is loud rather than quietly green.
     expect(operations.length).toBeGreaterThanOrEqual(276);
 
     // Measured over the operations that CAN have a JSON success body. The
-    // three in NON_JSON_SUCCESS have no 2xx code path at all — two answer 405
-    // unconditionally, one only ever redirects — so counting them as
+    // three in NON_JSON_SUCCESS have no 2xx code path at all, two answer 405
+    // unconditionally, one only ever redirects, so counting them as
     // "uncovered" measures the router's shape rather than the document's
     // completeness, and pinned the ratio just under any threshold worth
     // setting. Excluded from the denominator, not waved through: they are

@@ -39,7 +39,7 @@ const { getSession, setSession, signOut, safePath, rekeyMiddleware, rekey, Rekey
 
 const req = (headers: Record<string, string> = {}) => new Request('https://x/', { headers });
 // `apiUrl` is stated rather than left to the environment. It used to default to
-// `https://api.rekey.dev`, and these tests silently depended on that — which is
+// `https://api.rekey.dev`, and these tests silently depended on that, which is
 // exactly how the default survived: nothing here had to name a host, so nothing
 // here noticed that a self-hosted deployment which forgot `REKEY_URL` was
 // shipping its secret key to Rekey Cloud. The refusal is asserted below.
@@ -271,7 +271,7 @@ describe('a misconfigured deploy stays loud', () => {
   });
 
   it('refuses a missing REKEY_URL instead of falling back to Rekey Cloud', async () => {
-    // The fallback this replaces did not fail — it sent `REKEY_SECRET` to
+    // The fallback this replaces did not fail, it sent `REKEY_SECRET` to
     // `api.rekey.dev`, a host the operator of a self-hosted deployment never
     // chose. The request dies there (the key is unknown), so the only symptom
     // was a confusing 401, and by then the credential had left.

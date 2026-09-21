@@ -39,23 +39,24 @@ import {
   operatorProtectedResourceMetadata,
 } from './oauth.service.js';
 import { ok, errs, ref, raw, type JsonSchema } from '../../lib/openapi.js';
+import { assertOperatorMcpEnabled } from './workspace-mcp-switch.js';
+import { CLIENT_REGISTRATION_BODY_LIMIT, TOKEN_BODY_LIMIT } from '../../lib/body-limits.js';
 
 // This plugin only mounts when OPERATOR_MCP_ENABLED is on (see app.ts), so
 // there is no per-request feature-toggle 404 here. Most of these are OAuth
 // 2.1 / RFC-defined endpoints and answer with spec-shaped bodies, NOT the
-// Rekey `{success, data}` envelope — see the module header. `POST
+// Rekey `{success, data}` envelope, see the module header. `POST
 // /oauth/grant`, called by the panel (not an external OAuth client), is the
-// one exception: it deliberately wraps its response in the Rekey envelope so
-// the panel's `api()` helper can unwrap `.data`.
+// one exception: it wraps its response in the Rekey envelope so the panel's
+// `api()` helper can unwrap `.data`.
 
 /**
  * The two discovery routes below (and their path-insertion twins in
- * `well-known.routes.ts`) document `ROUTE_NOT_FOUND` because, unlike every
- * other operation in this file, they are reachable even on a deployment that
- * disabled the operator MCP surface after having advertised it — a
- * self-hoster flipping `OPERATOR_MCP_ENABLED` off unregisters this whole
- * plugin, and every path under it (including these) then falls through to
- * `app.ts`'s generic not-found handler.
+ * `well-known.routes.ts`) document `ROUTE_NOT_FOUND`: unlike every other
+ * operation in this file, they stay reachable after a deployment disables
+ * the operator MCP surface it once advertised. Flipping `OPERATOR_MCP_ENABLED`
+ * off unregisters this whole plugin, so every path under it, including
+ * these, falls through to `app.ts`'s generic not-found handler.
  */
 const OPERATOR_MCP_DISABLED_404 = {
   404:
@@ -75,7 +76,7 @@ const ProtectedResourceMetadata: JsonSchema = {
   required: ['resource', 'authorization_servers'],
 };
 
-/** RFC 7591 dynamic client registration response. Public client — no secret is issued. */
+/** RFC 7591 dynamic client registration response. Public client, no secret is issued. */
 const ClientRegistrationResponse: JsonSchema = {
   type: 'object',
   properties: {
@@ -96,7 +97,7 @@ const ClientRegistrationResponse: JsonSchema = {
   ],
 };
 
-/** RFC 6749 token response. No `id_token` — this AS has no OIDC surface. */
+/** RFC 6749 token response. No `id_token`, this AS has no OIDC surface. */
 const TokenResponse: JsonSchema = {
   type: 'object',
   properties: {
@@ -177,7 +178,7 @@ function buildRedirect(redirectUri: string, extra: Record<string, string>, state
 
 /** Single Fastify plugin mounting every operator-MCP OAuth route. */
 export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void> {
-  // ─── Discovery — RFC 8414 + RFC 9728 ───────────────────────────────
+  // ─── Discovery, RFC 8414 + RFC 9728 ───────────────────────────────
   app.get(
     '/.well-known/oauth-authorization-server',
     {
@@ -220,7 +221,8 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
   app.post(
     '/oauth/register',
     {
-      // RFC 7591 clients post JSON, but some post form-encoded — both allowed.
+      bodyLimit: CLIENT_REGISTRATION_BODY_LIMIT,
+      // RFC 7591 clients post JSON, but some post form-encoded, both allowed.
       config: { rateLimit: authRateLimit(20), acceptsForm: true },
       schema: {
         tags: ['MCP · Operator · OAuth'],
@@ -228,11 +230,11 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         summary: 'Dynamic client registration (RFC 7591)',
         description:
           'Unauthenticated by design (RFC 7591 open registration). Registers a PUBLIC ' +
-          'client — PKCE, no client secret — so there is nothing to authenticate with yet. ' +
+          'client, PKCE, no client secret, so there is nothing to authenticate with yet. ' +
           'Governed by `OPERATOR_MCP_DYNAMIC_REGISTRATION` (default `open`); when set to ' +
           '`disabled` this answers 403 `CLIENT_REGISTRATION_DISABLED` and disappears from ' +
-          'the RFC 8414 metadata. Registering grants no access on its own — an operator ' +
-          'still has to approve at the panel consent screen — but it DOES allowlist a ' +
+          'the RFC 8414 metadata. Registering grants no access on its own, an operator ' +
+          'still has to approve at the panel consent screen, but it DOES allowlist a ' +
           'redirect_uri of the registrant\'s choosing, which is the ingredient a ' +
           'consent-phishing link needs. Close it once your clients are connected.',
         body: {
@@ -275,7 +277,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
     },
   );
 
-  // ─── Authorization endpoint — delegate sign-in to the panel ─────────
+  // ─── Authorization endpoint, delegate sign-in to the panel ─────────
   //
   // Validate the client, redirect_uri, and PKCE up front (so a bad client is
   // rejected before we bounce anywhere), then 302 to the panel's consent page
@@ -289,12 +291,12 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         security: [],
         summary: 'Authorization endpoint → panel consent',
         description:
-          'Redirects the browser into the panel consent screen. No credential — the operator ' +
+          'Redirects the browser into the panel consent screen. No credential, the operator ' +
           'may not be signed in yet; the panel handles that and then calls /oauth/grant.',
         response: {
           302: {
             description:
-              'Success — redirect to `PANEL_URL`/mcp-consent with the OAuth params. Also used ' +
+              'Success, redirect to `PANEL_URL`/mcp-consent with the OAuth params. Also used ' +
               'for an unsupported `response_type` / `code_challenge_method` (redirect to the ' +
               'client `redirect_uri` with `error=invalid_request` instead).',
           },
@@ -329,7 +331,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
           buildRedirect(q.data.redirect_uri, { error: 'invalid_request' }, q.data.state),
         );
       }
-      // PANEL_URL has no default — a Rekey default would send a self-hoster's
+      // PANEL_URL has no default, a Rekey default would send a self-hoster's
       // operators to OUR panel to approve THEIR consent. Without it there is
       // nowhere to send them, so refuse explicitly: `new URL(path, undefined)`
       // throws a bare "Invalid URL" that says nothing about the cause.
@@ -349,18 +351,19 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
     },
   );
 
-  // ─── Grant endpoint — operator-session authenticated ────────────────
+  // ─── Grant endpoint, operator-session authenticated ────────────────
   //
   // Called by the panel's /mcp-consent page after the operator authenticated
   // (full login: MFA + lockout already enforced by the session) and picked a
   // workspace. `requireTenantSession` populates req.tenantUser. We re-validate
   // the client + redirect_uri + PKCE, confirm the operator is a member of the
   // chosen workspace, then mint the code. Returns the client redirect URL for
-  // the panel to send the browser to. The session bearer IS the CSRF guard —
+  // the panel to send the browser to. The session bearer IS the CSRF guard,
   // it can't be forged cross-site.
   app.post(
     '/oauth/grant',
     {
+      bodyLimit: TOKEN_BODY_LIMIT,
       onRequest: requireTenantSession,
       config: { rateLimit: authRateLimit(30) },
       schema: {
@@ -369,7 +372,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         summary: 'Mint an authorization code (panel consent)',
         description:
           'Called by the panel after the operator approves. Requires an operator **session** ' +
-          'access token (not a PAT) — the session bearer doubles as the CSRF guard, since it ' +
+          'access token (not a PAT), the session bearer doubles as the CSRF guard, since it ' +
           "cannot be forged cross-site. The operator's membership of the requested workspace " +
           'is confirmed before the code is minted.',
         response: {
@@ -381,7 +384,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
                   type: 'string',
                   format: 'uri',
                   description:
-                    "The client's `redirect_uri` — with `code` (+ `state`) on approval, or " +
+                    "The client's `redirect_uri`, with `code` (+ `state`) on approval, or " +
                     '`error=access_denied` (+ `state`) when the operator clicked Deny.',
                 },
               },
@@ -401,7 +404,8 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
             403:
               'TENANT_MEMBERSHIP_REVOKED — the session operator is no longer a member of ANY ' +
               'workspace; or TENANT_MEMBERSHIP_REQUIRED — the session operator is not a member ' +
-              'of the specific `tenant_id` they picked at consent.',
+              'of the specific `tenant_id` they picked at consent; or OPERATOR_MCP_DISABLED — ' +
+              'that workspace has switched the operator MCP server off, so no consent is granted.',
             429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
           }),
         },
@@ -429,7 +433,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
       const data = body.data;
       const client = await operatorMcpOAuthService.getClient(data.client_id);
       if (!client || !client.redirectUris.includes(data.redirect_uri)) {
-        // Don't redirect to an unvalidated URI — refuse outright.
+        // Don't redirect to an unvalidated URI, refuse outright.
         throw new RekeyError({
           statusCode: 400,
           code: 'MCP_GRANT_INVALID_CLIENT',
@@ -446,7 +450,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         });
       }
 
-      // Operator clicked Deny. Wrap in the standard { success, data } envelope —
+      // Operator clicked Deny. Wrap in the standard { success, data } envelope,
       // the panel's api() helper unwraps `.data`, so a bare { redirect } would
       // read back as undefined and the consent page would never redirect.
       if (!data.approve) {
@@ -458,7 +462,7 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
         });
       }
 
-      // The operator may consent for ANY workspace they belong to — not just
+      // The operator may consent for ANY workspace they belong to, not just
       // their active session workspace. Re-check membership against the DB.
       const role = await operatorMcpOAuthService.memberRole(operator.id, data.tenant_id);
       if (!role) {
@@ -469,6 +473,10 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
           fix: 'Pick a workspace you belong to.',
         });
       }
+
+      // Membership is necessary but not sufficient: the workspace itself may
+      // have switched operator MCP off, in which case no consent is granted.
+      await assertOperatorMcpEnabled(data.tenant_id);
 
       const code = await operatorMcpOAuthService.createAuthCode({
         clientId: data.client_id,
@@ -485,10 +493,11 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
     },
   );
 
-  // ─── Token endpoint — RFC 6749 ──────────────────────────────────────
+  // ─── Token endpoint, RFC 6749 ──────────────────────────────────────
   app.post(
     '/oauth/token',
     {
+      bodyLimit: TOKEN_BODY_LIMIT,
       // RFC 6749 §4.1.3 mandates application/x-www-form-urlencoded.
       config: { rateLimit: authRateLimit(20), acceptsForm: true },
       schema: {
@@ -572,14 +581,15 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
     },
   );
 
-  // ─── Introspection — RFC 7662 ───────────────────────────────────────
+  // ─── Introspection, RFC 7662 ───────────────────────────────────────
   app.post(
     '/oauth/introspect',
     {
+      bodyLimit: TOKEN_BODY_LIMIT,
       // RFC 7662 §2.1 mandates application/x-www-form-urlencoded, and §2.1 also
       // requires the endpoint be PROTECTED. It wasn't: any unauthenticated
       // caller could submit tokens and, for a live one, get back sub
-      // (tenantUserId), tid, scope, client_id and exp — a free, unlogged,
+      // (tenantUserId), tid, scope, client_id and exp, a free, unlogged,
       // unthrottled validity-and-metadata oracle for operator-MCP access
       // tokens, which are workspace-wide admin credentials. The per-app twin
       // (modules/mcp/mcp.routes.ts) has always required that Application's
@@ -599,9 +609,9 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
           '`{ active: false }`.',
         response: {
           // `introspect()` also returns `tid` (the workspace id), which
-          // `OAuthIntrospectionResponse` does not model — components are a
+          // `OAuthIntrospectionResponse` does not model. Components are a
           // documented floor, not a ceiling (see lib/openapi.ts), so this is
-          // still accurate, just incomplete. Noted in the report for this file.
+          // still accurate, just incomplete.
           200: { description: 'Token state (RFC 7662).', ...ref('OAuthIntrospectionResponse') },
           ...errs({
             401: 'OPERATOR_TOKEN_INVALID — the PAT is missing, invalid, revoked, or expired.',
@@ -612,16 +622,16 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
       },
     },
     async (req, reply) => {
-      // Token state is sensitive — never let a proxy cache an introspection
+      // Token state is sensitive, never let a proxy cache an introspection
       // result. Mirrors the per-app route.
       reply.header('Cache-Control', 'no-store');
       const body = IntrospectBody.safeParse(req.body);
       if (!body.success) return reply.send({ active: false });
-      const result = operatorMcpOAuthService.introspect(body.data.token);
+      const result = await operatorMcpOAuthService.introspect(body.data.token);
       // Scope the answer to the PAT's own workspace. `introspect` takes no
       // tenant argument and will happily describe a token belonging to any
       // workspace on the deployment, so requiring a PAT alone only narrowed the
-      // oracle from "anyone" to "any operator on this deployment" — a full fix
+      // oracle from "anyone" to "any operator on this deployment", a full fix
       // on a single-workspace self-host, not on a shared one. The per-app twin
       // is scoped by construction (it takes the Application).
       if (result.active === true && result.tid !== req.tenantId) {
@@ -632,5 +642,5 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
   );
 }
 
-/** The MCP resource URL — re-export so callers don't have to import the service. */
+/** The MCP resource URL, re-export so callers don't have to import the service. */
 export { operatorMcpIssuer };

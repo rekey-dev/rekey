@@ -52,7 +52,7 @@ describe('admin surface — end to end', () => {
     const res = await app.inject({ method: 'GET', url: '/health' });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { status: string; service: string; db: string; redis: string };
-    // `status: 'ok'` is load-bearing — existing monitors and the compose
+    // `status: 'ok'` is load-bearing, existing monitors and the compose
     // healthcheck match on it.
     expect(body.status).toBe('ok');
     expect(body.service).toBe('rekey-api');
@@ -136,7 +136,7 @@ describe('admin surface — end to end', () => {
       warning: string;
     }>(keyRes.json()).data;
     // The prefix follows the Application's environment, which defaults to
-    // DEVELOPMENT — it is not a per-key choice any more.
+    // DEVELOPMENT, it is not a per-key choice any more.
     expect(created.rawKey).toMatch(/^rp_test_/);
     expect(created.apiKey.keyPrefix).toMatch(/^rp_test_/);
     expect(created.apiKey.scopes).toEqual(['*']);
@@ -144,7 +144,7 @@ describe('admin surface — end to end', () => {
     // The hash MUST NOT be returned (regression guard).
     expect(created.apiKey).not.toHaveProperty('keyHash');
 
-    // 4. List keys — also redacted
+    // 4. List keys, also redacted
     const listRes = await app.inject({
       method: 'GET',
       url: `/api/v1/admin/applications/${application.id}/api-keys`,

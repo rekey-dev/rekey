@@ -4,7 +4,7 @@
  * The failure this guards against is not a rendering bug: the pricing page
  * says "14 days free", the buyer clicks, and the provider charges them today.
  * That is a chargeback and a support ticket, and the buyer is right. So the
- * rule is the same fail-closed one coupons already use — a provider that has
+ * rule is the same fail-closed one coupons already use, a provider that has
  * not declared it can express a trial never receives one.
  */
 import { describe, expect, it } from 'vitest';

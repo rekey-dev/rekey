@@ -2,7 +2,7 @@
  * Shared offset/limit pagination for operator (tenant) list endpoints.
  *
  * Every list endpoint that returns rows from a table that grows with usage
- * MUST bound its query — an unbounded `findMany` will eventually return tens
+ * MUST bound its query, an unbounded `findMany` will eventually return tens
  * of thousands of rows and freeze/crash the panel that renders them. Use
  * `parsePagination(req.query)` to get a safe `{ take, skip }` (capped at
  * MAX_LIMIT) and, when the consumer needs to page beyond the first window,
@@ -22,8 +22,8 @@ export const MAX_LIMIT = 100;
 /** Zod shape to merge into a route's querystring validation. */
 export const PaginationQuery = z.object({
   limit: z.coerce.number().int().min(1).max(MAX_LIMIT).optional(),
-  // Upper-bounded deliberately: `.int().min(0)` alone accepts 1e20 — it IS an
-  // integer — which then exceeds a 64-bit signed int inside Prisma's `skip`
+  // Upper-bounded deliberately: `.int().min(0)` alone accepts 1e20, it IS an
+  // integer, which then exceeds a 64-bit signed int inside Prisma's `skip`
   // and surfaces as a 500 with "share this request id with support". User
   // input must not produce a server error, and a caller paging past a million
   // rows has a different problem than pagination.
@@ -65,8 +65,8 @@ export function pageMeta(total: number, take: number, skip: number): PageMeta {
  *
  * This is the `data` of the `{success, data}` envelope, and it is what
  * `okPage()` (lib/openapi.ts) documents. It exists as a named type so a
- * handler cannot return `{items, ...pageMeta(...)}` — pagination flattened
- * one level up — and still typecheck; that flat variant shipped on
+ * handler cannot return `{items, ...pageMeta(...)}`, pagination flattened
+ * one level up, and still typecheck; that flat variant shipped on
  * `GET /api/v1/admin/operator-invites` and the whole `admin/metrics` family
  * and disagreed with the published document on every one of them.
  */

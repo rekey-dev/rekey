@@ -3,14 +3,16 @@
 /**
  * Portal server actions. Each is bound to a `slug` by the page. They drive the
  * Application's PUBLISHABLE key (resolved per-slug) plus the end-user's own
- * token — never a secret key.
+ * token, never a secret key.
  */
 
 import { redirect } from 'next/navigation';
 import { RekeyError } from '@rekey.dev/react';
 import { portalClientFor, setSession, clearSession, getRefreshToken, getAccessToken } from './session';
 import { getPortalConfig } from './config';
+import { resolveCheckoutProvider } from './provider-capabilities';
 import { portalBaseUrl, rekeyApiUrl } from './env';
+import { API_TIMEOUT_MS, forwardedClientHeaders } from './client-ip';
 
 export async function signInAction(slug: string, formData: FormData): Promise<void> {
   const email = String(formData.get('email') ?? '').trim();
@@ -24,7 +26,7 @@ export async function signInAction(slug: string, formData: FormData): Promise<vo
       // the code step (same pattern the operator panel uses).
       redirect(`/${slug}/login?mfa=${encodeURIComponent(out.mfaChallengeToken)}`);
     }
-    await setSession(slug, out.accessToken, out.refreshToken);
+    await setSession(slug, out.accessToken, out.refreshToken, out);
   } catch (err) {
     if (err instanceof RekeyError) {
       // Carry the email back so a mistyped password doesn't cost the customer
@@ -46,7 +48,7 @@ export async function mfaVerifyAction(slug: string, formData: FormData): Promise
   if (!challenge || !code) redirect(`/${slug}/login`);
   try {
     const out = await client.mfaVerify({ mfaChallengeToken: challenge, code });
-    await setSession(slug, out.accessToken, out.refreshToken);
+    await setSession(slug, out.accessToken, out.refreshToken, out);
   } catch (err) {
     if (err instanceof RekeyError) {
       // Keep the challenge so a mistyped code doesn't force a fresh sign-in.
@@ -61,7 +63,7 @@ export async function mfaVerifyAction(slug: string, formData: FormData): Promise
 
 /**
  * The browser SDK has no password-reset methods yet, but the API's
- * /forgot-password + /reset-password routes accept the publishable key —
+ * /forgot-password + /reset-password routes accept the publishable key,
  * call them directly with the same Bearer credential the SDK uses.
  */
 async function publishablePost(
@@ -74,11 +76,13 @@ async function publishablePost(
   const res = await fetch(`${rekeyApiUrl()}${path}`, {
     method: 'POST',
     headers: {
+      ...(await forwardedClientHeaders()),
       'Content-Type': 'application/json',
       Authorization: `Bearer ${config.publishableKey}`,
     },
     body: JSON.stringify(body),
     cache: 'no-store',
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
   });
   if (res.ok) return { ok: true };
   const json = (await res.json().catch(() => null)) as { error?: { code?: string } } | null;
@@ -88,7 +92,7 @@ async function publishablePost(
 export async function forgotPasswordAction(slug: string, formData: FormData): Promise<void> {
   const email = String(formData.get('email') ?? '').trim();
   if (!email) redirect(`/${slug}/forgot-password?error=missing`);
-  // Enumeration-safe on the API side — always confirm the same way. resetUrl
+  // Enumeration-safe on the API side, always confirm the same way. resetUrl
   // points the emailed link back at this portal's reset page.
   await publishablePost(slug, '/api/v1/auth/forgot-password', {
     email,
@@ -148,16 +152,30 @@ export async function checkoutAction(
 ): Promise<void> {
   const planSlug = String(formData.get('planSlug') ?? '');
   // The picker (when shown) posts the user's chosen provider; absent, the
-  // server-side geo router picks. Only forward known provider ids.
-  const rawProvider = String(formData.get('provider') ?? '');
-  const provider =
-    rawProvider === 'stripe' || rawProvider === 'paypal' || rawProvider === 'razorpay'
-      ? rawProvider
-      : undefined;
+  // server-side geo router picks.
+  const rawProvider = String(formData.get('provider') ?? '').trim();
   const client = await portalClientFor(slug);
   const access = await getAccessToken();
   const config = await getPortalConfig(slug);
   if (!client || !access || !config) redirect(`/${slug}/login?reason=expired`);
+  // Judge the pick against what this Application offers for checkout, from the
+  // same public list that rendered the picker, instead of a list of names. If
+  // that list cannot be read, forward the pick: checkout validates it too and
+  // answers with the same codes.
+  let provider: string | undefined;
+  if (rawProvider !== '') {
+    const offered = await client.listBillingProviders().then(
+      (r) => r.providers,
+      () => null,
+    );
+    if (offered === null) {
+      provider = rawProvider;
+    } else {
+      const choice = resolveCheckoutProvider(rawProvider, offered);
+      if (choice.kind === 'refused') redirect(`/${slug}?error=${encodeURIComponent(choice.code)}`);
+      if (choice.kind === 'provider') provider = choice.provider;
+    }
+  }
   let url: string;
   try {
     const result = await client.createCheckout(access, {

@@ -1,5 +1,5 @@
 /**
- * OpenAPI response modelling — shared components + the envelope helpers every
+ * OpenAPI response modelling, shared components + the envelope helpers every
  * route's `schema.response` is built from.
  *
  * ## Why this file exists
@@ -7,7 +7,7 @@
  * Until 2.0.0-rc.3 the published document (`/docs/json`, mirrored to
  * the published `openapi.json`) declared **zero** response schemas:
  * 275 of 276 operations said nothing but `"200": {"description": "Default
- * Response"}`. Two independent external audits called that "half a contract" —
+ * Response"}`. Two independent external audits called that "half a contract",
  * you could not generate a typed client, the `{success, data}` envelope was
  * undocumented, and no error shape appeared anywhere. This module is the fix:
  * declare the envelope and the recurring domain objects **once**, reference
@@ -25,8 +25,8 @@
  *     response: {
  *       200: ok(ref('Application'), 'The application.'),
  *       ...errs({
- *         401: 'UNAUTHORIZED — missing or invalid super-admin key.',
- *         404: 'APPLICATION_NOT_FOUND — no application with that id.',
+ *         401: 'UNAUTHORIZED, missing or invalid super-admin key.',
+ *         404: 'APPLICATION_NOT_FOUND, no application with that id.',
  *       }),
  *     },
  *   },
@@ -34,12 +34,12 @@
  * ```
  *
  * Rules of thumb:
- *   - `ok(x)`      — `{success: true, data: x}`.
- *   - `okPage(x)`  — `{success: true, data: {items: x[], page: PageMeta}}`.
+ *   - `ok(x)`     , `{success: true, data: x}`.
+ *   - `okPage(x)` , `{success: true, data: {items: x[], page: PageMeta}}`.
  *     Use this for **every** list endpoint. A bare array response is a defect
  *     (it silently truncates with nothing saying so) and the contract test
  *     rejects it.
- *   - `errs({...})` — only the statuses this operation can *actually* return.
+ *   - `errs({...})`, only the statuses this operation can *actually* return.
  *     Read the handler. A blanket 400/401/500 on everything is what the audit
  *     complained about; it documents nothing.
  *
@@ -56,14 +56,14 @@
  * Fastify normally compiles `schema.response` with fast-json-stringify, which
  * **drops** any field the schema does not declare. Switching 276 previously
  * unschema'd operations onto that in one change would silently strip fields
- * from live responses wherever a schema is even slightly incomplete — a much
+ * from live responses wherever a schema is even slightly incomplete, a much
  * worse outcome than a sparse document. So `registerOpenApiComponents()`
  * installs a pass-through serializer: `JSON.stringify`, exactly what Fastify
  * already did for every one of these routes when they had no response schema.
  * Runtime behaviour is therefore byte-identical to before this change; only the
  * published document gained content.
  *
- * The guard against drift is the test suite, not the serializer — see
+ * The guard against drift is the test suite, not the serializer, see
  * `test/openapi-contract.test.ts`.
  */
 
@@ -80,6 +80,7 @@ import {
   BillingProviderInfoDtoSchema,
   BillingStatsDtoSchema,
   CheckoutResultDtoSchema,
+  TrialEligibilityItemSchema,
   ConsumeCreditsResultDtoSchema,
   CouponDtoSchema,
   CreditBalanceDtoSchema,
@@ -89,6 +90,10 @@ import {
   JwksDtoSchema,
   LicenseDtoSchema,
   LicenseVerifyResultDtoSchema,
+  DeviceDtoSchema,
+  EndUserDeviceDtoSchema,
+  LicenseActivationDtoSchema,
+  LicenseDeactivateResultDtoSchema,
   MfaChallengeResultDtoSchema,
   MonthlyRevenuePointSchema,
   OAuthAuthServerMetadataSchema,
@@ -113,14 +118,14 @@ import {
   WebhookEndpointDtoSchema,
 } from '@rekey.dev/shared-types';
 
-/** A JSON Schema fragment. Deliberately loose — these are data, not types. */
+/** A JSON Schema fragment. Deliberately loose, these are data, not types. */
 export type JsonSchema = Record<string, unknown>;
 
 /**
  * Convert a zod schema to an OpenAPI-3.0-flavoured JSON Schema.
  *
  * `target: 'openApi3'` because the published document is `openapi: 3.0.3`,
- * where nullability is `nullable: true` rather than a `type` array — a
+ * where nullability is `nullable: true` rather than a `type` array, a
  * draft-07 `type: ['string','null']` would not validate.
  *
  * `$refStrategy: 'none'` inlines everything. The alternative emits a
@@ -160,8 +165,8 @@ function fromZod(schema: z.ZodTypeAny): JsonSchema {
  *      `GET /tenant/applications/:id` returns 15 fields the `Application`
  *      component does not declare (measured, not estimated).
  *
- * Only `false` is removed. `additionalProperties: true` is meaningful — it is
- * how `metadata` bags say "any keys" — and is left alone.
+ * Only `false` is removed. `additionalProperties: true` is meaningful, it is
+ * how `metadata` bags say "any keys", and is left alone.
  *
  * This does NOT weaken anything at runtime: the serializer is `JSON.stringify`
  * (see the module header), so these schemas have never gated a byte.
@@ -185,9 +190,9 @@ function openClosedObjects(node: unknown): JsonSchema {
 
 /**
  * The error object every failure carries. Mirrors what `rekeyErrorHandler`
- * (lib/error.ts) actually emits — verified against all five of its branches:
+ * (lib/error.ts) actually emits, verified against all five of its branches:
  * `RekeyError`, `ZodError`, Fastify-native 4xx, dependency-outage 503, and the
- * catch-all 500 — plus the two envelopes app.ts writes inline (the NUL-byte
+ * catch-all 500, plus the two envelopes app.ts writes inline (the NUL-byte
  * 400 and the `ROUTE_NOT_FOUND` 404).
  */
 const RekeyErrorObject: JsonSchema = {
@@ -197,7 +202,7 @@ const RekeyErrorObject: JsonSchema = {
     code: {
       type: 'string',
       description:
-        'Stable machine-readable identifier — safe to `switch` on. Never a framework ' +
+        'Stable machine-readable identifier, safe to `switch` on. Never a framework ' +
         'code: Fastify\'s own `FST_ERR_*` identifiers are mapped onto documented codes ' +
         '(see lib/error.ts).',
       example: 'PLAN_NOT_FOUND',
@@ -206,7 +211,7 @@ const RekeyErrorObject: JsonSchema = {
     fix: {
       type: 'string',
       description:
-        'Concrete remediation. Present on essentially every error — read this first when ' +
+        'Concrete remediation. Present on essentially every error, read this first when ' +
         'debugging, it is the most useful field for both humans and agents.',
     },
     docs: {
@@ -246,7 +251,7 @@ const RekeyErrorObject: JsonSchema = {
   required: ['code', 'message', 'requestId'],
 };
 
-/** `{success: false, error: {...}}` — the shape of every failed response. */
+/** `{success: false, error: {...}}`, the shape of every failed response. */
 const ErrorResponseSchema: JsonSchema = {
   type: 'object',
   description:
@@ -261,7 +266,7 @@ const ErrorResponseSchema: JsonSchema = {
 
 /**
  * Offset-pagination metadata. Matches `pageMeta()` in lib/pagination.ts
- * exactly — `{total, limit, offset, hasMore}`.
+ * exactly, `{total, limit, offset, hasMore}`.
  */
 const PageMetaSchema: JsonSchema = {
   type: 'object',
@@ -275,16 +280,16 @@ const PageMetaSchema: JsonSchema = {
     offset: { type: 'integer', description: 'Rows skipped before this window.' },
     hasMore: {
       type: 'boolean',
-      description: 'True when `offset + limit < total` — i.e. another page exists.',
+      description: 'True when `offset + limit < total`, i.e. another page exists.',
     },
   },
   required: ['total', 'limit', 'offset', 'hasMore'],
 };
 
-/** `{ok: true}` — the body of the handful of endpoints that confirm and return nothing. */
+/** `{ok: true}`, the body of the handful of endpoints that confirm and return nothing. */
 const OkFlagSchema: JsonSchema = {
   type: 'object',
-  description: 'A bare acknowledgement — the operation succeeded and returns no entity.',
+  description: 'A bare acknowledgement, the operation succeeded and returns no entity.',
   properties: { ok: { type: 'boolean', enum: [true] } },
   required: ['ok'],
 };
@@ -300,13 +305,11 @@ const OkFlagSchema: JsonSchema = {
  * so the document cannot drift from the types the SDKs compile against.
  *
  * **Every one of these was written against the service that produces it**, not
- * from the endpoint's name. The first draft of this block was written from
- * plausible field names and four separate reviewers caught it inventing fields
- * that do not exist (`Passkey.deviceType`, `Tenant.slug`, `UsageMeter.aggregation`,
- * `Operator.mfaEnabled`) — a named component that describes nothing real is
- * worse than no component, because a client generator turns it into a type
- * someone then writes code against. If you add one here, open the service and
- * copy the row type.
+ * from the endpoint's name. A named component that describes fields that do
+ * not exist (e.g. a guessed `Passkey.deviceType`, `Tenant.slug`,
+ * `UsageMeter.aggregation`, `Operator.mfaEnabled`) is worse than no component,
+ * because a client generator turns it into a type someone then writes code
+ * against. If you add one here, open the service and copy the row type.
  */
 const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
   ErrorResponse: ErrorResponseSchema,
@@ -317,7 +320,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
   /**
    * A workspace (the `Tenant` table). The operator-facing unit of isolation.
    * Source: `tenantsService.list/get/create` return the Prisma row verbatim.
-   * Note there is deliberately **no `slug`** — workspaces are addressed by id.
+   * Note there is deliberately **no `slug`**, workspaces are addressed by id.
    */
   Tenant: {
     type: 'object',
@@ -329,7 +332,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
         type: 'string',
         description:
           'The address captured when this workspace was created. NOT updated by an ownership ' +
-          'transfer — the canonical owner is the membership with `role: OWNER`.',
+          'transfer, the canonical owner is the membership with `role: OWNER`.',
       },
       limits: {
         description:
@@ -345,7 +348,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
   },
 
   /**
-   * An operator — a human with a login on the panel.
+   * An operator, a human with a login on the panel.
    * Source: `PublicTenantUser` = the `TenantUser` row minus `passwordHash`.
    */
   Operator: {
@@ -377,8 +380,16 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
       tenantId: { type: 'string' },
       tenantName: { type: 'string' },
       role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
+      scopes: {
+        type: 'array',
+        nullable: true,
+        items: { type: 'string' },
+        description:
+          'The member\'s resolved scopes in this workspace (`domain:level`), or null when ' +
+          'unrestricted. OWNER and ADMIN are always null. Drive navigation from this.',
+      },
     },
-    required: ['tenantId', 'tenantName', 'role'],
+    required: ['tenantId', 'tenantName', 'role', 'scopes'],
   },
 
   /**
@@ -388,7 +399,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
   MemberGrant: {
     type: 'object',
     description:
-      'A per-Application access grant. Only meaningful for MEMBER memberships — OWNER/ADMIN ' +
+      'A per-Application access grant. Only meaningful for MEMBER memberships, OWNER/ADMIN ' +
       'have implicit access to every Application, and a MEMBER with an empty list is in ' +
       'legacy mode (read-only on every Application).',
     properties: {
@@ -403,7 +414,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
 
   /**
    * An operator's membership of one workspace.
-   * Source: `MemberRow` (tenant-workspaces.service.ts) — note `membershipId` /
+   * Source: `MemberRow` (tenant-workspaces.service.ts), note `membershipId` /
    * `tenantUserId` / `joinedAt`, not `id` / `userId` / `createdAt`.
    */
   WorkspaceMember: {
@@ -417,14 +428,23 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
       role: { type: 'string', enum: ['OWNER', 'ADMIN', 'MEMBER'] },
       joinedAt: { type: 'string', format: 'date-time' },
       grants: { type: 'array', items: { $ref: 'MemberGrant#' } },
+      scopes: {
+        type: 'array',
+        nullable: true,
+        items: { type: 'string' },
+        description:
+          'The member\'s scopes as stored, or null when unrestricted. Only meaningful on a MEMBER.',
+      },
     },
-    required: ['membershipId', 'tenantUserId', 'email', 'role', 'joinedAt', 'grants'],
+    // `grants` and `scopes` are present for OWNER/ADMIN callers only. A MEMBER
+    // listing the roster gets the people, not their permissions.
+    required: ['membershipId', 'tenantUserId', 'email', 'role', 'joinedAt'],
   },
 
   /**
    * An invitation to join a workspace.
    * Source: `InvitationRow` (tenant-workspaces.service.ts). `status` is
-   * **derived** at read time, not a column — there are no `acceptedAt` /
+   * **derived** at read time, not a column, there are no `acceptedAt` /
    * `revokedAt` fields on the wire.
    */
   WorkspaceInvitation: {
@@ -447,14 +467,14 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
   },
 
   /**
-   * An operator personal access token (`rp_op_…`) — metadata only.
+   * An operator personal access token (`rp_op_…`), metadata only.
    * Source: `shapeOperatorToken` (tenant-auth.routes.ts).
    */
   OperatorToken: {
     type: 'object',
     description:
       'An operator personal access token. The raw `rp_op_…` secret is returned once, by the ' +
-      'mint endpoint only — never by a list or a get.',
+      'mint endpoint only, never by a list or a get.',
     properties: {
       id: { type: 'string' },
       name: { type: 'string' },
@@ -490,7 +510,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
    * The GDPR/DSAR data-export document.
    *
    * `GET /tenant/applications/{id}/end-users/{euid}/export` declared
-   * `{"type": "string"}` — because it is documented as a file download — and
+   * `{"type": "string"}`, because it is documented as a file download, and
    * returns a JSON **object**. A client generator turned that into
    * `Promise<string>`; the schema audit flagged it as describing something the
    * endpoint has never returned.
@@ -512,7 +532,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
       'Everything Rekey stores about one end-user, as one downloadable JSON document ' +
       '(GDPR Art. 15 / CCPA). Never contains credential material: no password hash, no ' +
       'token hashes, no MFA secrets or backup codes, no license key hash, no passkey ' +
-      'public keys. Several sections are capped server-side — `notes` says which.',
+      'public keys. Several sections are capped server-side, `notes` says which.',
     properties: {
       exportVersion: { type: 'integer', description: '1 today. Bumps when the shape changes.' },
       exportedAt: { type: 'string', format: 'date-time' },
@@ -520,7 +540,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
       notes: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Human-readable caveats — which sections hit a cap, what is excluded.',
+        description: 'Human-readable caveats, which sections hit a cap, what is excluded.',
       },
       endUser: {
         type: 'object',
@@ -544,7 +564,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
       oauthIdentities: { type: 'array', items: { type: 'object' } },
       sessions: {
         type: 'array',
-        description: 'Session METADATA only — never token material. Capped, newest first.',
+        description: 'Session METADATA only, never token material. Capped, newest first.',
         items: { type: 'object' },
       },
       mfa: {
@@ -565,7 +585,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
       payments: { type: 'array', items: { type: 'object' } },
       licenses: {
         type: 'array',
-        description: 'License metadata — `keyPrefix` only, never the key hash.',
+        description: 'License metadata, `keyPrefix` only, never the key hash.',
         items: { type: 'object' },
       },
       creditBalance: {
@@ -602,7 +622,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
   /** A metered-usage definition on an Application. Source: the `UsageMeter` Prisma row. */
   UsageMeter: {
     type: 'object',
-    description: 'A usage meter — the unit a USAGE-kind plan bills against.',
+    description: 'A usage meter, the unit a USAGE-kind plan bills against.',
     properties: {
       id: { type: 'string' },
       applicationId: { type: 'string' },
@@ -620,7 +640,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
    * One logged inbound API request. Source: `ApiRequestLogRow` (lib/request-log.ts).
    *
    * `routePath` is the route PATTERN (`/api/v1/tenant/applications/:id`), never
-   * the concrete URL — no path-param PII, no cardinality blowup. The table is
+   * the concrete URL, no path-param PII, no cardinality blowup. The table is
    * a capped convenience tail kept by a periodic pruner, not a billing-grade
    * audit trail, so a page `total` counts what survives pruning.
    */
@@ -648,6 +668,15 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
         description: 'Set for operator/panel traffic. Null for API-key and anonymous requests.',
       },
       ip: { type: 'string', nullable: true },
+      admittedScope: {
+        type: 'string',
+        nullable: true,
+        description:
+          'The membership scope that admitted this request, when a scope gate ran (a restricted ' +
+          'MEMBER on a scoped route). Null for OWNER/ADMIN, role-floor routes, open routes and ' +
+          'API-key traffic. The durable record of authority is the security event; this is the ' +
+          'per-request companion.',
+      },
       createdAt: { type: 'string', format: 'date-time' },
     },
     required: ['id', 'method', 'routePath', 'statusCode', 'durationMs', 'createdAt'],
@@ -672,7 +701,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
         description: 'Which template fired (e.g. `verify_email`). Null for ad-hoc sends.',
       },
       via: { type: 'string', description: 'The transport that carried it (e.g. `resend`, `smtp`).' },
-      status: { type: 'string', enum: ['sent', 'error', 'no_transport'] },
+      status: { type: 'string', enum: ['sent', 'error', 'no_transport', 'suppressed'] },
       messageId: { type: 'string', nullable: true },
       error: { type: 'string', nullable: true },
       createdAt: { type: 'string', format: 'date-time' },
@@ -682,7 +711,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
 
   /**
    * A registered passkey (WebAuthn credential).
-   * Source: `PasskeyRow` — the field is `deviceName`; there is no `deviceType`
+   * Source: `PasskeyRow`, the field is `deviceName`; there is no `deviceType`
    * or `backedUp` on the wire.
    */
   Passkey: {
@@ -703,13 +732,13 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
   },
 
   /**
-   * An operator session. Source: `AuthSessionResult` (tenant-auth.service.ts) —
+   * An operator session. Source: `AuthSessionResult` (tenant-auth.service.ts),
    * the token pair plus the workspace it is scoped to and the memberships the
    * panel's workspace switcher renders.
    */
   OperatorSession: {
     type: 'object',
-    description: 'An operator session — a token pair scoped to one workspace.',
+    description: 'An operator session, a token pair scoped to one workspace.',
     properties: {
       user: { $ref: 'Operator#' },
       memberships: {
@@ -741,7 +770,7 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
  * Components derived from `@rekey.dev/shared-types`.
  *
  * These are the shapes the SDKs already compile against, so deriving keeps the
- * document and the types from drifting apart — change the zod schema and this
+ * document and the types from drifting apart, change the zod schema and this
  * document changes with it.
  */
 const ZOD_COMPONENTS: Record<string, z.ZodTypeAny> = {
@@ -762,6 +791,7 @@ const ZOD_COMPONENTS: Record<string, z.ZodTypeAny> = {
   Subscription: SubscriptionDtoSchema,
   Payment: TenantPaymentDtoSchema,
   CheckoutResult: CheckoutResultDtoSchema,
+  TrialEligibilityItem: TrialEligibilityItemSchema,
   Coupon: CouponDtoSchema,
   PublicCoupon: PublicCouponDtoSchema,
   ValidateCouponResult: ValidateCouponResultDtoSchema,
@@ -771,6 +801,11 @@ const ZOD_COMPONENTS: Record<string, z.ZodTypeAny> = {
 
   License: LicenseDtoSchema,
   LicenseVerifyResult: LicenseVerifyResultDtoSchema,
+
+  Device: DeviceDtoSchema,
+  EndUserDevice: EndUserDeviceDtoSchema,
+  LicenseActivation: LicenseActivationDtoSchema,
+  LicenseDeactivateResult: LicenseDeactivateResultDtoSchema,
 
   UsageRecord: UsageRecordDtoSchema,
   UsageAggregate: UsageAggregateDtoSchema,
@@ -827,7 +862,7 @@ export function ref(name: ComponentName): JsonSchema {
   return { $ref: `${name}#` };
 }
 
-/** `{success: true, data: <data>}` — the success envelope. */
+/** `{success: true, data: <data>}`, the success envelope. */
 export function ok(data: JsonSchema, description = 'Success.'): JsonSchema {
   return {
     description,
@@ -841,11 +876,11 @@ export function ok(data: JsonSchema, description = 'Success.'): JsonSchema {
 }
 
 /**
- * `{success: true, data: {items: [...], page: PageMeta}}` — the list envelope.
+ * `{success: true, data: {items: [...], page: PageMeta}}`, the list envelope.
  *
  * Use this for every collection endpoint. A bare `data: [...]` array cannot
  * report `total`, so a caller has no way to tell a full page from a truncated
- * one — which is exactly the defect the functional audit found on 17 list
+ * one, which is exactly the defect the functional audit found on 17 list
  * operations.
  */
 export function okPage(item: JsonSchema, description = 'A page of results.'): JsonSchema {
@@ -863,7 +898,7 @@ export function okPage(item: JsonSchema, description = 'A page of results.'): Js
 }
 
 /**
- * `{success: true, data: [...]}` — an unpaginated array.
+ * `{success: true, data: [...]}`, an unpaginated array.
  *
  * Only for collections that are **bounded by construction** and cannot grow
  * with usage (a fixed provider list, an Application's OAuth providers, the
@@ -874,7 +909,7 @@ export function okArray(item: JsonSchema, description = 'Success.'): JsonSchema 
   return ok({ type: 'array', items: item }, description);
 }
 
-/** `{success: true, data: {ok: true}}` — acknowledgement, no entity. */
+/** `{success: true, data: {ok: true}}`, acknowledgement, no entity. */
 export function okFlag(description = 'Acknowledged.'): JsonSchema {
   return ok(ref('OkFlag'), description);
 }
@@ -887,8 +922,8 @@ export function okFlag(description = 'Acknowledged.'): JsonSchema {
  *
  * ```ts
  * ...errs({
- *   402: 'CREDITS_INSUFFICIENT — the balance is below `amount`.',
- *   409: 'PLAN_SLUG_TAKEN — another plan on this Application already uses that slug.',
+ *   402: 'CREDITS_INSUFFICIENT, the balance is below `amount`.',
+ *   409: 'PLAN_SLUG_TAKEN, another plan on this Application already uses that slug.',
  * })
  * ```
  */
@@ -903,7 +938,7 @@ export function errs(map: Record<number, string>): Record<number, JsonSchema> {
 /**
  * A non-JSON response (redirect, HTML, raw bytes).
  *
- * Some operations genuinely do not return the envelope — the OAuth authorize
+ * Some operations genuinely do not return the envelope, the OAuth authorize
  * endpoints 302 to the client's redirect URI, for instance. Declaring that is
  * still a contract; declaring `{success, data}` for it would be a lie.
  */

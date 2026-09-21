@@ -15,16 +15,18 @@
  *   - cross-tenant / cross-application 404 (no enumeration);
  *   - plain DELETE (no flag) still hard-deletes everything (back-compat);
  *   - a failed provider cancel REFUSES the delete (502 PROVIDER_CANCEL_FAILED)
- *     but does NOT block an erasure — the deliberate asymmetry.
+ *     but does NOT block an erasure, the deliberate asymmetry.
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import type { Prisma } from '@prisma/client';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { tombstoneEmail } from '../src/modules/tenant-applications/end-user-erasure.service.js';
 import { euLoginLockScope, getScopeLockState, LOGIN_POLICY } from '../src/lib/brute-force.js';
 import { FakeStripeProvider } from './fakes/billing-providers.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 
 interface Bootstrapped {
   applicationId: string;
@@ -104,7 +106,6 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
   /** Poll until `fn` returns truthy or the deadline passes (for fire-and-forget side effects). */
   async function waitFor<T>(fn: () => Promise<T>, timeoutMs = 2000): Promise<T> {
     const deadline = Date.now() + timeoutMs;
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       const v = await fn();
       if (v) return v;
@@ -297,18 +298,12 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
     expect(usageAfter.quantity).toBe(42);
     expect(usageAfter.metadata).toEqual({});
 
-    // Security event recorded (fire-and-forget — poll briefly).
-    const events = await waitFor(async () => {
-      const rows = await prisma.securityEvent.findMany({
-        where: { applicationId: b.applicationId, type: 'end_user.erased' },
-      });
-      return rows.length > 0 ? rows : null;
-    });
-    expect(events).not.toBeNull();
-    expect(events!).toHaveLength(1);
-    expect((events![0]!.metadata as { endUserId: string }).endUserId).toBe(euid);
+    // Security event recorded (fire-and-forget, poll briefly).
+    const events = await waitForSecurityEvents({ applicationId: b.applicationId, type: 'end_user.erased' });
+    expect(events).toHaveLength(1);
+    expect((events[0]!.metadata as { endUserId: string }).endUserId).toBe(euid);
 
-    // Webhook delivery enqueued for user.erased (fire-and-forget — poll briefly).
+    // Webhook delivery enqueued for user.erased (fire-and-forget, poll briefly).
     const deliveries = await waitFor(async () => {
       const rows = await prisma.webhookDelivery.findMany({
         where: { applicationId: b.applicationId, eventType: 'user.erased' },
@@ -374,7 +369,7 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
     expect(me.json().error.code).toBe('END_USER_ERASED');
 
     // Magic-link: requesting + verifying for the (old) email cannot revive them.
-    // (Magic-link may be disabled on the app — if so, this leg is a no-op; the
+    // (Magic-link may be disabled on the app, if so, this leg is a no-op; the
     // sign-in / access-token / refresh legs already prove the erasure block.)
     const reqRes = await app.inject({
       method: 'POST',
@@ -404,7 +399,7 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
   it('erasure drops the brute-force lock, which holds the address in plaintext', async () => {
     // The tombstone update used to zero `failedSignInAttempts` / `lockedUntil`
     // on the row. Lockout has been in Redis for several releases, so that
-    // erased nothing — and the limiter's key is
+    // erased nothing, and the limiter's key is
     // `bf:lock:eu:login:<appId>:<email>`, i.e. it holds the ERASED address in
     // plaintext for up to the 15-minute lock TTL, where the super-admin
     // locked-accounts dashboard enumerates it. An erasure that leaves the email
@@ -426,6 +421,239 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
 
     expect((await erase(b, euid)).statusCode).toBe(200);
     expect(await getScopeLockState(scope)).toEqual({ lockedForSec: null, failuresInWindow: 0 });
+  });
+
+  it('scrubs the address from email logs, suppressions and webhook payloads, and touches nobody else', async () => {
+    // The EndUser row was tombstoned while every log that copied the address
+    // at send or receive time kept it: the operator console still showed it,
+    // and the log archive would have exported it when the rows aged out.
+    const b = await bootstrap('logscrub');
+    const other = await bootstrap('logscrub-other');
+    const email = 'logsubject@example.com';
+    // Similar to the subject's address but not containing it, in the SAME Application.
+    const neighbourEmail = 'logsubject@example.co';
+    for (const x of [b, other]) {
+      await prisma.webhookEndpoint.create({
+        data: {
+          applicationId: x.applicationId,
+          url: 'https://example.com/hook',
+          secret: 'whsec_test_logscrub',
+          events: ['user.created'],
+          enabled: true,
+        },
+      });
+    }
+    const { euid } = await signUpUser(b, email);
+    const { euid: neighbour } = await signUpUser(b, neighbourEmail);
+    // The IDENTICAL address, in ANOTHER Application: a different data subject.
+    const { euid: twin } = await signUpUser(other, email);
+
+    // Real user.created deliveries carry the address. Enqueued fire-and-forget.
+    for (const [applicationId, id] of [
+      [b.applicationId, euid],
+      [b.applicationId, neighbour],
+      [other.applicationId, twin],
+    ] as const) {
+      const row = await waitFor(() =>
+        prisma.webhookDelivery.findFirst({
+          where: { applicationId, eventType: 'user.created', payload: { path: ['data', 'user', 'id'], equals: id } },
+        }),
+      );
+      expect(row).not.toBeNull();
+    }
+
+    async function seed(x: Bootstrapped, subjectId: string, address: string, tag: string) {
+      const endpoint = await prisma.webhookEndpoint.findFirstOrThrow({ where: { applicationId: x.applicationId } });
+      await prisma.emailLog.createMany({
+        data: [
+          {
+            tenantId: x.tenantId,
+            applicationId: x.applicationId,
+            toAddress: address,
+            subject: `Welcome, ${address}`,
+            eventKey: 'welcome',
+            via: 'byo_resend',
+            status: 'sent',
+            messageId: `msg-${tag}`,
+          },
+          {
+            tenantId: x.tenantId,
+            applicationId: x.applicationId,
+            toAddress: address,
+            subject: 'Reset your password',
+            eventKey: 'password_reset',
+            via: 'byo_smtp',
+            status: 'error',
+            error: `550 mailbox ${address.toUpperCase()} unavailable`,
+          },
+        ],
+      });
+      await prisma.emailSuppression.create({
+        data: { applicationId: x.applicationId, address, reason: 'bounce', note: 'hard bounce' },
+      });
+      const envelope = (eventId: string, type: string, data: Prisma.InputJsonObject) => ({
+        eventId,
+        occurredAt: new Date().toISOString(),
+        type,
+        applicationId: x.applicationId,
+        data,
+      });
+      await prisma.webhookDelivery.createMany({
+        data: [
+          {
+            endpointId: endpoint.id,
+            applicationId: x.applicationId,
+            eventId: `pc-${tag}`,
+            eventType: 'password.changed',
+            status: 'SUCCEEDED',
+            attempts: 1,
+            payload: envelope(`pc-${tag}`, 'password.changed', { userId: subjectId, email: address, via: 'reset' }),
+          },
+          {
+            endpointId: endpoint.id,
+            applicationId: x.applicationId,
+            eventId: `dev-${tag}`,
+            eventType: 'device.registered',
+            status: 'FAILED',
+            attempts: 5,
+            payload: envelope(`dev-${tag}`, 'device.registered', {
+              device: {
+                id: `dev-${tag}`,
+                endUserId: subjectId,
+                fingerprint: `fp-${tag}`,
+                label: `${address} laptop`,
+                status: 'ACTIVE',
+              },
+              reactivated: false,
+            }),
+          },
+        ],
+      });
+      await prisma.webhookEvent.create({
+        data: {
+          applicationId: x.applicationId,
+          provider: 'stripe',
+          providerEventId: `evt-${tag}`,
+          eventType: 'invoice.paid',
+          payload: {
+            id: `evt-${tag}`,
+            type: 'invoice.paid',
+            data: {
+              object: {
+                customer: `cus_${tag}`,
+                customer_email: address,
+                lines: [{ description: `Pro plan for ${address.toUpperCase()}` }],
+              },
+            },
+          },
+        },
+      });
+    }
+    await seed(b, euid, email, 'subject');
+    await seed(b, neighbour, neighbourEmail, 'neighbour');
+    await seed(other, twin, email, 'twin');
+    // A different customer whose address CONTAINS the subject's.
+    const lookalike = await prisma.webhookEvent.create({
+      data: {
+        applicationId: b.applicationId,
+        provider: 'stripe',
+        providerEventId: 'evt-lookalike',
+        eventType: 'invoice.paid',
+        payload: { data: { object: { customer_email: `x${email}` } } },
+      },
+    });
+
+    const countsFor = async (applicationId: string) => ({
+      emailLogs: await prisma.emailLog.count({ where: { applicationId } }),
+      deliveries: await prisma.webhookDelivery.count({ where: { applicationId } }),
+      receipts: await prisma.webhookEvent.count({ where: { applicationId } }),
+    });
+    // Rows that must come through byte-for-byte: everything in the other
+    // Application, and the neighbour's rows in this one. Deliveries compare on
+    // payload only; a PENDING one may be attempted while the test runs.
+    const untouched = async () => ({
+      logs: await prisma.emailLog.findMany({
+        where: { OR: [{ applicationId: other.applicationId }, { toAddress: neighbourEmail }] },
+        orderBy: { id: 'asc' },
+      }),
+      suppressions: await prisma.emailSuppression.findMany({
+        where: { OR: [{ applicationId: other.applicationId }, { address: neighbourEmail }] },
+        orderBy: { id: 'asc' },
+      }),
+      deliveries: await prisma.webhookDelivery.findMany({
+        where: {
+          OR: [
+            { applicationId: other.applicationId },
+            { eventId: { endsWith: '-neighbour' } },
+            { payload: { path: ['data', 'user', 'id'], equals: neighbour } },
+          ],
+        },
+        select: { id: true, payload: true },
+        orderBy: { id: 'asc' },
+      }),
+      receipts: await prisma.webhookEvent.findMany({
+        where: {
+          OR: [
+            { applicationId: other.applicationId },
+            { providerEventId: { in: ['evt-neighbour', 'evt-lookalike'] } },
+          ],
+        },
+        orderBy: { id: 'asc' },
+      }),
+    });
+    const countsBefore = await countsFor(b.applicationId);
+    const untouchedBefore = await untouched();
+
+    expect((await erase(b, euid)).statusCode).toBe(200);
+
+    // Nothing left anywhere in this Application that carries the raw address
+    // (the lookalike receipt is a different address that contains it).
+    const like = `%${email}%`;
+    const [left] = await prisma.$queryRaw<[{ logs: number; suppressions: number; deliveries: number; receipts: number }]>`
+      SELECT
+        (SELECT count(*)::int FROM email_logs WHERE application_id = ${b.applicationId}
+           AND (to_address ILIKE ${like} OR subject ILIKE ${like} OR coalesce(error, '') ILIKE ${like})) AS logs,
+        (SELECT count(*)::int FROM email_suppressions WHERE application_id = ${b.applicationId}
+           AND address ILIKE ${like}) AS suppressions,
+        (SELECT count(*)::int FROM webhook_deliveries WHERE application_id = ${b.applicationId}
+           AND payload::text ILIKE ${like}) AS deliveries,
+        (SELECT count(*)::int FROM webhook_events WHERE application_id = ${b.applicationId}
+           AND id <> ${lookalike.id} AND payload::text ILIKE ${like}) AS receipts`;
+    expect(left).toEqual({ logs: 0, suppressions: 0, deliveries: 0, receipts: 0 });
+
+    // Log and delivery rows are kept; the suppression is the one row that goes.
+    expect(await countsFor(b.applicationId)).toEqual(countsBefore);
+    expect(await prisma.emailSuppression.count({ where: { applicationId: b.applicationId } })).toBe(1);
+
+    // The other personal fields of our own payloads, not only the address.
+    const device = await prisma.webhookDelivery.findFirstOrThrow({ where: { eventId: 'dev-subject' } });
+    expect(device.status).toBe('FAILED');
+    expect(device.attempts).toBe(5);
+    expect((device.payload as { data: { device: Record<string, unknown> } }).data.device).toMatchObject({
+      endUserId: euid,
+      fingerprint: 'erased',
+      label: null,
+    });
+    const created = await prisma.webhookDelivery.findFirstOrThrow({
+      where: { applicationId: b.applicationId, payload: { path: ['data', 'user', 'id'], equals: euid } },
+    });
+    expect((created.payload as { data: { user: { email: string } } }).data.user.email).toBe(tombstoneEmail(euid));
+    const logs = await prisma.emailLog.findMany({ where: { applicationId: b.applicationId, toAddress: tombstoneEmail(euid) } });
+    // Seeded rows plus whatever sign-up itself sent; all of them now point at the tombstone.
+    expect(logs.map((l) => l.status)).toEqual(expect.arrayContaining(['error', 'sent']));
+    expect(logs.every((l) => l.subject === '[erased]')).toBe(true);
+
+    // Everyone else: byte-for-byte.
+    expect(await untouched()).toEqual(untouchedBefore);
+
+    // And their data export still carries their own data.
+    const exported = await app.inject({
+      method: 'GET',
+      url: `/api/v1/tenant/applications/${b.applicationId}/end-users/${neighbour}/export`,
+      headers: { authorization: `Bearer ${b.tenantAccess}` },
+    });
+    expect(exported.statusCode).toBe(200);
+    expect((JSON.parse(exported.body) as { endUser: { email: string } }).endUser.email).toBe(neighbourEmail);
   });
 
   it('is idempotent — erasing an already-erased user is a no-op', async () => {
@@ -585,15 +813,9 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
       expect(await prisma.endUser.findUnique({ where: { id: euid } })).toBeNull();
 
       // end_user.deleted security event recorded.
-      const events = await waitFor(async () => {
-        const rows = await prisma.securityEvent.findMany({
-          where: { applicationId: b.applicationId, type: 'end_user.deleted' },
-        });
-        return rows.length > 0 ? rows : null;
-      });
-      expect(events).not.toBeNull();
-      expect(events!).toHaveLength(1);
-      expect((events![0]!.metadata as { providerSubscriptionsCanceled: number }).providerSubscriptionsCanceled).toBe(1);
+      const events = await waitForSecurityEvents({ applicationId: b.applicationId, type: 'end_user.deleted' });
+      expect(events).toHaveLength(1);
+      expect((events[0]!.metadata as { providerSubscriptionsCanceled: number }).providerSubscriptionsCanceled).toBe(1);
 
       // user.deleted webhook delivery enqueued.
       const deliveries = await waitFor(async () => {
@@ -627,17 +849,12 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
       expect(res.statusCode).toBe(502);
       expect(res.json().error.code).toBe('PROVIDER_CANCEL_FAILED');
       expect(cancelSpy).toHaveBeenCalledTimes(1);
-      // The user must survive — that is the whole point of refusing.
+      // The user must survive, that is the whole point of refusing.
       expect(await prisma.endUser.findUnique({ where: { id: euid } })).not.toBeNull();
 
       // And the blocked attempt is auditable, so an operator can see why.
-      const blocked = await waitFor(async () => {
-        const rows = await prisma.securityEvent.findMany({
-          where: { applicationId: b.applicationId, type: 'end_user.delete_blocked' },
-        });
-        return rows.length > 0 ? rows : null;
-      });
-      expect((blocked![0]!.metadata as { reason: string }).reason).toBe(
+      const blocked = await waitForSecurityEvents({ applicationId: b.applicationId, type: 'end_user.delete_blocked' });
+      expect((blocked[0]!.metadata as { reason: string }).reason).toBe(
         'provider_subscription_cancel_failed',
       );
     });
@@ -675,13 +892,8 @@ describe('end-user erasure (GDPR right to be forgotten)', () => {
       expect((cancelSpy.mock.calls[0]![0] as { subscription: { id: string } }).subscription.id).toBe(subId);
 
       // The erasure security event records the cancel count.
-      const events = await waitFor(async () => {
-        const rows = await prisma.securityEvent.findMany({
-          where: { applicationId: b.applicationId, type: 'end_user.erased' },
-        });
-        return rows.length > 0 ? rows : null;
-      });
-      expect((events![0]!.metadata as { providerSubscriptionsCanceled: number }).providerSubscriptionsCanceled).toBe(1);
+      const events = await waitForSecurityEvents({ applicationId: b.applicationId, type: 'end_user.erased' });
+      expect((events[0]!.metadata as { providerSubscriptionsCanceled: number }).providerSubscriptionsCanceled).toBe(1);
     });
   });
 });

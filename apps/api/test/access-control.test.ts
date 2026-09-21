@@ -4,7 +4,7 @@
  *   - Per-app CORS origins folded into the API CORS allowlist.
  *
  * inject() requests originate from 127.0.0.1 and trustProxy is off in test, so
- * `req.ip` is 127.0.0.1 — we drive the allowlist relative to that. Domain
+ * `req.ip` is 127.0.0.1, we drive the allowlist relative to that. Domain
  * tables are truncated before every test (test/setup.ts), so each case
  * bootstraps its own operator + app + key inside the test body.
  */

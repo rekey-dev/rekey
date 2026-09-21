@@ -1,5 +1,5 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 
 /**
  * Table primitives for operator list views. Replaces the hand-rolled
@@ -13,7 +13,7 @@ import Link from 'next/link';
  *    header is a small-caps, tracked label for scannability.
  *  - Subtle zebra striping + row hover so the eye can track a row across many
  *    columns without heavy rules between every row.
- *  - Token-based borders/surfaces only — no hardcoded neutral-* colors.
+ *  - Token-based borders/surfaces only, no hardcoded neutral-* colors.
  *
  * Composition:
  *   <Table>
@@ -106,10 +106,8 @@ export function TR({
   );
 }
 
-// ─── Sortable headers ────────────────────────────────────────────────
-//
-// Server-component friendly (like the Pager): the header is a plain <Link>
-// that flips ?sort/?order query params — no client JS. Pages read the params
+// Sortable headers: server-component friendly (like the Pager). The header is a plain <Link>
+// that flips ?sort/?order query params, no client JS. Pages read the params
 // with `readSort` (allowlist-validated), pass them through to the API, and
 // hand each sortable <TH> the next-state href from `sortToggleHref`.
 // Click cycle per column: unsorted → asc → desc → unsorted (server default).
@@ -138,7 +136,7 @@ export function readSort<K extends string>(
  * Build the `sort` prop for one sortable <TH>: the column's current direction
  * (null when this column isn't the active sort) plus the href that advances it
  * to the next cycle state. `extraParams` preserves filters/page-size; offset is
- * deliberately dropped — re-sorting restarts at page 1.
+ * deliberately dropped, re-sorting restarts at page 1.
  */
 export function sortToggleHref({
   basePath,
@@ -176,7 +174,7 @@ export function TH({
   align?: Align;
   className?: string;
   scope?: 'col' | 'row';
-  /** Optional sortable affordance — pass the result of `sortToggleHref`. */
+  /** Optional sortable affordance, pass the result of `sortToggleHref`. */
   sort?: { dir: SortDir | null; href: string };
 }): React.JSX.Element {
   return (
@@ -234,7 +232,7 @@ export function TD({
   /** Convenience: monospace (ids, slugs, keys). */
   mono?: boolean;
   colSpan?: number;
-  /** Tooltip — pass the full value when the cell content is truncated. */
+  /** Tooltip, pass the full value when the cell content is truncated. */
   title?: string;
 }): React.JSX.Element {
   return (

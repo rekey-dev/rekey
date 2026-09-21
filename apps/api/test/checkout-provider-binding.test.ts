@@ -222,7 +222,7 @@ describe('a subscription binds its buyer to one payment provider', () => {
    * The subject is exclusive per Application (#431): a user-subject app now
    * refuses a checkout that names an organization outright, before any binding
    * guard runs. The tests below are about the SUBJECT-CONFLICT guard, which
-   * survives that change because it defends a state exclusivity cannot undo —
+   * survives that change because it defends a state exclusivity cannot undo,
    * rows that already mix subjects, from before the rule existed or from an
    * app that was toggled while empty. Seeding a personal row here and checking
    * out for an org is exactly that legacy shape.
@@ -451,7 +451,7 @@ describe('a subscription binds its buyer to one payment provider', () => {
     // subject guard protects a LIVE subscription, because that is the one an
     // opened checkout was silently destroying. A PENDING row is a checkout
     // nobody completed, and refusing over it would tell the buyer to cancel
-    // something that does not exist — the exact shape of refusal that had to
+    // something that does not exist, the exact shape of refusal that had to
     // be removed once already for one-off purchases.
     //
     // What it leaves open is narrow and is not new: the earlier subject's
@@ -641,11 +641,16 @@ describe('a subscription binds its buyer to one payment provider', () => {
     const { basic, pro } = await twoPlans();
     const user = await signUp();
     const stale = await seedSub({ endUserId: user.id, planSlug: basic, status: 'PENDING' });
-    // `updatedAt` is maintained by Prisma, so age it in SQL rather than asking
-    // for a value the client will overwrite.
-    await prisma.$executeRaw`UPDATE subscriptions SET updated_at = ${new Date(
-      Date.now() - CHECKOUT_SESSION_LIFETIME_MS - 60_000,
-    )} WHERE id = ${stale.id}`;
+    // Aged through the model, not raw SQL. An explicit `updatedAt` overrides
+    // `@updatedAt`, and it is the only way to write the column the way the
+    // binding query reads it: `$executeRaw` hands Postgres an offset-aware
+    // value that a `TIMESTAMP(3)` column casts through the SESSION time zone,
+    // so anywhere but UTC the row lands one offset in the future and never
+    // looks stale. Green in CI, red on every developer east of Greenwich.
+    await prisma.subscription.update({
+      where: { id: stale.id },
+      data: { updatedAt: new Date(Date.now() - CHECKOUT_SESSION_LIFETIME_MS - 60_000) },
+    });
 
     const res = await checkout(user.token, pro, 'stripe');
 

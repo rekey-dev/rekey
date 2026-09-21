@@ -1,5 +1,5 @@
 /**
- * Per-app portal session — httpOnly cookies, **scoped to the app's path**
+ * Per-app portal session, httpOnly cookies, **scoped to the app's path**
  * (`/<slug>`) so app A's session can't be replayed on app B under the shared
  * portal host. Tokens never reach client JS.
  */
@@ -11,11 +11,20 @@ import { RekeyBrowserClient } from '@rekey.dev/react';
 import { rekeyApiUrl } from './env';
 import { getPortalConfig } from './config';
 import { cookieSecure } from './cookie-secure';
+import { API_TIMEOUT_MS, forwardedClientHeaders } from './client-ip';
 
 const ACCESS = 'rekey_portal_access';
 const REFRESH = 'rekey_portal_refresh';
-const ACCESS_MAX_AGE = 60 * 15; // 15 min
-const REFRESH_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
+// Fallbacks only: the API's lifetimes are deployment settings and every auth
+// response carries the expiries, which `setSession` prefers.
+const ACCESS_MAX_AGE = 60 * 15;
+const REFRESH_MAX_AGE = 60 * 60 * 24 * 30;
+
+function secondsUntil(iso: string | undefined): number | null {
+  if (!iso) return null;
+  const ms = Date.parse(iso) - Date.now();
+  return Number.isNaN(ms) ? null : Math.max(60, Math.floor(ms / 1000));
+}
 
 async function cookieOpts(slug: string, maxAge: number) {
   return {
@@ -31,13 +40,26 @@ async function cookieOpts(slug: string, maxAge: number) {
 export async function portalClientFor(slug: string): Promise<RekeyBrowserClient | null> {
   const config = await getPortalConfig(slug);
   if (!config) return null;
-  return new RekeyBrowserClient({ apiUrl: rekeyApiUrl(), publishableKey: config.publishableKey });
+  // The SDK's calls run on the portal server too (sign-in, MFA, refresh), so
+  // they carry the vouched visitor address and a timeout like every other
+  // portal call (lib/client-ip.ts). Sign-in limits are per client IP.
+  const forwarded = await forwardedClientHeaders();
+  const portalFetch: typeof fetch = (input, init) => {
+    const merged = new Headers(init?.headers);
+    for (const [name, value] of Object.entries(forwarded)) merged.set(name, value);
+    return fetch(input, { ...init, headers: merged, signal: init?.signal ?? AbortSignal.timeout(API_TIMEOUT_MS) });
+  };
+  return new RekeyBrowserClient({
+    apiUrl: rekeyApiUrl(),
+    publishableKey: config.publishableKey,
+    fetch: portalFetch,
+  });
 }
 
 /**
  * Cookie writes are only allowed from server actions / route handlers. During a
  * Server Component render (e.g. the silent refresh inside `getPortalUser`) Next
- * throws "Cookies can only be modified in a Server Action or Route Handler" — we
+ * throws "Cookies can only be modified in a Server Action or Route Handler", we
  * swallow that one case so the request still renders with the fresh token; the
  * cookie lands on the next action-context write. Other errors propagate.
  */
@@ -47,11 +69,16 @@ function tolerateRenderContext(err: unknown): void {
   throw err;
 }
 
-export async function setSession(slug: string, accessToken: string, refreshToken: string): Promise<void> {
+export async function setSession(
+  slug: string,
+  accessToken: string,
+  refreshToken: string,
+  expiries: { accessTokenExpiresAt?: string; refreshTokenExpiresAt?: string } = {},
+): Promise<void> {
   try {
     const jar = await cookies();
-    jar.set(ACCESS, accessToken, await cookieOpts(slug, ACCESS_MAX_AGE));
-    jar.set(REFRESH, refreshToken, await cookieOpts(slug, REFRESH_MAX_AGE));
+    jar.set(ACCESS, accessToken, await cookieOpts(slug, secondsUntil(expiries.accessTokenExpiresAt) ?? ACCESS_MAX_AGE));
+    jar.set(REFRESH, refreshToken, await cookieOpts(slug, secondsUntil(expiries.refreshTokenExpiresAt) ?? REFRESH_MAX_AGE));
   } catch (err) {
     tolerateRenderContext(err);
   }
@@ -82,8 +109,8 @@ export async function getRefreshToken(): Promise<string | null> {
  *
  * Refresh tokens rotate and are single-use: the first exchange invalidates the
  * presented token, so a second CONCURRENT exchange of the same token gets a
- * 401. That is correct server behaviour — reuse detection is a security
- * feature — but it means concurrent refreshers cannot both win, and the loser
+ * 401. That is correct server behaviour, reuse detection is a security
+ * feature, but it means concurrent refreshers cannot both win, and the loser
  * here lands in the `catch` below, which clears the session and signs the
  * customer out mid-page.
  *
@@ -94,7 +121,7 @@ export async function getRefreshToken(): Promise<string | null> {
  * rotates the cookies and the other is told its token is already spent.
  *
  * This is the same failure the panel diagnosed in production and fixed in
- * `apps/panel/src/lib/api.ts` — "5 of 8 refreshes in a 40-minute session
+ * `apps/panel/src/lib/api.ts`, "5 of 8 refreshes in a 40-minute session
  * returned 401, with pairs landing in the same millisecond". The panel's bug
  * report was a spec for a bug that was still live here.
  *

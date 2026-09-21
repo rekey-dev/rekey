@@ -12,6 +12,8 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { entitlementsService } from '../src/modules/billing/entitlements.service.js';
 import { creditsService } from '../src/modules/credits/credits.service.js';
+import { billingService } from '../src/modules/billing/billing.service.js';
+import { accountTools } from '../src/modules/mcp/account-tools.js';
 
 describe('Org-beneficiary billing', () => {
   let app: FastifyInstance;
@@ -180,5 +182,98 @@ describe('Org-beneficiary billing', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().data.balance).toBe(60);
     expect(await creditsService.getBalance(appId, { organizationId: orgId })).toBe(60);
+  });
+  it("a personal subscription lookup does not return the org's, even when the org one is newer", async () => {
+    // The defect: `endUserId` is required on every Subscription, so an
+    // org-beneficiary row also carries the buyer's personal id. A lookup
+    // filtering on `endUserId` alone matched it, and the query is newest-first,
+    // so the org purchase shadowed the buyer's own subscription. Callers that
+    // cancel what this returns would have cancelled the organization's.
+    for (const slug of ['solo', 'crew']) {
+      await app.inject({
+        method: 'POST',
+        url: `/api/v1/tenant/applications/${appId}/plans`,
+        headers: auth(),
+        payload: { slug, name: slug, amount: 0, kind: 'SUBSCRIPTION' },
+      });
+    }
+    const personalPlan = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'solo' } });
+    const orgPlan = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'crew' } });
+
+    const buyerId = await makeEndUser(`buyer-${Math.random().toString(36).slice(2, 7)}@example.com`);
+    const orgId = await app
+      .inject({
+        method: 'POST',
+        url: `/api/v1/tenant/applications/${appId}/organizations`,
+        headers: auth(),
+        payload: { name: 'Beta', slug: `beta-${Math.random().toString(36).slice(2, 7)}`, ownerEndUserId: buyerId },
+      })
+      .then((r) => (r.json().data as { id: string }).id);
+
+    // Stamped rather than relying on insertion order: the org row must be
+    // unambiguously NEWER, or a `createdAt: desc` query proves nothing.
+    const personalSub = await prisma.subscription.create({
+      data: {
+        applicationId: appId,
+        endUserId: buyerId,
+        planId: personalPlan.id,
+        beneficiaryOrgId: null,
+        status: 'ACTIVE',
+        createdAt: new Date(Date.now() - 60_000),
+      },
+    });
+    const orgSub = await prisma.subscription.create({
+      data: {
+        applicationId: appId,
+        endUserId: buyerId,
+        planId: orgPlan.id,
+        beneficiaryOrgId: orgId,
+        status: 'ACTIVE',
+        createdAt: new Date(),
+      },
+    });
+
+    const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
+    const buyer = await prisma.endUser.findUniqueOrThrow({ where: { id: buyerId } });
+
+    // THE assertion: the personal lookup returns the personal row.
+    const mine = await billingService.getCurrentSubscription(application, buyer);
+    expect(mine?.id).toBe(personalSub.id);
+    expect(mine?.beneficiaryOrgId).toBeNull();
+
+    // The org lookup still finds the org row, so the fix did not just hide it.
+    const theirs = await billingService.getCurrentSubscription(application, buyer, { organizationId: orgId });
+    expect(theirs?.id).toBe(orgSub.id);
+
+    // And a buyer with ONLY an org subscription has no personal one, rather
+    // than borrowing the org's.
+    const orgOnlyId = await makeEndUser(`orgonly-${Math.random().toString(36).slice(2, 7)}@example.com`);
+    await prisma.subscription.create({
+      data: {
+        applicationId: appId,
+        endUserId: orgOnlyId,
+        planId: orgPlan.id,
+        beneficiaryOrgId: orgId,
+        status: 'ACTIVE',
+      },
+    });
+    const orgOnly = await prisma.endUser.findUniqueOrThrow({ where: { id: orgOnlyId } });
+    expect(await billingService.getCurrentSubscription(application, orgOnly)).toBeNull();
+
+    // Same defect, second surface: the end-user MCP `get_subscription` tool,
+    // whose description says it answers for the signed-in user. Handlers are
+    // transport-agnostic, so call it directly.
+    const getSubscription = accountTools.find((t) => t.name === 'get_subscription');
+    expect(getSubscription).toBeDefined();
+    const viaMcp = (await getSubscription!.handler({
+      applicationId: appId,
+      endUserId: buyerId,
+    })) as { plan: { slug: string } } | null;
+    expect(viaMcp?.plan.slug).toBe('solo');
+
+    // The org-only buyer has nothing personal to report, rather than the org's.
+    expect(
+      await getSubscription!.handler({ applicationId: appId, endUserId: orgOnlyId }),
+    ).toBeNull();
   });
 });

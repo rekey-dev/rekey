@@ -1,6 +1,6 @@
 {
   "name": "@rekey.dev/mcp",
-  "version": "2.1.0",
+  "version": "2.2.0-rc.1",
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
@@ -28,8 +28,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && chmod +x dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "echo \"(eslint not yet wired)\"",
-    "test": "tsc -p tsconfig.json && vitest run"
+    "lint": "eslint .",
+    "test": "tsc -p tsconfig.json && vitest run",
+    "lint:fix": "eslint . --fix --fix-type problem,suggestion,layout"
   },
   "keywords": [
     "rekey",

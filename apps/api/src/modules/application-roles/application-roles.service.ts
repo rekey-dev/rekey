@@ -1,18 +1,18 @@
 /**
  * Per-Application end-user role catalog.
  *
- * Roles are free-form names ("user", "admin", "editor"…) — we don't ship
+ * Roles are free-form names ("user", "admin", "editor"…), we don't ship
  * an enum. The catalog table guarantees:
  *   - Uniqueness within an Application (no typo'd duplicates).
  *   - Existence: writes to EndUser.role validate against this list.
  *   - A single default role: assigned to every public sign-up.
  *
  * Operators manage the catalog through the panel (tenant JWT). End-users
- * never touch it — the SDK has no role-mutation surface, and the only
+ * never touch it, the SDK has no role-mutation surface, and the only
  * write paths to EndUser.role are operator-scoped.
  *
  * Bootstrap: every Application is seeded with a `user` role (isDefault).
- * See applications.service.create — it inserts the row in the same
+ * See applications.service.create, it inserts the row in the same
  * transaction.
  */
 
@@ -35,9 +35,8 @@ export const applicationRolesService = {
       where: { applicationId, isDefault: true },
     });
     if (!def) {
-      // No default configured — fall back to any role with name "user", or
-      // the first one. The bootstrap should always have created one but a
-      // panel operator could have ended up here by deleting it.
+      // No default configured: fall back to the oldest role. Bootstrap always
+      // creates a default, but an operator can reach this by deleting it.
       const any = await prisma.applicationRole.findFirst({
         where: { applicationId },
         orderBy: { createdAt: 'asc' },
@@ -77,10 +76,10 @@ export const applicationRolesService = {
   /**
    * Seed the bootstrap `user` role for a freshly-created Application. Idempotent.
    *
-   * Currently UNCALLED: `applicationsService.create` inlines the equivalent
-   * `tx.applicationRole.create` inside its own transaction. Kept because it is the
-   * idempotent form — reach for it if a backfill or repair path ever needs to
-   * guarantee the default role exists without knowing whether it already does.
+   * Currently unused: `applicationsService.create` inlines the equivalent
+   * `tx.applicationRole.create` in its own transaction. Kept as the idempotent
+   * form for a backfill or repair path that needs to guarantee the default
+   * role exists without knowing whether it already does.
    */
   async seedDefault(tx: typeof prisma, applicationId: string): Promise<void> {
     await tx.applicationRole.upsert({
@@ -179,7 +178,7 @@ export const applicationRolesService = {
   /**
    * Delete a role. Refuses if the role is the default. If any EndUser
    * still holds it, the caller must pass `reassignTo` (the name of
-   * another role in this Application's catalog) — the service does the
+   * another role in this Application's catalog), the service does the
    * bulk-update + delete atomically.
    *
    * `reassignTo` semantics:

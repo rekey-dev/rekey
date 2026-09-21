@@ -1,11 +1,12 @@
 import * as React from 'react';
 import type { Metadata } from 'next';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { randomUUID } from 'node:crypto';
-import { publicPost, publicGet, setSessionCookies, PanelApiError, type SignInResponse } from '@/lib/api';
+import { publicPost, publicGet, setSessionCookies, PanelApiError, type SignInResponse, type AuthResponse } from '@/lib/api';
 import { PasskeyLoginButton } from '@/components/PasskeyLoginButton';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { AuthCard, OrDivider } from '@/components/AuthCard';
 import { Banner } from '@/components/Banner';
@@ -21,7 +22,7 @@ async function signIn(formData: FormData): Promise<void> {
   const password = String(formData.get('password') ?? '');
   const next = safeNext(formData.get('next'));
   // Preserve the typed email (never the password) so a failed sign-in doesn't
-  // make the operator retype it — and the `next` target so a retry still
+  // make the operator retype it, and the `next` target so a retry still
   // round-trips back (e.g. accept-invite).
   const keep = `&email=${encodeURIComponent(email)}${next ? `&next=${encodeURIComponent(next)}` : ''}`;
   if (!email || !password) redirect(`/login?error=missing${keep}`);
@@ -36,7 +37,7 @@ async function signIn(formData: FormData): Promise<void> {
     throw err;
   }
 
-  // MFA enrolled — redirect to the verify page carrying the challenge
+  // MFA enrolled, redirect to the verify page carrying the challenge
   // token in the URL. The token is single-use, 5-min-lifetime, and bound
   // to this operator + this sign-in attempt.
   if (result.mfaRequired) {
@@ -46,12 +47,12 @@ async function signIn(formData: FormData): Promise<void> {
     );
   }
 
-  await setSessionCookies({ accessToken: result.accessToken, refreshToken: result.refreshToken });
+  await setSessionCookies(result);
   if (next) redirect(`${next}${next.includes('?') ? '&' : '?'}e=login`);
   redirect('/applications?e=login');
 }
 
-/** Begin a passkey sign-in — returns the assertion options for the browser. */
+/** Begin a passkey sign-in, returns the assertion options for the browser. */
 async function startPasskeyLogin(): Promise<
   | { ok: true; options: Record<string, unknown>; expectedChallenge: string }
   | { ok: false; message: string }
@@ -85,9 +86,9 @@ async function completePasskeyLogin(formData: FormData): Promise<void> {
   } catch {
     redirect(`/login?error=PASSKEY_RESPONSE_INVALID${keep}`);
   }
-  let result: { accessToken: string; refreshToken: string };
+  let result: Pick<AuthResponse, 'accessToken' | 'refreshToken' | 'accessTokenExpiresAt' | 'refreshTokenExpiresAt'>;
   try {
-    result = await publicPost<{ accessToken: string; refreshToken: string }>(
+    result = await publicPost<typeof result>(
       '/api/v1/tenant/auth/passkeys/authenticate/complete',
       { response, expectedChallenge },
     );
@@ -97,7 +98,7 @@ async function completePasskeyLogin(formData: FormData): Promise<void> {
     }
     throw err;
   }
-  await setSessionCookies({ accessToken: result.accessToken, refreshToken: result.refreshToken });
+  await setSessionCookies(result);
   if (next) redirect(`${next}${next.includes('?') ? '&' : '?'}e=login_passkey`);
   redirect('/applications?e=login_passkey');
 }
@@ -108,7 +109,7 @@ async function completePasskeyLogin(formData: FormData): Promise<void> {
  * (/login/oauth/[provider]/callback) verifies the cookie against the returned
  * `state` before exchanging the code.
  *
- * `_formData` is the Next bound-action arg (ignored — provider is bound).
+ * `_formData` is the Next bound-action arg (ignored, provider is bound).
  */
 async function startOAuth(provider: string, next: string | null, _formData: FormData): Promise<void> {
   'use server';
@@ -116,7 +117,7 @@ async function startOAuth(provider: string, next: string | null, _formData: Form
   const jar = await cookies();
   const secure = await cookieSecure();
   // `lax`, not `strict`: the provider redirects back via a top-level cross-site
-  // GET on which a Strict cookie is NOT sent — which would break the CSRF check.
+  // GET on which a Strict cookie is NOT sent, which would break the CSRF check.
   const opts = { httpOnly: true as const, sameSite: 'lax' as const, secure, path: '/', maxAge: 600 };
   jar.set('oauth_state', state, opts);
   jar.set('oauth_provider', provider, opts);
@@ -157,7 +158,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   github: 'Continue with GitHub',
   // Operator sign-in against one of this deployment's own Applications. The
   // label names the site the operator already has an account on, which is the
-  // only thing that makes the button meaningful — "Continue with Rekey" on
+  // only thing that makes the button meaningful, "Continue with Rekey" on
   // Rekey's own panel would say nothing.
   rekey: `Continue with ${PANEL_OAUTH_REKEY_LABEL}`,
 };
@@ -168,7 +169,7 @@ const PROVIDER_LABELS: Record<string, string> = {
  * For a deployment where nearly every operator arrives through the OIDC button,
  * a password form sitting above it is the wrong default: it is the path almost
  * nobody should take, occupying the position that says "take this path".
- * Password sign-in is not removed — an operator who set one, or who needs it
+ * Password sign-in is not removed, an operator who set one, or who needs it
  * when the provider is down, still has it one click away.
  */
 const PASSWORD_SECONDARY = process.env.PANEL_PASSWORD_LOGIN_SECONDARY === 'true';
@@ -176,8 +177,8 @@ const PASSWORD_SECONDARY = process.env.PANEL_PASSWORD_LOGIN_SECONDARY === 'true'
 /**
  * Which credential this deployment leads with.
  *
- * `magic_link` suits a deployment whose operators never set a password —
- * arriving by invite, by OIDC, or by emailed link — where a password form in
+ * `magic_link` suits a deployment whose operators never set a password,
+ * arriving by invite, by OIDC, or by emailed link, where a password form in
  * the primary position is the path almost nobody should take, sitting where the
  * page says "start here".
  *
@@ -206,7 +207,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   // The one an operator hits after a *successful* authentication: the account
   // is real, the password was right, and this deployment simply has not let
   // them in. Reported externally as rekey-dev/rekey#19, where it rendered
-  // nothing at all — the code was not in this map, and an unmapped code paints
+  // nothing at all, the code was not in this map, and an unmapped code paints
   // no banner. Silence on the screen where trust is decided.
   //
   // The wording differs by deployment and must: a self-hoster's operators get
@@ -218,7 +219,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   OPERATOR_SIGNUP_CLOSED: 'This deployment is not accepting new operators.',
   OAUTH_PROVIDER_NOT_CONFIGURED: 'That sign-in provider is not enabled on this deployment.',
   OAUTH_PROVIDER_UNKNOWN: 'Unknown sign-in provider.',
-  OAUTH_EMAIL_NOT_VERIFIED: 'Your provider account email is not verified — verify it at the provider, then retry.',
+  OAUTH_EMAIL_NOT_VERIFIED: 'Your provider account email is not verified. Verify it at the provider, then retry.',
   OAUTH_NO_EMAIL: 'Your provider account did not share an email. Grant email access, then retry.',
   oauth_state: 'Sign-in session expired or could not be verified. Please try again.',
   oauth_no_code: 'The provider sent you back without an authorization code. Start the sign-in again.',
@@ -226,13 +227,13 @@ const ERROR_MESSAGES: Record<string, string> = {
   // Named precisely because it is the one with a cause worth chasing: the
   // browser did not return the cookie we set when the flow began.
   oauth_cookie_missing:
-    'Your browser did not send back the sign-in cookie. If you are blocking cookies for this site, allow them and try again — otherwise this is a bug worth reporting.',
+    'Your browser did not send back the sign-in cookie. If you are blocking cookies for this site, allow them and try again. Otherwise this is a bug worth reporting.',
   oauth_state_mismatch:
     'This sign-in link belongs to a different attempt. Start again from this page rather than reusing an old link.',
   oauth_provider_mismatch: 'That sign-in link is for a different provider. Start again.',
   oauth_denied: 'Sign-in was cancelled at the provider.',
   cloud_handoff: 'That sign-in link is missing its token. Start again from rekey.dev.',
-  OIDC_ASSERTION_INVALID: 'That sign-in link is not valid — they are single-use and short-lived. Start again from rekey.dev.',
+  OIDC_ASSERTION_INVALID: 'That sign-in link is not valid. They are single-use and short-lived. Start again from rekey.dev.',
   OIDC_ASSERTION_NOT_CONFIGURED: 'This deployment does not accept that kind of sign-in.',
   magic_link_missing: 'That sign-in link is missing its token. Request a fresh one.',
   MAGIC_LINK_TOKEN_INVALID: 'That sign-in link is invalid. Request a fresh one.',
@@ -253,7 +254,7 @@ export default async function LoginPage({
   // sign-in. The server action re-validates it before redirecting.
   const next = typeof params.next === 'string' ? params.next : undefined;
   // `?password=1` is how the disclosure below reveals the form. The flag only
-  // decides the DEFAULT — a deployment can demote password sign-in without
+  // decides the DEFAULT, a deployment can demote password sign-in without
   // taking it away, which matters when the identity provider is the thing
   // that is down.
   const passwordRequested = params.password === '1';
@@ -264,9 +265,6 @@ export default async function LoginPage({
     .then((d) => d.providers)
     .catch(() => [] as string[]);
 
-  // Demote the password form only when the flag is on, the reader has not asked
-  // for it, AND there is actually another way in. Hiding it with no provider
-  // configured would lock every operator out of their own panel.
   // Demote the password form when a provider is configured (the original
   // reason) OR when this deployment leads with magic link. Never demote it with
   // nothing else on the page: hiding the only way in locks every operator out
@@ -288,7 +286,7 @@ export default async function LoginPage({
   const inviteHelpUrl = process.env.PANEL_INVITE_HELP_URL?.trim() || null;
   // The wording is the deployment's too, not just the destination. The default
   // is neutral because this panel ships in the open-source product and has no
-  // idea how a given operator grants access — hardcoding "subscribe at
+  // idea how a given operator grants access, hardcoding "subscribe at
   // rekey.dev" here would put our commercial funnel in everybody's self-host,
   // which is the same reason the sign-up page says only "Find out how to get
   // one". Rekey Cloud sets the text to name the plan, because there the
@@ -302,7 +300,7 @@ export default async function LoginPage({
   return (
     <AuthCard
       title="Sign in to Rekey"
-      subtitle="Operator account — manage Applications, billing, and team."
+      subtitle="Operator account: manage Applications, billing, and team."
     >
       <TrackView event={AnalyticsEvent.LoginPageView} />
         {reason === 'expired' && (
@@ -313,9 +311,14 @@ export default async function LoginPage({
         {reason === 'reset' && (
           <Banner tone="success">Password updated. Sign in with your new password.</Banner>
         )}
+        {reason === 'password_changed' && (
+          <Banner tone="success">
+            Password changed, and every session was signed out, this one included. Sign in with the new password.
+          </Banner>
+        )}
         {/* Only render for codes we actually emit. An unknown ?error= (stale
             bookmark, crafted link) used to paint an unexplained failure on the
-            page where trust is decided — render nothing instead. */}
+            page where trust is decided, render nothing instead. */}
         {error && ERROR_MESSAGES[error] && (
           <Banner tone="error">
             {ERROR_MESSAGES[error]}
@@ -343,9 +346,13 @@ export default async function LoginPage({
               {oauthProviders
                 .filter((p) => p in PROVIDER_LABELS)
                 .map((p) => (
-                  <form key={p} action={startOAuth.bind(null, p, next ?? null)}>
+                  // OAuthButton is a SubmitButton under another name, so this
+                  // pair needs ActionForm like any other: startOAuth redirects
+                  // to the provider, and if that redirect does not commit the
+                  // button would sit on "Redirecting…", disabled, for good.
+                  <ActionForm key={p} action={startOAuth.bind(null, p, next ?? null)}>
                     <OAuthButton provider={p} label={PROVIDER_LABELS[p]!} />
-                  </form>
+                  </ActionForm>
                 ))}
             </div>
             {!showPasswordSecondary && <OrDivider />}
@@ -367,7 +374,7 @@ export default async function LoginPage({
               Email me a sign-in link
             </Link>
             <p className="text-center text-xs text-[var(--color-muted-fg)]">
-              No password needed — we send a one-time link to your inbox.
+              No password needed. We send a one-time link to your inbox.
             </p>
           </>
         )}
@@ -375,7 +382,7 @@ export default async function LoginPage({
         {showPasswordSecondary && (
           <p className="text-center text-sm text-[var(--color-text-muted)]">
             {/* A plain link, not client state: this page is a server component
-                and the disclosure has to work with JS off — which is the whole
+                and the disclosure has to work with JS off, which is the whole
                 reason for keeping a password path at all. */}
             <Link
               href={`/login?password=1${next ? `&next=${encodeURIComponent(next)}` : ''}`}
@@ -387,7 +394,7 @@ export default async function LoginPage({
         )}
 
         {!showPasswordSecondary && (
-        <form action={signIn} className="space-y-5">
+        <ActionForm action={signIn} className="space-y-5">
           {/* `hidden` attr keeps Tailwind's space-y sibling selector from
               shifting the first label's margin. */}
           {next && <input type="hidden" hidden name="next" value={next} />}
@@ -407,10 +414,10 @@ export default async function LoginPage({
           >
             Sign in
           </SubmitButton>
-        </form>
+        </ActionForm>
         )}
 
-        {/* Passwordless alternative — phishing-resistant, no second factor needed. */}
+        {/* Passwordless alternative, phishing-resistant, no second factor needed. */}
         {!showPasswordSecondary && <OrDivider />}
         <PasskeyLoginButton start={startPasskeyLogin} complete={completePasskeyLogin} next={next} />
 
@@ -427,7 +434,7 @@ export default async function LoginPage({
         </div>
 
         {/* Demo-deployment notice. Opt-in via PANEL_DEMO_NOTICE so a self-hosted
-            or production panel never tells operators their data may be wiped —
+            or production panel never tells operators their data may be wiped,
             it said that unconditionally before. Deliberately NOT a
             NEXT_PUBLIC_* var: those are inlined at build time, so a
             self-hoster setting it in compose env would see no change without
@@ -435,7 +442,7 @@ export default async function LoginPage({
             server env var is read at runtime. */}
         {process.env.PANEL_DEMO_NOTICE === '1' && (
           <p className="text-center text-xs text-[var(--color-muted-fg)]">
-            Demo environment — data may be reset without notice.
+            Demo environment: data may be reset without notice.
           </p>
         )}
     </AuthCard>

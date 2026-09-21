@@ -2,7 +2,7 @@
  * Super-admin management of operator-invite keys (OPERATOR_SIGNUP_MODE='invite').
  *
  * Mint / list / revoke. The consume-at-signup half lives in
- * `tenant-auth/operator-signup-policy.ts` — this module never issues sessions
+ * `tenant-auth/operator-signup-policy.ts`, this module never issues sessions
  * or creates operators; it only manages the keys.
  */
 
@@ -33,7 +33,7 @@ function deriveStatus(row: OperatorInvite, now: number): OperatorInviteStatus {
   return 'active';
 }
 
-/** Redact a row to its public shape — never exposes `tokenHash`. */
+/** Redact a row to its public shape, never exposes `tokenHash`. */
 export function toPublicOperatorInvite(row: OperatorInvite): PublicOperatorInvite {
   return {
     id: row.id,
@@ -93,7 +93,7 @@ export const operatorInvitesService = {
 
   /**
    * Revoke an unused key. Idempotent on an already-revoked key. Refuses to
-   * revoke a key that was already consumed (it already minted its operator —
+   * revoke a key that was already consumed (it already minted its operator,
    * revoking would be misleading).
    */
   async revoke(id: string): Promise<PublicOperatorInvite> {

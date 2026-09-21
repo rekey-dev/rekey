@@ -3,7 +3,7 @@
  *
  * The load-bearing assertions here are the two that make this safe to ship to
  * an auth product:
- *   1. A workspace with no limit set is UNLIMITED — every pre-existing
+ *   1. A workspace with no limit set is UNLIMITED, every pre-existing
  *      deployment must be unaffected by the column existing.
  *   2. A workspace OVER its limit still signs its existing end-users in.
  *      Quota gates creation, never authentication.
@@ -14,7 +14,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 
@@ -84,7 +84,7 @@ describe('Tenant limits — maxActiveEndUsers', () => {
   async function setLimits(
     tenantId: string,
     limits: Record<string, unknown>,
-  ): Promise<ReturnType<FastifyInstance['inject']>> {
+  ): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'PUT',
       url: `/api/v1/admin/tenants/${tenantId}/limits`,
@@ -93,7 +93,7 @@ describe('Tenant limits — maxActiveEndUsers', () => {
     });
   }
 
-  function signUp(ws: Workspace, email: string): ReturnType<FastifyInstance['inject']> {
+  function signUp(ws: Workspace, email: string): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'POST',
       url: '/api/v1/auth/sign-up',
@@ -102,7 +102,7 @@ describe('Tenant limits — maxActiveEndUsers', () => {
     });
   }
 
-  function signIn(ws: Workspace, email: string): ReturnType<FastifyInstance['inject']> {
+  function signIn(ws: Workspace, email: string): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'POST',
       url: '/api/v1/auth/sign-in',
@@ -149,7 +149,7 @@ describe('Tenant limits — maxActiveEndUsers', () => {
     const error = third.json().error as { code: string; message: string; fix: string };
     expect(error.code).toBe('TENANT_QUOTA_EXCEEDED');
     expect(error.fix).toBeTruthy();
-    // The message must name the ceiling and the count — an operator hitting
+    // The message must name the ceiling and the count, an operator hitting
     // this needs to know how far over they are without another API call.
     expect(error.message).toContain('2');
 
@@ -224,7 +224,7 @@ describe('Tenant limits — maxActiveEndUsers', () => {
     expect((await signUp(ws, 'gone@example.com')).statusCode).toBe(201);
     expect((await signUp(ws, 'blocked@example.com')).statusCode).toBe(403);
 
-    // Tombstone the first — the row stays for FK integrity but the person is
+    // Tombstone the first, the row stays for FK integrity but the person is
     // gone, so the seat is freed.
     await prisma.endUser.updateMany({
       where: { applicationId: ws.applicationId },
@@ -372,7 +372,7 @@ describe('Tenant limits — maxActiveEndUsers', () => {
     expect(wrongKey.statusCode).toBe(401);
     expect(wrongKey.json().error.code).toBe('ADMIN_AUTH_INVALID');
 
-    // GET is gated identically — the limits surface is super-admin-only end to end.
+    // GET is gated identically, the limits surface is super-admin-only end to end.
     const read = await app.inject({
       method: 'GET',
       url: `/api/v1/admin/tenants/${ws.tenantId}/limits`,
@@ -383,7 +383,7 @@ describe('Tenant limits — maxActiveEndUsers', () => {
   it('does not let a workspace operator raise their own quota', async () => {
     // The operator's own credential is a tenant session, not the deployment
     // key. Presenting it to the admin surface must fail exactly like any other
-    // wrong bearer — otherwise the quota is self-service.
+    // wrong bearer, otherwise the quota is self-service.
     const suffix = Math.random().toString(36).slice(2, 8);
     const token = await app
       .inject({

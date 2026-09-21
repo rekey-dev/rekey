@@ -1,5 +1,5 @@
 /**
- * Brute-force protection — distributed, Redis-backed attempt counters.
+ * Brute-force protection, distributed, Redis-backed attempt counters.
  *
  * Replaces the per-attempt DB writes that account-lockout + MFA-throttle used
  * to do (a write on every failed login does not scale under credential
@@ -24,7 +24,7 @@
  * Two functions are exceptions, both because neither can widen access.
  * `clearFailures` failing leaves a scope MORE restricted, never less.
  * `getScopeLockState` reads lock state for operator surfaces to DISPLAY and
- * gates nothing — see its own docblock.
+ * gates nothing, see its own docblock.
  *
  * In tests (no Redis) an in-memory store backs the same logic so the regression
  * tests are deterministic without an external dependency.
@@ -45,20 +45,20 @@ export interface BruteForcePolicy {
 
 // Password sign-in: 10 failures / 15 min → 15-min lock (matches the prior policy).
 export const LOGIN_POLICY: BruteForcePolicy = { threshold: 10, windowSec: 15 * 60, lockSec: 15 * 60 };
-// MFA verify: tighter (6-digit codes) — 5 failures / 15 min → 15-min lock.
+// MFA verify: tighter (6-digit codes), 5 failures / 15 min → 15-min lock.
 export const MFA_POLICY: BruteForcePolicy = { threshold: 5, windowSec: 15 * 60, lockSec: 15 * 60 };
 
 interface CounterStore {
   /**
    * INCR the key, setting the TTL on first hit. Returns the new count.
-   * THROWS on a store error — a swallowed error here reads as "no failures yet".
+   * THROWS on a store error, a swallowed error here reads as "no failures yet".
    */
   incrWithTtl(key: string, ttlSec: number): Promise<number>;
-  /** THROWS on a store error — a swallowed error here silently skips the lock. */
+  /** THROWS on a store error, a swallowed error here silently skips the lock. */
   setLock(key: string, ttlSec: number): Promise<void>;
   /**
    * Remaining lock TTL in seconds, or 0 if not locked.
-   * THROWS on a store error — a swallowed error here reads as "not locked",
+   * THROWS on a store error, a swallowed error here reads as "not locked",
    * which released every already-locked account during an outage.
    */
   lockTtl(key: string): Promise<number>;
@@ -189,7 +189,7 @@ function store(): CounterStore {
   // No client. Outside tests this is not a mode to support: the counters would
   // be per-process, so N replicas would grant N times the attempts and a
   // restart would clear every lock. Production already refuses to boot without
-  // REDIS_URL, so reaching here in production is a bug — say so rather than
+  // REDIS_URL, so reaching here in production is a bug, say so rather than
   // quietly running unprotected.
   if (process.env.NODE_ENV === 'production') {
     throw new RekeyError(dependencyUnavailablePayload('redis'));
@@ -207,7 +207,7 @@ function keysFor(scope: string): { fail: string; lock: string } {
 /**
  * Scope prefix for end-user password sign-in lockouts.
  *
- * Kept here so the super-admin dashboard can ENUMERATE active end-user locks —
+ * Kept here so the super-admin dashboard can ENUMERATE active end-user locks,
  * the individual `bf:lock:*` TTL keys aren't otherwise discoverable, which is
  * why the old `EndUser.lockedUntil` KPI silently read zero after lockout moved
  * to Redis.
@@ -220,7 +220,7 @@ export const EU_LOGIN_LOCK_SCOPE_PREFIX = 'eu:login:';
  * This used to be a private `loginLockScope()` in auth.service.ts, duplicated
  * as a prefix constant here. Every reader of a lock has to derive the key
  * byte-for-byte the way the writer did or the lookup silently answers "not
- * locked" — the exact failure mode that made the operator panel report the
+ * locked", the exact failure mode that made the operator panel report the
  * opposite of the truth. One exported builder, one lowercasing rule, so a
  * divergence is impossible rather than merely documented.
  *
@@ -247,8 +247,8 @@ export const OP_LOGIN_LOCK_SCOPE_PREFIX = 'op:login:';
  * Was a private `operatorLockScope()` inside tenant-auth.service. Exported for
  * the same reason `euLoginLockScope` is: the super-admin locked-accounts view
  * reads these locks back and has to build the key byte-for-byte the way
- * sign-in built it, or it silently reports "not locked" for a locked operator
- * — which is exactly how the end-user version of this surface once reported
+ * sign-in built it, or it silently reports "not locked" for a locked operator,
+ * which is exactly how the end-user version of this surface once reported
  * the opposite of the truth.
  *
  * There is no workspace in the key. An operator signs in BEFORE choosing one,
@@ -266,7 +266,7 @@ export interface ActiveOperatorLock {
 }
 
 /**
- * Enumerate the operator sign-in scopes currently locked — the operator twin of
+ * Enumerate the operator sign-in scopes currently locked, the operator twin of
  * `scanActiveLoginLocks`.
  *
  * This exists because a locked-out operator is invisible everywhere else. The
@@ -301,7 +301,7 @@ export async function scanActiveOperatorLoginLocks(
   const slice = limit > 0 ? keys.slice(0, limit) : [];
   const resolved = await Promise.all(
     slice.map(async (key): Promise<ActiveOperatorLock> => {
-      // key === `bf:lock:op:login:${email}` — the remainder IS the email.
+      // key === `bf:lock:op:login:${email}`, the remainder IS the email.
       const email = key.slice(LOCK_KEY_PREFIX.length + OP_LOGIN_LOCK_SCOPE_PREFIX.length);
       let ttlSec = 0;
       try {
@@ -341,7 +341,7 @@ export interface ScopeLockState {
  * **Fail-OPEN, deliberately, and the only read in this module that is.** The
  * fail-closed rule at the top of the file protects the credential path: a lock
  * we cannot read must never be treated as absent *when deciding whether to let
- * someone in*. This function decides nothing — it renders a badge in the
+ * someone in*. This function decides nothing, it renders a badge in the
  * operator panel. Propagating the error would 503 an entire end-user detail
  * page because Redis blipped, and it cannot open a hole: `assertNotLocked`
  * still refuses every sign-in attempt during the same outage, so the account
@@ -395,7 +395,7 @@ export async function scanActiveLoginLocks(
       const [next, batch] = await r.scan(cursor, 'MATCH', pattern, 'COUNT', 500);
       cursor = next;
       keys.push(...batch);
-      // Safety bound — a pathological keyspace shouldn't pin the event loop.
+      // Safety bound, a pathological keyspace shouldn't pin the event loop.
       if (keys.length >= 10_000) break;
     } while (cursor !== '0');
   } catch {
@@ -457,7 +457,7 @@ export async function assertNotLocked(
 export interface RegisteredFailure {
   /** Failures inside the current window, including this one. */
   failures: number;
-  /** True on the attempt that TRIPPED the lock — once per lockout, not per attempt. */
+  /** True on the attempt that TRIPPED the lock, once per lockout, not per attempt. */
   locked: boolean;
   /** Seconds the scope is locked for, when `locked`. */
   lockedForSec: number;
@@ -469,12 +469,12 @@ export interface RegisteredFailure {
  * Fails closed for the same reason as `assertNotLocked`: an attempt we could not
  * count is an attempt that does not count towards the threshold, which is the
  * whole exploit. The caller has already rejected the credential by this point,
- * so the 503 replaces a 401 — deliberately, because it also stops the endpoint
+ * so the 503 replaces a 401, deliberately, because it also stops the endpoint
  * being a free oracle while the counter is broken.
  *
  * Returns what it counted. The counter itself is in Redis with a TTL and is
  * cleared on the successful sign-in, so it answers "is this account locked
- * right now" and nothing else — an operator asking "why couldn't this user sign
+ * right now" and nothing else, an operator asking "why couldn't this user sign
  * in yesterday" needs a durable row, and only the caller knows which
  * end-user and Application to attribute it to.
  */
@@ -520,13 +520,13 @@ export async function clearFailures(scope: string): Promise<void> {
  * `getRedis()` returns null, so every counter and lock lives in the
  * module-level `MemoryStore` above and nothing cleared it between tests. Keys
  * are `bf:lock:<scope>:<appId>:<email>`, which outlives the TRUNCATE that
- * removed the end-user they refer to — so a lockout tripped by one test was
+ * removed the end-user they refer to, so a lockout tripped by one test was
  * still counting when a later one created a fresh end-user with a recycled
  * address and could not sign in.
  *
  * test/setup.ts believed it was clearing this via Redis. It was not: its
  * `clearRedisTestState` called `getRedis()`, got null, and returned
- * immediately on all 950 invocations — deleting zero keys, for a store that
+ * immediately on all 950 invocations, deleting zero keys, for a store that
  * was never Redis in the first place.
  */
 export function __resetForTests(): void {

@@ -4,7 +4,7 @@
  *
  * A stubbed `fetch` cannot prove this. The bug being guarded against was that
  * the SDK passed no `signal` at all, so the effective timeout was undici's
- * `headersTimeout` — five minutes. A review measured a call still pending at
+ * `headersTimeout`, five minutes. A review measured a call still pending at
  * 70 seconds. Nothing in a fetch stub reproduces that; only a socket does.
  *
  * The second half of the file pins the OTHER half of the same bug: there was no

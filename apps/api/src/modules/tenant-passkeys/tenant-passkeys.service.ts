@@ -4,7 +4,7 @@
  * Manages TenantWebAuthnCredential rows for tenant users. Two ceremonies:
  *
  *   - Registration (authenticated + stepped up): add a passkey to the current
- *     operator. The step-up is at the route — a passkey signs its holder in
+ *     operator. The step-up is at the route, a passkey signs its holder in
  *     with no password and no second factor, so a stolen panel session must
  *     not be able to enroll one.
  *   - Authentication (unauthenticated): sign in directly with a passkey,
@@ -18,12 +18,13 @@
  * (`lib/webauthn-challenge.ts`): `*Start` persists the challenge and
  * `*Complete` atomically consumes it (single-use, 5-minute TTL). The
  * `expectedChallenge` posted back is validated against that store, not
- * trusted verbatim — so a captured assertion can't be replayed.
+ * trusted verbatim, so a captured assertion can't be replayed.
  */
 
 import type { TenantUser } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
+import { expandScopes } from '../../lib/operator-scopes.js';
 import {
   buildTenantRegistrationOptions,
   verifyTenantRegistration,
@@ -65,7 +66,9 @@ function shape(c: {
 }
 
 function redact(user: TenantUser): PublicTenantUser {
-  const { passwordHash: _pw, ...rest } = user;
+  // Same two private fields tenant-auth.service strips; the stamp behind the
+  // session kill switch never leaves the server.
+  const { passwordHash: _pw, sessionsInvalidBefore: _stamp, ...rest } = user;
   return rest;
 }
 
@@ -75,7 +78,16 @@ async function loadMemberships(tenantUserId: string): Promise<MembershipSummary[
     include: { tenant: { select: { id: true, name: true } } },
     orderBy: { createdAt: 'asc' },
   });
-  return rows.map((r) => ({ tenantId: r.tenantId, tenantName: r.tenant.name, role: r.role }));
+  // Same shape as tenant-auth.service.ts's loadMemberships, a second copy
+  // of it lives here for the passkey sign-in path, and MembershipSummary now
+  // carries the member's resolved scopes so the panel can render from them.
+  return rows.map((r) => ({
+    tenantId: r.tenantId,
+    tenantName: r.tenant.name,
+    role: r.role,
+    scopes:
+      r.role === 'MEMBER' && r.scopesRestricted ? [...expandScopes(r.scopes)].sort() : null,
+  }));
 }
 
 export const tenantPasskeysService = {
@@ -170,7 +182,7 @@ export const tenantPasskeysService = {
     options: Awaited<ReturnType<typeof buildTenantAuthenticationOptions>>['options'];
     expectedChallenge: string;
   }> {
-    // Usernameless ceremony — operator picks the resident-key passkey on
+    // Usernameless ceremony, operator picks the resident-key passkey on
     // their device. We don't expose an email-first variant here because
     // any pre-population would leak account existence to the browser.
     const result = await buildTenantAuthenticationOptions({ allowCredentials: null });
@@ -197,7 +209,7 @@ export const tenantPasskeysService = {
       });
     }
     // Burn the challenge first (single-use) so a captured assertion can't be
-    // replayed into a session — this is the anti-replay control, since the
+    // replayed into a session, this is the anti-replay control, since the
     // counter check is a no-op for synced platform passkeys (counter = 0).
     await consumeChallenge({
       challenge: args.expectedChallenge,
@@ -249,10 +261,12 @@ export const tenantPasskeysService = {
       });
     }
     const active = memberships[0]!;
-    const access = issueTenantAccessToken(user.id, active.tenantId, active.role);
     const refresh = await issueTenantRefreshToken(user.id, {
       userAgent: args.device?.userAgent ?? null,
       ip: args.device?.ip ?? null,
+    });
+    const access = issueTenantAccessToken(user.id, active.tenantId, active.role, {
+      sessionId: refresh.record.sessionId,
     });
     return {
       user: redact(user),

@@ -41,6 +41,33 @@ An entitlement is a row saying "this subject may have this thing". Resolution un
 
 **Personal quota deliberately excludes organization-beneficiary subscriptions.** Usage metered under an org draws on the org pool; usage metered against a person draws on theirs. Recording team usage with `endUserId` instead of `organizationId` therefore bills the individual, which is a caller mistake worth catching in review.
 
+**The Application's free tier, and exactly how much of a base layer it is.**
+`billingConfig.defaultPlanSlug` names a plan whose FEATURE entitlements and
+included USAGE quota apply on top of what a subject's subscriptions grant. A
+SUBSCRIPTION or USAGE plan suppresses it entirely (`suppressesFreeTier` — buying
+a credit pack or a licence is not "being on a plan").
+
+Where it is **not** suppressed, two different things happen and the difference
+matters:
+
+- **For a key or meter a per-subscription override names**, the free tier is
+  withheld. An override is a deliberate deviation sold to one customer, so it has
+  to be authoritative or it is not an override. This is the only case in which
+  the default loses.
+- **For every other key**, the free tier participates in the merge, but only
+  ever upward: it can raise an INT (`Math.max`) or turn a BOOL true, and it is
+  applied FIRST so a subscription's STRING wins the last-wins tie. Applying it
+  last used to mean a default of `support_tier: "community"` overwrote a paying
+  plan's `"priority"`, which is a base layer beating the thing it sits under.
+
+Its per-unit price always floors the rate charged, even when its quantity is
+withheld: a change about how many units somebody gets must not silently move a
+price. An override whose resolved row grants nothing and prices nothing
+(quantity 0, no price — a shape `validate` refuses to let anyone author, reachable
+only when a later plan edit clears a price) counts as not having landed, and the
+default applies.
+
+
 ### Two ways to meter spend
 
 **Credits** are a pre-paid balance. `POST /credits/consume` is atomic, and idempotent **when the caller supplies a key** — without one, every call counts, which is the right default for a counter and the wrong one for a charge. A spend past zero returns `402` rather than going negative. This is the model for anything an agent burns unpredictably.
@@ -52,6 +79,8 @@ An entitlement is a row saying "this subject may have this thing". Resolution un
 `grantSubscription` creates an `ACTIVE` subscription with `provider` and `providerSubId` null, going through the same provisioning and the same outbox as a real activation. It exists because a deployment with no payment provider — or one selling by invoice, which is how Rekey Cloud sells — otherwise had no way to record a sale at all.
 
 This is not a workaround. It is the boundary working: entitlement is ours, so we can grant it without asking anyone.
+
+The external billing provider is the same idea driven by events instead of by an operator: a billing system of the operator's own posts what it sold, and the `subscription.granted` applier goes through `grantSubscription` with the sender's subscription id bound onto the row, so the status mirror and the payment appliers then treat it exactly like a Stripe subscription. The one thing it adds is creating the end-user when the sale names an address Rekey has not met, because the alternative is losing the sale to the order two unrelated systems happen to run in. See [external-billing.md](external-billing.md).
 
 ## Decisions, and what they cost
 
@@ -170,7 +199,7 @@ Do not add a kind whose meaning depends on the provider. If it cannot be explain
 
 ### Adding a provider
 
-Implement the module contract and declare capabilities honestly. Absent means cannot, and that is always safe. A provider that cannot do something makes checkouts refuse, which is visible; a provider that claims something it cannot do charges somebody the wrong amount, which is not.
+Implement the module contract and declare capabilities honestly. Absent means cannot, and that is always safe. `checkout` is the exception: it is required, so a module states whether buyers can be sent to it at all, and an inbound-only module (`false`) is skipped by the router and the public provider list while its webhooks work like everyone else's. A provider that cannot do something makes checkouts refuse, which is visible; a provider that claims something it cannot do charges somebody the wrong amount, which is not.
 
 ### Postpaid usage billing, when we do it
 

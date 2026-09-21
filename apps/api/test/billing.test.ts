@@ -1,5 +1,5 @@
 /**
- * Billing scaffold — admin plan CRUD + public plan list + checkout flow +
+ * Billing scaffold, admin plan CRUD + public plan list + checkout flow +
  * subscription resolution.
  *
  * No Stripe account is dialled. `test/setup.ts` mocks
@@ -7,7 +7,7 @@
  * `test/fakes/billing-providers.ts` (same input always produces the same
  * provider id and URL), which is enough to exercise the full wiring. The
  * shipped `src/modules/billing/providers/` factory has no stub to fall back
- * on — it refuses with `BILLING_CREDENTIALS_NOT_CONFIGURED`.
+ * on, it refuses with `BILLING_CREDENTIALS_NOT_CONFIGURED`.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -188,7 +188,7 @@ describe('billing scaffold', () => {
     // Reported as #30: archive a plan, try to create a new one with the same
     // name, get a duplicate-slug refusal for a plan you believe you removed.
     // Archiving flips `active` and keeps the row, because the slug is the
-    // public identifier integrator code passes to checkout — releasing it would
+    // public identifier integrator code passes to checkout, releasing it would
     // let a new plan inherit an old one's meaning. The refusal is right; saying
     // only "already exists" is what made it unactionable.
     await createPlan(applicationId, { slug: 'retired', name: 'Retired', amount: 500 });
@@ -326,6 +326,41 @@ describe('billing scaffold', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().data).toBeNull();
+  });
+
+  it('GET /billing/subscription says what the holding provider can do, on the wire', async () => {
+    const plan = await createPlan(applicationId, { slug: 'caps', name: 'Caps', amount: 500 });
+    const accessToken = await signUpUser();
+    const user = await prisma.endUser.findFirstOrThrow({ where: { applicationId, email: 'sub@example.com' } });
+    const read = async () => {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/v1/billing/subscription',
+        headers: { authorization: `Bearer ${liveKey}`, 'x-rekey-user-token': accessToken },
+      });
+      expect(res.statusCode).toBe(200);
+      return res.json().data as { provider: string | null; providerCapabilities: { checkout?: boolean } | null };
+    };
+    const row = await prisma.subscription.create({
+      data: { applicationId, endUserId: user.id, planId: plan.id as string, status: 'ACTIVE', provider: null },
+    });
+
+    // Hand-provisioned: no provider, so nothing to describe.
+    expect((await read()).providerCapabilities).toBeNull();
+
+    // A hosted provider can take buyers to checkout.
+    await prisma.subscription.update({ where: { id: row.id }, data: { provider: 'stripe', providerSubId: 'sub_caps_1' } });
+    expect((await read()).providerCapabilities?.checkout).toBe(true);
+
+    // The inbound-only provider says so, which is what the portal reads.
+    await prisma.subscription.update({ where: { id: row.id }, data: { provider: 'external' } });
+    const external = await read();
+    expect(external.provider).toBe('external');
+    expect(external.providerCapabilities?.checkout).toBe(false);
+
+    // A name this server does not run is described as nothing, not guessed at.
+    await prisma.subscription.update({ where: { id: row.id }, data: { provider: 'retired-provider' } });
+    expect((await read()).providerCapabilities).toBeNull();
   });
 
   it('POST /billing/checkout creates a PENDING subscription and returns a provider URL', async () => {

@@ -2,8 +2,8 @@
  * The portal's cancel confirmation must not promise a period end the API is
  * about to refuse.
  *
- * #338 fixed exactly this copy on the marketing site and left the portal — the
- * surface a merchant's own customers use — saying "your plan stays active until
+ * #338 fixed exactly this copy on the marketing site and left the portal, the
+ * surface a merchant's own customers use, saying "your plan stays active until
  * the end of the current period" for every subscription, including the ones
  * cancelled on the spot with no refund.
  *
@@ -32,7 +32,7 @@ describe('cancelCopy', () => {
   it('warns instead of promising when there is no period to run out (the PayPal first period)', () => {
     // The live Cloud subscription's shape. PayPal's activation carried no
     // period anchor, so `currentPeriodEnd` is null and the API cancels
-    // immediately — while this dialog used to promise the opposite.
+    // immediately, while this dialog used to promise the opposite.
     const copy = cancelCopy({ status: 'ACTIVE', currentPeriodEnd: null }, fmt);
 
     expect(copy.schedules).toBe(false);

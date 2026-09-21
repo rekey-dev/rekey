@@ -1,5 +1,5 @@
 /**
- * Stripe webhook ingestion — signature verification, durable idempotency,
+ * Stripe webhook ingestion, signature verification, durable idempotency,
  * state-machine transitions.
  *
  * We don't need a real Stripe account: `stripe.webhooks.generateTestHeaderString`
@@ -18,7 +18,7 @@ import { creditsService } from '../src/modules/credits/credits.service.js';
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const SLUG = 'w-app';
 // Per-app BYO webhook secret. There is no deployment-wide STRIPE_WEBHOOK_SECRET
-// anymore — webhooks are per-Application only.
+// anymore, webhooks are per-Application only.
 const WEBHOOK_SECRET = 'whsec_test_secret_for_ci_only';
 
 const stripe = new Stripe('sk_for_signing_only', {
@@ -144,7 +144,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
     // `{ applicationId, providerSubId: <the id we just established is
     // missing> }`. Prisma drops an `undefined` filter and `null` matches every
     // provider-less row, so the fallback mirrored the payload's status onto
-    // every subscription in the application — one `deleted` cancelled the lot.
+    // every subscription in the application, one `deleted` cancelled the lot.
     //
     // Signed with the application's own secret, because that is the
     // precondition: this is what a malformed provider delivery looks like
@@ -349,7 +349,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
   it('invoice.paid: re-provisions entitlements on renewal — recurring CREDIT plan refills credits each period', async () => {
     // A plan that grants 500 credits per period via an explicit CREDIT
     // entitlement (the admin plans route only takes slug/name/amount, so the
-    // bundle is attached directly — same shape the tenant entitlement route writes).
+    // bundle is attached directly, same shape the tenant entitlement route writes).
     await app.inject({
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/plans`,
@@ -426,7 +426,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
     // customer.subscription.updated (which sets currentPeriodEnd) can arrive
     // BEFORE the FIRST invoice.paid. If it does, that first invoice would
     // provision under a DIFFERENT anchor ("…:CREDIT:<p1>") for the SAME first
-    // billing period — granting a second pack the buyer never paid for. The fix
+    // billing period, granting a second pack the buyer never paid for. The fix
     // pins the first invoice (billing_reason: subscription_create) to the
     // 'initial' anchor so it collides with the checkout grant.
     await app.inject({
@@ -443,7 +443,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
     });
     const endUser = await prisma.endUser.findFirstOrThrow({ where: { applicationId } });
 
-    // A PENDING sub created at checkout — currentPeriodEnd is null, exactly as
+    // A PENDING sub created at checkout, currentPeriodEnd is null, exactly as
     // billing.service writes it. Its checkoutSessionId is what the completed
     // event matches on.
     const sub = await prisma.subscription.create({
@@ -504,7 +504,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
     expect(await creditsService.getBalance(applicationId, { endUserId: endUser.id })).toBe(500);
 
     // 4) A genuine renewal (subscription_cycle) for the NEXT period still
-    //    refills — proves the fix doesn't over-suppress legitimate grants.
+    //    refills, proves the fix doesn't over-suppress legitimate grants.
     const p2 = Math.floor(new Date('2026-07-31T00:00:00.000Z').getTime() / 1000);
     await fire('evt_ord_updated_p2', 'customer.subscription.updated', {
       id: 'sub_order_test',
@@ -525,7 +525,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
   });
 
   it('invoice.paid: re-provisions a TIMED license — extends expiry on renewal, idempotent within a period (#73)', async () => {
-    // A recurring TIMED LICENSE plan (30-day term). Inserted directly — the
+    // A recurring TIMED LICENSE plan (30-day term). Inserted directly, the
     // admin plans route only accepts SUBSCRIPTION fields.
     const plan = await prisma.plan.create({
       data: {
@@ -595,7 +595,7 @@ describe('POST /api/v1/billing/webhook/stripe/:slug', () => {
     expect(delta).toBeLessThan(31 * 86_400_000);
     expect(lic2.status).toBe('ACTIVE');
 
-    // Still exactly one license row — extension never over-issues.
+    // Still exactly one license row, extension never over-issues.
     const count = await prisma.license.count({
       where: { applicationId, endUserId: endUser.id, planId: plan.id },
     });

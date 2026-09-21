@@ -1,5 +1,5 @@
 /**
- * Operator MCP OAuth — registration gating + refresh-token family revocation.
+ * Operator MCP OAuth, registration gating + refresh-token family revocation.
  *
  * Two findings from the 2.0.0 security close-out, both on the OPERATOR
  * authorization server (`/api/v1/tenant/mcp`), whose tokens are workspace-wide
@@ -9,13 +9,13 @@
  *      way for an operator to close it. The per-Application twin has had
  *      `authConfig.dynamicClientRegistration` since it was written; the
  *      operator surface had no equivalent. What an anonymous registration buys
- *      an attacker is an ALLOWLISTED redirect_uri they control — the one
+ *      an attacker is an ALLOWLISTED redirect_uri they control, the one
  *      ingredient a consent-phishing link needs, since `/oauth/authorize`
  *      refuses any redirect_uri the client did not register.
  *
  *   2. Refresh-token reuse refused only the presented token. That is backwards:
  *      on a leak the ATTACKER rotates first, so the replay is the legitimate
- *      client arriving second — and the token the attacker rotated into stayed
+ *      client arriving second, and the token the attacker rotated into stayed
  *      live. The end-user path has burned the whole family since
  *      `refresh.test.ts` ("revoking a reused refresh token kills the family");
  *      this surface was left as a seam.
@@ -31,7 +31,7 @@ function pkce(): { verifier: string; challenge: string } {
   return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') };
 }
 
-/** Claude Desktop's real callback — a REMOTE https URL, not a loopback one. */
+/** Claude Desktop's real callback, a REMOTE https URL, not a loopback one. */
 const REDIRECT = 'https://claude.ai/api/mcp/auth_callback';
 
 describe('Operator MCP OAuth hardening', () => {
@@ -158,7 +158,7 @@ describe('Operator MCP OAuth hardening', () => {
       url: '/api/v1/tenant/mcp/.well-known/oauth-authorization-server',
     });
     expect(res.json()).not.toHaveProperty('registration_endpoint');
-    // The rest of the document is unaffected — clients already holding a
+    // The rest of the document is unaffected, clients already holding a
     // client_id keep working.
     expect(res.json()).toHaveProperty('token_endpoint');
   });
@@ -183,13 +183,13 @@ describe('Operator MCP OAuth hardening', () => {
     expect(first.statusCode).toBe(200);
     const rt2 = (first.json() as { refresh_token: string }).refresh_token;
 
-    // Replay the spent token — this is the compromise signal.
+    // Replay the spent token, this is the compromise signal.
     const replay = await refresh(clientId, rt1);
     expect(replay.statusCode).toBe(400);
     expect(replay.json().error).toBe('invalid_grant');
 
     // THE POINT: the live token the rotation produced must now be dead too.
-    // Before the family burn this call returned 200 — a thief who rotated
+    // Before the family burn this call returned 200, a thief who rotated
     // first kept a working workspace-admin credential for 30 days while the
     // real client got a single unexplained 400.
     const afterBurn = await refresh(clientId, rt2);

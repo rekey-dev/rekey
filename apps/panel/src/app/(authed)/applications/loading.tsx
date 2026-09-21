@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { HeaderSkeleton } from '@/components/Skeleton';
 
-/** Applications list renders cards, not a table — mirror that shape. */
+/** Applications list renders cards, not a table, mirror that shape. */
 export default function Loading(): React.JSX.Element {
   return (
     <section aria-busy="true" aria-label="Loading" className="mx-auto max-w-7xl animate-pulse space-y-6 px-6 py-8 lg:px-8">

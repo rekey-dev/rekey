@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
  * The published version of this package.
  *
  * Read from `package.json` at runtime rather than kept as a literal, because a
- * literal is a second place to remember on every release — and it was already
+ * literal is a second place to remember on every release, and it was already
  * forgotten: `rekey version` reported `0.0.0` for the whole 1.x line.
  *
  * `createRequire` rather than an `import ... with { type: 'json' }`: the

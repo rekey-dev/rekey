@@ -29,7 +29,7 @@ const securityHeaders = [
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // Self-contained server output for slim runtime images (same rationale as
-  // apps/panel — see its next.config.mjs).
+  // apps/panel, see its next.config.mjs).
   output: 'standalone',
   // Monorepo: trace dependencies from the workspace root so hoisted/workspace
   // packages resolve inside the standalone bundle.

@@ -1,5 +1,5 @@
 /**
- * Checkout discount policy — the one place that decides whether a validated
+ * Checkout discount policy, the one place that decides whether a validated
  * coupon may reach a payment provider, and refuses when it may not.
  *
  * Background worth keeping written down. `couponsService.validate` resolves a
@@ -15,7 +15,7 @@
  * Two questions, and both answer by refusing rather than approximating:
  *
  *   1. Can this provider apply the discount on this flow? Answered by the
- *      module's `capabilities.discounts`, fail-closed — an undeclared module
+ *      module's `capabilities.discounts`, fail-closed, an undeclared module
  *      counts as "cannot". PayPal and Razorpay can discount a one-off charge
  *      and cannot discount a single period of a recurring subscription; the
  *      why lives in their module descriptors.
@@ -24,7 +24,7 @@
  * What is deliberately NOT re-checked here: the discount's sign and ceiling.
  * `couponsService.computeDiscount` floors PERCENT to whole units and clamps
  * both kinds with `Math.min(raw, amount)`, and coupon creation rejects a
- * negative `amountOff` and a PERCENT over 10000bp — so `0 <= discountAmount
+ * negative `amountOff` and a PERCENT over 10000bp, so `0 <= discountAmount
  * <= plan.amount` already holds by construction. The over-price branch below
  * is a tripwire on that invariant, not a second implementation of it: a
  * provider call is the wrong place to discover the clamp regressed.
@@ -40,13 +40,13 @@ import type { CheckoutDiscount } from './providers/types.js';
  * Turn a validated coupon into the discount the provider will be handed, or
  * throw the reason it cannot be. Called once per checkout, before the
  * provider is constructed, so a refusal costs nothing but the validation
- * queries — no local Subscription row, no redemption, no provider round-trip.
+ * queries, no local Subscription row, no redemption, no provider round-trip.
  */
 export function resolveCheckoutDiscount(input: {
   plan: Plan;
   /** Registry name of the provider the checkout resolved to. */
   provider: string;
-  /** True for CREDIT packs and perpetual licences — a single charge. */
+  /** True for CREDIT packs and perpetual licences, a single charge. */
   isOneTime: boolean;
   coupon: { couponId: string; code: string; discountAmount: number };
 }): CheckoutDiscount {
@@ -66,14 +66,14 @@ export function resolveCheckoutDiscount(input: {
   }
 
   if (coupon.discountAmount > plan.amount) {
-    // Tripwire — couponsService clamps to the plan amount, so reaching this
+    // Tripwire, couponsService clamps to the plan amount, so reaching this
     // means that clamp broke. Never send it on: a discount larger than the
     // price is a negative charge, which is a refund with no audit trail.
     throw new RekeyError({
       statusCode: 500,
       code: 'COUPON_DISCOUNT_EXCEEDS_PRICE',
       message: `Coupon "${coupon.code}" resolved to a discount larger than plan "${plan.slug}".`,
-      fix: 'This is a Rekey bug — the coupon service is expected to clamp the discount to the plan amount. Report it with the coupon code and plan slug.',
+      fix: 'This is a Rekey bug, the coupon service is expected to clamp the discount to the plan amount. Report it with the coupon code and plan slug.',
     });
   }
 
@@ -89,7 +89,7 @@ export function resolveCheckoutDiscount(input: {
     // A fully comped one-off has nowhere to land. Every hosted one-time
     // surface we drive needs a positive amount (Stripe enforces a minimum
     // charge, a PayPal order of 0.00 is rejected, a Razorpay payment link of 0
-    // is rejected), and fulfilment — the credit grant, the licence issue —
+    // is rejected), and fulfilment, the credit grant, the licence issue,
     // hangs off the payment-succeeded webhook, which never fires without a
     // charge. So the buyer would pay nothing and receive nothing.
     //

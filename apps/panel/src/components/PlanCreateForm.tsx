@@ -7,13 +7,15 @@
  *   - LICENSE      → amount + interval + licenseKind + (expires-days | seats)
  *   - USAGE        → amount (base fee) + interval + meterSlug + pricePerUnit
  *
- * The kind selector is presented as three big radio cards at the top — easier
+ * The kind selector is presented as three big radio cards at the top, easier
  * to read than a dropdown and shows the trade-offs upfront.
  */
 
 import * as React from 'react';
+import { ActionForm } from './ActionForm';
 import { SubmitButton } from './SubmitButton';
 import { Banner } from './Banner';
+import { errorMessage } from '@/lib/error-message';
 
 interface MeterOption {
   slug: string;
@@ -35,7 +37,7 @@ const ERR: Record<string, string> = {
 
 type Kind = 'SUBSCRIPTION' | 'LICENSE' | 'USAGE' | 'CREDIT';
 
-// ── Bundle builder: PlanEntitlements attached to the plan at creation ──
+// Bundle builder: PlanEntitlements attached to the plan at creation.
 type EntKind = 'FEATURE' | 'CREDIT' | 'LICENSE' | 'USAGE';
 interface EntDraft {
   kind: EntKind;
@@ -44,6 +46,47 @@ interface EntDraft {
   value?: string;
   quantity?: number;
   licenseKind?: 'PERPETUAL' | 'TIMED' | 'SEATS';
+}
+
+/**
+ * The add-on fields as the operator has them right now, before "+ Add add-on"
+ * has turned them into a row.
+ */
+export interface PendingAddOn {
+  kind: EntKind;
+  key: string;
+  value: string;
+  quantity: string;
+  licenseKind: 'PERPETUAL' | 'TIMED' | 'SEATS';
+}
+
+/**
+ * What the operator has typed into the add-on fields that is not in the
+ * bundle yet, named the way the fieldset names it, or null when those fields
+ * are empty.
+ *
+ * Only the inputs the chosen kind actually renders count. `eKey` and `eQty`
+ * are shared across kinds and keep their contents when the kind changes, so a
+ * key left over from a half-built USAGE row must not make a PERPETUAL license
+ * look half-typed.
+ *
+ * Exported because this is the whole of the rule, and a test can hold it to
+ * that without a browser.
+ */
+export function pendingAddOn(d: PendingAddOn): string | null {
+  const typed = (...values: string[]): boolean => values.some((v) => v.trim() !== '');
+  switch (d.kind) {
+    case 'FEATURE':
+      return typed(d.key, d.value) ? 'feature flag' : null;
+    case 'CREDIT':
+      return typed(d.quantity) ? 'credit grant' : null;
+    case 'USAGE':
+      return typed(d.key, d.quantity) ? 'usage allowance' : null;
+    case 'LICENSE':
+      // PERPETUAL and TIMED render no inputs at all, so there is nothing an
+      // operator could have typed and nothing to lose.
+      return d.licenseKind === 'SEATS' && typed(d.quantity) ? 'seat license' : null;
+  }
 }
 
 function entDraftLabel(e: EntDraft): string {
@@ -92,7 +135,7 @@ const KIND_CARDS: Array<{
   {
     value: 'USAGE',
     title: 'Usage',
-    blurb: 'Metered — bill per unit consumed against a usage meter.',
+    blurb: 'Metered: bill per unit consumed against a usage meter.',
     icon: (
       <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <line x1="12" y1="20" x2="12" y2="10" />
@@ -127,7 +170,7 @@ export function PlanCreateForm({
   const [licenseKind, setLicenseKind] = React.useState<'PERPETUAL' | 'TIMED' | 'SEATS'>('PERPETUAL');
 
   // Live cents → dollars preview for the Amount field (same pattern as
-  // CouponAmountPreview) — removes the cents-vs-dollars ambiguity as you type.
+  // CouponAmountPreview), removes the cents-vs-dollars ambiguity as you type.
   const [amount, setAmount] = React.useState('');
   const amountNum = Number(amount);
   const amountPreview =
@@ -135,7 +178,7 @@ export function PlanCreateForm({
 
   // Bundle builder state. The list is serialized into a hidden `entitlements`
   // input and applied (one PUT each) by the server action after the plan is
-  // created — so a Subscription can ship with credits / usage caps / licenses /
+  // created, so a Subscription can ship with credits / usage caps / licenses /
   // feature flags in a single submit.
   const [ents, setEnts] = React.useState<EntDraft[]>([]);
   const [eKind, setEKind] = React.useState<EntKind>('CREDIT');
@@ -156,7 +199,7 @@ export function PlanCreateForm({
       d = { kind: 'CREDIT', quantity: q };
     } else if (eKind === 'LICENSE') {
       const q = Number(eQty);
-      // A SEATS license needs a positive seat count — the API rejects it
+      // A SEATS license needs a positive seat count, the API rejects it
       // otherwise (PLAN_ENTITLEMENT_INVALID), so guard here before adding.
       if (eLicenseKind === 'SEATS' && (!Number.isFinite(q) || q <= 0)) return;
       d = { kind: 'LICENSE', licenseKind: eLicenseKind, ...(eLicenseKind === 'SEATS' ? { quantity: q } : {}) };
@@ -169,13 +212,40 @@ export function PlanCreateForm({
     setEKey('');
     setEValue('');
     setEQty('');
+    setUnadded(null);
+  };
+
+  /**
+   * An add-on the operator filled in and did not add.
+   *
+   * Only `ents` is serialised into the hidden `entitlements` field, so a
+   * half-finished draft in the fields below was dropped on submit and the plan
+   * came back with no entitlements at all. Nothing said so; a reviewer hit this
+   * and concluded the feature did not work.
+   *
+   * Refusing the submit rather than quietly adding the draft: adding it would
+   * put an entitlement on a paid plan that the operator never confirmed, and
+   * the fields are also where an abandoned idea is left sitting. A refusal can
+   * only cost a second click, and it names both ways out.
+   */
+  const [unadded, setUnadded] = React.useState<string | null>(null);
+  const guardUnaddedAddOn = (event: React.SubmitEvent<HTMLFormElement>): void => {
+    const pending = pendingAddOn({
+      kind: eKind,
+      key: eKey,
+      value: eValue,
+      quantity: eQty,
+      licenseKind: eLicenseKind,
+    });
+    setUnadded(pending);
+    if (pending) event.preventDefault();
   };
 
   return (
-    <form action={action} className="space-y-4">
+    <ActionForm action={action} onSubmit={guardUnaddedAddOn} className="space-y-4">
       {error && (
         <Banner tone="error">
-          {ERR[error] ?? error}
+          {errorMessage(ERR, error)}
         </Banner>
       )}
 
@@ -215,7 +285,7 @@ export function PlanCreateForm({
 
       {/* Core fields */}
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Slug" required hint="URL-safe identifier — used by your app and SDK">
+        <Field label="Slug" required hint="URL-safe identifier, used by your app and SDK">
           <input
             type="text"
             name="slug"
@@ -311,7 +381,7 @@ export function PlanCreateForm({
             <p className="text-[11px] text-[var(--color-muted-fg)] mt-0.5">
               <span className="text-amber-700 dark:text-amber-400">Note:</span> records persist
               locally + appear on invoices, but provider-side metered subscription wiring (Stripe)
-              is scaffolded — invoice push lands in a follow-up.
+              is scaffolded, and invoice push lands in a follow-up.
             </p>
           </div>
           {meters.length === 0 ? (
@@ -326,7 +396,7 @@ export function PlanCreateForm({
                   <option value="" disabled>Pick a meter…</option>
                   {meters.map((m) => (
                     <option key={m.slug} value={m.slug}>
-                      {m.slug} — {m.name}
+                      {m.slug} ({m.name})
                     </option>
                   ))}
                 </select>
@@ -358,11 +428,11 @@ export function PlanCreateForm({
         </div>
       )}
 
-      {/* Add-ons — bundle entitlements onto the plan at creation */}
+      {/* Add-ons, bundle entitlements onto the plan at creation */}
       <fieldset className="rounded-lg border border-[var(--color-border)] p-3 space-y-3">
         <legend className="px-1 text-xs font-medium">Add-ons (optional)</legend>
         <p className="text-[11px] text-[var(--color-muted-fg)] -mt-1">
-          Benefits granted on purchase — credits, usage caps, licenses, feature flags. A Subscription
+          Benefits granted on purchase: credits, usage caps, licenses, feature flags. A Subscription
           can bundle any of these; they materialize onto the buyer (or their org) when it activates.
         </p>
 
@@ -406,7 +476,7 @@ export function PlanCreateForm({
               min={1}
               value={eQty}
               onChange={(e) => setEQty(e.currentTarget.value)}
-              placeholder="Credits per period — e.g. 500"
+              placeholder="Credits per period, e.g. 500"
               className={`${inputCls} font-mono`}
             />
           )}
@@ -416,7 +486,7 @@ export function PlanCreateForm({
                 type="text"
                 value={eKey}
                 onChange={(e) => setEKey(e.currentTarget.value)}
-                placeholder="meter slug — api_calls"
+                placeholder="meter slug, e.g. api_calls"
                 className={`${inputCls} font-mono`}
               />
               <input
@@ -424,7 +494,7 @@ export function PlanCreateForm({
                 min={1}
                 value={eQty}
                 onChange={(e) => setEQty(e.currentTarget.value)}
-                placeholder="included / period — 10000"
+                placeholder="included / period, e.g. 10000"
                 className={`${inputCls} font-mono`}
               />
             </div>
@@ -446,7 +516,7 @@ export function PlanCreateForm({
                   min={1}
                   value={eQty}
                   onChange={(e) => setEQty(e.currentTarget.value)}
-                  placeholder="seats — 5"
+                  placeholder="seats, e.g. 5"
                   className={`${inputCls} font-mono`}
                 />
               )}
@@ -458,7 +528,7 @@ export function PlanCreateForm({
                 type="text"
                 value={eKey}
                 onChange={(e) => setEKey(e.currentTarget.value)}
-                placeholder="key — advanced_reporting"
+                placeholder="key, e.g. advanced_reporting"
                 className={`${inputCls} font-mono`}
               />
               <select
@@ -487,9 +557,17 @@ export function PlanCreateForm({
           >
             + Add add-on
           </button>
+
+          {unadded && (
+            <Banner tone="warning">
+              There is a {unadded} in the fields above that has not been added to this plan yet.
+              Press <strong>+ Add add-on</strong> to include it, or clear those fields to leave it
+              out. The plan was not created.
+            </Banner>
+          )}
         </div>
 
-        {/* Serialized for the server action — applied (one PUT each) after create. */}
+        {/* Serialized for the server action, applied (one PUT each) after create. */}
         <input type="hidden" name="entitlements" value={JSON.stringify(ents)} />
       </fieldset>
 
@@ -499,7 +577,7 @@ export function PlanCreateForm({
       >
         Create plan
       </SubmitButton>
-    </form>
+    </ActionForm>
   );
 }
 

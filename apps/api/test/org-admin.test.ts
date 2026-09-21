@@ -2,7 +2,7 @@
  * Operator-side organization CRUD (Tenant · Organizations).
  *
  * Covers the admin routes the panel drives: create (with optional initial
- * OWNER), add/role/remove members, update, delete — plus the app-scoping
+ * OWNER), add/role/remove members, update, delete, plus the app-scoping
  * guards (foreign end-user, duplicate member).
  */
 

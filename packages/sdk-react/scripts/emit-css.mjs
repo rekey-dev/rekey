@@ -3,7 +3,7 @@
  *
  * Two copies of a stylesheet drift, so there is only one: `STYLES` in
  * theme.tsx. This emits it as a real file for consumers who cannot use the
- * rendered version — a strict CSP that forbids inline styles, a framework
+ * rendered version, a strict CSP that forbids inline styles, a framework
  * that wants one global stylesheet, anyone rendering the components without
  * React on the client.
  */

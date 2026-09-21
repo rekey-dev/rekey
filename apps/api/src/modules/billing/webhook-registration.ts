@@ -1,5 +1,5 @@
 /**
- * "Auto-configure webhook" — create the provider-side endpoint pointing at our
+ * "Auto-configure webhook", create the provider-side endpoint pointing at our
  * public per-app URL, then persist the returned signing secret (Stripe) or
  * webhook id (PayPal) back into the stored credentials, so the operator never
  * has to paste one out of a dashboard. Idempotent at the provider (it reuses
@@ -8,7 +8,7 @@
  * This lives in its own module rather than on `billingCredentialsService`
  * because it is the one credential operation that needs a *provider instance*.
  * Keeping it here means `credentials.service.ts` (storage) and
- * `providers/index.ts` (construction) no longer import each other — the cycle
+ * `providers/index.ts` (construction) no longer import each other, the cycle
  * that previously forced a dynamic import, and with it hid the dependency
  * from module mocking in tests.
  */
@@ -30,7 +30,7 @@ export async function registerProviderWebhook(
   appSlug: string,
 ): Promise<{ provider: BillingProviderName; webhookConfigured: boolean; url: string }> {
   const base = (env.PUBLIC_WEBHOOK_BASE_URL ?? env.API_URL).replace(/\/$/, '');
-  // In production the provider must be able to reach us — a localhost base
+  // In production the provider must be able to reach us, a localhost base
   // would register a dead endpoint. In dev/test we allow it (an
   // operator-supplied ngrok tunnel, or a fake provider under test).
   if (env.NODE_ENV === 'production' && /\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:|\/|$)/.test(base)) {
@@ -43,7 +43,7 @@ export async function registerProviderWebhook(
   }
   // Load the row's stored mode, not just its data: the re-save at the end of
   // this function has to preserve it verbatim. Re-deriving would be wrong for
-  // providers whose credentials carry no mode marker — PayPal's `detectMode` is
+  // providers whose credentials carry no mode marker, PayPal's `detectMode` is
   // absent by design, so a re-derive falls back to 'test' and would silently
   // relabel a live PayPal row. That is not cosmetic: `mode` is what picks
   // PayPal's sandbox-vs-live base URL and what the panel and revenue stats read
@@ -70,17 +70,16 @@ export async function registerProviderWebhook(
       fix: 'Configure the webhook manually in the provider dashboard, then paste the secret/id.',
     });
   }
-  // The provider API call can fail for reasons outside our control — most
+  // The provider API call can fail for reasons outside our control, most
   // commonly invalid credentials (e.g. PayPal 401 invalid_client), but also
   // rate limits or transient network errors. Surface a clean, actionable
   // error instead of bubbling a raw 500.
   //
-  // This route is the one the external audit found already CORRECT, so its
-  // observable contract is preserved exactly — 502, the established
-  // `BILLING_WEBHOOK_REGISTRATION_FAILED` code, and the same `fix`. What
-  // changed is that the mapping now goes through the shared helper every other
-  // provider call site was moved onto, so there is one place to fix rather
-  // than one correct place and six wrong ones.
+  // This route's observable contract is preserved exactly, 502, the
+  // established `BILLING_WEBHOOK_REGISTRATION_FAILED` code, and the same
+  // `fix`. What changed is that the mapping now goes through the shared
+  // helper every other provider call site uses, so there is one place to fix
+  // rather than one correct place and six wrong ones.
   const result = await withProviderErrors(
     {
       provider,

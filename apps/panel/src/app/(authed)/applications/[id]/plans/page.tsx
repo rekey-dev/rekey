@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { errorQuery, api, PanelApiError, type PlanRow, type UsageMeterRow, type PlanEntitlementRow, getApplication } from '@/lib/api';
+import { errorMessage } from '@/lib/error-message';
+import { errorQuery, api, PanelApiError, type PlanRow, type UsageMeterRow, type PlanEntitlementRow, getApplication, unlessBusy } from '@/lib/api';
 import { emptyPage, type Page } from '@/lib/paginate';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { formatMoney } from '@/lib/format';
@@ -14,6 +15,7 @@ import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
 import { EntitlementForm } from './EntitlementForm';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
 
@@ -63,7 +65,7 @@ async function createPlan(applicationId: string, formData: FormData): Promise<vo
   }
 
   // Apply bundle add-ons (one PUT per entitlement). The plan already exists, so
-  // a per-entitlement failure surfaces an error but keeps the `created` flag —
+  // a per-entitlement failure surfaces an error but keeps the `created` flag,
   // the operator sees the plan and can fix the bundle in the Entitlements modal.
   const entitlementsRaw = String(formData.get('entitlements') ?? '[]');
   let entitlements: Array<Record<string, unknown>> = [];
@@ -71,7 +73,7 @@ async function createPlan(applicationId: string, formData: FormData): Promise<vo
     const parsed: unknown = JSON.parse(entitlementsRaw);
     if (Array.isArray(parsed)) entitlements = parsed as Array<Record<string, unknown>>;
   } catch {
-    // Ignore a malformed payload — the plan is still created without add-ons.
+    // Ignore a malformed payload, the plan is still created without add-ons.
   }
   for (const ent of entitlements) {
     try {
@@ -109,7 +111,7 @@ async function registerPlan(applicationId: string, slug: string): Promise<void> 
     }
     throw err;
   }
-  // `redirect`, not `revalidatePath` — matching every other action in this
+  // `redirect`, not `revalidatePath`, matching every other action in this
   // file. A same-action revalidatePath kills Next's seeded prefetch here and
   // the page renders blank for a full RSC round-trip.
   redirect(`/applications/${applicationId}/plans`);
@@ -190,7 +192,7 @@ async function addEntitlement(applicationId: string, slug: string, formData: For
   } else if (kind === 'USAGE') {
     if (key) body.key = key;
     body.quantity = quantity;
-    // Empty means "hard cap", which is not the same as zero — zero is a real
+    // Empty means "hard cap", which is not the same as zero, zero is a real
     // price meaning "charge nothing per unit". Read the raw field so the two
     // stay distinguishable.
     const rawRate = String(formData.get('creditsPerUnit') ?? '').trim();
@@ -250,7 +252,7 @@ const ERR: Record<string, string> = {
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage plans.',
   PLAN_ENTITLEMENT_INVALID: 'Entitlement is missing required fields for its kind.',
   PLAN_ENTITLEMENT_NOT_FOUND: 'Entitlement not found.',
-  // The plan row is written either way and lands as "not registered" — say so,
+  // The plan row is written either way and lands as "not registered", say so,
   // rather than leaving the operator with the bare code and no idea whether
   // anything was saved.
   BILLING_PROVIDER_ERROR:
@@ -284,7 +286,7 @@ export default async function PlansPage({
       <div className="space-y-5">
         <SectionHeader
           title="Plans"
-          description="What end-users buy — subscriptions, licenses, usage-based pricing, or credit packs."
+          description="What end-users buy: subscriptions, licenses, usage-based pricing, or credit packs."
         />
         <BillingDisabledState applicationId={id} />
       </div>
@@ -299,7 +301,7 @@ export default async function PlansPage({
     api<Page<UsageMeterRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/usage-meters`,
-    }).catch(() => emptyPage<UsageMeterRow>()),
+    }).catch(unlessBusy(() => emptyPage<UsageMeterRow>())),
   ]);
   const plans = planPage.items;
   const meters = meterPage.items;
@@ -309,7 +311,7 @@ export default async function PlansPage({
       api<PlanEntitlementRow[]>({
         method: 'GET',
         path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/plans/${encodeURIComponent(p.slug)}/entitlements`,
-      }).catch(() => [] as PlanEntitlementRow[]),
+      }).catch(unlessBusy(() => [] as PlanEntitlementRow[])),
     ),
   );
   const entBySlug: Record<string, PlanEntitlementRow[]> = {};
@@ -357,7 +359,7 @@ export default async function PlansPage({
       )}
       {entError && (
         <Banner tone="error">
-          {ERR[entError] ?? entError}
+          {errorMessage(ERR, entError)}
         </Banner>
       )}
       {unbuyable.length > 0 && (
@@ -375,7 +377,7 @@ export default async function PlansPage({
                 <code className="font-mono">{p.slug}</code>
                 {p.checkout?.blockers.map((b) => (
                   <span key={`${p.id}-${b.provider ?? 'none'}-${b.code}`}>
-                    {' — '}
+                    {': '}
                     {b.message}
                   </span>
                 ))}
@@ -415,7 +417,7 @@ export default async function PlansPage({
             modalKey="newPlan"
             size="lg"
             title="Create a plan"
-            description="Pick the kind first — the form adapts to show only the fields that kind needs. Slug + name + amount are required for every kind."
+            description="Pick the kind first, and the form adapts to show only the fields that kind needs. Slug + name + amount are required for every kind."
             trigger="+ New plan"
           >
             <PlanCreateForm action={action} meters={meterOptions} error={error} />
@@ -432,7 +434,7 @@ export default async function PlansPage({
             </svg>
           }
           title="No plans yet"
-          description="Create your first plan — a subscription, license, usage-based, or credit pack. Pick the kind in the “+ New plan” modal and the form adapts."
+          description="Create your first plan: a subscription, license, usage-based, or credit pack. Pick the kind in the “+ New plan” modal and the form adapts."
         />
       ) : (
         <PlansTable
@@ -521,7 +523,7 @@ function PlansTable({
                 {p.registrationStatus === 'FAILED' ? (
                   // The provider's own reason is the only actionable thing
                   // here ("Invalid API Key provided: sk_test_…"), and it was
-                  // reachable only by hovering — invisible on touch and to
+                  // reachable only by hovering, invisible on touch and to
                   // keyboard users. Show it inline; keep the title for the
                   // full text when it is truncated.
                   <span
@@ -561,7 +563,7 @@ function PlansTable({
                   <Modal
                     modalKey={`edit_${p.slug}`}
                     size="md"
-                    title={`Edit plan — ${p.slug}`}
+                    title={`Edit plan: ${p.slug}`}
                     description="Rename the plan, and correct its price while no provider price exists yet. The slug is permanent because your integration passes it to checkout."
                     trigger="Edit"
                     triggerClassName="cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
@@ -586,7 +588,7 @@ function PlansTable({
                   <Modal
                     modalKey={`ent_${p.slug}`}
                     size="lg"
-                    title={`Entitlements — ${p.slug}`}
+                    title={`Entitlements: ${p.slug}`}
                     description="The benefit bundle this plan grants on purchase (licenses, credits, feature flags, usage allowance). Materialized onto the buyer when the subscription activates."
                     trigger="Entitlements"
                     triggerClassName="cursor-pointer rounded text-xs text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
@@ -600,11 +602,11 @@ function PlansTable({
                                 <Badge tone="neutral" mono className="mr-1.5">{e.kind}</Badge>
                                 {entitlementLabel(e)}
                               </span>
-                              <form action={removeEntitlement.bind(null, applicationId, p.slug, e.id)}>
+                              <ActionForm action={removeEntitlement.bind(null, applicationId, p.slug, e.id)}>
                                 <ConfirmButton confirm={`Remove "${entitlementLabel(e)}" from ${p.slug}? Future purchases stop granting it; already-materialized grants on existing buyers are unaffected.`}>
                                   Remove
                                 </ConfirmButton>
-                              </form>
+                              </ActionForm>
                             </li>
                           ))}
                         </ul>
@@ -628,31 +630,31 @@ function PlansTable({
                       // Offered alongside Archive rather than instead of it:
                       // this plan is live and the operator may reasonably want
                       // either to fix it or to pull it down.
-                      <form action={registerPlan.bind(null, applicationId, p.slug)} className="inline">
+                      <ActionForm action={registerPlan.bind(null, applicationId, p.slug)} className="inline">
                         <SubmitButton
                           pendingLabel="Registering…"
                           className="rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
                         >
                           Register
                         </SubmitButton>
-                      </form>
+                      </ActionForm>
                     )}
                   {p.registrationStatus === 'FAILED' || p.registrationStatus === 'PENDING' ? (
-                    // Activating an unregistered plan is refused by the API —
+                    // Activating an unregistered plan is refused by the API,
                     // nothing can be sold against it until the provider accepts
                     // it. Offering "Reactivate" here would be a button whose
                     // only outcome is an error, so this offers the repair the
                     // API actually wants instead.
-                    <form action={registerPlan.bind(null, applicationId, p.slug)} className="inline">
+                    <ActionForm action={registerPlan.bind(null, applicationId, p.slug)} className="inline">
                       <SubmitButton
                         pendingLabel="Registering…"
                         className="rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
                       >
                         Retry registration
                       </SubmitButton>
-                    </form>
+                    </ActionForm>
                   ) : (
-                  <form action={setPlanActive.bind(null, applicationId, p.slug, !p.active)} className="inline">
+                  <ActionForm action={setPlanActive.bind(null, applicationId, p.slug, !p.active)} className="inline">
                     {p.active ? (
                       <ConfirmButton confirm={`Archive plan "${p.slug}"? End-users on this plan stay subscribed; new sign-ups are blocked.`}>
                         Archive
@@ -665,7 +667,7 @@ function PlansTable({
                         Reactivate
                       </SubmitButton>
                     )}
-                  </form>
+                  </ActionForm>
                   )}
                 </div>
               </TD>

@@ -2,13 +2,13 @@
  * Three-way end-user sign-up policy (`authConfig.signupMode`).
  *
  * Load-bearing properties:
- *   - `public` (default) — both the publishable and the secret key may create
+ *   - `public` (default), both the publishable and the secret key may create
  *     end-users. Existing behaviour, must stay unchanged.
- *   - `secret_only` — ONLY a server-side secret key may create end-users; the
+ *   - `secret_only`, ONLY a server-side secret key may create end-users; the
  *     publishable key is refused with `SIGNUP_REQUIRES_SECRET_KEY`. The guard
  *     covers every creation entry: password sign-up, magic-link, OAuth-first.
  *     A publishable key can still sign EXISTING users in.
- *   - `invite_only` — no public sign-up at all; both kinds are refused with
+ *   - `invite_only`, no public sign-up at all; both kinds are refused with
  *     `SIGNUP_DISABLED`.
  *   - Back-compat: the legacy `signupEnabled` boolean still drives the mode
  *     both directions (`false` ⇔ `invite_only`).
@@ -89,7 +89,7 @@ describe('Sign-up mode (public / secret_only / invite_only)', () => {
     });
   }
 
-  // ---------- public (default) — unchanged ----------
+  // ---------- public (default), unchanged ----------
 
   describe('public (default)', () => {
     it('201: publishable key may create a user', async () => {

@@ -4,7 +4,7 @@
  * That branding is operator-authored JSON with no schema at rest, and it now
  * reaches two places where a raw value would be dangerous: `logoUrl` lands in
  * an `<img src>`, and `primaryColor` lands inside a `<style>` block. This is
- * the sign-in page — the single worst place in the product to execute
+ * the sign-in page, the single worst place in the product to execute
  * attacker-controlled script, because it is where people type passwords.
  *
  * An operator branding their own Application is not the threat. The threat is
@@ -133,7 +133,7 @@ describe('authorize screen branding', () => {
     // `form-action 'self'`, and browsers enforce form-action ACROSS the
     // redirect a submission triggers. This page is served by the API and must
     // redirect to the relying party's origin, so the browser silently refused
-    // the navigation — a correct 302 that went nowhere, with nothing in any
+    // the navigation, a correct 302 that went nowhere, with nothing in any
     // server log. Every headless test passed throughout, because curl and
     // `app.inject` do not enforce CSP. Hence this test asserts the HEADER
     // rather than the behaviour.

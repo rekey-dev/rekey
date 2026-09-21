@@ -1,7 +1,7 @@
 /**
  * NOTE: `pnpm test` in this package builds first (`tsc && vitest run`), because
  * these cases import the built `dist/`. Turbo's `test` task depends on
- * `^build` — dependencies, not this package — so under `turbo run test` the
+ * `^build`, dependencies, not this package, so under `turbo run test` the
  * dist would be whatever a previous run left behind, and the suite passed
  * standalone while failing in CI. `@rekey.dev/node` hit this first and its
  * script carries the same guard.
@@ -10,7 +10,7 @@
  * Importing this package must not kill the importing process.
  *
  * `@rekey.dev/mcp` declares `main` / `types` / `exports`, so
- * `import '@rekey.dev/mcp'` resolves — but `dist/index.js` read the environment
+ * `import '@rekey.dev/mcp'` resolves, but `dist/index.js` read the environment
  * and called `process.exit(1)` while the module was still evaluating. There is
  * no try/catch around a module's side effects, so an importer could not defend
  * against it: a test harness that wanted to list the tool schemas, or a wrapper
@@ -18,7 +18,7 @@
  *
  * These tests spawn a child process and import the BUILT artifact, because a
  * `process.exit` during module evaluation is exactly the failure a source-level
- * test cannot observe — the source-level test would take the process with it.
+ * test cannot observe, the source-level test would take the process with it.
  */
 
 import { describe, expect, it, beforeAll } from 'vitest';

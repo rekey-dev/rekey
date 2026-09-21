@@ -50,10 +50,12 @@ All gated by `SUPER_ADMIN_KEY`. Owned by the `plans` module.
 
 ```
 GET    /api/v1/admin/applications/:id/plans?includeInactive=true
-POST   /api/v1/admin/applications/:id/plans
+POST   /api/v1/admin/applications/:id/plans               { slug, name, amount, currency?, interval?, metadata? }
 PATCH  /api/v1/admin/applications/:id/plans/:slug         { active?, name?, amount?, currency?, interval?, metadata? }
 POST   /api/v1/admin/applications/:id/plans/:slug/register
 ```
+
+The create body is **strict**: it builds SUBSCRIPTION plans, and an unknown key (`kind`, `licenseKind`, `creditsAmount`, or a typo) is a 400 `VALIDATION_ERROR` naming the field. It used to drop them and answer 201, so a caller asking for a LICENSE or CREDIT plan got a subscription and a success message. Per-kind plans and `trialDays` live on the tenant route, `POST /api/v1/tenant/applications/:id/plans`.
 
 Creating a plan calls `ensurePlanRegistered()` **only when the Application already has Stripe credentials stored**; the returned price id is persisted into `Plan.metadata.stripe`. PayPal and Razorpay register the plan lazily at first checkout. Making the call unconditional used to be fine when a stub always answered — once the stubs were deleted it meant a PayPal-only or Razorpay-only operator could not create a plan at all, and the error named Stripe, a provider they had never configured.
 
@@ -67,6 +69,12 @@ Creating a plan calls `ensurePlanRegistered()` **only when the Application alrea
 | `PENDING` | Inserted, provider call in flight (or the process died during it). | no |
 | `REGISTERED` | Provider acknowledged it; `metadata.<provider>` holds the price id. | yes |
 | `FAILED` | Provider refused. Forced `active: false`, with the refusal in `registrationError`. | no |
+
+Readiness blockers a plan can report alongside these: `PLAN_NOT_REGISTERED`
+and `PLAN_REGISTRATION_FAILED` (Stripe), `PLAN_TRIAL_UNSUPPORTED` (a trial on
+a provider that cannot run one), `NO_BILLING_PROVIDER`, and
+`PROVIDER_INBOUND_ONLY` (the only enabled provider is the external billing
+system, which hosts no checkout — see [external-billing.md](external-billing.md)).
 
 A plan awaiting registration is inserted `active: false` and only promoted once the provider answers. The provider call is a network call, so it cannot sit inside a database transaction — the ordering is what makes it safe, not a transaction. Before this, a refused registration left the plan committed **and active**: it stayed on the pricing page, indistinguishable from a working plan, and every buyer who clicked it got a 500 out of checkout.
 
@@ -84,7 +92,10 @@ Publishable **or** secret key (`Authorization: Bearer rp_pub_…` / `rp_live_…
 GET   /api/v1/billing/plans                                  — Application key only (pricing pages)
 GET   /api/v1/billing/subscription                           — Application key + user JWT
 POST  /api/v1/billing/checkout    { planSlug, successUrl, cancelUrl }
+POST  /api/v1/billing/subscribe   { organizationId? }            — Application key + user JWT
 ```
+
+`POST /subscribe` puts the caller on the Application's nominated free plan (`billingConfig.defaultPlanSlug`) with no provider involved. When that plan grants CREDIT or LICENSE entitlements, the claim is **once per end-user**, across their personal account and every organization they own or administer, and it survives cancellation: activating it for a second beneficiary answers `409 BILLING_FREE_TIER_ALREADY_CLAIMED`. Cancelling and reactivating for the same beneficiary is allowed and issues nothing new. A free plan carrying only FEATURE or USAGE entitlements has no such limit, because nothing is handed over that outlives the subscription. To give a second organization the plan anyway, grant it as an operator. Credits already issued stay with their beneficiary after a cancel.
 
 `POST /checkout` asks the **provider first**: it creates the hosted-checkout session, and only once the provider has answered does it upsert the local `PENDING` Subscription (so the row can correlate the eventual webhook). Nothing local is written for a checkout the provider refused. Returns the URL to redirect to and the local Subscription row. **Subscription activation happens via the provider's webhook — not synchronously here.**
 
@@ -355,6 +366,15 @@ The signature is the auth — no `Authorization` header on this route. The raw b
 | anything else | Logged + recorded as processed (no-op) |
 
 See `apps/api/src/modules/billing/webhooks/` for the full module rules.
+
+### (c) Your own billing system posting to Rekey
+
+When the sale happens in a system Rekey never called (your own billing stack,
+an invoicing tool, a marketplace), that system posts signed events to
+`POST /api/v1/webhooks/billing/external/<app-slug>` and Rekey activates,
+renews and cancels the subscription from them, creating the end-user when it
+has not seen them yet. Same pipeline, same appliers, same outbound events as
+(b). See [Bring your own billing](external-billing.md).
 
 ## Caching entitlements
 

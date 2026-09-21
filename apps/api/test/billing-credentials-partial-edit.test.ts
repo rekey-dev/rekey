@@ -17,7 +17,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { decryptJson } from '../src/lib/secrets.js';
@@ -65,7 +65,7 @@ describe('Billing credentials: partial edit keeps the stored secret', () => {
     b: Bootstrapped,
     data: Record<string, string>,
     extra: Record<string, unknown> = {},
-  ): ReturnType<FastifyInstance['inject']> {
+  ): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'PUT',
       url: `/api/v1/tenant/applications/${b.applicationId}/billing-credentials/stripe`,

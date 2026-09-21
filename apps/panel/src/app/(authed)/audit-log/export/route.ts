@@ -10,7 +10,7 @@
 
 import type { NextRequest } from 'next/server';
 import { cookies } from 'next/headers';
-import { ACCESS_COOKIE } from '@/lib/api';
+import { ACCESS_COOKIE, apiCallerHeaders } from '@/lib/api';
 
 const PASSTHROUGH_PARAMS = ['applicationId', 'type', 'actorType', 'from', 'to'] as const;
 
@@ -22,7 +22,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   const jar = await cookies();
   const access = jar.get(ACCESS_COOKIE)?.value;
   if (!access) {
-    // Relative Location — `req.nextUrl` behind a proxy is the internal bind
+    // Relative Location, `req.nextUrl` behind a proxy is the internal bind
     // address (0.0.0.0:3031); a relative redirect resolves against the public host.
     return new Response(null, { status: 303, headers: { location: '/login?reason=expired' } });
   }
@@ -34,14 +34,13 @@ export async function GET(req: NextRequest): Promise<Response> {
   }
 
   const res = await fetch(`${base}/api/v1/tenant/security-events?${qs.toString()}`, {
-    headers: { authorization: `Bearer ${access}` },
+    headers: { ...(await apiCallerHeaders()), authorization: `Bearer ${access}` },
     cache: 'no-store',
   });
   if (res.status === 401) {
-    // Access token expired mid-session — bounce through the login flow rather
-    // than re-implementing the refresh dance for a download link.
-    // Relative Location — `req.nextUrl` behind a proxy is the internal bind
-    // address (0.0.0.0:3031); a relative redirect resolves against the public host.
+    // Access token expired mid-session, bounce through the login flow rather
+    // than re-implementing the refresh dance for a download link. Relative
+    // Location again, for the same reason as above.
     return new Response(null, { status: 303, headers: { location: '/login?reason=expired' } });
   }
   if (!res.ok) {

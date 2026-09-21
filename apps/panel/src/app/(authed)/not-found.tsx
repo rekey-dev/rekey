@@ -1,12 +1,12 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 
 /**
  * 404 inside the authed console. Same reason as the sibling `forbidden.tsx`:
  * with the only not-found file at the app root, the boundary sat above this
  * layout and a single missing resource unmounted the entire console.
  *
- * This is the common case, not the rare one — `ensureAppAccess` answers 404
+ * This is the common case, not the rare one, `ensureAppAccess` answers 404
  * (not 403) for a member with no grant on an application, so any wrong or
  * ungranted app URL took the whole panel down.
  */

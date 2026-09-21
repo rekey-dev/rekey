@@ -11,19 +11,21 @@
  *   - OWNER: invite anyone in any role, remove anyone, change anyone's
  *     role. There must always be at least one OWNER per Tenant.
  *   - ADMIN: invite, remove and re-role **MEMBERs only**. Anything touching an
- *     ADMIN or an OWNER requires OWNER (`ensureCanManage`) — an ADMIN cannot
+ *     ADMIN or an OWNER requires OWNER (`ensureCanManage`), an ADMIN cannot
  *     invite a second ADMIN, and gets 403 TENANT_ROLE_INSUFFICIENT if they try.
  *     Note this is stricter than the end-user-side `Organization` rules, where an
  *     org ADMIN may manage other ADMINs.
  *   - MEMBER: read-only.
  */
 
+import { ALL_SCOPES, invalidScopes } from '../../lib/operator-scopes.js';
 import type {
   ApplicationGrantRole,
   TenantInvitation,
   TenantMembership,
   TenantRole,
 } from '@prisma/client';
+import { invalidateMembershipAuth } from '../../lib/operator-auth-cache.js';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import {
@@ -45,7 +47,7 @@ import { panelBaseUrl } from '../../lib/panel-url.js';
  * Deployment policy for CREATING another workspace (`WORKSPACE_CREATION`).
  *
  * Read live from `process.env` with the boot-validated value as the fallback,
- * matching `operatorSignupMode` — capturing it at module load would make the
+ * matching `operatorSignupMode`, capturing it at module load would make the
  * gate untestable in-process, and an out-of-range live value must never quietly
  * widen the gate, so the boot value (which a typo would have crashed on) wins.
  */
@@ -60,8 +62,8 @@ export function workspaceCreationMode(): 'open' | 'disabled' {
  *
  * Why creation and nothing else: a workspace is the unit a deployment sizes
  * itself against (see `DEFAULT_TENANT_LIMITS`), and a ceiling per workspace is
- * worth nothing if any signed-in operator — including someone invited into a
- * team — can mint a fresh workspace with a fresh ceiling. Switching, listing,
+ * worth nothing if any signed-in operator, including someone invited into a
+ * team, can mint a fresh workspace with a fresh ceiling. Switching, listing,
  * renaming, leaving and everything else stay open, so an operator who already
  * belongs to several is completely unaffected.
  *
@@ -76,7 +78,7 @@ export function assertWorkspaceCreationAllowed(): void {
     message: 'Creating additional workspaces is disabled on this deployment.',
     fix:
       'Contact the deployment administrator to have a workspace created for you. ' +
-      'Your existing workspaces are unaffected — you can still switch between them, ' +
+      'Your existing workspaces are unaffected, you can still switch between them, ' +
       'invite members, and manage applications as usual.',
   });
 }
@@ -97,16 +99,22 @@ export interface MemberRow {
   role: TenantRole;
   joinedAt: Date;
   /**
-   * Per-application grants (roadmap #8). Only meaningful for MEMBER roles —
+   * Per-application grants (roadmap #8). Only meaningful for MEMBER roles,
    * OWNER/ADMIN have implicit access to every Application. A MEMBER with an
    * empty list can access no Application at all (unless `legacyWorkspaceRead`).
    */
   grants: MemberGrantRow[];
   /**
+   * The member's scopes as STORED, `null` when unrestricted. What the editor
+   * shows. The resolved set (lineage applied, reads implied) is what `/me`
+   * returns and what the gate reads; this is the admin-facing raw value.
+   */
+  scopes: string[] | null;
+  /**
    * True only for MEMBER memberships grandfathered by the 2.0.0-rc.3 backfill:
    * they keep the pre-grants workspace-wide READ over every Application.
    *
-   * Reported so an owner can actually find them — the old behaviour was
+   * Reported so an owner can actually find them, the old behaviour was
    * invisible in the API, indistinguishable from "a member with no access
    * yet". Setting any grant on the membership clears it permanently.
    */
@@ -145,7 +153,6 @@ function shapeInvitation(inv: TenantInvitation): InvitationRow {
 
 /** Permission helper. Throws if `actor` cannot manage `target` role. */
 function ensureCanManage(actor: TenantRole, target: TenantRole): void {
-  // OWNER can do anything. ADMIN can manage MEMBER only. MEMBER can manage nothing.
   if (actor === 'OWNER') return;
   if (actor === 'ADMIN' && target === 'MEMBER') return;
   throw new RekeyError({
@@ -182,6 +189,9 @@ export const tenantWorkspacesService = {
       role: r.role,
       joinedAt: r.createdAt,
       legacyWorkspaceRead: r.legacyWorkspaceRead,
+      // Scopes narrow a MEMBER only; mirror /me so a row promoted before
+      // promotion cleared scopes does not show a restriction nothing enforces.
+      scopes: r.role === 'MEMBER' && r.scopesRestricted ? r.scopes : null,
       grants: r.applicationGrants.map((g) => ({
         applicationId: g.application.id,
         applicationName: g.application.name,
@@ -201,7 +211,7 @@ export const tenantWorkspacesService = {
   //
   // Grants attach to a MEMBER membership and scope what that member can do
   // per Application. OWNER/ADMIN never need them (implicit full access), so
-  // setting one on a non-MEMBER membership is rejected — it would silently
+  // setting one on a non-MEMBER membership is rejected, it would silently
   // do nothing and mislead the operator.
 
   async loadMembershipOrThrow(tenantId: string, membershipId: string): Promise<TenantMembership> {
@@ -249,7 +259,7 @@ export const tenantWorkspacesService = {
     };
   },
 
-  /** Upsert one grant — (membership, application) is unique, so re-setting changes the role. */
+  /** Upsert one grant, (membership, application) is unique, so re-setting changes the role. */
   async setMemberGrant(args: {
     tenantId: string;
     membershipId: string;
@@ -295,7 +305,7 @@ export const tenantWorkspacesService = {
       // Setting a grant is the documented one-way door out of the
       // grandfathered pre-grants blanket read. It used to be implicit
       // ("grants.length > 0 wins"), which meant REMOVING the last grant put
-      // the member back on workspace-wide read — a de-scoping action that
+      // the member back on workspace-wide read, a de-scoping action that
       // widened access. Now the flag is cleared for good on the way in, so
       // removing the last grant leaves the member with nothing, which is what
       // the operator was asking for.
@@ -304,6 +314,7 @@ export const tenantWorkspacesService = {
         data: { legacyWorkspaceRead: false },
       }),
     ]);
+    invalidateMembershipAuth({ operatorId: membership.tenantUserId, membershipId: membership.id });
     return {
       applicationId: app.id,
       applicationName: app.name,
@@ -318,10 +329,11 @@ export const tenantWorkspacesService = {
     membershipId: string;
     applicationId: string;
   }): Promise<void> {
-    await this.loadMembershipOrThrow(args.tenantId, args.membershipId);
+    const membership = await this.loadMembershipOrThrow(args.tenantId, args.membershipId);
     const deleted = await prisma.applicationGrant.deleteMany({
       where: { tenantMembershipId: args.membershipId, applicationId: args.applicationId },
     });
+    invalidateMembershipAuth({ operatorId: membership.tenantUserId, membershipId: membership.id });
     if (deleted.count === 0) {
       throw new RekeyError({
         statusCode: 404,
@@ -351,7 +363,7 @@ export const tenantWorkspacesService = {
 
   /**
    * Mint a new invitation. Returns the raw token (one-time-show) + the
-   * record. Caller is responsible for assembling the share URL —
+   * record. Caller is responsible for assembling the share URL,
    * `${PANEL_URL}/accept-invite?token=${raw}`.
    */
   async createInvitation(input: {
@@ -370,7 +382,7 @@ export const tenantWorkspacesService = {
     ensureCanManage(input.invitedByRole, input.role);
 
     const email = input.email.toLowerCase();
-    // Block invites to existing members of this workspace — they'd just
+    // Block invites to existing members of this workspace, they'd just
     // confuse the recipient.
     const existing = await prisma.tenantMembership.findFirst({
       where: { tenantId: input.tenantId, tenantUser: { email } },
@@ -380,7 +392,7 @@ export const tenantWorkspacesService = {
         statusCode: 409,
         code: 'INVITE_TARGET_ALREADY_MEMBER',
         message: `${email} is already a member of this workspace.`,
-        fix: 'No invite needed — they can sign in directly.',
+        fix: 'No invite needed, they can sign in directly.',
       });
     }
 
@@ -397,7 +409,6 @@ export const tenantWorkspacesService = {
       },
     });
 
-    // Fetch the inviter + workspace name for the email body.
     const [inviter, tenant] = await Promise.all([
       prisma.tenantUser.findUnique({
         where: { id: input.invitedById },
@@ -418,11 +429,11 @@ export const tenantWorkspacesService = {
         inviterName: inviter?.name ?? inviter?.email ?? 'A teammate',
         workspaceName: tenant?.name ?? 'a workspace',
         // An invitation is an OPERATOR-facing link, so its base is the panel,
-        // not a customer app — `panelBaseUrl()` (PANEL_OAUTH_REDIRECT_BASE, or
-        // inferred from CORS_ALLOWED_ORIGINS). It used to fall back to the
-        // placeholder `your-panel.example.com`, which mailed a live invitation
-        // token to a domain nobody owns. Empty now when nothing resolves, and
-        // the template drops the button rather than rendering href="".
+        // not a customer app: `panelBaseUrl()` (PANEL_OAUTH_REDIRECT_BASE, or
+        // inferred from CORS_ALLOWED_ORIGINS). A prior fallback to the
+        // placeholder `your-panel.example.com` mailed a live invitation token
+        // to a domain nobody owns; it now resolves to empty instead, and the
+        // template drops the button rather than rendering href="".
         inviteUrl: input.inviteUrl
           ? input.inviteUrl.replace('{token}', encodeURIComponent(rawToken))
           : buildTokenUrl(panelBaseUrl(), '/accept-invite', rawToken),
@@ -507,7 +518,7 @@ export const tenantWorkspacesService = {
         statusCode: 400,
         code: 'INVITATION_ALREADY_ACCEPTED',
         message: 'This invitation has already been used.',
-        fix: 'Sign in normally — you should already have access.',
+        fix: 'Sign in normally, you should already have access.',
       });
     }
     if (inv.expiresAt <= new Date()) {
@@ -575,12 +586,12 @@ export const tenantWorkspacesService = {
           statusCode: 403,
           code: 'INVITATION_EMAIL_MISMATCH',
           message: 'This invitation was issued to a different email address.',
-          fix: 'Sign in as the invited email, then accept — or ask the workspace owner to re-invite your address.',
+          fix: 'Sign in as the invited email, then accept, or ask the workspace owner to re-invite your address.',
         });
       }
 
       // Already a member somehow? Treat as accept-no-op. The find-then-
-      // create has a narrow race window — two concurrent accepts could
+      // create has a narrow race window, two concurrent accepts could
       // both miss the find and both try the create. The DB unique
       // constraint catches the loser with P2002; we map that back to
       // "already member" and re-read.
@@ -627,8 +638,10 @@ export const tenantWorkspacesService = {
 
       // Issue a session scoped to the newly-joined workspace so the panel can
       // hop straight in.
-      const access = issueTenantAccessToken(args.tenantUserId, inv.tenantId, inv.role);
       const refresh = await issueTenantRefreshToken(args.tenantUserId);
+      const access = issueTenantAccessToken(args.tenantUserId, inv.tenantId, inv.role, {
+        sessionId: refresh.record.sessionId,
+      });
       return {
         membership,
         accessToken: access.token,
@@ -640,7 +653,7 @@ export const tenantWorkspacesService = {
   },
 
   /**
-   * Remove a member from this workspace. Cannot remove the last OWNER —
+   * Remove a member from this workspace. Cannot remove the last OWNER,
    * a workspace always has at least one OWNER.
    */
   async removeMember(args: {
@@ -677,6 +690,7 @@ export const tenantWorkspacesService = {
       }
     }
     await prisma.tenantMembership.delete({ where: { id: target.id } });
+    invalidateMembershipAuth({ operatorId: target.tenantUserId, membershipId: target.id });
   },
 
   async changeMemberRole(args: {
@@ -715,9 +729,16 @@ export const tenantWorkspacesService = {
       }
     }
 
+    // Scopes narrow a MEMBER only. Leaving them on a promoted row would be
+    // a stale restriction nothing reads today and something might tomorrow,
+    // and the editor refuses non-members, so it could not be cleared. A
+    // later demotion starts unrestricted; the admin restricts again.
     const updated = await prisma.tenantMembership.update({
       where: { id: target.id },
-      data: { role: args.newRole },
+      data:
+        args.newRole === 'MEMBER'
+          ? { role: args.newRole }
+          : { role: args.newRole, scopesRestricted: false, scopes: [] },
       include: {
         tenantUser: { select: { email: true, name: true } },
         applicationGrants: {
@@ -726,6 +747,7 @@ export const tenantWorkspacesService = {
         },
       },
     });
+    invalidateMembershipAuth({ operatorId: updated.tenantUserId, membershipId: updated.id });
     return {
       membershipId: updated.id,
       tenantUserId: updated.tenantUserId,
@@ -734,8 +756,9 @@ export const tenantWorkspacesService = {
       role: updated.role,
       joinedAt: updated.createdAt,
       legacyWorkspaceRead: updated.legacyWorkspaceRead,
+      scopes: updated.scopesRestricted ? updated.scopes : null,
       // Grants survive role changes but are only consulted while the role is
-      // MEMBER — promoting to ADMIN leaves them inert, demoting re-arms them.
+      // MEMBER, promoting to ADMIN leaves them inert, demoting re-arms them.
       grants: updated.applicationGrants.map((g) => ({
         applicationId: g.application.id,
         applicationName: g.application.name,
@@ -746,10 +769,118 @@ export const tenantWorkspacesService = {
     };
   },
 
-  async getWorkspace(tenantId: string): Promise<{ id: string; name: string; createdAt: Date }> {
+  /**
+   * Set or lift a MEMBER's scopes. `null` lifts every restriction.
+   *
+   * MEMBER only, for the same reason grants are: OWNER/ADMIN short-circuit the
+   * gate before scopes are read, so a value stored on them would be a lie
+   * the row tells and nothing honours. `ensureCanManage` applies, so an
+   * ADMIN edits members and nobody edits an OWNER. A member cannot reach this
+   * route at all, the floor above it is what makes self-escalation
+   * impossible rather than merely forbidden.
+   *
+   * Unknown scopes are REFUSED, naming the entries. Silently dropping one is
+   * the same trap as silently ignoring a filter parameter: the admin believes
+   * they granted something they did not.
+   */
+  async setMemberScopes(args: {
+    tenantId: string;
+    membershipId: string;
+    actorRole: TenantRole;
+    scopes: string[] | null;
+  }): Promise<MemberRow> {
+    const target = await this.loadMembershipOrThrow(args.tenantId, args.membershipId);
+    ensureCanManage(args.actorRole, target.role);
+    if (target.role !== 'MEMBER') {
+      throw new RekeyError({
+        statusCode: 400,
+        code: 'SCOPES_MEMBER_ONLY',
+        message: `Scopes only apply to MEMBER roles — this membership is ${target.role} and is unrestricted by definition.`,
+        fix: 'Change the member role to MEMBER first, then set scopes.',
+      });
+    }
+    if (args.scopes !== null) {
+      const bad = invalidScopes(args.scopes);
+      if (bad.length > 0) {
+        throw new RekeyError({
+          statusCode: 400,
+          code: 'SCOPE_INVALID',
+          message: `Unknown scope${bad.length === 1 ? '' : 's'}: ${bad.join(', ')}.`,
+          fix: `Use \`domain:level\` from the registry: ${ALL_SCOPES.join(', ')}.`,
+        });
+      }
+    }
+    const updated = await prisma.tenantMembership.update({
+      where: { id: target.id },
+      data: {
+        scopesRestricted: args.scopes !== null,
+        scopes: args.scopes === null ? [] : [...new Set(args.scopes)],
+      },
+      include: {
+        tenantUser: { select: { email: true, name: true } },
+        applicationGrants: {
+          include: { application: { select: { id: true, name: true, slug: true } } },
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+    });
+    invalidateMembershipAuth({ operatorId: updated.tenantUserId, membershipId: updated.id });
+    return {
+      membershipId: updated.id,
+      tenantUserId: updated.tenantUserId,
+      email: updated.tenantUser.email,
+      name: updated.tenantUser.name,
+      role: updated.role,
+      joinedAt: updated.createdAt,
+      legacyWorkspaceRead: updated.legacyWorkspaceRead,
+      scopes: updated.scopesRestricted ? updated.scopes : null,
+      grants: updated.applicationGrants.map((g) => ({
+        applicationId: g.application.id,
+        applicationName: g.application.name,
+        applicationSlug: g.application.slug,
+        role: g.role,
+        createdAt: g.createdAt,
+      })),
+    };
+  },
+
+  /**
+   * Name and the operator-MCP switch, both OWNER/ADMIN. `renameWorkspace` is
+   * kept for its callers; this is the route's entry point.
+   */
+  async updateWorkspace(args: {
+    tenantId: string;
+    name?: string;
+    operatorMcpEnabled?: boolean;
+  }): Promise<{ id: string; name: string; operatorMcpEnabled: boolean }> {
+    let name: string | undefined;
+    if (args.name !== undefined) {
+      name = args.name.trim();
+      if (name.length < 2 || name.length > 80) {
+        throw new RekeyError({
+          statusCode: 400,
+          code: 'WORKSPACE_NAME_INVALID',
+          message: 'Workspace name must be 2–80 characters.',
+          fix: 'Pick a shorter or longer name.',
+        });
+      }
+    }
+    return prisma.tenant.update({
+      where: { id: args.tenantId },
+      data: {
+        ...(name !== undefined && { name }),
+        ...(args.operatorMcpEnabled !== undefined && { operatorMcpEnabled: args.operatorMcpEnabled }),
+      },
+      select: { id: true, name: true, operatorMcpEnabled: true },
+    });
+  },
+
+  async getWorkspace(
+    tenantId: string,
+  ): Promise<{ id: string; name: string; createdAt: Date; operatorMcpEnabled: boolean }> {
     const t = await prisma.tenant.findUnique({
       where: { id: tenantId },
-      select: { id: true, name: true, createdAt: true },
+      select: { id: true, name: true, createdAt: true, operatorMcpEnabled: true },
     });
     if (!t) {
       throw new RekeyError({
@@ -766,7 +897,7 @@ export const tenantWorkspacesService = {
    * Create a brand new Tenant for an already-signed-in operator. The caller
    * becomes OWNER. Used when one user wants to spin up a second workspace
    * (e.g. side project) without signing up a second account. Returns the
-   * new tenantId — caller should then switch the active workspace via
+   * new tenantId, caller should then switch the active workspace via
    * /tenant/auth/switch-workspace.
    *
    * Gated by `WORKSPACE_CREATION`. The gate lives here rather than in the route
@@ -790,7 +921,7 @@ export const tenantWorkspacesService = {
     }
     const result = await prisma.$transaction(async (tx) => {
       const tenant = await tx.tenant.create({
-        // The deployment default applies here too — a second workspace must
+        // The deployment default applies here too, a second workspace must
         // not be a way to obtain a wider one than sign-up hands out.
         data: {
           name,

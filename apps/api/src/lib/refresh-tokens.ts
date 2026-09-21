@@ -7,21 +7,23 @@
  *      token via POST /api/v1/auth/refresh. The presented refresh is
  *      revoked (revokedAt set) and a new {access, refresh} pair is issued.
  *   3. `replacedById` chains the rotation history. A presented-but-revoked
- *      refresh is *replay* — we reject the call.
+ *      refresh is *replay*, we reject the call.
  *
  * Storage: SHA-256 hash of the raw token, hash-only DB (same model as
- * ApiKey). Refresh tokens are 32 bytes of CSPRNG entropy — fast hash is
+ * ApiKey). Refresh tokens are 32 bytes of CSPRNG entropy, fast hash is
  * correct, Argon2 is for user-chosen passwords (see lib/passwords.ts).
  *
- * Lifetime: 30 days, sliding (each rotation issues a fresh 30-day window).
+ * Lifetime: END_USER_REFRESH_TOKEN_TTL_DAYS (default 30), sliding: each
+ * rotation issues a fresh full window.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
 import type { RefreshToken } from '@prisma/client';
 import { prisma } from './prisma.js';
+import { env } from '../config/env.js';
 
 const REFRESH_TOKEN_BYTES = 32;
-const REFRESH_TOKEN_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+const REFRESH_TOKEN_LIFETIME_MS = env.END_USER_REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000;
 
 export function hashRefreshToken(raw: string): string {
   return createHash('sha256').update(raw).digest('hex');
@@ -43,17 +45,23 @@ export interface IssueRefreshTokenOptions {
   ip?: string | null;
   /** Surface: "session" (default, SDK) or "mcp" (per-app OAuth token endpoint). */
   kind?: 'session' | 'mcp';
-  /** For `kind: 'mcp'` — the OAuth client_id the token is bound to. */
+  /** For `kind: 'mcp'`, the OAuth client_id the token is bound to. */
   clientId?: string | null;
   /**
-   * For `kind: 'mcp'` — the scopes granted at consent (space-separated,
+   * For `kind: 'mcp'`, the scopes granted at consent (space-separated,
    * RFC 6749). The refresh grant re-issues this exact string, so a chain can
    * never widen (or drop) what the end-user approved. Sessions have no scope
    * and leave it null.
    */
   scope?: string | null;
-  /** Active organization for this session — re-emitted as the `oid` claim on refresh. */
+  /** Active organization for this session, re-emitted as the `oid` claim on refresh. */
   activeOrganizationId?: string | null;
+  /**
+   * Device the session was minted on (`devices.id`), when the client sent a
+   * fingerprint. Carried across rotations; the refresh grant refuses a
+   * different fingerprint for a bound chain (see auth.service `refresh`).
+   */
+  deviceId?: string | null;
 }
 
 /**
@@ -61,7 +69,7 @@ export interface IssueRefreshTokenOptions {
  * value is the *only* time the caller can read it.
  *
  * The optional UA/IP are captured so `/me/sessions` can render a device
- * list. They're hints, not security primitives — cookie cloning across
+ * list. They're hints, not security primitives, cookie cloning across
  * devices won't change the stored values, so don't use them for binding.
  */
 export async function issueRefreshToken(
@@ -70,7 +78,7 @@ export async function issueRefreshToken(
   options: IssueRefreshTokenOptions = {},
 ): Promise<IssuedRefreshToken> {
   const raw = generateRawToken();
-  // Truncate UA at 512 chars — some clients send egregious strings (especially
+  // Truncate UA at 512 chars, some clients send egregious strings (especially
   // mobile WebViews). 512 is generous for any real-world UA.
   const ua = options.userAgent ? options.userAgent.slice(0, 512) : null;
   const ip = options.ip ? options.ip.slice(0, 64) : null;
@@ -86,6 +94,7 @@ export async function issueRefreshToken(
       clientId: options.clientId ?? null,
       scope: options.scope ?? null,
       activeOrganizationId: options.activeOrganizationId ?? null,
+      deviceId: options.deviceId ?? null,
     },
   });
   return { raw, record };
@@ -98,7 +107,7 @@ export type RefreshOutcome =
   | { kind: 'expired'; token: RefreshToken };
 
 /**
- * Look up a presented refresh token by hash. Does **not** mutate state —
+ * Look up a presented refresh token by hash. Does **not** mutate state,
  * the caller (rotateRefreshToken) wraps this in a transaction with the
  * revoke + issue.
  */
@@ -147,12 +156,12 @@ export async function rotateRefreshToken(
         expiresAt,
         // Carry forward the originating device fingerprint so the
         // session list stays stable across rotations. A new device hitting
-        // /refresh with a stolen token wouldn't update this anyway —
+        // /refresh with a stolen token wouldn't update this anyway,
         // the rotation transaction is keyed off `presented.id`.
         userAgent: presented.userAgent,
         ip: presented.ip,
         // Carry the surface + client binding forward across rotations, and the
-        // granted scope with them — a rotation is a re-issue of the SAME grant,
+        // granted scope with them, a rotation is a re-issue of the SAME grant,
         // so it must not be an opportunity to change what it covers.
         kind: presented.kind,
         clientId: presented.clientId,
@@ -160,6 +169,13 @@ export async function rotateRefreshToken(
         // Carry the active org forward so it survives refresh (the refresh
         // handler re-confirms membership and clears it if the user left).
         activeOrganizationId: presented.activeOrganizationId,
+        // And the device: a rotation is the same session on the same machine.
+        // The refresh handler is what refuses a rotation presented from a
+        // different fingerprint; here the binding is simply preserved.
+        deviceId: presented.deviceId,
+        // Same session: the access token minted from this row carries the
+        // same `sid`, so a later single-session revoke reaches it.
+        sessionId: presented.sessionId,
       },
     });
 
@@ -173,7 +189,7 @@ export async function rotateRefreshToken(
 }
 
 /**
- * Revoke a single refresh token. Idempotent — re-revoking is fine. Used
+ * Revoke a single refresh token. Idempotent, re-revoking is fine. Used
  * by sign-out.
  */
 export async function revokeRefreshToken(raw: string): Promise<void> {
@@ -188,6 +204,11 @@ export async function revokeRefreshToken(raw: string): Promise<void> {
  * change, account compromise, "sign out everywhere".
  */
 export async function revokeAllForEndUser(endUserId: string): Promise<number> {
+  // Refresh tokens are revoked row by row; the access tokens they paired with
+  // are refused from this instant by the session middleware (see
+  // EndUser.sessionsInvalidBefore), so the caller's remaining access token
+  // does not ride out its lifetime.
+  await prisma.endUser.updateMany({ where: { id: endUserId }, data: { sessionsInvalidBefore: new Date() } });
   const result = await prisma.refreshToken.updateMany({
     where: { endUserId, revokedAt: null },
     data: { revokedAt: new Date() },
@@ -198,12 +219,12 @@ export async function revokeAllForEndUser(endUserId: string): Promise<number> {
 /**
  * Revoke every active refresh token for an Application. Returns the count revoked.
  *
- * UNUSED — do not reach for this as the session kill-switch. That is
+ * UNUSED, do not reach for this as the session kill-switch. That is
  * `applicationsService.rotateSessions` (route `POST /tenant/applications/:id/
  * rotate-sessions`), which bumps `Application.tokenGeneration` AND revokes the
  * refresh tokens in ONE transaction. Doing the two halves separately is the
  * failure mode worth avoiding: revoke without the bump and outstanding access
- * tokens keep working for up to 15 minutes; bump without the revoke and clients
+ * tokens keep working until their expiry; bump without the revoke and clients
  * refresh straight back in.
  */
 export async function revokeAllForApplication(applicationId: string): Promise<number> {
@@ -225,6 +246,8 @@ export interface SessionSummary {
   expiresAt: Date;
   userAgent: string | null;
   ip: string | null;
+  /** Bound device, or null for sessions minted without a fingerprint. */
+  deviceId: string | null;
 }
 
 export async function listActiveSessions(
@@ -247,6 +270,7 @@ export async function listActiveSessions(
         expiresAt: true,
         userAgent: true,
         ip: true,
+        deviceId: true,
       },
       ...(opts.take !== undefined && { take: opts.take }),
       ...(opts.skip !== undefined && { skip: opts.skip }),
@@ -268,5 +292,11 @@ export async function revokeSessionForEndUser(
     where: { id: sessionId, endUserId, revokedAt: null },
     data: { revokedAt: new Date() },
   });
+  // No `sessionsInvalidBefore` stamp here. The stamp is per user, so it would
+  // end the access token of every OTHER session too, and our own clients do
+  // not survive that (the panel and portal refresh during an RSC render where
+  // the rotated cookie is lost, and a second tab's replay then trips reuse
+  // detection). The revoked session's access token is refused by its `sid`
+  // instead: this row is the newest of its family, now revoked.
   return result.count === 1;
 }

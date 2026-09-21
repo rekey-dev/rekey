@@ -1,11 +1,11 @@
 /**
- * The GENERIC billing-webhook pipeline —
+ * The GENERIC billing-webhook pipeline,
  * `POST /api/v1/webhooks/billing/:provider[/:slug]`.
  *
  * Every other webhook suite in this repo goes through the legacy per-provider
  * aliases (`/api/v1/billing/webhook/stripe/:slug`). The generic route those
  * aliases forward to, and specifically the **slug-less** form where Stripe's
- * Application is resolved from `payload.metadata.applicationId`, had no test —
+ * Application is resolved from `payload.metadata.applicationId`, had no test,
  * and `WEBHOOK_APPLICATION_UNRESOLVED` was never asserted anywhere.
  *
  * The slug-less form is the interesting one because resolution happens BEFORE
@@ -119,7 +119,7 @@ describe('generic billing-webhook pipeline', () => {
 
     // Receipt is filed against the resolved Application, not "unknown".
     const row = await prisma.webhookEvent.findUniqueOrThrow({
-      // The receipt's unique key is scoped by Application now — two tenants
+      // The receipt's unique key is scoped by Application now, two tenants
       // sharing one provider account previously collided here, and the loser's
       // event was acknowledged 200 and dropped.
       where: {
@@ -161,7 +161,7 @@ describe('generic billing-webhook pipeline', () => {
     });
     expect(viaGeneric.json()).toMatchObject({ processed: true });
 
-    // Same event id arriving on the legacy URL must not be applied twice —
+    // Same event id arriving on the legacy URL must not be applied twice,
     // the money-moving appliers dedupe on the WebhookEvent row, not the route.
     const viaLegacy = await app.inject({
       method: 'POST',
@@ -180,13 +180,13 @@ describe('generic billing-webhook pipeline', () => {
 
   it('401 WEBHOOK_APPLICATION_UNRESOLVED when neither the slug nor the metadata is present', async () => {
     const a = await bootstrap('unresolved');
-    // Signed correctly — the refusal is about scoping, not the signature.
+    // Signed correctly, the refusal is about scoping, not the signature.
     const { payload, headers } = signStripe(stripeEvent('evt_unresolved_1', {}), a.webhookSecret);
 
     const res = await app.inject({ method: 'POST', url: `${GENERIC}/stripe`, headers, payload });
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('WEBHOOK_APPLICATION_UNRESOLVED');
-    // Nothing was recorded — an unscoped event has no Application to file under.
+    // Nothing was recorded, an unscoped event has no Application to file under.
     expect(await prisma.webhookEvent.count()).toBe(0);
   });
 
@@ -202,7 +202,7 @@ describe('generic billing-webhook pipeline', () => {
       a.webhookSecret,
     );
     const res = await app.inject({ method: 'POST', url: `${GENERIC}/stripe`, headers, payload });
-    // A crafted body must never flow onward as an AppRef — the runtime shape
+    // A crafted body must never flow onward as an AppRef, the runtime shape
     // check in the Stripe module is the only thing standing between a JSON
     // array and a credential lookup.
     expect(res.statusCode).toBe(401);
@@ -262,7 +262,7 @@ describe('generic billing-webhook pipeline', () => {
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('WEBHOOK_SIGNATURE_INVALID');
 
-    // No receipt against either Application — verification precedes storage.
+    // No receipt against either Application, verification precedes storage.
     expect(await prisma.webhookEvent.count()).toBe(0);
   });
 
@@ -318,7 +318,7 @@ describe('generic billing-webhook pipeline', () => {
       signer.webhookSecret,
     );
     const res = await app.inject({ method: 'POST', url: `${GENERIC}/stripe`, headers, payload });
-    // 503, not 401: the request may well be genuine — it is the deployment
+    // 503, not 401: the request may well be genuine, it is the deployment
     // that is not ready, so the provider should retry rather than give up.
     expect(res.statusCode).toBe(503);
     expect(res.json().error.code).toBe('BILLING_CREDENTIALS_NOT_CONFIGURED');

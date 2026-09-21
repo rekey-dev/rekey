@@ -16,7 +16,7 @@
  * list endpoints had the same shape.
  *
  * The fix is the `{items, page}` envelope the published OpenAPI document had
- * already declared for all of them — `page` carries `{total, limit, offset,
+ * already declared for all of them, `page` carries `{total, limit, offset,
  * hasMore}`, so "there is more" is a fact in the response rather than
  * something the caller has to infer by over-fetching.
  *
@@ -27,14 +27,14 @@
  *    `items.length` and `page.hasMore` is true.
  * 2. Paging with `offset` walks the whole set without overlap or gaps, and
  *    `hasMore` goes false on the last page.
- * 3. A representative endpoint from each shape of handler in the migration —
+ * 3. A representative endpoint from each shape of handler in the migration,
  *    service-backed, inline-Prisma, count-through-a-guard, and the two whose
- *    service clamps `limit` itself — returns the envelope rather than a bare
+ *    service clamps `limit` itself, returns the envelope rather than a bare
  *    array. The contract test (`openapi-contract.test.ts`) proves the
  *    *document* declares `{items, page}`; response schemas are documentation
  *    and not serialisation here (see lib/openapi.ts), so only a real request
  *    proves the *handler* agrees.
- * 4. The three endpoints whose envelope was wrong in a different way —
+ * 4. The three endpoints whose envelope was wrong in a different way,
  *    `security-events` returned `{events}`, `admin/operator-invites` and the
  *    `admin/metrics/*` family returned pagination flattened one level up.
  */
@@ -66,7 +66,7 @@ function expectEnvelope(body: unknown): PageEnvelope {
     hasMore: expect.any(Boolean),
   });
   // `hasMore` must be derivable from the other three, not independently
-  // asserted by the handler — a `hasMore` that disagrees with `total` is worse
+  // asserted by the handler, a `hasMore` that disagrees with `total` is worse
   // than no `hasMore`, because a pager trusts it.
   expect(page.page.hasMore).toBe(page.page.offset + page.page.limit < page.page.total);
   return page;
@@ -126,14 +126,14 @@ describe('list endpoints report truncation', () => {
   /**
    * Seed end-users straight through Prisma.
    *
-   * 36 rows against a default page size of 25 — the exact numbers from the
+   * 36 rows against a default page size of 25, the exact numbers from the
    * audit report, so the test fails the way the bug was found.
    */
   async function seedEndUsers(applicationId: string, count: number): Promise<void> {
     await prisma.endUser.createMany({
       data: Array.from({ length: count }, (_, i) => ({
         applicationId,
-        // Zero-padded so lexical and creation order agree — the assertions
+        // Zero-padded so lexical and creation order agree, the assertions
         // below page by `?sort=email` and compare against a sorted expectation.
         email: `bulk-${String(i).padStart(3, '0')}@example.com`,
         passwordHash: 'x',
@@ -150,7 +150,7 @@ describe('list endpoints report truncation', () => {
     const { operatorToken, applicationId } = await fixture('trunc');
     await seedEndUsers(applicationId, 36);
 
-    // No `limit` — the exact call from the audit report.
+    // No `limit`, the exact call from the audit report.
     const res = await app.inject({
       method: 'GET',
       url: `/api/v1/tenant/applications/${applicationId}/end-users`,
@@ -306,7 +306,7 @@ describe('list endpoints report truncation', () => {
     // `recordSecurityEvent` is called fire-and-forget everywhere, deliberately,
     // so the rows land AFTER the responses `fixture` already awaited. Asserting
     // `items.length > 0` directly is a race that reads as stable locally and
-    // fails in CI roughly one run in ten — which is exactly what it did here.
+    // fails in CI roughly one run in ten, which is exactly what it did here.
     // The fixture's api-key mint emits `app.api_key.created` carrying this
     // applicationId, so waiting on it is precise rather than a sleep.
     // See wait-for-security-events.ts, which documents this failure mode and

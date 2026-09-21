@@ -1,6 +1,6 @@
 import * as React from 'react';
 import type { Metadata } from 'next';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { publicPost, publicGet, setSessionCookies, PanelApiError, type AuthResponse } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
@@ -21,7 +21,7 @@ async function fetchSignupMode(): Promise<SignupMode> {
     const { mode } = await publicGet<{ mode: SignupMode }>('/api/v1/tenant/auth/signup-mode');
     return mode === 'invite' || mode === 'closed' ? mode : 'open';
   } catch {
-    // If the probe fails, fall back to the open form — the API still enforces
+    // If the probe fails, fall back to the open form, the API still enforces
     // the real mode server-side, so a wrong guess can't bypass the gate.
     return 'open';
   }
@@ -35,7 +35,7 @@ async function signUp(formData: FormData): Promise<void> {
   const inviteKey = String(formData.get('inviteKey') ?? '').trim();
   const next = safeNext(formData.get('next'));
   // Preserve what the operator typed (never the password, never the invite key)
-  // so a failed submit doesn't blank the form — a common first-signup drop-off.
+  // so a failed submit doesn't blank the form, a common first-signup drop-off.
   // The invite key is deliberately NOT round-tripped through the URL.
   const keep = `&email=${encodeURIComponent(email)}&name=${encodeURIComponent(workspaceName)}${next ? `&next=${encodeURIComponent(next)}` : ''}`;
   if (!email || !password || !workspaceName) redirect(`/sign-up?error=missing${keep}`);
@@ -47,7 +47,7 @@ async function signUp(formData: FormData): Promise<void> {
       workspaceName,
       ...(inviteKey ? { inviteKey } : {}),
     });
-    await setSessionCookies({ accessToken: auth.accessToken, refreshToken: auth.refreshToken });
+    await setSessionCookies(auth);
   } catch (err) {
     if (err instanceof PanelApiError) {
       const code = normalizeErrorCode(err.code, ERROR_MESSAGES);
@@ -71,12 +71,12 @@ const ERROR_MESSAGES: Record<string, string> = {
   OPERATOR_INVITE_EXPIRED: 'That invite key has expired. Ask for a fresh one.',
   INTERNAL_ERROR: 'Something went wrong creating your workspace. Please try again.',
   BAD_REQUEST:
-    'Check the details above — the workspace name, email, or password was rejected. Passwords need at least 8 characters.',
+    'Check the details above. The workspace name, email, or password was rejected. Passwords need at least 8 characters.',
   VALIDATION_ERROR:
-    'Check the details above — the workspace name, email, or password was rejected. Passwords need at least 8 characters.',
+    'Check the details above. The workspace name, email, or password was rejected. Passwords need at least 8 characters.',
   // Catch-all the server action maps unrecognised API codes to, so a failure
   // never renders as a blank form. `?error=` is in the URL, so a value that
-  // isn't in this map still renders nothing — a hand-crafted link can't paint
+  // isn't in this map still renders nothing, a hand-crafted link can't paint
   // a fake error on a healthy form.
   unknown: 'Could not create your workspace. Please try again.',
 };
@@ -101,7 +101,7 @@ export default async function SignUpPage({
   // sign-up. The server action re-validates it before redirecting.
   const next = typeof params.next === 'string' ? params.next : undefined;
   // Per-field errors render at the broken field instead of the page-top
-  // banner (WP4) — the operator's eye is already at the form.
+  // banner, the operator's eye is already at the form.
   const emailError = error === 'EMAIL_ALREADY_EXISTS' ? ERROR_MESSAGES[error] : undefined;
   const passwordError = error === 'PASSWORD_TOO_SHORT' ? ERROR_MESSAGES[error] : undefined;
   const inviteError =
@@ -112,7 +112,7 @@ export default async function SignUpPage({
   const bannerError =
     error && !emailError && !passwordError && !inviteError ? ERROR_MESSAGES[error] : undefined;
 
-  // Closed: no form at all — registration is disabled deployment-wide.
+  // Closed: no form at all, registration is disabled deployment-wide.
   if (mode === 'closed') {
     return (
       <AuthCard title="Registration closed" spacing="sm" className="text-center">
@@ -232,7 +232,7 @@ export default async function SignUpPage({
           Create workspace
         </SubmitButton>
 
-        {/* No env var for the marketing host — the panel links rekey.dev
+        {/* No env var for the marketing host, the panel links rekey.dev
             absolutely elsewhere (docs, MCP guide), so match that. */}
         <p className="text-xs text-[var(--color-muted-fg)] text-center">
           By creating a workspace you agree to the{' '}

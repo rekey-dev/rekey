@@ -4,13 +4,13 @@
  * The bug this file locks down: the welcome email's "Get started" button
  * pointed at `https://your-app.example.com`, a placeholder domain, for every
  * customer who didn't pass `appUrl` through the SDK. The obvious fix is a
- * trap — `renderTemplate` substitutes an unknown `{{var}}` with the empty
+ * trap, `renderTemplate` substitutes an unknown `{{var}}` with the empty
  * string, so simply dropping the fallback produces `href=""`, which is the
  * same broken button with a quieter failure mode.
  *
  * So there are two properties under test:
  *
- *   1. The resolution chain — caller > per-Application `authConfig.appUrl` >
+ *   1. The resolution chain, caller > per-Application `authConfig.appUrl` >
  *      origin of `redirectUrls[0]` > `DEFAULT_APP_URL` env > nothing.
  *   2. Nothing resolvable ⇒ NO anchor in the rendered HTML at all. Not a
  *      placeholder, not an empty href, not a bare `<a>`.
@@ -129,7 +129,7 @@ describe('Email app URL resolution', () => {
       redirectUrls: ['https://redirect.example.com/auth/callback?next=/home'],
     });
     const application = await load(b.applicationId);
-    // Origin only — the callback path is not where a welcome email should land.
+    // Origin only, the callback path is not where a welcome email should land.
     expect(resolveAppUrl(application as never)).toBe('https://redirect.example.com');
   });
 
@@ -145,7 +145,6 @@ describe('Email app URL resolution', () => {
   it('resolveAppUrl refuses a non-http scheme in authConfig and moves down the chain', async () => {
     const b = await bootstrap('badscheme');
     await setAuthConfig(b.applicationId, {
-      // eslint-disable-next-line no-script-url -- exactly what must never reach an href
       appUrl: 'javascript:alert(1)',
       redirectUrls: ['https://safe.example.com/cb'],
     });
@@ -216,7 +215,7 @@ describe('Email app URL resolution', () => {
     };
     for (const eventKey of Object.keys(urlVars)) {
       const rendered = await emailService.renderForEvent(b.applicationId, eventKey, {
-        // Deliberately supply NOTHING — every variable resolves to ''.
+        // Deliberately supply NOTHING, every variable resolves to ''.
       });
       expect(hrefs(rendered.html), `${eventKey} emitted an href`).toEqual([]);
       expect(rendered.html, `${eventKey} kept a placeholder domain`).not.toContain('example.com/');
@@ -274,7 +273,7 @@ describe('Email app URL resolution', () => {
     const swept = stripEmptyHrefAnchors(out);
     expect(swept).not.toContain('href=""');
     expect(swept).not.toContain('<a ');
-    // The label survives as plain text — the sentence still reads.
+    // The label survives as plain text, the sentence still reads.
     expect(swept).toBe('<p>Hi</p>Get started<p>Bye</p>');
   });
 

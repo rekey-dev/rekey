@@ -1,6 +1,6 @@
 /**
  * License org seats (owner+beneficiary, ORG_BILLING §3). An org-beneficiary
- * subscription provisions ONE license pooled to the org — its seats are shared
+ * subscription provisions ONE license pooled to the org, its seats are shared
  * by the team's machines. The owner stays the holder (endUserId); a personal
  * sub still issues a personal (non-org) license. Verify is unchanged (key +
  * machine fingerprint, capped at seatsAllowed).
@@ -163,7 +163,7 @@ describe('License — org seats', () => {
     // Two distinct member machines each take a seat.
     expect((await verify('m1')).ok).toBe(true);
     expect((await verify('m2')).ok).toBe(true);
-    // The third is refused — the org's two seats are full.
+    // The third is refused, the org's two seats are full.
     const third = await verify('m3');
     expect(third.ok).toBe(false);
     expect(third.reason).toBe('seats_exhausted');

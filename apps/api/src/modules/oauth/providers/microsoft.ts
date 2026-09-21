@@ -8,7 +8,7 @@ import { StaticOAuth2Provider, emailFromClaims } from './_oauth2-base.js';
  *
  * **Email verification.** Microsoft consumer (MSA) accounts can have an
  * unverified email alias; `email_verified` is sometimes absent from the
- * id_token. `emailFromClaims` returns `false` in that case — the
+ * id_token. `emailFromClaims` returns `false` in that case, the
  * auto-link gate in oauth.service refuses to attach to an existing user.
  */
 export class MicrosoftProvider extends StaticOAuth2Provider {

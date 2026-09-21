@@ -1,7 +1,7 @@
 /**
  * How the harness names the things it creates, across every provider.
  *
- * A sandbox account is shared — with the operator's own manual experiments,
+ * A sandbox account is shared, with the operator's own manual experiments,
  * with other contributors, with every previous run of this suite. So nothing
  * is created without the harness prefix on it, and nothing without that prefix
  * is ever deleted. That rule is the whole basis on which cleanup is allowed to

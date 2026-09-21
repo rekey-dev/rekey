@@ -1,6 +1,6 @@
 /**
  * Inline status/error banner rendered from `?error=` / status query params
- * (the server-action redirect convention — see lib/actions.ts).
+ * (the server-action redirect convention, see lib/actions.ts).
  *
  * Colors come from the semantic tokens (globals.css); soft fills/borders are
  * derived with color-mix because Tailwind 3 can't apply an opacity modifier

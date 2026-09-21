@@ -1,16 +1,16 @@
 'use client';
 
 /**
- * Responsive shell for the global sidebar (WP11).
+ * Responsive shell for the global sidebar.
  *
- * - `md:` and up — renders the sidebar exactly as before (always visible).
- * - Below `md:` — the sidebar hides behind a hamburger in a slim top bar;
+ * - `md:` and up, renders the sidebar exactly as before (always visible).
+ * - Below `md:`, the sidebar hides behind a hamburger in a slim top bar;
  *   tapping it opens a slide-over with a backdrop. Esc / backdrop click /
  *   route change close it, and focus returns to the hamburger trigger.
  *
  * The slide-over is a native `<dialog>` opened with `showModal()` (same
- * approach as Modal/CommandPalette) so focus is contained in the drawer —
- * Tab can't escape into the inert background — and Esc-to-close is free.
+ * approach as Modal/CommandPalette) so focus is contained in the drawer,
+ * Tab can't escape into the inert background, and Esc-to-close is free.
  *
  * The server-rendered <Sidebar> element is passed in as a ReactNode so the
  * server-action props (sign-out, switch-workspace) keep working unchanged.
@@ -37,11 +37,12 @@ export function MobileSidebar({ sidebar }: { sidebar: React.ReactNode }): React.
   React.useEffect(() => {
     if (!open) return;
     const dialog = dialogRef.current;
+    const trigger = triggerRef.current;
     if (dialog && !dialog.open) {
       try {
         dialog.showModal();
       } catch {
-        /* already-open or detached — safe to ignore */
+        /* already-open or detached, safe to ignore */
       }
     }
     const prevOverflow = document.body.style.overflow;
@@ -49,7 +50,7 @@ export function MobileSidebar({ sidebar }: { sidebar: React.ReactNode }): React.
     return () => {
       document.body.style.overflow = prevOverflow;
       if (dialog?.open) dialog.close();
-      triggerRef.current?.focus();
+      trigger?.focus();
     };
   }, [open]);
 

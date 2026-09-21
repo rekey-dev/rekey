@@ -12,18 +12,18 @@
  * schemas matching the real responses rather than referencing DTOs that lied:
  *
  *   - `UsageRecordDto` promised `applicationId` and `meterSlug`. The route
- *     returned the raw Prisma row, which has NEITHER — `applicationId` lives on
+ *     returned the raw Prisma row, which has NEITHER, `applicationId` lives on
  *     the meter, and the row stores `meterId`, an internal id the caller cannot
  *     resolve back to the slug they sent.
  *   - `UsageAggregateDto` promised `{meterSlug, total, from, to}`. The service
- *     returned `{total, count}` — no overlap beyond `total`, and `count` was
+ *     returned `{total, count}`, no overlap beyond `total`, and `count` was
  *     undocumented.
  *   - `CreditBalanceDto` required `endUserId`, which an ORGANIZATION balance
  *     cannot have, and `updatedAt`, which does not exist at all: the balance is
  *     summed from the ledger, not stored on a row with a timestamp.
  *
- * The first two were fixed by shaping the handler to the DTO — the DTO was the
- * better contract. The third by correcting the DTO — the handler was right and
+ * The first two were fixed by shaping the handler to the DTO, the DTO was the
+ * better contract. The third by correcting the DTO, the handler was right and
  * the DTO described something impossible.
  *
  * These assert the response parses against the exported schema, so the two

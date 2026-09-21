@@ -1,9 +1,9 @@
 /**
- * Razorpay webhook ingestion — signature verification (offline HMAC-SHA256),
+ * Razorpay webhook ingestion, signature verification (offline HMAC-SHA256),
  * durable idempotency, state-machine transitions.
  *
- * No real Razorpay account: we sign the raw body with HMAC-SHA256(secret) — the
- * same digest the verifier checks — so the whole flow runs in CI.
+ * No real Razorpay account: we sign the raw body with HMAC-SHA256(secret), the
+ * same digest the verifier checks, so the whole flow runs in CI.
  */
 
 import { createHmac } from 'node:crypto';
@@ -81,7 +81,7 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
       // INR, like the payloads below and like any real Razorpay account. It
       // used to default to USD while every fixture charged INR, which the
-      // appliers happily recorded — the mismatch the plan cross-check now
+      // appliers happily recorded, the mismatch the plan cross-check now
       // refuses.
       payload: { slug: 'pro_monthly', name: 'Pro', amount: 49900, currency: 'INR' },
     });
@@ -278,7 +278,7 @@ describe('POST /api/v1/billing/webhook/razorpay/:slug', () => {
     }
     expect(await creditsService.getBalance(applicationId, { endUserId: endUser.id })).toBe(500);
 
-    // first charge (paid_count 1) collides with the activation grant — no double.
+    // first charge (paid_count 1) collides with the activation grant, no double.
     {
       const evt = {
         event: 'subscription.charged',

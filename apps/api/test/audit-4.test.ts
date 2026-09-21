@@ -13,7 +13,7 @@
  *   - Cross-Application credential lookup is refused (the credential
  *     belongs to App A; presenting it to App B fails 401).
  *   - WEBAUTHN_NOT_CONFIGURED is surfaced when `authConfig.webauthn` is
- *     absent — operators must opt in deliberately.
+ *     absent, operators must opt in deliberately.
  *   - listPasskeys + deletePasskey are scoped to the calling user.
  *
  * The counter-advancement contract is enforced by SimpleWebAuthn itself
@@ -54,7 +54,6 @@ vi.mock('@simplewebauthn/server', async () => {
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 
-const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
 interface Bootstrapped {
   applicationId: string;
@@ -364,7 +363,7 @@ describe('Audit-4 passkeys', () => {
     expect(data.accessToken).toBeTruthy();
     expect(data.impersonatedUser.id).toBe(b.endUserId);
 
-    // The token verifies as a regular eu_access — middleware accepts it.
+    // The token verifies as a regular eu_access, middleware accepts it.
     const me = await app.inject({
       method: 'GET',
       url: '/api/v1/users/me/',

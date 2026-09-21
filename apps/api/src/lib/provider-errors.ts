@@ -2,12 +2,12 @@
  * One mapper for every exception thrown by a payment-provider SDK.
  *
  * Before this existed, each outbound provider call decided for itself what a
- * failure looked like, and most decided nothing at all — the raw SDK error
+ * failure looked like, and most decided nothing at all, the raw SDK error
  * escaped to `rekeyErrorHandler` and got whatever that could infer from it:
  *
  *   POST /api/v1/billing/checkout
  *     → 500 INTERNAL_ERROR ("An unexpected error occurred", share a request id
- *       with support) — for an END USER, about the OPERATOR's Stripe account.
+ *       with support), for an END USER, about the OPERATOR's Stripe account.
  *
  *   POST /api/v1/tenant/applications/{id}/plans
  *     → 401 { code: "BAD_REQUEST",
@@ -18,20 +18,20 @@
  * (401) and `.message`, which is enough for the `FastifyError` branch in
  * `lib/error.ts` to duck-type it as a framework 4xx: the status passes
  * through, the absent `.code` collapses to `BAD_REQUEST`, and the `fix`
- * blames the caller's request shape — while the actual cause is the
+ * blames the caller's request shape, while the actual cause is the
  * operator's own stored credential, and the provider's message (including a
  * fragment of that credential) is echoed verbatim to whoever asked.
  *
  * `POST .../billing-credentials/stripe/register-webhook` already got this
  * right: 502 with a stable code, a framed message, and a `fix` naming
  * credentials. This module generalises that, and adds the one distinction
- * that route did not have to make — WHO IS READING THE RESPONSE.
+ * that route did not have to make, WHO IS READING THE RESPONSE.
  *
- *   audience: 'operator'  — the caller owns the credential (every
+ *   audience: 'operator' , the caller owns the credential (every
  *                           /api/v1/tenant/* route). Frame and include the
  *                           provider's message; it is the only thing that
  *                           tells them which key is wrong.
- *   audience: 'end-user'  — the caller is somebody's customer (the public
+ *   audience: 'end-user' , the caller is somebody's customer (the public
  *                           /api/v1/billing/* surface). They can do nothing
  *                           about it and must never be shown the operator's
  *                           provider internals, so the message says only that
@@ -79,7 +79,7 @@ function summarize(err: unknown): string {
 }
 
 export interface ProviderErrorArgs {
-  /** 'stripe' | 'razorpay' | 'paypal' — used verbatim in the message. */
+  /** 'stripe' | 'razorpay' | 'paypal', used verbatim in the message. */
   provider: string;
   /** What we were asking the provider to do: 'checkout', 'plan registration', … */
   operation: string;

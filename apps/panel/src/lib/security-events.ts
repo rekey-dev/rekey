@@ -2,8 +2,8 @@
  * Security-event presentation: labels for the log, and CUID→email resolution.
  *
  * The label map used to live here as a panel-side MIRROR of a list nobody
- * owned — the API emits its event types as bare string literals at ~62 call
- * sites — and this file said so, with "it should live in
+ * owned, the API emits its event types as bare string literals at ~62 call
+ * sites, and this file said so, with "it should live in
  * `@rekey.dev/shared-types` next to the emitters". It now does. The names below
  * are thin re-exports so the pages calling them did not have to change; new
  * code should import from `@rekey.dev/shared-types` directly.
@@ -24,13 +24,74 @@ import { apiGet, type EndUserRow, type MemberRow } from '@/lib/api';
 import type { Page } from '@/lib/paginate';
 
 // ────────────────────────────────────────────────────────────────────────────
+// Metadata presentation
+// ────────────────────────────────────────────────────────────────────────────
+
+/** One chip rendered next to an event's label. */
+export interface EventDetail {
+  label: string;
+  /** Display value, truncated for the cell. */
+  value: string;
+  /** The untruncated value, for the title. */
+  full: string;
+}
+
+/**
+ * The keys worth surfacing from `metadata`, in display order. The audit log
+ * and Activity rendered the event type and actor only, so everything an event
+ * actually said (which tool an agent called and under which scope, whether a
+ * switch went on or off, which plan was granted and why) was written and shown
+ * nowhere. Whitelisted rather than dumped: metadata routinely carries ids and
+ * argument shapes that mean nothing in a table cell.
+ */
+const DETAIL_KEYS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: 'tool', label: 'tool' },
+  { key: 'scope', label: 'scope' },
+  { key: 'enabled', label: 'state' },
+  { key: 'via', label: 'via' },
+  { key: 'role', label: 'role' },
+  { key: 'planSlug', label: 'plan' },
+  { key: 'reason', label: 'reason' },
+  { key: 'note', label: 'note' },
+  { key: 'admin', label: 'admin' },
+  { key: 'write', label: 'write' },
+];
+
+const MAX_DETAILS = 5;
+const MAX_VALUE_CHARS = 48;
+
+export function eventDetails(metadata: unknown): EventDetail[] {
+  if (!metadata || typeof metadata !== 'object') return [];
+  const m = metadata as Record<string, unknown>;
+  const out: EventDetail[] = [];
+  for (const { key, label } of DETAIL_KEYS) {
+    if (!(key in m)) continue;
+    const v = m[key];
+    let value: string | null = null;
+    if (typeof v === 'string') value = v.replace(/_/g, ' ');
+    else if (typeof v === 'number') value = String(v);
+    else if (typeof v === 'boolean') {
+      // `enabled` reads as a state; the other flags only matter when set.
+      if (key === 'enabled') value = v ? 'on' : 'off';
+      else if (v) value = 'yes';
+    }
+    if (value === null || value === '') continue;
+    const full = value;
+    if (value.length > MAX_VALUE_CHARS) value = value.slice(0, MAX_VALUE_CHARS - 1) + '…';
+    out.push({ label, value, full });
+    if (out.length === MAX_DETAILS) break;
+  }
+  return out;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Actor resolution
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
  * Map of `actorId` → email, for the actors on one page of events.
  *
- * The API does not join this. `SecurityEvent` has no relations at all —
+ * The API does not join this. `SecurityEvent` has no relations at all,
  * `actorId` is a bare scalar pointing at `TenantUser.id` or `EndUser.id`
  * depending on `actorType`, and the list endpoint has no `actorId` filter and
  * no email in its serializer. Payments and Dunning show an email because their
@@ -39,7 +100,7 @@ import type { Page } from '@/lib/paginate';
  *
  * So the panel resolves it. Operators come from one workspace-members read
  * (small, already cached per request). End-users are fetched by id, deduped
- * and in parallel, capped at `MAX_END_USER_LOOKUPS` — a page is 50 rows and
+ * and in parallel, capped at `MAX_END_USER_LOOKUPS`, a page is 50 rows and
  * distinct actors are far fewer, but the cap keeps a pathological page from
  * fanning out unboundedly. Anything unresolved falls back to the CUID, which
  * is strictly no worse than before.
@@ -56,7 +117,7 @@ export async function resolveActorEmails(
   const operatorIds = new Set(
     events.filter((e) => e.actorType === 'operator' && e.actorId).map((e) => e.actorId!),
   );
-  // (applicationId, endUserId) pairs — an end-user id is only meaningful
+  // (applicationId, endUserId) pairs, an end-user id is only meaningful
   // within its application.
   const endUserKeys = new Map<string, { appId: string; euid: string }>();
   for (const e of events) {
@@ -67,10 +128,10 @@ export async function resolveActorEmails(
   const lookups = [...endUserKeys.values()].slice(0, MAX_END_USER_LOOKUPS);
 
   // ONE wave, not two. The members read used to sit in its own `Promise.all`
-  // — a `Promise.all` over a single element, which buys nothing but does cost
-  // a whole serial round-trip: the end-user fan-out could not start until it
-  // resolved. Neither depends on the other, so they go together and the audit
-  // log loses a full API latency from every render.
+  // over a single element, which buys nothing but does cost a whole serial
+  // round-trip: the end-user fan-out could not start until it resolved.
+  // Neither depends on the other, so they go together and the audit log no
+  // longer loses a full API latency on every render.
   const [memberPage, resolved] = await Promise.all([
     operatorIds.size > 0
       ? apiGet<Page<MemberRow>>('/api/v1/tenant/workspace/members').catch(() => null)

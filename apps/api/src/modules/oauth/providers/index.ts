@@ -1,5 +1,5 @@
 /**
- * OAuth provider registry. Single chokepoint — routes look up the named
+ * OAuth provider registry. Single chokepoint, routes look up the named
  * provider here; tests inject mock providers by calling
  * `registerOAuthProvider` before booting the app under test.
  *
@@ -11,7 +11,7 @@
  * `oidc` is special: it's a single registered instance that drives ANY
  * OIDC issuer at runtime by reading `config.issuerUrl` per Application.
  * Use it for Okta / Auth0 / Keycloak / Authentik / single-tenant Azure /
- * self-hosted GitLab / Cognito — anything that publishes
+ * self-hosted GitLab / Cognito, anything that publishes
  * `/.well-known/openid-configuration`.
  */
 

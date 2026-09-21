@@ -55,7 +55,10 @@ three `PORTAL_HOST` references, as the note on it in the compose file explains.
   self-apply on container start, a migration that needs an operator decision
   will have already run by the time you notice. Read
   [Upgrading: Application environments](#upgrading-application-environments)
-  **before** you deploy a version that contains it.
+  **before** you deploy a version that contains it. For 2.2.0, read
+  [Upgrading: 2.2.0 migrations and rollback](#upgrading-220-migrations-and-rollback)
+  first. It also lists the three proxy secrets `docker-compose.prod.yml`
+  requires from 2.2.0 on, without which the stack will not start.
 - Bootstrap the first tenant via `/api/v1/admin/*` using `SUPER_ADMIN_KEY`, or sign up at the panel.
 
 ## 4. Verify
@@ -97,8 +100,13 @@ advertised and refused. See [docs/mcp.md](docs/mcp.md).
 
 Also worth setting here: `ADMIN_IP_ALLOWLIST`, which gates `/api/v1/admin/*` by
 source address *before* the key is examined, so a leaked `SUPER_ADMIN_KEY` alone
-is not enough. Behind Traefik that needs `TRUSTED_PROXIES` too, or every request
-looks like it came from the proxy.
+is not enough. Behind a proxy that **requires** `API_PROXY_SECRET` (the proxy
+presents it, and only then is the forwarded client address believed). Without
+it the API sees the proxy's own address, shared by everyone behind it, so a
+list naming it would admit them all; rather than do that, a configured
+allowlist refuses every such request with `403 ADMIN_IP_UNVERIFIABLE` and the
+API says so once at boot. Set the proxy secret, or clear the allowlist. See
+[docs/rate-limits.md](docs/rate-limits.md).
 
 ## Session cookies and `Secure`
 
@@ -164,6 +172,124 @@ Portal** — no deploy, no key wiring. Nothing to set in Dokploy for a new app.
 Operators who want to **self-host** their own single-app portal should follow
 `docs/portal.md`. (A worked reference app previously lived at
 `examples/portal`; the examples were removed pending a rebuild.)
+
+## Database load: connection pool and caches
+
+### Sizing `DATABASE_POOL_SIZE`
+
+Each API process holds up to `DATABASE_POOL_SIZE` Postgres connections (default
+**20**), applied to `DATABASE_URL` as `connection_limit`. A request that finds
+every connection busy waits `DATABASE_POOL_TIMEOUT_SECONDS` (default 10) and
+then fails. The same pool serves the HTTP handlers, the outbound-webhook worker
+(up to 10 jobs at once) and the periodic jobs, so keep it above 10 with room
+for requests.
+
+The ceiling is the database, not the API:
+
+```
+replicas x DATABASE_POOL_SIZE  <=  max_connections - reserved - headroom
+```
+
+- `max_connections` is whatever the server reports: run `SHOW max_connections;`
+  against the database the API uses. On Neon it follows the compute size, so
+  check it again after resizing, and read it on the endpoint in `DATABASE_URL`
+  (a `-pooler` endpoint accepts far more clients than the compute behind it).
+- `reserved` is `superuser_reserved_connections` (3 by default), plus any
+  connections your provider keeps for itself.
+- `headroom`: leave about 10 for migrations on deploy, `psql`, backups and
+  anything else that connects (a second app, a BI tool).
+
+Example: `max_connections = 100`, 2 API replicas: `(100 - 3 - 10) / 2 = 43`, so
+the default of 20 per replica is safe and there is room to raise it. With 4
+replicas on the same server, 20 is the most you can give each.
+
+Raising the pool past that line does not add capacity; it moves the queue from
+Prisma into Postgres, which then refuses new connections outright.
+
+The default stays at 20. The requests that used to need the most connections at
+once were the per-application stats tile (13 queries in parallel, now 1) and
+the super-admin lists (3 to 5 queries per listed row, up to 1,500 at once on a
+computed sort, now 3 to 5 in total). What remains fits the default with the
+webhook worker busy.
+
+### What is cached, and for how long
+
+| Cache | Where | Lifetime | Invalidated by |
+|---|---|---|---|
+| Operator session, membership, grants | each API process (memory) | `OPERATOR_AUTH_CACHE_TTL_MS`, default 5s | every sign-out, session revoke, password change or reset, role, scope, grant or membership change, at once in the writing process and over Redis pub/sub in the others |
+| Application to workspace | each API process (memory) | life of the process | never changes |
+| Per-application overview stats (`rk:stats:app:<id>`) | Redis | 60s | billing on/off toggle; the counts may lag up to a minute |
+| Super-admin overview (`rk:admin:overview`) | Redis | 60s | nothing; the rollup may lag up to a minute |
+
+Set `OPERATOR_AUTH_CACHE_TTL_MS=0` to turn the operator cache off. The TTL is a
+backstop only: it bounds how long a process that MISSED an invalidation (a
+publish lost while Redis was failing) can keep admitting a revoked operator
+session. A process whose subscriber is disconnected serves nothing from the
+cache until it reconnects.
+
+## Why Valkey, not Redis
+
+The `redis` service in every compose file runs the `valkey/valkey:8.1-alpine`
+image, not a Redis image. The service name and the `REDIS_URL` /
+`REDIS_PASSWORD` variables are unchanged, and the URL still uses the
+`redis://` scheme, because Valkey speaks the same wire protocol and none of
+that is Redis-specific — only the container image changed.
+
+Redis moved its own license off-open-source: 7.4 shipped under
+RSALv2/SSPLv1, and the floating `redis:7-alpine` tag this repo used to pin
+now resolves to a 7.4.x image, silently pulling a source-available license
+into every fresh deploy and CI run. Valkey is the Linux Foundation's fork of
+Redis 7.2, kept under BSD-3-Clause, and is protocol-compatible with ioredis
+and BullMQ, which is all this codebase talks to. Nothing in `apps/api` changed
+to make this work.
+
+**Upgrading an existing self-hosted deployment starts the store empty — this
+is deliberate, not a bug.** Valkey 8.x loads an RDB/AOF file written by Redis
+7.2 without any conversion, but refuses to start on one written by Redis
+7.4 — verified directly: Valkey 8.1 boots against a real Redis 7.2 AOF file,
+and refuses a real Redis 7.4 one with `Can't handle RDB format version 12`.
+Since the floating `redis:7-alpine` tag has been resolving to 7.4 since Redis
+published it, most existing self-hosted volumes are already in the format
+Valkey refuses, and the API refuses to boot without a reachable Redis — so
+pointing Valkey at the existing volume turns this upgrade into an outage for
+most installs, not a graceful in-place read.
+
+To avoid that, the compose files mount Valkey on a **new** volume
+(`rekey_valkey` in `docker-compose.yml` and `docker-compose.prod.yml`)
+instead of the old `rekey_redis` volume. The old volume is declared nowhere in these files after
+this change — Docker never touches it, so there is nothing for a stale RDB
+format to crash. Pulling this update and restarting the stack always gets you
+a clean, empty Valkey, on every install, with no version check to run first.
+
+This datastore is a cache, queue and lockout store, not a system of record
+(see the backup section below), so starting empty is safe. Concretely, on
+first boot after this upgrade you lose:
+- **In-flight BullMQ webhook-delivery retries** — the delayed retry jobs
+  living in Redis's queue disappear. This is not permanent data loss: Postgres
+  is the source of truth for webhook deliveries, and a periodic poller
+  (`processDueWebhookDeliveries`, registered in `apps/api/src/app.ts`)
+  re-attempts any `PENDING` row whose `nextAttemptAt` has passed — see the
+  comment on `apps/api/src/modules/webhooks/webhook.service.ts` describing it
+  as "the crash backstop for a row orphaned by a Redis flush". Deliveries are
+  redelivered, just later than they would have been.
+- **Every active account lockout** — an account mid-lockout gets a clean
+  slate; the next bad attempt starts counting from zero.
+- **Current rate-limit windows** — limits reset to zero for a moment.
+- **In-flight PKCE state for OAuth/OIDC sign-ins** — a sign-in mid-flow when
+  you restart has to be retried from the start; there is no partial-flow data
+  to lose.
+
+Nothing in Postgres is affected by any of this.
+
+Once you've confirmed the deploy is healthy on the new volume, the old one is
+safe to remove:
+
+```bash
+docker volume rm rekey_redis
+```
+
+It is not removed automatically — compose never deletes a volume it no longer
+declares, so it just sits there unused until you clean it up.
 
 ## Backup, restore, and getting your data out
 
@@ -381,6 +507,131 @@ Locked accounts are, as before, invisible after a Redis flush: the locks are
 TTL'd keys, not rows. That is unchanged by this migration, but worth knowing if
 you flush Redis as part of a deploy — you are releasing every active lockout.
 
+## Upgrading: 2.2.0 migrations and rollback
+
+**Applies to:** any deployment upgrading from 2.1.x to 2.2.0. The migrations
+self-apply on `api` container start, like every other release.
+
+**Set these three before you redeploy, or the stack will not start.**
+`docker-compose.prod.yml` now requires `PANEL_PROXY_SECRET`, `API_PROXY_SECRET`
+and `PORTAL_PROXY_SECRET`, each with no fallback, and compose refuses to render
+the file while any of them is unset or empty. They are how the panel, the API
+and the portal recognise the Traefik in front of them, and so the whole reason
+a per-IP rate limit counts a visitor rather than a container. An empty value
+used to be accepted and turned those limits off for public traffic, with one
+line in the boot log as the only sign, so they are required rather than
+defaulted. Generate a separate value for each:
+
+```bash
+printf 'PANEL_PROXY_SECRET=%s\nAPI_PROXY_SECRET=%s\nPORTAL_PROXY_SECRET=%s\n' \
+  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" >> .env
+```
+
+`docker-compose.yml`, the development stack, still starts with none of them set.
+
+Every OTHER new setting in this release is optional and unset keeps the
+previous behaviour. Read the 2.2.0 section of `CHANGELOG.md` for what changes
+for operators, in particular that erasing an end-user is now workspace-owner
+only.
+
+### Before you deploy: count the rows
+
+Most migrations in this release add a column with a constant default or a new
+table, and finish instantly. The ones below rewrite existing rows or build
+indexes, and hold locks while they do. Their cost depends on how big these tables are:
+
+```sql
+SELECT 'license_activations' AS t, count(*) FROM license_activations
+UNION ALL SELECT 'refresh_tokens', count(*) FROM refresh_tokens
+UNION ALL SELECT 'tenant_refresh_tokens', count(*) FROM tenant_refresh_tokens
+UNION ALL SELECT 'security_events', count(*) FROM security_events
+UNION ALL SELECT 'email_logs', count(*) FROM email_logs
+UNION ALL SELECT 'webhook_deliveries', count(*) FROM webhook_deliveries;
+```
+
+With under roughly 100,000 rows in each, deploy normally. Above that, plan a
+short maintenance window.
+
+| Migration | What it does | Blocked while it runs |
+|---|---|---|
+| `20260902120000_devices` | Backfills `license_activations.application_id`, makes it NOT NULL, adds a device foreign key to `refresh_tokens` | Licence activation, and sign-in and refresh while the foreign key is checked |
+| `20260912100000_security_event_subject` | Backfills `subject_end_user_id` on every security event, then builds an index | Inserts into `security_events` |
+| `20260914100000_log_retention_indexes` | Builds three indexes | Writes to `security_events`, `email_logs` and `webhook_deliveries` |
+| `20260915100000_refresh_token_session_id` | Backfills `session_id` on every row of both refresh-token tables, makes it NOT NULL, builds indexes | Sign-in and refresh, for end-users and operators |
+| `20260915120000_refresh_token_session_head_index` | Builds a unique partial index on `session_id` (live rows only) on both refresh-token tables, then drops the plain `session_id` indexes | Sign-in and refresh, for end-users and operators |
+| `20260915160000_email_logs_to_address_index` | Builds an index on `email_logs (application_id, to_address)` for erasure | Writes to `email_logs`, which every sent mail records |
+| `20260919143000_dashboard_hot_path_indexes` | Builds indexes on `security_events (application_id, type, created_at)`, `subscriptions (application_id, status)`, and `created_at` on `end_users`, `api_request_logs` and `webhook_deliveries` | Writes to each of those tables while its own index builds (end-user sign-up, every API request log flush, webhook delivery, security events). Reads are not blocked. See [Building the five dashboard indexes by hand](#building-the-five-dashboard-indexes-by-hand) |
+
+`20260906110000_request_log_admitted_scope` adds one column to
+`api_request_logs`. The change itself is instant, but it has to wait for a lock
+on a table every request writes to, and writes queue behind it while it waits.
+Deploy at a quiet moment if your API is busy.
+
+If your deploy keeps the old `api` container serving while the new one runs
+its migrations, the old container cannot create refresh tokens once
+`session_id` is NOT NULL, so sign-ins and refreshes fail until the new
+container takes over. A failed refresh does not spend the token, so clients
+recover on their next attempt.
+
+### Building the five dashboard indexes by hand
+
+`20260919143000_dashboard_hot_path_indexes` is the one migration in this
+release whose cost is the index build itself rather than a row rewrite.
+
+`prisma migrate deploy` cannot build indexes `CONCURRENTLY` (it sends the file
+as one batch, which Postgres runs as a transaction). If any of the five tables
+named in that row is past roughly 100,000 rows, build the indexes by hand
+first, without blocking writes, then deploy normally. The migration uses `IF NOT EXISTS`, so it skips
+every index you already built and nothing needs marking as applied:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "security_events_application_id_type_created_at_idx"
+  ON "security_events" ("application_id", "type", "created_at");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "subscriptions_application_id_status_idx"
+  ON "subscriptions" ("application_id", "status");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "end_users_created_at_idx"
+  ON "end_users" ("created_at");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "api_request_logs_created_at_idx"
+  ON "api_request_logs" ("created_at");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "webhook_deliveries_created_at_idx"
+  ON "webhook_deliveries" ("created_at");
+```
+
+Run them one at a time (each `CONCURRENTLY` must be its own statement, outside
+a transaction). If one fails part way it leaves an `INVALID` index behind:
+`DROP INDEX CONCURRENTLY` it and run that line again.
+
+These five indexes need nothing on a rollback: the 2.1.x API ignores them.
+
+### Rolling back
+
+Three new columns are NOT NULL with no default, and the 2.1.x API never writes
+them. **Before starting a 2.1.x image against a migrated database, run:**
+
+```sql
+ALTER TABLE refresh_tokens ALTER COLUMN session_id DROP NOT NULL;
+ALTER TABLE tenant_refresh_tokens ALTER COLUMN session_id DROP NOT NULL;
+ALTER TABLE license_activations ALTER COLUMN application_id DROP NOT NULL;
+```
+
+Without the first two, every sign-in and refresh fails on the old API. Without
+the third, activating a licence on a new machine fails. Everything else in the
+new schema is ignored by the old code.
+
+**Before upgrading to 2.2.0 again**, fill in what the old API left empty and
+restore the constraints, since `prisma migrate deploy` will not re-run a
+migration it has already recorded:
+
+```sql
+UPDATE refresh_tokens SET session_id = id WHERE session_id IS NULL;
+ALTER TABLE refresh_tokens ALTER COLUMN session_id SET NOT NULL;
+UPDATE tenant_refresh_tokens SET session_id = id WHERE session_id IS NULL;
+ALTER TABLE tenant_refresh_tokens ALTER COLUMN session_id SET NOT NULL;
+UPDATE license_activations AS la SET application_id = l.application_id
+  FROM licenses AS l WHERE l.id = la.license_id AND la.application_id IS NULL;
+ALTER TABLE license_activations ALTER COLUMN application_id SET NOT NULL;
+```
+
 ## Upgrading an existing deployment: required datastore passwords
 
 `docker-compose.yml` used to default Postgres to `POSTGRES_PASSWORD: rekey`
@@ -428,4 +679,73 @@ database outage) and load-balancer checks at `/health` or `/health/ready`.
 **Behind a reverse proxy?** `X-Forwarded-For` is no longer trusted by default.
 Set `TRUSTED_PROXIES` to a hop count or an IP/CIDR allowlist, or `request.ip`
 — and everything keyed off it, including rate limits and lockout — will see
-your proxy instead of the real client.
+your proxy instead of the real client. The compose files trust only the panel
+and portal by address, and recognise Traefik by `API_PROXY_SECRET`, which you
+set (required by `docker-compose.prod.yml`). [docs/rate-limits.md](docs/rate-limits.md) explains
+each setting and when to change it.
+
+## Upgrading: the panel's forwarded client IP
+
+The panel tells the API which client IP each operator request came from, and
+the API rate-limits operator sign-in and token refresh on that address. The
+panel used to forward whatever `X-Forwarded-For` it received, so anything that
+reached it directly (a browser on a published port, another container on the
+same Docker network) could choose that address and rotate it for a fresh
+budget per attempt. It now believes the header only from a proxy that proves
+itself with a shared secret.
+
+Two panel variables decide it:
+
+- `PANEL_TRUSTED_PROXIES`: how many proxies append to `X-Forwarded-For` in
+  front of the panel. `0` (default) means the panel is reached directly and
+  reports the connection address. `1` for one Traefik, nginx or Caddy. `2` for
+  a CDN such as Cloudflare in front of that proxy.
+- `PANEL_PROXY_SECRET`: a random value your proxy sends on every request as the
+  `X-Rekey-Proxy-Secret` header. The header is believed only when it matches.
+  Generate one with `openssl rand -hex 32`.
+
+**`PANEL_PROXY_SECRET` is now required by `docker-compose.prod.yml`.** `docker compose up` (and a Dokploy deploy) fails
+until it is set. That is deliberate: with a hop count and no secret, the panel
+cannot tell the proxy from anything else, believes no header, and reports the
+proxy's address for every operator, so all of them share one sign-in and
+refresh limit. The panel logs a warning at startup when it sees that
+combination.
+
+What your proxy has to do:
+
+- **Traefik (the bundled compose files):** nothing by hand. The panel service
+  carries a `headers.customRequestHeaders` middleware label that sets
+  `X-Rekey-Proxy-Secret` from `PANEL_PROXY_SECRET`. Setting the header also
+  overwrites any copy a client sent.
+- **nginx:** in the `location` that proxies to the panel, set (not append) the
+  header, and keep appending the client to `X-Forwarded-For`:
+
+  ```nginx
+  proxy_set_header X-Rekey-Proxy-Secret "<same value as PANEL_PROXY_SECRET>";
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  ```
+
+- **Caddy:** `reverse_proxy` already sends `X-Forwarded-For`. Add the secret:
+
+  ```caddyfile
+  reverse_proxy panel:3031 {
+      header_up X-Rekey-Proxy-Secret "<same value as PANEL_PROXY_SECRET>"
+  }
+  ```
+
+  Caddy only passes along an incoming `X-Forwarded-For` from addresses in its
+  `trusted_proxies`. Leave that unset unless something sits in front of Caddy.
+
+In every case the proxy must be the only way to reach the panel. Do not publish
+the panel port on a public interface.
+
+**Cloudflare in front of Traefik (the hosted panel, `PANEL_TRUSTED_PROXIES=2`).**
+Two hops is only correct if Traefik trusts Cloudflare's address ranges on its
+`websecure` entrypoint
+(`entryPoints.websecure.forwardedHeaders.trustedIPs`, set to the list at
+https://www.cloudflare.com/ips/). Traefik then keeps the client address
+Cloudflare wrote and appends Cloudflare's edge after it. Without that setting,
+Traefik replaces the header with the edge address, the chain is one entry
+long, and the panel falls back to reporting Traefik's own address: safe, but
+every operator shares one limit again. Check it after deploying by signing in
+and confirming the API logs your real address.

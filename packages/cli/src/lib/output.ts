@@ -1,9 +1,9 @@
 /**
- * Output helpers — used by every command to emit either human-friendly text
+ * Output helpers, used by every command to emit either human-friendly text
  * or machine-readable JSON, depending on the global `--json` flag.
  *
  * Errors always go to stderr; exit code is 0 on success, 1 on failure.
- * Commands should return *data*, not call `process.exit` directly — the
+ * Commands should return *data*, not call `process.exit` directly, the
  * runner here decides on the right exit path.
  */
 

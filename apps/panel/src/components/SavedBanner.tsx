@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * Success banner for `?saved=…` redirect feedback (WP7).
+ * Success banner for `?saved=…` redirect feedback.
  *
  * The server-action → `redirect('…?saved=1')` pattern is kept (no toast
  * library, no client state store), but the banner itself is now a small
@@ -11,7 +11,7 @@
  *      copy-paste of the URL doesn't re-show stale success;
  *   2. offers an explicit dismiss (×) button;
  *   3. auto-fades after ~5s (visual fade then unmount). Hovering pauses
- *      nothing — 5s is long enough to read a one-liner.
+ *      nothing, 5s is long enough to read a one-liner.
  */
 
 import * as React from 'react';
@@ -35,7 +35,7 @@ export function SavedBanner({
   // the address bar is all this ever wanted, and Next 15 reflects a native
   // replaceState back into useSearchParams. `router.replace` would instead
   // start a second navigation on top of the one the server action's redirect
-  // is already running — and the RedirectBoundary renders nothing while a
+  // is already running, and the RedirectBoundary renders nothing while a
   // redirect is in flight, so racing it is what made pages go blank.
   React.useEffect(() => {
     if (typeof window === 'undefined') return;

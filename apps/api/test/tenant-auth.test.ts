@@ -134,7 +134,7 @@ describe('tenant-auth + workspaces', () => {
       expect(r.statusCode).toBe(401);
       expect(r.json().error.code).toBe('INVALID_CREDENTIALS');
     }
-    // Now locked — even the CORRECT password is refused with 429 + Retry-After.
+    // Now locked, even the CORRECT password is refused with 429 + Retry-After.
     const locked = await app.inject({
       method: 'POST',
       url: '/api/v1/tenant/auth/sign-in',

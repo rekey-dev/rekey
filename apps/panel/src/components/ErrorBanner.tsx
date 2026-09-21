@@ -1,11 +1,11 @@
 /**
- * Standard error banner — thin wrapper over the <Banner> primitive.
+ * Standard error banner, thin wrapper over the <Banner> primitive.
  *
  * Maps a known error code to a friendly message via the page's local
  * `messages` map; falls back to a generic "Something went wrong" line
  * with the request id surfaced so the operator can share it with
  * support. Without this, unknown codes used to leak as raw
- * `SCREAMING_SNAKE_CASE` (UX-AUDIT HIGH #11).
+ * `SCREAMING_SNAKE_CASE`.
  */
 
 import * as React from 'react';

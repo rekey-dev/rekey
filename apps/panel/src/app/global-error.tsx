@@ -2,7 +2,7 @@
 
 /**
  * Last-resort boundary: the panel's ROOT LAYOUT threw, so Next discarded the
- * whole tree — `<html>` and `<body>` included, which this file must supply.
+ * whole tree, `<html>` and `<body>` included, which this file must supply.
  *
  * Inline-styled and import-free on purpose. `global-error.tsx` replaces the
  * root layout, so the stylesheet that layout imports is NOT applied: a

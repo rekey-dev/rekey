@@ -1,5 +1,5 @@
 /**
- * /api/v1/me — the SDK's smoke-test endpoint and the first route gated by an
+ * /api/v1/me, the SDK's smoke-test endpoint and the first route gated by an
  * Application API key (rather than SUPER_ADMIN_KEY).
  *
  * The negative cases are the load-bearing ones: every kind of credential
@@ -152,7 +152,7 @@ describe('GET /api/v1/me — Application API key auth', () => {
   });
 
   it('401 API_KEY_INVALID when the key has expired', async () => {
-    // Backdate expires_at directly. Sidesteps having to wait or freeze time —
+    // Backdate expires_at directly. Sidesteps having to wait or freeze time,
     // we trust the verify() path's `expiresAt < new Date()` check.
     await prisma.apiKey.update({
       where: { id: liveKeyId },

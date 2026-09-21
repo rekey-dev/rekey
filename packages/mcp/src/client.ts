@@ -12,7 +12,7 @@ export interface AdminClientConfig {
   apiUrl: string;
   /**
    * Global super-admin key. Authenticates the (global-scope) READ tools.
-   * Optional: when unset, the server can still run for the scoped write tool —
+   * Optional: when unset, the server can still run for the scoped write tool,
    * read tools then fail closed with `READ_REQUIRES_ADMIN_KEY` rather than
    * silently using a lesser credential.
    */
@@ -44,7 +44,7 @@ export class AdminClient {
     if (!cfg.apiUrl) throw new Error('AdminClient: apiUrl is required.');
   }
 
-  /** Read-path request — authenticated with the admin key. */
+  /** Read-path request, authenticated with the admin key. */
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     if (!this.cfg.adminKey) {
       throw new AdminApiError({
@@ -58,10 +58,10 @@ export class AdminClient {
   }
 
   /**
-   * Write-path request — authenticated with the configured operator PAT
+   * Write-path request, authenticated with the configured operator PAT
    * (`rp_op_…`). Used by write tools so an agent acts as a SCOPED operator, not
    * as the global super-admin. Throws `OPERATOR_TOKEN_MISSING` if no PAT was
-   * configured — write tools must fail closed, never silently fall back to the
+   * configured, write tools must fail closed, never silently fall back to the
    * admin key.
    */
   async requestAsOperator<T>(method: string, path: string, body?: unknown): Promise<T> {

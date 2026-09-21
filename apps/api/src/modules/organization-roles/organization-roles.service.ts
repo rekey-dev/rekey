@@ -371,10 +371,6 @@ export const organizationRolesService = {
       ((args.baseRole !== undefined && args.baseRole !== 'OWNER') ||
         (args.disabled === true && !role.disabled));
     if (losesOwnerAuthority) {
-      // Disabling an OWNER-tier role strands an organization exactly like
-      // re-tiering it down does: nobody left who can manage members, transfer
-      // ownership, or authorize a charge, and no way to fix it from inside.
-      // Same guard, both doors.
       const orphaned = await this.organizationsLeftWithoutOwner(args.applicationId, role.name);
       if (orphaned > 0) {
         const verb = args.disabled === true ? 'disable' : 'move off the OWNER tier';

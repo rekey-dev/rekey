@@ -18,8 +18,8 @@ export type SecurityActorType = 'operator' | 'end_user' | 'system';
 /**
  * Event types this API emits that `@rekey.dev/shared-types` does not label yet.
  *
- * The rule stays what it was — an emit site names a type from the shared union,
- * so the panel can label it — and this is the documented exception, not a way
+ * The rule stays what it was, an emit site names a type from the shared union,
+ * so the panel can label it, and this is the documented exception, not a way
  * around it. Both entries are the operator counterparts of `user.sign_in_failed`
  * / `user.locked_out`, added when operator sign-in failures were found to be
  * recorded nowhere at all. `humanizeSecurityEventType` degrades an unlabelled
@@ -27,7 +27,7 @@ export type SecurityActorType = 'operator' | 'end_user' | 'system';
  * so the panel is readable in the meantime.
  *
  * **Delete these two entries the moment shared-types carries them.** Nothing
- * breaks if you forget — the union just stops narrowing usefully.
+ * breaks if you forget, the union just stops narrowing usefully.
  */
 export type PendingSecurityEventType = 'operator.sign_in_failed' | 'operator.locked_out';
 
@@ -43,7 +43,7 @@ export interface SecurityEventInput {
    * a bare `string` on both sides is how the panel ended up rendering 44 of
    * the 54 types as raw keys: nothing connected an emit site to the list of
    * things anyone could display. Adding an event now means adding it there,
-   * with a label, or this does not compile — the sole exception being
+   * with a label, or this does not compile, the sole exception being
    * `PendingSecurityEventType`, which is enumerated above and is not a hole a
    * new event can slip through unnoticed.
    */
@@ -69,6 +69,33 @@ export function requestContext(req: FastifyRequest): {
   };
 }
 
+/**
+ * The end-user an event is ABOUT, whoever performed it.
+ *
+ * An end-user's own events name them as the actor. Everything done TO them by
+ * someone else, an operator blocking a device, the billing webhook creating
+ * their account, names the subject in `metadata.endUserId` instead, with the
+ * operator or the system as the actor. "Show me this person's history" needs
+ * both, and the panel used to get it by pulling the application's last 200
+ * events three times over (once per actor type) and matching either field in
+ * memory: 600 rows fetched to render twenty, on every view of the end-user
+ * screen.
+ *
+ * Deriving it here, at the only place an event is written, turns that into an
+ * indexed equality. The explicit subject wins over the actor; the two have
+ * never disagreed in recorded data (checked against every row on the bench
+ * when this column was introduced), and if they ever did, the event is about
+ * whoever it says it is about.
+ */
+export function subjectEndUserIdOf(
+  input: Pick<SecurityEventInput, 'actorType' | 'actorId' | 'metadata'>,
+): string | null {
+  const explicit = input.metadata?.endUserId;
+  if (typeof explicit === 'string' && explicit.length > 0) return explicit;
+  if (input.actorType === 'end_user' && input.actorId) return input.actorId;
+  return null;
+}
+
 export async function recordSecurityEvent(input: SecurityEventInput): Promise<void> {
   try {
     await prisma.securityEvent.create({
@@ -76,6 +103,7 @@ export async function recordSecurityEvent(input: SecurityEventInput): Promise<vo
         type: input.type,
         actorType: input.actorType,
         actorId: input.actorId ?? null,
+        subjectEndUserId: subjectEndUserIdOf(input),
         tenantId: input.tenantId ?? null,
         applicationId: input.applicationId ?? null,
         ip: input.ip ?? null,
@@ -93,6 +121,12 @@ export interface SecurityEventQuery {
   applicationId?: string | undefined;
   type?: string | undefined;
   actorType?: SecurityActorType | undefined;
+  /**
+   * Events ABOUT this end-user, from any actor, see `subjectEndUserIdOf`.
+   * Not the same as `actorType=end_user` plus an actor id: that misses every
+   * operator and system action taken on them.
+   */
+  endUserId?: string | undefined;
   /** Inclusive createdAt window. */
   from?: Date | undefined;
   to?: Date | undefined;
@@ -110,17 +144,62 @@ export interface SecurityEventQuery {
 }
 
 /**
+ * The Applications a workspace owns, for scoping a read.
+ *
+ * `SecurityEvent` carries `tenantId` and `applicationId` as bare scalars with
+ * no FK relations, deliberately, the same reason `ApiRequestLog` does, so that
+ * writing an audit row can never contend with or block the request it records.
+ * That rules out a join, so the ids are fetched. One small query per read, on a
+ * table an operator lists a page of at a time.
+ */
+async function tenantApplicationIds(tenantId: string): Promise<string[]> {
+  const rows = await prisma.application.findMany({ where: { tenantId }, select: { id: true } });
+  return rows.map((r) => r.id);
+}
+
+/**
  * The filter `listSecurityEvents` and `countSecurityEvents` share.
  *
  * One builder for both: a `total` computed over a different filter than the
  * rows is a pager that walks off the end of the log.
+ *
+ * ## Why an event is scoped two ways
+ *
+ * This used to be `tenantId: query.tenantId` alone, and a row written without a
+ * `tenantId` was therefore durable, correct, and invisible: in the table, and in
+ * no operator's log. Six emit sites had exactly that shape, the five device
+ * events (`user.device_registered`, `user.device_limit_reached`, both
+ * `*.device_released`, `end_user.device_blocked`, `end_user.device_unblocked`)
+ * and `user.session_handoff_granted`, against 53 that pass it. So the whole
+ * device audit trail was written and surfaced nowhere: blocking someone's device
+ * recorded an event that appeared neither in the workspace Activity log nor on
+ * the end-user it happened to.
+ *
+ * The obvious repair is to derive the tenant when the event is WRITTEN. That was
+ * tried and reverted: it puts a read on the audit-write path, which is precisely
+ * what the scalar-only schema exists to avoid, and it measurably reordered
+ * detached webhook emission in `devices.test.ts` (~53% failure) by contending
+ * for a connection with the `emitDetached` beside it.
+ *
+ * An event that names an Application already identifies its workspace, the
+ * fact was never missing, only unjoined. So the scoping is done here, where a
+ * query costs an operator's page load rather than somebody's sign-in, and it
+ * fixes the rows already written: no backfill.
+ *
+ * `application: { tenantId }` is NOT expressible (no relation), hence the id
+ * list. An empty list yields `in: []`, which matches nothing, correct for a
+ * workspace with no Applications.
  */
-function securityEventWhere(query: SecurityEventQuery) {
+async function securityEventWhere(query: SecurityEventQuery) {
+  const ownedApplicationIds = await tenantApplicationIds(query.tenantId);
   return {
-    tenantId: query.tenantId,
+    // Either the row names this workspace, or it names an Application this
+    // workspace owns. Both are the same claim; only one of them was recorded.
+    OR: [{ tenantId: query.tenantId }, { applicationId: { in: ownedApplicationIds } }],
     ...(query.applicationId !== undefined && { applicationId: query.applicationId }),
     ...(query.type !== undefined && { type: query.type }),
     ...(query.actorType !== undefined && { actorType: query.actorType }),
+    ...(query.endUserId !== undefined && { subjectEndUserId: query.endUserId }),
     ...((query.from || query.to) && {
       createdAt: {
         ...(query.from && { gte: query.from }),
@@ -132,10 +211,10 @@ function securityEventWhere(query: SecurityEventQuery) {
 
 /** Total events matching the same filters `listSecurityEvents` applies. */
 export async function countSecurityEvents(query: SecurityEventQuery): Promise<number> {
-  return prisma.securityEvent.count({ where: securityEventWhere(query) });
+  return prisma.securityEvent.count({ where: await securityEventWhere(query) });
 }
 
-/** List recent security events for a tenant (newest first, capped at `cap` — default 200). */
+/** List recent security events for a tenant (newest first, capped at `cap`, default 200). */
 export async function listSecurityEvents(query: SecurityEventQuery): Promise<
   Array<{
     id: string;
@@ -150,7 +229,7 @@ export async function listSecurityEvents(query: SecurityEventQuery): Promise<
   }>
 > {
   const rows = await prisma.securityEvent.findMany({
-    where: securityEventWhere(query),
+    where: await securityEventWhere(query),
     // Stable secondary order by id keeps pagination consistent on ties.
     orderBy: [
       query.sort === 'type'

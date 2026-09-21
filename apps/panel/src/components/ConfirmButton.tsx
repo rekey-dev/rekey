@@ -3,13 +3,13 @@
 /**
  * Form submit with a styled confirmation dialog. Wraps a server-action form:
  *
- *   <form action={revoke}>
+ *   <ActionForm action={revoke}>
  *     <ConfirmButton confirm="Revoke this key? This cannot be undone.">Revoke</ConfirmButton>
- *   </form>
+ *   </ActionForm>
  *
  * The trigger opens a native `<dialog>` (top-layer, focus-trapped, Esc-to-close,
  * backdrop-click-to-dismiss). Confirm is a real `type="submit"` inside the
- * parent form, so the server action runs exactly as before — only the
+ * parent form, so the server action runs exactly as before, only the
  * confirmation surface changed from `window.confirm` to a styled modal that
  * matches the rest of the panel.
  *
@@ -18,6 +18,7 @@
  */
 
 import * as React from 'react';
+import { useActionPending } from './ActionForm';
 
 export function ConfirmButton({
   confirm,
@@ -55,14 +56,19 @@ export function ConfirmButton({
     try {
       dialogRef.current?.showModal();
     } catch {
-      /* already open / detached — ignore */
+      /* already open / detached, ignore */
     }
   };
   const close = (): void => dialogRef.current?.close();
+  // The dialog closes before the action runs, so the trigger is the element
+  // left on screen. `aria-busy` is also what `<RefreshAfterAction>` waits on,
+  // which is why this must not come straight from `useFormStatus`: a stuck
+  // true would block that refresh for good. See `ActionForm.tsx`.
+  const pending = useActionPending();
 
   return (
     <>
-      <button type="button" className={triggerCls} onClick={open}>
+      <button type="button" className={triggerCls} onClick={open} aria-busy={pending || undefined}>
         {children}
       </button>
       <dialog

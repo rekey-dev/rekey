@@ -173,7 +173,7 @@ describe('Usage — included-quota hard cap', () => {
     expect(orgOver.statusCode).toBe(402);
     expect(orgOver.json().error.code).toBe('USAGE_QUOTA_EXCEEDED');
 
-    // The org sub pools to the org, not the owner's personal pool — owner's own
+    // The org sub pools to the org, not the owner's personal pool, owner's own
     // (subject-less of org) usage is uncapped.
     expect((await record({ meterSlug: 'api_calls', quantity: 100, endUserId: ownerId })).statusCode).toBe(201);
   });

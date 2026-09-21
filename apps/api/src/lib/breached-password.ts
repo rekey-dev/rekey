@@ -4,13 +4,13 @@
  * We never send the raw password (or even a full hash) to HIBP. The
  * protocol is:
  *
- *   1. SHA-1 the password — yes SHA-1, that's the wire format HIBP uses.
+ *   1. SHA-1 the password, yes SHA-1, that's the wire format HIBP uses.
  *   2. GET https://api.pwnedpasswords.com/range/<first 5 hex chars>
  *   3. Response is a `\r\n`-delimited list of `SUFFIX:COUNT` rows.
  *   4. If the remaining 35 chars of our hash appear in the list, the
  *      password has been seen `COUNT` times across known breaches.
  *
- * We treat any non-zero match as "breached". This is conservative — HIBP
+ * We treat any non-zero match as "breached". This is conservative, HIBP
  * surfaces counts as low as 1, and the value of breach-checking is the
  * categorical signal, not the magnitude.
  *
@@ -20,7 +20,7 @@
  *
  * Failure mode: when HIBP is unreachable or slow we let the password
  * through. Breach-checking is defence-in-depth, not the security
- * primitive — refusing sign-up because the breach API is down would be
+ * primitive, refusing sign-up because the breach API is down would be
  * worse for users than letting one weak password through. The check has
  * a 1.5-second timeout and any error returns `{ breached: false }`.
  */
@@ -46,8 +46,7 @@ export async function checkPasswordBreached(
   password: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<BreachCheckResult> {
-  // Empty password is never queried — caller will fail the min-length
-  // check first anyway. Defensive guard.
+  // Empty password is never queried; the caller fails the min-length check first.
   if (password.length === 0) return { breached: false, count: 0, contacted: false };
 
   const fullHash = sha1Upper(password);
@@ -65,7 +64,7 @@ export async function checkPasswordBreached(
       signal: controller.signal,
     });
     if (!res.ok) {
-      // 4xx/5xx — treat as unreachable to avoid blocking sign-up.
+      // 4xx/5xx, treat as unreachable to avoid blocking sign-up.
       return { breached: false, count: 0, contacted: false };
     }
     const text = await res.text();

@@ -15,7 +15,7 @@
  * setup fails with "Couldn't register with Rekey's sign-in service". These
  * routes serve the SAME metadata bodies at the path-insertion locations.
  *
- * Registered at the ROOT (no prefix) in `app.ts` — the well-known segment must
+ * Registered at the ROOT (no prefix) in `app.ts`, the well-known segment must
  * sit directly under the origin, so this plugin cannot live under the
  * `/api/v1/tenant/mcp` prefix. Gated by the same `OPERATOR_MCP_ENABLED` flag as
  * the rest of the operator MCP surface (the guard lives in `app.ts`).
@@ -25,15 +25,14 @@ import type { FastifyInstance } from 'fastify';
 import { operatorAuthServerMetadata, operatorProtectedResourceMetadata } from './oauth.service.js';
 import { errs, ref, type JsonSchema } from '../../lib/openapi.js';
 
-// This whole plugin only mounts when OPERATOR_MCP_ENABLED is on (see app.ts),
-// so there is no per-request feature-toggle 404 to document — unlike the
-// per-Application mirror (mcp.well-known.routes.ts), neither route here has a
-// gate of its own INSIDE the handler. There is still a real 404, though: a
+// This plugin only mounts when OPERATOR_MCP_ENABLED is on (see app.ts), so
+// unlike the per-Application mirror (mcp.well-known.routes.ts) neither route
+// here has its own gate inside the handler. There is still a real 404: a
 // deployment that turns the flag off unregisters this whole plugin, so both
-// paths below fall through to `app.ts`'s generic `ROUTE_NOT_FOUND` handler —
-// see `OPERATOR_MCP_DISABLED_404` in `oauth.routes.ts` (same reasoning,
-// mirrored here rather than imported to keep this plugin dependency-free of
-// that one). Bodies are RFC-shaped, not the Rekey envelope.
+// paths fall through to `app.ts`'s generic `ROUTE_NOT_FOUND` handler. See
+// `OPERATOR_MCP_DISABLED_404` in `oauth.routes.ts` (duplicated, not imported,
+// to keep this plugin dependency-free of that one). Bodies are RFC-shaped,
+// not the Rekey envelope.
 const OPERATOR_MCP_DISABLED_404 = {
   404:
     'ROUTE_NOT_FOUND — this deployment has `OPERATOR_MCP_ENABLED=false`, so the whole operator ' +
@@ -53,7 +52,7 @@ const ProtectedResourceMetadata: JsonSchema = {
 };
 
 export async function operatorMcpWellKnownRoutes(app: FastifyInstance): Promise<void> {
-  // RFC 8414 — authorization-server metadata, path-insertion form. This is the
+  // RFC 8414, authorization-server metadata, path-insertion form. This is the
   // one a strict connector constructs from the issuer; the suffix form alone
   // 404s for it.
   app.get(
@@ -75,7 +74,7 @@ export async function operatorMcpWellKnownRoutes(app: FastifyInstance): Promise<
     async () => operatorAuthServerMetadata(),
   );
 
-  // RFC 9728 — protected-resource metadata, path-insertion form. Added for
+  // RFC 9728, protected-resource metadata, path-insertion form. Added for
   // spec-completeness alongside the 401 `WWW-Authenticate: resource_metadata`
   // pointer (which targets the suffix form).
   app.get(

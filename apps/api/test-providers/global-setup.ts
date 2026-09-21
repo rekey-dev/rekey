@@ -10,7 +10,7 @@
  *   2. Sweep whatever a previous run left in the provider sandbox. Cleanup on
  *      exit cannot survive a crash or a Ctrl-C; a sweep on entry is what makes
  *      repeated runs idempotent.
- *   3. Print the banner — on the way in, which credentials were found, and on
+ *   3. Print the banner, on the way in, which credentials were found, and on
  *      the way out, which suites skipped and why. A run where everything
  *      skipped must not be mistakable for a run where everything passed.
  */
@@ -44,7 +44,7 @@ const schemaPath = path.join(repoRoot, 'prisma/schema.prisma');
  *
  * `SANDBOX_DATABASE_URL` first so a contributor can point it anywhere;
  * `rekey_sandbox` on the standard dev Postgres otherwise. `TEST_DATABASE_URL`
- * is NOT consulted — inheriting the default suite's database is the mistake
+ * is NOT consulted, inheriting the default suite's database is the mistake
  * this ordering exists to prevent.
  */
 function resolveDbUrl(): string {
@@ -55,7 +55,6 @@ function resolveDbUrl(): string {
 }
 
 function line(text = ''): void {
-  // eslint-disable-next-line no-console
   console.log(text);
 }
 
@@ -84,7 +83,7 @@ export default async function setup(): Promise<() => void> {
   // Ephemeral and per-run, so a real `sk_test_` key is AES-encrypted at rest
   // even in a throwaway database. Without it `lib/secrets.ts` silently falls
   // back to `plain.<hex>` and the sandbox key sits readable in a Postgres
-  // row — which is fine right up until someone runs this against a database
+  // row, which is fine right up until someone runs this against a database
   // they keep, or dumps it into a bug report.
   process.env.ENCRYPTION_KEY ??= randomBytes(32).toString('hex');
 

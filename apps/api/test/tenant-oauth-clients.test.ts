@@ -3,7 +3,7 @@
  *
  * Registration is unauthenticated by design (RFC 7591) and on by default,
  * because MCP clients self-register. Until these routes an operator could
- * neither see what had registered nor remove it — open registration nobody can
+ * neither see what had registered nor remove it, open registration nobody can
  * audit. What matters here is less the happy path than the boundary: a client
  * id is a public value, so "revoke by id" must not reach across Applications.
  */
@@ -81,7 +81,7 @@ describe('registered OAuth clients', () => {
       clientName: 'Some MCP client',
       redirectUris: ['https://client.example/callback'],
     });
-    // Registration mints PUBLIC clients — PKCE, no secret. Anything that looks
+    // Registration mints PUBLIC clients, PKCE, no secret. Anything that looks
     // like one appearing here would mean the model had changed underneath.
     expect(JSON.stringify(rows[0])).not.toMatch(/secret/i);
   });
@@ -128,7 +128,7 @@ describe('registered OAuth clients', () => {
 
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe('OAUTH_CLIENT_NOT_FOUND');
-    // Still there — a 404 that deleted the row anyway would be worse than a 200.
+    // Still there, a 404 that deleted the row anyway would be worse than a 200.
     expect(await prisma.oAuthClient.findUnique({ where: { id: victim.id } })).not.toBeNull();
   });
 

@@ -6,7 +6,7 @@
  * raw HTML in a variable value is never rendered as markup.
  *
  * The template body itself is operator-authored markup. It runs through
- * the substituter as-is — the trust model is "the operator wrote this and
+ * the substituter as-is, the trust model is "the operator wrote this and
  * is responsible for its safety." We only neutralise the *runtime
  * variables* the system supplies.
  *
@@ -14,12 +14,12 @@
  * since text/plain has no markup to escape.
  */
 
-import { isKnownEvent, EMAIL_EVENTS, type EmailEventKey } from './events.js';
+import { isKnownEvent, EMAIL_EVENTS } from './events.js';
 
 const TOKEN_RE = /\{\{(\w+)\}\}/g;
 
 /**
- * `{{#if var}}…{{/if}}` — the ONLY control structure the engine has, and
+ * `{{#if var}}…{{/if}}`, the ONLY control structure the engine has, and
  * deliberately the smallest one that solves the problem it was added for:
  * a call-to-action button whose URL cannot be resolved must not render at
  * all. `{{appUrl}}` substituted with the empty string yields `href=""`,
@@ -126,7 +126,7 @@ export function renderHtmlBody(
 
 /**
  * Validate that the supplied `variables` cover every name the event
- * declares. Extra names are dropped silently — the registry is the
+ * declares. Extra names are dropped silently, the registry is the
  * source of truth. Missing names render as empty strings (no throw),
  * which is the right call for "compatible with older templates."
  */

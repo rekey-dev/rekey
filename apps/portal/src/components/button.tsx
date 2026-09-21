@@ -1,5 +1,5 @@
 /**
- * Button primitive — two variants matching the hand-rolled styles already in
+ * Button primitive, two variants matching the hand-rolled styles already in
  * use ([slug]/login/page.tsx primary submit, [slug]/layout.tsx sign-out), plus
  * a keyboard focus ring. `--color-primary` is operator-brandable (layout.tsx
  * overrides it), so both the fill and the ring track the brand.

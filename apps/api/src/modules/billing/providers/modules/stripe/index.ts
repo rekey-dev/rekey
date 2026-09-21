@@ -4,12 +4,12 @@
  * Bundles what used to be spread across stripe.routes.ts (signature
  * verification), stripe.handler.ts (event-type dispatch + status map), and
  * credentials.service.ts (credential shape) into one self-describing
- * descriptor. Every mapping here is a straight port — the CI webhook tests pin
+ * descriptor. Every mapping here is a straight port, the CI webhook tests pin
  * the behavior. Outbound provider construction is NOT here: that stayed in
  * providers/index.ts (see the note on `ProviderModule`).
  *
  * Credential JSON keys (`apiKey`, `webhookSecret`) match the stored
- * encrypted blobs exactly — zero data migration (see StripeCredentials in
+ * encrypted blobs exactly, zero data migration (see StripeCredentials in
  * credentials.service.ts, the source of truth until P3 derives it from
  * this schema).
  */
@@ -29,7 +29,7 @@ import type {
   VerifyResult,
 } from '../../module-types.js';
 
-// Verifying a webhook signature is offline HMAC — `webhooks.constructEvent`
+// Verifying a webhook signature is offline HMAC, `webhooks.constructEvent`
 // makes no network call and never authenticates. The SDK constructor demands
 // *a* key regardless, so this client is built with a fixed placeholder. There
 // is deliberately no deployment-level Stripe key to configure: the money path
@@ -46,7 +46,7 @@ interface ApplicationScopedObject {
 
 function extractApplicationId(obj: ApplicationScopedObject | undefined | null): string | null {
   // The payload is attacker-writable until signature verification passes, and
-  // the interface type above is a cast, not a guarantee — so runtime-check the
+  // the interface type above is a cast, not a guarantee, so runtime-check the
   // shape. A non-string (array/object/number via a crafted body) must resolve
   // to "no id", never flow onward as an AppRef.
   const id = obj?.metadata?.applicationId;
@@ -59,7 +59,7 @@ export function mapStripeSubStatus(s: Stripe.Subscription.Status): LocalSubscrip
     case 'active':
       return 'ACTIVE';
     // Was folded into ACTIVE, which entitled correctly but made a trial
-    // indistinguishable from a paid subscription — no "trial ends in 4 days",
+    // indistinguishable from a paid subscription, no "trial ends in 4 days",
     // no conversion reporting. TRIALING is in ENTITLING_STATUSES, so this
     // changes what we can SEE, not who has access.
     case 'trialing':
@@ -82,7 +82,7 @@ export function mapStripeSubStatus(s: Stripe.Subscription.Status): LocalSubscrip
 /**
  * Pick the lifecycle event type for a mapped status. `status` stays the
  * authoritative field on the event (the appliers key everything off it);
- * EXPIRED buckets under `canceled` (terminal — the sub died before/after
+ * EXPIRED buckets under `canceled` (terminal, the sub died before/after
  * activating) and PENDING under `past_due` (billing interrupted, not
  * terminal). See SubscriptionStatusEvent in module-types.ts.
  */
@@ -90,9 +90,10 @@ function statusEventType(status: LocalSubscriptionStatus): SubscriptionStatusEve
   switch (status) {
     case 'ACTIVE':
     // A trial starting IS the subscriber gaining access, which is what this
-    // event announces — consumers provision on it. There is no
+    // event announces, consumers provision on it. There is no
     // `subscription.trial_started` in the catalogue, and minting one is a
     // public-surface decision, not a side effect of adding a status.
+    // falls through
     case 'TRIALING':
       return 'subscription.activated';
     case 'CANCELED':
@@ -111,11 +112,11 @@ function resolveApplication(req: RawWebhookReq): AppRef {
   if (req.params.slug) return { slug: req.params.slug };
   // Slug-less generic-route fallback: the one payload field the spec allows
   // reading pre-verify. Verification with THAT app's secret then proves the
-  // claim — a forged payload naming app X still needs X's signing secret.
+  // claim, a forged payload naming app X still needs X's signing secret.
   const event = req.payload as { data?: { object?: ApplicationScopedObject } } | null;
   const applicationId = extractApplicationId(event?.data?.object);
   if (applicationId) return { applicationId };
-  // No slug and no metadata → nothing to scope credentials by. 401 — an
+  // No slug and no metadata → nothing to scope credentials by. 401, an
   // unverifiable request is unauthenticated.
   throw new RekeyError({
     statusCode: 401,
@@ -137,7 +138,7 @@ async function verify(req: RawWebhookReq, creds: Record<string, string>, _ctx: V
   }
   try {
     // Offline HMAC over the exact raw bytes. constructEvent also parses, but
-    // the pipeline already holds the parsed body — verification is the only
+    // the pipeline already holds the parsed body, verification is the only
     // output we need here.
     stripeForVerification.webhooks.constructEvent(req.rawBody, sig, creds.webhookSecret ?? '');
   } catch {
@@ -153,21 +154,21 @@ async function verify(req: RawWebhookReq, creds: Record<string, string>, _ctx: V
 
 /**
  * The charge a ONE-TIME (`mode: 'payment'`) checkout session settled, in the
- * shape `CheckoutCompletedEvent.payment` takes — or null when this completion
+ * shape `CheckoutCompletedEvent.payment` takes, or null when this completion
  * carries no charge of its own.
  *
  * Why this rides on the completion rather than on its own event type: a
  * `mode: 'payment'` session produces no invoice, so none of the invoice events
  * we subscribe to ever fire for it and one-time revenue had no `Payment` row
- * anywhere in Rekey. The obvious repair — subscribing `payment_intent.succeeded`
- * — is worse than it looks: that event ALSO fires for every invoice payment on
+ * anywhere in Rekey. The obvious repair, subscribing `payment_intent.succeeded`,
+ * is worse than it looks: that event ALSO fires for every invoice payment on
  * every subscription (so it would double-count against `invoice.paid` under a
  * different provider id), and its payload has no checkout-session or
  * subscription reference to match the local row by. The session has all three:
  * the payment intent, the amount actually charged after the coupon, and a
  * `payment_status` that says whether money really moved.
  *
- * `mode: 'subscription'` sessions return null on purpose — their money is
+ * `mode: 'subscription'` sessions return null on purpose, their money is
  * `invoice.paid`'s to record, and recording it twice under two provider ids is
  * exactly the double-count this avoids.
  */
@@ -191,7 +192,7 @@ function oneTimeCharge(
   return {
     payment: {
       providerPaymentId,
-      // `amount_total` is what the buyer was charged — net of the ad-hoc
+      // `amount_total` is what the buyer was charged, net of the ad-hoc
       // coupon, which is the number that has to appear in revenue.
       amount: session.amount_total,
       currency: session.currency ?? null,
@@ -204,7 +205,7 @@ function oneTimeCharge(
  * Port of the stripe.handler.ts dispatch switch: the same 5 handled event
  * types, translated to normalized domain events. Everything else → null
  * (logged + acked upstream). Application scoping stays payload-metadata
- * based — missing metadata means "cannot route", warn + no events, never
+ * based, missing metadata means "cannot route", warn + no events, never
  * guess (see webhooks/AGENTS.md).
  */
 function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | null {
@@ -250,7 +251,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           applicationId,
           providerSubscriptionId: sub.id,
           status,
-          // Absolute mirror — null clears, matching the pre-module handler.
+          // Absolute mirror, null clears, matching the pre-module handler.
           currentPeriodEnd: sub.current_period_end ? new Date(sub.current_period_end * 1000) : null,
           trialEndsAt: sub.trial_end ? new Date(sub.trial_end * 1000) : null,
           cancelAt: sub.cancel_at ? new Date(sub.cancel_at * 1000) : null,
@@ -300,7 +301,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           currency: invoice.currency ?? null,
           description: invoice.description ?? null,
           // The FIRST invoice (billing_reason: subscription_create) pays for
-          // the period checkout already provisioned — the applier anchors it
+          // the period checkout already provisioned, the applier anchors it
           // 'initial' to prevent a double grant.
           firstPeriod: invoice.billing_reason === 'subscription_create',
           raw: payload,
@@ -348,6 +349,7 @@ export const stripeModule: ProviderModule = {
     priority: 100,
   },
   capabilities: {
+    checkout: true,
     oneTime: true,
     captureStep: false,
     autoWebhookRegister: true,
@@ -359,9 +361,9 @@ export const stripeModule: ProviderModule = {
     // Both hosted flows take `discounts: [{ coupon }]` on the Checkout
     // Session, so an ad-hoc Coupon minted per checkout covers each. On a
     // subscription the coupon is created `duration: 'once'`, which is what a
-    // single recorded redemption actually buys — see stripe-real.ts.
+    // single recorded redemption actually buys, see stripe-real.ts.
     discounts: { oneTime: true, recurring: true },
-    // Stripe documents no deadline on refunds — the API will take an old
+    // Stripe documents no deadline on refunds, the API will take an old
     // charge, and what actually stops one is the card network or the buyer's
     // bank rather than Stripe. `null` says that honestly instead of inventing
     // a limit to look symmetrical with the other two.
@@ -414,8 +416,8 @@ export const stripeModule: ProviderModule = {
     },
   ],
   detectMode(creds) {
-    // Stripe secret keys are self-describing. Anything else — a restricted
-    // key, a typo, a future prefix — is `null`, NOT 'test': claiming "test"
+    // Stripe secret keys are self-describing. Anything else, a restricted
+    // key, a typo, a future prefix, is `null`, NOT 'test': claiming "test"
     // for a key we don't recognise is how a live credential ends up stored
     // against a development application.
     const apiKey = creds.apiKey ?? '';

@@ -1,5 +1,5 @@
 /**
- * Provider refund capability — the three real implementations, unit-tested
+ * Provider refund capability, the three real implementations, unit-tested
  * against stubbed provider clients.
  *
  * These classes are normally unreachable from the suite: `test/setup.ts` mocks
@@ -12,14 +12,15 @@
  *
  * Refunds move money OUT, so the same blind spot is more expensive here. These
  * tests instantiate the real classes directly and replace only the HTTP client
- * underneath, so the request each provider actually builds — endpoint, field
- * names, id — is what gets asserted.
+ * underneath, so the request each provider actually builds, endpoint, field
+ * names, id, is what gets asserted.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RealStripeProvider } from '../src/modules/billing/providers/stripe-real.js';
 import { RealPaypalProvider } from '../src/modules/billing/providers/paypal.js';
 import { RealRazorpayProvider } from '../src/modules/billing/providers/razorpay.js';
+import { ExternalBillingProvider } from '../src/modules/billing/providers/external.js';
 import { getModule, registryNames } from '../src/modules/billing/providers/registry.js';
 import type { RefundPaymentInput } from '../src/modules/billing/providers/types.js';
 
@@ -41,13 +42,18 @@ describe('capability declaration matches implementation', () => {
   it.each(registryNames)('%s: declares refunds iff its provider implements it', (name) => {
     const mod = getModule(name);
     expect(mod, `no module registered for ${name}`).toBeDefined();
-    const impl: Record<string, unknown> =
+    // `object` rather than `{ refundPayment?: unknown }`: the external provider
+    // shares no property with that weak type, so the union would not assign.
+    const impl: object =
       name === 'stripe'
         ? new RealStripeProvider({ apiKey: 'sk_test_x', webhookSecret: 'whsec_x' })
         : name === 'paypal'
           ? new RealPaypalProvider({ clientId: 'c', clientSecret: 's', webhookId: 'w' }, 'test')
-          : new RealRazorpayProvider({ keyId: 'rzp_test_x', keySecret: 'k' });
-    expect(typeof impl.refundPayment === 'function').toBe(Boolean(mod!.capabilities.refunds));
+          : name === 'external'
+            ? new ExternalBillingProvider()
+            : new RealRazorpayProvider({ keyId: 'rzp_test_x', keySecret: 'k', webhookSecret: 'w' });
+    const refundPayment = (impl as { refundPayment?: unknown }).refundPayment;
+    expect(typeof refundPayment === 'function').toBe(Boolean(mod!.capabilities.refunds));
   });
 
   it('all three declare partial refunds, and only Stripe has no window', () => {
@@ -100,7 +106,7 @@ describe('stripe: resolving the stored id to something refundable', () => {
       expect.objectContaining({ payment_intent: 'pi_from_invoice' }),
       { idempotencyKey: REFUND.idempotencyKey },
     );
-    expect(create.mock.calls[0][0]).not.toHaveProperty('charge');
+    expect(create.mock.calls[0]![0]).not.toHaveProperty('charge');
   });
 
   it('resolves a checkout session id to its payment intent', async () => {
@@ -190,7 +196,7 @@ describe('paypal: choosing between the v1 sale and v2 capture refund', () => {
   /**
    * Stub `fetch` for the token exchange plus a scripted sequence of refund
    * responses, recording every refund request so the endpoint AND the body's
-   * field names can both be asserted — they differ between the two API
+   * field names can both be asserted, they differ between the two API
    * versions, and crossing them produces a confusing 400.
    */
   function paypalFetchStub(responses: Array<{ status: number; body: unknown }>) {
@@ -204,7 +210,7 @@ describe('paypal: choosing between the v1 sale and v2 capture refund', () => {
         });
       }
       calls.push({ url, body: JSON.parse((init?.body as string) ?? '{}') });
-      const next = responses[i++] ?? responses[responses.length - 1];
+      const next = (responses[i++] ?? responses[responses.length - 1])!;
       return new Response(JSON.stringify(next.body), {
         status: next.status,
         headers: { 'content-type': 'application/json' },
@@ -230,12 +236,12 @@ describe('paypal: choosing between the v1 sale and v2 capture refund', () => {
     });
 
     expect(calls).toHaveLength(2);
-    expect(calls[0].url).toContain('/v2/payments/captures/5TY05013RG002845M/refund');
-    expect(calls[1].url).toContain('/v1/payments/sale/5TY05013RG002845M/refund');
+    expect(calls[0]!.url).toContain('/v2/payments/captures/5TY05013RG002845M/refund');
+    expect(calls[1]!.url).toContain('/v1/payments/sale/5TY05013RG002845M/refund');
     // v2 takes `value`/`currency_code`; v1 takes `total`/`currency`. Sending
     // v2's names to v1 is a 400 that reads like a broken integration.
-    expect(calls[0].body.amount).toEqual({ value: '9.99', currency_code: 'USD' });
-    expect(calls[1].body.amount).toEqual({ total: '9.99', currency: 'USD' });
+    expect(calls[0]!.body.amount).toEqual({ value: '9.99', currency_code: 'USD' });
+    expect(calls[1]!.body.amount).toEqual({ total: '9.99', currency: 'USD' });
     expect(res).toMatchObject({ refundId: 'ref_1', amount: 999, status: 'succeeded' });
   });
 
@@ -253,8 +259,8 @@ describe('paypal: choosing between the v1 sale and v2 capture refund', () => {
     });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0].url).toBe('https://api-m.sandbox.paypal.com/v2/payments/captures/ABC/refund');
-    expect(calls[0].url).not.toContain('ignored-when-href-present');
+    expect(calls[0]!.url).toBe('https://api-m.sandbox.paypal.com/v2/payments/captures/ABC/refund');
+    expect(calls[0]!.url).not.toContain('ignored-when-href-present');
   });
 
   it('sends note_to_payer, not note', async () => {
@@ -271,8 +277,8 @@ describe('paypal: choosing between the v1 sale and v2 capture refund', () => {
       currency: 'USD',
       reason: 'Duplicate charge',
     });
-    expect(calls[0].body).toHaveProperty('note_to_payer', 'Duplicate charge');
-    expect(calls[0].body).not.toHaveProperty('note');
+    expect(calls[0]!.body).toHaveProperty('note_to_payer', 'Duplicate charge');
+    expect(calls[0]!.body).not.toHaveProperty('note');
   });
 
   it('sends an empty body for a full refund', async () => {
@@ -283,7 +289,7 @@ describe('paypal: choosing between the v1 sale and v2 capture refund', () => {
     await provider.refundPayment({ ...REFUND, providerPaymentId: 'CAP2' });
     // An empty payload is how PayPal is told "all of what remains". Sending a
     // computed amount instead would be us guessing at the remainder.
-    expect(calls[0].body).toEqual({});
+    expect(calls[0]!.body).toEqual({});
   });
 
   it('maps the 180-day refusal to a distinct code', async () => {
@@ -312,7 +318,7 @@ describe('paypal: choosing between the v1 sale and v2 capture refund', () => {
 describe('razorpay: refund creation and its refusals', () => {
   function razorpayStub(refund: unknown, rejects = false) {
     const fn = rejects ? vi.fn().mockRejectedValue(refund) : vi.fn().mockResolvedValue(refund);
-    const provider = withClient(new RealRazorpayProvider({ keyId: 'rzp_test_x', keySecret: 'k' }), 'client', {
+    const provider = withClient(new RealRazorpayProvider({ keyId: 'rzp_test_x', keySecret: 'k', webhookSecret: 'w' }), 'client', {
       payments: { refund: fn },
     });
     return { provider, fn };
@@ -355,7 +361,7 @@ describe('razorpay: refund creation and its refusals', () => {
   it('omits the amount for a full refund rather than computing one', async () => {
     const { provider, fn } = razorpayStub({ id: 'rfnd_3', status: 'pending' });
     await provider.refundPayment({ ...REFUND, providerPaymentId: 'pay_Y' });
-    expect(fn.mock.calls[0][1]).not.toHaveProperty('amount');
+    expect(fn.mock.calls[0]![1]).not.toHaveProperty('amount');
   });
 
   it('maps the six-month cliff to a distinct code', async () => {

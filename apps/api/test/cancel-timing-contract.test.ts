@@ -5,15 +5,15 @@
  * ## Why a test instead of a comment
  *
  * A cancel confirmation has to tell the buyer which of two things is about to
- * happen — keep the rest of the period you paid for, or lose it now with no
- * refund — and it has to say so *before* the call, so it cannot read the answer
+ * happen, keep the rest of the period you paid for, or lose it now with no
+ * refund, and it has to say so *before* the call, so it cannot read the answer
  * off the response. It has to predict.
  *
  * That prediction was written out a second time, in the marketing app, and it
  * was correct for about seven hours. #335 mirrored the API's predicate of the
  * day (ACTIVE + provider-backed + known period end). #336 then removed the
  * provider requirement, because requiring one meant every hand-provisioned
- * subscription — which is every subscription Rekey Cloud has — was terminated
+ * subscription, which is every subscription Rekey Cloud has, was terminated
  * on the spot when its owner asked for period-end. The copy was not updated,
  * so the dialog spent the next stretch warning ordinary subscribers that
  * cancelling would cost them the remainder of a period it would in fact have
@@ -24,7 +24,7 @@
  * honest: it drives a real cancellation through the HTTP surface for each
  * shape a subscription can be in, and asserts the shared predicate called it.
  * Change `cancelCurrentSubscription`'s timing without changing the predicate
- * and this goes red — which is exactly what should have happened to #336.
+ * and this goes red, which is exactly what should have happened to #336.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -176,7 +176,7 @@ describe('cancellation timing: the predicate and the server agree', () => {
 
   it('hand-provisioned, ACTIVE, with a period end → ALSO scheduled', async () => {
     // The case the marketing copy got wrong. Every Rekey Cloud subscription
-    // has this shape — checkout is closed, so they are all provisioned by hand
+    // has this shape, checkout is closed, so they are all provisioned by hand
     // and none carries a provider record. The old predicate answered "this
     // ends immediately, with no refund"; the API had already stopped doing
     // that, and the warning cost buyers nothing but nerve.
@@ -199,8 +199,8 @@ describe('cancellation timing: the predicate and the server agree', () => {
   });
 
   it('PAST_DUE → immediate, entitled though it is', async () => {
-    // The sharp one. PAST_DUE counts as entitled everywhere else — the buyer
-    // still has their plan while dunning runs — so a confirmation that keys
+    // The sharp one. PAST_DUE counts as entitled everywhere else, the buyer
+    // still has their plan while dunning runs, so a confirmation that keys
     // off entitlement alone would promise them a period end they do not get.
     const { predicted, scheduled, row } = await cancelAndCompare('ctc-pastdue', {
       status: 'PAST_DUE',

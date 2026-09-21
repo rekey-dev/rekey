@@ -1,5 +1,5 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 
 /**
  * Root 403. Rendered when `lib/api.ts` turns an API 403 into `forbidden()`.
@@ -18,7 +18,7 @@ export default function Forbidden(): React.JSX.Element {
         <h1 className="text-xl font-semibold text-[var(--color-fg)]">You don&apos;t have access to this</h1>
         <p className="text-sm text-[var(--color-muted-fg)]">
           This page exists, but your role in this workspace can&apos;t open it. An owner or admin can
-          grant access — or you may be looking at the wrong workspace.
+          grant access, or you may be looking at the wrong workspace.
         </p>
         <Link
           href="/applications"

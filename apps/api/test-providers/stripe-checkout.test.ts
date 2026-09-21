@@ -1,5 +1,5 @@
 /**
- * Checkout against a real Stripe test account — the session as STRIPE
+ * Checkout against a real Stripe test account, the session as STRIPE
  * understands it, not as we hoped it would.
  *
  * Every assertion here reads the Session back out of the Stripe API after
@@ -15,7 +15,7 @@
  * full price. `amount_total` and `total_details.amount_discount` are the two
  * numbers that settle it.
  *
- * Completing a session is a separate matter — see `stripe-checkout-browser.test.ts`.
+ * Completing a session is a separate matter, see `stripe-checkout-browser.test.ts`.
  * There is no API in Stripe test mode that completes a hosted Checkout Session;
  * the supported route is a test card on the hosted page.
  */
@@ -128,7 +128,7 @@ describeSandbox('stripe', 'Stripe sandbox · checkout', stripeSandbox, (creds) =
     const { fixture } = await withPlan('co-coupon', { slug: 'discounted', amount: 4000 });
 
     // 25% off 4000 = 1000. Rekey resolves the percentage itself and hands
-    // Stripe money — see `createDiscount` on why a percentage must not be
+    // Stripe money, see `createDiscount` on why a percentage must not be
     // forwarded as one.
     await couponsService.create({
       applicationId: fixture.applicationId,
@@ -191,7 +191,7 @@ describeSandbox('stripe', 'Stripe sandbox · checkout', stripeSandbox, (creds) =
     const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ['line_items'] });
     expect(session.mode).toBe('payment');
     expect(session.amount_total).toBe(2000);
-    // Inline `price_data`, so Stripe minted a price for this session alone —
+    // Inline `price_data`, so Stripe minted a price for this session alone,
     // it must NOT be the recurring plan price.
     expect(session.line_items?.data[0]?.price?.recurring).toBeNull();
     const productRef = session.line_items?.data[0]?.price?.product;
@@ -221,7 +221,7 @@ describeSandbox('stripe', 'Stripe sandbox · checkout', stripeSandbox, (creds) =
     expect(res.json().error?.code).toBe('COUPON_FULL_DISCOUNT_UNSUPPORTED');
 
     // The refusal happens in `checkout-discount.ts`, before a provider is
-    // built — so no Coupon object was minted and abandoned in the operator's
+    // built, so no Coupon object was minted and abandoned in the operator's
     // Stripe account. Asserted against Stripe rather than against a spy.
     const after = await stripe.coupons.list({ limit: 5 });
     expect(after.data[0]?.id).toBe(before.data[0]?.id);

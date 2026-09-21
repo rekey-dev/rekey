@@ -1,13 +1,13 @@
 'use client';
 
 /**
- * RekeyProvider — wraps the app, exposes user + signed-in state.
+ * RekeyProvider, wraps the app, exposes user + signed-in state.
  *
  * Two ways to feed it:
  *   1. Initial user + access token from your SSR (Next.js App Router server
- *      component): `<RekeyProvider initialUser={...} accessToken={...}>` — the
+ *      component): `<RekeyProvider initialUser={...} accessToken={...}>`, the
  *      first render needs no fetch.
- *   2. Fetch on mount: pass only `accessToken` — the provider calls
+ *   2. Fetch on mount: pass only `accessToken`, the provider calls
  *      getCurrentUser on mount + on token change.
  *
  * Auth state changes (sign-in, sign-out, refresh) are usually handled by
@@ -26,7 +26,7 @@ export interface RekeyContextValue {
   signedIn: boolean;
   loading: boolean;
   client: RekeyBrowserClient;
-  /** Manual refresh — re-fetch the current user. Useful after sign-in. */
+  /** Manual refresh, re-fetch the current user. Useful after sign-in. */
   refresh: () => Promise<void>;
 }
 
@@ -38,7 +38,7 @@ export interface RekeyProviderProps {
   /**
    * Publishable key (`rp_pub_…`) for this Application. Enables the bootstrap
    * auth methods (sign-in/up, magic-link, passkey, license verify, plans) so a
-   * browser-only app needs no backend. Safe to ship in client code — it only
+   * browser-only app needs no backend. Safe to ship in client code, it only
    * identifies the app. Omit only if you sign users in server-side and just
    * read the current user here via `accessToken`.
    */
@@ -121,7 +121,7 @@ export function RekeyProvider({
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
-/** Internal — use the public hooks instead. */
+/** Internal, use the public hooks instead. */
 export function useRekeyContext(): RekeyContextValue {
   const ctx = React.useContext(Ctx);
   if (!ctx) {

@@ -1,7 +1,7 @@
 /**
  * Keep an impersonated session out of the routes that rebind credentials.
  *
- * Impersonation exists so an operator can SEE what a user sees — reproduce a
+ * Impersonation exists so an operator can SEE what a user sees, reproduce a
  * billing state, confirm an entitlement, work a support ticket. It was
  * implemented as an unrestricted session instead: the route's own comment said
  * "every route the user could call becomes callable as them, except routes that
@@ -19,7 +19,7 @@
  * ## What is refused, and what is not
  *
  * Refused: anything that changes a credential, or the set of credentials, that
- * can sign the end-user in later — password, MFA enrollment/removal, passkey
+ * can sign the end-user in later, password, MFA enrollment/removal, passkey
  * enrollment/removal. These are the actions whose effect survives the token.
  *
  * Not refused: reads, billing, organization membership, and profile edits.
@@ -45,14 +45,23 @@ import { RekeyError } from '../lib/error.js';
 export function refuseWhileImpersonating(action: string) {
   return async function guard(request: FastifyRequest, _reply: FastifyReply): Promise<void> {
     if (!request.impersonation) return;
-    throw new RekeyError({
-      statusCode: 403,
-      code: 'IMPERSONATION_ACTION_FORBIDDEN',
-      message: `An impersonation session cannot ${action}.`,
-      fix:
-        'Credential changes are refused while impersonating — they would outlive the ' +
-        '5-minute token and the user could not tell who made them. Ask the user to perform ' +
-        'this themselves, or act through the operator panel.',
-    });
+    throw impersonationForbidden(action);
   };
+}
+
+/**
+ * The refusal itself, shared with the service-layer backstop in
+ * `auth.service.ts` (`issuePair`), which refuses to mint a session pair from
+ * an impersonated session whichever route asked for it.
+ */
+export function impersonationForbidden(action: string): RekeyError {
+  return new RekeyError({
+    statusCode: 403,
+    code: 'IMPERSONATION_ACTION_FORBIDDEN',
+    message: `An impersonation session cannot ${action}.`,
+    fix:
+      'Credential and session changes are refused while impersonating, they would outlive ' +
+      'the 5-minute token and the user could not tell who made them. Ask the user to perform ' +
+      'this themselves, or act through the operator panel.',
+  });
 }

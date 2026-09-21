@@ -1,5 +1,5 @@
 /**
- * Public usage endpoints — the customer's app reports/aggregates here.
+ * Public usage endpoints, the customer's app reports/aggregates here.
  * Tenant operator routes for meter CRUD live in tenant-applications.
  */
 
@@ -11,8 +11,10 @@ import { requireBillingEnabled } from '../../middleware/billing-enabled.js';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
+import { resolveGlobalBudgets } from '../../lib/rate-limit.js';
 import { positiveBoundedInt } from '../../lib/bounded-int.js';
-import { ok, errs, ref, type JsonSchema } from '../../lib/openapi.js';
+import { assertMetadataWithinLimit } from '../../lib/metadata-limit.js';
+import { ok, errs, ref } from '../../lib/openapi.js';
 
 /**
  * Auth/gate errors shared by every route in this file: `requireApiKey`
@@ -35,25 +37,11 @@ const WRITE_GATE_ERRORS = {
   429: READ_GATE_ERRORS[429],
 } as const;
 
-/*
- * The two schemas that used to live here (`RawUsageRecord`, `UsageAggregateResult`)
- * are gone. They existed only to describe handlers that disagreed with their own
- * published DTOs — `POST /record` returned the raw Prisma row, missing the
- * `applicationId` and `meterSlug` that `UsageRecordDto` requires, and
- * `/aggregate` returned `{total, count}` where `UsageAggregateDto` promised
- * `{meterSlug, total, from, to}`.
- *
- * Documenting the disagreement was the right call at the time — a schema that
- * matches a wrong response is better than one that lies. Both handlers now
- * return what the DTO says, so the components describe them and the workaround
- * is dead.
- */
-
 const RecordBody = z.object({
   meterSlug: z.string().min(1).max(40),
   // Positive integers only. Negative/zero quantities would let a billing:write
   // key deflate a metered total below true consumption (under-billing) or poison
-  // aggregates — usage events represent consumption, which is never negative.
+  // aggregates, usage events represent consumption, which is never negative.
   quantity: positiveBoundedInt(),
   endUserId: z.string().min(1).optional(),
   organizationId: z.string().min(1).optional(),
@@ -128,10 +116,14 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
     '/record',
     {
       onRequest: requireScope('billing:write'),
-      // Higher per-API-key cap for ingestion — keyed per key via the global
+      // Higher per-API-key cap for ingestion, keyed per key via the global
       // keyGenerator, so one customer's high scan volume doesn't starve others.
       config: {
-        rateLimit: { max: env.RATE_LIMIT_USAGE_MAX, timeWindow: env.RATE_LIMIT_WINDOW_MS },
+        // RATE_LIMIT_USAGE_MAX, else the per-key budget (see config/env.ts).
+        rateLimit: {
+          max: env.RATE_LIMIT_USAGE_MAX ?? resolveGlobalBudgets(env).apiKey,
+          timeWindow: env.RATE_LIMIT_WINDOW_MS,
+        },
         // Accept the generic `Idempotency-Key` header as well as the body-level
         // `idempotencyKey` below. The body key dedupes at the RECORD level via
         // the unique (meterId, idempotencyKey) constraint; the header replays the
@@ -145,7 +137,7 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
         summary: 'Record a usage event against a named meter',
         description:
           'Requires an Application **secret** key with the `billing:write` scope (or ' +
-          '`*`, the mint default). The publishable key is rejected — call this from your server.',
+          '`*`, the mint default). The publishable key is rejected, call this from your server.',
         security: [{ apiKey: [] }],
         body: {
           type: 'object',
@@ -174,7 +166,8 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
               'VALIDATION_ERROR — the body failed schema validation; or ' +
               'IDEMPOTENCY_KEY_INVALID — the Idempotency-Key header is empty or exceeds 200 ' +
               'characters; or USAGE_SUBJECT_AMBIGUOUS — both `endUserId` and `organizationId` ' +
-              'were passed; or USAGE_METER_INACTIVE — the meter exists but does not accept records.',
+              'were passed; or USAGE_METER_INACTIVE — the meter exists but does not accept records; ' +
+              'or METADATA_TOO_LARGE — `metadata` exceeds the 16KB limit.',
             ...WRITE_GATE_ERRORS,
             402: 'USAGE_QUOTA_EXCEEDED — the subject\'s plan-included quota for this meter is exhausted this period.',
             404:
@@ -192,6 +185,10 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       const body = RecordBody.parse(req.body);
+      // Usage rows are the highest-volume table in the schema and are never
+      // updated, so an oversized blob here is multiplied by the ingestion rate
+      // rather than held to one row per subject.
+      if (body.metadata) assertMetadataWithinLimit(body.metadata);
       await assertSubjectInApp(req.application!.id, body);
       const record = await usageService.record({
         applicationId: req.application!.id,
@@ -204,7 +201,7 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
         ...(body.idempotencyKey !== undefined && { idempotencyKey: body.idempotencyKey }),
       });
       // Shaped into UsageRecordDto rather than sent raw. The row stores
-      // `meterId`, and `applicationId` lives on the meter, not the record — so
+      // `meterId`, and `applicationId` lives on the meter, not the record, so
       // returning it raw omitted BOTH fields the published DTO requires while
       // shipping an internal id the caller cannot resolve.
       return reply.status(201).send({

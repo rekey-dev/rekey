@@ -1,15 +1,15 @@
 'use client';
 
 /**
- * Browser entrypoint — `@rekey.dev/nextjs/client`.
+ * Browser entrypoint, `@rekey.dev/nextjs/client`.
  *
  * The ONLY Rekey credential this touches is the Application **publishable**
  * key (`rp_pub_…`), which is public by design and safe to ship in client code.
- * Use it for the signed-out **bootstrap** flow — sign-up, sign-in, magic-link,
- * passkey, license verify, plan listing — straight from a Client Component,
+ * Use it for the signed-out **bootstrap** flow, sign-up, sign-in, magic-link,
+ * passkey, license verify, plan listing, straight from a Client Component,
  * with no server round-trip to start auth.
  *
- * The secret key (`rp_live_…`) NEVER belongs here — keep it on the server in
+ * The secret key (`rp_live_…`) NEVER belongs here, keep it on the server in
  * `@rekey.dev/nextjs/server` for `auth()`, route handlers, and trusted API calls.
  *
  * Recommended Next.js shape (keeps tokens out of JS long-term):

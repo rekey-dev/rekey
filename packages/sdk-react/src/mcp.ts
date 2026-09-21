@@ -4,7 +4,7 @@
  * When an Application has MCP enabled (Panel → Application → MCP), end-users
  * connect an MCP client (Claude Code, Claude Desktop, Cursor) to their account.
  * This builds the connection URL + the `claude mcp add` command so your app can
- * render a "Connect to Claude" affordance. Pure string-building — no network,
+ * render a "Connect to Claude" affordance. Pure string-building, no network,
  * no auth (the MCP client runs the OAuth flow itself).
  */
 

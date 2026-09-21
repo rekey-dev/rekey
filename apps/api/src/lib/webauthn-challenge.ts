@@ -1,5 +1,5 @@
 /**
- * Server-side WebAuthn challenge store — the anti-replay control for passkey
+ * Server-side WebAuthn challenge store, the anti-replay control for passkey
  * ceremonies (both operator and end-user).
  *
  * A WebAuthn assertion is only fresh if the relying party verifies it against
@@ -7,12 +7,12 @@
  * the challenge round-trip to the client: `/start` returned a challenge and
  * `/complete` trusted whatever `expectedChallenge` the caller posted back.
  * That meant a captured assertion (from logs, APM, a malicious panel, …) could
- * be replayed forever — the server had no way to tell a fresh assertion from a
+ * be replayed forever, the server had no way to tell a fresh assertion from a
  * stale one, especially for synced platform passkeys that report `counter = 0`.
  *
  * Now `/start` persists the challenge here and `/complete` must look it up and
  * atomically burn it. The posted `expectedChallenge` is no longer trusted on
- * its own — it must match a stored, unexpired, unconsumed row bound to the
+ * its own, it must match a stored, unexpired, unconsumed row bound to the
  * right ceremony/scope/subject, and the row is consumed on first use.
  *
  * Rows live ~5 minutes. Single-use is enforced by an atomic guarded
@@ -65,7 +65,7 @@ export interface ConsumeChallengeArgs {
   applicationId?: string | null;
   /**
    * For registration ceremonies, the authenticated session subject. The stored
-   * challenge must have been minted for this same subject — stops a challenge
+   * challenge must have been minted for this same subject, stops a challenge
    * issued to user A being completed by user B. Omit for authentication.
    */
   expectedSubjectId?: string | null;
@@ -76,7 +76,7 @@ export interface ConsumeChallengeArgs {
  * if it is unknown, expired, already used, or bound to a different
  * ceremony/scope/subject. Consumes BEFORE the cryptographic verify so a failed
  * verify still burns the challenge (one challenge = one attempt, regardless of
- * outcome — the WebAuthn-correct behaviour).
+ * outcome, the WebAuthn-correct behaviour).
  */
 export async function consumeChallenge(args: ConsumeChallengeArgs): Promise<void> {
   const now = new Date();
@@ -107,7 +107,7 @@ export async function consumeChallenge(args: ConsumeChallengeArgs): Promise<void
 /**
  * Best-effort sweep of expired/consumed challenges. Safe to call opportunistically
  * (e.g. from a cron); failures are swallowed since the rows are harmless once
- * past their TTL — they can never be consumed again.
+ * past their TTL, they can never be consumed again.
  */
 export async function pruneExpiredChallenges(): Promise<number> {
   const res = await prisma.webAuthnChallenge.deleteMany({

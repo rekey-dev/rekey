@@ -1,5 +1,5 @@
 /**
- * @rekey.dev/react — React hooks + headless components for end-user auth.
+ * @rekey.dev/react, React hooks + headless components for end-user auth.
  *
  * @example
  * ```tsx
@@ -40,6 +40,12 @@ export type {
   BillingProviderInfoDto,
   BillingProviderCapabilities,
   BillingProvider,
+  TrialEligibilityDto,
+  TrialEligibilityItemDto,
+  TrialPolicyType,
+  EndUserDeviceDto,
+  DeviceLimitDetails,
+  DeviceStatusType,
 } from './client.js';
 export { mcpConnectionInfo } from './mcp.js';
 export type { McpConnectionInfo } from './mcp.js';
@@ -54,7 +60,7 @@ export type {
   AppearanceElement,
 } from './theme.js';
 
-// Control components — gate UI on auth state / entitlements.
+// Control components, gate UI on auth state / entitlements.
 export { Protect, RekeyLoading, RekeyLoaded } from './control.js';
 export type { ProtectProps, ProtectAuthorization } from './control.js';
 
@@ -99,6 +105,6 @@ export type {
   PricingPlan,
 } from './billing-components.js';
 
-// Provider picker — let the end-user choose a billing provider ("Pay with…").
+// Provider picker, let the end-user choose a billing provider ("Pay with…").
 export { ProviderPicker } from './provider-picker.js';
 export type { ProviderPickerProps, ProviderOption } from './provider-picker.js';

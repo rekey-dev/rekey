@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `rekey` — command-line interface.
+ * `rekey`, command-line interface.
  *
  * Two design rules drive everything in here (per PLAN.md §2.5 "AI-first DX"):
  *
@@ -37,8 +37,8 @@ export function buildProgram(): Command {
         'Agent-facing contract: the AGENTS.md shipped in this package, also at ' +
         'https://github.com/rekey-dev/rekey/blob/main/packages/cli/AGENTS.md',
     )
-    // `rekey version` was the only way to ask, and `rekey --version` — which is
-    // what everyone tries first — answered "unknown option". Both work now; the
+    // `rekey version` was the only way to ask, and `rekey --version`, which is
+    // what everyone tries first, answered "unknown option". Both work now; the
     // subcommand stays because it is the one that honours --json.
     .version(VERSION, '-V, --version', 'Print the CLI version')
     .option('--api-url <url>', 'Override REKEY_URL', process.env.REKEY_URL)
@@ -63,14 +63,13 @@ export async function main(argv: string[] = process.argv): Promise<void> {
       // Top-level safety net. Individual commands handle their own errors and
       // call process.exit(1); we only get here if a command throws something
       // unhandled.
-      // eslint-disable-next-line no-console
       console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     });
 }
 
 // This package declares `main` / `types` / `exports`, so `import '@rekey.dev/cli'`
-// resolves — and it used to PARSE `process.argv` and `process.exit(1)` while the
+// resolves, and it used to PARSE `process.argv` and `process.exit(1)` while the
 // module was still evaluating, hijacking the importing program's arguments. Same
 // defect as @rekey.dev/mcp's env check. Running is now gated on actually being
 // the process entry point.

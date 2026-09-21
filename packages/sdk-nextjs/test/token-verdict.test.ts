@@ -1,8 +1,8 @@
 /**
  * A dead refresh token must be cleared, whichever way the API says it is dead.
  *
- * The terminal-code list used to hold three entries — EXPIRED, REUSED and
- * USER_TOKEN_INVALID — while `/auth/refresh` throws six. The two that mattered
+ * The terminal-code list used to hold three entries, EXPIRED, REUSED and
+ * USER_TOKEN_INVALID, while `/auth/refresh` throws six. The two that mattered
  * most were the two missing: REVOKED is what "sign out my other devices"
  * produces, and INVALID is any stale cookie, a restored database, or an app
  * rebuilt from scratch.

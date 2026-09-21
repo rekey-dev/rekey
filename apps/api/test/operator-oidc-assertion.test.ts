@@ -10,8 +10,8 @@
  * The security of the whole flow reduces to what this endpoint refuses, so the
  * negatives are the point: another issuer's token, another audience's token,
  * an expired one, one with an unverified email, one signed with the wrong key,
- * an ACCESS token substituted for an ID Token, and — because the assertion
- * crosses a browser — the same valid token used twice.
+ * an ACCESS token substituted for an ID Token, and, because the assertion
+ * crosses a browser, the same valid token used twice.
  *
  * The existing-operator case is the migration story for buyers who already
  * have two separate accounts, so it is asserted explicitly: the assertion must
@@ -116,7 +116,7 @@ describe('operator sign-in by ID Token assertion', () => {
       })
       .then((r) => (r.json() as { client_id: string }).client_id);
     // Read the issuer off the provider's own discovery document rather than
-    // reconstructing it — it is derived from the deployment's public base URL,
+    // reconstructing it, it is derived from the deployment's public base URL,
     // and a hand-built copy would silently drift from it.
     const issuer = await app
       .inject({ method: 'GET', url: `/api/v1/mcp/${slug}/.well-known/openid-configuration` })
@@ -145,7 +145,7 @@ describe('operator sign-in by ID Token assertion', () => {
       })
       .then((r) => (r.json().data as { accessToken: string }).accessToken);
 
-    // Straight through the app-authorised handoff — the same path the
+    // Straight through the app-authorised handoff, the same path the
     // marketing server uses in production.
     const { verifier, challenge } = pkce();
     const clientId = opts.clientId ?? cloud.clientId;
@@ -267,7 +267,7 @@ describe('operator sign-in by ID Token assertion', () => {
     const trusted = await cloudApp();
     const other = await cloudApp();
     trust(trusted);
-    // Valid, correctly signed, right shape — but minted by another issuer.
+    // Valid, correctly signed, right shape, but minted by another issuer.
     const res = await assert(await idTokenFor(other, `x-${other.slug}@example.com`));
     expect(res.statusCode).toBe(401);
     expect((res.json().error as { code: string }).code).toBe('OIDC_ASSERTION_INVALID');
@@ -331,8 +331,8 @@ describe('operator sign-in by ID Token assertion', () => {
     const cloud = await cloudApp();
     trust(cloud);
     const live = await idTokenFor(cloud, `exp-${cloud.slug}@example.com`);
-    // Re-sign the same claims with a past expiry using a key we do not have —
-    // covered above — so instead assert on the real token after its window by
+    // Re-sign the same claims with a past expiry using a key we do not have,
+    // covered above, so instead assert on the real token after its window by
     // tampering with nothing and checking the verifier's own exp handling via
     // a token minted with a negative lifetime is not possible here. Use the
     // decoded claims to confirm the window is the documented ten minutes.
@@ -368,7 +368,7 @@ describe('operator sign-in by ID Token assertion', () => {
     const idToken = await idTokenFor(cloud, email);
     process.env.OPERATOR_SIGNUP_MODE = 'closed';
     const res = await assert(idToken);
-    // Closed gates CREATION, never sign-in — a paying customer must not be
+    // Closed gates CREATION, never sign-in, a paying customer must not be
     // locked out of the workspace they already have by a deployment switch.
     expect(res.statusCode).toBe(200);
   });

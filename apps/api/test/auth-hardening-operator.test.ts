@@ -5,7 +5,7 @@
  * server, and asserts the specific behaviour that was observed is now refused.
  *
  *   1. Operator failed sign-ins and lockouts were recorded nowhere.
- *   2. Operator MFA was removable with nothing but a stolen session — via
+ *   2. Operator MFA was removable with nothing but a stolen session, via
  *      /mfa/disable, which asked for no factor, and via /mfa/setup, which
  *      un-enrolled the existing authenticator on the way past.
  *   3. Operator passkey enrolment had no step-up, and the ceremonies asked for
@@ -17,10 +17,11 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import type { SecurityEvent } from '@prisma/client';
 import * as OTPAuth from 'otpauth';
 import { buildApp } from '../src/app.js';
-import { prisma } from '../src/lib/prisma.js';
 import { verifyPassword, verifyPasswordOrDecoy } from '../src/lib/passwords.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 
 const PASSWORD = 'pw-one-two-three';
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
@@ -84,18 +85,15 @@ describe('operator auth hardening', () => {
   }
 
   /**
-   * `recordSecurityEvent` is fire-and-forget by contract — the sign-in response
-   * must not wait on an audit write — so poll rather than assume it has landed.
+   * `recordSecurityEvent` is fire-and-forget by contract, the sign-in response
+   * must not wait on an audit write, so poll rather than assume it has landed.
+   *
+   * Delegates to the shared helper: this file's own loop gave up after 1s and
+   * then returned whatever it had, so a slow runner failed on a bare length
+   * mismatch instead of saying the write had not landed in time.
    */
-  async function waitForEvents(actorId: string, type: string, atLeast = 1): Promise<
-    Array<{ type: string; tenantId: string | null; metadata: unknown }>
-  > {
-    for (let i = 0; i < 50; i++) {
-      const rows = await prisma.securityEvent.findMany({ where: { actorId, type } });
-      if (rows.length >= atLeast) return rows;
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    return prisma.securityEvent.findMany({ where: { actorId, type } });
+  function waitForEvents(actorId: string, type: string, atLeast = 1): Promise<SecurityEvent[]> {
+    return waitForSecurityEvents({ actorId, type }, { atLeast });
   }
 
   // ── Finding 1 ────────────────────────────────────────────────────────────
@@ -105,7 +103,7 @@ describe('operator auth hardening', () => {
       const email = `lockout-${Math.random().toString(36).slice(2, 8)}@example.com`;
       const op = await signUp(email, ip);
 
-      // LOGIN_POLICY.threshold is 10 — the tenth attempt trips the lock.
+      // LOGIN_POLICY.threshold is 10, the tenth attempt trips the lock.
       for (let i = 0; i < 10; i++) {
         const r = await app.inject({
           remoteAddress: ip,
@@ -124,7 +122,7 @@ describe('operator auth hardening', () => {
       expect(new Set(failures.map((f) => f.tenantId))).toEqual(new Set([op.tenantId]));
 
       const lockouts = await waitForEvents(op.userId, 'operator.locked_out', 1);
-      // Once per lockout, on the attempt that tripped it — not per refused attempt.
+      // Once per lockout, on the attempt that tripped it, not per refused attempt.
       expect(lockouts.length).toBe(1);
       expect(lockouts[0]!.tenantId).toBe(op.tenantId);
       expect((lockouts[0]!.metadata as { lockedForSec: number }).lockedForSec).toBeGreaterThan(0);
@@ -201,7 +199,7 @@ describe('operator auth hardening', () => {
         url: '/api/v1/tenant/auth/mfa/disable',
         headers: { authorization: `Bearer ${op.accessToken}` },
       });
-      // Was 200 { disabled: true } — a session was the whole requirement.
+      // Was 200 { disabled: true }, a session was the whole requirement.
       expect(bare.statusCode).toBe(401);
       expect(bare.json().error.code).toBe('STEP_UP_REQUIRED');
 
@@ -245,7 +243,7 @@ describe('operator auth hardening', () => {
         url: '/api/v1/tenant/auth/mfa/setup',
         headers: { authorization: `Bearer ${op.accessToken}` },
       });
-      // Was 201 with a fresh secret AND `enrolledAt: null` — the disable guard
+      // Was 201 with a fresh secret AND `enrolledAt: null`, the disable guard
       // routed around, one endpoint to the left.
       expect(rebind.statusCode).toBe(401);
       expect(rebind.json().error.code).toBe('STEP_UP_REQUIRED');
@@ -298,7 +296,7 @@ describe('operator auth hardening', () => {
           url: '/api/v1/tenant/auth/passkeys/register/start',
           headers: { authorization: `Bearer ${op.accessToken}` },
         });
-        // Was 201 with ceremony options — a panel access token was sufficient
+        // Was 201 with ceremony options, a panel access token was sufficient
         // to enroll a credential that signs its holder in forever after.
         expect(bare.statusCode).toBe(401);
         expect(bare.json().error.code).toBe('STEP_UP_REQUIRED');
@@ -357,7 +355,7 @@ describe('operator auth hardening', () => {
 
         expect(known.statusCode).toBe(unknown.statusCode);
         // THE assertion: `delivered` was false for an unknown address and true
-        // for a known one — one request per address, and you had the operator
+        // for a known one, one request per address, and you had the operator
         // roster for the deployment.
         const k = known.json().data as Record<string, unknown>;
         const u = unknown.json().data as Record<string, unknown>;
@@ -390,7 +388,7 @@ describe('operator auth hardening', () => {
         payload: { email: unknown, password: 'nope-nope-nope' },
       });
       // Was 401 forever for an address with no account, while a real one
-      // switched to 429 on the 11th try. No timing measurement needed — the
+      // switched to 429 on the 11th try. No timing measurement needed, the
       // status code answered "does this operator exist?" outright.
       expect(after.statusCode).toBe(429);
     });

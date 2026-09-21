@@ -5,23 +5,21 @@
  * session), then set the session cookies and land in the panel.
  *
  * A Route Handler (not a page) because this is a provider GET redirect that
- * must set cookies + redirect — server components can't set cookies.
+ * must set cookies + redirect, server components can't set cookies.
  */
 
 import { cookies } from 'next/headers';
 import { type NextRequest, NextResponse } from 'next/server';
-import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE } from '@/lib/api';
+import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE, sessionCookieMaxAges } from '@/lib/api';
 import { cookieSecure } from '@/lib/cookie-secure';
 import { safeNext } from '@/lib/safe-next';
 
 type CallbackResult =
   | { mfaRequired: true; mfaChallengeToken: string }
-  | { mfaRequired: false; accessToken: string; refreshToken: string };
+  | { mfaRequired: false; accessToken: string; refreshToken: string; accessTokenExpiresAt: string; refreshTokenExpiresAt: string };
 
-const ACCESS_MAX_AGE = 60 * 15; // 15 min — mirrors setSessionCookies
-const REFRESH_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 
-// Relative Location — the browser resolves it against the public URL it's on
+// Relative Location, the browser resolves it against the public URL it's on
 // (panel.rekey.dev), NOT `req.url`, which behind a proxy is the internal bind
 // address (e.g. 0.0.0.0:3031). NextResponse.redirect requires an absolute URL,
 // so emit the header directly.
@@ -66,12 +64,10 @@ export async function GET(
   // CSRF: the returned state must match the cookie we set on start, for THIS
   // provider. A missing or mismatched cookie means a forged or stale callback.
   //
-  // These were one condition answering one error code, which made a genuine
-  // bug indistinguishable from an attack and from a stale bookmark. They are
-  // five different situations with five different fixes, and the operator
-  // staring at "sign-in session expired" has no way to tell which they are in.
-  // Splitting them discloses nothing an attacker does not already know — they
-  // control the request that produced the failure — while telling an operator
+  // Each check below is its own error code rather than one shared one: these
+  // are five different situations with five different fixes, and splitting
+  // them discloses nothing an attacker does not already know (they control
+  // the request that produced the failure) while telling a genuine operator
   // whether their cookie is being dropped or their link is stale.
   if (!code) return fail('oauth_no_code');
   if (!state) return fail('oauth_no_state');
@@ -110,11 +106,12 @@ export async function GET(
   const res = seeOther(
     next ? `${next}${next.includes('?') ? '&' : '?'}e=login_oauth` : '/applications?e=login_oauth',
   );
+  const maxAges = sessionCookieMaxAges(result);
   res.cookies.set(ACCESS_COOKIE, result.accessToken, {
-    httpOnly: true, sameSite: 'strict', secure, path: '/', maxAge: ACCESS_MAX_AGE,
+    httpOnly: true, sameSite: 'strict', secure, path: '/', maxAge: maxAges.access,
   });
   res.cookies.set(REFRESH_COOKIE, result.refreshToken, {
-    httpOnly: true, sameSite: 'strict', secure, path: '/', maxAge: REFRESH_MAX_AGE,
+    httpOnly: true, sameSite: 'strict', secure, path: '/', maxAge: maxAges.refresh,
   });
   return clearOAuthCookies(res);
 }

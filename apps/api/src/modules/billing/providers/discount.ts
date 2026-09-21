@@ -16,7 +16,7 @@ export type CheckoutFlow = 'recurring' | 'one-time';
  * Refuse a coupon the provider genuinely cannot honour.
  *
  * A 400, not a 500: nothing is broken, the buyer has simply picked a
- * combination this Application cannot sell. The `fix` names both ways out —
+ * combination this Application cannot sell. The `fix` names both ways out,
  * drop the coupon, or route the checkout at a provider that supports it
  * (`POST /billing/checkout` takes an explicit `provider`).
  */

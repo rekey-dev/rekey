@@ -3,7 +3,7 @@
  *
  * The property: nothing a browser bundle can reach may lead to the module that
  * reads the Application secret key. `src/index.ts` states that intent in a
- * comment and `package.json` encodes it in `exports` — but until this file
+ * comment and `package.json` encodes it in `exports`, but until this file
  * existed, nothing failed if either drifted. A comment is not a guard, and
  * `exports` maps are edited by people fixing unrelated resolution bugs.
  *
@@ -16,7 +16,7 @@
  *
  * NOT a claim that the barrel is browser-safe. It isn't, deliberately: the root
  * entry re-exports `./server.js` and `./middleware.js` and is a SERVER entry.
- * The claim is narrower and is the one that matters — `/client` and `/cookies`,
+ * The claim is narrower and is the one that matters, `/client` and `/cookies`,
  * the two entries a `'use client'` component is documented to import, reach
  * neither the secret key nor `next/headers`.
  */
@@ -33,7 +33,7 @@ const dist = path.join(pkgRoot, 'dist');
 /** Every module specifier statically imported or re-exported by a built file. */
 function specifiersOf(file: string): string[] {
   const src = readFileSync(file, 'utf8')
-    // Strip comments — several of them name `REKEY_SECRET` and `./server.js`
+    // Strip comments, several of them name `REKEY_SECRET` and `./server.js`
     // while explaining precisely why those must not be reachable.
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '');
@@ -135,7 +135,7 @@ describe('@rekey.dev/nextjs entrypoint isolation', () => {
 
   it('the cookies entry stays dependency-free', () => {
     // This entry exists so a client component can have the cookie names without
-    // dragging the barrel — and therefore server.js — along. One import here
+    // dragging the barrel, and therefore server.js, along. One import here
     // and that reason evaporates.
     const { files, external } = localGraph(entries.cookies);
     expect(files.size).toBe(1);

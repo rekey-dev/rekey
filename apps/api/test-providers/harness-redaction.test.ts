@@ -1,7 +1,7 @@
 /**
  * The harness's own safety mechanism, tested.
  *
- * This suite needs no credentials and therefore always runs — deliberately.
+ * This suite needs no credentials and therefore always runs, deliberately.
  * Redaction is the one part of the harness whose failure is silent and
  * expensive: a leaked `sk_test_…` in a CI log is in a retention system, a PR
  * check page, and wherever that log was forwarded, and nothing about the run
@@ -55,7 +55,7 @@ describe('harness · secret redaction', () => {
 
   it('ignores values too short to be a credential', () => {
     // Registering a short string would turn ordinary output into confetti and
-    // make failures unreadable — which is its own way of hiding a bug.
+    // make failures unreadable, which is its own way of hiding a bug.
     registerSecret('short', 'TOO_SHORT');
     expect(redact('a short word here')).toBe('a short word here');
   });

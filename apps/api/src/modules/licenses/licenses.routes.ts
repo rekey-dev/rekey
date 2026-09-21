@@ -6,7 +6,7 @@
  * resources in one place.
  *
  * THIS file ships the public verification endpoint
- * (POST /api/v1/licenses/verify) — that's what the customer's software
+ * (POST /api/v1/licenses/verify), that's what the customer's software
  * calls at startup with the raw license key + a machine fingerprint.
  */
 
@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { licensesService } from './licenses.service.js';
 import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireBillingEnabled } from '../../middleware/billing-enabled.js';
+import { licenseRateLimit } from '../../lib/rate-limit.js';
 import { ok, errs, ref } from '../../lib/openapi.js';
 
 const VerifyBody = z.object({
@@ -23,10 +24,15 @@ const VerifyBody = z.object({
   label: z.string().min(1).max(120).optional(),
 });
 
+const DeactivateBody = z.object({
+  key: z.string().min(1).max(256),
+  machineFingerprint: z.string().min(1).max(256),
+});
+
 export async function licensesPublicRoutes(app: FastifyInstance): Promise<void> {
   // A desktop/client app verifies its own license at startup with no backend,
   // so this accepts the publishable key (or a secret key). The actual
-  // entitlement bearer is the license `key` in the body — the publishable key
+  // entitlement bearer is the license `key` in the body, the publishable key
   // only identifies which Application's licenses to check against.
   app.addHook('onRequest', requirePublishableOrSecretKey);
   app.addHook('onRequest', requireBillingEnabled);
@@ -35,14 +41,20 @@ export async function licensesPublicRoutes(app: FastifyInstance): Promise<void> 
   // requests are pre-authorized by route membership).
   app.addHook('onRequest', requireScope('billing:write'));
 
+  // Per (application, IP) bucket for both licence routes, see
+  // licenseRateLimitKey. 60/min covers an office launching at nine and bounds
+  // a key guesser to one attempt a second per address.
+  const LICENSE_RATE_LIMIT = licenseRateLimit(60);
+
   app.post(
     '/verify',
     {
+      config: { rateLimit: LICENSE_RATE_LIMIT },
       schema: {
         tags: ['Public · Licenses'],
         summary: 'Verify a license key + record an activation for this machine',
         description:
-          'Returns { ok, license?, reason? }. `ok=false` is intentional for invalid licenses — ' +
+          'Returns { ok, license?, reason? }. `ok=false` is intentional for invalid licenses, ' +
           'the customer\'s software loops on this and we want a deterministic body, not an HTTP error.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
         body: {
@@ -55,10 +67,10 @@ export async function licensesPublicRoutes(app: FastifyInstance): Promise<void> 
           },
         },
         response: {
-          // Always 200 — `verify()` never throws for an invalid/expired/
+          // Always 200, `verify()` never throws for an invalid/expired/
           // revoked/seats-exhausted license; `ok: false` + `reason` IS the
           // deterministic failure body the description promises.
-          200: ok(ref('LicenseVerifyResult'), 'Verification outcome — check `ok` before `license`.'),
+          200: ok(ref('LicenseVerifyResult'), 'Verification outcome, check `ok` before `license`.'),
           ...errs({
             400: 'VALIDATION_ERROR — the body failed schema validation.',
             401:
@@ -82,6 +94,57 @@ export async function licensesPublicRoutes(app: FastifyInstance): Promise<void> 
         rawKey: body.key,
         machineFingerprint: body.machineFingerprint,
         ...(body.label !== undefined && { label: body.label }),
+      });
+      return { success: true, data: result };
+    },
+  );
+
+  app.post(
+    '/deactivate',
+    {
+      config: { rateLimit: LICENSE_RATE_LIMIT },
+      schema: {
+        tags: ['Public · Licenses'],
+        summary: 'Give back the seat this machine holds on a license',
+        description:
+          'The counterpart to /verify: the customer\'s software calls it before a re-image or on ' +
+          'uninstall so the seat is free for the next machine. Same deterministic body, `ok=false` ' +
+          '+ `reason` for an unknown, revoked or expired key, never an HTTP error. Idempotent: ' +
+          '`released` is false when the machine held no seat. A later /verify from the same ' +
+          'machine reactivates the seat in place if one is free.',
+        security: [{ apiKey: [] }, { publishableKey: [] }],
+        body: {
+          type: 'object',
+          required: ['key', 'machineFingerprint'],
+          properties: {
+            key: { type: 'string', minLength: 1, maxLength: 256 },
+            machineFingerprint: { type: 'string', minLength: 1, maxLength: 256 },
+          },
+        },
+        response: {
+          200: ok(ref('LicenseDeactivateResult'), 'Outcome, check `ok` before `released`.'),
+          ...errs({
+            400: 'VALIDATION_ERROR — the body failed schema validation.',
+            401:
+              'API_KEY_MISSING / API_KEY_INVALID — the secret key is missing, malformed, or ' +
+              'unknown/revoked/expired; or PUBLISHABLE_KEY_INVALID — the publishable key is ' +
+              'unknown or has rotated out.',
+            403:
+              "IP_NOT_ALLOWED — caller IP outside the secret key's allowlist; or " +
+              "ORIGIN_NOT_ALLOWED — the Origin is outside the publishable key's CORS allowlist; " +
+              'or BILLING_DISABLED — billing is not enabled for this application; or ' +
+              'API_KEY_SCOPE_INSUFFICIENT — the secret key lacks the `billing:write` scope.',
+            429: 'RATE_LIMITED — too many requests. Honour the Retry-After header.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const body = DeactivateBody.parse(req.body);
+      const result = await licensesService.deactivate({
+        applicationId: req.application!.id,
+        rawKey: body.key,
+        machineFingerprint: body.machineFingerprint,
       });
       return { success: true, data: result };
     },

@@ -5,13 +5,13 @@
  * transpiles on the fly into an environment where CommonJS interop happens to
  * be available. That is not what consumers get. `verifyWebhookSignature` and
  * the RS256 path of `verifyAccessToken` both called a bare `require('node:crypto')`,
- * which is undefined in the ESM-only package we actually publish — so both threw
+ * which is undefined in the ESM-only package we actually publish, so both threw
  * `ReferenceError: require is not defined` for every npm consumer, in every
  * released version, while the suite stayed green.
  *
  * The failure also does not reproduce under `node -e`, because inline eval
  * defines `globalThis.require`. It only appears in a real `.mjs` file or a
- * `"type": "module"` package — which is to say, only in real use.
+ * `"type": "module"` package, which is to say, only in real use.
  *
  * So these tests spawn a separate Node process and import the built file the
  * way a consumer does. Anything exercised here is a promise made to people who
@@ -43,7 +43,7 @@ function runEsm(source: string): string {
  * `require('@rekey.dev/node')` resolves by NAME through the package's own
  * `exports` map (Node's package self-reference). That matters: the resolver
  * only consults `exports` for bare specifiers, and CJS resolution runs with
- * conditions `["require","node"]` — the exact path that was broken.
+ * conditions `["require","node"]`, the exact path that was broken.
  */
 function runCjs(source: string): string {
   return execFileSync(process.execPath, ['--input-type=commonjs', '-e', source], {
@@ -105,7 +105,7 @@ describe('the published ESM artifact', () => {
 
   it('verifyAccessToken reaches its crypto path as ESM rather than throwing ReferenceError', () => {
     // A structurally-valid RS256 JWT with a signature that cannot verify. The
-    // point is not the verdict — it is that the RS256 branch executes at all,
+    // point is not the verdict, it is that the RS256 branch executes at all,
     // since that branch is the second place the bare `require` lived.
     const header = Buffer.from(JSON.stringify({ alg: 'RS256', kid: 'k1', typ: 'JWT' })).toString(
       'base64url',
@@ -172,7 +172,7 @@ describe('the published CommonJS contract', () => {
   // resolver finds a target. CJS resolution walks the `exports` map with
   // conditions ["require","node"]; a map containing only `types` + `import`
   // matches neither, so every `require('@rekey.dev/node')` failed with
-  // ERR_PACKAGE_PATH_NOT_EXPORTED — Jest-CJS, ts-node, and any CommonJS
+  // ERR_PACKAGE_PATH_NOT_EXPORTED, Jest-CJS, ts-node, and any CommonJS
   // consumer, on a package that otherwise works fine. The fix is a `default`
   // condition; no CJS build is involved, which is why this must be verified by
   // actually requiring rather than by reading the manifest.
@@ -186,7 +186,7 @@ describe('the published CommonJS contract', () => {
 
   it('gives require() and import() the same RekeyError class', () => {
     // Two copies of the class would make `instanceof` silently false across
-    // the boundary — the exact failure mode this package's error contract
+    // the boundary, the exact failure mode this package's error contract
     // depends on not having.
     const out = runCjs(`
       const cjs = require('@rekey.dev/node');
@@ -228,7 +228,7 @@ describe('the published CommonJS contract', () => {
 describe('the published type surface', () => {
   // `stripInternal` is what keeps `@internal`-marked members out of the .d.ts.
   // Without it, a test hook and two positional transport methods were part of
-  // the public API — and 2.0.0 would have frozen them there.
+  // the public API, and 2.0.0 would have frozen them there.
   it('does not publish the JWKS test hook', () => {
     expect(readFileSync(distTypes, 'utf8')).not.toContain('_clearJwksCacheForTests');
   });

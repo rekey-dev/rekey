@@ -6,8 +6,8 @@
  * ## What was wrong
  *
  * Typing "Northwind Store" left Slug empty. The submit button was then
- * *disabled* — by this component reaching into `form.elements`, flipping
- * `btn.disabled`, and adding `opacity-50` — with nothing on screen saying which
+ * *disabled*, by this component reaching into `form.elements`, flipping
+ * `btn.disabled`, and adding `opacity-50`, with nothing on screen saying which
  * field was blocking it. A dead button and no error message is the worst of
  * both: no feedback, and no way to ask for feedback. Worse, `status === 'checking'`
  * was in the same blocked set, so a click during the 350ms debounce plus the
@@ -44,7 +44,7 @@ const STATUS_ID = 'slug-availability-status';
 const BLOCK_ID = 'slug-blocking-message';
 
 const TAKEN_MSG = (v: string): string =>
-  `“${v}” is already taken — slugs are globally unique. Pick another.`;
+  `“${v}” is already taken. Slugs are globally unique, so pick another.`;
 const INVALID_MSG =
   'The slug must be lowercase letters, digits and hyphens, 2–40 characters, starting and ending alphanumeric.';
 
@@ -85,7 +85,7 @@ export function SlugAvailabilityField({
 }): React.JSX.Element {
   const [value, setValue] = React.useState('');
   const [status, setStatus] = React.useState<Status>('idle');
-  /** True once the operator edits the slug directly — stops mirroring the name. */
+  /** True once the operator edits the slug directly, stops mirroring the name. */
   const [touched, setTouched] = React.useState(false);
   /** Non-null when a submit was attempted and blocked; names the reason. */
   const [blockedReason, setBlockedReason] = React.useState<string | null>(null);
@@ -166,7 +166,7 @@ export function SlugAvailabilityField({
       inputRef.current?.focus();
       return;
     }
-    // 'available', 'idle' or 'error' (server unreachable — the server-side
+    // 'available', 'idle' or 'error' (server unreachable, the server-side
     // action revalidates anyway, so don't strand the operator here).
     findSubmit()?.click();
   }, [submitPending, status, value, findSubmit]);
@@ -177,7 +177,7 @@ export function SlugAvailabilityField({
     if (!form) return;
 
     const onSubmit = (e: SubmitEvent): void => {
-      // Our own programmatic re-submit — let it through.
+      // Our own programmatic re-submit, let it through.
       if (submitPendingRef.current) return;
       const current = inputRef.current?.value ?? '';
 
@@ -194,7 +194,7 @@ export function SlugAvailabilityField({
         return;
       }
       if (status === 'checking') {
-        // Don't drop the click — hold it and fire when the answer arrives.
+        // Don't drop the click, hold it and fire when the answer arrives.
         e.preventDefault();
         setBlockedReason(null);
         setSubmitPending(true);
@@ -259,7 +259,7 @@ function SlugStatus({
   if (value.length === 0) {
     return (
       <span id={STATUS_ID} className={`${common} text-[var(--color-muted-fg)]`}>
-        URL-safe identifier — used in API keys (<code className="font-mono">rp_live_…_…</code>) and webhook URLs. Cannot be changed later.
+        URL-safe identifier, used in API keys (<code className="font-mono">rp_live_…_…</code>) and webhook URLs. Cannot be changed later.
       </span>
     );
   }
@@ -275,7 +275,7 @@ function SlugStatus({
         <span id={STATUS_ID} role="status" aria-live="polite" className={`${common} text-green-600 dark:text-green-400`}>
           ✓ <code className="font-mono">{value}</code> is available
           {derived && (
-            <span className="text-[var(--color-muted-fg)]"> — from the name; edit to change</span>
+            <span className="text-[var(--color-muted-fg)]"> (from the name; edit to change)</span>
           )}
         </span>
       );
@@ -294,7 +294,7 @@ function SlugStatus({
     case 'error':
       return (
         <span id={STATUS_ID} role="status" aria-live="polite" className={`${common} text-amber-700 dark:text-amber-400`}>
-          ! Couldn't reach the server — submit will revalidate.
+          ! Couldn't reach the server. Submit will revalidate.
         </span>
       );
     default:

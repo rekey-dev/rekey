@@ -3,7 +3,7 @@
  *
  * Pure READ aggregations across the whole deployment for the operator
  * dashboard at admin.rekey.dev. Every method is a `findMany`/`count`/
- * `groupBy` over Prisma — no writes, no caching. The dashboard runs at low
+ * `groupBy` over Prisma, no writes, no caching. The dashboard runs at low
  * cadence (operator-driven page loads), so we avoid materialised views and
  * compute on demand.
  *
@@ -12,7 +12,9 @@
  */
 
 import type { AppEnvironment } from '@rekey.dev/shared-types';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
+import { cachedDashboard } from '../../lib/dashboard-cache.js';
 import { paged, type Paged } from '../../lib/pagination.js';
 import { getRedis } from '../../lib/redis.js';
 import {
@@ -35,22 +37,18 @@ function clampOffset(raw: number | undefined): number {
 }
 
 /**
- * One page of a list endpoint: `{items, page}`.
- *
- * This used to be a FLAT `{items, total, limit, offset}` — pagination one
- * level higher than the published document declared for all ten of these
- * operations, and with no `hasMore`. It is now the same `{items, page:
- * PageMeta}` every other list endpoint in the API returns, aliased through
- * `lib/pagination.ts` so there is exactly one definition of the shape.
+ * One page of a list endpoint: `{items, page}`, the same `{items, page:
+ * PageMeta}` shape every list endpoint in the API returns, aliased through
+ * `lib/pagination.ts` so there is exactly one definition of it.
  *
  * `page.total` is the full count of matching rows (independent of
- * limit/offset) so the UI can render "X–Y of Z" + page nav.
+ * limit/offset) so the UI can render a "first to last of total" range plus page nav.
  */
 export type Page<T> = Paged<T>;
 
 /**
  * Upper bound on rows scanned for a COMPUTED-sort page (MRR, end-user count,
- * last-activity — values that aren't DB columns, so we sort in JS). The window
+ * last-activity, values that aren't DB columns, so we sort in JS). The window
  * must cover `offset + limit`; beyond this cap, deep pages of a computed sort
  * are not materialised (acceptable: a deployment with 500+ tenants would want
  * a materialised ranking, not an on-demand fan-out). DB-column sorts use real
@@ -66,7 +64,7 @@ const COMPUTED_SCAN_CAP = 500;
  * most "recent first" and "biggest first" feel natural.
  */
 export interface ListQuery<S extends string = string> {
-  // `| undefined` on each — Zod's `.optional()` produces `T | undefined` which
+  // `| undefined` on each, Zod's `.optional()` produces `T | undefined` which
   // under `exactOptionalPropertyTypes: true` (root tsconfig) is *not* assignable
   // to a bare `T?` property. Spelling it out keeps the route layer's parsed
   // `req.query` shape assignable straight into these signatures.
@@ -128,7 +126,7 @@ export interface OverviewMetrics {
   /**
    * Number of end-user accounts currently inside the failed-sign-in lockout
    * window. Sourced from the Redis brute-force limiter (`bf:lock:eu:login:*`),
-   * which is the only source — the `EndUser.lockedUntil` column this used to
+   * which is the only source, the `EndUser.lockedUntil` column this used to
    * read was dropped on 2026-07-30. See `scanActiveLoginLocks`.
    */
   lockedAccountsCount: number;
@@ -143,7 +141,7 @@ const MRR_READ_CAP = 10_000;
 
 async function computeMrrCents(): Promise<{ totalCents: number; capped: boolean }> {
   // ACTIVE subscriptions, joined to their plan. Convert YEAR pricing to monthly.
-  // Cap the read at a sane page size — a deployment with MRR_READ_CAP+ active
+  // Cap the read at a sane page size, a deployment with MRR_READ_CAP+ active
   // subs would want a materialised total, but we're not there. We return
   // `capped: true` so the caller can surface a "this is a lower bound" warning
   // instead of silently undercounting forever once we cross the threshold.
@@ -160,85 +158,164 @@ async function computeMrrCents(): Promise<{ totalCents: number; capped: boolean 
   return { totalCents: total, capped: rows.length === MRR_READ_CAP };
 }
 
+/**
+ * Row count per application over `ids`, one grouped query. The table name is
+ * one of a fixed set chosen by the caller, never user input.
+ */
+async function countByApplication(
+  table: 'end_users' | 'organizations',
+  ids: string[],
+): Promise<Map<string, number>> {
+  if (ids.length === 0) return new Map();
+  const rows = await prisma.$queryRaw<Array<{ application_id: string; n: bigint }>>(Prisma.sql`
+    SELECT "application_id", count(*) AS n
+    FROM ${Prisma.raw(`"${table}"`)}
+    WHERE "application_id" = ANY(${ids}::text[])
+    GROUP BY "application_id"
+  `);
+  return new Map(rows.map((r) => [r.application_id, Number(r.n)]));
+}
+
+/**
+ * ACTIVE subscriptions per application, with their monthly recurring value
+ * (YEAR plans at a twelfth, floored per subscription as before), in one query.
+ */
+async function activeSubscriptionsByApplication(
+  ids: string[],
+): Promise<Map<string, { count: number; mrrCents: number }>> {
+  if (ids.length === 0) return new Map();
+  const rows = await prisma.$queryRaw<
+    Array<{ application_id: string; n: bigint; mrr: bigint | null }>
+  >(Prisma.sql`
+    SELECT s."application_id",
+           count(*) AS n,
+           sum(CASE WHEN p."interval" = 'YEAR' THEN p."amount" / 12 ELSE p."amount" END) AS mrr
+    FROM "subscriptions" s
+    JOIN "plans" p ON p."id" = s."plan_id"
+    WHERE s."status" = 'ACTIVE' AND s."application_id" = ANY(${ids}::text[])
+    GROUP BY s."application_id"
+  `);
+  return new Map(
+    rows.map((r) => [r.application_id, { count: Number(r.n), mrrCents: Number(r.mrr ?? 0) }]),
+  );
+}
+
+/** API requests per application since `since`, one grouped query. */
+async function requestsSinceByApplication(ids: string[], since: Date): Promise<Map<string, number>> {
+  if (ids.length === 0) return new Map();
+  const rows = await prisma.$queryRaw<Array<{ application_id: string; n: bigint }>>(Prisma.sql`
+    SELECT "application_id", count(*) AS n
+    FROM "api_request_logs"
+    WHERE "application_id" = ANY(${ids}::text[]) AND "created_at" >= ${since}
+    GROUP BY "application_id"
+  `);
+  return new Map(rows.map((r) => [r.application_id, Number(r.n)]));
+}
+
+/**
+ * Newest API request per application. A LATERAL `ORDER BY ... LIMIT 1` per id
+ * rides the (application_id, created_at) index backwards, where a GROUP BY
+ * max() would read every log row the applications ever wrote.
+ */
+async function lastRequestByApplication(ids: string[]): Promise<Map<string, Date>> {
+  if (ids.length === 0) return new Map();
+  const rows = await prisma.$queryRaw<Array<{ application_id: string; created_at: Date }>>(Prisma.sql`
+    SELECT x.id AS application_id, l."created_at"
+    FROM unnest(${ids}::text[]) AS x(id)
+    CROSS JOIN LATERAL (
+      SELECT "created_at" FROM "api_request_logs"
+      WHERE "application_id" = x.id
+      ORDER BY "created_at" DESC
+      LIMIT 1
+    ) l
+  `);
+  return new Map(rows.map((r) => [r.application_id, r.created_at]));
+}
+
 export const adminMetricsService = {
+  /**
+   * The deployment rollup. Cached in Redis for 60s under `rk:admin:overview`
+   * (lib/dashboard-cache.ts): it counts the largest tables whole, the console
+   * reloads it on every visit, and a minute of lag on a rollup is harmless.
+   * `computeOverview` is the uncached read.
+   */
   async overview(): Promise<OverviewMetrics> {
+    return cachedDashboard('rk:admin:overview', 60, () => adminMetricsService.computeOverview());
+  },
+
+  async computeOverview(): Promise<OverviewMetrics> {
     const now = new Date();
     const since24h = new Date(now.getTime() - DAY_MS);
     const since7d = new Date(now.getTime() - 7 * DAY_MS);
     const since30d = new Date(now.getTime() - 30 * DAY_MS);
 
-    const [
-      tenantsTotal,
-      tenantsNew30d,
-      appsTotal,
-      appsNew30d,
-      endUsersTotal,
-      endUsersVerified,
-      endUsersNew24h,
-      endUsersNew7d,
-      endUsersNew30d,
-      orgsTotal,
-      orgsNew30d,
-      subsGrouped,
-      paymentsLifetime,
-      paymentsLast30d,
-      paymentsSucceeded24h,
-      paymentsFailed24h,
-      mrrCents,
-      webhookEvents24h,
-      webhookDeliveries24h,
-      webhookDeliveriesFailed24h,
-      requestsLast24h,
-      requests4xx24h,
-      requests5xx24h,
-      requestsAvgDuration,
-      tenantUsersTotal,
-      tenantUsersActive30d,
-      lockedAccountsCount,
-      outstandingCreditsAgg,
-      emailGrouped24h,
-    ] = await Promise.all([
-      prisma.tenant.count(),
-      prisma.tenant.count({ where: { createdAt: { gte: since30d } } }),
-      prisma.application.count(),
-      prisma.application.count({ where: { createdAt: { gte: since30d } } }),
-      prisma.endUser.count(),
-      prisma.endUser.count({ where: { emailVerified: true } }),
-      prisma.endUser.count({ where: { createdAt: { gte: since24h } } }),
-      prisma.endUser.count({ where: { createdAt: { gte: since7d } } }),
-      prisma.endUser.count({ where: { createdAt: { gte: since30d } } }),
-      prisma.organization.count(),
-      prisma.organization.count({ where: { createdAt: { gte: since30d } } }),
-      prisma.subscription.groupBy({ by: ['status'], _count: { _all: true } }),
-      prisma.payment.aggregate({ _count: { _all: true }, _sum: { amount: true }, where: { status: 'SUCCEEDED' } }),
-      prisma.payment.aggregate({ _count: { _all: true }, _sum: { amount: true }, where: { status: 'SUCCEEDED', createdAt: { gte: since30d } } }),
-      prisma.payment.count({ where: { status: 'SUCCEEDED', createdAt: { gte: since24h } } }),
-      prisma.payment.count({ where: { status: 'FAILED', createdAt: { gte: since24h } } }),
-      computeMrrCents(),
-      prisma.webhookEvent.count({ where: { receivedAt: { gte: since24h } } }),
-      prisma.webhookDelivery.count({ where: { createdAt: { gte: since24h } } }),
-      prisma.webhookDelivery.count({ where: { createdAt: { gte: since24h }, status: 'FAILED' } }),
-      prisma.apiRequestLog.count({ where: { createdAt: { gte: since24h } } }),
-      prisma.apiRequestLog.count({ where: { createdAt: { gte: since24h }, statusCode: { gte: 400, lt: 500 } } }),
-      prisma.apiRequestLog.count({ where: { createdAt: { gte: since24h }, statusCode: { gte: 500 } } }),
-      prisma.apiRequestLog.aggregate({ _avg: { durationMs: true }, where: { createdAt: { gte: since24h } } }),
-      prisma.tenantUser.count(),
-      // "Active" operator = had a refresh token created in the last 30 days.
-      // Equivalent of a sign-in event since refresh rotation also writes here.
-      prisma.tenantUser.count({
-        where: { refreshTokens: { some: { createdAt: { gte: since30d } } } },
-      }),
-      // End-user lockouts in effect right now (failed sign-in protection).
-      // Lockout lives in the Redis brute-force limiter, not a DB column —
-      // enumerate the `bf:lock:eu:login:*` keys. limit:0 → count only.
-      scanActiveLoginLocks(0).then((r) => r.total),
-      prisma.creditBalance.aggregate({ _sum: { balance: true } }),
-      prisma.emailLog.groupBy({
-        by: ['status'],
-        where: { createdAt: { gte: since24h } },
-        _count: { _all: true },
-      }),
-    ]);
+    // The plain counts are one statement: each table scanned once, its
+    // numbers taken with `count(*) FILTER (...)`. This used to be 22 separate
+    // count queries fired at once, which alone could hold most of the pool.
+    const [countsRows, subsGrouped, mrrCents, tenantUsersActive30d, lockedAccountsCount, emailGrouped24h] =
+      await Promise.all([
+        prisma.$queryRaw<Array<Record<string, bigint | number | null>>>(Prisma.sql`
+          SELECT
+            t.total AS tenants_total, t.new_30d AS tenants_new_30d,
+            a.total AS apps_total, a.new_30d AS apps_new_30d,
+            eu.total AS eu_total, eu.verified AS eu_verified,
+            eu.new_24h AS eu_new_24h, eu.new_7d AS eu_new_7d, eu.new_30d AS eu_new_30d,
+            o.total AS orgs_total, o.new_30d AS orgs_new_30d,
+            p.lifetime_count AS pay_lifetime_count, p.lifetime_sum AS pay_lifetime_sum,
+            p.last30_count AS pay_last30_count, p.last30_sum AS pay_last30_sum,
+            p.succeeded_24h AS pay_succeeded_24h, p.failed_24h AS pay_failed_24h,
+            (SELECT count(*) FROM "webhook_events" WHERE "received_at" >= ${since24h}) AS wh_events_24h,
+            wd.total AS wh_deliveries_24h, wd.failed AS wh_deliveries_failed_24h,
+            r.total AS req_24h, r.e4 AS req_4xx_24h, r.e5 AS req_5xx_24h, r.avg_ms AS req_avg_ms,
+            (SELECT count(*) FROM "tenant_users") AS tenant_users_total,
+            (SELECT sum("balance") FROM "credit_balances") AS credits_outstanding
+          FROM
+            (SELECT count(*) AS total, count(*) FILTER (WHERE "created_at" >= ${since30d}) AS new_30d
+               FROM "tenants") t,
+            (SELECT count(*) AS total, count(*) FILTER (WHERE "created_at" >= ${since30d}) AS new_30d
+               FROM "applications") a,
+            (SELECT count(*) AS total,
+                    count(*) FILTER (WHERE "email_verified") AS verified,
+                    count(*) FILTER (WHERE "created_at" >= ${since24h}) AS new_24h,
+                    count(*) FILTER (WHERE "created_at" >= ${since7d}) AS new_7d,
+                    count(*) FILTER (WHERE "created_at" >= ${since30d}) AS new_30d
+               FROM "end_users") eu,
+            (SELECT count(*) AS total, count(*) FILTER (WHERE "created_at" >= ${since30d}) AS new_30d
+               FROM "organizations") o,
+            (SELECT count(*) FILTER (WHERE "status" = 'SUCCEEDED') AS lifetime_count,
+                    sum("amount") FILTER (WHERE "status" = 'SUCCEEDED') AS lifetime_sum,
+                    count(*) FILTER (WHERE "status" = 'SUCCEEDED' AND "created_at" >= ${since30d}) AS last30_count,
+                    sum("amount") FILTER (WHERE "status" = 'SUCCEEDED' AND "created_at" >= ${since30d}) AS last30_sum,
+                    count(*) FILTER (WHERE "status" = 'SUCCEEDED' AND "created_at" >= ${since24h}) AS succeeded_24h,
+                    count(*) FILTER (WHERE "status" = 'FAILED' AND "created_at" >= ${since24h}) AS failed_24h
+               FROM "payments" WHERE "status" IN ('SUCCEEDED', 'FAILED')) p,
+            (SELECT count(*) AS total, count(*) FILTER (WHERE "status" = 'FAILED') AS failed
+               FROM "webhook_deliveries" WHERE "created_at" >= ${since24h}) wd,
+            (SELECT count(*) AS total,
+                    count(*) FILTER (WHERE "status_code" >= 400 AND "status_code" < 500) AS e4,
+                    count(*) FILTER (WHERE "status_code" >= 500) AS e5,
+                    avg("duration_ms") AS avg_ms
+               FROM "api_request_logs" WHERE "created_at" >= ${since24h}) r
+        `),
+        prisma.subscription.groupBy({ by: ['status'], _count: { _all: true } }),
+        computeMrrCents(),
+        // "Active" operator = had a refresh token created in the last 30 days.
+        // Equivalent of a sign-in event since refresh rotation also writes here.
+        prisma.tenantUser.count({
+          where: { refreshTokens: { some: { createdAt: { gte: since30d } } } },
+        }),
+        // End-user lockouts in effect right now (failed sign-in protection).
+        // Lockout lives in the Redis brute-force limiter, not a DB column,
+        // enumerate the `bf:lock:eu:login:*` keys. limit:0 → count only.
+        scanActiveLoginLocks(0).then((r) => r.total),
+        prisma.emailLog.groupBy({
+          by: ['status'],
+          where: { createdAt: { gte: since24h } },
+          _count: { _all: true },
+        }),
+      ]);
+    const c = countsRows[0] ?? {};
+    const num = (k: string): number => Number(c[k] ?? 0);
 
     // Roll the email grouping into the overview's tiny rollup shape. Full
     // detail lives behind `/api/v1/admin/metrics/email-deliverability`.
@@ -247,22 +324,29 @@ export const adminMetricsService = {
       sent: emailMap.sent ?? 0,
       error: emailMap.error ?? 0,
       noTransport: emailMap.no_transport ?? 0,
-      total: (emailMap.sent ?? 0) + (emailMap.error ?? 0) + (emailMap.no_transport ?? 0),
+      // The fourth outcome. Left out of the total, a workspace that switches
+      // email off reports a shrinking volume rather than a redirected one.
+      suppressed: emailMap.suppressed ?? 0,
+      total:
+        (emailMap.sent ?? 0) +
+        (emailMap.error ?? 0) +
+        (emailMap.no_transport ?? 0) +
+        (emailMap.suppressed ?? 0),
     };
 
     const subsByStatus = Object.fromEntries(subsGrouped.map((g) => [g.status, g._count._all])) as Record<string, number>;
 
     return {
-      tenants: { total: tenantsTotal, newLast30d: tenantsNew30d },
-      applications: { total: appsTotal, newLast30d: appsNew30d },
+      tenants: { total: num('tenants_total'), newLast30d: num('tenants_new_30d') },
+      applications: { total: num('apps_total'), newLast30d: num('apps_new_30d') },
       endUsers: {
-        total: endUsersTotal,
-        verified: endUsersVerified,
-        newLast24h: endUsersNew24h,
-        newLast7d: endUsersNew7d,
-        newLast30d: endUsersNew30d,
+        total: num('eu_total'),
+        verified: num('eu_verified'),
+        newLast24h: num('eu_new_24h'),
+        newLast7d: num('eu_new_7d'),
+        newLast30d: num('eu_new_30d'),
       },
-      organizations: { total: orgsTotal, newLast30d: orgsNew30d },
+      organizations: { total: num('orgs_total'), newLast30d: num('orgs_new_30d') },
       subscriptions: {
         pending: subsByStatus.PENDING ?? 0,
         active: subsByStatus.ACTIVE ?? 0,
@@ -272,27 +356,27 @@ export const adminMetricsService = {
         total: Object.values(subsByStatus).reduce((a, b) => a + b, 0),
       },
       payments: {
-        lifetime: { count: paymentsLifetime._count._all, volumeCents: paymentsLifetime._sum.amount ?? 0 },
-        last30d: { count: paymentsLast30d._count._all, volumeCents: paymentsLast30d._sum.amount ?? 0 },
-        succeededLast24h: paymentsSucceeded24h,
-        failedLast24h: paymentsFailed24h,
+        lifetime: { count: num('pay_lifetime_count'), volumeCents: num('pay_lifetime_sum') },
+        last30d: { count: num('pay_last30_count'), volumeCents: num('pay_last30_sum') },
+        succeededLast24h: num('pay_succeeded_24h'),
+        failedLast24h: num('pay_failed_24h'),
       },
       mrrCents: mrrCents.totalCents,
       mrrCapped: mrrCents.capped,
       webhooks: {
-        eventsLast24h: webhookEvents24h,
-        deliveriesLast24h: webhookDeliveries24h,
-        deliveriesFailedLast24h: webhookDeliveriesFailed24h,
+        eventsLast24h: num('wh_events_24h'),
+        deliveriesLast24h: num('wh_deliveries_24h'),
+        deliveriesFailedLast24h: num('wh_deliveries_failed_24h'),
       },
       apiRequests: {
-        last24h: requestsLast24h,
-        errors4xxLast24h: requests4xx24h,
-        errors5xxLast24h: requests5xx24h,
-        avgDurationMs: Math.round(requestsAvgDuration._avg.durationMs ?? 0),
+        last24h: num('req_24h'),
+        errors4xxLast24h: num('req_4xx_24h'),
+        errors5xxLast24h: num('req_5xx_24h'),
+        avgDurationMs: Math.round(num('req_avg_ms')),
       },
-      tenantUsers: { total: tenantUsersTotal, activeLast30d: tenantUsersActive30d },
+      tenantUsers: { total: num('tenant_users_total'), activeLast30d: tenantUsersActive30d },
       lockedAccountsCount,
-      outstandingCredits: outstandingCreditsAgg._sum.balance ?? 0,
+      outstandingCredits: num('credits_outstanding'),
       emailLast24h,
     };
   },
@@ -308,7 +392,7 @@ export const adminMetricsService = {
     const since24h = new Date(now.getTime() - DAY_MS);
 
     // DB ping.
-    let dbStatus: 'up' | 'down' = 'down';
+    let dbStatus: 'up' | 'down';
     let dbLatency: number | null = null;
     const dbT0 = Date.now();
     try {
@@ -341,7 +425,7 @@ export const adminMetricsService = {
     ]);
     const successRate = total24h === 0 ? null : succeeded24h / total24h;
 
-    // Oldest inbound webhook still unprocessed — surfaces stuck queues.
+    // Oldest inbound webhook still unprocessed, surfaces stuck queues.
     const oldestPending = await prisma.webhookEvent.findFirst({
       where: { processedAt: null },
       orderBy: { receivedAt: 'asc' },
@@ -378,7 +462,7 @@ export const adminMetricsService = {
       opActive7d,
       opActive30d,
     ] = await Promise.all([
-      // RefreshToken.createdAt is the closest proxy for "active end-user" — a
+      // RefreshToken.createdAt is the closest proxy for "active end-user", a
       // token is created on sign-in and on each rotation, so an active user
       // generates fresh rows continually. We groupBy endUserId to count distinct.
       prisma.refreshToken
@@ -435,7 +519,7 @@ export const adminMetricsService = {
       organizationCount: number;
       activeSubscriptions: number;
       mrrCents: number;
-      /** True when the per-tenant MRR sum saturated MRR_READ_CAP (lower bound). */
+      /** Always false since the per-tenant MRR is summed in SQL; kept for clients that read it. */
       mrrCapped: boolean;
       createdAt: string;
       lastActivityAt: string | null;
@@ -456,8 +540,8 @@ export const adminMetricsService = {
         }
       : {};
     // When sorting on a computed field (MRR / endUserCount / applicationCount /
-    // lastActivityAt) we need to enrich more than `limit` rows before sorting
-    // — otherwise top-N by MRR could be wrong if the top earners are older.
+    // lastActivityAt) we need to enrich more than `limit` rows before sorting,
+    // otherwise top-N by MRR could be wrong if the top earners are older.
     const isComputedSort =
       query.sort === 'mrrCents' ||
       query.sort === 'endUserCount' ||
@@ -487,65 +571,47 @@ export const adminMetricsService = {
       }),
     ]);
 
-    // For each tenant fan out the per-app aggregates. The list is bounded
-    // (default 50) so the parallel fan-out is fine.
-    const enriched = await Promise.all(
-      tenants.map(async (t) => {
-        const appIds = t.applications.map((a) => a.id);
-        if (appIds.length === 0) {
-          return {
-            id: t.id,
-            name: t.name,
-            ownerEmail: t.ownerEmail,
-            applicationCount: 0,
-            endUserCount: 0,
-            organizationCount: 0,
-            activeSubscriptions: 0,
-            mrrCents: 0,
-            mrrCapped: false,
-            createdAt: t.createdAt.toISOString(),
-            lastActivityAt: null as string | null,
-          };
-        }
-        const [endUserCount, orgCount, activeSubs, lastReq, activeSubPlans] = await Promise.all([
-          prisma.endUser.count({ where: { applicationId: { in: appIds } } }),
-          prisma.organization.count({ where: { applicationId: { in: appIds } } }),
-          prisma.subscription.count({ where: { applicationId: { in: appIds }, status: 'ACTIVE' } }),
-          prisma.apiRequestLog.findFirst({
-            where: { applicationId: { in: appIds } },
-            orderBy: { createdAt: 'desc' },
-            select: { createdAt: true },
-          }),
-          // Bounded read for per-tenant MRR. If a single tenant ever crosses
-          // this cap, the tenant row's MRR is a lower bound — surfaced via
-          // `mrrCapped` so the UI flags it instead of silently undercounting.
-          prisma.subscription.findMany({
-            where: { applicationId: { in: appIds }, status: 'ACTIVE' },
-            select: { plan: { select: { amount: true, interval: true } } },
-            take: MRR_READ_CAP,
-          }),
-        ]);
-        let mrr = 0;
-        for (const s of activeSubPlans) {
-          if (!s.plan) continue;
-          mrr += s.plan.interval === 'YEAR' ? Math.floor(s.plan.amount / 12) : s.plan.amount;
-        }
-        const mrrCapped = activeSubPlans.length === MRR_READ_CAP;
-        return {
-          id: t.id,
-          name: t.name,
-          ownerEmail: t.ownerEmail,
-          applicationCount: appIds.length,
-          endUserCount,
-          organizationCount: orgCount,
-          activeSubscriptions: activeSubs,
-          mrrCents: mrr,
-          mrrCapped,
-          createdAt: t.createdAt.toISOString(),
-          lastActivityAt: lastReq?.createdAt.toISOString() ?? null,
-        };
-      }),
-    );
+    // One grouped query per metric over every listed tenant's applications,
+    // not five queries per tenant: a computed sort scans up to
+    // COMPUTED_SCAN_CAP tenants, which was up to 2,500 queries at once.
+    const appIds = tenants.flatMap((t) => t.applications.map((a) => a.id));
+    const [endUsers, orgs, subs, lastSeen] = await Promise.all([
+      countByApplication('end_users', appIds),
+      countByApplication('organizations', appIds),
+      activeSubscriptionsByApplication(appIds),
+      lastRequestByApplication(appIds),
+    ]);
+    const enriched = tenants.map((t) => {
+      const ids = t.applications.map((a) => a.id);
+      let endUserCount = 0;
+      let organizationCount = 0;
+      let activeSubscriptions = 0;
+      let mrrCents = 0;
+      let last: Date | null = null;
+      for (const id of ids) {
+        endUserCount += endUsers.get(id) ?? 0;
+        organizationCount += orgs.get(id) ?? 0;
+        activeSubscriptions += subs.get(id)?.count ?? 0;
+        mrrCents += subs.get(id)?.mrrCents ?? 0;
+        const seen = lastSeen.get(id);
+        if (seen && (last === null || seen > last)) last = seen;
+      }
+      return {
+        id: t.id,
+        name: t.name,
+        ownerEmail: t.ownerEmail,
+        applicationCount: ids.length,
+        endUserCount,
+        organizationCount,
+        activeSubscriptions,
+        mrrCents,
+        // Summed in SQL over every active subscription, so no longer capped.
+        // Kept in the shape for clients that read it.
+        mrrCapped: false,
+        createdAt: t.createdAt.toISOString(),
+        lastActivityAt: last?.toISOString() ?? null,
+      };
+    });
 
     // Post-aggregate sort for computed fields, then slice out the requested
     // page window. DB-column sort already returned exactly the page.
@@ -616,29 +682,29 @@ export const adminMetricsService = {
         include: { tenant: { select: { name: true } } },
       }),
     ]);
-    const enriched = await Promise.all(
-      apps.map(async (a) => {
-        const [endUserCount, activeSubs, requests24h] = await Promise.all([
-          prisma.endUser.count({ where: { applicationId: a.id } }),
-          prisma.subscription.count({ where: { applicationId: a.id, status: 'ACTIVE' } }),
-          prisma.apiRequestLog.count({ where: { applicationId: a.id, createdAt: { gte: since24h } } }),
-        ]);
-        return {
-          id: a.id,
-          tenantId: a.tenantId,
-          tenantName: a.tenant.name,
-          name: a.name,
-          slug: a.slug,
-          // The deployment owner sees every tenant's applications side by side;
-          // with data modes gone this is the only marker of which ones are real.
-          environment: a.environment,
-          endUserCount,
-          activeSubscriptions: activeSubs,
-          apiRequestsLast24h: requests24h,
-          createdAt: a.createdAt.toISOString(),
-        };
-      }),
-    );
+    // One grouped query per metric over the listed ids, not three per row: a
+    // computed sort scans up to COMPUTED_SCAN_CAP rows, which was up to 1,500
+    // queries at once against a 20-connection pool.
+    const ids = apps.map((a) => a.id);
+    const [endUsers, subs, requests] = await Promise.all([
+      countByApplication('end_users', ids),
+      activeSubscriptionsByApplication(ids),
+      requestsSinceByApplication(ids, since24h),
+    ]);
+    const enriched = apps.map((a) => ({
+      id: a.id,
+      tenantId: a.tenantId,
+      tenantName: a.tenant.name,
+      name: a.name,
+      slug: a.slug,
+      // The deployment owner sees every tenant's applications side by side;
+      // with data modes gone this is the only marker of which ones are real.
+      environment: a.environment,
+      endUserCount: endUsers.get(a.id) ?? 0,
+      activeSubscriptions: subs.get(a.id)?.count ?? 0,
+      apiRequestsLast24h: requests.get(a.id) ?? 0,
+      createdAt: a.createdAt.toISOString(),
+    }));
     const items =
       isComputedSort && query.sort
         ? sortByField(enriched, query.sort as keyof (typeof enriched)[number], query.order ?? 'desc').slice(
@@ -1177,7 +1243,7 @@ export const adminMetricsService = {
   },
 
   /**
-   * Outstanding prepaid credits — `SUM(CreditBalance.balance)`. Credits are
+   * Outstanding prepaid credits, `SUM(CreditBalance.balance)`. Credits are
    * unit-less in Rekey's model (each Application decides what a credit
    * means in its own product), so this is a unit-less count, NOT cents.
    * Operator reads this as "how many prepaid units have been bought but
@@ -1222,12 +1288,12 @@ export const adminMetricsService = {
   },
 
   /**
-   * Accounts currently inside the failed-sign-in lockout window — **end-users
+   * Accounts currently inside the failed-sign-in lockout window, **end-users
    * AND operators**.
    *
    * The operator half was missing, and its absence was the sharper problem of
-   * the two. A locked-out workspace OWNER — the account that owns every
-   * Application, API key and billing credential in their workspace — appeared
+   * the two. A locked-out workspace OWNER, the account that owns every
+   * Application, API key and billing credential in their workspace, appeared
    * in no operator- or admin-facing surface at all: this endpoint read only
    * `bf:lock:eu:login:*`, and the workspace security log they might otherwise
    * have been visible in is behind the sign-in they cannot complete. The
@@ -1266,7 +1332,7 @@ export const adminMetricsService = {
       /** TenantUser id, or a synthetic `op:<email>` when the row is gone. */
       id: string;
       email: string;
-      /** Workspaces this operator belongs to — who else can still get in. */
+      /** Workspaces this operator belongs to, who else can still get in. */
       workspaces: Array<{ tenantId: string; tenantName: string; role: string }>;
       failedAttempts: number;
       lockedUntil: string;
@@ -1310,7 +1376,7 @@ export const adminMetricsService = {
 
   /**
    * The operator half of `lockedAccounts`. Split out only to keep that method
-   * readable — it has no other caller.
+   * readable, it has no other caller.
    *
    * `workspaces` is the actionable part: it names the workspaces the locked
    * operator belongs to, so the deployment administrator can tell at a glance
@@ -1364,15 +1430,18 @@ export const adminMetricsService = {
   },
 
   /**
-   * Email-deliverability rollup from `EmailLog`. Three statuses are written
-   * at the transport boundary (`sent | error | no_transport`), so the
-   * dashboard can surface raw counts + a success ratio across 24h / 7d.
-   * `topErrorApps` lists the worst offenders so the operator knows where to
-   * look first.
+   * Email-deliverability rollup from `EmailLog`. Four statuses are written:
+   * three at the transport boundary (`sent | error | no_transport`) and
+   * `suppressed` at the gate before it, for a send an Application's own
+   * configuration stopped. The dashboard surfaces raw counts + a success ratio
+   * across 24h / 7d. `topErrorApps` lists the worst offenders so the operator
+   * knows where to look first, and deliberately filters on `error` alone, so
+   * an Application that has switched an event off does not appear as a
+   * deliverability problem.
    */
   async emailDeliverability(): Promise<{
-    last24h: { sent: number; error: number; noTransport: number; total: number };
-    last7d: { sent: number; error: number; noTransport: number; total: number };
+    last24h: { sent: number; error: number; noTransport: number; suppressed: number; total: number };
+    last7d: { sent: number; error: number; noTransport: number; suppressed: number; total: number };
     topErrorApps: Array<{ applicationId: string; applicationSlug: string; errors: number }>;
   }> {
     const since24h = new Date(Date.now() - DAY_MS);
@@ -1392,13 +1461,15 @@ export const adminMetricsService = {
       sent: number;
       error: number;
       noTransport: number;
+      suppressed: number;
       total: number;
     } {
       const m = Object.fromEntries(rows.map((r) => [r.status, r._count._all])) as Record<string, number>;
       const sent = m.sent ?? 0;
       const error = m.error ?? 0;
       const noTransport = m.no_transport ?? 0;
-      return { sent, error, noTransport, total: sent + error + noTransport };
+      const suppressed = m.suppressed ?? 0;
+      return { sent, error, noTransport, suppressed, total: sent + error + noTransport + suppressed };
     }
 
     const appIds = errorByApp.map((r) => r.applicationId).filter((id): id is string => !!id);

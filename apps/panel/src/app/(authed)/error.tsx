@@ -7,7 +7,9 @@
  */
 
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
+import { ApiBusyNotice, useRetry } from '@/components/ApiBusyNotice';
+import { parseBusyDigest } from '@/lib/api-busy';
 
 export default function AuthedError({
   error,
@@ -21,6 +23,19 @@ export default function AuthedError({
     console.error(error);
   }, [error]);
 
+  // `reset()` alone re-renders from the payload the router already holds,
+  // which still contains the error, so "Try again" could never succeed on a
+  // Server Component failure. Refresh first, in the same transition.
+  const retry = useRetry(reset);
+  const busy = parseBusyDigest(error.digest);
+  if (busy) {
+    return (
+      <section className="mx-auto max-w-5xl px-6 py-6">
+        <ApiBusyNotice busy={busy} reset={reset} />
+      </section>
+    );
+  }
+
   return (
     <section className="mx-auto max-w-5xl px-6 py-6">
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-10 text-center space-y-3">
@@ -31,13 +46,13 @@ export default function AuthedError({
           {error.digest ? ` (ref ${error.digest})` : ''}
         </p>
         {/* "Try again" alone was a dead end whenever the cause wasn't
-            transient — a mistyped id retried forever. Always offer a way out
+            transient, a mistyped id retried forever. Always offer a way out
             of the page as well. (404 and 403 no longer reach this boundary at
             all: lib/api.ts routes them to not-found.tsx / forbidden.tsx.) */}
         <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
           <button
             type="button"
-            onClick={() => reset()}
+            onClick={retry}
             className="rounded-md bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
           >
             Try again

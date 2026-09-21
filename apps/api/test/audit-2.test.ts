@@ -1,7 +1,7 @@
 /**
  * Second-pass audit (2026-05-19) regression tests:
  *
- *   - License seat-exhaustion under concurrent verifies — atomic, no double-issue.
+ *   - License seat-exhaustion under concurrent verifies, atomic, no double-issue.
  *   - Coupon redemption recorded ONCE per payment (idempotent under replay).
  *   - Coupon TOCTOU: parallel `recordRedemption` calls past the limit are
  *     correctly serialised and the loser fails.
@@ -12,7 +12,7 @@
  *     instead of silently trying to use junk.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
@@ -149,7 +149,7 @@ describe('Audit-2 regression', () => {
     });
     expect(first.ok).toBe(true);
 
-    // Same machine, 5 more times — should keep passing without consuming.
+    // Same machine, 5 more times, should keep passing without consuming.
     for (let i = 0; i < 5; i++) {
       const r = await licensesService.verify({
         applicationId: b.applicationId,
@@ -169,7 +169,7 @@ describe('Audit-2 regression', () => {
 
   // Checkout now takes a RESERVATION, not a confirmed redemption. Deferring
   // everything to payment-success is what let a maxRedemptions:1 coupon
-  // discount an unlimited number of concurrent checkouts — the limit was
+  // discount an unlimited number of concurrent checkouts, the limit was
   // counted against rows that did not exist yet. The reservation holds the
   // slot; only payment success confirms it.
   it('checkout with a coupon reserves the slot but does not confirm a redemption', async () => {
@@ -204,7 +204,7 @@ describe('Audit-2 regression', () => {
     });
     expect(confirmed).toBe(0);
 
-    // The slot IS held, which is the point — a second concurrent checkout on a
+    // The slot IS held, which is the point, a second concurrent checkout on a
     // single-use coupon must not also get the discount.
     const reserved = await prisma.couponRedemption.count({
       where: { applicationId: b.applicationId, status: 'RESERVED' },
@@ -237,7 +237,7 @@ describe('Audit-2 regression', () => {
     // Replay. The idempotency key is the CHECKOUT SESSION, not the payment:
     // a one-time sale has no payment event at all, and a recurring one has a
     // fresh invoice id every period for the same single discount. Reported,
-    // not thrown — the callers are webhook appliers writing money.
+    // not thrown, the callers are webhook appliers writing money.
     await expect(couponsService.redeemForCheckout(args)).resolves.toEqual({
       recorded: false,
       reason: 'already-redeemed',
@@ -270,7 +270,7 @@ describe('Audit-2 regression', () => {
     // 10 concurrent redemptions, each for a distinct checkout session so the
     // (couponId, checkoutSessionId) unique index doesn't block them. Each
     // comes from a different "user" too so the per-user limit is never the
-    // gate — global maxRedemptions is.
+    // gate, global maxRedemptions is.
     const eu = await prisma.endUser.createMany({
       data: Array.from({ length: 10 }, (_, i) => ({
         applicationId: b.applicationId,
@@ -300,7 +300,7 @@ describe('Audit-2 regression', () => {
     expect(ok).toBe(3);
     expect(refused).toHaveLength(7);
     for (const r of refused) {
-      // A limit refusal is REPORTED rather than raised — the callers are
+      // A limit refusal is REPORTED rather than raised, the callers are
       // webhook appliers that must not have a payment rolled back under them.
       expect(r).toMatchObject({ reason: 'limit-reached', code: 'COUPON_REDEMPTION_LIMIT_REACHED' });
     }
@@ -338,7 +338,7 @@ describe('Audit-2 regression', () => {
     expect(verifyWebhookSignature({ body, secret, header: signatureHeader })).toBe(true);
     expect(verifyWebhookSignature({ body: '{"event":"y"}', secret, header: signatureHeader })).toBe(false);
     expect(verifyWebhookSignature({ body, secret: 'b'.repeat(64), header: signatureHeader })).toBe(false);
-    // Replay window — present a 10-minute-old timestamp; should reject.
+    // Replay window, present a 10-minute-old timestamp; should reject.
     const { signatureHeader: old } = signWebhook({
       body,
       secret,

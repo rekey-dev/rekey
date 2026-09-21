@@ -1,5 +1,5 @@
 /**
- * Operator-registration policy — the single chokepoint that enforces
+ * Operator-registration policy, the single chokepoint that enforces
  * OPERATOR_SIGNUP_MODE at every path that would CREATE a new operator.
  *
  * Two creation paths exist in the codebase and BOTH route through here before
@@ -7,8 +7,8 @@
  *   1. password sign-up   → tenantAuthService.signUpAndCreateWorkspace
  *   2. OAuth first login   → tenantAuthService.findOrCreateOAuthOperator
  *
- * (Magic-link is sign-in only — it issues a token to an existing operator and
- * never creates one — so it needs no gate.)
+ * (Magic-link is sign-in only, it issues a token to an existing operator and
+ * never creates one, so it needs no gate.)
  *
  * Modes:
  *   open    → no gate (today's behavior). `resolveSignupInvite` returns null.
@@ -35,7 +35,7 @@ export type OperatorSignupMode = z.infer<typeof ModeSchema>;
  * live from process.env here so the mode can be flipped at runtime (and in
  * tests) without a process restart. An out-of-range live value falls back to
  * the boot-validated `env.OPERATOR_SIGNUP_MODE` (which itself defaults 'open'),
- * so a fat-fingered runtime override can never silently change behavior — the
+ * so a fat-fingered runtime override can never silently change behavior, the
  * boot value, which a typo would have crashed on, wins.
  */
 export function operatorSignupMode(): OperatorSignupMode {
@@ -43,7 +43,7 @@ export function operatorSignupMode(): OperatorSignupMode {
   return parsed.success ? parsed.data : env.OPERATOR_SIGNUP_MODE;
 }
 
-/** Opaque handle returned by `resolveSignupInvite` — pass to `consumeSignupInvite`. */
+/** Opaque handle returned by `resolveSignupInvite`, pass to `consumeSignupInvite`. */
 export interface ResolvedSignupInvite {
   inviteId: string;
 }
@@ -53,7 +53,7 @@ export interface ResolvedSignupInvite {
  * is not permitted. Returns the invite to consume (mode='invite'), or null
  * when no consumption is required (mode='open').
  *
- * Does NOT mutate the invite — validation only. Consume happens later, inside
+ * Does NOT mutate the invite, validation only. Consume happens later, inside
  * the operator-creation transaction, so a sign-up that fails afterwards (e.g.
  * duplicate email) does not burn the key.
  */

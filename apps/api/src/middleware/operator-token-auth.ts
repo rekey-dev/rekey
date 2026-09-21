@@ -3,20 +3,20 @@
  *
  * For tenant-scoped routes that an operator (or an AI agent acting as them)
  * may call with a long-lived `Authorization: Bearer rp_op_…` token instead of
- * a short-lived session JWT — replacing reliance on the global SUPER_ADMIN_KEY.
+ * a short-lived session JWT, replacing reliance on the global SUPER_ADMIN_KEY.
  *
  * On success it decorates the request EXACTLY like `requireTenantSession`:
- *   - request.tenantUser  — the operator (PublicTenantUser)
- *   - request.tenantId    — the workspace the PAT is bound to
- *   - request.tenantRole  — the operator's LIVE role in that workspace (from DB)
- *   - request.operatorTokenScopes — the PAT's granted scopes
+ *   - request.tenantUser , the operator (PublicTenantUser)
+ *   - request.tenantId   , the workspace the PAT is bound to
+ *   - request.tenantRole , the operator's LIVE role in that workspace (from DB)
+ *   - request.operatorTokenScopes, the PAT's granted scopes
  *
  * so downstream tenant handlers (which read req.tenantId / req.tenantUser /
  * req.tenantRole) work unchanged.
  *
  * Security:
  *   - Hash-only lookup. The presented raw token is SHA-256'd (lib/keys.hashKey)
- *     and looked up against the unique `token_hash` index — a direct, scan-free
+ *     and looked up against the unique `token_hash` index, a direct, scan-free
  *     lookup with no timing oracle. Unknown / revoked / expired ⇒ 401.
  *   - Membership is re-confirmed against the DB on every request. A PAT minted
  *     while the operator was a member doesn't keep working after the operator
@@ -27,6 +27,7 @@
  */
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
+import { intersectScopes, patTokenScopes, resolveMembershipScopes } from '../lib/operator-scopes.js';
 import type { TenantRole } from '@prisma/client';
 import { RekeyError } from '../lib/error.js';
 import { prisma } from '../lib/prisma.js';
@@ -54,7 +55,7 @@ function unauthorized(): RekeyError {
 /**
  * `onRequest` guard: authenticate the request via an operator PAT. Throws 401
  * on any failure. On success, decorates the request like `requireTenantSession`
- * and records `lastUsedAt` best-effort (fire-and-forget — never blocks or fails
+ * and records `lastUsedAt` best-effort (fire-and-forget, never blocks or fails
  * the request).
  */
 export async function resolveOperatorToken(
@@ -65,7 +66,7 @@ export async function resolveOperatorToken(
   const presented = header.startsWith('Bearer ') ? header.slice(7) : '';
   if (!presented) throw unauthorized();
 
-  // Direct hash lookup against the unique index — no scan, no timing oracle.
+  // Direct hash lookup against the unique index, no scan, no timing oracle.
   // A wrong token simply doesn't match any row.
   const token = await prisma.tenantApiToken.findUnique({
     where: { tokenHash: hashOperatorToken(presented) },
@@ -79,7 +80,7 @@ export async function resolveOperatorToken(
 
   // Re-confirm membership against the DB. A PAT is bound to one workspace; if
   // the operator was removed from it (or had their role changed) after the PAT
-  // was minted, the live membership decides — exactly like requireTenantSession.
+  // was minted, the live membership decides, exactly like requireTenantSession.
   const membership = await prisma.tenantMembership.findUnique({
     where: {
       tenantUserId_tenantId: { tenantUserId: token.tenantUserId, tenantId: token.tenantId },
@@ -95,7 +96,6 @@ export async function resolveOperatorToken(
   }
 
   // Strip passwordHash before attaching (mirrors requireTenantSession).
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { passwordHash, ...publicUser } = user;
   request.tenantUser = publicUser;
   request.tenantId = token.tenantId;
@@ -103,6 +103,13 @@ export async function resolveOperatorToken(
   request.tenantRole = membership.role as TenantRole;
   request.tenantMembershipId = membership.id;
   request.operatorTokenScopes = token.scopes;
+  // A token can only narrow what its holder may do. "Scopes bound what a
+  // token may do. They cannot stand in for whether its holder is still
+  // allowed to do it", enforced structurally now, not by re-checking the role.
+  request.tenantScopes = intersectScopes(
+    resolveMembershipScopes(membership.scopesRestricted, membership.scopes),
+    patTokenScopes(token.scopes),
+  );
 
   // Best-effort lastUsedAt bump, at most once per token per minute (see
   // lib/last-used-throttle.ts). Fire-and-forget: a failed write here must
@@ -111,7 +118,7 @@ export async function resolveOperatorToken(
     void prisma.tenantApiToken
       .update({ where: { id: token.id }, data: { lastUsedAt: new Date() } })
       .catch(() => {
-        /* ignore — telemetry only */
+        /* ignore, telemetry only */
       });
   }
 }

@@ -81,7 +81,7 @@ export function createProcessGroup() {
 
   /**
    * Spawn a long-lived server. Output is only echoed under DEMO_VERBOSE=1, but
-   * it is always accumulated — `outputOf(name)` gives a recording script the
+   * it is always accumulated, `outputOf(name)` gives a recording script the
    * server's real boot banner to put on screen, instead of typing a plausible
    * one by hand.
    */
@@ -126,7 +126,7 @@ export function createProcessGroup() {
  * Run a command to completion and capture its combined output.
  *
  * The walkthroughs really execute their scaffolding commands with this and
- * render the resulting text — so what is on screen is whatever the tool
+ * render the resulting text, so what is on screen is whatever the tool
  * actually printed on this run, not prose typed to look like output.
  */
 export function runCapture(cmd, args, opts = {}) {
@@ -141,12 +141,14 @@ export function runCapture(cmd, args, opts = {}) {
 }
 
 /**
- * Strip ANSI escapes and carriage-return progress redraws — the pane renders
+ * Strip ANSI escapes and carriage-return progress redraws, the pane renders
  * as HTML, not a TTY, so a spinner that overwrote itself 400 times would
  * otherwise arrive as 400 separate lines.
  */
 export const stripAnsi = (s) =>
   String(s)
+    // The control character IS what this matches: it strips ANSI escapes.
+    // eslint-disable-next-line no-control-regex
     .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '')
     .split('\n')
     .map((line) => line.split('\r').pop())
@@ -174,7 +176,7 @@ export async function waitFor(label, url, { timeoutMs = 180_000, expect } = {}) 
 // ---------------------------------------------------------------------------
 /**
  * Minimal client for the scratch API. Returns `{ status, json }` rather than
- * throwing so callers can assert the exact status they expect — every asserted
+ * throwing so callers can assert the exact status they expect, every asserted
  * call in a recording script checks it, so a closing frame can never claim a
  * 200 that did not happen.
  */

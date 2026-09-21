@@ -91,7 +91,7 @@ describe('Audit-6 regressions', () => {
   });
 
   it('500-class errors surface requestId in the fix string', async () => {
-    // Force a 500 by hitting an admin route without the SUPER_ADMIN_KEY —
+    // Force a 500 by hitting an admin route without the SUPER_ADMIN_KEY,
     // returns 401 from middleware. Skip: instead, exercise the validation
     // error path (400) which the handler also stamps with requestId.
     const res = await app.inject({
@@ -185,7 +185,7 @@ describe('Audit-6 regressions', () => {
       url: `/api/v1/tenant/applications/${appA.applicationId}/end-users/${otherUser.endUser.id}`,
       headers: { authorization: `Bearer ${operator.accessToken}` },
     });
-    // 404 from the tenant-scope guard OR 404 from the end-user lookup —
+    // 404 from the tenant-scope guard OR 404 from the end-user lookup,
     // both are correct refusals; neither leaks the other Application's row.
     expect([403, 404]).toContain(res.statusCode);
   });

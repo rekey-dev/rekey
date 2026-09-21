@@ -5,11 +5,14 @@ import { api, type SecurityEventRow } from '@/lib/api';
 import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
 import type { Page } from '@/lib/paginate';
 import { PageHeader } from '@/components/PageHeader';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
 import { EmptyState } from '@/components/EmptyState';
 import { ActorCell } from '@/components/ActorCell';
+import { Badge } from '@/components/Badge';
 import {
+  eventDetails,
   eventTypeOptions,
   humanizeEventType,
   resolveActorEmails,
@@ -48,12 +51,12 @@ export default async function AuditLogPage({
 
   // Accept ANY syntactically plausible type, not only the ones we have a label
   // for. The old `sp.type in TYPE_LABEL` guard silently discarded a hand-typed
-  // `?type=app.plan_created` — the page rendered the unfiltered log with no
+  // `?type=app.plan_created`, the page rendered the unfiltered log with no
   // indication the filter had been thrown away. The API takes
   // `z.string().min(1).max(80)`, so mirror that and let it answer.
   const rawType = typeof sp.type === 'string' ? sp.type.trim() : '';
   const type = rawType.length > 0 && rawType.length <= 80 ? rawType : '';
-  // A type outside our map is still a valid filter — surface it in the select
+  // A type outside our map is still a valid filter, surface it in the select
   // rather than resetting the control to "All types" while the filter is live.
   const typeOptions =
     type !== '' && !TYPE_OPTIONS.some((o) => o.value === type)
@@ -119,7 +122,7 @@ export default async function AuditLogPage({
     <section className="mx-auto max-w-7xl space-y-6 px-6 py-8 lg:px-8">
       <PageHeader
         title="Audit log"
-        description="Security-relevant events for this workspace — sign-ins, API-key lifecycle, session kill-switch, access-control changes. Newest first."
+        description="Security-relevant events for this workspace: sign-ins, API-key lifecycle, session kill-switch, access-control changes. Newest first."
         action={
           <a
             href={exportHref}
@@ -131,7 +134,7 @@ export default async function AuditLogPage({
         }
       />
 
-      <form action={applyFilters} className="flex flex-wrap items-end gap-2">
+      <ActionForm action={applyFilters} className="flex flex-wrap items-end gap-2">
         <label className="block space-y-1">
           <span className="block text-xs font-medium text-[var(--color-fg)]">Event type</span>
           <select name="type" defaultValue={type} className={inputCls}>
@@ -173,10 +176,10 @@ export default async function AuditLogPage({
             href="/audit-log"
             className="px-1 py-2 text-sm text-[var(--color-muted-fg)] hover:text-[var(--color-fg)]"
           >
-            filtered — clear
+            filtered (clear)
           </a>
         )}
-      </form>
+      </ActionForm>
 
       {events.length === 0 ? (
         <EmptyState
@@ -198,7 +201,14 @@ export default async function AuditLogPage({
             {events.map((e) => (
               <TR key={e.id} hover>
                 <TD>
-                  <div className="font-medium text-[var(--color-fg)]">{humanizeEventType(e.type)}</div>
+                  <div className="flex flex-wrap items-center gap-1.5 font-medium text-[var(--color-fg)]">
+                    {humanizeEventType(e.type)}
+                    {eventDetails(e.metadata).map((d) => (
+                      <Badge key={d.label} tone="neutral" className="font-normal" title={`${d.label}: ${d.full}`}>
+                        {d.label === 'via' ? d.value : `${d.label}: ${d.value}`}
+                      </Badge>
+                    ))}
+                  </div>
                   <div className="font-mono text-xs text-[var(--color-muted-fg)]">{e.type}</div>
                 </TD>
                 <TD>

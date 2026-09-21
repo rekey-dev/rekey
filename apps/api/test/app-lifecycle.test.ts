@@ -1,5 +1,5 @@
 /**
- * Application lifecycle — promotion to production, and the disable switch.
+ * Application lifecycle, promotion to production, and the disable switch.
  * Spec: docs/specs/app-lifecycle.md
  *
  * The invariant every quota assertion here defends, stated once:
@@ -53,7 +53,7 @@ describe('Application lifecycle', () => {
     operator = (res.json().data as { accessToken: string }).accessToken;
 
     // The sign-up response carries the token, not the workspace. Read the
-    // tenant id from the membership the sign-up just created — the same route
+    // tenant id from the membership the sign-up just created, the same route
     // other suites use, rather than asserting a response shape this feature
     // does not own.
     const membership = await prisma.tenantMembership.findFirstOrThrow({
@@ -103,7 +103,7 @@ describe('Application lifecycle', () => {
   /**
    * A second operator who is a full ADMIN of the SAME workspace.
    *
-   * The point of the role tests below is not "a stranger is refused" — that is
+   * The point of the role tests below is not "a stranger is refused", that is
    * the cross-tenant matrix's job. It is that someone with real, legitimate,
    * far-reaching authority over this exact workspace is still refused these
    * three routes specifically.
@@ -120,7 +120,7 @@ describe('Application lifecycle', () => {
     await prisma.tenantMembership.create({
       data: { tenantUserId: user.id, tenantId, role: 'ADMIN' },
     });
-    // Re-issue against the workspace under test — the sign-up token carries
+    // Re-issue against the workspace under test, the sign-up token carries
     // their OWN workspace in `tid`, not this one.
     const switched = await app.inject({
       method: 'POST',
@@ -244,7 +244,7 @@ describe('Application lifecycle', () => {
     });
 
     // Eight racers, not two. Two `app.inject` calls under Promise.all do not
-    // reliably overlap inside the database — the first transaction often
+    // reliably overlap inside the database, the first transaction often
     // commits before the second one counts, so the check-then-act window never
     // opens and the test passes with the advisory lock DELETED. That is a test
     // that proves nothing. Eight racers against one slot opens the window
@@ -571,7 +571,7 @@ describe('Application lifecycle', () => {
     it('promoting an application disabled mid-flight reports DISABLED, not ALREADY_PROMOTED', async () => {
       // The 409 pre-check reads the row before the workspace lock is taken, so
       // the conditional update carries `disabledAt: null` too. When that
-      // predicate is what missed, the error has to name it — telling an
+      // predicate is what missed, the error has to name it, telling an
       // operator their application was "already promoted" sends them looking
       // for a promotion that never happened. Simulated by disabling first,
       // which exercises the same raise site the race reaches.
@@ -596,7 +596,7 @@ describe('Application lifecycle', () => {
 
   // The third door. `create` asserted the quota but took no lock until this
   // test existed, so two concurrent PRODUCTION creates could both pass the
-  // count — and with no demote and no delete, the workspace stayed over its
+  // count, and with no demote and no delete, the workspace stayed over its
   // ceiling permanently. Verified sensitive: removing `lockWorkspaceSlots`
   // from the create path makes this fail with every racer winning.
   it('concurrent PRODUCTION creates cannot exceed the ceiling', async () => {
@@ -625,7 +625,7 @@ describe('Application lifecycle', () => {
   // There is deliberately NO test here for "a create racing a promote".
   //
   // It was written, and it could not be made to fail with the create-path lock
-  // removed — at every width and ordering tried, `promote` committed before any
+  // removed, at every width and ordering tried, `promote` committed before any
   // create had counted (measured: 6 creates all 403, promote 200). A test that
   // cannot fail is not evidence, and one shaped like a race test is worse than
   // none because it reads as proof to the next person.
@@ -684,7 +684,7 @@ describe('Application lifecycle', () => {
       const a = await createApp('wire-list');
       await disable(a.id);
 
-      // The list is paged — `data` is { items, total, limit, offset }, not an
+      // The list is paged, `data` is { items, total, limit, offset }, not an
       // array. Asserted here rather than assumed: the panel sidebar and the
       // command palette are both fed by this endpoint, so the field has to
       // survive the page wrapper as well as the row serialiser.

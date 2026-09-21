@@ -1,5 +1,5 @@
 /**
- * Status badge — design.md §4 status colors, applied to subscription and
+ * Status badge, design.md §4 status colors, applied to subscription and
  * payment states. Status dots stay small (w-1.5 h-1.5) and unobtrusive.
  *
  * Tones follow the panel <Badge> convention: a soft 10% tint fill + a readable
@@ -16,8 +16,8 @@
  *
  *   - `PAST_DUE` was `danger` here and `warning` in the panel, so the same
  *     account looked routine to the operator handling it and alarming to the
- *     customer reading it. Past-due IS the grace period — the subscription is
- *     still live and a retry may yet succeed — so amber is the honest colour
+ *     customer reading it. Past-due IS the grace period, the subscription is
+ *     still live and a retry may yet succeed, so amber is the honest colour
  *     for both audiences, and red here was a fright shown to someone whose card
  *     had merely expired.
  *   - The label rendered `past due` (lowercase) against `Past due` in the

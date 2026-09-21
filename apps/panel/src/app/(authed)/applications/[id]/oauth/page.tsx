@@ -4,6 +4,7 @@ import { errorQuery, readErrorFlash, api, PanelApiError, getApplication } from '
 import { Modal } from '@/components/Modal';
 import { ApiErrorText } from '@/components/api-error';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
 import { PageHeader } from '@/components/PageHeader';
@@ -33,7 +34,7 @@ const PROVIDERS: ProviderInfo[] = [
   {
     name: 'google',
     label: 'Google',
-    hint: 'Sign in with Google. Uses OpenID Connect — no userinfo round-trip.',
+    hint: 'Sign in with Google. Uses OpenID Connect, with no userinfo round-trip.',
     consoleUrl: 'https://console.cloud.google.com/apis/credentials',
   },
   {
@@ -63,7 +64,7 @@ const PROVIDERS: ProviderInfo[] = [
   {
     name: 'slack',
     label: 'Slack',
-    hint: '"Sign in with Slack" — Slack\'s OIDC endpoints. Email + name only, no workspace permissions.',
+    hint: '"Sign in with Slack", via Slack\'s OIDC endpoints. Email + name only, no workspace permissions.',
     consoleUrl: 'https://api.slack.com/apps',
   },
   {
@@ -122,7 +123,7 @@ const ERR: Record<string, string> = {
   missing_issuer: 'The OIDC provider requires an issuer URL.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can configure OAuth providers.',
   APPLICATION_NOT_FOUND: 'Application not found.',
-  FST_ERR_VALIDATION: 'One or more fields are invalid — check the values and try again.',
+  FST_ERR_VALIDATION: 'One or more fields are invalid. Check the values and try again.',
 };
 
 export default async function OAuthPage({
@@ -193,7 +194,7 @@ export default async function OAuthPage({
       <PageHeader
         level={2}
         title="OAuth providers"
-        description="Optional — let end-users sign in with their existing accounts. Each provider needs a client ID + secret from the provider's developer console plus a matching redirect URI. Secrets are AES-256-GCM encrypted at rest; never returned in any API response."
+        description="Optional: let end-users sign in with their existing accounts. Each provider needs a client ID + secret from the provider's developer console plus a matching redirect URI. Secrets are AES-256-GCM encrypted at rest; never returned in any API response."
       />
 
       {saved && <SavedBanner message={`${saved} configuration saved.`} />}
@@ -229,7 +230,7 @@ export default async function OAuthPage({
 
       {Object.keys(configured).length === 0 && (
         <p className="text-sm text-[var(--color-muted-fg)]">
-          No social logins yet — add Google, GitHub, and others below so users can sign in with one
+          No social logins yet. Add Google, GitHub, and others below so users can sign in with one
           click. Optional; password sign-in works on its own.
         </p>
       )}
@@ -292,7 +293,7 @@ export default async function OAuthPage({
                   </a>
                 )}
                 {isConfigured && (
-                  <form action={removeOauth.bind(null, id, p.name)} className="ml-auto">
+                  <ActionForm action={removeOauth.bind(null, id, p.name)} className="ml-auto">
                     <TypedConfirmButton
                       expected={p.name}
                       title={`Remove ${p.label}?`}
@@ -300,7 +301,7 @@ export default async function OAuthPage({
                       triggerLabel="Remove"
                       confirmLabel={`Remove ${p.label}`}
                     />
-                  </form>
+                  </ActionForm>
                 )}
               </div>
             </Card>
@@ -328,7 +329,7 @@ function ConfigForm({
   errorFix?: string;
 }): React.JSX.Element {
   return (
-    <form action={setOauth.bind(null, applicationId)} className="space-y-3">
+    <ActionForm action={setOauth.bind(null, applicationId)} className="space-y-3">
       <input type="hidden" name="provider" value={provider.name} />
 
       {error && (
@@ -348,7 +349,7 @@ function ConfigForm({
         />
       </Field>
 
-      <Field label="Client secret" hint="Encrypted at rest. Re-enter on every rotation — we don't show old secrets.">
+      <Field label="Client secret" hint="Encrypted at rest. Re-enter on every rotation, because we don't show old secrets.">
         <input
           type="password"
           name="clientSecret"
@@ -422,7 +423,7 @@ function ConfigForm({
       <div className="flex items-center gap-2 pt-2">
         <SubmitButton pendingLabel="Saving…">{existing ? 'Save changes' : 'Add provider'}</SubmitButton>
       </div>
-    </form>
+    </ActionForm>
   );
 }
 

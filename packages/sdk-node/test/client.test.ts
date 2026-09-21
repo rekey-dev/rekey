@@ -1,9 +1,9 @@
 /**
- * SDK unit tests — request shaping, config validation, error decoding.
+ * SDK unit tests, request shaping, config validation, error decoding.
  *
  * Uses a fake `fetch` so the suite is hermetic and fast. End-to-end coverage
  * of the actual HTTP wire lives in apps/api server tests; we don't duplicate
- * that here — instead we pin the contract on each side independently.
+ * that here, instead we pin the contract on each side independently.
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -187,7 +187,7 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     const fetchSpy = vi.fn().mockResolvedValue(
       jsonResponse(200, {
         success: true,
-        // `{items, page}` — the list envelope. Every list method resolves to
+        // `{items, page}`, the list envelope. Every list method resolves to
         // this; a bare array cannot report that it was truncated.
         data: {
           items: [{ slug: 'pro_monthly', amount: 999 }],
@@ -313,7 +313,7 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     const [url, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
     expect(url).toBe('https://api.example.com/api/v1/billing/subscription/cancel');
     expect(init.method).toBe('POST');
-    // Empty body, not `{atPeriodEnd: undefined}` — the API's own default is
+    // Empty body, not `{atPeriodEnd: undefined}`, the API's own default is
     // cancel-at-period-end and the SDK must not talk it out of that.
     expect(JSON.parse(init.body as string)).toEqual({});
     expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBe(
@@ -464,7 +464,7 @@ describe('auth.signUp / signIn / getCurrentUser', () => {
     const [url, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
     expect(url).toBe('https://api.example.com/api/v1/users/me/');
     const headers = init.headers as Record<string, string>;
-    // Authorization carries the SECRET key, not the user JWT — the user JWT goes in its own header.
+    // Authorization carries the SECRET key, not the user JWT, the user JWT goes in its own header.
     expect(headers.Authorization).toBe('Bearer rp_live_token');
     expect(headers['X-Rekey-User-Token']).toBe('user.jwt.value');
   });
@@ -495,6 +495,12 @@ describe('WEBHOOK_EVENTS registry', () => {
       'dunning.case_opened',
       'dunning.case_recovered',
       'dunning.case_exhausted',
+      'device.registered',
+      'device.released',
+      'device.blocked',
+      'device.unblocked',
+      'device.limit_reached',
+      'license.deactivated',
     ]);
     expect(WEBHOOK_EVENTS.map((e) => e.name)).toEqual(KNOWN_WEBHOOK_EVENTS);
     // Every entry carries a non-empty description for picker/autocomplete UIs.

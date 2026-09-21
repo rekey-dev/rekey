@@ -3,7 +3,7 @@
  *
  * Truncates the domain tables before each test so individual cases stay
  * isolated. We use `TRUNCATE ... RESTART IDENTITY CASCADE` to also reset
- * sequences and follow FK chains — slightly heavier than per-table DELETE
+ * sequences and follow FK chains, slightly heavier than per-table DELETE
  * but a lot less code than carefully ordering deletes.
  *
  * Postgres is not the only store holding per-test state, and the second one is
@@ -23,7 +23,7 @@
  *
  * It also installs the FAKE billing providers. The shipped factory only ever
  * returns real, network-talking providers and throws when an Application has
- * no credentials — deliberately, see `providers/index.ts`. Tests must not
+ * no credentials, deliberately, see `providers/index.ts`. Tests must not
  * reach api.stripe.com, so the seam is here in test-land rather than a
  * `NODE_ENV === 'test'` branch in the product. `pickProvider` and
  * `countryFromRequest` keep their real implementations: routing logic is
@@ -44,7 +44,7 @@ vi.mock('../src/modules/billing/providers/index.js', async (importOriginal) => {
     await importOriginal<typeof import('../src/modules/billing/providers/index.js')>();
   return {
     ...actual,
-    // A `vi.fn`, not a bare arrow: tests need to assert on the call log —
+    // A `vi.fn`, not a bare arrow: tests need to assert on the call log,
     // "plan creation did not ask for a provider" is only checkable that way,
     // and a mock that silently answers is exactly how the Stripe-required
     // regression stayed invisible.

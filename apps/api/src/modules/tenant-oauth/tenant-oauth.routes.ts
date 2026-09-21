@@ -1,5 +1,5 @@
 /**
- * Operator OAuth routes — social login for the PANEL. Public (the OAuth flow
+ * Operator OAuth routes, social login for the PANEL. Public (the OAuth flow
  * IS the authentication), mounted under /api/v1/tenant/auth.
  *
  *   GET  /api/v1/tenant/auth/oauth/providers            configured provider names
@@ -16,13 +16,10 @@ import { tenantOAuthService } from './tenant-oauth.service.js';
 import type { TenantDeviceContext } from '../tenant-auth/tenant-auth.service.js';
 import { ok, errs, ref } from '../../lib/openapi.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
+import { CREDENTIAL_BODY_LIMIT, TOKEN_BODY_LIMIT } from '../../lib/body-limits.js';
 
-/**
- * `TenantSignInOutcome` — the primary factor (the OAuth code exchange) passed; if the operator
- * has MFA enrolled this is an `MfaChallenge` instead of a full session.
- */
 const TenantSession = {
-  description: 'An operator session — token pair, memberships, and the active workspace.',
+  description: 'An operator session, token pair, memberships, and the active workspace.',
   allOf: [
     ref('OperatorSession'),
     {
@@ -69,7 +66,7 @@ const TenantSignInOutcome = {
 };
 
 /**
- * Shared across /start and /callback — both resolve provider config via `configFor`.
+ * Shared across /start and /callback, both resolve provider config via `configFor`.
  */
 const OAUTH_CONFIG_ERRORS = {
   404: 'OAUTH_PROVIDER_UNKNOWN — no such provider is registered.',
@@ -85,7 +82,7 @@ const CallbackBody = z.object({
   // its own one-shot cookie; here it is the key the PKCE verifier was stored
   // under. Optional so a caller that never started a PKCE flow still works.
   state: z.string().min(1).max(512).optional(),
-  // Single-use invite key — only consulted when this OAuth login would create
+  // Single-use invite key, only consulted when this OAuth login would create
   // a NEW operator under OPERATOR_SIGNUP_MODE='invite'.
   inviteKey: z.string().min(1).max(512).optional(),
 });
@@ -112,7 +109,7 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
           200: ok(
             {
               type: 'object',
-              description: 'A fixed, deployment-configured list — bounded by construction.',
+              description: 'A fixed, deployment-configured list, bounded by construction.',
               properties: {
                 providers: { type: 'array', items: { type: 'string', enum: ['google', 'github'] } },
               },
@@ -130,6 +127,7 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
   app.post(
     '/oauth/:provider/start',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       schema: {
         tags: ['Tenant · OAuth'],
         security: [],
@@ -147,7 +145,7 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
               properties: { authorizationUrl: { type: 'string', format: 'uri' } },
               required: ['authorizationUrl'],
             },
-            "The provider's authorization URL — redirect the browser here.",
+            "The provider's authorization URL, redirect the browser here.",
           ),
           ...errs(OAUTH_CONFIG_ERRORS),
         },
@@ -163,6 +161,7 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
   app.post(
     '/oauth/:provider/callback',
     {
+      bodyLimit: TOKEN_BODY_LIMIT,
       schema: {
         tags: ['Tenant · OAuth'],
         security: [],
@@ -207,19 +206,19 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
     },
   );
 
-  // ---- Operator sign-in by ID Token assertion -----------------------------
-  //
-  // Establishes an operator session from an OIDC ID Token this deployment
-  // issued for the Application named by OPERATOR_OIDC_ISSUER. It is how a
-  // Rekey Cloud buyer reaches the panel with the account they already signed
-  // in with on the marketing site, instead of being handed an invite key to
-  // paste — but nothing here knows about Rekey Cloud, billing, or invites.
+  // Operator sign-in by ID Token assertion: establishes an operator session
+  // from an OIDC ID Token this deployment issued for the Application named by
+  // OPERATOR_OIDC_ISSUER. It is how a Rekey Cloud buyer reaches the panel
+  // with the account they already signed in with on the marketing site,
+  // instead of being handed an invite key to paste, but nothing here knows
+  // about Rekey Cloud, billing, or invites.
   //
   // 404 rather than 403 when unconfigured: a deployment that has not opted in
   // should not advertise that the surface exists.
   app.post(
     '/oidc/assert',
     {
+      bodyLimit: TOKEN_BODY_LIMIT,
       config: { rateLimit: authRateLimit(20) },
       schema: {
         tags: ['Tenant · OAuth'],
@@ -228,7 +227,7 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
         description:
           'Accepts an ID Token minted by this deployment for the Application configured as ' +
           '`OPERATOR_OIDC_ISSUER`, carrying `OPERATOR_OIDC_CLIENT_ID` as its audience. The ' +
-          'token must be unexpired, carry a verified email, and has not been redeemed before — ' +
+          'token must be unexpired, carry a verified email, and has not been redeemed before, ' +
           'assertions are single-use. Matches an existing operator by verified email, and ' +
           'otherwise creates one subject to `OPERATOR_SIGNUP_MODE` exactly like any other ' +
           'first sign-in.',

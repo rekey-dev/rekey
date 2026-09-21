@@ -1,5 +1,5 @@
 /**
- * Operator (panel) OAuth — social login for OPERATORS, not end-users.
+ * Operator (panel) OAuth, social login for OPERATORS, not end-users.
  *
  * Verifies the provider-agnostic start/callback flow: configured-provider
  * discovery, authorization-URL build, verified-email gate, match-or-create of

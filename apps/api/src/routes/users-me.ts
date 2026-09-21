@@ -1,7 +1,7 @@
 /**
  * GET / PATCH /api/v1/users/me
  *
- * Returns — and now updates — the EndUser identified by the JWT in
+ * Returns, and now updates, the EndUser identified by the JWT in
  * `X-Rekey-User-Token`, scoped to the Application identified by the key in
  * `Authorization`.
  *
@@ -9,7 +9,7 @@
  * schema advertises it as the place for display name, avatar and custom
  * fields, but every write path was operator-side, so an integrator could show
  * a profile and never let the user edit it. It is a self-service route in the
- * strictest sense — there is no id anywhere in it, so "someone else's record"
+ * strictest sense, there is no id anywhere in it, so "someone else's record"
  * is not a request this route can express.
  *
  * This is the per-user counterpart to `/api/v1/me`, which returns the
@@ -39,7 +39,7 @@ import { authService } from '../modules/auth/auth.service.js';
 import { ok, errs, ref } from '../lib/openapi.js';
 
 // ---------------------------------------------------------------------------
-// Shared error fragments — every route here sits behind
+// Shared error fragments, every route here sits behind
 // requirePublishableOrSecretKey + requireScope('auth:read') + requireUserSession
 // (see middleware/api-key-auth.ts, middleware/user-session.ts).
 // ---------------------------------------------------------------------------
@@ -65,14 +65,14 @@ const USERS_ME_ERRORS = {
 } as const;
 
 /**
- * `{...EndUser, activeOrganizationId, …}` — the shape both GET and PATCH return.
+ * `{...EndUser, activeOrganizationId, …}`, the shape both GET and PATCH return.
  *
  * This `allOf` was **unsatisfiable** until 2.0.0-rc.3. The `EndUser` component
  * is generated from `EndUserDtoSchema`, a `.strict()` zod object, and the
  * generator stamped `additionalProperties: false` on it. That made
  * `activeOrganizationId` simultaneously required by the second branch and
  * forbidden by the first: no JSON object could ever validate against this
- * declaration. `fromZod` (lib/openapi.ts) now strips the closed flag — those
+ * declaration. `fromZod` (lib/openapi.ts) now strips the closed flag, those
  * components describe a floor, not a ceiling, which is what their own docblock
  * always claimed.
  *
@@ -132,7 +132,7 @@ const END_USER_SELF_SCHEMA = {
 };
 
 /**
- * Self-service write surface — a **closed** allowlist.
+ * Self-service write surface, a **closed** allowlist.
  *
  * `.strict()` matters as much as the field list: an unknown key is refused
  * loudly (400) rather than dropped silently, so an integrator who tries
@@ -142,7 +142,7 @@ const END_USER_SELF_SCHEMA = {
  * closed rather than a deny-list.
  *
  * The allowlist is about the TOP level of the body. One key inside `metadata`
- * is reserved too — `oidc`, the OIDC identity claims — and refused on the same
+ * is reserved too, `oidc`, the OIDC identity claims, and refused on the same
  * loud-not-silent principle by `updateSelf`; see lib/oidc-profile.ts.
  */
 const UpdateSelfBody = z
@@ -155,7 +155,7 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
   // Order matters: requireUserSession depends on request.application, which the
   // key hook sets.
   app.addHook('onRequest', requirePublishableOrSecretKey);
-  // No-ops for a publishable request by design — a publishable key carries no
+  // No-ops for a publishable request by design, a publishable key carries no
   // scopes, so route membership plus the session is what constrains it.
   app.addHook('onRequest', requireScope('auth:read'));
   app.addHook('onRequest', requireUserSession);
@@ -205,12 +205,12 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
     '/',
     {
       // Same credential tier as the GET (the plugin hooks above), plus
-      // `auth:write` — the read scope must not buy a write, and this is the
+      // `auth:write`, the read scope must not buy a write, and this is the
       // posture every other user-session write route in the codebase uses
       // (see modules/organizations/organizations.routes.ts). It stays a no-op
       // for publishable callers for the reason given above: route membership,
       // not scopes, is what authorizes them, and this route's membership is
-      // deliberate — a browser updating its own signed-in user's profile is
+      // deliberate, a browser updating its own signed-in user's profile is
       // the whole use case.
       onRequest: requireScope('auth:write'),
       schema: {
@@ -218,13 +218,13 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
         summary: "Update the current end-user's own record",
         description:
           'Updates the EndUser identified by the X-Rekey-User-Token JWT. The token IS the ' +
-          'authorizer, so this can only ever write the caller\'s own row — there is no id in ' +
+          'authorizer, so this can only ever write the caller\'s own row, there is no id in ' +
           'the path and the write is scoped to (token subject, key\'s Application). ' +
           '**MERGE SEMANTICS (read this):** `metadata` is merged SHALLOWLY at the top level. ' +
           'A key you omit is left untouched; a key you send REPLACES that top-level key ' +
           'wholesale (nested objects are not deep-merged); a key sent as `null` is DELETED; ' +
           'and `"metadata": null` clears the whole object. Omitting `metadata` entirely ' +
-          'changes nothing. Fields other than `metadata` are rejected with 400 — email, role, ' +
+          'changes nothing. Fields other than `metadata` are rejected with 400, email, role, ' +
           'password and erasure state are not self-service and never will be on this route. ' +
           'One key INSIDE `metadata` is likewise refused (400 `METADATA_KEY_RESERVED`): `oidc`, ' +
           'which holds the OpenID Connect identity claims the Application asserts about this ' +
@@ -238,7 +238,7 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
           type: 'object',
           properties: {
             metadata: {
-              // Nullable, hence no `type` — `null` is the "clear it" signal and
+              // Nullable, hence no `type`, `null` is the "clear it" signal and
               // a bare `type: 'object'` would reject it before the handler.
               description:
                 'Free-form per-app metadata. Shallow-merged over what is stored; a top-level ' +

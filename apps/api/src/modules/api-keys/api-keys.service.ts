@@ -4,9 +4,9 @@
  * Mints and lists Application-scoped secret keys. The prefix follows the
  * Application's `environment`: PRODUCTION apps mint `rp_live_…`, STAGING and
  * DEVELOPMENT apps mint `rp_test_…`. That prefix is a label for humans, not a
- * switch — every key has exactly the reach its Application has.
+ * switch, every key has exactly the reach its Application has.
  *
- * The raw key is returned **once at creation** and never again — only the
+ * The raw key is returned **once at creation** and never again, only the
  * SHA-256 hash is stored.
  *
  * Verification (looking up an Application by presented key) lives in
@@ -16,10 +16,11 @@
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { generateSecretKey, hashKey } from '../../lib/keys.js';
+import { forgetVerifiedKey } from '../../lib/rate-limit.js';
 import type { ApiKey, Application } from '@prisma/client';
 
 /**
- * Public-safe shape of an API key — `keyHash` stripped. The hash isn't
+ * Public-safe shape of an API key, `keyHash` stripped. The hash isn't
  * cryptographically secret (it's a deterministic derivation of the raw
  * key), but exposing it serves no caller and breaks the principle that
  * the hash never leaves the DB.
@@ -27,7 +28,6 @@ import type { ApiKey, Application } from '@prisma/client';
 export type PublicApiKey = Omit<ApiKey, 'keyHash'>;
 
 function redact(key: ApiKey): PublicApiKey {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { keyHash, ...rest } = key;
   return rest;
 }
@@ -49,7 +49,7 @@ const DEFAULT_SCOPES = ['*'];
 /**
  * Hard ceiling on ACTIVE keys per Application, enforced at mint time.
  *
- * Exported because it is what makes this list bounded by construction — the
+ * Exported because it is what makes this list bounded by construction, the
  * three routes that serve it lean on that fact (two return a bare array,
  * allow-listed in `test/openapi-contract.test.ts`; the operator-PAT one
  * reports this value as its page `limit`).
@@ -67,7 +67,7 @@ export const apiKeysService = {
 
   async create(input: CreateApiKeyInput): Promise<CreateApiKeyResult> {
     // A non-future expiry would mint a key that `verify()` immediately rejects
-    // as expired — a dead-on-arrival credential the operator was told was
+    // as expired, a dead-on-arrival credential the operator was told was
     // "created". Fail fast with a clear error instead.
     if (input.expiresAt !== undefined && input.expiresAt.getTime() <= Date.now()) {
       throw new RekeyError({
@@ -135,13 +135,16 @@ export const apiKeysService = {
       });
     }
     if (key.revokedAt !== null) {
-      // Idempotent — re-revoking is fine, just return the existing record.
+      // Idempotent, re-revoking is fine, just return the existing record.
       return redact(key);
     }
     const revoked = await prisma.apiKey.update({
       where: { id },
       data: { revokedAt: new Date() },
     });
+    // A revoked key must not keep passing a rate-limited address on the
+    // strength of having verified earlier (lib/rate-limit.ts).
+    await forgetVerifiedKey(key.keyHash);
     return redact(revoked);
   },
 

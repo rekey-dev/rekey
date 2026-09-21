@@ -2,7 +2,7 @@
 
 /**
  * Per-app error boundary. Catches everything BELOW `[slug]/layout.tsx`, so the
- * merchant's own header — their name, their logo, their colours — stays on
+ * merchant's own header, their name, their logo, their colours, stays on
  * screen and the customer never loses the sense of whose site they are on.
  *
  * The dashboard under here does four billing reads (`page.tsx`); any one of

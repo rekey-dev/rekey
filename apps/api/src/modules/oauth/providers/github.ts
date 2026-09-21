@@ -1,7 +1,7 @@
 /**
  * GitHub OAuth provider.
  *
- * GitHub doesn't return id_tokens — we exchange the code for an access
+ * GitHub doesn't return id_tokens, we exchange the code for an access
  * token, then call /user and /user/emails to identify the account.
  */
 
@@ -69,7 +69,7 @@ export class GithubProvider implements OAuthProvider {
 
     // GitHub /user.email is best-effort (only populated when the user's
     // public profile email is set). Always consult /user/emails so we can
-    // surface verification status — required by the OAuth auto-link gate.
+    // surface verification status, required by the OAuth auto-link gate.
     let email: string | null = user.email;
     let emailVerified = false;
     const emailsRes = await fetchJsonWithTimeout(EMAILS_URL, {

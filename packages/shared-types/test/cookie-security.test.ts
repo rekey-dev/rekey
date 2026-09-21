@@ -3,8 +3,8 @@
  *
  * The regression this pins: every cookie in the monorepo decided `Secure` with
  * `process.env.NODE_ENV === 'production'`. A deployment behind TLS whose
- * NODE_ENV was unset — or `staging`, or anything the Next build did not inline
- * as exactly `"production"` — shipped its operator and end-user session cookies
+ * NODE_ENV was unset, or `staging`, or anything the Next build did not inline
+ * as exactly `"production"`, shipped its operator and end-user session cookies
  * without `Secure`, and a browser will replay those over plain HTTP.
  */
 

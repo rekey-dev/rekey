@@ -1,10 +1,10 @@
 /**
- * DEFAULT_TENANT_LIMITS — the ceilings a deployment stamps on every workspace
+ * DEFAULT_TENANT_LIMITS, the ceilings a deployment stamps on every workspace
  * it creates.
  *
  * `Tenant.limits` is otherwise only ever written after the fact by the
  * super-admin endpoint, so a workspace nobody runs that endpoint against is
- * unbounded — which is every workspace a self-serve sign-up produces. This
+ * unbounded, which is every workspace a self-serve sign-up produces. This
  * covers the closing of that gap, and the three properties that make it safe:
  *
  *   1. **Unset = unlimited.** A deployment that never sets the variable behaves
@@ -15,7 +15,7 @@
  *      applied on three of four is not a default; it is a workaround waiting to
  *      be found.
  *   3. **An explicit value wins.** The super-admin path is how a bespoke
- *      workspace gets provisioned, so limits passed there beat the default —
+ *      workspace gets provisioned, so limits passed there beat the default,
  *      including an explicit `{}`, meaning "unlimited, deliberately".
  *
  * The variable is read live from process.env by lib/tenant-limits.ts, so each
@@ -23,7 +23,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { assertDefaultTenantLimitsValid } from '../src/lib/tenant-limits.js';
@@ -71,7 +71,7 @@ describe('DEFAULT_TENANT_LIMITS', () => {
   function createProductionApp(
     tenantId: string,
     slug: string,
-  ): ReturnType<FastifyInstance['inject']> {
+  ): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'POST',
       url: '/api/v1/admin/applications',
@@ -114,7 +114,7 @@ describe('DEFAULT_TENANT_LIMITS', () => {
     expect(second.statusCode).toBe(403);
     expect(second.json().error.code).toBe('TENANT_QUOTA_EXCEEDED');
 
-    // Non-production environments are still free — the ceiling counts PRODUCTION only.
+    // Non-production environments are still free, the ceiling counts PRODUCTION only.
     const dev = await app.inject({
       method: 'POST',
       url: '/api/v1/admin/applications',

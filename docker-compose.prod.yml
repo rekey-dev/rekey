@@ -66,24 +66,31 @@ services:
     networks: [rekey-internal]
 
   redis:
-    image: redis:7-alpine
+    image: valkey/valkey:8.1-alpine
     restart: unless-stopped
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
     # AOF persistence so BullMQ webhook-delivery jobs (delayed retries) survive a
-    # Redis restart. The DB retry poller backstops any gap; durable queue state
+    # restart. The DB retry poller backstops any gap; durable queue state
     # avoids needless re-deliveries on a bounce.
+    #
+    # This mounts a NEW volume (rekey_valkey), not the old rekey_redis one: a
+    # Redis 7.4 AOF/RDB file (anything written since the redis:7-alpine tag
+    # started resolving to 7.4) makes Valkey refuse to start, which would turn
+    # this image swap into a boot-time outage. Starting empty is safe — see
+    # "Why Valkey, not Redis" in DEPLOY.md for exactly what resets and why.
+    # `docker volume rm rekey_redis` once you've confirmed you don't need it.
     command:
       [
-        "redis-server",
+        "valkey-server",
         "--appendonly",
         "yes",
         "--requirepass",
         "${REDIS_PASSWORD}",
       ]
     environment:
-      # redis-cli reads this, so the healthcheck doesn't put the password in an
+      # valkey-cli reads this, so the healthcheck doesn't put the password in an
       # argv element visible via `docker inspect`.
       #
       # Plain ${VAR} rather than ${VAR:?err}: the fail-fast form is reserved for
@@ -95,9 +102,9 @@ services:
       # `openssl rand -hex 24` is; a password containing @ : / or # would not be.
       REDISCLI_AUTH: ${REDIS_PASSWORD}
     volumes:
-      - rekey_redis:/data
+      - rekey_valkey:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -136,6 +143,17 @@ services:
       # Redis, so this is the backstop for a Redis outage, not the normal
       # propagation path. 0 disables the cache. See docs/organization-roles.md.
       ORG_ROLE_CACHE_TTL_MS: ${ORG_ROLE_CACHE_TTL_MS:-}
+      OPERATOR_AUTH_CACHE_TTL_MS: ${OPERATOR_AUTH_CACHE_TTL_MS:-}
+
+      # ── Token lifetimes ──────────────────────────────────────────────────
+      # Refresh tokens rotate on every use and slide, so these windows only
+      # have to cover the longest gap between two uses, not how long someone
+      # stays signed in. Empty = the values they were hard-coded to before
+      # they became configurable: 15 minute access, 30 day refresh.
+      END_USER_ACCESS_TOKEN_TTL_SECONDS: ${END_USER_ACCESS_TOKEN_TTL_SECONDS:-}
+      END_USER_REFRESH_TOKEN_TTL_DAYS: ${END_USER_REFRESH_TOKEN_TTL_DAYS:-}
+      OPERATOR_ACCESS_TOKEN_TTL_SECONDS: ${OPERATOR_ACCESS_TOKEN_TTL_SECONDS:-}
+      OPERATOR_REFRESH_TOKEN_TTL_DAYS: ${OPERATOR_REFRESH_TOKEN_TTL_DAYS:-}
 
       # ── Secrets ──────────────────────────────────────────────────────────
       JWT_SECRET: ${JWT_SECRET}
@@ -174,10 +192,35 @@ services:
       # Empty = unset, and unset means emails omit the button rather than link
       # somewhere broken.
       DEFAULT_APP_URL: ${DEFAULT_APP_URL:-}
-      # Behind a reverse proxy: a hop count or an IP/CIDR allowlist. Unset means
-      # X-Forwarded-For is not trusted, so rate limits and lockout key on the
-      # proxy's IP rather than the real client.
-      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      # Whose X-Forwarded-For to believe: the panel and the portal, by their
+      # fixed addresses on the private rekey-edge network below, and nobody
+      # else. Both call the API server-side and forward the visitor's address;
+      # without this every operator and every portal visitor shares one bucket,
+      # and one person spraying the login page locks every operator out.
+      #
+      # Never a hop count here: the API also sits on dokploy-network, which
+      # other Dokploy apps share, and a hop count believes the header from any
+      # of them (they could then claim an ADMIN_IP_ALLOWLIST address). Traefik
+      # is not trusted by address (it has no fixed one); it proves itself with
+      # API_PROXY_SECRET below. docs/rate-limits.md.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-${REKEY_PANEL_EDGE_IP:-10.203.53.10},${REKEY_PORTAL_EDGE_IP:-10.203.53.11}}
+      # --- Traefik proxy secret (rate limiting; see docs/rate-limits.md) ---
+      # Traefik sends this as X-Rekey-Proxy-Secret on every request (label
+      # below), overwriting any client copy; only then does the API believe
+      # X-Forwarded-For, taking the API_PROXY_HOPS-th entry from the right
+      # (1 = Traefik alone; 2 = a CDN in front, which Traefik must be told to
+      # trust). REQUIRED, like PANEL_PROXY_SECRET below: without it public
+      # traffic through Traefik gets no per-IP limits at all, only per-key,
+      # per-account and per-Application ones, and the only sign of it is one
+      # line in the boot log. A self-hoster who reads neither is running with
+      # the sign-in and credential-failure limits off. Generate with:
+      # openssl rand -hex 32
+      API_PROXY_SECRET: ${API_PROXY_SECRET:?set API_PROXY_SECRET in .env, e.g. openssl rand -hex 32}
+      API_PROXY_HOPS: ${API_PROXY_HOPS:-1}
+      # Not needed in this file: the panel and portal reach the API over
+      # rekey-edge and are trusted by address. Set it (on the API and on both
+      # of them) only if they call the API some other way.
+      INTERNAL_CALLER_SECRET: ${INTERNAL_CALLER_SECRET:-}
 
       # ── Transactional email (Resend) ─────────────────────────────────────
       # Unset = Rekey sends no mail and returns raw tokens to the caller
@@ -196,6 +239,12 @@ services:
       # open (default) | disabled. Pairs with DEFAULT_TENANT_LIMITS — a ceiling
       # per workspace means little if anyone can mint a fresh one.
       WORKSPACE_CREATION: ${WORKSPACE_CREATION:-}
+      # Whether OWNER/ADMIN may grant a subscription from the panel with no
+      # payment provider behind it: enabled (default) | disabled. Granting only;
+      # cancelling is never gated. Set `disabled` if this deployment SELLS to the
+      # workspaces it hosts, where a granted subscription can write the granter's
+      # own allowance; granting then stays on the super-admin key.
+      TENANT_SUBSCRIPTION_GRANTS: ${TENANT_SUBSCRIPTION_GRANTS:-}
       # Starting ceilings for every workspace this deployment creates (JSON,
       # TenantLimitsSchema — e.g. {"maxProductionApps":1}). Empty = unlimited.
       DEFAULT_TENANT_LIMITS: ${DEFAULT_TENANT_LIMITS:-}
@@ -242,10 +291,36 @@ services:
       # "true" lets outbound webhooks target private/internal addresses. Leave
       # empty on an internet-facing deployment: it is the SSRF guard.
       WEBHOOK_ALLOW_PRIVATE_TARGETS: ${WEBHOOK_ALLOW_PRIVATE_TARGETS:-}
-      # Global rate limit, and the higher per-key cap for usage ingestion.
-      # Empty = 100 req / 60s, and 1000 for POST /api/v1/usage/record.
+      # How long a processed inbound billing webhook is remembered, which is
+      # what makes a provider's redelivery idempotent. Empty = kept forever;
+      # set a number of days to turn pruning on.
+      WEBHOOK_EVENT_RETENTION_DAYS: ${WEBHOOK_EVENT_RETENTION_DAYS:-}
+      # Days the append-only log tables keep rows in Postgres (security_events,
+      # email_logs, finished webhook_deliveries). Empty = kept forever; set a
+      # number of days to turn pruning on. usage_records is a billing ledger
+      # and is never pruned by this.
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-}
+      # Optional S3-compatible archive (Cloudflare R2 or AWS S3) rows are written
+      # to before they are pruned. Endpoint, bucket and both keys together, or
+      # none: a partial set stops the API from booting. Region empty = auto.
+      LOG_ARCHIVE_S3_ENDPOINT: ${LOG_ARCHIVE_S3_ENDPOINT:-}
+      LOG_ARCHIVE_S3_BUCKET: ${LOG_ARCHIVE_S3_BUCKET:-}
+      LOG_ARCHIVE_S3_REGION: ${LOG_ARCHIVE_S3_REGION:-}
+      LOG_ARCHIVE_S3_ACCESS_KEY_ID: ${LOG_ARCHIVE_S3_ACCESS_KEY_ID:-}
+      LOG_ARCHIVE_S3_SECRET_ACCESS_KEY: ${LOG_ARCHIVE_S3_SECRET_ACCESS_KEY:-}
+      LOG_ARCHIVE_S3_PREFIX: ${LOG_ARCHIVE_S3_PREFIX:-}
+      # Rate limits, per RATE_LIMIT_WINDOW_MS (60s). Empty = the defaults:
+      # 100 per client IP unauthenticated, 600 per operator or signed-in end
+      # user, 3000 per IP across those, 6000 per secret API key (and for
+      # POST /api/v1/usage/record), 100 rejected credentials per IP, 60
+      # operator refreshes per IP. Sizing: docs/rate-limits.md.
       RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-}
       RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-}
+      RATE_LIMIT_AUTHENTICATED_MAX: ${RATE_LIMIT_AUTHENTICATED_MAX:-}
+      RATE_LIMIT_API_KEY_MAX: ${RATE_LIMIT_API_KEY_MAX:-}
+      RATE_LIMIT_AUTHENTICATED_IP_MAX: ${RATE_LIMIT_AUTHENTICATED_IP_MAX:-}
+      RATE_LIMIT_AUTH_FAILURE_MAX: ${RATE_LIMIT_AUTH_FAILURE_MAX:-}
+      RATE_LIMIT_REFRESH_MAX: ${RATE_LIMIT_REFRESH_MAX:-}
       RATE_LIMIT_USAGE_MAX: ${RATE_LIMIT_USAGE_MAX:-}
       # Prisma connection-pool sizing. Empty = 20 connections / 10s timeout;
       # read the docblock in apps/api/src/lib/prisma.ts before lowering it, as
@@ -258,8 +333,18 @@ services:
       - traefik.http.routers.rekey-api.entrypoints=websecure
       - traefik.http.routers.rekey-api.tls.certresolver=letsencrypt
       - traefik.http.services.rekey-api.loadbalancer.server.port=3030
+      # Proxy secret (see API_PROXY_SECRET above).
+      - traefik.http.middlewares.rekey-api-proxy-secret.headers.customrequestheaders.X-Rekey-Proxy-Secret=${API_PROXY_SECRET}
+      - traefik.http.routers.rekey-api.middlewares=rekey-api-proxy-secret
     # dokploy-network: reachable by Traefik. rekey-internal: reach postgres/redis.
-    networks: [rekey-internal, dokploy-network]
+    # rekey-edge: the panel and portal reach it here, under a name that exists
+    # on no other network, so their calls always arrive from the fixed
+    # addresses TRUSTED_PROXIES names.
+    networks:
+      rekey-internal: {}
+      dokploy-network: {}
+      rekey-edge:
+        aliases: [rekey-api-edge]
 
   panel:
     build:
@@ -283,9 +368,22 @@ services:
       - api
     environment:
       NODE_ENV: production
-      # Server-side panel → API calls stay on the private network.
-      REKEY_URL: http://api:3030
+      # Server-side panel → API calls stay on the private rekey-edge network,
+      # from the fixed address the API trusts (see TRUSTED_PROXIES).
+      REKEY_URL: http://rekey-api-edge:3030
       PANEL_URL: ${PANEL_URL:-https://${PANEL_HOST}}
+      # Traefik is the one proxy in front of the panel. Count every proxy that
+      # appends to X-Forwarded-For (a CDN in front of Traefik makes it 2).
+      PANEL_TRUSTED_PROXIES: ${PANEL_TRUSTED_PROXIES:-1}
+      # Traefik presents this on every request (label below), and the panel
+      # believes X-Forwarded-For only when it does, so nothing that reaches the
+      # panel around Traefik can pick the IP the API rate-limits sign-in on.
+      # Required: without it every operator would share Traefik's address.
+      # Generate with: openssl rand -hex 32
+      PANEL_PROXY_SECRET: ${PANEL_PROXY_SECRET:?set PANEL_PROXY_SECRET in .env, e.g. openssl rand -hex 32}
+      # Optional here (the panel reaches the API on the private network). When
+      # set, sent to the API as X-Rekey-Caller-Secret; must match the API's value.
+      INTERNAL_CALLER_SECRET: ${INTERNAL_CALLER_SECRET:-}
       # Leave empty. Session cookies get `Secure` from the request — Traefik
       # terminates TLS and sets X-Forwarded-Proto: https, which is what the
       # panel reads. Only set this (to "false") if you front this stack with
@@ -307,7 +405,14 @@ services:
       - traefik.http.routers.rekey-panel.entrypoints=websecure
       - traefik.http.routers.rekey-panel.tls.certresolver=letsencrypt
       - traefik.http.services.rekey-panel.loadbalancer.server.port=3031
-    networks: [rekey-internal, dokploy-network]
+      # Sets (and so overwrites any client copy of) the header the panel checks
+      # against PANEL_PROXY_SECRET before believing X-Forwarded-For.
+      - traefik.http.middlewares.rekey-panel-proxy-secret.headers.customrequestheaders.X-Rekey-Proxy-Secret=${PANEL_PROXY_SECRET}
+      - traefik.http.routers.rekey-panel.middlewares=rekey-panel-proxy-secret
+    networks:
+      dokploy-network: {}
+      rekey-edge:
+        ipv4_address: ${REKEY_PANEL_EDGE_IP:-10.203.53.10}
 
   # Hosted multi-app customer portal (Portal V2) at <PORTAL_HOST>/<slug>.
   # ONE deployment serves every opted-in Application — no per-app deploy, no
@@ -334,8 +439,19 @@ services:
       - api
     environment:
       NODE_ENV: production
-      # Server-side portal → API calls stay on the private network.
-      REKEY_URL: http://api:3030
+      # Server-side portal → API calls stay on the private rekey-edge network.
+      REKEY_URL: http://rekey-api-edge:3030
+      # --- Visitor address forwarding (rate limiting; docs/rate-limits.md) ---
+      # The portal forwards the visitor's address to the API so per-IP limits
+      # are per visitor, not per portal, but only for a request that carries
+      # PORTAL_PROXY_SECRET as X-Rekey-Proxy-Secret (Traefik adds it, label
+      # below), so a container that reaches the portal around Traefik cannot
+      # choose the address. Hops: proxies in front (1 = Traefik alone).
+      # REQUIRED: unset, the portal's own address is what every visitor's
+      # requests are counted against, so one visitor can exhaust the bucket
+      # for all of them. Generate with: openssl rand -hex 32
+      PORTAL_TRUSTED_PROXY_HOPS: ${PORTAL_TRUSTED_PROXY_HOPS:-1}
+      PORTAL_PROXY_SECRET: ${PORTAL_PROXY_SECRET:?set PORTAL_PROXY_SECRET in .env, e.g. openssl rand -hex 32}
       # Public URL of this portal — checkout success/cancel return links.
       PORTAL_BASE_URL: ${PORTAL_BASE_URL:-https://${PORTAL_HOST}}
       # Leave empty — see the panel service above.
@@ -346,12 +462,18 @@ services:
       - traefik.http.routers.rekey-portal.entrypoints=websecure
       - traefik.http.routers.rekey-portal.tls.certresolver=letsencrypt
       - traefik.http.services.rekey-portal.loadbalancer.server.port=3050
-    networks: [rekey-internal, dokploy-network]
+      # Proxy secret (see PORTAL_PROXY_SECRET above).
+      - traefik.http.middlewares.rekey-portal-proxy-secret.headers.customrequestheaders.X-Rekey-Proxy-Secret=${PORTAL_PROXY_SECRET}
+      - traefik.http.routers.rekey-portal.middlewares=rekey-portal-proxy-secret
+    networks:
+      dokploy-network: {}
+      rekey-edge:
+        ipv4_address: ${REKEY_PORTAL_EDGE_IP:-10.203.53.11}
 
 
 volumes:
   rekey_postgres:
-  rekey_redis:
+  rekey_valkey:
 
 networks:
   dokploy-network:
@@ -360,3 +482,13 @@ networks:
   # shared network so generic names can't collide with other Dokploy apps.
   rekey-internal:
     driver: bridge
+  # Private to this stack: the panel and portal reach the API over it from
+  # fixed addresses, which is what lets the API trust their forwarded client
+  # IP without trusting anything on dokploy-network. The subnet sits outside
+  # Docker's default pools; if it collides with a network on your host, set
+  # REKEY_EDGE_SUBNET and the two REKEY_*_EDGE_IP addresses inside it.
+  rekey-edge:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${REKEY_EDGE_SUBNET:-10.203.53.0/28}

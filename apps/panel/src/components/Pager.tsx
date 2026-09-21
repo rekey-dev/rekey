@@ -1,5 +1,5 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 
 /** Page sizes offered by the per-page selector. */
 export const PAGE_SIZES = [10, 25, 100] as const;
@@ -29,8 +29,8 @@ export function readOffset(sp: SearchParams): number {
  * through (`lib/paginate.ts`). This component neither guesses nor infers.
  *
  * It used to do both, in turn: first `count === pageSize`, which is wrong for
- * every result set that is an exact multiple of the page size — 25 rows at
- * 25/page rendered a "Next →" onto a page that said "No results" — and then an
+ * every result set that is an exact multiple of the page size, 25 rows at
+ * 25/page rendered a "Next →" onto a page that said "No results", and then an
  * over-fetch of one extra row, which was correct but could not work at the
  * 100/page size the API caps `limit` at. Both are gone.
  *
@@ -48,9 +48,9 @@ export function Pager({
   basePath: string;
   offset: number;
   pageSize: number;
-  /** Rows actually rendered on this page — drives the "Showing 1–25" label. */
+  /** Rows actually rendered on this page, drives the "Showing 1–25" label. */
   count: number;
-  /** True when a further page exists — the API's `page.hasMore`. */
+  /** True when a further page exists, the API's `page.hasMore`. */
   hasMore: boolean;
   extraParams?: Record<string, string>;
 }): React.JSX.Element | null {

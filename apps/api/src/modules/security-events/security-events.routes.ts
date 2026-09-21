@@ -1,14 +1,15 @@
 /**
  * Operator-facing security audit log.
  *
- * GET /api/v1/tenant/security-events — recent security events for the active
+ * GET /api/v1/tenant/security-events, recent security events for the active
  * workspace (sign-ins, session kill-switch, API-key lifecycle, …). OWNER/ADMIN
  * only: the log carries IPs and event metadata that a plain MEMBER shouldn't
  * see. Read-only; the log is append-only and written best-effort elsewhere.
  *
- * Filters: `applicationId`, `type`, `actorType`, plus an inclusive
+ * Filters: `applicationId`, `type`, `actorType`, `endUserId` (events ABOUT
+ * that end-user from any actor, not just ones they performed), plus an inclusive
  * `from`/`to` createdAt window. `?format=csv` returns a downloadable CSV
- * instead of JSON — capped at CSV_MAX_ROWS rows (newest first), same
+ * instead of JSON, capped at CSV_MAX_ROWS rows (newest first), same
  * OWNER/ADMIN gate.
  */
 
@@ -23,7 +24,7 @@ import { okPage, errs, ref } from '../../lib/openapi.js';
 import { paged } from '../../lib/pagination.js';
 
 /**
- * The 401/403 pair every `/api/v1/tenant/security-events` route shares —
+ * The 401/403 pair every `/api/v1/tenant/security-events` route shares,
  * `requireTenantSession` (401) runs as an `onRequest` hook, and
  * `requireTenantRole(['OWNER', 'ADMIN'])` (403) as the route `preHandler`,
  * both preceding the handler.
@@ -43,6 +44,7 @@ const Query = z.object({
   applicationId: z.string().min(1).optional(),
   type: z.string().min(1).max(80).optional(),
   actorType: z.enum(['operator', 'end_user', 'system']).optional(),
+  endUserId: z.string().min(1).max(64).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
   sort: z.enum(['createdAt', 'type']).optional(),
@@ -69,6 +71,7 @@ export async function securityEventsRoutes(app: FastifyInstance): Promise<void> 
   app.get(
     '/',
     {
+      config: { access: { scope: 'activity:read' } },
       preHandler: requireTenantRole(['OWNER', 'ADMIN']),
       schema: {
         tags: ['Tenant · Security'],
@@ -82,6 +85,14 @@ export async function securityEventsRoutes(app: FastifyInstance): Promise<void> 
             applicationId: { type: 'string' },
             type: { type: 'string', maxLength: 80 },
             actorType: { type: 'string', enum: ['operator', 'end_user', 'system'] },
+            endUserId: {
+              type: 'string',
+              maxLength: 64,
+              description:
+                'Events about this end-user from ANY actor: their own sign-ins and device registrations, ' +
+                'and what operators or the system did to them (a blocked device, an account created by a ' +
+                'billing webhook). Not equivalent to `actorType=end_user`, which misses the latter.',
+            },
             from: { type: 'string', format: 'date-time' },
             to: { type: 'string', format: 'date-time' },
             sort: { type: 'string', enum: ['createdAt', 'type'] },
@@ -119,13 +130,14 @@ export async function securityEventsRoutes(app: FastifyInstance): Promise<void> 
       const q = Query.parse(req.query);
 
       if (q.format === 'csv') {
-        // CSV export ignores limit/offset — it's "give me the (filtered) log
+        // CSV export ignores limit/offset, it's "give me the (filtered) log
         // as a file", newest first, capped so a huge tenant can't OOM us.
         const rows = await listSecurityEvents({
           tenantId: req.tenantId!,
           applicationId: q.applicationId,
           type: q.type,
           actorType: q.actorType,
+          endUserId: q.endUserId,
           from: q.from,
           to: q.to,
           limit: CSV_MAX_ROWS,
@@ -156,11 +168,12 @@ export async function securityEventsRoutes(app: FastifyInstance): Promise<void> 
         applicationId: q.applicationId,
         type: q.type,
         actorType: q.actorType,
+        endUserId: q.endUserId,
         from: q.from,
         to: q.to,
       };
       // `listSecurityEvents` clamps `limit` to `cap` (200 here) and defaults it
-      // to 50 — mirror both so `page` describes the window that was served.
+      // to 50, mirror both so `page` describes the window that was served.
       const limit = Math.min(q.limit ?? 50, 200);
       const offset = q.offset ?? 0;
       const [items, total] = await Promise.all([

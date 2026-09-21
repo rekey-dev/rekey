@@ -15,7 +15,7 @@
  *      consume this (forgot-password, verify-email) fall back to the
  *      legacy "return the raw token to the API caller" behaviour.
  *
- * Every send — success, error, or no_transport — is recorded in `EmailLog`
+ * Every send, success, error, or no_transport, is recorded in `EmailLog`
  * at this boundary (see `recordLog`) so the panel's per-app / per-tenant
  * log views capture all mail regardless of which caller invoked us. Logging
  * never throws into the send path.
@@ -102,7 +102,17 @@ async function withEmailDeadline<T>(work: Promise<T>): Promise<T> {
 export type SendOutcome =
   | { kind: 'sent'; messageId: string | null; via: SentVia }
   | { kind: 'no_transport' }
-  | { kind: 'error'; message: string };
+  /**
+   * Nothing was sent and the caller must withhold whatever token it minted.
+   *
+   * `suppressed` marks the sub-case where the refusal was a CONFIGURATION
+   * CHOICE, the Application's email switch, a disabled event, or an address
+   * on the suppression list, rather than a transport that broke. Callers that
+   * raise a delivery-failure alarm must not raise it for this: an operator who
+   * turns an event off should not then find their own activity feed filling
+   * with `auth.email_delivery_failed` alerts about the thing they just did.
+   */
+  | { kind: 'error'; message: string; suppressed?: true };
 
 export interface SendInput {
   to: string;
@@ -115,27 +125,26 @@ export interface SendInput {
  * A send that FAILED is not a send that was never attempted.
  *
  * The auth flows fall back to returning the raw token when there is no mail
- * transport — that's the documented "your server forwards it" contract. They
- * used to take the same branch on `{kind:'error'}`, so a lapsed Resend key or a
- * blown quota silently turned every password-reset and magic-link request into
- * a token handed back in the JSON body: straight into request logs, error
- * trackers, and anything else recording responses, while the endpoint still
- * answered 200 and nobody noticed.
+ * transport (the documented "your server forwards it" contract). They used
+ * to take the same branch on `{kind:'error'}`, so a lapsed Resend key or a
+ * blown quota silently turned every password-reset and magic-link request
+ * into a token handed back in the JSON response body, while the endpoint
+ * still answered 200.
  *
- * Callers now withhold the token on `error` and call this instead. The response
- * shape must stay IDENTICAL to the delivered path: only an existing user
- * triggers a send at all, so surfacing the failure to the caller would turn
- * these endpoints into email-enumeration oracles. The operator learns about it
- * out of band — the EmailLog row (recorded for every outcome, including this
- * one) plus this security event, which shows up in the app's activity feed.
+ * Callers now withhold the token on `error` and call this instead. The
+ * response shape must stay identical to the delivered path: only an existing
+ * user triggers a send at all, so surfacing the failure would turn these
+ * endpoints into email-enumeration oracles. The operator learns via the
+ * EmailLog row (recorded for every outcome) plus this security event, which
+ * shows up in the app's activity feed.
  */
 export async function recordAuthEmailDeliveryFailure(input: {
-  /** null on the operator surface — those flows aren't Application-scoped. */
+  /** null on the operator surface, those flows aren't Application-scoped. */
   applicationId: string | null;
   /**
    * REQUIRED for the event to be visible. `listSecurityEvents` filters on
    * tenantId, so a row written without one can never be returned by the only
-   * consumer — the panel's security-events page. Omitting it made the
+   * consumer, the panel's security-events page. Omitting it made the
    * compensating control this whole fix leans on unobservable.
    */
   tenantId: string | null;
@@ -169,13 +178,12 @@ export interface SendLogMeta {
  * shape. Accepts both the current discriminated form and the pre-SMTP
  * `{ resend: { apiKey } }`. Returns `null` when nothing usable is present.
  *
- * The legacy branch is KEPT deliberately (reviewed for removal in 2.0.0). The
+ * The legacy branch stays deliberately (candidate for removal in 2.0.0). The
  * blobs are encrypted with ENCRYPTION_KEY, so no SQL migration can rewrite
- * them — conversion would need a bespoke key-holding backfill script. And the
- * failure mode of dropping it is silent: `null` here falls through to the
- * default transport, so an Application whose Resend key was stored before the
- * SMTP change would simply stop delivering its own verification and
- * password-reset mail with no error anywhere. Six lines is cheaper than that.
+ * them; converting them needs a bespoke key-holding backfill script. Dropping
+ * this branch fails silently: `null` falls through to the default transport,
+ * so an Application whose Resend key predates the SMTP change would simply
+ * stop delivering verification and password-reset mail with no error anywhere.
  */
 export function normalizeCredentials(raw: unknown): EmailCredentials | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -217,7 +225,7 @@ function resolveCredentials(application: Application): EmailCredentials | null {
   try {
     return normalizeCredentials(decryptJson<unknown>(application.emailCredentialsCiphertext));
   } catch {
-    // Malformed ciphertext is treated the same as no creds — fall back to
+    // Malformed ciphertext is treated the same as no creds, fall back to
     // default transport. Decryption errors surface in logs when the operator
     // next inspects the panel.
     return null;
@@ -268,13 +276,12 @@ async function sendVia(
   // SMTP (nodemailer). Covers SES/Postmark/SendGrid/Mailgun/custom relays.
   //
   // The host and port come straight from an operator-supplied credential
-  // record, so this is an outbound connection to a tenant-chosen address —
-  // exactly what the SSRF guard exists for, and it was not applied here. A
-  // workspace admin could point it at 127.0.0.1:6379 or 169.254.169.254:80,
-  // fire a test send, and read the connection outcome out of the API response:
-  // an internal port scanner over the public API. The guard lived next to the
-  // webhook code rather than next to *outbound connections*, which is why an
-  // equally tenant-controlled destination four modules away never got it.
+  // record, so this is an outbound connection to a tenant-chosen address,
+  // exactly what the SSRF guard exists for. A workspace admin could point it
+  // at 127.0.0.1:6379 or 169.254.169.254:80, fire a test send, and read the
+  // connection outcome from the API response: an internal port scanner over
+  // the public API. Apply the guard here too, not just next to the webhook
+  // code where it originally lived.
   try {
     await assertSafeHost(creds.host);
   } catch {
@@ -282,7 +289,7 @@ async function sendVia(
       kind: 'error',
       // Deliberately fixed text. The whole value of the scanner was that the
       // message distinguished refused / timed out / wrong protocol / spoke
-      // SMTP — so the message is where the fix has to land, not just the block.
+      // SMTP, so the message is where the fix has to land, not just the block.
       message: 'SMTP host is not an allowed destination.',
     };
   }
@@ -302,7 +309,7 @@ async function sendVia(
     // The nodemailer timeouts above are PER-PHASE, not a total budget:
     // `socketTimeout` is an inactivity timer. An SMTP conversation is about
     // seven round trips, so a host that answers every command just under the
-    // timer stalls the request indefinitely — measured at 42s against a server
+    // timer stalls the request indefinitely, measured at 42s against a server
     // that never idled more than 6s. That is precisely the tarpit this module
     // exists to bound, and it is the tenant-supplied host, the one we control
     // least. The total deadline has to wrap the send itself.
@@ -340,7 +347,7 @@ async function sendVia(
  * A tenant-safe description of why an SMTP send failed.
  *
  * Deliberately coarse: an operator needs to know whether to fix their
- * credentials, their host, or wait — and nothing finer than that can be said
+ * credentials, their host, or wait, and nothing finer than that can be said
  * without describing the network to someone who chose the address.
  */
 function classifySmtpError(e: unknown): string {
@@ -360,18 +367,18 @@ function classifySmtpError(e: unknown): string {
  * The display name an Application's mail goes out under when it is riding the
  * shared pool rather than its own credentials.
  *
- * The address belongs to the deployment, so the name has to disclose that: mail
- * about "Acme" arriving from `noreply@rekey.dev` under the bare name "Rekey"
- * tells the recipient nothing about who it concerns, and under the bare name
- * "Acme" it claims a sending identity Acme does not have. `Acme (via Rekey)` is
- * the convention Google Groups and GitHub use for the same situation, and it is
- * the honest reading of what actually happened.
+ * The address belongs to the deployment, so the name has to disclose that:
+ * mail about "Acme" arriving from `noreply@rekey.dev` under the bare name
+ * "Rekey" tells the recipient nothing about who it concerns, and under the
+ * bare name "Acme" it claims a sending identity Acme does not have.
+ * `Acme (via Rekey)` is the convention Google Groups and GitHub use for the
+ * same situation.
  *
- * An operator who sets their own `fromName` gets it verbatim — this is only the
- * default. An Application with BYO credentials never reaches here at all: that
+ * An operator who sets their own `fromName` gets it verbatim; this is only
+ * the default. An Application with BYO credentials never reaches here: that
  * mail leaves their own domain, so there is nothing to disclose.
  *
- * The suffix is the deployment's own name, never a hardcoded "Rekey" — a
+ * The suffix is the deployment's own name, never a hardcoded "Rekey". A
  * self-hoster's shared pool is theirs, not ours.
  */
 export function pooledFromName(
@@ -417,6 +424,46 @@ async function sendDefaultResend(
   }
 }
 
+/**
+ * Persist an EmailLog row for a send that was deliberately NOT attempted.
+ *
+ * Exported so every `email_logs` write still happens in this file, the
+ * invariant the table's own comment states ("Recorded at the transport boundary
+ * so EVERY send is captured regardless of caller"). A suppression never reaches
+ * a transport, so without this it would be the one outcome leaving no trace,
+ * and "the customer never got the email" would have no answer in the single
+ * place an operator looks for send outcomes.
+ *
+ * `status: 'suppressed'` is a fourth value alongside sent / error /
+ * no_transport, and deliberately not `error`: nothing failed.
+ */
+export async function recordSuppressedSend(args: {
+  tenantId: string | null;
+  applicationId: string | null;
+  to: string;
+  subject: string;
+  eventKey: string | null;
+  reason: string;
+}): Promise<void> {
+  try {
+    await prisma.emailLog.create({
+      data: {
+        tenantId: args.tenantId,
+        applicationId: args.applicationId,
+        toAddress: args.to.toLowerCase(),
+        subject: args.subject,
+        eventKey: args.eventKey,
+        via: 'none',
+        status: 'suppressed',
+        messageId: null,
+        error: args.reason,
+      },
+    });
+  } catch {
+    // Same contract as `recordLog`: a log write must never break the caller.
+  }
+}
+
 /** Persist one EmailLog row. Never throws into the send path. */
 async function recordLog(args: {
   tenantId: string | null;
@@ -445,7 +492,7 @@ async function recordLog(args: {
       },
     });
   } catch {
-    // Swallow — a log write failure must never break delivery.
+    // Swallow, a log write failure must never break delivery.
   }
 }
 
@@ -475,7 +522,7 @@ export function describeTransport(application: Application): {
 }
 
 /**
- * System-level send — tenant-scoped flows (workspace invitations, operator
+ * System-level send, tenant-scoped flows (workspace invitations, operator
  * MFA) with no `Application`. Default Resend pool only. Pass `tenantId` so the
  * send shows in that tenant's email-log view.
  */
@@ -502,22 +549,19 @@ export async function sendEmail(
 ): Promise<SendOutcome> {
   // A disabled Application sends no mail. Its end-user-facing routes are
   // already refused at both API-key middlewares, so in practice this catches
-  // the callers that are NOT request-driven — dunning escalation, subscription
-  // lifecycle mail, anything on a timer — which would otherwise keep mailing
-  // an operator's customers about a product that is switched off.
+  // callers that are NOT request-driven: dunning escalation, subscription
+  // lifecycle mail, anything on a timer that would otherwise keep mailing an
+  // operator's customers about a product that is switched off.
   //
-  // The outcome is `error`, and the choice matters more than it looks.
-  // `no_transport` is the documented "your server forwards the token" contract
-  // (see the note below): auth flows take that branch by handing the RAW token
-  // back in the JSON response body. Returning it here would turn disabling an
-  // Application into a token-disclosure path. `error` is the branch where
-  // callers withhold the token, which is the correct behaviour for a send that
-  // was deliberately not attempted, and it is already handled by every
-  // existing consumer — no fourth union member, so no consumer goes unaudited.
+  // The outcome is `error`, not `no_transport`, and that choice matters.
+  // `no_transport` is the "your server forwards the token" contract: auth
+  // flows take that branch by handing the raw token back in the JSON
+  // response body. Returning it here would turn disabling an Application
+  // into a token-disclosure path. `error` is the branch where callers
+  // withhold the token, already handled by every existing consumer.
   //
-  // Still logged, with the real reason in the outcome, because "why did my
-  // customer not get this mail" must be answerable from the email log rather
-  // than by reading this function.
+  // Still logged, with the real reason in the outcome, so "why did my
+  // customer not get this mail" is answerable from the email log.
   if (application.disabledAt !== null) {
     const outcome: SendOutcome = {
       kind: 'error',

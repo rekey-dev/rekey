@@ -1,5 +1,5 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import {
   api,
@@ -13,6 +13,7 @@ import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { BillingModeBanner } from '@/components/BillingModeBanner';
 import { ApiErrorText } from '@/components/api-error';
 import { SavedBanner } from '@/components/SavedBanner';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Modal } from '@/components/Modal';
 import { Banner } from '@/components/Banner';
@@ -25,13 +26,13 @@ import { StatusPill } from '@/components/StatusPill';
 import { EmptyState } from '@/components/EmptyState';
 
 /**
- * Unapplied payments — money a provider captured for something Rekey never
+ * Unapplied payments, money a provider captured for something Rekey never
  * applied. Almost always a checkout that completed at the provider after Rekey
  * had stopped waiting for it, which means the customer probably paid for
  * something they are expecting to receive.
  *
  * Rekey never resolves one of these on its own, so this page is the whole
- * interface: it exists to get a human to decide. Three dispositions — refund
+ * interface: it exists to get a human to decide. Three dispositions, refund
  * the money, keep it and extend the customer, or close the case with a note
  * when it was settled somewhere Rekey cannot see.
  */
@@ -66,7 +67,7 @@ function money(minor: number, currency: string): string {
 /**
  * Colour for the age column.
  *
- * Only an OPEN case is urgent — a resolved one's age is history, and colouring
+ * Only an OPEN case is urgent, a resolved one's age is history, and colouring
  * it would put permanent alarm into a list that is mostly resolved rows.
  */
 function ageClass(status: UnappliedPaymentRow['status'], ageDays: number): string {
@@ -75,8 +76,6 @@ function ageClass(status: UnappliedPaymentRow['status'], ageDays: number): strin
   if (ageDays >= 90) return 'text-amber-700 dark:text-amber-400';
   return '';
 }
-
-// ─── Actions ─────────────────────────────────────────────────────────
 
 async function refundCase(applicationId: string, caseId: string, formData: FormData): Promise<void> {
   'use server';
@@ -137,8 +136,6 @@ async function dismissCase(applicationId: string, caseId: string, formData: Form
   redirect(`/applications/${applicationId}/unapplied-payments?dismissed=1`);
 }
 
-// ─── Page ────────────────────────────────────────────────────────────
-
 export default async function UnappliedPaymentsPage({
   params,
   searchParams,
@@ -193,7 +190,7 @@ export default async function UnappliedPaymentsPage({
       <SectionHeader
         title="Unapplied payments"
         count={`(${cases.length === 0 ? 0 : `${offset + 1}–${offset + cases.length}`})`}
-        description="Money a payment provider captured that Rekey could not match to any subscription — usually a checkout that finished after Rekey stopped waiting for it. The customer has most likely paid for something they expect to receive. Rekey never refunds these automatically; the decision is yours."
+        description="Money a payment provider captured that Rekey could not match to any subscription, usually a checkout that finished after Rekey stopped waiting for it. The customer has most likely paid for something they expect to receive. Rekey never refunds these automatically; the decision is yours."
       />
 
       {errorCode && (
@@ -205,7 +202,7 @@ export default async function UnappliedPaymentsPage({
       {sp.extended && <SavedBanner message="Access extended and the case closed." />}
       {sp.dismissed && <SavedBanner message="Case closed." />}
 
-      {/* Ordering is the feature, not a detail — say so, because it is the
+      {/* Ordering is the feature, not a detail, say so, because it is the
           opposite of every other list in the panel and looks like a bug
           otherwise. */}
       <Banner tone="info">
@@ -237,7 +234,7 @@ export default async function UnappliedPaymentsPage({
             href={basePath}
             className="px-1 py-2 text-sm text-[var(--color-muted-fg)] hover:text-[var(--color-fg)]"
           >
-            filtered — clear
+            filtered (clear)
           </a>
         )}
       </form>
@@ -279,7 +276,7 @@ export default async function UnappliedPaymentsPage({
                       is a dispute rather than a request.
 
                       Tailwind palette classes with a dark: variant, matching
-                      Banner — there is no --color-danger token in this design
+                      Banner, there is no --color-danger token in this design
                       system, and the class that named one resolved to nothing,
                       so every age rendered in the ordinary foreground colour. */}
                   <span className={ageClass(c.status, c.ageDays)}>{c.ageDays}d</span>
@@ -293,18 +290,15 @@ export default async function UnappliedPaymentsPage({
                       {c.endUserEmail}
                     </Link>
                   ) : (
-                    // Not a blank: an unattributable payment is a materially
-                    // worse case and the operator has to go to the provider
-                    // dashboard to work out who paid.
-                    // Not muted: an unattributable payment is a materially
-                    // worse case — the operator has to go to the provider
-                    // dashboard to find out who paid — and greying it out
-                    // reads as "nothing here" instead.
+                    // Not blank, and not muted: an unattributable payment is a
+                    // materially worse case, and the operator has to go to the
+                    // provider dashboard to find out who paid. Greying it out
+                    // would read as "nothing here".
                     <span className="text-xs text-amber-700 dark:text-amber-400">unknown</span>
                   )}
                 </TD>
                 {/* Provider name only. The charge id used to sit here too,
-                    and a PayPal sale id is 17 mono characters — enough to push
+                    and a PayPal sale id is 17 mono characters, enough to push
                     the row past the content width and carry the Decide button
                     off the right edge, where the primary action of the page
                     was reachable only by horizontal scroll. The id is not
@@ -388,7 +382,7 @@ function DecideModal({
             a greyed-out button still reads as "possible later", which for a
             provider with no refund API it is not. */}
         {row.refundable ? (
-          <form
+          <ActionForm
             action={refundCase.bind(null, applicationId, row.id)}
             className="space-y-2 rounded-lg border border-[var(--color-border)] p-3"
           >
@@ -415,7 +409,7 @@ function DecideModal({
               </label>
               <SubmitButton>Refund</SubmitButton>
             </div>
-          </form>
+          </ActionForm>
         ) : (
           <div className="rounded-lg border border-[var(--color-border)] p-3 text-xs text-[var(--color-muted-fg)]">
             Rekey cannot issue refunds through {row.provider}. Refund it in the provider dashboard,
@@ -423,11 +417,11 @@ function DecideModal({
           </div>
         )}
 
-        {/* Extend — the alternative with no precedent among billing vendors,
+        {/* Extend, the alternative with no precedent among billing vendors,
             who all credit money instead. Rendered only when Rekey knows who
             paid, because there is nobody to extend otherwise. */}
         {row.endUserId ? (
-          <form
+          <ActionForm
             action={extendCase.bind(null, applicationId, row.id)}
             className="space-y-2 rounded-lg border border-[var(--color-border)] p-3"
           >
@@ -455,7 +449,7 @@ function DecideModal({
               </label>
               <SubmitButton>Extend</SubmitButton>
             </div>
-          </form>
+          </ActionForm>
         ) : (
           <div className="rounded-lg border border-[var(--color-border)] p-3 text-xs text-[var(--color-muted-fg)]">
             Rekey does not know which customer this came from, so it cannot extend anyone. Find them
@@ -466,7 +460,7 @@ function DecideModal({
 
         {/* Dismiss. The note is required because this is the only disposition
             that leaves no other record of where the money went. */}
-        <form
+        <ActionForm
           action={dismissCase.bind(null, applicationId, row.id)}
           className="space-y-2 rounded-lg border border-[var(--color-border)] p-3"
         >
@@ -493,7 +487,7 @@ function DecideModal({
             </label>
             <SubmitButton>Close case</SubmitButton>
           </div>
-        </form>
+        </ActionForm>
       </div>
     </Modal>
   );

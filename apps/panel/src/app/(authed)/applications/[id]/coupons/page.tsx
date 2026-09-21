@@ -1,10 +1,11 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { errorQuery, readErrorFlash, api, PanelApiError, type CouponRow, getApplication } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
 import { formatDate } from '@/lib/date';
@@ -157,15 +158,15 @@ export default async function CouponsPage({
       <SectionHeader
         title="Coupons"
         count={`(${coupons.length})`}
-        description="Discount codes applied at checkout. Codes are case-insensitive and unique per Application. Validation happens before payment — bad codes fail the whole checkout."
+        description="Discount codes applied at checkout. Codes are case-insensitive and unique per Application. Validation happens before payment, so bad codes fail the whole checkout."
         action={
           <Modal
             modalKey="newCoupon"
             title="Add a coupon"
-            description="Pick PERCENT (e.g. 15 = 15% off) or AMOUNT (e.g. 500 = $5.00 off — enter the value in cents). Caps and expiry are optional."
+            description="Pick PERCENT (e.g. 15 = 15% off) or AMOUNT (e.g. 500 = $5.00 off, entered in cents). Caps and expiry are optional."
             trigger="+ New coupon"
           >
-            <form action={action} className="space-y-3">
+            <ActionForm action={action} className="space-y-3">
               {error && (
                 <Banner tone="error">
                   <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
@@ -185,7 +186,7 @@ export default async function CouponsPage({
                     className={`${inputCls} font-mono`}
                   />
                 </Field>
-                <Field label="Expires at" hint="Optional — leave blank for no expiry">
+                <Field label="Expires at" hint="Optional. Leave blank for no expiry">
                   <input type="datetime-local" name="endsAt" className={inputCls} />
                 </Field>
                 <Field label="Max total redemptions" hint="Optional cap across all users">
@@ -202,7 +203,7 @@ export default async function CouponsPage({
                 </Field>
               </div>
               <SubmitButton pendingLabel="Adding coupon…">Add coupon</SubmitButton>
-            </form>
+            </ActionForm>
           </Modal>
         }
       />
@@ -290,7 +291,7 @@ function CouponsTable({
               )}
             </TD>
             <TD align="right">
-              <form
+              <ActionForm
                 action={setCouponActive.bind(null, applicationId, c.code, !c.active)}
                 className="inline"
               >
@@ -308,7 +309,7 @@ function CouponsTable({
                     Reactivate
                   </SubmitButton>
                 )}
-              </form>
+              </ActionForm>
             </TD>
           </TR>
         ))}

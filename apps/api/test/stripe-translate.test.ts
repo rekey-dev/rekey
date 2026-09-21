@@ -1,5 +1,5 @@
 /**
- * Stripe module `translate` unit tests — fixture payloads in, normalized
+ * Stripe module `translate` unit tests, fixture payloads in, normalized
  * DomainBillingEvents out. No DB writes: translate is pure mapping (the
  * appliers own persistence, pinned by stripe-webhook.test.ts through the
  * pipeline). These fixtures pin the mapping itself: event-type coverage,
@@ -92,7 +92,7 @@ describe('stripe module translate', () => {
     expect(fire('past_due')?.[0]).toMatchObject({ type: 'subscription.past_due', status: 'PAST_DUE' });
     expect(fire('unpaid')?.[0]).toMatchObject({ type: 'subscription.past_due', status: 'PAST_DUE' });
     expect(fire('canceled')?.[0]).toMatchObject({ type: 'subscription.canceled', status: 'CANCELED' });
-    // No first-class domain event exists for these local statuses — the
+    // No first-class domain event exists for these local statuses, the
     // absolute status mirror must still happen, so `status` rides the
     // nearest lifecycle type and stays authoritative for the applier.
     expect(fire('incomplete')?.[0]).toMatchObject({ type: 'subscription.canceled', status: 'EXPIRED' });

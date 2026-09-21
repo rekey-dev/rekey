@@ -7,7 +7,7 @@ import { THEME_INIT } from '@/components/ThemeToggle';
 import { Analytics } from '@/components/providers/analytics';
 import { TrackFlag } from '@/components/analytics/track-flag';
 
-// Brand faces — same self-hosted fonts as the marketing site (etherlabz brand).
+// Brand faces, same self-hosted fonts as the marketing site (etherlabz brand).
 // Akkurat = body/sans, Feature = display serif. Metric-matched fallbacks kill FOUC.
 const fontAkkurat = localFont({
   variable: '--font-akkurat',
@@ -31,8 +31,8 @@ const fontFeature = localFont({
 
 export const metadata: Metadata = {
   title: 'Rekey Panel',
-  description: 'Operator panel for Rekey — auth + billing administration.',
-  // The panel is an authenticated application, not a search target — keep it
+  description: 'Operator panel for Rekey, auth + billing administration.',
+  // The panel is an authenticated application, not a search target, keep it
   // out of search indexes (also see robots.ts, which disallows crawling).
   robots: { index: false, follow: false },
 };

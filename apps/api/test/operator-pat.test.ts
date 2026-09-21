@@ -3,7 +3,7 @@
  *
  * A long-lived, revocable, SCOPED `rp_op_…` credential that lets an operator
  * (or an AI agent acting as them) call tenant-scoped routes without a session
- * JWT — replacing reliance on the global SUPER_ADMIN_KEY.
+ * JWT, replacing reliance on the global SUPER_ADMIN_KEY.
  *
  * The load-bearing cases are the security ones:
  *   - mint → use: a PAT-authed call to a real tenant endpoint succeeds.
@@ -386,7 +386,7 @@ describe('Operator personal-access-tokens (PATs)', () => {
       headers: { authorization: `Bearer ${op.accessToken}` },
       payload: { name: 'bad', scopes: ['billing:refund'] },
     });
-    // Rejected at the route schema (enum) — a 400-class error, never minted.
+    // Rejected at the route schema (enum), a 400-class error, never minted.
     expect(res.statusCode).toBe(400);
     expect(await prisma.tenantApiToken.count()).toBe(0);
   });

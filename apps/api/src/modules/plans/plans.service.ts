@@ -6,7 +6,7 @@
  * own plan catalogue; slugs are unique per-Application.
  *
  * On create we register the plan with **Stripe** (Product+Price) and stash the
- * price id in `Plan.metadata` for reconciliation — but only when Stripe
+ * price id in `Plan.metadata` for reconciliation, but only when Stripe
  * credentials already exist for the Application. PayPal and Razorpay register
  * lazily at first checkout instead. Making the call unconditional broke plan
  * creation outright for PayPal-only and Razorpay-only operators once the stub
@@ -15,7 +15,7 @@
  * ## A plan is never on sale before the provider can charge for it
  *
  * The provider call is a NETWORK call, so it cannot live inside a database
- * transaction — holding one open across a 10-second Stripe round-trip would
+ * transaction, holding one open across a 10-second Stripe round-trip would
  * pin a connection and a row lock on every plan create. What replaces the
  * transaction is ordering: the row is inserted in an explicitly un-purchasable
  * state (`active: false`, `registrationStatus: PENDING`) and only promoted to
@@ -23,14 +23,14 @@
  * to `FAILED` and re-throws.
  *
  * This is write-ahead, not compensation, and the difference is the whole point.
- * The previous shape — insert active, then register — put the row on sale for
+ * The previous shape, insert active, then register, put the row on sale for
  * the length of the provider call and left it there forever if the call failed:
  * a plan that 500s at checkout, indistinguishable on the wire from a working
  * one. A compensating DELETE would shrink that window but not close it (a crash
  * between the provider refusal and the delete reopens it), and it would burn a
  * slug an operator's pricing page may already reference. Writing the safe state
- * first means every way this can be interrupted — refusal, timeout, process
- * death — leaves a plan nobody can buy, which is the failure worth having.
+ * first means every way this can be interrupted, refusal, timeout, process
+ * death, leaves a plan nobody can buy, which is the failure worth having.
  */
 
 import { Prisma, type Plan, type PlanInterval, type PlanKind, type LicenseKind, type Application } from '@prisma/client';
@@ -58,8 +58,8 @@ const REGISTRATION_ERROR_MAX = 500;
 /**
  * True once ANY provider has minted a price/plan object for this row.
  *
- * This is the gate on editing price fields. A Stripe Price — and its PayPal and
- * Razorpay analogues — is immutable once created, so an `amount` change on a
+ * This is the gate on editing price fields. A Stripe Price, and its PayPal and
+ * Razorpay analogues, is immutable once created, so an `amount` change on a
  * registered plan would make our row disagree with what the buyer is actually
  * charged. Before registration there is no such object to disagree with, which
  * is exactly why a plan that FAILED registration may still be re-priced.
@@ -105,7 +105,7 @@ const MAX_TRIAL_DAYS = 365;
 /**
  * Validate and normalise a trial length to what the column should hold.
  *
- * `null` means no trial, which is the ONLY encoding for it — `0` and `null`
+ * `null` means no trial, which is the ONLY encoding for it, `0` and `null`
  * must not both end up in the column meaning the same thing, or the same plan
  * reads back differently depending on which surface created it.
  *
@@ -127,36 +127,65 @@ function normaliseTrialDays(value: number | undefined): number | null {
       fix: `Send a whole number up to ${MAX_TRIAL_DAYS}, or 0 for no trial.`,
     });
   }
-  // HELD FOR 2.1.0. The write path works; what is missing is everything that
-  // makes a trial safe to sell.
+  // The 2.1.0 hold is lifted here, and NOT by accepting what it refused.
   //
-  // Two independent release reviews found two ways it loses money, and neither
-  // is in this function's reach:
+  // It named two ways a trial loses money. One is fixed: nothing recorded that
+  // a buyer had already trialled, so a cancelled subscription row was reused
+  // and the trial granted again without limit. `TrialRedemption` and
+  // `billingConfig.trialPolicy` now hold that.
   //
-  //   * `entitlementsService.provision` has no trial gate, and checkout calls it
-  //     on `checkout.session.completed`. A SUBSCRIPTION plan carrying `trialDays`
-  //     AND a CREDIT or LICENSE entitlement materialises those on day 0, before
-  //     any money moves, and `provision` has no inverse. Cancel before the first
-  //     invoice and keep them.
-  //   * nothing records that a buyer has already trialled. The subscription key
-  //     is (application, end-user, plan), so a cancelled row is reused and the
-  //     trial is granted again, without limit. `docs/specs/trial-eligibility.md`
-  //     is the design for that limit and states it is not built.
-  //
-  // Refused here rather than reverted to the pre-#474 behaviour, because that
-  // behaviour was to accept the field, report 201, and silently drop it, which
-  // is the defect #474 existed to fix. An operator who asks for a trial is now
-  // told they cannot have one yet. Zero and absent stay legal so a plan that
-  // somehow carries one can still be cleared.
-  if (value > 0) {
-    throw new RekeyError({
-      statusCode: 400,
-      code: 'PLAN_TRIAL_UNAVAILABLE',
-      message: 'Free trials are not available in this release.',
-      fix: 'Create the plan without `trialDays`. Trials are held until per-buyer eligibility exists, because a trial can currently be taken repeatedly and can hand over credits or a licence key before the first payment. Tracked in docs/specs/trial-eligibility.md.',
-    });
-  }
-  return null;
+  // The other is not fixable in this function and is closed by construction
+  // instead, in `assertTrialMaterialisesNothing` below: `provision` has no
+  // trial gate, so a plan carrying a CREDIT or LICENSE entitlement hands over
+  // credits or a licence key when the subscription activates, day 0 for a
+  // trial, before any money moves, with no inverse. The per-buyer limit BOUNDS
+  // that to once, which is not the same as fixing it.
+  return value === 0 ? null : value;
+}
+
+/**
+ * A trial may only be sold on a plan that materialises NOTHING.
+ *
+ * `entitlementsService.provision` has no trial gate: a CREDIT entitlement mints
+ * credits and a LICENSE entitlement issues a key when the subscription
+ * activates, which for a trial is day 0, before any money moves, and there is
+ * no inverse. Cancel before the first invoice and keep them. The per-buyer
+ * limit bounds that to once per subject, which still means handing a stranger a
+ * licence key for free.
+ *
+ * FEATURE and USAGE are resolved at read time and stop resolving the moment the
+ * subscription stops entitling, so a lapsed trial takes them with it. That is
+ * the ordinary feature-gated SaaS trial, which is what `trialDays` is for.
+ *
+ * Called from BOTH write paths, because entitlements are added after a plan is
+ * created: from plan create/update with the plan's existing rows, and from
+ * `entitlementsService.validate` when a row is added to a plan already carrying
+ * a trial. Guarding only one leaves the other as the way in.
+ */
+export function assertTrialMaterialisesNothing(args: {
+  planSlug: string;
+  trialDays: number | null;
+  kinds: readonly string[];
+}): void {
+  if (args.trialDays === null || args.trialDays <= 0) return;
+  const offending = args.kinds.filter((k) => k === 'CREDIT' || k === 'LICENSE');
+  if (offending.length === 0) return;
+  const which = offending.includes('CREDIT') && offending.includes('LICENSE')
+    ? 'credits and a licence key'
+    : offending.includes('CREDIT')
+      ? 'credits'
+      : 'a licence key';
+  throw new RekeyError({
+    statusCode: 400,
+    code: 'PLAN_TRIAL_MATERIALISES_ENTITLEMENTS',
+    message:
+      `Plan "${args.planSlug}" offers a free trial and grants ${which}, which would be handed ` +
+      'over on day 0, before the first payment, with no way to take them back.',
+    fix:
+      'Sell the trial on a plan whose entitlements are FEATURE or USAGE only, those resolve at ' +
+      'read time and lapse with the subscription. To sell credits or a licence, drop `trialDays` ' +
+      'and charge for them, or split them onto a separate plan.',
+  });
 }
 
 export interface CreatePlanInput {
@@ -167,21 +196,21 @@ export interface CreatePlanInput {
   currency?: string;     // ISO 4217
   interval?: PlanInterval;
   kind?: PlanKind;
-  // LICENSE-kind config — required when kind = LICENSE.
+  // LICENSE-kind config, required when kind = LICENSE.
   licenseKind?: LicenseKind;
   licenseSeatsAllowed?: number;
   licenseDurationDays?: number;
-  // USAGE-kind config — required when kind = USAGE.
+  // USAGE-kind config, required when kind = USAGE.
   meterSlug?: string;
   pricePerUnitCents?: number;
-  // CREDIT-kind config — required when kind = CREDIT.
+  // CREDIT-kind config, required when kind = CREDIT.
   creditsAmount?: number;
   /**
    * Free-trial length in days for a SUBSCRIPTION plan. Omitted or 0 means no
    * trial.
    *
    * This field was missing from this interface while the route validated it,
-   * documented it, and spread it into `create` — so it was silently dropped on
+   * documented it, and spread it into `create`, so it was silently dropped on
    * the way in, `Plan.trialDays` was never written by any surface, and
    * `resolveCheckoutTrial` read `plan.trialDays ?? 0` and therefore always
    * decided "no trial". Every buyer of a plan advertised with a free trial was
@@ -264,7 +293,7 @@ export const plansService = {
         statusCode: 400,
         code: 'PLAN_AMOUNT_INVALID',
         message: 'Plan amount must be >= 0 (smallest currency unit, e.g. cents).',
-        fix: 'Send the price in cents (or paise/sen/etc.) — never as a decimal float.',
+        fix: 'Send the price in cents (or paise/sen/etc.), never as a decimal float.',
       });
     }
 
@@ -335,7 +364,7 @@ export const plansService = {
 
     // A trial only means something for a recurring charge. `checkout-trial.ts`
     // already refuses one on a one-off purchase and its comment says the case
-    // is "Rejected at plan creation too" — which was not true of any layer that
+    // is "Rejected at plan creation too", which was not true of any layer that
     // could be reached, because `trialDays` never made it this far. It is true
     // here now, so the claim and the code agree.
     //
@@ -351,6 +380,13 @@ export const plansService = {
       });
     }
 
+    // No guard on `creditsAmount` here, and none is needed. It is the LEGACY
+    // credit column, and `synthesizeLegacy` returns [] for `kind: SUBSCRIPTION`
+    //, while `trialDays` is legal ONLY on SUBSCRIPTION. So the pair can never
+    // materialise anything, and guarding it produced 400s for a hazard that
+    // does not exist. A new plan has no entitlement rows yet either; the
+    // entitlement upsert is what guards the real case.
+
     const application: Application = await applicationsService.get(input.applicationId);
 
     // Decided BEFORE the insert, because it decides what state the insert
@@ -358,7 +394,7 @@ export const plansService = {
     // unconditional, which was harmless while a stub absorbed the call and
     // became a bug the moment the stub was deleted: a PayPal-only or
     // Razorpay-only operator could no longer create any plan at all, and the
-    // error they got named Stripe — a provider they had deliberately not set
+    // error they got named Stripe, a provider they had deliberately not set
     // up. Other providers already register lazily on first checkout, so
     // skipping here costs nothing but a first-checkout round-trip.
     const registersEagerly = await billingCredentialsService.isConfigured(
@@ -396,7 +432,7 @@ export const plansService = {
           // can't be forgotten in one of them", and it was forgotten in this
           // one: create wrote the operator's metadata verbatim. A plan created
           // with `{stripe: {priceId: 'price_of_something_else'}}` is treated as
-          // already registered — `ensurePlanRegistered` returns the stored id
+          // already registered, `ensurePlanRegistered` returns the stored id
           // without minting anything, `hasProviderRegistration` reports true,
           // and `createCheckoutSession` charges that price while the row, the
           // pricing page and the receipt all show this plan's `amount`. That is
@@ -428,7 +464,7 @@ export const plansService = {
         // because the slug is the identifier integrator code passes to
         // checkout and reads back off a subscription. Releasing it would let a
         // NEW plan inherit an OLD one's public identity, silently changing what
-        // `pro` means for every existing caller — a worse failure than this
+        // `pro` means for every existing caller, a worse failure than this
         // refusal. Reported as #30.
         const archived = existing?.active === false;
         throw new RekeyError({
@@ -456,7 +492,7 @@ export const plansService = {
   },
 
   /**
-   * Retry provider registration for a plan that hasn't got one — the repair for
+   * Retry provider registration for a plan that hasn't got one, the repair for
    * a create whose provider call was refused, and for a plan created before its
    * Application had Stripe credentials.
    *
@@ -465,7 +501,7 @@ export const plansService = {
    * is answered from the row.
    *
    * Success re-activates a plan that FAILED or is stuck PENDING, because that
-   * plan was deactivated by *us* and never by the operator — undoing our own
+   * plan was deactivated by *us* and never by the operator, undoing our own
    * forced deactivation is the point of the call. A plan the operator retired
    * on purpose keeps its `active` flag: this is a registration operation, not a
    * publish button.
@@ -493,7 +529,7 @@ export const plansService = {
   },
 
   /**
-   * Edit a plan's ENTITLEMENTS in place — the things it grants, which live
+   * Edit a plan's ENTITLEMENTS in place, the things it grants, which live
    * entirely on the Rekey side and don't touch the provider-registered Price:
    * display name, LICENSE seats/duration, CREDIT amount, and free-form metadata
    * (feature flags etc.).
@@ -541,7 +577,7 @@ export const plansService = {
   },
 
   /**
-   * The operator's edit surface for a plan — `active`, display name, metadata,
+   * The operator's edit surface for a plan, `active`, display name, metadata,
    * and, conditionally, the PRICE.
    *
    * This exists because "deactivate it and mint a new slug" is not a repair for
@@ -552,12 +588,12 @@ export const plansService = {
    *
    * ## When the price may move
    *
-   * Only while `hasProviderRegistration(plan)` is false — i.e. no provider has
+   * Only while `hasProviderRegistration(plan)` is false, i.e. no provider has
    * minted a price object for this row yet. That is not a loosening of the old
    * rule, it is the same rule stated honestly: `amount`/`currency`/`interval`
    * were frozen because a Stripe Price is immutable once created and an edit
    * would make our row lie about what the buyer is charged. A plan that never
-   * registered has no such object, so there is nothing to contradict — and
+   * registered has no such object, so there is nothing to contradict, and
    * re-pricing is precisely what a currency- or amount-rejection needs before
    * registration can be retried. Once REGISTERED the fields lock again, and the
    * refusal says so.
@@ -595,6 +631,27 @@ export const plansService = {
         fix: 'Drop `trialDays`, or move the trial to a SUBSCRIPTION plan.',
       });
     }
+    // Only when the patch is SETTING a trial. Guarding on the row's existing
+    // value made the remedy unreachable: a plan that already holds the
+    // forbidden pair (written before this rule existed) could not be renamed,
+    // or even archived with `{"active": false}`, without first clearing
+    // `trialDays`, and the refusal never said so.
+    if (nextTrialDays !== undefined && nextTrialDays !== null && nextTrialDays > 0) {
+      // The plan's entitlements already exist by now, so this is the path that
+      // catches both "add a trial to a plan that grants credits" and "add
+      // credits to a plan that already has a trial".
+      const rows = await prisma.planEntitlement.findMany({
+        where: { planId: plan.id },
+        select: { kind: true },
+      });
+      // `creditsAmount` is not patchable here, so the row's own value is the
+      // only one that can apply.
+      assertTrialMaterialisesNothing({
+        planSlug: slug,
+        trialDays: nextTrialDays,
+        kinds: rows.map((r) => r.kind),
+      });
+    }
     if (patch.active === true) assertActivatable(applicationId, plan);
 
     const pricePatched =
@@ -612,7 +669,7 @@ export const plansService = {
         statusCode: 400,
         code: 'PLAN_AMOUNT_INVALID',
         message: 'Plan amount must be >= 0 (smallest currency unit, e.g. cents).',
-        fix: 'Send the price in cents (or paise/sen/etc.) — never as a decimal float.',
+        fix: 'Send the price in cents (or paise/sen/etc.), never as a decimal float.',
       });
     }
 
@@ -636,7 +693,7 @@ export const plansService = {
 
 /**
  * Refuse to publish a plan the provider has never acknowledged. Guards every
- * path that can set `active: true` from the outside — the only writer allowed
+ * path that can set `active: true` from the outside, the only writer allowed
  * past it is `registerAndSettle`, which flips the flag as the last step of a
  * registration that just succeeded.
  */
@@ -661,15 +718,15 @@ function registrationErrorText(e: unknown): string {
  * call. The one place the local↔provider boundary is crossed for plans.
  *
  * The status write happens on BOTH sides of the network call and never inside a
- * database transaction — a `$transaction` held across a 10-second Stripe
+ * database transaction, a `$transaction` held across a 10-second Stripe
  * round-trip would pin a connection and lock the row for the duration, and
  * would still not be atomic with the provider, which has no way to join it.
  *
  * `blocked` is what the settling is FOR: a plan that is PENDING or FAILED is
  * un-purchasable because this function's own contract put it there, so this
  * function is entitled to flip `active` in either direction. A NOT_REQUIRED or
- * already-REGISTERED plan is live for reasons of its own — a Razorpay-only app
- * that later added Stripe keys, say — and a failed Stripe promotion must not
+ * already-REGISTERED plan is live for reasons of its own, a Razorpay-only app
+ * that later added Stripe keys, say, and a failed Stripe promotion must not
  * take it off sale.
  */
 async function registerAndSettle(application: Application, plan: Plan): Promise<Plan> {
@@ -701,8 +758,8 @@ async function registerAndSettle(application: Application, plan: Plan): Promise<
           },
         });
       } catch {
-        // Best-effort annotation only. The row is already PENDING + inactive —
-        // un-purchasable, which is the state that matters — and replacing the
+        // Best-effort annotation only. The row is already PENDING + inactive,
+        // un-purchasable, which is the state that matters, and replacing the
         // provider's refusal with a database error would hide the one thing the
         // caller can act on.
       }
@@ -712,7 +769,7 @@ async function registerAndSettle(application: Application, plan: Plan): Promise<
     // is the mapped error: a raw StripeError reaching the global handler kept
     // its own `.statusCode` and answered `401 {code:"BAD_REQUEST", message:
     // "Invalid API Key provided: sk_test_…", fix:"Check the request shape
-    // against the route schema"}` — three disagreeing signals for one bad
+    // against the route schema"}`, three disagreeing signals for one bad
     // stored credential. Raw for the record, mapped for the caller.
     throw providerError({
       provider: 'stripe',

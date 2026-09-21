@@ -1,7 +1,8 @@
 # Adding a billing provider
 
-Rekey ships with Stripe, PayPal, and Razorpay. If your processor isn't one of
-those, you add it as a **provider module**: one directory in the API that
+Rekey ships with Stripe, PayPal, and Razorpay, plus an inbound-only module
+for a billing system of your own (see [Bring your own billing](external-billing.md)).
+If your processor isn't one of those, you add it as a **provider module**: one directory in the API that
 describes everything Rekey needs — how to create checkouts, how to verify the
 processor's webhooks, and how its events map onto Rekey's subscription state
 machine. The registry derives the rest: routes, validation, credential
@@ -33,6 +34,7 @@ const mollie: ProviderModule = {
     priority: 50,
   },
   capabilities: {
+    checkout: true,            // buyers can be sent here to pay (false = inbound only)
     oneTime: true,             // supports one-time checkouts
     captureStep: false,        // no separate capture call needed
     autoWebhookRegister: true, // can create its own webhook endpoint via API
@@ -73,7 +75,14 @@ events from a fixed set —
 checkout.completed          checkout.approved        payment.succeeded
 payment.failed              payment.refunded         subscription.activated
 subscription.canceled       subscription.past_due    subscription.period_advanced
+subscription.granted
 ```
+
+`subscription.granted` is the activate-or-create event for a sale Rekey did
+not run the checkout for: it names the plan and the subscriber (by end-user id
+or by email, which core creates when unknown) instead of a checkout session.
+Emit it from a module whose processor sells without a Rekey checkout, and
+declare `checkout: false` so the router never sends a buyer there.
 
 `checkout.approved` is the buyer-approved-but-not-yet-captured case: emit it
 instead of `checkout.completed` when your processor separates approval from

@@ -6,7 +6,7 @@ type AppEnvironment = ApplicationRow['environment'];
 
 /**
  * An application's environment is fixed at creation and there is no endpoint
- * that changes it, so this is a label rather than a control — nothing here
+ * that changes it, so this is a label rather than a control, nothing here
  * links to an editor. Tones stay calm on purpose: the environment is what the
  * application IS, not a problem to fix, so PRODUCTION gets the brand tint
  * rather than a red alarm.
@@ -27,7 +27,7 @@ const LABELS: Record<AppEnvironment, string> = {
  * The prefix an application's secret keys carry. Derived API-side from the
  * environment (`api-keys.service.ts`), mirrored here so panel copy can show
  * the prefix an operator will actually get instead of guessing `rp_live_`.
- * Descriptive only — nothing in the API branches on it.
+ * Descriptive only, nothing in the API branches on it.
  */
 export function keyPrefixFor(environment: AppEnvironment): string {
   return environment === 'PRODUCTION' ? 'rp_live_' : 'rp_test_';

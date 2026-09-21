@@ -1,11 +1,11 @@
 /**
  * Per-Application email-verification configuration.
  *
- *   - `sendVerificationEmailOnSignUp` (default ON) — password sign-up posts
+ *   - `sendVerificationEmailOnSignUp` (default ON), password sign-up posts
  *     the verification mail *alongside* the welcome one, and a send that goes
  *     nowhere (no transport configured, as in this suite) still leaves the
  *     account created and the token usable.
- *   - `requireEmailVerification` (default OFF) — password sign-in refuses an
+ *   - `requireEmailVerification` (default OFF), password sign-in refuses an
  *     unconfirmed address with 403 EMAIL_NOT_VERIFIED rather than a session,
  *     without counting the refusal as a failed password attempt.
  *
@@ -14,20 +14,22 @@
  * `error`) rather than the sign-up response.
  *
  * Every fixture below sets `appUrl`, because a send with no resolvable link is
- * now skipped outright — see the "no link, no mail" block at the bottom, which
+ * now skipped outright, see the "no link, no mail" block at the bottom, which
  * is the case that needs the default (`redirectUrls: []`, no `appUrl`, no
  * `DEFAULT_APP_URL`) and asserts on it deliberately.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import type { Prisma } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { LOGIN_POLICY } from '../src/lib/brute-force.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 
 const PASSWORD = 'pw-one-two-three';
 
-/** Poll for email-log rows of one event key — both sends are fire-and-forget. */
+/** Poll for email-log rows of one event key, both sends are fire-and-forget. */
 async function waitForEmailLogs(
   applicationId: string,
   eventKey: string,
@@ -153,7 +155,7 @@ describe('email-verification configuration', () => {
       expect(welcome).toHaveLength(1);
       expect(verification).toHaveLength(1);
       expect(verification[0]!.toAddress).toBe(euEmail);
-      // No transport is configured here — the send is recorded as
+      // No transport is configured here, the send is recorded as
       // `no_transport` and the sign-up succeeded anyway. That degradation is
       // the point: a deployment with no email set up must not lose accounts.
       expect(verification[0]!.status).toBe('no_transport');
@@ -213,7 +215,7 @@ describe('email-verification configuration', () => {
       expect(res.statusCode).toBe(403);
       const error = res.json().error as { code: string; message: string };
       expect(error.code).toBe('EMAIL_NOT_VERIFIED');
-      // The user has to be told to go and look in their inbox — a generic
+      // The user has to be told to go and look in their inbox, a generic
       // credential error sends them to password reset instead.
       expect(error.message).toMatch(/email/i);
     });
@@ -250,7 +252,7 @@ describe('email-verification configuration', () => {
       await setAuthConfig({ requireEmailVerification: true });
 
       // A user waiting on their verification email retries. Every one of these
-      // carries the CORRECT password, so none is a failed attempt — past the
+      // carries the CORRECT password, so none is a failed attempt, past the
       // lockout threshold they must still be refused for the right reason.
       for (let i = 0; i < LOGIN_POLICY.threshold + 1; i += 1) {
         const res = await signIn();
@@ -305,7 +307,7 @@ describe('email-verification configuration', () => {
     delete legacy.requireEmailVerification;
     await prisma.application.update({
       where: { id: applicationId },
-      data: { authConfig: legacy },
+      data: { authConfig: legacy as Prisma.InputJsonValue },
     });
 
     expect((await signUp()).statusCode).toBe(201);
@@ -318,7 +320,7 @@ describe('email-verification configuration', () => {
 
   /**
    * The composed defect: `sendVerificationEmailOnSignUp` is on by default, and
-   * a link that cannot resolve must not render (#275) — so an Application with
+   * a link that cannot resolve must not render (#275), so an Application with
    * no `appUrl`, no usable `redirectUrls` origin and no `DEFAULT_APP_URL`
    * mailed every new user "click the button below to confirm this is your
    * email address" with no button in it. With `requireEmailVerification` also
@@ -334,7 +336,7 @@ describe('email-verification configuration', () => {
       expect((await clearAppUrl()).statusCode).toBe(200);
       expect((await signUp()).statusCode).toBe(201);
 
-      // The welcome mail still goes — its body reads without its CTA.
+      // The welcome mail still goes, its body reads without its CTA.
       expect(await waitForEmailLogs(applicationId, 'welcome', 1)).toHaveLength(1);
       await settle();
       expect(await waitForEmailLogs(applicationId, 'email_verification', 1, 0)).toHaveLength(0);
@@ -346,16 +348,10 @@ describe('email-verification configuration', () => {
       await clearAppUrl();
       await signUp();
 
-      const deadline = Date.now() + 4000;
-      let events: Array<{ metadata: unknown }> = [];
-      for (;;) {
-        events = await prisma.securityEvent.findMany({
-          where: { applicationId, type: 'auth.email_delivery_failed' },
-          select: { metadata: true },
-        });
-        if (events.length > 0 || Date.now() > deadline) break;
-        await new Promise((r) => setTimeout(r, 25));
-      }
+      const events = await waitForSecurityEvents({
+        applicationId,
+        type: 'auth.email_delivery_failed',
+      });
       expect(events).toHaveLength(1);
       const metadata = events[0]!.metadata as { eventKey: string; reason: string };
       expect(metadata.eventKey).toBe('email_verification');
@@ -421,7 +417,7 @@ describe('email-verification configuration', () => {
 
       const res = await resend(euEmail, liveKey);
       expect(res.statusCode).toBe(200);
-      // No transport in the suite, so a SECRET caller gets the raw token —
+      // No transport in the suite, so a SECRET caller gets the raw token,
       // same contract /auth/forgot-password uses.
       const { verificationToken } = res.json().data as { verificationToken: string | null };
       expect(verificationToken).toBeTruthy();

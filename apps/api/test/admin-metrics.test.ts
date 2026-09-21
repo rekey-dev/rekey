@@ -1,5 +1,5 @@
 /**
- * Super-admin metrics — `/api/v1/admin/metrics/*`.
+ * Super-admin metrics, `/api/v1/admin/metrics/*`.
  *
  * ~1,850 LOC of aggregation that had no test at all. It is the operator's only
  * view of a running deployment: if `overview` throws on an empty database, or
@@ -17,14 +17,14 @@
  *      published OpenAPI document on every one of them.
  *   3. The rollups report the rows that exist, not zeros.
  *
- * `services.redis` is asserted as `not_configured` on purpose — `lib/redis.ts`
+ * `services.redis` is asserted as `not_configured` on purpose, `lib/redis.ts`
  * returns null under NODE_ENV=test, so this suite can never exercise the
  * Redis-up branch. Pinning the test-mode value at least makes the gap visible
  * rather than implicit.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { flushApiRequestLogs } from '../src/lib/request-log.js';
@@ -81,7 +81,7 @@ describe('admin metrics', () => {
     await app.close();
   });
 
-  function get(path: string, key: string | null = ADMIN_KEY): ReturnType<typeof app.inject> {
+  function get(path: string, key: string | null = ADMIN_KEY): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'GET',
       url: `${BASE}/${path}`,
@@ -188,8 +188,8 @@ describe('admin metrics', () => {
     expect(secondPage.page.hasMore).toBe(false);
     expect(secondPage.items).toHaveLength(1);
 
-    // No overlap — the second page is genuinely further down the list.
-    const firstIds = firstPage.items.map((t) => t.id);
+    // No overlap, the second page is genuinely further down the list.
+    const firstIds = (firstPage.items as Array<{ id: string }>).map((t) => t.id);
     expect(firstIds).not.toContain(secondPage.items[0]!.id);
   });
 
@@ -201,7 +201,7 @@ describe('admin metrics', () => {
 
     // This used to be 500 INTERNAL_ERROR: these routes declare no Fastify
     // `querystring` schema, so the Zod parse in the handler is the only
-    // validator, and `rekeyErrorHandler` had no ZodError branch — so a typo'd
+    // validator, and `rekeyErrorHandler` had no ZodError branch, so a typo'd
     // query param (`?limit=500`, `?sort=bogus`, `?order=sideways`,
     // `?status=NOPE`) became a server error telling the caller to contact
     // support about their own typo. Fixed in lib/error.ts; the loose assertion
@@ -262,7 +262,7 @@ describe('admin metrics', () => {
     expect(data.api.status).toBe('up');
     expect(data.database.status).toBe('up');
     expect(typeof data.database.latencyMs).toBe('number');
-    // lib/redis.ts short-circuits to null under test — the Redis-up branch has
+    // lib/redis.ts short-circuits to null under test, the Redis-up branch has
     // no execution coverage anywhere in this suite. See the file header.
     expect(data.redis.status).toBe('not_configured');
     // No deliveries yet → null, not a divide-by-zero NaN.
@@ -317,7 +317,7 @@ describe('admin metrics', () => {
       totalOutstanding: number;
       perApp: Array<{ applicationId: string; applicationSlug: string; outstanding: number }>;
     };
-    // This is money the deployment owes in kind — a zero here when balances
+    // This is money the deployment owes in kind, a zero here when balances
     // exist is the bug worth catching, so seed one rather than assert a shape.
     expect(data.totalOutstanding).toBe(250);
     expect(data.perApp).toHaveLength(1);
@@ -381,9 +381,13 @@ describe('admin metrics', () => {
       // `pathContains` matches the route *pattern*, not the concrete URL.
       expect(row.routePath).toContain('/api/v1/admin/tenants');
     }
-    expect(matching.items.some((r) => r.method === 'POST' && r.statusCode === 201)).toBe(true);
+    expect(
+      (matching.items as Array<{ method: string; statusCode: number }>).some(
+        (r) => r.method === 'POST' && r.statusCode === 201,
+      ),
+    ).toBe(true);
 
-    // The filter excludes as well as includes — without this the assertion
+    // The filter excludes as well as includes, without this the assertion
     // above would pass on an unfiltered dump of the whole log.
     //
     // The non-matching row is created HERE rather than assumed. It used to

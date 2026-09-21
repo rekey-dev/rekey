@@ -12,7 +12,7 @@
  *
  * ## Why the price fields disappear once a plan is registered
  *
- * A provider price object is immutable once minted — Stripe will not let a
+ * A provider price object is immutable once minted, Stripe will not let a
  * `price` change amount, currency or interval, and neither will PayPal. The API
  * enforces this with `PLAN_PRICE_IMMUTABLE`, so rendering those inputs for a
  * registered plan would offer an edit that is refused on submit. The name and
@@ -20,10 +20,11 @@
  *
  * That makes this form the documented repair path for the other half of the
  * problem too: a plan whose registration FAILED is un-purchasable and still
- * unregistered, so its price is editable here — fix it, then retry Register.
+ * unregistered, so its price is editable here, fix it, then retry Register.
  */
 
 import * as React from 'react';
+import { ActionForm } from './ActionForm';
 import { SubmitButton } from './SubmitButton';
 import { Banner } from './Banner';
 
@@ -62,7 +63,7 @@ export function PlanEditForm({
     'mt-1 w-full rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]';
 
   return (
-    <form action={action} className="space-y-4">
+    <ActionForm action={action} className="space-y-4">
       {error && <Banner tone="error">{ERR[error] ?? 'Could not save the plan.'}</Banner>}
 
       <div>
@@ -87,7 +88,7 @@ export function PlanEditForm({
         <p className="mt-1 font-mono text-sm text-[var(--color-fg)]">{plan.slug}</p>
         <p className="mt-1 text-xs text-[var(--color-muted-fg)]">
           Permanent. Your integration passes this to checkout and reads it back off a
-          subscription, so changing it would break live callers — and archiving keeps it
+          subscription, so changing it would break live callers, and archiving keeps it
           reserved for the same reason.
         </p>
       </div>
@@ -153,6 +154,6 @@ export function PlanEditForm({
       <div className="flex justify-end">
         <SubmitButton pendingLabel="Saving…">Save changes</SubmitButton>
       </div>
-    </form>
+    </ActionForm>
   );
 }

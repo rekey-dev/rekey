@@ -5,7 +5,7 @@
  *     verify → session. Auto-creates user when sign-up is enabled.
  *   - HIBP breached-password refusal at sign-up (mocked via fetch stub).
  *   - Per-user account lockout after N failed sign-ins; lockout returns
- *     429 + Retry-After, then expires on the limiter key's TTL — and the
+ *     429 + Retry-After, then expires on the limiter key's TTL, and the
  *     operator end-user detail page reports the same lock the limiter is
  *     enforcing (it used to report "none" for every account; see the last
  *     test in this file).
@@ -18,7 +18,6 @@ import { prisma } from '../src/lib/prisma.js';
 import { checkPasswordBreached } from '../src/lib/breached-password.js';
 import { clearFailures, euLoginLockScope, LOGIN_POLICY } from '../src/lib/brute-force.js';
 
-const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
 interface Bootstrapped {
   applicationId: string;
@@ -69,7 +68,7 @@ describe('Audit-3 feature additions', () => {
 
     if (opts?.magicLink) {
       // Flip the Application's authConfig.methods to include magic_link.
-      // Direct DB mutation is fine here — the API surface for editing
+      // Direct DB mutation is fine here, the API surface for editing
       // authConfig lives at /tenant/applications/:id but exercising it
       // is incidental to this test.
       await prisma.application.update({
@@ -283,7 +282,7 @@ describe('Audit-3 feature additions', () => {
 
   it('11th failed sign-in triggers 429 TOO_MANY_FAILED_ATTEMPTS with Retry-After', async () => {
     const b = await bootstrap('lockout');
-    // Disable HIBP for this test app — fast sign-ups during the lockout drill.
+    // Disable HIBP for this test app, fast sign-ups during the lockout drill.
     await prisma.application.update({
       where: { id: b.applicationId },
       data: {
@@ -316,7 +315,7 @@ describe('Audit-3 feature additions', () => {
       expect(res.json().error.code).toBe('INVALID_CREDENTIALS');
     }
 
-    // 11th attempt — even with the CORRECT password — is locked out.
+    // 11th attempt, even with the CORRECT password, is locked out.
     const blocked = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/sign-in',
@@ -419,7 +418,7 @@ describe('Audit-3 feature additions', () => {
     });
     expect(locked.statusCode).toBe(429);
 
-    // Only Date is faked — setTimeout/argon2/Prisma I/O stay real.
+    // Only Date is faked, setTimeout/argon2/Prisma I/O stay real.
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       vi.setSystemTime(Date.now() + (LOGIN_POLICY.lockSec + 1) * 1000);
@@ -440,7 +439,7 @@ describe('Audit-3 feature additions', () => {
   it('the operator end-user detail reports the lock the limiter is actually enforcing', async () => {
     // The bug: `lockedUntil` / `failedSignInAttempts` were columns that nothing
     // had written since lockout moved to Redis, and the detail endpoint didn't
-    // even select them — so the panel rendered "Lockout: none" for every
+    // even select them, so the panel rendered "Lockout: none" for every
     // account, including one the API was actively refusing with 429. An
     // operator handling a "locked out of my account" report was shown the
     // opposite of the truth. Both fields now come from the limiter, so this

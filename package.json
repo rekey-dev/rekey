@@ -11,21 +11,33 @@
   "scripts": {
     "build": "pnpm db:generate && turbo run build",
     "dev": "pnpm db:generate && dotenv -- turbo run dev",
-    "lint": "turbo run lint",
+    "lint": "eslint .",
     "typecheck": "pnpm db:generate && turbo run typecheck",
     "test": "pnpm db:generate && turbo run test",
     "db:generate": "prisma generate --schema prisma/schema.prisma",
     "db:migrate": "prisma migrate dev --schema prisma/schema.prisma",
     "db:migrate:deploy": "prisma migrate deploy --schema prisma/schema.prisma",
-    "db:studio": "prisma studio --schema prisma/schema.prisma"
+    "db:studio": "prisma studio --schema prisma/schema.prisma",
+    "lint:fix": "eslint . --fix --fix-type problem,suggestion,layout",
+    "prepare": "simple-git-hooks"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@next/eslint-plugin-next": "^16.3.3",
     "@prisma/client": "6.10.1",
     "dotenv-cli": "^11.0.0",
+    "eslint": "^9",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^5",
+    "globals": "^17.11.0",
+    "lint-staged": "^17.4.1",
     "playwright": "^1.60.0",
     "prisma": "6.10.1",
+    "simple-git-hooks": "^2.14.0",
     "turbo": "^2.3.0",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8"
   },
   "pnpm": {
     "overrides": {
@@ -36,5 +48,13 @@
       "brace-expansion@>=5.0.0 <5.0.6": ">=5.0.6",
       "qs@>=6.11.1 <=6.15.1": ">=6.15.2"
     }
+  },
+  "simple-git-hooks": {
+    "pre-commit": "pnpm exec lint-staged"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,mjs,js,jsx}": [
+      "eslint --fix --fix-type problem,suggestion,layout --max-warnings=0"
+    ]
   }
 }

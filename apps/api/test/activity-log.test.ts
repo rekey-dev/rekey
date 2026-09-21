@@ -1,5 +1,5 @@
 /**
- * Per-app Activity log — end-user events (sign-up / sign-in) are recorded as
+ * Per-app Activity log, end-user events (sign-up / sign-in) are recorded as
  * `actorType: 'end_user'` security events, scoped to the Application + its
  * tenant, and read back via the operator security-events route filtered by
  * `actorType=end_user`.

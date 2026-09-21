@@ -3,7 +3,7 @@
  *
  * `lib/format.ts` is a deliberate copy of `formatPrice` in `@rekey.dev/react`
  * (that module is client-only and this app renders plans on the server). A copy
- * only stays honest if something fails when it drifts — these assertions are
+ * only stays honest if something fails when it drifts, these assertions are
  * that something. Each expectation below is what the SDK produces for the same
  * plan, except where the file's docblock records a known, deliberate difference.
  */
@@ -36,7 +36,7 @@ describe('formatPlanPrice — the six plan shapes', () => {
   });
 
   it('renders a credit pack with the credits it grants', () => {
-    // Was: "$9.00 one-time" — which drops the only fact that distinguishes one
+    // Was: "$9.00 one-time", which drops the only fact that distinguishes one
     // credit pack from another.
     expect(formatPlanPrice({ amount: 900, currency: 'USD', kind: 'CREDIT', creditsAmount: 500 }))
       .toBe('$9 · 500 credits');

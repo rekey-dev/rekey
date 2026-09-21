@@ -1,7 +1,7 @@
 /**
  * Usage record idempotency (BUG-2). POST /api/v1/usage/record accepts an
  * OPTIONAL `idempotencyKey`. A retried call with the same (meter, key) returns
- * the ORIGINAL UsageRecord — it does not double-count usage, and (under a
+ * the ORIGINAL UsageRecord, it does not double-count usage, and (under a
  * bundled quota) charges the quota only once. No key → each call counts.
  */
 
@@ -121,14 +121,14 @@ describe('Usage — record idempotency', () => {
       data: { applicationId: appId, endUserId: euId, planId: plan.id, status: 'ACTIVE', provider: 'stripe' },
     });
 
-    // Record 8 with a key; replay it; then 2 more — total must be 10 (not 18).
+    // Record 8 with a key; replay it; then 2 more, total must be 10 (not 18).
     expect((await record({ meterSlug: 'api_calls', quantity: 8, endUserId: euId, idempotencyKey: 'k8' })).statusCode).toBe(201);
     expect((await record({ meterSlug: 'api_calls', quantity: 8, endUserId: euId, idempotencyKey: 'k8' })).statusCode).toBe(201);
     expect((await record({ meterSlug: 'api_calls', quantity: 2, endUserId: euId })).statusCode).toBe(201);
 
     const { total } = await totalFor(euId);
     expect(total).toBe(10);
-    // The quota is now exactly full — one more unit is refused.
+    // The quota is now exactly full, one more unit is refused.
     const over = await record({ meterSlug: 'api_calls', quantity: 1, endUserId: euId });
     expect(over.statusCode).toBe(402);
     expect(over.json().error.code).toBe('USAGE_QUOTA_EXCEEDED');

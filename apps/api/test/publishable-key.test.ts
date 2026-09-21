@@ -1,10 +1,10 @@
 /**
- * Publishable-key auth — the browser credential for public-bootstrap routes.
+ * Publishable-key auth, the browser credential for public-bootstrap routes.
  *
  * Load-bearing properties:
  *   - A publishable key (`rp_pub_…`) IS accepted on public-bootstrap routes
  *     (sign-up here), so a browser-only app can sign users in with no backend.
- *   - It is NEVER accepted on secret-only routes (GET /me) — the secret-key
+ *   - It is NEVER accepted on secret-only routes (GET /me), the secret-key
  *     middleware rejects it, so a pub key can't structurally reach money or
  *     account-management surfaces.
  *   - The per-app CORS origin allowlist gates publishable requests.

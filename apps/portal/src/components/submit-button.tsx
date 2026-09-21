@@ -11,7 +11,7 @@
  * or a double cancel, from a customer who just thought the page had hung.
  *
  * `useFormStatus` reads the pending state of the nearest ancestor `<form>`,
- * which only works from a child component — hence the separate client
+ * which only works from a child component, hence the separate client
  * component rather than a prop on `<Button>`. Mirrors the panel's
  * `components/SubmitButton.tsx`.
  */

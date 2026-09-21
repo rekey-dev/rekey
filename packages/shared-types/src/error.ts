@@ -1,5 +1,5 @@
 /**
- * `@rekey.dev/shared-types/error` — the canonical SDK error, and NOTHING else.
+ * `@rekey.dev/shared-types/error`, the canonical SDK error, and NOTHING else.
  *
  * ── Why this is its own module ──
  *
@@ -23,7 +23,7 @@
 /**
  * The error envelope shape (just the data fields) every Rekey API response uses
  * on failure. `index.js` exports `RekeyErrorSchema`, the zod schema this
- * interface mirrors — the two are asserted structurally identical at compile
+ * interface mirrors, the two are asserted structurally identical at compile
  * time over there.
  *
  * @example
@@ -44,13 +44,19 @@ export interface RekeyErrorShape {
    * idempotency in-flight conflict. Absent on errors that retrying will not fix.
    */
   retryAfterSeconds?: number | undefined;
+  /**
+   * Structured, code-specific context a client can act on without parsing
+   * `message`. Documented per code (DEVICE_LIMIT_REACHED carries
+   * `{ limit, devices[] }`); absent on every other error.
+   */
+  details?: Record<string, unknown> | undefined;
 }
 
 /**
  * The canonical SDK error. Both @rekey.dev/node and @rekey.dev/react re-export
  * this class, so `instanceof RekeyError` is consistent across packages.
  * Always carries a stable `code` and, when the server provided one, a concrete
- * `fix` — read `error.fix` first when debugging.
+ * `fix`, read `error.fix` first when debugging.
  *
  * Transport failures are RekeyErrors too: a connection refused / DNS failure
  * arrives as `NETWORK_ERROR`, a client-side deadline as `REQUEST_TIMEOUT`, and
@@ -64,10 +70,12 @@ export class RekeyError extends Error implements RekeyErrorShape {
   public readonly docs: string | undefined;
   /** HTTP status, when the error came from an API response. */
   public readonly statusCode: number | undefined;
-  /** Server-assigned request id — share with support to find the log entry. */
+  /** Server-assigned request id, share with support to find the log entry. */
   public readonly requestId: string | undefined;
   /** Seconds to wait before retrying, when the server said so (see the shape docs). */
   public readonly retryAfterSeconds: number | undefined;
+  /** Code-specific context, when the server attached any (see the shape docs). */
+  public readonly details: Record<string, unknown> | undefined;
 
   constructor(
     error: RekeyErrorShape & {
@@ -85,5 +93,6 @@ export class RekeyError extends Error implements RekeyErrorShape {
     this.statusCode = error.statusCode;
     this.requestId = error.requestId;
     this.retryAfterSeconds = error.retryAfterSeconds;
+    this.details = error.details;
   }
 }

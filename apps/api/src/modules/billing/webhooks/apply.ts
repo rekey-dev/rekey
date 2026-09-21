@@ -23,7 +23,7 @@
  *   - Outbound OUTBOX ROWS are written inside the same $transaction as the
  *     state change they announce (`enqueuePaymentEvent` /
  *     `enqueueSubscriptionEvent` take the tx client), gated on a NEWLY
- *     recorded payment / an actual status transition — replays announce
+ *     recorded payment / an actual status transition, replays announce
  *     nothing. Only the first delivery ATTEMPT is post-commit
  *     (`kickDeliveries`), and skipping even that only costs latency: the row
  *     is PENDING with nextAttemptAt=now, so the poller re-attempts it.
@@ -32,7 +32,7 @@
  *     after the commit. A pod rotation or a pool timeout in that gap lost
  *     `payment.succeeded` permanently, because there was no row for the poller
  *     to find. The word "outbox" was already in these comments; it is now true.
- *   - Dunning calls still run strictly POST-commit — they are their own state
+ *   - Dunning calls still run strictly POST-commit, they are their own state
  *     machine with their own transactions, not part of this one.
  *   - Entitlements provisioning semantics unchanged (idempotent per period;
  *     first period pinned to the 'initial' anchor).
@@ -40,8 +40,9 @@
 
 import type { FastifyBaseLogger } from 'fastify';
 import type { Subscription } from '@prisma/client';
-import { isEntitlingStatus, ENTITLING_SUBSCRIPTION_STATUSES } from '@rekey.dev/shared-types';
+import { isEntitlingStatus, ENTITLING_SUBSCRIPTION_STATUSES, BillingConfigSchema } from '@rekey.dev/shared-types';
 import { prisma } from '../../../lib/prisma.js';
+import { RekeyError } from '../../../lib/error.js';
 import { entitlementsService } from '../entitlements.service.js';
 import { dunningService } from '../dunning.service.js';
 import {
@@ -55,7 +56,11 @@ import { advanceBillingPeriod } from './period.js';
 import { enqueuePaymentEvent, enqueueSubscriptionEvent } from './billing-events.js';
 import { kickDeliveries } from '../../webhooks/webhook.service.js';
 import { openUnappliedPaymentCase } from '../unapplied-payments.service.js';
+import { subscriptionGrantsService } from '../grant.service.js';
+import { subscriberService } from '../subscriber.service.js';
+import { plansService } from '../../plans/plans.service.js';
 import type {
+  SubscriptionGrantedEvent,
   CheckoutApprovedEvent,
   CheckoutCompletedEvent,
   DomainBillingEvent,
@@ -74,7 +79,7 @@ export interface ApplyContext {
    *
    * Optional so the many existing test call sites that build a context by
    * hand keep compiling. Only the unapplied-payment queue reads it, and it
-   * records 'unknown' rather than guessing when absent — a queue row naming
+   * records 'unknown' rather than guessing when absent, a queue row naming
    * the wrong processor would send an operator to refund money in the wrong
    * dashboard.
    */
@@ -97,7 +102,7 @@ const MAX_PAYMENT_AMOUNT = 10_000_000_000; // 100,000,000.00
  *
  * CANCELED and EXPIRED are the end of the relationship: the buyer asked to
  * stop, or the finite cycle count ran out. Re-subscribing is a NEW checkout,
- * which walks its own row back through PENDING first — so nothing legitimate
+ * which walks its own row back through PENDING first, so nothing legitimate
  * needs to write a live status straight onto a terminal one.
  */
 const TERMINAL_STATUSES = new Set<Subscription['status']>(['CANCELED', 'EXPIRED']);
@@ -106,9 +111,9 @@ const TERMINAL_STATUSES = new Set<Subscription['status']>(['CANCELED', 'EXPIRED'
  * Whether a provider event may move a local subscription from `from` to `to`.
  *
  * The status mirror used to write `ev.status` absolutely, with the transition
- * test gating only the outbound announcement. So a single stale `ACTIVE` event
- * — a provider re-delivery, or the pipeline's own documented re-attempt path
- * for an event whose first dispatch failed — silently resurrected a CANCELED
+ * test gating only the outbound announcement. So a single stale `ACTIVE` event,
+ * a provider re-delivery, or the pipeline's own documented re-attempt path
+ * for an event whose first dispatch failed, silently resurrected a CANCELED
  * subscription, and `ACTIVE` is an entitling status, so everything the buyer
  * had cancelled came back with it.
  *
@@ -128,7 +133,7 @@ function transitionAllowed(from: Subscription['status'], to: Subscription['statu
  * The cancellation stamps a subscription sheds when it becomes live again.
  *
  * `Subscription` is unique on `(applicationId, endUserId, planId)`, so a buyer
- * who cancels and then buys the same plan again does not get a new row — the
+ * who cancels and then buys the same plan again does not get a new row, the
  * checkout reuses the cancelled one, walking it back to PENDING and then to
  * ACTIVE. Until now nothing on that journey ever cleared `cancelAt`, and the
  * only code that cleared it at all was Stripe-specific (the status mirror,
@@ -142,7 +147,7 @@ function transitionAllowed(from: Subscription['status'], to: Subscription['statu
  *     past>", and in that branch renders Resubscribe INSTEAD of the Cancel
  *     button;
  *   - `cancelCurrentSubscription` short-circuits on
- *     `if (atPeriodEnd && sub.cancelAt !== null) return sub` — so a direct
+ *     `if (atPeriodEnd && sub.cancelAt !== null) return sub`, so a direct
  *     cancel call answers 200 having done nothing at all;
  *   - meanwhile the provider is still charging, on schedule.
  *
@@ -153,7 +158,7 @@ function transitionAllowed(from: Subscription['status'], to: Subscription['statu
  * Applied ONLY on a genuine transition into ACTIVE, never on a replay of an
  * activation for a row already ACTIVE. Providers re-deliver webhooks routinely,
  * and clearing unconditionally would let a re-delivery silently un-cancel a
- * cancellation the buyer had scheduled — the same defect pointed the other way.
+ * cancellation the buyer had scheduled, the same defect pointed the other way.
  */
 const clearedOnReactivation = { cancelAt: null, canceledAt: null } as const;
 
@@ -182,8 +187,8 @@ function safeAmount(
  * it as a unit mismatch rather than a sale.
  *
  * 100× is the classic dollars-recorded-as-cents error, and it is the shape this
- * is here to catch. Real charges do exceed `plan.amount` — tax, proration, a
- * mid-period upgrade — but never by two orders of magnitude, and a charge that
+ * is here to catch. Real charges do exceed `plan.amount`, tax, proration, a
+ * mid-period upgrade, but never by two orders of magnitude, and a charge that
  * big is a number no revenue dashboard should be asked to sum.
  */
 const MAX_PLAN_AMOUNT_MULTIPLE = 100;
@@ -194,7 +199,7 @@ const MAX_PLAN_AMOUNT_MULTIPLE = 100;
  *
  * The amount and currency arrive as provider payload fields and were written
  * verbatim: `safeAmount` bounded the amount absolutely, and the currency was
- * taken as given with a hardcoded `'usd'` when absent — so an INR plan whose
+ * taken as given with a hardcoded `'usd'` when absent, so an INR plan whose
  * event omitted the currency recorded USD rows, and every per-currency total an
  * operator reads was a sum over a column nobody had checked. A charge in a
  * currency the plan is not sold in is not a rounding difference; it means the
@@ -203,7 +208,7 @@ const MAX_PLAN_AMOUNT_MULTIPLE = 100;
  *
  * Returns null when the charge must not be recorded. An event that matched no
  * local subscription has nothing to check against and keeps the historical
- * pass-through — the unlinked-payment posture is `requireLocalSubscription`'s
+ * pass-through, the unlinked-payment posture is `requireLocalSubscription`'s
  * to decide, not this function's.
  */
 async function resolveChargeCurrency(
@@ -220,7 +225,7 @@ async function resolveChargeCurrency(
   if (!plan) return (charge.currency ?? 'usd').toUpperCase();
 
   const planCurrency = plan.currency.toUpperCase();
-  // An absent currency inherits the PLAN's, not USD — the old default silently
+  // An absent currency inherits the PLAN's, not USD, the old default silently
   // mislabelled every non-USD provider that omits the field.
   const currency = (charge.currency ?? planCurrency).toUpperCase();
   if (currency !== planCurrency) {
@@ -234,7 +239,7 @@ async function resolveChargeCurrency(
   // USAGE plans bill on consumption and a zero-amount plan has no price to
   // compare against, so neither has a meaningful ceiling here.
   // `>=`, not `>`. The classic failure this catches is a major-units amount
-  // recorded as minor units, which is a clean 100× — and with a multiple of
+  // recorded as minor units, which is a clean 100×, and with a multiple of
   // 100 that lands exactly ON the boundary, so a strict `>` let through the
   // single most likely instance of the bug the guard exists for.
   if (plan.kind !== 'USAGE' && plan.amount > 0 && charge.amount >= plan.amount * MAX_PLAN_AMOUNT_MULTIPLE) {
@@ -264,7 +269,7 @@ async function resolveChargeCurrency(
  *
  * Never throws, and never runs inside a caller's transaction: an exhausted
  * coupon must not be able to undo a payment write. What it could not record
- * is logged at warn — the operator's coupon books being one row short is a
+ * is logged at warn, the operator's coupon books being one row short is a
  * thing to look at, not a thing to fail a webhook over.
  */
 async function redeemSessionCoupon(
@@ -308,6 +313,8 @@ async function redeemSessionCoupon(
 /** Dispatch one normalized event to its applier. Used by the pipeline. */
 export async function applyBillingEvent(ev: DomainBillingEvent, ctx: ApplyContext): Promise<void> {
   switch (ev.type) {
+    case 'subscription.granted':
+      return applySubscriptionGranted(ev, ctx);
     case 'checkout.completed':
       return applyCheckoutCompleted(ev, ctx);
     case 'checkout.approved':
@@ -330,8 +337,359 @@ export async function applyBillingEvent(ev: DomainBillingEvent, ctx: ApplyContex
 }
 
 /**
+ * A subscription sold by a system Rekey never called (SubscriptionGrantedEvent).
+ *
+ * Four outcomes, decided by what the row already says:
+ *
+ *   - no row, or a row in a non-entitling state (PENDING, CANCELED, EXPIRED):
+ *     the GRANT path. `grantSubscription` creates or reopens it, provisions
+ *     the plan's entitlements and announces `subscription.activated`, with the
+ *     sender's provider and subscription id bound onto the row so the status
+ *     mirror finds it later.
+ *   - an entitled row and a LATER `currentPeriodEnd`: a renewal. The period
+ *     moves forward and entitlements are provisioned for it (idempotent per
+ *     period anchor: credits refill once, a timed licence rolls once).
+ *   - a PAST_DUE row: recovery. Status returns to ACTIVE, the dunning case
+ *     closes as recovered, and `subscription.activated` is announced, exactly
+ *     as the status mirror does for a hosted provider.
+ *   - a TRIALING row and a `trialEndsAt` that is null or past: conversion.
+ *     Status becomes ACTIVE and `subscription.activated` is announced, as the
+ *     hosted status mirror does for a provider's trialing → active.
+ *   - an entitled row and nothing new: a replay. The binding is refreshed and
+ *     nothing else is written or announced.
+ *
+ * A future `trialEndsAt` on the grant path is judged by the trial ledger
+ * (`GrantSubscriptionInput.trialEndsAt`), so a sender cannot hand one buyer a
+ * trial per event; refused, the grant proceeds ACTIVE without it.
+ *
+ * Before any of that, the sender's subscription id is checked against every
+ * row in the Application. Found on a row for a DIFFERENT plan or a different
+ * end-user, that row is retired (cancelled if it was live, the id released)
+ * because the sender has told us the subscription now means something else:
+ * a plan change, or an account the subscription moved to.
+ *
+ * A period end already in the past is stale news and is ignored, loudly. A
+ * grant for it would be refused with SUBSCRIPTION_PERIOD_END_IN_PAST, the
+ * pipeline would answer 5xx, and the sender would retry an event that can
+ * never succeed.
+ */
+export async function applySubscriptionGranted(
+  ev: SubscriptionGrantedEvent,
+  ctx: ApplyContext,
+): Promise<void> {
+  const now = new Date();
+  if (ev.currentPeriodEnd instanceof Date && ev.currentPeriodEnd <= now) {
+    ctx.log.warn(
+      {
+        applicationId: ev.applicationId,
+        providerSubscriptionId: ev.providerSubscriptionId,
+        currentPeriodEnd: ev.currentPeriodEnd,
+        providerEventId: ev.providerEventId,
+      },
+      'subscription.granted names a period that has already ended — ignored',
+    );
+    return;
+  }
+
+  const application = await prisma.application.findUniqueOrThrow({
+    where: { id: ev.applicationId },
+  });
+  const plan = await plansService.getBySlug(application.id, ev.planSlug);
+  // The organization preconditions `grantSubscription` enforces, checked here
+  // BEFORE anything is written: an event that would fail them must not first
+  // create the subscriber or retire the row its subscription id was bound to.
+  const billingConfig = BillingConfigSchema.parse(application.billingConfig);
+  if (billingConfig.billingSubject === 'org' && ev.organizationId === undefined) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'BILLING_ORGANIZATION_REQUIRED',
+      message: 'This Application bills per organization, but the event names no organization.',
+      fix: 'Send `subscriber.organizationId` on subscription.activated for this Application.',
+    });
+  }
+  if (ev.organizationId !== undefined) {
+    const org = await prisma.organization.findFirst({
+      where: { id: ev.organizationId, applicationId: application.id },
+      select: { id: true },
+    });
+    if (!org) {
+      throw new RekeyError({
+        statusCode: 404,
+        code: 'ORGANIZATION_NOT_FOUND',
+        message: `Organization "${ev.organizationId}" not found in this application.`,
+        fix: 'Send an organization id that belongs to this Application.',
+      });
+    }
+  }
+  const subscriber = await subscriberService.resolveOrCreate({
+    application,
+    subscriber: ev.subscriber,
+    provider: ev.provider,
+    providerEventId: ev.providerEventId,
+    log: ctx.log,
+  });
+
+  const holder = await prisma.subscription.findUnique({
+    where: {
+      applicationId_providerSubId: {
+        applicationId: application.id,
+        providerSubId: ev.providerSubscriptionId,
+      },
+    },
+  });
+  // The sender's id already names a subscription ANOTHER provider created.
+  // Stripe ids are printed on invoices; a sender that reuses one, by accident
+  // or otherwise, must not be able to retire the hosted row. Recorded and
+  // ignored, like the same-plan case below.
+  if (holder && holder.provider !== null && holder.provider !== ev.provider) {
+    ctx.log.error(
+      {
+        subscriptionId: holder.id,
+        currentProvider: holder.provider,
+        provider: ev.provider,
+        providerSubscriptionId: ev.providerSubscriptionId,
+        providerEventId: ev.providerEventId,
+      },
+      'subscription.granted names a subscription id that belongs to another provider — ignored',
+    );
+    await recordRefusedGrant(holder, ev, now);
+    return;
+  }
+  if (holder && (holder.planId !== plan.id || holder.endUserId !== subscriber.id)) {
+    await retireReplacedSubscription(holder, ev, ctx);
+  }
+
+  const key = { applicationId: application.id, endUserId: subscriber.id, planId: plan.id };
+  const existing = await prisma.subscription.findUnique({
+    where: { applicationId_endUserId_planId: key },
+  });
+
+  if (!existing || !isEntitlingStatus(existing.status)) {
+    const result = await subscriptionGrantsService.grantSubscription({
+      application,
+      planSlug: plan.slug,
+      endUserId: subscriber.id,
+      ...(ev.organizationId !== undefined && { organizationId: ev.organizationId }),
+      ...(ev.currentPeriodEnd instanceof Date && { currentPeriodEnd: ev.currentPeriodEnd }),
+      // A future trialEndsAt is judged by the trial ledger inside the grant,
+      // keyed on this event, so a re-delivery takes no second slot. See
+      // `GrantSubscriptionInput.trialEndsAt`.
+      ...(ev.trialEndsAt !== undefined && { trialEndsAt: ev.trialEndsAt }),
+      trialAttemptId: ev.providerEventId,
+      note: `Activated by ${ev.provider} event ${ev.providerEventId}`,
+      providerBinding: { provider: ev.provider, providerSubId: ev.providerSubscriptionId },
+    });
+    if (result.trialRefused) {
+      ctx.log.warn(
+        {
+          subscriptionId: result.subscription.id,
+          trialEndsAt: ev.trialEndsAt,
+          reason: result.trialRefused.reason,
+          providerEventId: ev.providerEventId,
+        },
+        'subscription.granted named a trial the buyer is not eligible for; granted without it',
+      );
+    }
+    ctx.log.info(
+      {
+        subscriptionId: result.subscription.id,
+        activated: result.activated,
+        status: result.subscription.status,
+        subscriberCreated: subscriber.created,
+        providerEventId: ev.providerEventId,
+      },
+      'subscription.granted — activated',
+    );
+    return;
+  }
+
+  // Already entitled: renewal, recovery, rebind, or replay.
+  //
+  // Unless the live subscription belongs to a HOSTED provider. A row with a
+  // Stripe id and a Stripe provider is still being charged by Stripe; taking
+  // its id away would orphan every later Stripe event and hand the buyer a
+  // subscription they can no longer cancel from Rekey while Stripe keeps
+  // billing. The event is recorded on the row and otherwise ignored; the
+  // operator resolves which system owns this customer.
+  if (existing.provider !== null && existing.provider !== ev.provider && existing.providerSubId !== null) {
+    ctx.log.error(
+      {
+        subscriptionId: existing.id,
+        currentProvider: existing.provider,
+        currentProviderSubId: existing.providerSubId,
+        provider: ev.provider,
+        providerSubscriptionId: ev.providerSubscriptionId,
+        providerEventId: ev.providerEventId,
+      },
+      'subscription.granted names a subscriber whose live subscription belongs to another provider — not rebound',
+    );
+    await recordRefusedGrant(existing, ev, now);
+    return;
+  }
+  const periodAdvanced =
+    ev.currentPeriodEnd instanceof Date &&
+    (existing.currentPeriodEnd === null || ev.currentPeriodEnd > existing.currentPeriodEnd);
+  const recovering = existing.status === 'PAST_DUE';
+  // The trial the sender was running has ended: the row converts to ACTIVE,
+  // which is when its revenue starts counting, the transition the hosted
+  // status mirror makes from a provider's `trialing` → `active`. A future
+  // date on a row already TRIALING is the sender re-dating its own clock and
+  // is mirrored; on an ACTIVE or PAST_DUE row it is dropped, a paid
+  // subscription is not put back on a trial by an event, and the ledger has
+  // already judged this buyer once.
+  const trialEnded =
+    ev.trialEndsAt === null || (ev.trialEndsAt instanceof Date && ev.trialEndsAt <= now);
+  const converting = existing.status === 'TRIALING' && trialEnded;
+  const mirrorsTrialDate =
+    ev.trialEndsAt !== undefined && (trialEnded || existing.status === 'TRIALING');
+  // A term that runs past a scheduled cancellation says the subscription
+  // continues. Anything shorter leaves the schedule alone, so a re-delivered
+  // activation cannot quietly undo a cancellation the sender has since posted.
+  const clearsCancellation =
+    ev.currentPeriodEnd instanceof Date &&
+    existing.cancelAt !== null &&
+    ev.currentPeriodEnd > existing.cancelAt;
+
+  const deliveryIds = await prisma.$transaction(async (tx) => {
+    // Conditional on the row STILL being entitled: a cancellation applied
+    // between the read above and this write must win.
+    const { count } = await tx.subscription.updateMany({
+      where: { id: existing.id, status: { in: [...ENTITLING_SUBSCRIPTION_STATUSES] } },
+      data: {
+        ...((recovering || converting) && { status: 'ACTIVE' as const }),
+        provider: ev.provider,
+        providerSubId: ev.providerSubscriptionId,
+        // Only ever forward. An older-but-future period end is a delayed
+        // delivery, not a shortening, and an explicit null on a live termed
+        // row is not a request to make it open-ended.
+        ...(periodAdvanced && { currentPeriodEnd: ev.currentPeriodEnd }),
+        ...(mirrorsTrialDate && { trialEndsAt: ev.trialEndsAt }),
+        ...(clearsCancellation && clearedOnReactivation),
+      },
+    });
+    if (count === 0) return [];
+    // Keep the ledger's copy of the clock in step with the row's.
+    if (mirrorsTrialDate && !trialEnded) {
+      await tx.trialRedemption.updateMany({
+        where: { applicationId: application.id, subscriptionId: existing.id, status: 'CONSUMED' },
+        data: { endsAt: ev.trialEndsAt as Date },
+      });
+    }
+    if (!recovering && !converting) return [];
+    return enqueueSubscriptionEvent(tx, 'subscription.activated', existing.id);
+  });
+  // Provision on every pass, not only when the period moved. Provisioning is
+  // idempotent per period anchor, so a replay costs a few reads; what it buys
+  // is retry safety. The grant path commits the row and then provisions, and
+  // if provisioning throws, the pipeline answers 5xx and the sender retries
+  // the same event, which now lands here with nothing "new" to do. Without
+  // this the period's entitlements would never be materialised.
+  const row = await prisma.subscription.findUniqueOrThrow({ where: { id: existing.id } });
+  await entitlementsService.provision({ subscription: row, log: ctx.log });
+  // Announce after the entitlements exist, the ordering every other
+  // activation path promises its consumers.
+  kickDeliveries(deliveryIds);
+  if (recovering) await dunningService.recoverForSubscription(existing.id);
+  ctx.log.info(
+    {
+      subscriptionId: existing.id,
+      periodAdvanced,
+      recovering,
+      converting,
+      rebound: existing.providerSubId !== ev.providerSubscriptionId,
+      providerEventId: ev.providerEventId,
+    },
+    'subscription.granted — already entitled',
+  );
+}
+
+/** Keep the last twenty refused activations on the row for the operator. */
+async function recordRefusedGrant(
+  row: Subscription,
+  ev: SubscriptionGrantedEvent,
+  now: Date,
+): Promise<void> {
+  const previous =
+    typeof row.metadata === 'object' && row.metadata !== null && !Array.isArray(row.metadata)
+      ? (row.metadata as Record<string, unknown>)
+      : {};
+  const refused = Array.isArray(previous.refusedGrants) ? previous.refusedGrants.slice(-19) : [];
+  await prisma.subscription.update({
+    where: { id: row.id },
+    data: {
+      metadata: {
+        ...previous,
+        refusedGrants: [
+          ...refused,
+          {
+            provider: ev.provider,
+            providerSubId: ev.providerSubscriptionId,
+            providerEventId: ev.providerEventId,
+            at: now.toISOString(),
+          },
+        ],
+      } as never,
+    },
+  });
+}
+
+/**
+ * The sender's subscription id was bound to a row this event does not
+ * describe. Release the id and, if that row was live, cancel it: the
+ * external system has said the subscription now buys a different plan, or
+ * belongs to a different account. Announced as a cancellation because that
+ * is what happened to THAT row; the activation of its replacement follows
+ * from the caller.
+ */
+async function retireReplacedSubscription(
+  holder: Subscription,
+  ev: SubscriptionGrantedEvent,
+  ctx: ApplyContext,
+): Promise<void> {
+  const now = new Date();
+  const wasEntitled = isEntitlingStatus(holder.status);
+  const previous =
+    typeof holder.metadata === 'object' && holder.metadata !== null && !Array.isArray(holder.metadata)
+      ? (holder.metadata as Record<string, unknown>)
+      : {};
+  const deliveryIds = await prisma.$transaction(async (tx) => {
+    await tx.subscription.update({
+      where: { id: holder.id },
+      data: {
+        providerSubId: null,
+        ...(wasEntitled && { status: 'CANCELED' as const, cancelAt: now, canceledAt: now }),
+        metadata: {
+          ...previous,
+          replacedBy: {
+            providerSubId: ev.providerSubscriptionId,
+            planSlug: ev.planSlug,
+            providerEventId: ev.providerEventId,
+            at: now.toISOString(),
+          },
+        } as never,
+      },
+    });
+    return wasEntitled ? enqueueSubscriptionEvent(tx, 'subscription.canceled', holder.id) : [];
+  });
+  kickDeliveries(deliveryIds);
+  if (wasEntitled) await dunningService.closeForCanceledSubscription(holder.id);
+  ctx.log.info(
+    {
+      subscriptionId: holder.id,
+      previousPlanId: holder.planId,
+      previousEndUserId: holder.endUserId,
+      providerSubscriptionId: ev.providerSubscriptionId,
+      providerEventId: ev.providerEventId,
+    },
+    wasEntitled
+      ? 'subscription.granted — retired the row previously bound to this subscription id'
+      : 'subscription.granted — released the subscription id from a dormant row',
+  );
+}
+
+/**
  * Hosted checkout completed: the local PENDING subscription (matched by any
- * checkout-session id the row has issued — see checkout-sessions.ts) flips
+ * checkout-session id the row has issued, see checkout-sessions.ts) flips
  * ACTIVE, the provider's subscription id is persisted for future event
  * matching, and the plan's entitlements are provisioned for the FIRST period.
  *
@@ -346,7 +704,7 @@ export async function applyCheckoutCompleted(
 ): Promise<void> {
   // Same hazard the status mirror carried: an empty identifier does not match
   // nothing, it matches the wrong rows. `checkoutSessionWhere` builds a JSON
-  // path filter, and Prisma strips an `undefined` operator — leaving a filter
+  // path filter, and Prisma strips an `undefined` operator, leaving a filter
   // that can match every subscription in the application, which the
   // `updateMany` below would then mark ACTIVE. The type says `string`; only
   // PayPal's translator enforces it.
@@ -359,7 +717,7 @@ export async function applyCheckoutCompleted(
   }
   const where = checkoutSessionWhere(ev.applicationId, ev.checkoutSessionId);
   // Pre-transition snapshot so the outbound `subscription.activated` event
-  // fires only on a REAL state change — a replayed event whose row is
+  // fires only on a REAL state change, a replayed event whose row is
   // already ACTIVE must not re-announce.
   const before = await prisma.subscription.findFirst({
     where,
@@ -367,7 +725,7 @@ export async function applyCheckoutCompleted(
   });
   // Same terminal-state guard the status mirror applies, and for the same
   // reason: a re-delivered completion for an old session must not resurrect a
-  // subscription the buyer cancelled. A genuine re-subscribe is not affected —
+  // subscription the buyer cancelled. A genuine re-subscribe is not affected,
   // its checkout walks the row back to PENDING before this event arrives.
   if (before && !transitionAllowed(before.status, 'ACTIVE')) {
     ctx.log.warn(
@@ -392,7 +750,7 @@ export async function applyCheckoutCompleted(
   // closing anything. That decision names this function as the place the
   // damage is stopped. Nothing here stopped it: `transitionAllowed('ACTIVE',
   // 'ACTIVE')` passes, so the second completion overwrote `providerSubId` and
-  // the FIRST provider-side subscription became unreachable — cancel could
+  // the FIRST provider-side subscription became unreachable, cancel could
   // never find it and it billed forever, in a processor's dashboard nobody was
   // looking at.
   //
@@ -444,10 +802,38 @@ export async function applyCheckoutCompleted(
   // recent checkout was opened at. `Subscription.provider` is written by
   // checkout, before anybody has paid, so a buyer who opens Stripe, goes back
   // and opens PayPal, then returns to the first tab and pays leaves the column
-  // naming PayPal while `providerSubId` is a Stripe id — and cancel dials the
+  // naming PayPal while `providerSubId` is a Stripe id, and cancel dials the
   // column. Null on rows written before `providerBySession` existed, which
   // leaves the column untouched exactly as before.
   const completingProvider = providerForSession(before?.metadata ?? null, ev.checkoutSessionId);
+
+  // Did this checkout mint a free trial at the provider (#478)?
+  //
+  // Stripe's `customer.subscription.created` is not in the translate switch,
+  // and for a plain trial no `customer.subscription.updated` arrives until
+  // conversion, so nothing else ever tells us. Hard-writing ACTIVE meant a
+  // 30-day trial on a $99 plan added $99 to reported MRR on day 0 against zero
+  // cash, because `computeMrrCents` sums `plan.amount` over `status: 'ACTIVE'`.
+  // It also made TRIALING unreachable for hosted checkout, which is the status
+  // `mapStripeSubStatus` emits and the provider-switch wording branches on.
+  //
+  // The trial ledger (#500) already knows: the redemption was bound to this
+  // session before the provider call returned, so by webhook time it is there.
+  const trialForSession =
+    ev.providerSubscriptionId === null
+      ? null
+      : await prisma.trialRedemption.findFirst({
+          where: {
+            applicationId: ev.applicationId,
+            checkoutSessionId: ev.checkoutSessionId,
+            status: { in: ['RESERVED', 'RELEASED'] },
+          },
+          select: { trialDays: true },
+        });
+  const trialEndsAt =
+    trialForSession?.trialDays != null && trialForSession.trialDays > 0
+      ? new Date(Date.now() + trialForSession.trialDays * 86_400_000)
+      : null;
 
   // Status flip + its outbox rows in ONE transaction, so a
   // `subscription.activated` announcement can never be lost by a crash between
@@ -458,7 +844,7 @@ export async function applyCheckoutCompleted(
     const result = await tx.subscription.updateMany({
       where: {
         ...where,
-        // The guard above, repeated as a WRITE PREDICATE — and this repetition
+        // The guard above, repeated as a WRITE PREDICATE, and this repetition
         // is the whole point, not redundancy (#437).
         //
         // The read above happens outside this transaction, so two completions
@@ -470,8 +856,8 @@ export async function applyCheckoutCompleted(
         //
         // Stated on the UPDATE, Postgres settles it. Two concurrent updates of
         // one row serialise on its lock, and under READ COMMITTED the loser
-        // re-evaluates this predicate against the winner's committed version —
-        // where `providerSubId` is now the winner's — so it matches zero rows
+        // re-evaluates this predicate against the winner's committed version,
+        // where `providerSubId` is now the winner's, so it matches zero rows
         // instead of overwriting. `result.count === 0` below is how we learn
         // we lost, which is exactly when the orphaned completion needs
         // recording.
@@ -481,7 +867,7 @@ export async function applyCheckoutCompleted(
             // re-delivery, which must stay idempotent).
             { providerSubId: null },
             { providerSubId: ev.providerSubscriptionId },
-            // Held by a different id, but not yet entitling — a PENDING row
+            // Held by a different id, but not yet entitling, a PENDING row
             // carrying a stale id is a checkout that never settled, and the
             // sale that IS settling now is the one that should own the row.
             { NOT: { status: { in: [...ENTITLING_SUBSCRIPTION_STATUSES] } } },
@@ -489,7 +875,11 @@ export async function applyCheckoutCompleted(
         }),
       },
       data: {
-        status: 'ACTIVE',
+        // TRIALING, not ACTIVE, while the provider is running a trial clock.
+        // Both are entitling, so what the buyer can DO is unchanged; what
+        // changes is that unpaid revenue stops being reported as MRR.
+        status: trialEndsAt !== null ? 'TRIALING' : 'ACTIVE',
+        ...(trialEndsAt !== null && { trialEndsAt }),
         ...(ev.providerSubscriptionId !== null && { providerSubId: ev.providerSubscriptionId }),
         ...(completingProvider !== null && { provider: completingProvider }),
         // Activation payloads that carry the period anchor (Razorpay
@@ -511,8 +901,8 @@ export async function applyCheckoutCompleted(
     return { updated: result, deliveryIds: ids };
   });
 
-  // We lost the race. The predicate above matched nothing, which — when a row
-  // was there to match — means another completion got the row first and this
+  // We lost the race. The predicate above matched nothing, which, when a row
+  // was there to match, means another completion got the row first and this
   // sale is live at its processor with nothing local pointing at it.
   //
   // Recorded on the row rather than only in a log line, for the same reason
@@ -555,7 +945,7 @@ export async function applyCheckoutCompleted(
   if (updated.count > 0) {
     const sub = await prisma.subscription.findFirst({ where });
     if (sub) {
-      // Checkout provisions the subscription's FIRST period by default —
+      // Checkout provisions the subscription's FIRST period by default,
       // pinned to the 'initial' anchor so the first invoice.paid
       // (subscription_create) collides with it instead of double-granting
       // (see provision()). PayPal's ACTIVATED port sets firstPeriod: false
@@ -566,6 +956,10 @@ export async function applyCheckoutCompleted(
         subscription: sub,
         log: ctx.log,
         firstPeriod: ev.firstPeriod ?? true,
+        // A one-off plan has no period to anchor on, so the purchase itself is
+        // its identity. Without this a second credit pack charged and granted
+        // nothing (#490).
+        purchaseRef: ev.checkoutSessionId,
       });
 
       // The charge, when the completion payload carried one (one-time flows).
@@ -583,6 +977,17 @@ export async function applyCheckoutCompleted(
         { subscription: sub, checkoutSessionId: ev.checkoutSessionId, paymentId },
         ctx,
       );
+      // The provider started the trial this session carried, if it carried
+      // one. Post-commit and non-throwing, for the reason stated at the top of
+      // this module: a bookkeeping write must never be able to roll back a
+      // payment. A session with no trial costs one indexed lookup.
+      const { consumeTrial } = await import('../trial-eligibility.service.js');
+      await consumeTrial({
+        applicationId: sub.applicationId,
+        checkoutSessionId: ev.checkoutSessionId,
+        subscriptionId: sub.id,
+        log: ctx.log,
+      });
     }
     // Delivery kickoff for the rows committed above. Deliberately here rather
     // than right after the commit, so a consumer still sees the same ordering
@@ -592,7 +997,7 @@ export async function applyCheckoutCompleted(
     if (activatedFrom) {
       // Reactivation of a suspended (PAST_DUE) sub recovers its dunning case
       // (PayPal BILLING.SUBSCRIPTION.ACTIVATED port). No-op when no case is
-      // open — a fresh PENDING→ACTIVE checkout (Stripe) has none.
+      // open, a fresh PENDING→ACTIVE checkout (Stripe) has none.
       await dunningService.recoverForSubscription(activatedFrom.id);
     }
   }
@@ -623,7 +1028,7 @@ async function recordCompletionPayment(
     field: 'amount_total',
   });
   if (amount === null) return undefined; // Refused (see safeAmount).
-  // Cross-checked against the plan this session bought — see
+  // Cross-checked against the plan this session bought, see
   // resolveChargeCurrency.
   const currency = await resolveChargeCurrency(sub, { amount, currency: charge.currency }, ctx.log, {
     providerPaymentId: charge.providerPaymentId,
@@ -645,7 +1050,7 @@ async function recordCompletionPayment(
         },
         select: { id: true },
       });
-      // Outbox row commits with the payment — see the module docblock.
+      // Outbox row commits with the payment, see the module docblock.
       return { payment: row, deliveryIds: await enqueuePaymentEvent(tx, 'payment.succeeded', row.id) };
     });
     kickDeliveries(deliveryIds);
@@ -659,7 +1064,7 @@ async function recordCompletionPayment(
     // Scoped by application: the unique key is (application_id,
     // provider_payment_id), and looking the charge id up globally would return
     // ANOTHER tenant's payment row when two Applications share a provider
-    // account — which is exactly the collision that key now prevents.
+    // account, which is exactly the collision that key now prevents.
     const existing = await prisma.payment.findUnique({
       where: {
         applicationId_providerPaymentId: {
@@ -674,10 +1079,10 @@ async function recordCompletionPayment(
 }
 
 /**
- * Approved-but-uncaptured one-time order (PayPal Orders v2 —
+ * Approved-but-uncaptured one-time order (PayPal Orders v2,
  * CHECKOUT.ORDER.APPROVED). Port of the bespoke paypal.handler
  * `onOrderApproved`: capture via the provider, then flip the local row
- * ACTIVE and provision. Idempotent — the capture tolerates
+ * ACTIVE and provision. Idempotent, the capture tolerates
  * already-captured, and provision dedupes per period. An incomplete
  * capture leaves the row PENDING (deliberately; the provider retries the
  * webhook).
@@ -688,7 +1093,7 @@ export async function applyCheckoutApproved(
 ): Promise<void> {
   // Same hazard the status mirror carried: an empty identifier does not match
   // nothing, it matches the wrong rows. `checkoutSessionWhere` builds a JSON
-  // path filter, and Prisma strips an `undefined` operator — leaving a filter
+  // path filter, and Prisma strips an `undefined` operator, leaving a filter
   // that can match every subscription in the application, which the
   // `updateMany` below would then mark ACTIVE. The type says `string`; only
   // PayPal's translator enforces it.
@@ -718,7 +1123,7 @@ export async function applyCheckoutApproved(
     return;
   }
 
-  // Capture the approved order (the provider doesn't auto-capture — that's
+  // Capture the approved order (the provider doesn't auto-capture, that's
   // what routed us to this applier). Dynamic import breaks the
   // apply ↔ providers/index cycle, same as the credentials service does.
   const { getProviderForApplication } = await import('../providers/index.js');
@@ -745,14 +1150,18 @@ export async function applyCheckoutApproved(
       ? enqueueSubscriptionEvent(tx, 'subscription.activated', sub.id)
       : [];
   });
-  await entitlementsService.provision({ subscription: sub, log: ctx.log });
+  await entitlementsService.provision({
+    subscription: sub,
+    log: ctx.log,
+    purchaseRef: ev.checkoutSessionId,
+  });
   // Fulfilment happened, so the coupon has been spent. This applier is the
   // ONLY place that knows it for a PayPal one-off: the capture arrives later
   // as its own payment event, and before this existed the redemption was
-  // simply never recorded — a single-use code discounted every subsequent
+  // simply never recorded, a single-use code discounted every subsequent
   // purchase by the same buyer, forever.
   await redeemSessionCoupon({ subscription: sub, checkoutSessionId: ev.checkoutSessionId }, ctx);
-  // Delivery kickoff, at the point the emit used to sit — after provisioning,
+  // Delivery kickoff, at the point the emit used to sit, after provisioning,
   // so a consumer sees the same ordering it always did.
   kickDeliveries(deliveryIds);
   ctx.log.info(
@@ -761,12 +1170,6 @@ export async function applyCheckoutApproved(
   );
 }
 
-/**
- * Successful recurring payment: record the SUCCEEDED Payment row and the
- * subscription's status/period in one transaction, then — strictly after the
- * commit — redeem the checkout's coupon if it has not been already, recover
- * any open dunning case, and (re-)provision entitlements for the paid period.
- */
 /**
  * Local-subscription matcher shared by the payment/status appliers.
  * `providerSubId` is the historical (Stripe) key; `checkoutSessionId`, when
@@ -786,19 +1189,48 @@ function localSubscriptionWhere(
   // must all yield `null` from this function, because each one turns into a
   // filter that matches the wrong rows rather than no rows.
   if (providerSubscriptionId && !checkoutSessionId) {
-    // Exactly the historical query — no OR clause for Stripe/PayPal.
+    // Exactly the historical query, no OR clause for Stripe/PayPal.
     return { applicationId, providerSubId: providerSubscriptionId };
   }
   const or: object[] = [];
   if (providerSubscriptionId) or.push({ providerSubId: providerSubscriptionId });
   if (checkoutSessionId) {
-    // Any session the row has issued, not just its newest — see
+    // Any session the row has issued, not just its newest, see
     // checkout-sessions.ts for why a row can have several live at once.
     or.push(...checkoutSessionMatchers(checkoutSessionId));
   }
   return or.length > 0 ? { applicationId, OR: or } : null;
 }
 
+/**
+ * The local subscription an event may act on: the row its ids match, unless
+ * that row was created by a DIFFERENT provider. Provider subscription ids
+ * are not secret (a Stripe id is on every invoice), and the external module
+ * accepts whatever id its sender chooses, so an event verified with one
+ * provider's credentials must not reach a row that belongs to another. A
+ * row with no provider (a legacy or hand-granted one) is fair game, as it
+ * always was; contexts without a provider (tests) keep the historical
+ * behaviour.
+ */
+async function findOwnedSubscription(
+  where: NonNullable<ReturnType<typeof localSubscriptionWhere>>,
+  ctx: ApplyContext,
+): Promise<Subscription | null> {
+  const row = await prisma.subscription.findFirst({ where });
+  if (!row || !ctx.provider || row.provider === null || row.provider === ctx.provider) return row;
+  ctx.log.warn(
+    { subscriptionId: row.id, rowProvider: row.provider, eventProvider: ctx.provider },
+    'billing event matched a subscription created by another provider — ignored',
+  );
+  return null;
+}
+
+/**
+ * Successful recurring payment: record the SUCCEEDED Payment row and the
+ * subscription's status/period in one transaction, then, strictly after the
+ * commit, redeem the checkout's coupon if it has not been already, recover
+ * any open dunning case, and (re-)provision entitlements for the paid period.
+ */
 export async function applyPaymentSucceeded(
   ev: PaymentSucceededEvent,
   ctx: ApplyContext,
@@ -811,13 +1243,13 @@ export async function applyPaymentSucceeded(
 
   // Find local subscription if present so the Payment links to it.
   const where = localSubscriptionWhere(ev.applicationId, ev.providerSubscriptionId, ev.checkoutSessionId);
-  const localSub = where ? await prisma.subscription.findFirst({ where }) : null;
+  const localSub = where ? await findOwnedSubscription(where, ctx) : null;
   // `requireLocalSubscription` is deliberately NOT honoured on this path any
   // more, and Razorpay is the only module that sets it.
   //
   // The flag preserved the posture of Razorpay's old bespoke handler, which
   // dropped an unmatched event rather than writing an unlinked Payment. For a
-  // FAILED payment that is still right — an unlinked failure record buys
+  // FAILED payment that is still right, an unlinked failure record buys
   // nothing. For a SUCCEEDED one it means a Razorpay customer's money can
   // arrive, be captured, and leave no trace anywhere in Rekey: not in the
   // payments list, not in the operator queue below, nowhere. The operator
@@ -828,7 +1260,7 @@ export async function applyPaymentSucceeded(
   // Stripe and PayPal already did, and what the applier's own "money that
   // moved is a fact" comment claims a few lines down.
   // Amount + currency cross-checked against the plan before either reaches a
-  // row — see resolveChargeCurrency.
+  // row, see resolveChargeCurrency.
   const currency = await resolveChargeCurrency(localSub, { amount, currency: ev.currency }, ctx.log, {
     providerPaymentId: ev.providerPaymentId,
   });
@@ -839,7 +1271,7 @@ export async function applyPaymentSucceeded(
   //
   // The coupon redemption is deliberately NOT in this transaction any more.
   // It used to be, on the reasoning that a payment must never commit without
-  // its redemption — but the redemption throws on an exhausted limit, and a
+  // its redemption, but the redemption throws on an exhausted limit, and a
   // recurring coupon was being redeemed again on EVERY renewal, so the first
   // renewal after a `maxRedemptionsPerUser: 1` coupon was consumed rolled the
   // renewal payment back: money moved at the provider, no Payment row, no
@@ -869,10 +1301,10 @@ export async function applyPaymentSucceeded(
       });
       // Flip the subscription ACTIVE (and mirror a payload-carried period
       // anchor, e.g. Razorpay current_end) in the SAME transaction as the
-      // payment — a committed payment must never be left with a stale
+      // payment, a committed payment must never be left with a stale
       // status or stranded from its period change.
       if (localSub) {
-        // The payment is recorded either way — money that moved is a fact —
+        // The payment is recorded either way, money that moved is a fact,
         // but a charge arriving against a CANCELED/EXPIRED row does not bring
         // it back to life. See transitionAllowed.
         const mayActivate =
@@ -881,7 +1313,7 @@ export async function applyPaymentSucceeded(
           ...(mayActivate && { status: 'ACTIVE' as const }),
           ...(ev.currentPeriodEnd !== undefined && { currentPeriodEnd: ev.currentPeriodEnd }),
           // A PENDING row going live on its payment is a checkout completing,
-          // and a resubscribe reuses the cancelled row — so the old dates have
+          // and a resubscribe reuses the cancelled row, so the old dates have
           // to go (see `clearedOnReactivation`). This path matters because the
           // two events are not ordered: when a provider's sale lands before its
           // activation, the activation then finds the row already ACTIVE and
@@ -897,12 +1329,12 @@ export async function applyPaymentSucceeded(
           await tx.subscription.update({ where: { id: localSub.id }, data: subData });
         }
       }
-      // Outbox rows, same transaction as the money — only when a NEW payment
+      // Outbox rows, same transaction as the money, only when a NEW payment
       // row was committed, which by construction is every path that reaches
       // here (a replay throws P2002 above and rolls the whole thing back).
       const ids = await enqueuePaymentEvent(tx, 'payment.succeeded', payment.id);
       if (localSub && localSub.status !== 'ACTIVE' && transitionAllowed(localSub.status, 'ACTIVE')) {
-        // Recovery/activation via payment — a real status transition. Refused
+        // Recovery/activation via payment, a real status transition. Refused
         // above for a terminal row, so nothing is announced for one either.
         ids.push(...(await enqueueSubscriptionEvent(tx, 'subscription.activated', localSub.id)));
       }
@@ -912,7 +1344,7 @@ export async function applyPaymentSucceeded(
     deliveryIds = committed.deliveryIds;
   } catch (e) {
     // P2002 = this provider payment id already has a Payment row for this
-    // application (webhook replay) — the original transaction committed
+    // application (webhook replay), the original transaction committed
     // payment + status + outbox rows together, so skipping here is safe.
     // Anything else rolls all back and rethrows.
     if ((e as { code?: string }).code === 'P2002') {
@@ -934,7 +1366,7 @@ export async function applyPaymentSucceeded(
   //
   // Gated on `createdPayment` so a replay does not re-announce a case that is
   // already open, and awaited rather than fired-and-forgotten so the row and
-  // the mail are done before the webhook is acknowledged — a provider that
+  // the mail are done before the webhook is acknowledged, a provider that
   // gets its 200 and never retries is the last chance this event had.
   if (createdPayment && !localSub) {
     await openUnappliedPaymentCase(
@@ -952,21 +1384,21 @@ export async function applyPaymentSucceeded(
     );
   }
 
-  // Coupon redemption — post-commit, and keyed on the session the EVENT names,
+  // Coupon redemption, post-commit, and keyed on the session the EVENT names,
   // never on whichever session the row issued most recently.
   //
   // It was the newest, and that was a free drain on a coupon's global ceiling:
   // the row's newest session is whatever checkout the buyer opened last, so
   // opening a fresh discounted checkout and then letting the existing
   // subscription renew redeemed the NEW session's coupon off a renewal invoice
-  // that the new coupon never touched — no payment for it, repeatable monthly.
+  // that the new coupon never touched, no payment for it, repeatable monthly.
   //
   // Every flow that reaches here carries its session or is already covered:
   // Razorpay puts the subscription/payment-link id on the event, PayPal's
   // capture carries the order id, and Stripe's one-time and recurring sales are
   // both redeemed by `checkout.completed`, which knows exactly which session
   // completed. A renewal names no session and redeems nothing, which is the
-  // correct answer — the provider coupon is `duration: 'once'` and only ever
+  // correct answer, the provider coupon is `duration: 'once'` and only ever
   // cut invoice #1.
   if (localSub && ev.checkoutSessionId) {
     await redeemSessionCoupon(
@@ -979,13 +1411,13 @@ export async function applyPaymentSucceeded(
     );
   }
 
-  // Money moved for this subscription — whatever the status-mirror ordering,
+  // Money moved for this subscription, whatever the status-mirror ordering,
   // an OPEN dunning case is now recovered (no-op when none is open).
   if (localSub) {
     await dunningService.recoverForSubscription(localSub.id);
   }
 
-  // Re-provision on every successful payment — this is the recurring-renewal
+  // Re-provision on every successful payment, this is the recurring-renewal
   // event, so a CREDIT plan refills its per-period credits and a TIMED license
   // extends. `provision()` is idempotent per (subscription, period): its credit
   // anchor is keyed off `currentPeriodEnd`, so a replay within the same period
@@ -996,15 +1428,23 @@ export async function applyPaymentSucceeded(
   if (localSub) {
     const fresh = await prisma.subscription.findUnique({ where: { id: localSub.id } });
     if (fresh) {
-      // The FIRST payment provisions the SAME period checkout already did —
+      // The FIRST payment provisions the SAME period checkout already did,
       // anchor it 'initial' so the two collide rather than double-grant when
       // the period mirror has already advanced currentPeriodEnd (providers
       // don't order webhooks). Renewals anchor on currentPeriodEnd and refill
       // once each.
+      //
+      // A one-off plan has no period, so it collides on the PURCHASE instead,
+      // and it must be the same ref the checkout applier used or the two stop
+      // colliding and the pack is granted twice. That is not hypothetical: the
+      // PayPal one-off path provisions on approval and again on capture, and
+      // before #490 both landed on `'initial'`, the shared anchor was quietly
+      // doing this job as well as breaking repeat purchases.
       await entitlementsService.provision({
         subscription: fresh,
         log: ctx.log,
         firstPeriod: ev.firstPeriod,
+        ...(ev.checkoutSessionId !== undefined && { purchaseRef: ev.checkoutSessionId }),
       });
     }
   }
@@ -1017,7 +1457,7 @@ export async function applyPaymentSucceeded(
  */
 export async function applyPaymentFailed(ev: PaymentFailedEvent, ctx: ApplyContext): Promise<void> {
   const where = localSubscriptionWhere(ev.applicationId, ev.providerSubscriptionId, ev.checkoutSessionId);
-  const localSub = where ? await prisma.subscription.findFirst({ where }) : null;
+  const localSub = where ? await findOwnedSubscription(where, ctx) : null;
   if (!localSub && ev.requireLocalSubscription) {
     ctx.log.warn(
       { providerPaymentId: ev.providerPaymentId, providerSubscriptionId: ev.providerSubscriptionId },
@@ -1035,7 +1475,7 @@ export async function applyPaymentFailed(ev: PaymentFailedEvent, ctx: ApplyConte
   // Record the FAILED payment, flip the subscription to PAST_DUE, and write
   // the outbox rows atomically: a committed payment must never be left behind
   // without its matching status change, and neither must be left without the
-  // event that announces it. Idempotent — (application_id,
+  // event that announces it. Idempotent, (application_id,
   // provider_payment_id) is unique, so a webhook replay hits P2002 and the
   // whole transaction rolls back cleanly.
   let createdPayment: { id: string } | null = null;
@@ -1071,7 +1511,7 @@ export async function applyPaymentFailed(ev: PaymentFailedEvent, ctx: ApplyConte
     deliveryIds = committed.deliveryIds;
   } catch (e) {
     // P2002 = this provider payment id already recorded a FAILED payment
-    // (replay) — the original transaction committed payment + status
+    // (replay), the original transaction committed payment + status
     // together, so skipping is safe. Anything else rolls both back and
     // rethrows for the provider to retry.
     if ((e as { code?: string }).code === 'P2002') {
@@ -1087,25 +1527,23 @@ export async function applyPaymentFailed(ev: PaymentFailedEvent, ctx: ApplyConte
   kickDeliveries(deliveryIds);
   if (createdPayment && localSub) {
     // Open (or bump) the dunning case. The provider keeps retrying the card
-    // itself — the case tracks state + notifies; it never re-charges.
+    // itself, the case tracks state + notifies; it never re-charges.
     await dunningService.recordPaymentFailure({ subscriptionId: localSub.id, log: ctx.log });
   }
 }
 
 /**
- * Refund applier — documented no-op stub. No provider handler records
- * refunds today (the Stripe dispatcher has no `charge.refunded` /
- * `refund.*` coverage), so there is no behavior to extract; the event
- * exists so modules can translate into it once the domain grows a
- * REFUNDED payment status / negative-amount policy. Logged so operators
- * can see refund traffic arriving before it's modeled.
+ * Refund applier: marks a matching SUCCEEDED payment REFUNDED. It does not
+ * revoke what the payment bought, see the note in the body for why, so a
+ * plan can be split later into "record the reversal" and "claw back what it
+ * funded" without re-deriving either half.
  */
 export async function applyPaymentRefunded(
   ev: PaymentRefundedEvent,
   ctx: ApplyContext,
 ): Promise<void> {
   // Records the reversal on the books. It does NOT revoke what the payment
-  // bought — clawing back credits, licences and subscriptions is #413, and
+  // bought, clawing back credits, licences and subscriptions is #413, and
   // needs a dispute policy, a negative-balance primitive and a restore path
   // for a dispute the operator wins. Until then the operator reverses credits
   // with `credits.grant({ reason: 'ADJUST', amount: -n })`, which is audited.
@@ -1157,7 +1595,7 @@ export async function applySubscriptionPastDue(
 }
 
 /**
- * Status mirror shared by the three lifecycle appliers — the former
+ * Status mirror shared by the three lifecycle appliers, the former
  * onSubscriptionUpdated/onSubscriptionDeleted bodies unified. `ev.status`
  * (the module's mapped local status) drives everything; `ev.type` only
  * routed us here (see SubscriptionStatusEvent docs for why they can
@@ -1173,13 +1611,13 @@ async function applySubscriptionStatusMirror(
 ): Promise<void> {
   // No identifier, no write. `localSubscriptionWhere` returns null only when
   // the event carries neither a provider subscription id nor a checkout
-  // session id — nothing that names a row.
+  // session id, nothing that names a row.
   //
   // This used to fall back to `{ applicationId, providerSubId: <the id we just
   // established is missing> }`. Prisma drops an `undefined` filter entirely, so
   // that collapsed to `{ applicationId }` and the `updateMany` below mirrored
   // the payload's status onto EVERY subscription in the application; a `null`
-  // was worse in a different way, matching every row with no provider — which
+  // was worse in a different way, matching every row with no provider, which
   // on a deployment where subscriptions are granted rather than checked out is
   // all of them. One `customer.subscription.deleted` missing its `id` cancels
   // the whole application; one `updated` with `status: active` entitles every
@@ -1207,15 +1645,34 @@ async function applySubscriptionStatusMirror(
   // nothing).
   const existing = await prisma.subscription.findFirst({
     where,
-    select: { id: true, status: true, cancelAt: true },
+    select: { id: true, status: true, cancelAt: true, provider: true },
   });
-  const transitioned = Boolean(existing && existing.status !== ev.status);
+  // Same ownership rule as the payment appliers: another provider's row is
+  // not this event's to mirror.
+  if (existing && ctx.provider && existing.provider !== null && existing.provider !== ctx.provider) {
+    ctx.log.warn(
+      { subscriptionId: existing.id, rowProvider: existing.provider, eventProvider: ctx.provider, type: ev.type },
+      'subscription status event matched a subscription created by another provider — ignored',
+    );
+    return;
+  }
+  // A timestamp-only event (no status) describes a live subscription. On a
+  // row that has already ended, or never started, the date means nothing
+  // and would only read as a scheduled cancellation on a dead row.
+  if (existing && ev.status === undefined && !isEntitlingStatus(existing.status)) {
+    ctx.log.info(
+      { subscriptionId: existing.id, currentStatus: existing.status, providerEventId: ev.providerEventId },
+      'timestamp-only status event on a subscription that is not live — ignored',
+    );
+    return;
+  }
+  const transitioned = Boolean(existing && ev.status !== undefined && existing.status !== ev.status);
   // A terminal subscription is not reopened by a later-arriving event. This
   // gates the WRITE, not just the announcement: gating only the announcement is
   // how a stale `ACTIVE` re-delivery used to resurrect a CANCELED subscription,
   // entitlements and all, while the outbox stayed silent about it. See
   // transitionAllowed.
-  if (existing && !transitionAllowed(existing.status, ev.status)) {
+  if (existing && ev.status !== undefined && !transitionAllowed(existing.status, ev.status)) {
     ctx.log.warn(
       {
         subscriptionId: existing.id,
@@ -1235,7 +1692,7 @@ async function applySubscriptionStatusMirror(
   // cancel (see RealPaypalProvider.cancelSubscription), so asking to cancel at
   // period end terminates the agreement now and PayPal reports it within
   // seconds. Mirroring that report straight onto the local row took the
-  // remainder of the period away from the buyer — mid-period, with no refund,
+  // remainder of the period away from the buyer, mid-period, with no refund,
   // moments after the account page had told them "you keep everything you paid
   // for until <date>".
   //
@@ -1246,7 +1703,7 @@ async function applySubscriptionStatusMirror(
   //
   // Narrow on purpose:
   //   - only CANCELED. EXPIRED means the subscription ran out its own finite
-  //     cycle count — a real ending, not one we scheduled.
+  //     cycle count, a real ending, not one we scheduled.
   //   - only a `cancelAt` still in the FUTURE, so the provider's event at the
   //     natural end of a scheduled cancellation (Stripe, whose cancellation
   //     really is scheduled, arrives on the day) mirrors normally.
@@ -1274,9 +1731,9 @@ async function applySubscriptionStatusMirror(
   // CANCELED subscription that nobody was ever told about.
   const deliveryIds = await prisma.$transaction(async (tx) => {
     await tx.subscription.updateMany({
-      where,
+      where: existing ? { id: existing.id } : where,
       data: {
-        status: ev.status,
+        ...(ev.status !== undefined && { status: ev.status }),
         ...(ev.currentPeriodEnd !== undefined && { currentPeriodEnd: ev.currentPeriodEnd }),
         ...(ev.trialEndsAt !== undefined && { trialEndsAt: ev.trialEndsAt }),
         ...(ev.cancelAt !== undefined && { cancelAt: ev.cancelAt }),
@@ -1284,7 +1741,7 @@ async function applySubscriptionStatusMirror(
       },
     });
     if (!transitioned || !existing) return [];
-    // No outbound event for EXPIRED — a natural end, not a cancellation
+    // No outbound event for EXPIRED, a natural end, not a cancellation
     // (consumers read the terminal state off the record).
     if (ev.status === 'ACTIVE') return enqueueSubscriptionEvent(tx, 'subscription.activated', existing.id);
     if (ev.status === 'CANCELED') return enqueueSubscriptionEvent(tx, 'subscription.canceled', existing.id);
@@ -1301,7 +1758,7 @@ async function applySubscriptionStatusMirror(
     } else if (ev.status === 'ACTIVE') {
       await dunningService.recoverForSubscription(existing.id);
     } else if (ev.status === 'CANCELED' || ev.status === 'EXPIRED') {
-      // EXPIRED is terminal too (Razorpay `subscription.completed` — the sub
+      // EXPIRED is terminal too (Razorpay `subscription.completed`, the sub
       // ran its full finite cycle count): close any open case so it doesn't
       // linger.
       await dunningService.closeForCanceledSubscription(existing.id);
@@ -1310,7 +1767,7 @@ async function applySubscriptionStatusMirror(
 }
 
 /**
- * Advance the local billing period by one plan interval — the first-class
+ * Advance the local billing period by one plan interval, the first-class
  * form of the PayPal-only workaround (PayPal never tells us the new period
  * end, so renewals must advance it locally). Calendar-aware via
  * advanceBillingPeriod so the anchor doesn't drift against the provider's
@@ -1318,7 +1775,7 @@ async function applySubscriptionStatusMirror(
  *
  * When the event carries `providerPaymentId` (payment-derived rotation:
  * a renewal sale) the applier owns the renewal gate the bespoke PayPal
- * handler had — translate is pure and cannot query, so the gate cannot
+ * handler had, translate is pure and cannot query, so the gate cannot
  * live there. Without it the applier advances unconditionally for a known
  * subscription (the original P1 contract; no current module uses that
  * spelling).
@@ -1354,9 +1811,9 @@ export async function applySubscriptionPeriodAdvanced(
     //   - the funding sale already recorded → a replayed sale must never
     //     advance the period twice;
     //   - no prior SUCCEEDED payment → this is the FIRST sale, which pays
-    //     for the period the activation already provisioned — advancing
+    //     for the period the activation already provisioned, advancing
     //     would double-grant.
-    // Scoped by application — see recordCompletionPayment. A global lookup
+    // Scoped by application, see recordCompletionPayment. A global lookup
     // would see ANOTHER tenant's payment for the same charge id and skip the
     // period advance for a renewal this tenant genuinely just had.
     const alreadyRecorded = await prisma.payment.findUnique({

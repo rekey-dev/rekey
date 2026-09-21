@@ -2,6 +2,7 @@ import * as React from 'react';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { ACCESS_COOKIE, api, PanelApiError, getMe } from '@/lib/api';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
 import { CONSENT_COOKIE } from '../consent-cookie';
@@ -12,24 +13,23 @@ const ADMIN_SCOPE = 'mcp:operator:admin';
 /**
  * Where the authorization code will actually be delivered.
  *
- * This screen used to name the scope tier and the workspace but never the
- * destination, and that asymmetry is what made anonymous RFC 7591 registration
- * dangerous. Registration is open by default (it is how Claude Desktop / Code /
- * Cursor connect), so anyone can register `https://evil.example/cb` under any
- * `client_name` they like and send an operator an authorize link on the
- * operator's OWN deployment. Everything the operator saw at that point was
- * genuine — their panel, their session, their workspaces — and one Allow click
- * handed a workspace-admin grant to a host they were never shown. PKCE does not
- * help: the attacker generated the challenge.
+ * Naming the scope tier and workspace but never the destination is what makes
+ * anonymous RFC 7591 registration dangerous. Registration is open by default
+ * (it is how Claude Desktop / Code / Cursor connect), so anyone can register
+ * `https://evil.example/cb` under any `client_name` they like and send an
+ * operator an authorize link on the operator's OWN deployment. Everything the
+ * operator sees at that point is genuine, their panel, their session, their
+ * workspaces, and one Allow click hands a workspace-admin grant to a host they
+ * were never shown. PKCE does not help: the attacker generated the challenge.
  *
- * Origin only, not the full URI: the path is attacker-chosen text and a long
- * one pushes the host off the end of the line, which is the oldest trick for
- * hiding a destination in plain sight.
+ * Origin only, not the full URI: the path is attacker-chosen text, and a long
+ * one pushes the host off the end of the line, the oldest trick for hiding a
+ * destination in plain sight.
  */
 function redirectOrigin(uri: string): string {
   try {
     const u = new URL(uri);
-    // Custom-scheme callbacks (`cursor://…`) have no host — show the scheme.
+    // Custom-scheme callbacks (`cursor://…`) have no host, show the scheme.
     return u.host ? `${u.protocol}//${u.host}` : u.protocol.replace(/:$/, '');
   } catch {
     return uri.slice(0, 80);
@@ -85,7 +85,6 @@ export default async function McpConsentReviewPage({
   const sp = await searchParams;
   const errored = typeof sp.error === 'string';
 
-  // ── Consent decision ─────────────────────────────────────────────────
   async function decide(formData: FormData): Promise<void> {
     'use server';
     const approve = formData.get('decision') === 'allow';
@@ -94,9 +93,9 @@ export default async function McpConsentReviewPage({
     // The OAuth params are PUBLIC (the client already holds them) and the grant
     // endpoint re-validates every one of them server-side: client_id +
     // redirect_uri against the registered allowlist, PKCE method, and workspace
-    // membership for tenant_id. So carry them in the form — relying on the
-    // consent cookie surviving the POST proved fragile behind the proxy. Cookie
-    // is the fallback if the form somehow lacks them.
+    // membership for tenant_id. Carried through the form instead of relying on
+    // the consent cookie, which proved fragile surviving the POST behind the
+    // proxy; the cookie is only the fallback if the form lacks them.
     const jar2 = await cookies();
     const cookieParams = readParams(jar2.get(CONSENT_COOKIE)?.value);
     const clientId = String(formData.get('client_id') ?? cookieParams?.client_id ?? '');
@@ -133,7 +132,7 @@ export default async function McpConsentReviewPage({
       if (err instanceof PanelApiError) redirect('/mcp-consent/review?error=grant');
       throw err;
     }
-    // Done — drop the pending cookie and hand the browser back to the client.
+    // Done, drop the pending cookie and hand the browser back to the client.
     jar2.delete(CONSENT_COOKIE);
     redirect(result.redirect);
   }
@@ -167,7 +166,7 @@ export default async function McpConsentReviewPage({
         </div>
 
         {/* The destination, stated plainly. If this is not the client you just
-            started a connection from, Deny — an approval here sends a
+            started a connection from, Deny, an approval here sends a
             workspace credential to that host. */}
         <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-2 text-sm">
           <div className="text-[var(--color-muted-fg)]">Access will be sent to</div>
@@ -200,7 +199,7 @@ export default async function McpConsentReviewPage({
           {wantsAdmin ? (
             <>
               <strong>Admin</strong> access: in addition to read &amp; write, the client can perform
-              destructive / financial actions in the selected workspace — configure billing-provider
+              destructive / financial actions in the selected workspace: configure billing-provider
               credentials and cancel subscriptions. Only grant this to a client you fully trust;
               secrets you give it travel through that client.
             </>
@@ -218,10 +217,8 @@ export default async function McpConsentReviewPage({
           )}
         </div>
 
-        <form action={decide} className="space-y-4">
-          {/* OAuth params carried through the form (public values; the grant
-              endpoint re-validates every one server-side). More robust than
-              relying on the consent cookie surviving the POST. */}
+        <ActionForm action={decide} className="space-y-4">
+          {/* OAuth params carried through the form; see decide() above for why. */}
           <input type="hidden" name="client_id" value={params.client_id} />
           <input type="hidden" name="redirect_uri" value={params.redirect_uri} />
           <input type="hidden" name="code_challenge" value={params.code_challenge} />
@@ -269,7 +266,7 @@ export default async function McpConsentReviewPage({
               Deny
             </SubmitButton>
           </div>
-        </form>
+        </ActionForm>
       </div>
     </main>
   );

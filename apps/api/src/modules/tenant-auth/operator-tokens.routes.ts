@@ -3,7 +3,7 @@
  *
  * These are the routes an AI agent (or any non-interactive automation) calls
  * with an operator personal-access-token (`Authorization: Bearer rp_op_…`)
- * instead of a short-lived session JWT — replacing reliance on the global
+ * instead of a short-lived session JWT, replacing reliance on the global
  * SUPER_ADMIN_KEY.
  *
  * Every route here authenticates via `resolveOperatorToken` (which decorates
@@ -11,7 +11,7 @@
  * default-deny on writes: the mint endpoint additionally requires the PAT to
  * carry the `keys:mint` scope. We deliberately reuse the existing services
  * (`applicationsService`, `apiKeysService`) and only add the PAT auth + scope
- * gate + tenant-ownership check — no duplicated business logic, no weakening of
+ * gate + tenant-ownership check, no duplicated business logic, no weakening of
  * the session-gated `/api/v1/tenant/applications/*` surface.
  *
  * Mounted under /api/v1/tenant/operator.
@@ -55,7 +55,7 @@ async function ensureAppInTenant(
 ): Promise<void> {
   // A PAT's authority was taken entirely from its scopes, and the live role the
   // middleware resolves was read by nothing. So a token minted by an ADMIN kept
-  // full workspace power after that person was demoted to MEMBER — including
+  // full workspace power after that person was demoted to MEMBER, including
   // minting Application secret keys, which are durable credentials that outlive
   // the token. Membership EXISTENCE was re-checked; the role was not.
   //
@@ -119,7 +119,8 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
             403:
               "TENANT_MEMBERSHIP_REVOKED — the PAT's operator no longer has a membership in " +
               'its bound workspace; or OPERATOR_SCOPE_INSUFFICIENT — the PAT does not carry ' +
-              'the `read` scope.',
+              'the `read` scope; or TENANT_ROLE_INSUFFICIENT — the operator who minted the ' +
+              'token has since been demoted below admin.',
           }),
         },
       },
@@ -128,6 +129,18 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
       // This query used to be unbounded: `applicationsService.list(tenantId)`
       // with no take, so a workspace with thousands of Applications returned
       // all of them in one body. Bounded now, and the caller is told the total.
+      // Same rule the sibling routes apply through `ensureAppInTenant`: a
+      // token minted by an admin who has since been demoted to MEMBER does
+      // not keep listing every Application in the workspace, including the
+      // ones the member holds no grant on.
+      if (req.tenantRole !== undefined && req.tenantRole !== 'OWNER' && req.tenantRole !== 'ADMIN') {
+        throw new RekeyError({
+          statusCode: 403,
+          code: 'TENANT_ROLE_INSUFFICIENT',
+          message: 'This token was minted by a member who no longer has admin rights in this workspace.',
+          fix: 'Have an owner or admin mint a new token, or restore the role.',
+        });
+      }
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
       const [items, total] = await Promise.all([
         applicationsService.list(req.tenantId!, { take, skip }),
@@ -158,8 +171,8 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
           // in test/openapi-contract.test.ts because active keys are hard-capped
           // at MAX_KEYS_PER_APP (25) on the write path. This route is NOT on that
           // list and the published document declares `{items, page}` for it, so
-          // it returns the envelope. `page.hasMore` is always false in practice —
-          // the cap sits below any page size — but the shape matches what the
+          // it returns the envelope. `page.hasMore` is always false in practice,
+          // the cap sits below any page size, but the shape matches what the
           // contract says, which is what a generated client compiles against.
           200: okPage(ref('ApiKey'), 'A page of active (non-revoked) API keys for the application.'),
           ...errs({

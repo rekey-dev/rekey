@@ -2,7 +2,7 @@
  * A GDPR-erased end-user cannot be verified back into existence.
  *
  * `resendVerificationEmail` has always short-circuited on `erasedAt`, but
- * `verifyEmail` did not — so a token minted BEFORE the erasure stayed
+ * `verifyEmail` did not, so a token minted BEFORE the erasure stayed
  * redeemable after it. Redeeming flipped `emailVerified: true`, emitted an
  * `email.verified` webhook about a record that is supposed to be erased, and
  * answered `{ ok: true }`. The person was told "Email confirmed", and then
@@ -10,7 +10,7 @@
  * chokepoint. The success was a lie and the write should never have happened.
  *
  * Only the SOFT erasure path was affected. A hard-deleted row takes its tokens
- * with it — `EmailVerificationToken.endUser` is `onDelete: Cascade` — so the
+ * with it, `EmailVerificationToken.endUser` is `onDelete: Cascade`, so the
  * lookup misses and the caller already gets EMAIL_VERIFICATION_TOKEN_INVALID.
  * That asymmetry is why this went unnoticed: the obvious test case was fine.
  */
@@ -20,7 +20,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 
-// A caller-supplied verify link must sit on an origin the Application declared —
+// A caller-supplied verify link must sit on an origin the Application declared,
 // the route takes a publishable key, so an unregistered destination is refused.
 const VERIFY_ORIGIN = 'https://example.com';
 
@@ -60,7 +60,7 @@ describe('verifyEmail refuses an erased end-user', () => {
       .then((r) => (r.json().data as { id: string }).id);
 
     // Register the origin the verify link points at. MERGED into the existing
-    // authConfig — replacing it wholesale drops the enabled sign-in methods and
+    // authConfig, replacing it wholesale drops the enabled sign-in methods and
     // the fixture's own sign-up then fails.
     const existing = await prisma.application.findUniqueOrThrow({
       where: { id: applicationId },
@@ -94,7 +94,7 @@ describe('verifyEmail refuses an erased end-user', () => {
       })
       .then((r) => (r.json().data as { endUser: { id: string } }).endUser.id);
 
-    // The token is minted while the account is live — the whole point is that
+    // The token is minted while the account is live, the whole point is that
     // it predates the erasure.
     const token = await app
       .inject({
@@ -115,7 +115,7 @@ describe('verifyEmail refuses an erased end-user', () => {
     const { liveKey, endUserId, token } = await fixture('vfe-erased');
     expect(token, 'fixture did not mint a token').toBeTruthy();
 
-    // Soft erasure — the tombstone an operator sets on a data-subject request.
+    // Soft erasure, the tombstone an operator sets on a data-subject request.
     await prisma.endUser.update({
       where: { id: endUserId },
       data: { erasedAt: new Date(), erasedBy: 'test' },

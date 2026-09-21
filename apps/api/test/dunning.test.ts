@@ -1,19 +1,19 @@
 /**
- * Dunning — failed-payment recovery cases (roadmap §5 v1).
+ * Dunning, failed-payment recovery cases (roadmap §5 v1).
  *
  * Covers the whole case lifecycle:
  *   - PAST_DUE opens a case (Stripe `invoice.payment_failed` + PayPal
  *     SUSPENDED / SALE.DENIED paths) and emits `dunning.case_opened`,
  *   - a later successful payment closes it RECOVERED (+ event),
  *   - the scheduler advances day-3/day-7 reminders (asserted by manipulating
- *     `nextActionAt` — no fake timers needed),
+ *     `nextActionAt`, no fake timers needed),
  *   - day-14 exhaustion cancels the subscription and emits both
  *     `subscription.canceled` and `dunning.case_exhausted`,
  *   - the per-case atomic claim stops concurrent pollers double-processing,
  *   - the tenant list endpoint (filtering + workspace scoping).
  *
  * Outbound events are asserted as WebhookDelivery rows (wildcard endpoint,
- * unreachable URL) — same approach as billing-outbound-events.test.ts.
+ * unreachable URL), same approach as billing-outbound-events.test.ts.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -42,7 +42,7 @@ function stripeSigned(body: object): { payload: string; headers: Record<string, 
   return { payload, headers: { 'stripe-signature': sig, 'content-type': 'application/json' } };
 }
 
-/** Poll for delivery rows of one event type — emission is fire-and-forget. */
+/** Poll for delivery rows of one event type, emission is fire-and-forget. */
 async function waitForDeliveries(
   endpointId: string,
   eventType: string,
@@ -58,7 +58,7 @@ async function waitForDeliveries(
   }
 }
 
-/** Poll for email-log rows of one event key — day-0 send is fire-and-forget. */
+/** Poll for email-log rows of one event key, day-0 send is fire-and-forget. */
 async function waitForEmailLogs(
   applicationId: string,
   eventKey: string,
@@ -100,7 +100,7 @@ describe('Dunning', () => {
 
   /**
    * Tenant + app (billing on) + plan + end-user + wildcard webhook endpoint.
-   * Dunning is opt-in (off by default) — `dunningEnabled` (default true) turns
+   * Dunning is opt-in (off by default), `dunningEnabled` (default true) turns
    * it on so the lifecycle suite below opens cases; the opt-in test passes false.
    */
   async function bootstrap(
@@ -223,7 +223,7 @@ describe('Dunning', () => {
   // -------------------------------------------------------------- opt-in gate
 
   it('opt-in gate: dunningEnabled=false opens NO case on payment failure; =true opens one', async () => {
-    // dunningEnabled OFF — a payment failure must NOT open a case.
+    // dunningEnabled OFF, a payment failure must NOT open a case.
     const offSlug = 'dun-optin-off';
     const off = await bootstrap(offSlug, 'stripe', false);
     const offSub = await prisma.subscription.create({
@@ -254,7 +254,7 @@ describe('Dunning', () => {
       }),
     ).toBe(0);
 
-    // dunningEnabled ON — the same failure opens exactly one case.
+    // dunningEnabled ON, the same failure opens exactly one case.
     const onSlug = 'dun-optin-on';
     const on = await bootstrap(onSlug, 'stripe', true);
     const onSub = await prisma.subscription.create({
@@ -624,7 +624,7 @@ describe('Dunning', () => {
     // Next action = openedAt + 14d (exhaustion deadline).
     expect(dunningCase.nextActionAt!.getTime() - dunningCase.openedAt.getTime()).toBe(14 * DAY_MS);
 
-    // All three reminders went through the email system (day-0 was async —
+    // All three reminders went through the email system (day-0 was async,
     // poll; the scheduler sends synchronously).
     const emails = await waitForEmailLogs(b.applicationId, 'billing_payment_failed_reminder', 3);
     expect(emails.length).toBe(3);
@@ -657,7 +657,7 @@ describe('Dunning', () => {
     expect(await waitForDeliveries(b.endpointId, 'dunning.case_exhausted', 1)).toHaveLength(1);
     expect(await waitForDeliveries(b.endpointId, 'subscription.canceled', 1)).toHaveLength(1);
 
-    // Exhaustion is terminal — replaying the poll does nothing.
+    // Exhaustion is terminal, replaying the poll does nothing.
     expect(await processDueDunningCases()).toBe(0);
   });
 
@@ -708,7 +708,7 @@ describe('Dunning', () => {
     const endUser = await prisma.endUser.create({
       data: { applicationId, email: 'dun-list-eu@example.com' },
     });
-    // The (applicationId, endUserId, planId) unique allows one sub per plan —
+    // The (applicationId, endUserId, planId) unique allows one sub per plan,
     // a second plan backs the second case.
     const sub1 = await prisma.subscription.create({
       data: {

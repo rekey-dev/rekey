@@ -6,14 +6,14 @@
  * running API, and asserts the refusal. They are grouped by audit finding.
  *
  *   1. A workspace MEMBER with zero grants read every Application in the
- *      workspace — and zero grants is exactly what accepting an invite
+ *      workspace, and zero grants is exactly what accepting an invite
  *      produces, so the "legacy" path was the live default.
  *   2. PATCH .../auth-config answered 200 for a body of entirely unrecognised
  *      keys and changed nothing, so `mfaa` for `mfa` silently no-opped an
  *      Application's MFA policy while reporting success.
  *   3. A payment-provider failure surfaced as 500 INTERNAL_ERROR to the end
- *      user and as a mismatched 401 BAD_REQUEST — with a fragment of the
- *      operator's Stripe key in `message` — to the operator.
+ *      user and as a mismatched 401 BAD_REQUEST, with a fragment of the
+ *      operator's Stripe key in `message`, to the operator.
  *   4. POST .../licenses returned a 404 with no `requestId`, the sole envelope
  *      break across 244 operations.
  *   5. GET /tenant/workspace/email-logs was MEMBER-readable while
@@ -210,7 +210,7 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
       });
       expect(detail.statusCode).toBe(200);
 
-      // Reads only — writes stay 403 with the pre-grants code, unchanged.
+      // Reads only, writes stay 403 with the pre-grants code, unchanged.
       const key = await inject({
         method: 'POST',
         url: `/api/v1/tenant/applications/${appA}/api-keys`,
@@ -276,7 +276,7 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
       ).toBe(404);
 
       // Removing the LAST grant used to widen access back to the whole
-      // workspace — a de-scoping call that granted more than it took away.
+      // workspace, a de-scoping call that granted more than it took away.
       const removed = await inject({
         method: 'DELETE',
         url: `/api/v1/tenant/workspace/members/${membershipId}/grants/${appA}`,
@@ -401,7 +401,7 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
       ).toBe(201);
 
       // Reported verbatim: this answered 200 having applied only `active`, and
-      // echoed back the PRE-EDIT name and unit — so the response itself looked
+      // echoed back the PRE-EDIT name and unit, so the response itself looked
       // like confirmation that the rename had happened.
       const res = await inject({
         method: 'PATCH',
@@ -437,7 +437,7 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
 
     it('POST end-user-roles refuses an unrecognised key instead of 201-ing', async () => {
       const { ownerToken, appA } = await bootstrap();
-      // `allowMagicLink` is not a role field — the real switch is the
+      // `allowMagicLink` is not a role field, the real switch is the
       // auth-config `methods` array. It used to be accepted and dropped.
       const res = await inject({
         method: 'POST',
@@ -682,7 +682,7 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
       expect(err.fix).not.toMatch(/route schema/i);
       expect(err.message).not.toMatch(/sk_test/);
 
-      // The subscription genuinely was NOT canceled — the failure is honest
+      // The subscription genuinely was NOT canceled, the failure is honest
       // about that now, where the 401 implied a client-side mistake.
       const after = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
       expect(after.status).toBe('ACTIVE');
@@ -776,7 +776,7 @@ describe('authorization defaults + error mapping (audit 2026-08)', () => {
       const paths = [
         '/api/v1/tenant/workspace/email-logs',
         '/api/v1/tenant/workspace/invitations',
-        // Already correct before this change — the parity anchor the other
+        // Already correct before this change, the parity anchor the other
         // two are being aligned to.
         '/api/v1/tenant/security-events',
       ];

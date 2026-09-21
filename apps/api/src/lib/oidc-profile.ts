@@ -11,7 +11,7 @@
  * Vault, Nextcloud and Keycloak brokering all provision or match local accounts
  * on `preferred_username`, so that is impersonation with one PATCH.
  *
- * The claims therefore live in a RESERVED sub-object — `metadata.oidc` — that
+ * The claims therefore live in a RESERVED sub-object, `metadata.oidc`, that
  * every end-user-authenticated write path refuses. The rest of `metadata` stays
  * exactly as free-form as it was, which is the point: reserving the claim names
  * themselves would have made `name` and `picture` unwritable through the
@@ -19,7 +19,7 @@
  * custom fields". One reserved key costs an integrator nothing; five reserved
  * words in the middle of their own profile object costs them the feature.
  *
- * Nothing here reads the database or the request — it is pure shaping, so both
+ * Nothing here reads the database or the request, it is pure shaping, so both
  * the write guard and the claim reader are unit-testable on their own and the
  * two can never drift apart about which keys are claims.
  */
@@ -56,7 +56,7 @@ export const PROFILE_METADATA_CLAIMS = [
  *
  * The 16KB ceiling on the whole `metadata` object is not a bound on any single
  * claim: a 15KB `name` fits inside it and produced a 164,620-byte `id_token`
- * plus a 122KB `/userinfo` body — an attacker-chosen payload every relying
+ * plus a 122KB `/userinfo` body, an attacker-chosen payload every relying
  * party has to parse before it can decide it doesn't like it. Bounding at read
  * time rather than only at write time means an oversized value already sitting
  * in a row cannot mint one of those tokens either.
@@ -68,7 +68,7 @@ export const PROFILE_METADATA_CLAIMS = [
 const CLAIM_MAX_LENGTH = 256;
 const PICTURE_MAX_LENGTH = 512;
 
-/** Over-long or malformed values are DROPPED, not errors — see `profileClaims`. */
+/** Over-long or malformed values are DROPPED, not errors, see `profileClaims`. */
 function acceptableClaimValue(claim: string, value: unknown): value is string {
   // Strings only. A number or object under `name` is the app's data, not a
   // claim value, and shipping it would hand RPs a type they can't parse.
@@ -78,7 +78,7 @@ function acceptableClaimValue(claim: string, value: unknown): value is string {
     // `picture` is the one claim an RP renders. `javascript:alert(...)` stored
     // here reached both the ID Token and `/userinfo` verbatim, and an RP that
     // drops it into an `<img src>` or an anchor inherits the payload. https
-    // only — not even http, because a mixed-content avatar is a broken avatar.
+    // only, not even http, because a mixed-content avatar is a broken avatar.
     try {
       return new URL(value).protocol === 'https:';
     } catch {
@@ -113,7 +113,7 @@ export function profileClaims(metadata: unknown): Record<string, string> {
 /**
  * Refuse a metadata write that names the reserved namespace.
  *
- * Called on the paths an END-USER can reach — `PATCH /api/v1/users/me` and
+ * Called on the paths an END-USER can reach, `PATCH /api/v1/users/me` and
  * sign-up with a publishable key. Refused loudly (400) rather than dropped
  * silently, matching the rest of the self-service allowlist: an integrator who
  * tries to set their own claims learns immediately instead of shipping code

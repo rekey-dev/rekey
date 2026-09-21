@@ -1,7 +1,7 @@
 /**
  * License key generation + verification.
  *
- * Format: `rl_lic_<20-byte-base64url>` — cryptographically random; not
+ * Format: `rl_lic_<20-byte-base64url>`, cryptographically random; not
  * derivable from anything visible. Stored as SHA-256 hash on disk; raw
  * value is shown to the operator exactly once at issue.
  *

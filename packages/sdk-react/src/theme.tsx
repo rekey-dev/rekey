@@ -5,8 +5,8 @@
  *
  * Design goals:
  *   - **No CSS framework.** The package ships a single `<style>` block keyed on
- *     CSS custom properties (`--rekey-*`). It works in any host app — Tailwind,
- *     vanilla CSS, CSS-in-JS — because it depends on nothing but the cascade.
+ *     CSS custom properties (`--rekey-*`). It works in any host app, Tailwind,
+ *     vanilla CSS, CSS-in-JS, because it depends on nothing but the cascade.
  *   - **Tokens, not classes.** Every colour / radius / spacing value the
  *     components use resolves to a custom property, so an integrator restyles the
  *     whole kit by overriding a handful of variables (via `appearance.variables`
@@ -15,7 +15,7 @@
  *     `appearance="light" | "dark"` (or `appearance.baseTheme`) pins it.
  *   - **Per-element overrides.** `appearance.elements` maps a slot name to a
  *     className (Clerk's `appearance.elements` pattern, slimmed) so an integrator
- *     can target one part — e.g. `{ button: "my-cta" }` — without re-theming.
+ *     can target one part, e.g. `{ button: "my-cta" }`, without re-theming.
  *
  * The style block is injected exactly once per document (guarded by an id), and
  * every component is wrapped by `<Themed>` which establishes the `.rekey-root`
@@ -43,7 +43,7 @@ export interface AppearanceVariables {
   /** Danger/destructive colour (sign-out everywhere, errors). */
   colorDanger?: string;
   /**
-   * Corner radius for surfaces — cards, plan tiles, menus.
+   * Corner radius for surfaces, cards, plan tiles, menus.
    *
    * Defaults to 2px. Rekey's own look is flat and editorial: hairline rules
    * and square corners, with the accent colour doing the work that a rounded,
@@ -51,7 +51,7 @@ export interface AppearanceVariables {
    */
   borderRadius?: string;
   /**
-   * Corner radius for controls — inputs, buttons, badges.
+   * Corner radius for controls, inputs, buttons, badges.
    *
    * Separate from `borderRadius` because these used to be derived from it by
    * subtraction, which silently broke at small values: a 2px surface radius
@@ -113,8 +113,6 @@ function normalizeAppearance(a: AppearanceProp | undefined): Appearance {
   if (a === 'light' || a === 'dark') return { baseTheme: a };
   return a;
 }
-
-const STYLE_ELEMENT_ID = 'rekey-react-styles';
 
 /**
  * The default stylesheet. Everything is scoped under `.rekey-root` so it can
@@ -378,7 +376,7 @@ const StylesRenderedCtx = React.createContext(false);
  * Next, where these components hydrate anyway, and fails everywhere the
  * components are rendered server-only: Astro without a client directive gets
  * correct markup with no styling at all, because the effect never runs. The
- * workaround — adding a client directive — ships React to a page that needs
+ * workaround, adding a client directive, ships React to a page that needs
  * none, purely to get a stylesheet, which made the whole component set
  * effectively Next-only.
  *
@@ -387,8 +385,8 @@ const StylesRenderedCtx = React.createContext(false);
  * scoped rules are unaffected by where the element sits. The id is kept so an
  * app that injected it by other means can still find it.
  *
- * For consumers who would rather link a real file — a global stylesheet, a
- * CDN, a strict CSP that forbids inline styles — `@rekey.dev/react/styles.css`
+ * For consumers who would rather link a real file, a global stylesheet, a
+ * CDN, a strict CSP that forbids inline styles, `@rekey.dev/react/styles.css`
  * is the same content, generated from this constant at build time.
  */
 function StyleSheet(): React.JSX.Element {
@@ -408,8 +406,8 @@ function StyleSheet(): React.JSX.Element {
  * Render the component stylesheet once, yourself.
  *
  * Optional. Every Rekey component brings its own copy, so things look right
- * without this. Put it in your layout — inside `<head>` if your framework
- * allows — when you would rather have one copy than one per component, and
+ * without this. Put it in your layout, inside `<head>` if your framework
+ * allows, when you would rather have one copy than one per component, and
  * wrap the rest of the tree so they know to skip theirs:
  *
  * ```tsx
@@ -460,7 +458,7 @@ export function variablesToStyle(vars: AppearanceVariables | undefined): React.C
 /** Context carrying the resolved appearance to nested helpers (element classNames). */
 const AppearanceCtx = React.createContext<Appearance>({});
 
-/** Read the active appearance — used by `cx` to merge element overrides. */
+/** Read the active appearance, used by `cx` to merge element overrides. */
 export function useAppearance(): Appearance {
   return React.useContext(AppearanceCtx);
 }

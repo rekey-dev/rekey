@@ -1,5 +1,5 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 
 /**
  * 403 inside the authed console.
@@ -9,8 +9,8 @@ import Link from 'next/link';
  * only one at the app root the boundary sat ABOVE this layout: a single 403 on
  * a single fetch unmounted the sidebar, the workspace switcher and the command
  * palette, and replaced the console with a full-screen card whose one exit was
- * a hard link back to /applications. `lib/api.ts` claimed the opposite — that
- * the boundary "keeps the chrome and offers a way back" — and it did not.
+ * a hard link back to /applications. `lib/api.ts` claimed the opposite, that
+ * the boundary "keeps the chrome and offers a way back", and it did not.
  *
  * That mattered most for a mistyped or ungranted application id, which answers
  * 404 for a member with no grant, so any wrong app URL blanked the whole
@@ -28,7 +28,7 @@ export default function AuthedForbidden(): React.JSX.Element {
         <h1 className="text-xl font-semibold text-[var(--color-fg)]">You don&apos;t have access to this</h1>
         <p className="text-sm text-[var(--color-muted-fg)]">
           This page exists, but your role in this workspace can&apos;t open it. An owner or admin can
-          grant access — or you may be looking at the wrong workspace.
+          grant access, or you may be looking at the wrong workspace.
         </p>
         <Link
           href="/applications"

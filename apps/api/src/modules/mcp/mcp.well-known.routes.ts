@@ -17,10 +17,10 @@
  * `openid-configuration` is served in BOTH forms for the opposite reason: OIDC
  * Discovery 1.0 §4 mandates the SUFFIX form (issuer + `/.well-known/...`, in
  * mcp.routes.ts), while RFC 8414 §3.1 defines the insertion form for the same
- * document — real relying-party libraries are split between the two, and a
+ * document, real relying-party libraries are split between the two, and a
  * provider that answers only one is unreachable from half of them.
  *
- * Registered at the ROOT (no prefix) in `app.ts` — the well-known segment must
+ * Registered at the ROOT (no prefix) in `app.ts`, the well-known segment must
  * sit directly under the origin, so this plugin cannot live under the
  * `/api/v1/mcp` prefix. Bodies are byte-identical to the suffix form and share
  * the same toggle-gated 404s.
@@ -40,7 +40,7 @@ import { errs, ref, type JsonSchema } from '../../lib/openapi.js';
 
 const SlugParam = z.object({ slug: z.string().min(1).max(40) });
 
-// Bodies are byte-identical to the suffix form in mcp.routes.ts — these
+// Bodies are byte-identical to the suffix form in mcp.routes.ts, these
 // responses are RFC-shaped (NOT the Rekey envelope); the 404 gate below it IS
 // the Rekey envelope, since `resolveApp` throws a `RekeyError` before any
 // metadata is built.
@@ -59,7 +59,7 @@ const MCP_GATE_404 = {
 
 /**
  * OIDC Discovery 1.0 document. A superset of the `OAuthAuthServerMetadata`
- * component plus OIDC-only fields the component does not model — see
+ * component plus OIDC-only fields the component does not model, see
  * `mcp.routes.ts` for the suffix-form route with the same body.
  */
 const OpenIdConfiguration: JsonSchema = {
@@ -102,7 +102,7 @@ const ProtectedResourceMetadata: JsonSchema = {
 };
 
 export async function mcpWellKnownRoutes(app: FastifyInstance): Promise<void> {
-  // RFC 8414 — authorization-server metadata, path-insertion form. This is the
+  // RFC 8414, authorization-server metadata, path-insertion form. This is the
   // one a strict connector constructs from the issuer; the suffix form alone
   // 404s for it.
   app.get(
@@ -147,7 +147,7 @@ export async function mcpWellKnownRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // RFC 9728 — protected-resource metadata, path-insertion form. Added for
+  // RFC 9728, protected-resource metadata, path-insertion form. Added for
   // spec-completeness alongside the 401 `WWW-Authenticate: resource_metadata`
   // pointer (which targets the suffix form).
   app.get(

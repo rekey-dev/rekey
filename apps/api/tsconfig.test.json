@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // No `rootDir`: `test/sdk.test.ts` imports the SDK from `packages/`, which
+    // sits outside this app. Type CHECKING has no output tree to constrain, and
+    // the build config (tsconfig.json) still pins rootDir to `src`.
+    "rootDir": null,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*", "test/**/*", "test-providers/**/*", "scripts/**/*"]
+}

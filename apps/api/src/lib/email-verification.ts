@@ -4,7 +4,7 @@
  * Same lifecycle as `lib/password-reset.ts`:
  *   - 32-byte CSPRNG raw value, stored only as SHA-256 hash.
  *   - 24-hour lifetime (the user might check email on a phone, on a desk,
- *     a day later — longer than reset because the action is lower-stakes).
+ *     a day later, longer than reset because the action is lower-stakes).
  *   - Single-use via `consumedAt`.
  *   - Captures the email being verified at issue time so a later
  *     email-change doesn't accidentally promote a stale verification.
@@ -63,7 +63,7 @@ export async function lookupVerificationToken(raw: string): Promise<Verification
 }
 
 /**
- * Atomically mark consumed. Race-safe — concurrent requests can't both
+ * Atomically mark consumed. Race-safe, concurrent requests can't both
  * succeed (the second sees `consumedAt !== null` and bails).
  */
 export async function consumeVerificationToken(

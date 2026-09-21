@@ -2,9 +2,9 @@
  * The deployment defaults a self-hoster inherits without choosing them.
  *
  * `docker-compose.yml` published the API on 0.0.0.0 while defaulting
- * `OPERATOR_SIGNUP_MODE` to `open`. Each half is defensible alone — the API
+ * `OPERATOR_SIGNUP_MODE` to `open`. Each half is defensible alone, the API
  * genuinely has to be reachable, and first boot genuinely has to be able to
- * create the first operator — but together they mean that bringing the stack up
+ * create the first operator, but together they mean that bringing the stack up
  * on a VPS to try it out puts an unauthenticated operator-signup endpoint on
  * the public internet. Postgres and Redis had already been moved to loopback
  * for the same reason; the web services had not.
@@ -53,7 +53,7 @@ describe('docker-compose.yml publishes nothing on 0.0.0.0 by default', () => {
   );
 
   it('leaves the datastores pinned to literal loopback', () => {
-    // These must NOT become BIND_ADDRESS-configurable — nothing outside the
+    // These must NOT become BIND_ADDRESS-configurable, nothing outside the
     // compose network should ever reach them, and the API talks to them by
     // service name over the compose network regardless.
     const ports = publishedPorts(compose);

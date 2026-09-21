@@ -1,6 +1,6 @@
 /**
  * The bookkeeping that links a provider checkout session back to the local
- * `Subscription` row — and, critically, keeps linking the OLDER ones.
+ * `Subscription` row, and, critically, keeps linking the OLDER ones.
  *
  * ## Why a list and not a field
  *
@@ -9,7 +9,7 @@
  * id overwrites the first. The provider does not care: a Stripe Checkout
  * Session stays completable for about 24 hours, and so does the ad-hoc coupon
  * minted alongside it. Completing the FIRST one then matched no local row at
- * all — the webhook answered 200, the subscription stayed PENDING, no payment
+ * all, the webhook answered 200, the subscription stayed PENDING, no payment
  * was recorded and no coupon was redeemed. The buyer had paid.
  *
  * So the row remembers every session it has issued that could still be
@@ -25,7 +25,7 @@
  * without a coupon left the previous one's id in place. Each session carries
  * its own, so completing session N redeems session N's coupon or none.
  *
- * The history is bounded — an unbounded array on a JSON column that every
+ * The history is bounded, an unbounded array on a JSON column that every
  * webhook reads is a slow leak, and a buyer with more live sessions than this
  * is not a case worth carrying.
  */
@@ -59,7 +59,7 @@ export interface SessionCoupon {
    * global limit (see the RESERVED rows in coupons.service.ts). Carried on the session rather than
    * the row because the hold belongs to ONE checkout: completing session N must
    * release session N's slot and nobody else's. Absent for unlimited coupons
-   * and for sessions written before holds existed — releasing is a no-op then,
+   * and for sessions written before holds existed, releasing is a no-op then,
    * and the hold expires on its own TTL either way.
    */
   holdId?: string;
@@ -103,7 +103,7 @@ function stringArray(value: unknown): string[] {
  *
  * Keys that other code reads are preserved verbatim: `checkoutSessionId` is
  * the newest session, and `couponId` / `discountAmount` mirror the newest
- * session's coupon (or are dropped when this checkout carries none — leaving a
+ * session's coupon (or are dropped when this checkout carries none, leaving a
  * previous checkout's coupon on the row is how a code got redeemed against a
  * purchase that never used it).
  */
@@ -118,7 +118,7 @@ export function buildCheckoutSessionMetadata(input: {
    * checkout ran most recently, written before anybody has paid. A buyer who
    * opens Stripe, goes back and opens PayPal, then returns to the first tab
    * and pays leaves the row naming PayPal and carrying a Stripe subscription
-   * id — and `cancelCurrentSubscription` reads `provider` to decide who to
+   * id, and `cancelCurrentSubscription` reads `provider` to decide who to
    * dial. The completion applier stamps the column from the session that
    * actually completed.
    */
@@ -175,7 +175,7 @@ export function buildCheckoutSessionMetadata(input: {
 }
 
 /**
- * Prisma `where` fragment matching the subscription that issued `sessionId` —
+ * Prisma `where` fragment matching the subscription that issued `sessionId`,
  * whether it is the row's newest session or one it issued earlier.
  *
  * Both branches are kept rather than only the array one: rows written before
@@ -202,7 +202,7 @@ export function checkoutSessionMatchers(sessionId: string): object[] {
  * The coupon a specific session carried, read off a subscription's metadata.
  *
  * Falls back to the row-level `couponId` only when the row predates
- * `couponBySession` AND the session asked about is the row's newest — never
+ * `couponBySession` AND the session asked about is the row's newest, never
  * for an older session, which by definition was not the one that stamped it.
  */
 export function couponForSession(metadata: unknown, sessionId: string): SessionCoupon | null {
@@ -273,7 +273,7 @@ export function recordUnappliedCompletion(
 
 // There was a `newestCheckoutSessionId(metadata)` helper here, and it is gone
 // on purpose. Its one caller was the payment applier, which used it to pick the
-// coupon a payment redeemed — and "the row's newest session" is not "the
+// coupon a payment redeemed, and "the row's newest session" is not "the
 // session this payment settled". Opening a new discounted checkout and then
 // letting the existing subscription renew redeemed the new coupon off the
 // renewal invoice, for free, every period. Appliers key off the session the

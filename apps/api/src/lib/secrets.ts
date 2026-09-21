@@ -2,7 +2,7 @@
  * AES-256-GCM JSON encryption used to store provider credentials at rest.
  *
  * Key comes from `ENCRYPTION_KEY` (32 bytes hex, validated by env.ts in
- * production). Each ciphertext carries its own random IV — we never reuse
+ * production). Each ciphertext carries its own random IV, we never reuse
  * IVs across writes, even for the same plaintext.
  *
  * Format on disk: `v1.<iv-hex>.<authTag-hex>.<ciphertext-hex>`. The version
@@ -12,7 +12,7 @@
  * deployment still functions. Production cannot reach that branch: `config/env.ts`
  * throws at boot when `NODE_ENV=production` and the key is absent, because
  * plaintext provider credentials at rest is exactly the kind of exposure nobody
- * notices. Note there is NO warning on the dev path — a mis-set `NODE_ENV` will
+ * notices. Note there is NO warning on the dev path, a mis-set `NODE_ENV` will
  * write `plain.` rows silently.
  */
 

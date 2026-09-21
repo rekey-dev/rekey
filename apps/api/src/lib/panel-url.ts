@@ -1,11 +1,11 @@
 /**
- * Base origin the operator PANEL runs on — used to build operator-facing links
+ * Base origin the operator PANEL runs on, used to build operator-facing links
  * (OAuth redirect URI, magic-link + password-reset URLs in emails).
  *
  * `PANEL_OAUTH_REDIRECT_BASE` wins; otherwise the panel origin is inferred from
  * `CORS_ALLOWED_ORIGINS` (preferring a `panel.` host), so operator links work
  * without a second env in the common deployment. Returns null when nothing
- * usable resolves — callers then fall back to returning the raw token.
+ * usable resolves, callers then fall back to returning the raw token.
  */
 
 import { env, corsAllowedOrigins } from '../config/env.js';

@@ -3,7 +3,7 @@
  *
  * Operator personal-access-tokens (PATs, `rp_op_…`): long-lived, revocable,
  * SCOPED credentials an operator (or an AI agent acting as them) uses to call
- * tenant routes without a session — replacing the global SUPER_ADMIN_KEY. Mint
+ * tenant routes without a session, replacing the global SUPER_ADMIN_KEY. Mint
  * is OWNER/ADMIN only; the raw token is shown EXACTLY ONCE (stashed in a
  * short-lived HttpOnly cookie for the post-redirect reveal, never in the URL).
  *
@@ -20,6 +20,7 @@ import { ApiErrorText } from '@/components/api-error';
 import { Badge } from '@/components/Badge';
 import { CopyButton } from '@/components/CopyButton';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { formatDate, formatDateTime } from '@/lib/date';
@@ -51,12 +52,12 @@ const REVEAL_COOKIE = 'rekey_pat_reveal';
 // Short floor: the reveal is dismissed (cookie deleted) the moment the operator
 // clicks "Done" or navigates away, so this max-age is only the fallback window
 // if they abandon the tab. Kept tight to limit how long the raw token lingers.
-const REVEAL_COOKIE_MAX_AGE = 60 * 2; // 2 min fallback — copy, then it's gone.
+const REVEAL_COOKIE_MAX_AGE = 60 * 2;
 
 const ERR: Record<string, string> = {
   TENANT_ROLE_INSUFFICIENT: 'Only workspace owners and admins can mint or revoke personal-access-tokens.',
   OPERATOR_SCOPE_UNKNOWN: 'Unknown scope. Allowed: read, applications:write, keys:mint.',
-  OPERATOR_TOKEN_LIMIT_REACHED: 'You already have the maximum number of active tokens — revoke one first.',
+  OPERATOR_TOKEN_LIMIT_REACHED: 'You already have the maximum number of active tokens. Revoke one first.',
   NAME_REQUIRED: 'Give the token a name.',
   EXPIRES_IN_PAST: 'Expiry must be in the future (or leave it blank for no expiry).',
 };
@@ -119,7 +120,7 @@ async function revokeToken(formData: FormData): Promise<void> {
 /**
  * Dismiss the one-time reveal: delete the cookie and drop the `?minted=1`
  * query so a refresh can't re-display the raw token. A Server Component render
- * cannot mutate cookies in Next 15 — only a Server Action / Route Handler can —
+ * cannot mutate cookies in Next 15, only a Server Action / Route Handler can,
  * so the delete-on-read has to live here, invoked by the "Done" button (and as
  * a belt-and-braces auto-dismiss) once the operator has had a chance to copy it.
  */
@@ -169,7 +170,7 @@ export default async function ApiTokensPage({
     <section className="mx-auto max-w-7xl space-y-10 px-6 py-8 lg:px-8">
       <PageHeader
         title="API tokens"
-        description="Personal-access-tokens (rp_op_…) let you — or an AI agent acting as you — call the Rekey API without a session, scoped to exactly what you grant. Revocable any time. For MCP setup see Account → Operator MCP."
+        description="Personal-access-tokens (rp_op_…) let you (or an AI agent acting as you) call the Rekey API without a session, scoped to exactly what you grant. Revocable any time. For MCP setup see Account → Operator MCP."
       />
 
       {error && (
@@ -188,7 +189,7 @@ export default async function ApiTokensPage({
         <div className="rounded-lg border-2 border-amber-300 dark:border-amber-600 bg-amber-50 dark:bg-amber-950 p-4 space-y-2">
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-              New token — copy it now, it&apos;s shown once
+              New token: copy it now, it&apos;s shown once
             </p>
             <CopyButton value={reveal.rawToken} label="Copy token" />
           </div>
@@ -196,17 +197,17 @@ export default async function ApiTokensPage({
             {reveal.rawToken}
           </code>
           <p className="text-xs text-amber-800 dark:text-amber-300">
-            Store it like a database password — only its SHA-256 hash is kept on the server, so it
+            Store it like a database password. Only its SHA-256 hash is kept on the server, so it
             cannot be recovered.
           </p>
-          <form action={dismissReveal}>
+          <ActionForm action={dismissReveal}>
             <SubmitButton
               pendingLabel="Dismissing…"
               className="rounded-md border border-amber-400 dark:border-amber-600 px-3 py-1.5 text-xs font-medium text-amber-900 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900 disabled:opacity-60"
             >
-              Done — I&apos;ve copied it
+              Done, I&apos;ve copied it
             </SubmitButton>
-          </form>
+          </ActionForm>
         </div>
       )}
 
@@ -218,7 +219,7 @@ export default async function ApiTokensPage({
             Default-deny: pick only the scopes the token needs. Owners and admins only.
           </p>
         </div>
-        <form
+        <ActionForm
           action={mintToken}
           className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5 space-y-4"
         >
@@ -245,7 +246,7 @@ export default async function ApiTokensPage({
             ))}
           </fieldset>
           <SubmitButton pendingLabel="Creating token…">Create token</SubmitButton>
-        </form>
+        </ActionForm>
       </section>
 
       {/* ─── Active tokens ────────────────────────────────── */}
@@ -292,12 +293,12 @@ export default async function ApiTokensPage({
                     {t.expiresAt ? formatDate(t.expiresAt) : 'never'}
                   </TD>
                   <TD align="right">
-                    <form action={revokeToken} className="inline">
+                    <ActionForm action={revokeToken} className="inline">
                       <input type="hidden" name="id" value={t.id} />
                       <ConfirmButton confirm={`Revoke "${t.name}"? Any tool using it stops working immediately.`}>
                         Revoke
                       </ConfirmButton>
-                    </form>
+                    </ActionForm>
                   </TD>
                 </TR>
               ))}
@@ -306,10 +307,9 @@ export default async function ApiTokensPage({
         )}
       </section>
 
-      {/* MCP connection guide moved to its own page — `/account/mcp` — so this
-          page focuses purely on PAT lifecycle (mint / list / revoke). The PAT
-          minted here is also what the operator pastes into the MCP page's
-          PAT-Bearer mcp.json snippet. */}
+      {/* MCP connection guide lives at /account/mcp; this page is PAT lifecycle
+          only. The PAT minted here is what the operator pastes into that
+          page's PAT-Bearer mcp.json snippet. */}
     </section>
   );
 }

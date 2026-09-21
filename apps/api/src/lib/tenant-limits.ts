@@ -1,5 +1,5 @@
 /**
- * Per-workspace (Tenant) resource limits — read + enforcement.
+ * Per-workspace (Tenant) resource limits, read + enforcement.
  *
  * A workspace can carry optional ceilings in `Tenant.limits` (jsonb, shape =
  * `TenantLimitsSchema` in @rekey.dev/shared-types). Two writers, both
@@ -10,7 +10,7 @@
  * their own via the panel surface but cannot raise them.
  *
  * **Null / absent means unlimited.** That is the default for every row,
- * including every row that existed before this feature — a self-host
+ * including every row that existed before this feature, a self-host
  * deployment that never touches limits behaves exactly as it always did.
  *
  * This is a mechanism, not a pricing model. Rekey attaches no plan, tier, or
@@ -43,7 +43,7 @@
  * that existed briefly when door 2 was added and door 1 was left unlocked.
  *
  * Door 3 is the one that is easy to miss. Because a DISABLED production
- * Application does not count, disabling frees a slot — that is deliberate,
+ * Application does not count, disabling frees a slot, that is deliberate,
  * it is what makes disable a usable substitute for the Application delete
  * Rekey does not have. But it means re-enabling CONSUMES a slot and can be
  * refused, and if it were not asserted, disable/re-enable would launder an
@@ -59,7 +59,7 @@
  * per-Application). Two rules follow from that, and both are load-bearing:
  *
  *   1. **Existing end-users are never locked out.** Sign-in, refresh, MFA,
- *      password reset — untouched. This is an auth product; a workspace going
+ *      password reset, untouched. This is an auth product; a workspace going
  *      over its ceiling must never strand people who already have accounts.
  *   2. **Erased (tombstoned) users don't count.** `erasedAt != null` rows are
  *      retained only for FK integrity behind retained financial rows (see
@@ -70,7 +70,7 @@
  * The check is check-then-act: count, then create, with no lock between them.
  * What we guarantee is that the count is **exact and tenant-wide at the moment
  * of the check**. What we do NOT guarantee is a hard ceiling under
- * concurrency — N sign-ups racing at the boundary can each observe
+ * concurrency, N sign-ups racing at the boundary can each observe
  * `count < max` and all succeed, overshooting by at most the number of
  * in-flight creates.
  *
@@ -92,7 +92,7 @@ import { prisma } from './prisma.js';
 import { RekeyError } from './error.js';
 
 /**
- * Anything that can run the two queries we need — the PrismaClient itself or
+ * Anything that can run the two queries we need, the PrismaClient itself or
  * an interactive-transaction client.
  */
 export type LimitsDb = Pick<Prisma.TransactionClient, 'tenant' | 'endUser' | 'application'>;
@@ -103,7 +103,7 @@ export type LimitsDb = Pick<Prisma.TransactionClient, 'tenant' | 'endUser' | 'ap
  * Unset (null) → `{}` → unlimited. A blob that fails validation is also
  * treated as unlimited rather than throwing: the only writer is the
  * super-admin endpoint, which validates on the way in, so an invalid value
- * means someone hand-edited the database — and refusing every sign-up in the
+ * means someone hand-edited the database, and refusing every sign-up in the
  * workspace is a far worse failure mode than ignoring a limit nobody can
  * currently read.
  */
@@ -113,13 +113,11 @@ export function parseTenantLimits(value: Prisma.JsonValue | null | undefined): T
   return parsed.success ? parsed.data : {};
 }
 
-// ---------------------------------------------------------------------------
-// Default ceilings for NEWLY created workspaces (DEFAULT_TENANT_LIMITS)
-// ---------------------------------------------------------------------------
+// Default ceilings for NEWLY created workspaces (DEFAULT_TENANT_LIMITS).
 //
 // `Tenant.limits` is only ever written after the fact, by the super-admin
 // endpoint. So a workspace that nobody ever runs that endpoint against is
-// unbounded — which is every workspace a plain operator sign-up produces. That
+// unbounded, which is every workspace a plain operator sign-up produces. That
 // is fine for a self-host and wrong for a deployment that wants a floor under
 // every workspace it creates, so the floor is a deployment setting.
 //
@@ -165,7 +163,7 @@ function decodeDefaultTenantLimits(raw: string | undefined): DecodedDefault {
 }
 
 /**
- * Boot-time validation, called from app construction — same reasoning as
+ * Boot-time validation, called from app construction, same reasoning as
  * `assertAdminIpAllowlistValid`: a limits default that fails to parse would
  * otherwise be swallowed at runtime, and the operator would run a deployment
  * they believe caps every new workspace while it caps nothing. Refusing to
@@ -187,7 +185,7 @@ export function assertDefaultTenantLimitsValid(): void {
  * The configured default ceilings, or `null` for unlimited.
  *
  * Read live from `process.env` (falling back to the boot-validated value),
- * matching `adminIpAllowlist` and `operatorSignupMode` — capturing it at module
+ * matching `adminIpAllowlist` and `operatorSignupMode`, capturing it at module
  * load makes the behaviour untestable in-process, because the module is
  * imported before a test can set the variable. An unparseable live override
  * falls back to the boot value, which validation has already proved good, so a
@@ -203,7 +201,7 @@ export function defaultTenantLimits(): TenantLimits | null {
 }
 
 /**
- * The `limits` fragment to spread into a `tenant.create` data object — THE
+ * The `limits` fragment to spread into a `tenant.create` data object, THE
  * single place the default-vs-explicit decision is made.
  *
  * There are four `tenant.create` sites (see the docblock in
@@ -214,7 +212,7 @@ export function defaultTenantLimits(): TenantLimits | null {
  *
  * An explicitly-passed `limits` WINS over the deployment default, including an
  * explicit `{}` (which means "this workspace is unlimited, deliberately"). That
- * path is the super-admin one — provisioning a bespoke workspace is exactly
+ * path is the super-admin one, provisioning a bespoke workspace is exactly
  * where an override belongs. Only `null`/`undefined` (nothing was asked for)
  * falls through to the default.
  */
@@ -247,7 +245,7 @@ export async function countActiveEndUsers(
  *
  * The `disabledAt: null` half is load-bearing and is the reason this function
  * exists rather than an inline `count`. A disabled Application serves no
- * traffic — both API-key middlewares refuse it — so charging a workspace for
+ * traffic, both API-key middlewares refuse it, so charging a workspace for
  * one would be charging for nothing, and with no Application delete in the
  * product the operator would have no way to stop paying. Freeing the slot is
  * what makes `disable` a real substitute for `delete`.
@@ -273,7 +271,7 @@ export async function countProductionApps(
  *
  * `create` has an easy out: make it a staging Application instead. `promote`
  * has the same out, because the Application keeps working exactly as it does
- * today if you leave it alone. `enable` has NEITHER — the operator is trying
+ * today if you leave it alone. `enable` has NEITHER, the operator is trying
  * to bring a real product back online and "create a staging app" is not a
  * remedy for that. Only two things help there, and the message must say both.
  */
@@ -300,7 +298,7 @@ async function runningProductionAppNames(tenantId: string, db: LimitsDb): Promis
  * RUNNING production Application.
  *
  * Call immediately before creating one, promoting one, or re-enabling a
- * disabled one — the three doors in the module docblock. Non-production
+ * disabled one, the three doors in the module docblock. Non-production
  * Applications must not route through here at all, and neither must
  * `disable`, which frees a slot and can therefore never fail on quota.
  *
@@ -364,7 +362,7 @@ export async function assertProductionAppQuota(
 
 /**
  * Throw `TENANT_QUOTA_EXCEEDED` when this workspace has no room for another
- * end-user. Call immediately before any `endUser.create` — see the module
+ * end-user. Call immediately before any `endUser.create`, see the module
  * docblock for why every creation path must route through here.
  *
  * No-op (and one cheap indexed read) when the workspace has no limit set,

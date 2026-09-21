@@ -3,7 +3,7 @@
  * emitted.
  *
  * Every event fed to the pipeline in this file was fetched from
- * `stripe.events.list` after a real billing action — the same object, field
+ * `stripe.events.list` after a real billing action, the same object, field
  * for field, that Stripe would have POSTed to a public endpoint. The one thing
  * that is local is the signature; see the header of `support/fixture.ts` for
  * exactly what that does and does not prove.
@@ -12,14 +12,14 @@
  * contains**, because those are the assumptions the translator is built on and
  * a hand-written fixture can only ever confirm:
  *
- *   - `invoice.metadata.applicationId` — the ONLY thing that routes an
+ *   - `invoice.metadata.applicationId`, the ONLY thing that routes an
  *     invoice event to an Application. `stripe-real.ts` sets metadata on the
  *     subscription and comments that it "propagates to the resulting
  *     subscription/invoice events automatically". If that inheritance is not
  *     real, every `invoice.paid` is dropped with "cannot route" and no payment
- *     is ever recorded — while the money moved.
+ *     is ever recorded, while the money moved.
  *
- *   - `invoice.subscription` — read as a string by the translator. Stripe
+ *   - `invoice.subscription`, read as a string by the translator. Stripe
  *     moved this field under `parent` in the 2025 API versions, and an EVENT
  *     is rendered in the ACCOUNT's default API version, not the one the SDK
  *     client asks for. `registerWebhook` does not pin `api_version` on the
@@ -68,7 +68,7 @@ describeSandbox('stripe', 'Stripe sandbox · webhook → subscription → entitl
 
   /**
    * A buyer mid-checkout: real plan, real Stripe Price, real Checkout Session,
-   * a local PENDING Subscription — and a live Stripe subscription standing in
+   * a local PENDING Subscription, and a live Stripe subscription standing in
    * for the one a completed checkout would have created.
    */
   async function buyerAtActivation(label: string): Promise<{
@@ -90,7 +90,7 @@ describeSandbox('stripe', 'Stripe sandbox · webhook → subscription → entitl
       currency: 'usd',
       interval: 'MONTH',
     });
-    const priceId = (plan.metadata as { stripe?: { priceId?: string } }).stripe?.priceId!;
+    const priceId = (plan.metadata as { stripe?: { priceId?: string } }).stripe!.priceId!;
     const price = await stripe.prices.retrieve(priceId);
     janitor.track('product', typeof price.product === 'string' ? price.product : price.product.id);
 
@@ -197,7 +197,7 @@ describeSandbox('stripe', 'Stripe sandbox · webhook → subscription → entitl
     });
     expect(payment.status).toBe('SUCCEEDED');
     // The amount Stripe actually collected, matched against the plan. This is
-    // where a units mismatch would surface — `resolveChargeCurrency` drops a
+    // where a units mismatch would surface, `resolveChargeCurrency` drops a
     // payment whose currency disagrees with the plan, so a silent 0-payment
     // row here would mean the cross-check rejected a genuine charge.
     expect(payment.amount).toBe(3000);

@@ -6,17 +6,20 @@
  * with a polymorphic helper, but the cost is one extra type parameter
  * everywhere; the duplication is tiny and stays auditable.
  *
- * 30-day lifetime, single-use, hash-only DB. Race-safe rotation via
+ * Configurable lifetime (30 days by default), single-use, hash-only DB. Race-safe rotation via
  * updateMany. Mirror the contract of `lib/refresh-tokens.ts` exactly so
  * the parallel structure is the documentation.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
 import type { TenantRefreshToken } from '@prisma/client';
+import { invalidateOperatorAuth } from './operator-auth-cache.js';
 import { prisma } from './prisma.js';
+import { env } from '../config/env.js';
 
 const REFRESH_TOKEN_BYTES = 32;
-const REFRESH_TOKEN_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+// OPERATOR_REFRESH_TOKEN_TTL_DAYS (default 30), sliding like the end-user one.
+const REFRESH_TOKEN_LIFETIME_MS = env.OPERATOR_REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000;
 
 export function hashTenantRefreshToken(raw: string): string {
   return createHash('sha256').update(raw).digest('hex');
@@ -93,6 +96,8 @@ export async function rotateTenantRefreshToken(
         // Carry forward UA/IP so the operator's session list stays stable.
         userAgent: presented.userAgent,
         ip: presented.ip,
+        // Same session, same `sid` on the access token minted from it.
+        sessionId: presented.sessionId,
       },
     });
     await tx.tenantRefreshToken.update({
@@ -104,20 +109,47 @@ export async function rotateTenantRefreshToken(
 }
 
 export async function revokeTenantRefreshToken(raw: string): Promise<void> {
-  await prisma.tenantRefreshToken.updateMany({
+  // Returning the owner is what lets sign-out drop the cached session: the
+  // presented refresh token is the only thing that names it.
+  const revoked = await prisma.tenantRefreshToken.updateManyAndReturn({
     where: { tokenHash: hashTenantRefreshToken(raw), revokedAt: null },
     data: { revokedAt: new Date() },
+    select: { tenantUserId: true },
   });
+  for (const row of revoked) invalidateOperatorAuth(row.tenantUserId);
 }
 
 export async function revokeAllTenantRefreshTokensForUser(
   tenantUserId: string,
 ): Promise<number> {
-  const result = await prisma.tenantRefreshToken.updateMany({
-    where: { tenantUserId, revokedAt: null },
-    data: { revokedAt: new Date() },
-  });
-  return result.count;
+  // See TenantUser.sessionsInvalidBefore: the operator's live access tokens,
+  // panel and operator MCP OAuth alike, are refused from this instant, whatever
+  // their lifetime.
+  //
+  // The operator's MCP OAuth refresh tokens are revoked here too. They are a
+  // separate table with their own chain, and until they were included a
+  // password reset or sign-out everywhere left a stolen MCP refresh token
+  // minting hour-long `op_mcp_access` tokens, write scope included. Only this
+  // revoke-everything path reaches them: a single-session revoke leaves every
+  // MCP connection alone, as it does the operator's other panel sessions.
+  // One transaction, so the stamp never lands without the revocations.
+  const now = new Date();
+  const [, panel] = await prisma.$transaction([
+    prisma.tenantUser.updateMany({ where: { id: tenantUserId }, data: { sessionsInvalidBefore: now } }),
+    prisma.tenantRefreshToken.updateMany({
+      where: { tenantUserId, revokedAt: null },
+      data: { revokedAt: now },
+    }),
+    prisma.tenantMcpRefreshToken.updateMany({
+      where: { tenantUserId, revokedAt: null },
+      data: { revokedAt: now },
+    }),
+  ]);
+  // After the commit, never before: a request that re-reads between an
+  // earlier invalidation and the commit would cache the pre-revoke rows.
+  invalidateOperatorAuth(tenantUserId);
+  // The panel session count, as before: it is what sign-out-everywhere reports.
+  return panel.count;
 }
 
 export interface TenantSessionSummary {
@@ -132,7 +164,7 @@ export async function listActiveTenantSessions(
   tenantUserId: string,
   opts: { take?: number; skip?: number } = {},
 ): Promise<{ items: TenantSessionSummary[]; total: number }> {
-  // One `now` for rows and count — see listActiveSessions (lib/refresh-tokens.ts).
+  // One `now` for rows and count, see listActiveSessions (lib/refresh-tokens.ts).
   const now = new Date();
   const where = { tenantUserId, revokedAt: null, expiresAt: { gt: now } };
   const [items, total] = await Promise.all([
@@ -162,5 +194,14 @@ export async function revokeSessionForTenantUser(
     where: { id: sessionId, tenantUserId, revokedAt: null },
     data: { revokedAt: new Date() },
   });
+  // No per-operator stamp: it would end every other session's access token,
+  // and the panel does not renew safely on that 401 (see
+  // revokeSessionForEndUser). The revoked session's access token is refused
+  // by its `sid`, since this row is now the revoked head of its family.
+  //
+  // The cache is dropped for the whole operator, not just this `sid`: the
+  // row id the caller passed is not the family id the cache is keyed on, and
+  // re-reading the operator's other sessions once costs one query each.
+  if (result.count === 1) invalidateOperatorAuth(tenantUserId);
   return result.count === 1;
 }

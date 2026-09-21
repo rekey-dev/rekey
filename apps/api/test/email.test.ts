@@ -7,7 +7,7 @@
  *   - Email-verification flow: send → consume → emailVerified=true; stale
  *     token rejected after email-change.
  *
- * Transport selection is tested without actually hitting Resend — the
+ * Transport selection is tested without actually hitting Resend, the
  * default env doesn't set RESEND_DEFAULT_API_KEY in tests, so a no-creds
  * Application gets `kind: 'no_transport'` and the auth flow returns the
  * raw token. That keeps existing customers' legacy contract intact and
@@ -264,14 +264,14 @@ describe('Email pipeline', () => {
         authorization: `Bearer ${b.liveKey}`,
         'x-rekey-user-token': eu.accessToken,
       },
-      // No `{token}` placeholder — the route's `format: uri` schema
+      // No `{token}` placeholder, the route's `format: uri` schema
       // rejects strings with curly braces. The service falls back to its
       // built-in placeholder URL when verifyUrl is omitted.
       payload: {},
     });
     expect(send.statusCode).toBe(200);
     const sendData = send.json().data as { emailSent: boolean; verificationToken: string | null };
-    // No transport configured in tests — token returned to caller.
+    // No transport configured in tests, token returned to caller.
     expect(sendData.emailSent).toBe(false);
     expect(sendData.verificationToken).toBeTruthy();
 

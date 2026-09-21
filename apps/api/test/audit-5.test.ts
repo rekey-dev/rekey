@@ -353,7 +353,7 @@ describe('Audit-5 end-user organizations', () => {
       })
       .then((r) => r.json().data as { organization: { id: string } });
 
-    // Demote attempt — no other OWNER exists.
+    // Demote attempt, no other OWNER exists.
     const demote = await app.inject({
       method: 'PATCH',
       url: `/api/v1/users/me/organizations/${org.organization.id}/members/${b.ownerEndUserId}`,
@@ -366,7 +366,7 @@ describe('Audit-5 end-user organizations', () => {
     expect(demote.statusCode).toBe(409);
     expect(demote.json().error.code).toBe('ORGANIZATION_LAST_OWNER');
 
-    // Leave attempt — an OWNER can never self-leave (billing is tied to them),
+    // Leave attempt, an OWNER can never self-leave (billing is tied to them),
     // so this is refused before the last-OWNER check even applies.
     const leave = await app.inject({
       method: 'POST',
@@ -408,7 +408,7 @@ describe('Audit-5 end-user organizations', () => {
       payload: { token: inv.token },
     });
 
-    // Owner still cannot leave — billing is tied to owners, not the seat count.
+    // Owner still cannot leave, billing is tied to owners, not the seat count.
     const blocked = await app.inject({
       method: 'POST',
       url: `/api/v1/users/me/organizations/${org.organization.id}/leave`,
@@ -417,7 +417,7 @@ describe('Audit-5 end-user organizations', () => {
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json().error.code).toBe('ORGANIZATION_OWNER_CANNOT_LEAVE');
 
-    // Self-demote to ADMIN (allowed — a co-owner remains), then leaving works.
+    // Self-demote to ADMIN (allowed, a co-owner remains), then leaving works.
     await app.inject({
       method: 'PATCH',
       url: `/api/v1/users/me/organizations/${org.organization.id}/members/${b.ownerEndUserId}`,

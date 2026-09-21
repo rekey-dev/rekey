@@ -2,7 +2,7 @@
 //
 // NOTE: `pnpm test` in this package builds first (`tsc && vitest run`), because
 // these cases bundle the built `dist/`. Turbo's `test` task depends on
-// `^build` — dependencies, not this package — so under `turbo run test` the
+// `^build`, dependencies, not this package, so under `turbo run test` the
 // dist would be whatever a previous run left behind: green standalone,
 // order-dependent in CI. `@rekey.dev/node` and `@rekey.dev/mcp` carry the same
 // guard for the same reason.
@@ -21,7 +21,7 @@
  * `@rekey.dev/shared-types` barrel, a module that evaluates ~60
  * `z.object(...)` calls at module scope. A bundler keeping the barrel for one
  * live export must keep those call expressions and therefore zod, so any app
- * touching `RekeyBrowserClient` — which is any app that signs a user in —
+ * touching `RekeyBrowserClient`, which is any app that signs a user in,
  * shipped zod it never asked for.
  *
  * ── The two fixes, and what each one actually buys ──
@@ -36,7 +36,7 @@
  *   false       | /error subpath  |    346         |  4,397
  *
  * So they fix different things and both are needed. `"sideEffects": false`
- * lets a bundler drop an unused MODULE — that is what collapses the
+ * lets a bundler drop an unused MODULE, that is what collapses the
  * `useUser`-only import, which never needed the client at all. It does nothing
  * for a bundle that genuinely uses the client, because you cannot drop a module
  * you are using: there, only splitting `RekeyError` out of the schema barrel
@@ -114,7 +114,7 @@ describe('tree-shaking the published bundle', () => {
   it('ships no zod even when the whole barrel is imported', async () => {
     const { bytes, text } = await bundle(`import * as all from ${entry};\nconsole.log(all);`);
     expect(containsZod(text)).toBe(false);
-    // Measured 37,248 B — every component and the client. Was 111,028 B.
+    // Measured 37,248 B, every component and the client. Was 111,028 B.
     expect(bytes).toBeLessThan(60_000);
   });
 

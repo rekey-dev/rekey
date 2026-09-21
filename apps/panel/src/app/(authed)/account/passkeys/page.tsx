@@ -7,9 +7,10 @@
  */
 
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { errorQuery, api, PanelApiError } from '@/lib/api';
+import { ActionForm } from '@/components/ActionForm';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { FlashBanner } from '@/components/FlashBanner';
 import { Banner } from '@/components/Banner';
@@ -43,7 +44,7 @@ async function startRegistration(): Promise<StartResult> {
     return { ok: true, ...data };
   } catch (err) {
     // Return (don't throw) known API errors so the client can render a clean
-    // message — a thrown server-action error is sanitized in prod to the scary
+    // message, a thrown server-action error is sanitized in prod to the scary
     // "An error occurred in the Server Components render" digest. A genuine 401
     // re-throws here (api() already triggered the login redirect).
     if (err instanceof PanelApiError) {
@@ -153,7 +154,7 @@ export default async function PasskeysPage({
           <h3 className="text-sm font-semibold text-[var(--color-fg)]">Register a new passkey</h3>
           <p className="text-xs text-[var(--color-muted-fg)]">
             Your browser will prompt you to confirm with the authenticator. The label is
-            optional — handy when you have more than one device.
+            optional, and handy when you have more than one device.
           </p>
         </div>
         <PasskeyRegisterButton start={startRegistration} complete={completeRegistration} />
@@ -192,11 +193,11 @@ export default async function PasskeysPage({
                     {p.lastUsedAt ? formatDate(p.lastUsedAt) : 'never'}
                   </TD>
                   <TD align="right">
-                    <form action={deletePasskey.bind(null, p.id)} className="inline">
+                    <ActionForm action={deletePasskey.bind(null, p.id)} className="inline">
                       <ConfirmButton confirm={`Remove the passkey "${p.deviceName ?? 'Unnamed device'}"? You will need to register a new one to use passkey sign-in from this device.`}>
                         Remove
                       </ConfirmButton>
-                    </form>
+                    </ActionForm>
                   </TD>
                 </TR>
               ))}

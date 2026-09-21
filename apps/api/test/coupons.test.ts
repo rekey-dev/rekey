@@ -1,5 +1,5 @@
 /**
- * Coupons — admin CRUD, validate, apply-on-checkout, redemption tracking,
+ * Coupons, admin CRUD, validate, apply-on-checkout, redemption tracking,
  * cross-application scoping.
  */
 
@@ -74,7 +74,7 @@ describe('coupons', () => {
     userId = suData.endUser.id;
   }
 
-  async function createCoupon(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async function createCoupon(body: Record<string, unknown>): Promise<{ id: string; code: string; discountType: string; amountOff: number }> {
     const res = await app.inject({
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/coupons`,
@@ -82,7 +82,7 @@ describe('coupons', () => {
       payload: body,
     });
     expect(res.statusCode).toBe(201);
-    return res.json().data as Record<string, unknown>;
+    return res.json().data as { id: string; code: string; discountType: string; amountOff: number };
   }
 
   beforeEach(async () => {
@@ -240,7 +240,7 @@ describe('coupons', () => {
       discountAmount: 499,
     });
     expect(redemptions[0]!.expiresAt!.getTime()).toBeGreaterThan(Date.now());
-    // Nothing is SETTLED — no money has moved, and the operator's redemption
+    // Nothing is SETTLED, no money has moved, and the operator's redemption
     // stats must not count an open checkout.
     expect(
       await prisma.couponRedemption.count({ where: { applicationId, status: 'CONFIRMED' } }),
@@ -278,7 +278,7 @@ describe('coupons', () => {
       maxRedemptionsPerUser: 1,
     });
 
-    // First validate passes — no redemptions yet.
+    // First validate passes, no redemptions yet.
     const first = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/coupons/validate',
@@ -329,7 +329,7 @@ describe('coupons', () => {
     // and providers replay webhooks freely. Idempotency is by (coupon,
     // checkout session), and an already-recorded session reports
     // "already-redeemed" rather than a limit failure even once the coupon is
-    // exhausted — otherwise a replay would look like a real problem.
+    // exhausted, otherwise a replay would look like a real problem.
     const coupon = await createCoupon({
       code: 'twice',
       discountType: 'AMOUNT',

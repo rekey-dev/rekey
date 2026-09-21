@@ -10,8 +10,8 @@
  *
  *   - **Only a verdict about the token clears it.** Treat any thrown error as
  *     "signed out" and a thirty-second API blip becomes a mass logout, because
- *     the refresh cookie — the one credential that could have recovered the
- *     session — has been deleted.
+ *     the refresh cookie, the one credential that could have recovered the
+ *     session, has been deleted.
  *   - **`Secure` is decided per request, not per build.** `import.meta.env.PROD`
  *     is a build-time answer to a request-time question. Guess wrong on a real
  *     host and the browser refuses the cookie, which is loud and takes one
@@ -54,8 +54,8 @@ const REFRESH_MAX_AGE = 60 * 60 * 24 * 30;
  * having failed? Only a verdict justifies throwing the session away.
  *
  * Matched by prefix rather than a literal list. The API has six
- * `REFRESH_TOKEN_*` codes today — EXPIRED, INVALID, REUSED, REVOKED, RACE and
- * WRONG_APPLICATION — and every one of them is a 401 saying this token will
+ * `REFRESH_TOKEN_*` codes today, EXPIRED, INVALID, REUSED, REVOKED, RACE and
+ * WRONG_APPLICATION, and every one of them is a 401 saying this token will
  * never work again. An enumerated list gets this right on the day it is
  * written and silently wrong the day a seventh is added: the missed code falls
  * through to "the API failed", the dead cookie is never cleared, and the
@@ -121,7 +121,7 @@ export interface RekeyAstroConfig {
   /** Defaults to `REKEY_SECRET` from the environment. */
   secretKey?: string;
   /**
-   * Defaults to `REKEY_URL`. Required — there is deliberately no fallback.
+   * Defaults to `REKEY_URL`. Required, there is deliberately no fallback.
    *
    * On Rekey Cloud this is `https://api.rekey.dev`; self-hosted it is your own
    * deployment's public origin. This used to fall back to `api.rekey.dev`,
@@ -131,10 +131,26 @@ export interface RekeyAstroConfig {
   apiUrl?: string;
   /**
    * Force the `Secure` flag instead of deciding per request. Only set this to
-   * `false` when serving plain HTTP on a hostname that is not localhost — a
+   * `false` when serving plain HTTP on a hostname that is not localhost, a
    * LAN box, or a proxy that sets no forwarded proto. Otherwise leave it.
    */
   cookieSecure?: boolean;
+  /**
+   * The machine this session belongs to, for an Application that binds
+   * sessions to devices (docs/devices.md).
+   *
+   * This matters on refresh and not only at sign-in. The API binds a chain at
+   * sign-in and re-checks it on every rotation: a bound chain refreshed from a
+   * different fingerprint is `REFRESH_TOKEN_DEVICE_MISMATCH`, which is treated
+   * as a stolen token and revokes every session the user has. `getSession`
+   * rotates, so a site that signs users in with a `device` and then refreshes
+   * without one is refreshing as an unidentified machine. Leave it unset and
+   * nothing changes: no key is sent, and an unbound chain stays unbound.
+   *
+   * A browser cannot produce a fingerprint worth having, so this is for a site
+   * fronting a desktop or mobile client that computes one.
+   */
+  device?: { fingerprint: string; label?: string };
 }
 
 /** Hosts a browser already treats as a secure context over plain HTTP. */
@@ -158,7 +174,7 @@ function isLoopback(host: string): boolean {
  * session cookie without `Secure`. The `Host` header is set by the connection.
  *
  * The fallback leans secure, because the two failure directions are not
- * symmetric — see the module docblock.
+ * symmetric, see the module docblock.
  */
 export function cookieSecureFor(request: Request, override?: boolean): boolean {
   if (override !== undefined) return override;
@@ -198,7 +214,7 @@ export function rekey(config: RekeyAstroConfig = {}): Rekey {
   // No fallback, deliberately, and this one is not a convenience question.
   //
   // It used to default to `https://api.rekey.dev`. A self-hosted deployment
-  // that forgot `REKEY_URL` therefore did not fail — it sent its own
+  // that forgot `REKEY_URL` therefore did not fail, it sent its own
   // `REKEY_SECRET`, in an Authorization header, to a host its operator never
   // chose. The request fails at that host (the key is unknown there), but the
   // credential has already left, and the only symptom is a confusing 401.
@@ -220,7 +236,7 @@ export function rekey(config: RekeyAstroConfig = {}): Rekey {
 
   // Keyed on the resolved config, not just "have we built one". A single
   // cached client meant the first caller won and every later config was
-  // discarded in silence — in an app serving two Applications, that is one
+  // discarded in silence, in an app serving two Applications, that is one
   // tenant's requests going out with the other's credential.
   const key = `${secretKey}\u0000${apiUrl}`;
   if (cached?.key === key) return cached.client;
@@ -242,7 +258,7 @@ export function rekey(config: RekeyAstroConfig = {}): Rekey {
  * Write both session cookies.
  *
  * The runtime check is not paranoia. `signIn` returns a union discriminated on
- * `mfaRequired`, and the token-less arm carries a challenge instead — but the
+ * `mfaRequired`, and the token-less arm carries a challenge instead, but the
  * shared DTOs are inferred from Zod schemas typed as `any`, so handing this
  * function an MFA outcome type-checks cleanly and then writes the string
  * "undefined" into a session cookie. Failing loudly here costs one line and
@@ -280,7 +296,7 @@ export function clearSession(cookies: CookieJar): void {
  * Resolve the session, refreshing when the access token has expired.
  *
  * Returns null when signed out. Throws only when the API failed in a way that
- * is not about the token — an unreachable API is not a signed-out user, and
+ * is not about the token, an unreachable API is not a signed-out user, and
  * reporting it as one is how a blip becomes a mass logout.
  */
 export async function getSession(
@@ -307,7 +323,7 @@ export async function getSession(
   // The API rotates on every refresh: the presented token is revoked the
   // moment the new pair is issued, and a later replay of it reads as a stolen
   // credential, which revokes every session the user has on every device.
-  // Astro throws from `cookies.set()` once the response has started — calling
+  // Astro throws from `cookies.set()` once the response has started, calling
   // getSession() from an imported component rather than middleware or
   // top-level frontmatter does exactly that. Without this probe the sequence
   // is: refresh succeeds, the old token is dead, setSession throws, the
@@ -316,7 +332,12 @@ export async function getSession(
   if (!canWrite(cookies)) return null;
 
   try {
-    const fresh = await client.auth.refresh(refresh);
+    // Two calls rather than `{ device: undefined }`: the API bodies are
+    // strict, and a present-but-undefined key is not an absent one once it has
+    // been through JSON.
+    const fresh = config.device
+      ? await client.auth.refresh(refresh, { device: config.device })
+      : await client.auth.refresh(refresh);
     setSession(cookies, request, fresh, config);
     return {
       user: await client.auth.getCurrentUser(fresh.accessToken),
@@ -376,7 +397,7 @@ export async function signOut(
     // collapsing the two is the exact mistake getSession exists to avoid. A
     // token that is already expired or revoked needs no revoking. A timeout
     // means a thirty-day credential is still live and anyone holding a copy
-    // can keep using it — the caller is told so it can retry or alert.
+    // can keep using it, the caller is told so it can retry or alert.
     if (err instanceof RekeyError && isTokenVerdict(err.code)) {
       return { revoked: true };
     }
@@ -418,7 +439,7 @@ interface MiddlewareContext {
  *
  * It does NOT protect routes: whether a route needs a session is a property of
  * the route, so that check belongs in the page. It also never lets a failure
- * escape — this runs on every route, so an uncaught error would take down the
+ * escape, this runs on every route, so an uncaught error would take down the
  * public pages, the sign-in page, and the sign-out endpoint that could clear a
  * poisoned cookie, leaving a visitor with no way back in.
  */
@@ -433,7 +454,7 @@ export function rekeyMiddleware(config: RekeyAstroConfig = {}) {
       // A misconfigured deploy must not present as "everybody is signed out".
       // Swallowing this renders the site perfectly, bounces every protected
       // page to sign-in, and leaves one log line per request as the only
-      // evidence — the silent failure this package exists to refuse.
+      // evidence, the silent failure this package exists to refuse.
       if (err instanceof RekeyAstroConfigError) throw err;
       console.error('[rekey] session read failed, continuing signed out:', err);
       context.locals.session = null;

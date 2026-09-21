@@ -5,13 +5,13 @@
  * the whole tree including `<html>`/`<body>`. This file has to supply them.
  *
  * Deliberately inline-styled and import-free. `global-error.tsx` replaces the
- * root layout, which means the stylesheet that layout imports is not applied —
+ * root layout, which means the stylesheet that layout imports is not applied,
  * a Tailwind-classed version of this page renders as unstyled text in exactly
  * the situation it exists for. Anything this page imports is also one more
  * thing that can be the reason the page is broken. So: no CSS import, no
  * component library, no icons. Plain elements and a style attribute.
  *
- * Same audience as the rest of the portal — the merchant's customer — so the
+ * Same audience as the rest of the portal, the merchant's customer, so the
  * copy carries no error code, no digest, and no operator instruction.
  */
 

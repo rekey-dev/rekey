@@ -1,5 +1,5 @@
 /**
- * Unapplied payments — money that reached a processor for something Rekey
+ * Unapplied payments, money that reached a processor for something Rekey
  * never applied.
  *
  * The definition is exact: a `Payment` with `status = SUCCEEDED` and
@@ -9,7 +9,7 @@
  * operator, or let them act on it.
  *
  * This module opens the case and tells the operator. It never resolves one.
- * Refunding automatically would be wrong in the common case — most of these
+ * Refunding automatically would be wrong in the common case, most of these
  * buyers received the service they paid for through a path we lost track of,
  * and silently reversing the charge takes away something they are using. The
  * operator knows things Rekey does not, so the decision is theirs.
@@ -27,14 +27,14 @@ import type { FastifyBaseLogger } from 'fastify';
 /**
  * Find the end-user a stray provider subscription id belongs to.
  *
- * The charge matched no local subscription — that is what makes it unapplied —
+ * The charge matched no local subscription, that is what makes it unapplied,
  * but the checkout that produced it usually left a breadcrumb:
  * `recordUnappliedCompletion` stamps `{providerSubId, checkoutSessionId,
  * provider, at}` onto the Subscription row whose checkout it was. So the row
  * exists, it just is not linked to the payment.
  *
  * A JSONB containment scan, which is the thing #455 rightly did not want on a
- * hot path — but this runs once per unapplied payment, an event that is rare
+ * hot path, but this runs once per unapplied payment, an event that is rare
  * by construction, and the alternative is showing the operator a sum of money
  * with no name attached to it. Attribution is the single most useful fact in
  * the queue: it is the difference between "someone paid you" and "this
@@ -65,7 +65,7 @@ async function attributeByProviderSubId(
 /**
  * Who hears about a new case.
  *
- * Workspace OWNERs, and ADMINs as a fallback when a workspace has no owner —
+ * Workspace OWNERs, and ADMINs as a fallback when a workspace has no owner,
  * a state invitations can produce. Deliberately not every member: this mail
  * says "someone paid you and we do not know what for", which is an owner's
  * decision to make and not something to broadcast to every contractor holding
@@ -103,7 +103,7 @@ function formatAmount(minor: number, currency: string): string {
  *
  * Best-effort by construction, and called AFTER the payment transaction has
  * committed rather than inside it. The payment is the money record and must
- * never be rolled back because a queue row or an email failed — that would
+ * never be rolled back because a queue row or an email failed, that would
  * turn "we could not send mail" into "the charge was never recorded", which
  * is precisely the orphaned money this feature exists to catch.
  */
@@ -136,8 +136,8 @@ export async function openUnappliedPaymentCase(
     });
     // Mirrored onto the Payment too, so the payments list and any per-user
     // view show the charge against the customer it belongs to rather than
-    // stranding it. The applier could not do this — it had no match to work
-    // from — but the breadcrumb scan above does.
+    // stranding it. The applier could not do this, it had no match to work
+    // from, but the breadcrumb scan above does.
     if (endUserId) {
       await prisma.payment.update({
         where: { id: input.paymentId },
@@ -145,7 +145,7 @@ export async function openUnappliedPaymentCase(
       });
     }
   } catch (e) {
-    // P2002 on the unique payment_id — a replayed webhook that reached here
+    // P2002 on the unique payment_id, a replayed webhook that reached here
     // twice. One case per payment is the intent, so this is the guard working.
     if ((e as { code?: string }).code === 'P2002') {
       log.info({ paymentId: input.paymentId }, 'unapplied payment: case already open');
@@ -233,7 +233,7 @@ export interface UnappliedPaymentRow {
    * Surfaced because an unresolved case does not stay neutral. Both scenarios
    * that produce one map to named card-network reason codes with 120-day
    * issuer filing windows (Visa 12.6.1 Duplicate Processing, 12.6.2 Paid by
-   * Other Means), and refund windows close too — PayPal at 180 days, Razorpay
+   * Other Means), and refund windows close too, PayPal at 180 days, Razorpay
    * at six months. Age is the one column that tells an operator which case to
    * open first.
    */
@@ -303,7 +303,7 @@ async function loadOpenCase(applicationId: string, caseId: string) {
       statusCode: 404,
       code: 'UNAPPLIED_PAYMENT_NOT_FOUND',
       message: 'No unapplied payment with that id in this application.',
-      fix: 'Reload the list — the id may belong to another application, or the case may have been removed with its payment.',
+      fix: 'Reload the list, the id may belong to another application, or the case may have been removed with its payment.',
     });
   }
   if (found.status !== 'OPEN') {
@@ -460,7 +460,7 @@ export const unappliedPaymentsService = {
    * Keep the money and give the customer time instead.
    *
    * The alternative to a refund, and the one with no precedent among billing
-   * vendors — Stripe, Chargebee, Recurly and Zuora all credit MONEY. Crediting
+   * vendors, Stripe, Chargebee, Recurly and Zuora all credit MONEY. Crediting
    * service rather than money is also the cleaner outcome in the books: we
    * deliver what was paid for, so revenue recognises normally instead of
    * parking a liability.
@@ -513,6 +513,13 @@ export const unappliedPaymentsService = {
     await entitlementsService.provision({
       subscription: updatedSub,
       ...(args.log && { log: args.log }),
+      // The unapplied payment IS the purchase here. A one-off plan has no
+      // period to anchor on, and without a ref it would fall back to the
+      // constant every one-off purchase shares, so resolving a second case for
+      // a buyer who already owns the pack would grant nothing and report
+      // success. The case id is the right grain: applying one payment grants
+      // once, and re-resolving the same case is correctly a no-op.
+      purchaseRef: `unapplied:${kase.id}`,
     });
 
     const updated = await prisma.unappliedPayment.update({

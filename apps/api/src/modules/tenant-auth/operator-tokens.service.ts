@@ -2,7 +2,7 @@
  * Operator personal-access-token (PAT) service.
  *
  * Mints, lists and revokes operator PATs (`rp_op_…`). Mirrors the
- * `api-keys.service.ts` create/redact/revoke flow exactly — the raw token is
+ * `api-keys.service.ts` create/redact/revoke flow exactly, the raw token is
  * returned **once at mint** and never again; only the SHA-256 hash is stored.
  *
  * An operator manages their OWN tokens only: every read/mutate is scoped by
@@ -24,19 +24,18 @@ import {
 } from '../../lib/operator-token.js';
 
 /**
- * Public-safe shape of a PAT — `tokenHash` stripped. The hash is a
+ * Public-safe shape of a PAT, `tokenHash` stripped. The hash is a
  * deterministic derivation of the raw token, not a secret in its own right,
  * but it never leaves the DB (mirrors `PublicApiKey`).
  */
 export type PublicOperatorToken = Omit<TenantApiToken, 'tokenHash'>;
 
 function redact(token: TenantApiToken): PublicOperatorToken {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { tokenHash, ...rest } = token;
   return rest;
 }
 
-/** Per-operator cap. Mirrors `MAX_KEYS_PER_APP` — a sanity bound, not a quota. */
+/** Per-operator cap. Mirrors `MAX_KEYS_PER_APP`, a sanity bound, not a quota. */
 const MAX_TOKENS_PER_OPERATOR = 25;
 
 export interface MintOperatorTokenInput {
@@ -83,7 +82,7 @@ export const operatorTokensService = {
     const scopes = normaliseScopes(input.scopes);
 
     // A non-future expiry would mint a token the auth middleware immediately
-    // rejects as expired — a dead-on-arrival credential the operator was told
+    // rejects as expired, a dead-on-arrival credential the operator was told
     // was "created". Fail fast with a clear error instead.
     if (input.expiresAt !== undefined && input.expiresAt.getTime() <= Date.now()) {
       throw new RekeyError({
@@ -123,7 +122,7 @@ export const operatorTokensService = {
     return { token: redact(token), rawToken: raw };
   },
 
-  /** List the operator's active PATs, redacted (prefix only — hash never leaks). */
+  /** List the operator's active PATs, redacted (prefix only, hash never leaks). */
   async list(
     tenantUserId: string,
     opts: { take?: number; skip?: number } = {},
@@ -142,7 +141,7 @@ export const operatorTokensService = {
   },
 
   /**
-   * Revoke one of the operator's PATs by id. Idempotent — re-revoking is fine.
+   * Revoke one of the operator's PATs by id. Idempotent, re-revoking is fine.
    * Scoped by `tenantUserId` so an operator can only revoke their OWN tokens;
    * a token belonging to someone else reads as "not found" (no cross-operator
    * existence oracle).

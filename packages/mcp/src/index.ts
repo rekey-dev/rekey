@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * @rekey.dev/mcp — Model Context Protocol server.
+ * @rekey.dev/mcp, Model Context Protocol server.
  *
  * Speaks MCP over stdio, exposing introspection tools for Rekey
  * (Applications, Plans, Coupons, API keys, Tenants) plus a single guarded
@@ -10,11 +10,11 @@
  *
  * Read tools use `SUPER_ADMIN_KEY` (global scope). The write tool uses a SCOPED
  * operator personal-access-token (`REKEY_OPERATOR_TOKEN`, an `rp_op_…` token)
- * and is rejected server-side unless that PAT carries the `keys:mint` scope —
+ * and is rejected server-side unless that PAT carries the `keys:mint` scope,
  * default-deny, so an agent can't mutate production unless explicitly granted.
  *
  * At least ONE credential is required. An agent that should only mint keys can
- * run with `REKEY_OPERATOR_TOKEN` alone (no master key) — read tools then fail
+ * run with `REKEY_OPERATOR_TOKEN` alone (no master key), read tools then fail
  * closed with `READ_REQUIRES_ADMIN_KEY`. Configure `SUPER_ADMIN_KEY` too to
  * enable the global read/introspection tools.
  */
@@ -42,7 +42,7 @@ export { VERSION } from './version.js';
  * ── Why this is a function, and why nothing runs at module scope ──
  *
  * This package declares `main` / `types` / `exports` like a library, so
- * `import '@rekey.dev/mcp'` is a thing people can do — a test harness listing
+ * `import '@rekey.dev/mcp'` is a thing people can do, a test harness listing
  * the tools, a wrapper re-exporting them. It used to read the env and call
  * `process.exit(1)` while the module was still evaluating, which killed the
  * HOST process on a plain import. An importer cannot catch that; there is no

@@ -6,7 +6,7 @@ import type { WorkspaceLimitsDto } from '@/lib/api';
  *
  * Built for a deployment that has set NO limits, which is the default and the
  * state of every self-host that never touches the feature. That case is not an
- * error and not an empty state — it is the normal, fully-working configuration,
+ * error and not an empty state, it is the normal, fully-working configuration,
  * so it renders as an affirmative "no limit" rather than a blank, a zero, or a
  * meter pinned at 0%. Reading an absent ceiling as 0 is the specific bug this
  * component exists to not have: it would tell an unlimited workspace it was
@@ -36,7 +36,7 @@ import type { WorkspaceLimitsDto } from '@/lib/api';
 /** One ceiling, or the absence of one. `max` null/undefined means unlimited. */
 interface LimitRow {
   label: string;
-  /** What the number counts, in the operator's terms — not the column name. */
+  /** What the number counts, in the operator's terms, not the column name. */
   hint: string;
   used: number;
   max: number | null | undefined;
@@ -70,7 +70,7 @@ function Meter({ used, max }: { used: number; max: number }): React.JSX.Element 
     >
       <div
         className={`h-full rounded-full ${tone}`}
-        // A non-zero usage must never round away to an invisible bar — at a
+        // A non-zero usage must never round away to an invisible bar, at a
         // ceiling of 1,000,000 a single used slot is 0.0001%, which paints
         // nothing at all and reads as "zero used" when it is not.
         style={{ width: `${pct === 0 ? 0 : Math.max(pct, 1.5)}%` }}
@@ -146,7 +146,7 @@ export function WorkspaceLimits({
         <p className="text-xs text-[var(--color-muted-fg)]">
           Limits are set by whoever runs this deployment and cannot be changed from the panel. On a
           self-hosted Rekey a deployment administrator sets them; on Rekey Cloud, get in touch to
-          raise one. Reaching a ceiling never takes anything offline — existing applications keep
+          raise one. Reaching a ceiling never takes anything offline: existing applications keep
           serving and existing users keep signing in.
         </p>
       )}

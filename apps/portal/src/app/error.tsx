@@ -3,7 +3,7 @@
 /**
  * Root error boundary for the hosted portal.
  *
- * This is the boundary that catches `[slug]/layout.tsx` — and that layout's
+ * This is the boundary that catches `[slug]/layout.tsx`, and that layout's
  * very first act is `getPortalConfig(slug)`, which THROWS on any non-404 HTTP
  * response from the API (`lib/config.ts`). One API blip, one 502 from the edge,
  * one restart mid-deploy, and without a boundary here the person looking at the
@@ -11,7 +11,7 @@
  * development, an unstyled "Application error: a client-side exception has
  * occurred" in production.
  *
- * The audience is what makes this urgent. It is not the operator — it is the
+ * The audience is what makes this urgent. It is not the operator, it is the
  * MERCHANT'S PAYING CUSTOMER, on the same app whose not-found.tsx is explicit
  * that no Rekey vocabulary, error code, or operator instruction may reach them.
  * A default Next error page fails every line of that rule at once.
@@ -21,7 +21,7 @@
  *   - the only actions offered are ones this person can actually take;
  *   - "Powered by Rekey" stays a footer credit and nothing more.
  *
- * `reset()` re-renders the segment, which re-runs the config fetch — the right
+ * `reset()` re-renders the segment, which re-runs the config fetch, the right
  * affordance for the transient case that dominates here. There is deliberately
  * no "go home" link: the portal root is not a page a customer has any use for,
  * and every real portal address is `/<slug>`, which is where they already are.

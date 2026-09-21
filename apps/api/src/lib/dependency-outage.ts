@@ -27,8 +27,8 @@ export const OUTAGE_SUBSYSTEM_LABEL: Record<OutageSubsystem, string> = {
 
 /**
  * Prisma connection-level error codes.
- *   P1001 — can't reach the database server
- *   P1017 — server closed the connection
+ *   P1001, can't reach the database server
+ *   P1017, server closed the connection
  * `PrismaClientInitializationError` carries the code on `errorCode` instead of
  * `code`, and can also surface with no code at all (bad DSN, no server).
  */
@@ -59,7 +59,7 @@ const PROVIDER_ERROR_NAME = /^(Stripe|Razorpay|PayPal)/i;
  *
  * Lives here (rather than next to the provider-error mapper in
  * `provider-errors.ts`) because `lib/error.ts` needs it as a last-resort
- * guard and already imports this module — importing the mapper instead would
+ * guard and already imports this module, importing the mapper instead would
  * be a cycle, since the mapper imports `RekeyError` from `error.ts`.
  */
 export function isProviderSdkError(err: unknown): boolean {
@@ -106,7 +106,7 @@ export function classifyDependencyOutage(err: unknown): OutageSubsystem | null {
 
   // A provider SDK wrapping a socket failure is not our dependency.
   if (PROVIDER_ERROR_NAME.test(name)) return null;
-  // `fetch` wraps the real socket error in `cause` — outbound HTTP, not us.
+  // `fetch` wraps the real socket error in `cause`, outbound HTTP, not us.
   if (e.cause !== undefined) return null;
 
   // Redis, via ioredis.
@@ -127,7 +127,7 @@ export function classifyDependencyOutage(err: unknown): OutageSubsystem | null {
  * did this start" without burying anything else.
  *
  * Deliberately keyed with tenantId in it: `listSecurityEvents` filters on
- * tenantId, so a row written without one can never reach the panel — a trap this
+ * tenantId, so a row written without one can never reach the panel, a trap this
  * codebase has fallen into before.
  *
  * Best-effort by construction: `recordSecurityEvent` swallows its own errors, and
@@ -152,7 +152,7 @@ export function shouldRecordOutageEvent(subsystem: OutageSubsystem, tenantId: st
  *
  * Test-only. The 5-minute suppression window outlives a whole test file, so
  * the FIRST test to provoke an outage event silences every later one for the
- * same (subsystem, tenant) — including tests whose entire assertion is that
+ * same (subsystem, tenant), including tests whose entire assertion is that
  * the row was written. Called from test/setup.ts's beforeEach.
  */
 export function __resetForTests(): void {

@@ -1,5 +1,5 @@
 /**
- * Checkout trial policy — the one place that decides whether a plan's free
+ * Checkout trial policy, the one place that decides whether a plan's free
  * trial may reach a payment provider, and refuses when it may not.
  *
  * The sibling of `checkout-discount.ts`, and it exists for the same reason.
@@ -12,7 +12,7 @@
  * Two questions, both answered by refusing rather than approximating:
  *
  *   1. Does this plan even have a trial to apply? A trial belongs to a
- *      recurring subscription — a CREDIT pack or a perpetual licence has
+ *      recurring subscription, a CREDIT pack or a perpetual licence has
  *      nothing to convert into.
  *   2. Can this provider express one? Answered by the module's
  *      `capabilities.trials`, fail-closed: an undeclared module counts as
@@ -41,7 +41,7 @@ export function resolveCheckoutTrial(input: {
   plan: Plan;
   /** Registry name of the provider the checkout resolved to. */
   provider: string;
-  /** True for CREDIT packs and perpetual licences — a single charge. */
+  /** True for CREDIT packs and perpetual licences, a single charge. */
   isOneTime: boolean;
 }): { days: number } | null {
   const { plan, provider, isOneTime } = input;

@@ -1,8 +1,8 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { DeviceBindingRequestSchema } from '@rekey.dev/shared-types';
 import { authService } from './auth.service.js';
 import {
-  requireApiKey,
   requirePublishableOrSecretKey,
   requireScope,
 } from '../../middleware/api-key-auth.js';
@@ -10,11 +10,12 @@ import { requireUserSession } from '../../middleware/user-session.js';
 import { assertStepUp } from '../../lib/step-up.js';
 import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { mfaService } from '../mfa/mfa.service.js';
-import { authRateLimit } from '../../lib/rate-limit.js';
+import { authRateLimit, signUpRateLimit } from '../../lib/rate-limit.js';
 import type { SecurityEventType } from '@rekey.dev/shared-types';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
 import { ok, okPage, okFlag, errs, ref, type JsonSchema } from '../../lib/openapi.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
+import { CREDENTIAL_BODY_LIMIT, SIGN_UP_BODY_LIMIT, WEBAUTHN_BODY_LIMIT } from '../../lib/body-limits.js';
 
 // ---------------------------------------------------------------------------
 // Shared error fragments
@@ -22,7 +23,7 @@ import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '.
 // Every route in `authRoutes` (the public-bootstrap plugin) sits behind
 // `requirePublishableOrSecretKey` + `requireScope('auth:write')`. Every route
 // in `authenticatedAuthRoutes` sits behind those two PLUS `requireUserSession`
-// — see middleware/api-key-auth.ts and middleware/user-session.ts for the
+//, see middleware/api-key-auth.ts and middleware/user-session.ts for the
 // exact throws these hooks produce.
 // ---------------------------------------------------------------------------
 
@@ -60,7 +61,7 @@ const IMPERSONATION_403 =
   ' Or IMPERSONATION_ACTION_FORBIDDEN — an impersonation session cannot rebind a credential ' +
   '(password, MFA, or passkey).';
 
-/** `navigator.credentials.{get,create}` options — opaque to the server, so modelled loosely. */
+/** `navigator.credentials.{get,create}` options, opaque to the server, so modelled loosely. */
 const WEBAUTHN_OPTIONS: JsonSchema = {
   type: 'object',
   additionalProperties: true,
@@ -68,17 +69,48 @@ const WEBAUTHN_OPTIONS: JsonSchema = {
 };
 
 /**
- * Extract device fingerprint from a Fastify request for session tracking.
- * Returns `null` fields when the headers are missing; the refresh-token
- * lib treats nulls as "unknown" and the panel renders accordingly.
+ * Everything the session lib wants to know about the caller's machine: the
+ * User-Agent and IP for the session list, and, when the body carried a
+ * `device` binding, the fingerprint and label that bind the session to a
+ * Device row (docs/devices.md). Returns `null` fields when absent; the
+ * refresh-token lib treats nulls as "unknown" and the panel renders accordingly.
  */
-function deviceContext(req: FastifyRequest): { userAgent: string | null; ip: string | null } {
+function deviceContext(
+  req: FastifyRequest,
+  binding?: { fingerprint: string; label?: string | undefined },
+): { userAgent: string | null; ip: string | null; fingerprint: string | null; label: string | null } {
   const ua = req.headers['user-agent'];
   return {
     userAgent: typeof ua === 'string' && ua.length > 0 ? ua : null,
     ip: req.ip || null,
+    fingerprint: binding?.fingerprint ?? null,
+    label: binding?.label ?? null,
   };
 }
+
+/** JSON-schema twin of `DeviceBindingRequestSchema`, for the OpenAPI document. */
+const DEVICE_BODY_SCHEMA = {
+  type: 'object',
+  required: ['fingerprint'],
+  description:
+    'Bind the session to a device (docs/devices.md). Optional unless the Application sets ' +
+    '`authConfig.deviceBinding = "required"`.',
+  properties: {
+    fingerprint: {
+      type: 'string',
+      minLength: 8,
+      maxLength: 256,
+      description: 'Opaque, client-computed, stable across launches.',
+    },
+    label: { type: 'string', minLength: 1, maxLength: 120, description: 'Shown in device lists.' },
+  },
+} as const;
+
+const DEVICE_ERRORS_403 =
+  ' Or DEVICE_LIMIT_REACHED — the account is at its `max_devices` entitlement; `details.devices` ' +
+  'lists the active devices to release; or DEVICE_BLOCKED — an operator blocked this device.';
+const DEVICE_ERRORS_400 =
+  ' Or DEVICE_FINGERPRINT_REQUIRED — the Application requires a `device` binding on sign-in.';
 
 /**
  * Append an end-user activity event to the security-events log. Fire-and-forget
@@ -109,22 +141,25 @@ const SignUpBody = z.object({
   email: z.string().email().max(254),
   password: z.string().min(1).max(256),
   metadata: z.record(z.unknown()).optional(),
+  device: DeviceBindingRequestSchema.optional(),
 });
 
 const SignInBody = z.object({
   email: z.string().email().max(254),
   password: z.string().min(1).max(256),
+  device: DeviceBindingRequestSchema.optional(),
 });
 
 const RefreshBody = z.object({
   refreshToken: z.string().min(1).max(512),
+  device: DeviceBindingRequestSchema.optional(),
 });
 
 const SignOutBody = z.object({
   refreshToken: z.string().min(1).max(512),
 });
 
-// Permissive URL check — accepts `{token}` placeholders that Ajv's
+// Permissive URL check, accepts `{token}` placeholders that Ajv's
 // `format: uri` would reject. Zod's `.url()` parses with the WHATWG URL
 // constructor which tolerates `{` `}` in path/query.
 const TokenizedUrl = z
@@ -132,6 +167,8 @@ const TokenizedUrl = z
   .max(2048)
   .refine((v) => {
     try {
+      // Constructed for its THROW: this is URL validation, not an object we keep.
+      // eslint-disable-next-line no-new
       new URL(v);
       return true;
     } catch {
@@ -166,6 +203,7 @@ const MagicLinkRequestBody = z.object({
 
 const MagicLinkVerifyBody = z.object({
   token: z.string().min(1).max(512),
+  device: DeviceBindingRequestSchema.optional(),
 });
 
 const PasskeyAuthStartBody = z.object({
@@ -177,6 +215,7 @@ const PasskeyAuthCompleteBody = z.object({
   // record; SimpleWebAuthn's verifier validates the shape.
   response: z.record(z.unknown()),
   expectedChallenge: z.string().min(1).max(1024),
+  device: DeviceBindingRequestSchema.optional(),
 });
 
 const PasskeyRegisterCompleteBody = z.object({
@@ -198,6 +237,7 @@ const ChangePasswordBody = z.object({
 const MfaVerifyBody = z.object({
   mfaChallengeToken: z.string().min(1).max(2048),
   code: z.string().min(1).max(64),
+  device: DeviceBindingRequestSchema.optional(),
 });
 
 export function shapeAuthResult(result: import('./auth.service.js').AuthResult): {
@@ -207,6 +247,7 @@ export function shapeAuthResult(result: import('./auth.service.js').AuthResult):
   accessTokenExpiresAt: string;
   refreshToken: string;
   refreshTokenExpiresAt: string;
+  deviceId: string | null;
 } {
   return {
     mfaRequired: false,
@@ -215,6 +256,7 @@ export function shapeAuthResult(result: import('./auth.service.js').AuthResult):
     accessTokenExpiresAt: result.accessTokenExpiresAt.toISOString(),
     refreshToken: result.refreshToken,
     refreshTokenExpiresAt: result.refreshTokenExpiresAt.toISOString(),
+    deviceId: result.deviceId,
   };
 }
 
@@ -247,15 +289,15 @@ export function shapeSignInOutcome(
  * EndUser **public-bootstrap** auth endpoints (sign-up, sign-in, magic link,
  * passkey authenticate, refresh, password reset).
  *
- * Gated by `requirePublishableOrSecretKey` — NOT `requireApiKey`. These are the
+ * Gated by `requirePublishableOrSecretKey`, NOT `requireApiKey`. These are the
  * routes a browser-only app must reach before any user token exists, so they
  * accept the Application's **publishable** key (`rp_pub_…`) as well as a
  * server-side secret key. The key only says *which Application* is calling; the
  * user still proves their own identity per route (password, passkey assertion,
  * or an emailed single-use token).
  *
- * The authenticated half of the end-user auth surface — sessions, token
- * revocation, password change, MFA enrollment — lives in
+ * The authenticated half of the end-user auth surface, sessions, token
+ * revocation, password change, MFA enrollment, lives in
  * `authenticatedAuthRoutes` below. It takes the same two key kinds and adds
  * `requireUserSession`, which is the actual authorizer there. Passkey ENROLLMENT
  * additionally demands a step-up proof from publishable callers (`lib/step-up.ts`).
@@ -265,7 +307,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   // authenticate, refresh, password-reset). These are the routes a browser-only
   // app must call before any user token exists, so they accept the Application's
   // publishable key (`rp_pub_*`) as well as a server secret key. The credential
-  // only identifies the app — the user still proves identity (password/passkey/
+  // only identifies the app, the user still proves identity (password/passkey/
   // emailed token) per route.
   app.addHook('onRequest', requirePublishableOrSecretKey);
   // All routes in this plugin mutate auth state (create users, mint sessions,
@@ -277,6 +319,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/sign-up',
     {
+      bodyLimit: SIGN_UP_BODY_LIMIT,
+      // 10 per (Application, IP): each account is a fresh identity budget, so
+      // an uncapped sign-up let one address multiply its allowance.
+      config: { rateLimit: signUpRateLimit(10) },
       schema: {
         tags: ['Public · Auth'],
         summary: 'Create an end-user via email + password',
@@ -284,7 +330,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           'Creates a new EndUser in the calling Application and issues a JWT. ' +
           'Email is unique per Application, not globally. Unless the Application turns ' +
           '`authConfig.sendVerificationEmailOnSignUp` off, the verification link goes out ' +
-          'alongside the welcome mail — both are best-effort and neither can fail the sign-up. ' +
+          'alongside the welcome mail, both are best-effort and neither can fail the sign-up. ' +
           'With `authConfig.requireEmailVerification` on this returns 403 `EMAIL_NOT_VERIFIED` ' +
           'instead of a session: the account IS created and the link IS sent (that switch ' +
           'overrides the send setting), but no token is issued until the address is confirmed.',
@@ -300,6 +346,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
               additionalProperties: true,
               description: 'Free-form per-app metadata (display name, avatar, custom fields).',
             },
+            device: DEVICE_BODY_SCHEMA,
           },
         },
         response: {
@@ -311,9 +358,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
               'PASSWORD_TOO_SHORT — shorter than `authConfig.passwordMinLength`; or ' +
               'PASSWORD_BREACHED — the password appears in a known breach corpus; or ' +
               'METADATA_TOO_LARGE — `metadata` exceeds the 16KB limit; or ' +
-              'METADATA_KEY_RESERVED — a publishable caller set the reserved `metadata.oidc` key.',
+              'METADATA_KEY_RESERVED — a publishable caller set the reserved `metadata.oidc` key.' +
+              DEVICE_ERRORS_400,
             403:
               BOOTSTRAP_403 +
+              DEVICE_ERRORS_403 +
               ' Also: SIGNUP_DISABLED — public sign-up is off for this Application; or ' +
               'SIGNUP_REQUIRES_SECRET_KEY — the Application only allows creating end-users with ' +
               "a secret key; or TENANT_QUOTA_EXCEEDED — the workspace's end-user limit is " +
@@ -331,7 +380,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         email: body.email,
         password: body.password,
         ...(body.metadata !== undefined && { metadata: body.metadata }),
-        device: deviceContext(req),
+        device: deviceContext(req, body.device),
         // Signup policy: a `secret_only` app refuses creation via a pub key.
         ...(req.authKind !== undefined && { authKind: req.authKind }),
       });
@@ -343,13 +392,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/sign-in',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Public · Auth'],
         summary: 'Authenticate an existing end-user with email + password',
         description:
           'Verifies the password and issues a JWT. Returns 401 INVALID_CREDENTIALS for ' +
-          'any auth failure (wrong email, wrong password, or sign-up via different method) — ' +
+          'any auth failure (wrong email, wrong password, or sign-up via different method), ' +
           'we never disclose which. When the Application sets ' +
           '`authConfig.requireEmailVerification`, a correct password on an unconfirmed ' +
           'address returns 403 EMAIL_NOT_VERIFIED instead, so your app can prompt the user ' +
@@ -361,6 +411,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           properties: {
             email: { type: 'string', format: 'email', maxLength: 254 },
             password: { type: 'string', minLength: 1, maxLength: 256 },
+            device: DEVICE_BODY_SCHEMA,
           },
         },
         response: {
@@ -370,15 +421,24 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...BOOTSTRAP_ERRORS,
-            400: 'AUTH_METHOD_DISABLED — password sign-in is disabled for this Application.',
+            400: 'AUTH_METHOD_DISABLED — password sign-in is disabled for this Application.' + DEVICE_ERRORS_400,
             401:
               BOOTSTRAP_401 +
               ' Or INVALID_CREDENTIALS — the email or password is wrong (we never disclose which).',
-            403: BOOTSTRAP_403 + ' Or EMAIL_NOT_VERIFIED — the password was correct but the address is unconfirmed.',
+            403:
+              BOOTSTRAP_403 +
+              ' Or EMAIL_NOT_VERIFIED — the password was correct but the address is unconfirmed.' +
+              DEVICE_ERRORS_403,
             429:
               RATE_LIMITED +
               ' Or TOO_MANY_FAILED_ATTEMPTS — this (Application, email) pair is locked out after ' +
               'repeated failures; see `retryAfterSeconds`.',
+            503:
+              'PASSWORD_VERIFY_BUSY: too many password checks were already queued on this ' +
+              'server, so this one was never attempted. No verdict was reached: the password ' +
+              'was neither accepted nor rejected, and nothing was counted against the account, ' +
+              'so this must NOT be shown to the user as a wrong password. Retry after the ' +
+              '`Retry-After` header (mirrored as `retryAfterSeconds`).',
           }),
         },
       },
@@ -389,7 +449,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         application: req.application!,
         email: body.email,
         password: body.password,
-        device: deviceContext(req),
+        device: deviceContext(req, body.device),
       });
       if (!outcome.mfaRequired) {
         recordEndUserEvent(req, 'user.signed_in', outcome.endUser.id, { via: 'password' });
@@ -401,6 +461,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/mfa-verify',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Public · Auth'],
@@ -414,17 +475,20 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           properties: {
             mfaChallengeToken: { type: 'string', minLength: 1, maxLength: 2048 },
             code: { type: 'string', minLength: 1, maxLength: 64 },
+            device: DEVICE_BODY_SCHEMA,
           },
         },
         response: {
           200: ok(ref('AuthResult'), 'A finished session.'),
           ...errs({
             ...BOOTSTRAP_ERRORS,
+            400: 'VALIDATION_ERROR — the body failed schema validation.' + DEVICE_ERRORS_400,
             401:
               BOOTSTRAP_401 +
               ' Or MFA_CHALLENGE_INVALID — the challenge token is invalid or expired; or ' +
               'MFA_CHALLENGE_WRONG_APPLICATION — issued for a different Application; or ' +
               'MFA_CODE_INVALID — the TOTP/backup code did not verify.',
+            403: BOOTSTRAP_403 + DEVICE_ERRORS_403,
           }),
         },
       },
@@ -435,7 +499,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         application: req.application!,
         mfaChallengeToken: body.mfaChallengeToken,
         code: body.code,
-        device: deviceContext(req),
+        device: deviceContext(req, body.device),
       });
       recordEndUserEvent(req, 'user.signed_in', result.endUser.id, { via: 'mfa' });
       return { success: true, data: shapeAuthResult(result) };
@@ -445,6 +509,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/refresh',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       schema: {
         tags: ['Public · Auth'],
         summary: 'Exchange a refresh token for a new {access, refresh} pair',
@@ -455,7 +520,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         body: {
           type: 'object',
           required: ['refreshToken'],
-          properties: { refreshToken: { type: 'string', minLength: 1, maxLength: 512 } },
+          properties: {
+            refreshToken: { type: 'string', minLength: 1, maxLength: 512 },
+            device: DEVICE_BODY_SCHEMA,
+          },
         },
         response: {
           200: ok(ref('AuthResult'), 'A fresh {access, refresh} pair.'),
@@ -466,9 +534,16 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
               ' Or REFRESH_TOKEN_INVALID — the token is unknown or not a session-kind token; or ' +
               'REFRESH_TOKEN_REUSED — a rotated-out token was replayed (every session for this ' +
               'user has been revoked as a precaution); or REFRESH_TOKEN_REVOKED — this session ' +
-              'was revoked; or REFRESH_TOKEN_EXPIRED — the token has expired; or ' +
-              'REFRESH_TOKEN_WRONG_APPLICATION — the token belongs to a different Application.',
-            403: BOOTSTRAP_403 + ' Or EMAIL_NOT_VERIFIED — re-checked on every refresh.',
+              'was revoked, or its device was refused after the token was spent (`details.reason`); ' +
+              'or REFRESH_TOKEN_EXPIRED — the token has expired; or ' +
+              'REFRESH_TOKEN_WRONG_APPLICATION — the token belongs to a different Application; or ' +
+              'REFRESH_TOKEN_DEVICE_MISMATCH — the session is bound to a different device than ' +
+              'the one presenting it (every session for this user has been revoked as a precaution); ' +
+              'or SESSION_DEVICE_RELEASED — the device this session is bound to was released since.',
+            403:
+              BOOTSTRAP_403 +
+              ' Or EMAIL_NOT_VERIFIED — re-checked on every refresh.' +
+              ' Or DEVICE_BLOCKED — an operator blocked the device this session is bound to.',
             410: 'END_USER_ERASED — this end-user was erased (GDPR) since the token was issued.',
           }),
         },
@@ -476,7 +551,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const body = RefreshBody.parse(req.body);
-      const result = await authService.refresh(req.application!, body.refreshToken);
+      const result = await authService.refresh(
+        req.application!,
+        body.refreshToken,
+        deviceContext(req, body.device),
+      );
       return { success: true, data: shapeAuthResult(result) };
     },
   );
@@ -484,11 +563,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/sign-out',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       schema: {
         tags: ['Public · Auth'],
         summary: 'Revoke a refresh token',
         description:
-          'Idempotent. Returns 200 even for unknown tokens — we don\'t disclose whether the token existed.',
+          'Idempotent. Returns 200 even for unknown tokens, we don\'t disclose whether the token existed.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
         body: {
           type: 'object',
@@ -498,7 +578,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         response: {
           200: ok(
             { type: 'object', properties: { signedOut: { type: 'boolean', enum: [true] } }, required: ['signedOut'] },
-            'Always {signedOut: true} — we do not disclose whether the token existed.',
+            'Always {signedOut: true}, we do not disclose whether the token existed.',
           ),
           ...errs({ ...BOOTSTRAP_ERRORS }),
         },
@@ -511,11 +591,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // -- Password reset (no user JWT — the whole point is the user can't sign in) ----
+  // -- Password reset (no user JWT, the whole point is the user can't sign in) ----
 
   app.post(
     '/forgot-password',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Public · Auth'],
@@ -524,7 +605,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           'Always returns 200 with `{ delivered: boolean, emailSent: boolean, resetToken: string|null }`. ' +
           'Never discloses whether the email exists. When the Application has email transport ' +
           'configured (BYO Resend or RESEND_DEFAULT_*), the email is sent and `resetToken` is null. ' +
-          'Otherwise the legacy contract applies — caller forwards `resetToken` via their own provider.',
+          'Otherwise the legacy contract applies, caller forwards `resetToken` via their own provider.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
         body: {
           type: 'object',
@@ -540,7 +621,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
               type: 'object',
               description:
                 'Never discloses whether the email exists. `resetToken` is non-null only when the ' +
-                'Application has no email transport configured (legacy contract) — a publishable ' +
+                'Application has no email transport configured (legacy contract), a publishable ' +
                 'caller never receives it.',
               properties: {
                 delivered: { type: 'boolean' },
@@ -574,6 +655,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/magic-link/request',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Public · Auth'],
@@ -582,7 +664,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           'Enumeration-safe: returns the same shape whether the email exists or not. ' +
           'When the Application has email transport configured, the link is sent and ' +
           '`magicLinkToken` is null. Otherwise the raw token is returned for the caller ' +
-          'to forward via their own provider. Honours `authConfig.signupEnabled` — when ' +
+          'to forward via their own provider. Honours `authConfig.signupEnabled`, when ' +
           'disabled, magic links for new emails are silently refused (same enumeration-safe shape).',
         security: [{ apiKey: [] }, { publishableKey: [] }],
         body: {
@@ -599,7 +681,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
               type: 'object',
               description:
                 'Enumeration-safe: same shape whether the email exists or not. `magicLinkToken` ' +
-                'is non-null only when the Application has no email transport configured — a ' +
+                'is non-null only when the Application has no email transport configured, a ' +
                 'publishable caller never receives it (it IS a session).',
               properties: {
                 delivered: { type: 'boolean' },
@@ -633,26 +715,30 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/magic-link/verify',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Public · Auth'],
         summary: 'Consume a magic-link token + complete sign-in',
         description:
           'Single-use, 15-minute lifetime. Returns the same `SignInOutcome` shape as ' +
-          '/sign-in — MFA-enrolled users get a challenge token; otherwise a full session. ' +
+          '/sign-in, MFA-enrolled users get a challenge token; otherwise a full session. ' +
           'For tokens issued when the email had no account yet, the EndUser is created ' +
           'atomically with the consume (sign-up must be enabled on the Application).',
         security: [{ apiKey: [] }, { publishableKey: [] }],
         body: {
           type: 'object',
           required: ['token'],
-          properties: { token: { type: 'string', minLength: 1, maxLength: 512 } },
+          properties: {
+            token: { type: 'string', minLength: 1, maxLength: 512 },
+            device: DEVICE_BODY_SCHEMA,
+          },
         },
         response: {
           200: ok(ref('SignInOutcome'), 'A finished session, or an MFA challenge.'),
           ...errs({
             ...BOOTSTRAP_ERRORS,
-            400: 'AUTH_METHOD_DISABLED — magic-link sign-in is disabled for this Application.',
+            400: 'AUTH_METHOD_DISABLED — magic-link sign-in is disabled for this Application.' + DEVICE_ERRORS_400,
             401:
               BOOTSTRAP_401 +
               ' Or MAGIC_LINK_INVALID — the token is unknown; or MAGIC_LINK_USED — already ' +
@@ -673,7 +759,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       const outcome = await authService.verifyMagicLink({
         application: req.application!,
         token: body.token,
-        device: deviceContext(req),
+        device: deviceContext(req, body.device),
         // Signup policy: refuse creation via a pub key in `secret_only` apps.
         ...(req.authKind !== undefined && { authKind: req.authKind }),
       });
@@ -688,6 +774,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/passkey/authenticate/start',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       schema: {
         tags: ['Public · Auth'],
         summary: 'Begin a passkey authentication ceremony',
@@ -728,12 +815,13 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/passkey/authenticate/complete',
     {
+      bodyLimit: WEBAUTHN_BODY_LIMIT,
       schema: {
         tags: ['Public · Auth'],
         summary: 'Complete a passkey authentication and mint a session',
         description:
           'Verifies the browser response against `expectedChallenge` from /start. ' +
-          'On success returns the same `SignInOutcome` shape as /sign-in — passkeys ' +
+          'On success returns the same `SignInOutcome` shape as /sign-in, passkeys ' +
           'bypass MFA challenge (the passkey itself is a strong factor).',
         security: [{ apiKey: [] }, { publishableKey: [] }],
         body: {
@@ -742,13 +830,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           properties: {
             response: { type: 'object' },
             expectedChallenge: { type: 'string', minLength: 1, maxLength: 1024 },
+            device: DEVICE_BODY_SCHEMA,
           },
         },
         response: {
           200: ok(ref('SignInOutcome'), 'A finished session (passkeys bypass the MFA challenge).'),
           ...errs({
             ...BOOTSTRAP_ERRORS,
-            400: 'WEBAUTHN_AUTH_INVALID — the response is missing a credential id.',
+            400: 'WEBAUTHN_AUTH_INVALID — the response is missing a credential id.' + DEVICE_ERRORS_400,
             401:
               BOOTSTRAP_401 +
               ' Or WEBAUTHN_AUTH_INVALID — the credential is unknown to this Application, the ' +
@@ -764,7 +853,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         application: req.application!,
         expectedChallenge: body.expectedChallenge,
         response: body.response as never,
-        device: deviceContext(req),
+        device: deviceContext(req, body.device),
       });
       if (!outcome.mfaRequired) {
         recordEndUserEvent(req, 'user.signed_in', outcome.endUser.id, { via: 'passkey' });
@@ -776,6 +865,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/verify-email',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       schema: {
         tags: ['Public · Auth'],
         summary: 'Consume an email-verification token; marks `emailVerified: true`',
@@ -824,12 +914,13 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   // The sessionless sibling of `/send-verification` (which needs one). It
   // exists because `requireEmailVerification` refuses the very session that
   // route demands, so without this a user whose mail never arrived had no
-  // self-service way back. Rate-limited exactly like `/forgot-password` — same
-  // surface, same cap — and enumeration-safe by construction; see
+  // self-service way back. Rate-limited exactly like `/forgot-password`, same
+  // surface, same cap, and enumeration-safe by construction; see
   // `authService.resendVerificationEmail`.
   app.post(
     '/resend-verification',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Public · Auth'],
@@ -839,11 +930,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           'has no session and so cannot call /auth/send-verification.\n\n' +
           'Always returns 200 with `{ emailSent: boolean, verificationToken: string|null }` ' +
           'and never discloses whether the address exists, is already verified, or was ' +
-          'delivered to — a **publishable**-key caller gets one constant body whatever ' +
+          'delivered to, a **publishable**-key caller gets one constant body whatever ' +
           'happened. A secret-key caller gets the real outcome, and the raw token when the ' +
           'Application has no email transport configured (the same contract /forgot-password ' +
           'uses).\n\n' +
-          'Nothing is sent when no verification link can be built — pass `verifyUrl`, or set ' +
+          'Nothing is sent when no verification link can be built, pass `verifyUrl`, or set ' +
           'the Application URL (Panel → Application → Auth). An already-verified address is ' +
           'a no-op rather than an error.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
@@ -852,7 +943,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           required: ['email'],
           properties: {
             email: { type: 'string', format: 'email', maxLength: 254 },
-            // No `format: uri` — see /send-verification for why.
+            // No `format: uri`, see /send-verification for why.
             verifyUrl: { type: 'string', maxLength: 2048 },
           },
         },
@@ -891,13 +982,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/reset-password',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Public · Auth'],
         summary: 'Consume a reset token + set a new password',
         description:
           'Single-use token; consumed atomically. On success, every refresh token for ' +
-          'this end-user is revoked — anyone holding a session via the compromised credential is signed out.',
+          'this end-user is revoked, anyone holding a session via the compromised credential is signed out.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
         body: {
           type: 'object',
@@ -937,17 +1029,17 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 }
 
 /**
- * Authenticated auth-management routes — separate plugin so the user-session
+ * Authenticated auth-management routes, separate plugin so the user-session
  * middleware can be added once via `addHook` without affecting the
  * public-bootstrap routes above. Registered at the SAME `/api/v1/auth` prefix;
  * Fastify encapsulation is what keeps the two hook sets apart.
  *
  * Credential: an Application **publishable or secret** key AND the end-user
- * JWT. The JWT is the authorizer — every route here acts solely on
- * `req.endUser` — so a browser-only client can reach these with `rp_pub_…`.
+ * JWT. The JWT is the authorizer, every route here acts solely on
+ * `req.endUser`, so a browser-only client can reach these with `rp_pub_…`.
  *
  * Passkey ENROLLMENT (`passkey/register/{start,complete}`) is reachable on the
- * same terms, but a **publishable** caller must additionally step up — see
+ * same terms, but a **publishable** caller must additionally step up, see
  * `lib/step-up.ts`. A passkey bypasses the MFA challenge at sign-in, and neither
  * a password change nor sign-out-everywhere removes one, so a stolen access
  * token alone must not be able to enroll it. The step-up is enforced at
@@ -960,7 +1052,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<void> {
   // Accepts the publishable key, like the pre-user siblings (`passkey/
   // authenticate/*`, `verify-email`, `forgot-password`, `reset-password`).
-  // `requireUserSession` is the authorizer here — every route acts solely on
+  // `requireUserSession` is the authorizer here, every route acts solely on
   // `req.endUser`, and change-password additionally requires the current
   // password. Secret-only meant a browser could sign in with a passkey but
   // never enroll one, and consume a verification token but never request one.
@@ -971,13 +1063,18 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
   app.post(
     '/change-password',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
+      // Checks a secret inside a session, so it gets the credential tier's
+      // 10/min per (account, IP), not the 600/min identity budget. See
+      // test/rate-limit-hardening.test.ts.
+      config: { rateLimit: authRateLimit(10) },
       preHandler: refuseWhileImpersonating("change this account's password"),
       schema: {
         tags: ['Public · Auth'],
         summary: 'Change the current user\'s password',
         description:
-          'Requires the current password. On success, revokes every refresh token for this user — ' +
-          'other devices are signed out. The caller\'s access token stays valid until its 15-min expiry.',
+          'Requires the current password. On success, revokes every refresh token for this user, ' +
+          'other devices are signed out. Access tokens minted before this call are refused on their next use, whatever their expiry.',
         security: [
           { publishableKey: [], userToken: [] },
           { apiKey: [], userToken: [] },
@@ -1019,6 +1116,9 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
   app.post(
     '/send-verification',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
+      // Sends an email on every call; same tier as /resend-verification.
+      config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Public · Auth'],
         summary: 'Send (or re-send) an email-verification link to the current user',
@@ -1033,7 +1133,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
         ],
         body: {
           type: 'object',
-          // No `format: uri` here — Ajv's strict URI check rejects URLs
+          // No `format: uri` here, Ajv's strict URI check rejects URLs
           // containing `{token}` placeholders. Zod handles the URL parse
           // (WHATWG, permissive) inside the handler.
           properties: { verifyUrl: { type: 'string', maxLength: 2048 } },
@@ -1076,9 +1176,12 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
   app.post(
     '/passkey/register/start',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
+      // The step-up below checks the password or an MFA code.
+      config: { rateLimit: authRateLimit(10) },
       // Refused outright for an impersonating operator: a passkey enrolled
       // during a 5-minute support session is a permanent sign-in credential on
-      // somebody else's account, and the step-up below does not stop it — an
+      // somebody else's account, and the step-up below does not stop it, an
       // operator can hold the user's password (they can set one) without ever
       // being the user.
       preHandler: refuseWhileImpersonating('enroll a passkey on this account'),
@@ -1089,13 +1192,13 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
       // `authService.passkeyAuthenticateComplete`), so an attacker who enrolled
       // one could
       // sign in later with no password and no second factor. Neither
-      // change-password nor sign-out-everywhere removes it — the victim would
+      // change-password nor sign-out-everywhere removes it, the victim would
       // have to notice a stranger's row in GET /passkeys.
       //
       // This used to be secret-key-only for that reason, which was the safe
       // holding position but not a fix: it made passkey enrollment unreachable
       // from a browser-only app while doing nothing about a stolen token on a
-      // server-side one. lib/step-up.ts is the actual control — a publishable
+      // server-side one. lib/step-up.ts is the actual control, a publishable
       // caller must re-prove identity with the account password or a current
       // authenticator code, neither of which the access token carries.
       schema: {
@@ -1109,7 +1212,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
           '(the account password) or `code` (a current authenticator or unused ' +
           'backup code). A passkey bypasses the MFA challenge at sign-in, so a ' +
           'stolen access token alone must not be able to enroll one. Secret-key ' +
-          'callers are not required to step up — the customer backend is the gate.',
+          'callers are not required to step up, the customer backend is the gate.',
         security: [
           { publishableKey: [], userToken: [] },
           { apiKey: [], userToken: [] },
@@ -1144,7 +1247,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
       },
       // `password`/`code` are optional, so a secret-key caller may POST no body.
       // Fastify validates a missing body against the schema and answers 400
-      // "body must be object" — the same trap that broke mfa/disable.
+      // "body must be object", the same trap that broke mfa/disable.
       preValidation: async (req) => {
         if (req.body === undefined || req.body === null) req.body = {};
       },
@@ -1173,14 +1276,15 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
   app.post(
     '/passkey/register/complete',
     {
+      bodyLimit: WEBAUTHN_BODY_LIMIT,
       preHandler: refuseWhileImpersonating('enroll a passkey on this account'),
       // Same credentials as the rest of this plugin (publishable or secret key
-      // + the user's token) — no extra route-level hook.
+      // + the user's token), no extra route-level hook.
       //
       // No step-up here, and that is not an oversight: the step-up happens at
       // /passkey/register/start, and `consumeChallenge` binds this ceremony to it.
       // The challenge is single-use and scoped to (application, endUserId), so a
-      // caller cannot invent one or replay somebody else's — it must have come
+      // caller cannot invent one or replay somebody else's, it must have come
       // from a start call that already proved identity. Demanding a second factor
       // again here would only ask the user to re-enter a code mid-ceremony.
       schema: {
@@ -1201,7 +1305,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
         },
         response: {
           // NOT `ref('Passkey')`: `authService.passkeyRegisterComplete` returns only
-          // `{credentialId, deviceName}` (auth.service.ts) — it never fetches `id`, `lastUsedAt`,
+          // `{credentialId, deviceName}` (auth.service.ts), it never fetches `id`, `lastUsedAt`,
           // or `createdAt`, all of which `Passkey` requires. Modelled inline rather than forcing
           // a component that would over-promise fields this handler does not send.
           200: ok(
@@ -1253,7 +1357,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
         response: {
           // `authService.listPasskeys` selects exactly `{id, credentialId, deviceName,
-          // lastUsedAt, createdAt}` — matches the corrected `Passkey` component field-for-field.
+          // lastUsedAt, createdAt}`, matches the corrected `Passkey` component field-for-field.
           200: okPage(ref('Passkey'), "A page of the current user's registered passkeys."),
           ...errs({
             400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
@@ -1355,8 +1459,13 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
                 expiresAt: { type: 'string', format: 'date-time' },
                 userAgent: { type: 'string', nullable: true },
                 ip: { type: 'string', nullable: true },
+                deviceId: {
+                  type: 'string',
+                  nullable: true,
+                  description: 'The device this session is bound to, when the client sent a fingerprint.',
+                },
               },
-              required: ['id', 'createdAt', 'expiresAt', 'userAgent', 'ip'],
+              required: ['id', 'createdAt', 'expiresAt', 'userAgent', 'ip', 'deviceId'],
             },
             "A page of the current user's active sessions (live refresh tokens), newest first.",
           ),
@@ -1379,6 +1488,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
             expiresAt: r.expiresAt.toISOString(),
             userAgent: r.userAgent,
             ip: r.ip,
+            deviceId: r.deviceId,
           })),
           total,
           take,
@@ -1431,12 +1541,17 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
   app.post(
     '/sign-out-everywhere',
     {
+      // Takes no body at all, so the cap only decides how many bytes Fastify
+      // reads before ignoring them. Its sibling /sign-out is capped; leaving
+      // this one on the global 1 MiB would let a holder of any valid user
+      // token push a megabyte per call at the parser.
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       schema: {
         tags: ['Public · Auth'],
         summary: 'Revoke every refresh token for the current user',
         description:
           'Used for "sign out of all devices" / suspected compromise. The caller\'s ' +
-          'access token stays valid until its 15-min expiry; clear it client-side for full logout.',
+          'access token paired with it is refused on its next use; clear it client-side too.',
         security: [
           { publishableKey: [], userToken: [] },
           { apiKey: [], userToken: [] },

@@ -5,7 +5,7 @@
  * id_token (Google's stable account id) plus the email.
  *
  * This implementation makes real outbound calls to Google. In tests we
- * inject a mock provider via the registry — see `test/phase4.test.ts`,
+ * inject a mock provider via the registry, see `test/phase4.test.ts`,
  * `test/security.test.ts` and `test/tenant-oauth.test.ts`.
  */
 
@@ -31,7 +31,7 @@ function decodeIdTokenPayload(idToken: string): IdTokenClaims {
   const parts = idToken.split('.');
   if (parts.length !== 3) throw new Error('Malformed id_token');
   const payload = parts[1]!;
-  // base64url → utf8. Don't VERIFY here — Google's HTTPS connection is
+  // base64url → utf8. Don't VERIFY here, Google's HTTPS connection is
   // the trust anchor (we got the token from oauth2.googleapis.com).
   // Production-grade: validate signature against Google's JWKS.
   const padded = payload + '='.repeat((4 - (payload.length % 4)) % 4);
@@ -75,7 +75,7 @@ export class GoogleProvider implements OAuthProvider {
     if (!data.id_token) throw new Error('Google token response missing id_token');
     const claims = decodeIdTokenPayload(data.id_token);
     // Google's id_token includes `email_verified`. Treat absence as
-    // unverified — never opt-in to "trusted unless told otherwise."
+    // unverified, never opt-in to "trusted unless told otherwise."
     const verified = claims.email_verified === true;
     return {
       providerAccountId: claims.sub,

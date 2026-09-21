@@ -1,12 +1,12 @@
 /**
- * MCP tool tests — exercise each tool against a stub HTTP server, plus the
+ * MCP tool tests, exercise each tool against a stub HTTP server, plus the
  * Zod → JSON Schema shim used to publish input descriptors.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { z } from 'zod';
-import { AdminClient, AdminApiError } from '../src/client.js';
+import { AdminClient } from '../src/client.js';
 import { tools } from '../src/tools.js';
 import { zodToJsonSchema } from '../src/lib/zod-to-json-schema.js';
 
@@ -72,7 +72,7 @@ describe('@rekey.dev/mcp tool registry', () => {
   it('list_payments builds the admin-metrics query string from its filters', async () => {
     stub.reset();
     // /admin/metrics/payments is paginated → `{items, page}`; the tool unwraps
-    // `.items`. The pagination fields moved under `page` in 2.0.0-rc.3 — they
+    // `.items`. The pagination fields moved under `page` in 2.0.0-rc.3, they
     // used to sit flat beside `items`, one level up from where the published
     // OpenAPI document declared them.
     stub.set('GET /api/v1/admin/metrics/payments', 200, {

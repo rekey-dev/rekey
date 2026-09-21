@@ -2,7 +2,7 @@
  * Operator MCP plan editing + archive flow.
  *
  * A plan's price is registered with the payment provider and immutable, so
- * update_plan edits ENTITLEMENTS only (name / license / credit) — never price —
+ * update_plan edits ENTITLEMENTS only (name / license / credit), never price,
  * and set_plan_active(false) is the archive path. These tests confirm an
  * entitlement edit lands, the price is untouched, and archiving works, all
  * tenant-scoped.
@@ -67,7 +67,7 @@ describe('Operator MCP plan edit + archive', () => {
     expect(updated.isError).toBe(false);
     const d = updated.data as { name: string; amount: number };
     expect(d.name).toBe('Pro Plus');
-    // Price is unchanged — update_plan can't touch it.
+    // Price is unchanged, update_plan can't touch it.
     expect(d.amount).toBe(1500);
 
     // Even if an agent tries to smuggle a price change, it's ignored (the tool
@@ -76,7 +76,9 @@ describe('Operator MCP plan edit + archive', () => {
       applicationId: appId,
       slug: 'pro',
       name: 'Pro Plus 2',
-      // @ts-expect-error — not part of the schema; asserting it has no effect.
+      // Not part of the tool's schema. The RPC params are `Record<string,
+      // unknown>`, so this is not a type error, the assertion below is what
+      // proves the field is ignored.
       amount: 99,
     });
     expect((sneaky.data as { amount: number }).amount).toBe(1500);

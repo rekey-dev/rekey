@@ -2,7 +2,7 @@
 
 /**
  * Sidebar/topbar nav item with active state. Client component only for
- * usePathname — keep it tiny.
+ * usePathname, keep it tiny.
  */
 
 import Link from 'next/link';

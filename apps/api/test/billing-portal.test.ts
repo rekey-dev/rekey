@@ -1,8 +1,8 @@
 /**
  * End-user self-service billing surface (portal v1):
  *
- *   GET  /api/v1/billing/payments            — caller's OWN payment history
- *   POST /api/v1/billing/subscription/cancel — self-service cancellation
+ *   GET  /api/v1/billing/payments           , caller's OWN payment history
+ *   POST /api/v1/billing/subscription/cancel, self-service cancellation
  *
  * Both require the Application API key + the end-user JWT. Payments must be
  * strictly scoped to the caller; cancel must honor at-period-end vs immediate
@@ -183,7 +183,7 @@ describe('end-user billing portal surface', () => {
     };
     expect(payments).toHaveLength(2);
     // Bob's payment is excluded from the count behind the window too, not just
-    // from the rows — otherwise Alice's pager would page into nothing.
+    // from the rows, otherwise Alice's pager would page into nothing.
     expect(page.total).toBe(2);
     // Newest first.
     expect(payments[0]!.description).toBe('second month');
@@ -391,7 +391,7 @@ describe('end-user billing portal surface', () => {
   });
 
   it('cancel SCHEDULES at period end when the sub has no provider-side record', async () => {
-    // This test used to assert the opposite — that a row with no
+    // This test used to assert the opposite, that a row with no
     // `providerSubId` was cancelled immediately. That was the defect: being
     // unable to call Stripe says something about who terminates the
     // subscription, not about when the buyer's paid time should end. The
@@ -409,7 +409,7 @@ describe('end-user billing portal surface', () => {
         planId,
         status: 'ACTIVE',
         provider: 'stripe',
-        // No providerSubId — e.g. activated manually / legacy row.
+        // No providerSubId, e.g. activated manually / legacy row.
         currentPeriodEnd: new Date('2099-01-01T00:00:00Z'),
       },
     });

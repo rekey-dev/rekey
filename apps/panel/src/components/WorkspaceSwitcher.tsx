@@ -1,16 +1,16 @@
 'use client';
 
 /**
- * Workspace switcher — shadcn-style dropdown with inline create-workspace
+ * Workspace switcher, shadcn-style dropdown with inline create-workspace
  * modal. Replaces the old native `<select>` (which broke styling on long
  * names + couldn't host a modal trigger naturally).
  *
  * Two server actions threaded in from the (authed)/layout.tsx:
- *   - switchAction(formData)  — POSTed when user picks a different workspace
- *   - createAction(formData)  — POSTed from the inline "+ New workspace" modal
+ *   - switchAction(formData) , POSTed when user picks a different workspace
+ *   - createAction(formData) , POSTed from the inline "+ New workspace" modal
  *
  * Both bounce server-side (redirect after action), so no client state to
- * keep in sync — the dropdown closes when the navigation happens.
+ * keep in sync, the dropdown closes when the navigation happens.
  */
 
 import * as React from 'react';
@@ -23,6 +23,7 @@ import {
   DropdownMenuTrigger,
 } from './DropdownMenu';
 import { Modal } from './Modal';
+import { ActionForm } from './ActionForm';
 import { SubmitButton } from './SubmitButton';
 
 interface Membership {
@@ -43,29 +44,49 @@ export function WorkspaceSwitcher({
   /**
    * Omitted when this deployment does not allow additional workspaces
    * (`WORKSPACE_CREATION=disabled`). The entry and its modal are then not
-   * rendered at all — an operator is never shown a door that will not open.
+   * rendered at all, an operator is never shown a door that will not open.
    */
   createAction?: ((formData: FormData) => Promise<void>) | undefined;
 }): React.JSX.Element {
-  // Hidden form so any DropdownMenuItem can submit a switch by setting the
-  // tenantId input + calling submit().
+  // Hidden form so any DropdownMenuItem can start a switch by setting the
+  // tenantId input, and so a browser with no JavaScript still has a native
+  // post target. The FormData we hand the action is read off this element.
   const formRef = React.useRef<HTMLFormElement | null>(null);
   const tenantIdInputRef = React.useRef<HTMLInputElement | null>(null);
   // Same trick for the modal's create form trigger.
   const newModalTriggerRef = React.useRef<HTMLButtonElement | null>(null);
 
   // Pending feedback: the switch is a full server round-trip, so without this
-  // the picked item just sits inert until navigation lands. The component
-  // remounts on success, so the flag never needs resetting.
+  // the picked item just sits inert until navigation lands.
+  //
+  // The flag used to have no way back down: it was set, the form was
+  // `requestSubmit()`ed, and the only thing that ever cleared it was the
+  // component being remounted by the navigation the action ends in. A switch
+  // whose navigation does not commit therefore left the trigger reading
+  // "Switching…", disabled, until the operator reloaded the page by hand. So
+  // we call the action ourselves and clear the flag when its promise settles,
+  // the same bargain `ActionForm` makes for a form with a submit button in it.
+  // The action is started inside a transition so the router has one to
+  // navigate with, and the promise chain is left outside that transition on
+  // purpose: an action ending in `redirect()` puts the navigation into
+  // whichever transition dispatched it, and it is the navigation, not the
+  // write, that can hang.
   const [switching, setSwitching] = React.useState(false);
+  const [, startTransition] = React.useTransition();
 
   function switchTo(tenantId: string): void {
     if (tenantId === activeTenantId || switching) return;
-    if (tenantIdInputRef.current && formRef.current) {
-      tenantIdInputRef.current.value = tenantId;
-      setSwitching(true);
-      formRef.current.requestSubmit();
-    }
+    const form = formRef.current;
+    const input = tenantIdInputRef.current;
+    if (!form || !input) return;
+    input.value = tenantId;
+    const formData = new FormData(form);
+    setSwitching(true);
+    startTransition(() => {
+      void Promise.resolve(switchAction(formData)).finally(() => {
+        setSwitching(false);
+      });
+    });
   }
 
   const active = memberships.find((m) => m.tenantId === activeTenantId);
@@ -123,16 +144,16 @@ export function WorkspaceSwitcher({
 
       {/* The "+ New workspace" entry triggers this Modal. We ref the Modal's
           own (hidden) trigger button so the dropdown item can .click() it
-          programmatically — no nested <button>. */}
+          programmatically, no nested <button>. */}
       {createAction && (
         <Modal
           title="Create workspace"
-          description="Workspaces are isolated — applications, members, billing creds, and API keys don't leak between them."
+          description="Workspaces are isolated: applications, members, billing creds, and API keys don't leak between them."
           trigger="open"
           triggerClassName="hidden"
           triggerRef={newModalTriggerRef}
         >
-          <form action={createAction} className="space-y-3">
+          <ActionForm action={createAction} className="space-y-3">
             <label className="block space-y-1">
               <span className="text-xs font-medium">Workspace name</span>
               <input
@@ -150,7 +171,7 @@ export function WorkspaceSwitcher({
               </span>
             </label>
             <SubmitButton pendingLabel="Creating workspace…">Create + switch</SubmitButton>
-          </form>
+          </ActionForm>
         </Modal>
       )}
     </>

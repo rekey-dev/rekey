@@ -1,16 +1,16 @@
 /**
- * <ProviderPicker> — the "Pay with…" radio-card group.
+ * <ProviderPicker>, the "Pay with…" radio-card group.
  *
  * Load-bearing behaviour pinned here:
  *   - one radio per provider, friendly names, a labelled radiogroup (a11y);
  *   - the FIRST provider (the geo router's top pick) is selected by default;
  *   - uncontrolled mode posts the selected `provider` in the form's FormData
- *     with no JS wiring (the checked radio is what submits) — this is what lets
+ *     with no JS wiring (the checked radio is what submits), this is what lets
  *     it drop into the existing checkout `<form>`;
  *   - controlled mode (`value` + `onChange`) fires `onChange` with the new id
  *     and does NOT self-update (the parent owns the value).
  *
- * The provider list is always a PROP — the component never fetches it (the
+ * The provider list is always a PROP, the component never fetches it (the
  * providers endpoint rejects public keys), mirroring <PricingTable plans>.
  */
 

@@ -1,9 +1,9 @@
 /**
- * <RekeyProvider> + hooks — the source of the auth state every control/auth
+ * <RekeyProvider> + hooks, the source of the auth state every control/auth
  * widget reads. We test the provider for real (no mocking of itself) so the
  * seams the components depend on are pinned:
  *   - initialUser seeds a signed-in, non-loading state synchronously (the SSR
- *     pattern) — no protected-UI flash;
+ *     pattern), no protected-UI flash;
  *   - a null access token resolves to signed-out, not loading;
  *   - useUser() throws a helpful error outside the provider.
  */

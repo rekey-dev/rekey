@@ -4,6 +4,7 @@ import { errorQuery, readErrorFlash, api, PanelApiError, getApplication } from '
 import { CopyButton } from '@/components/CopyButton';
 import { ApiErrorText } from '@/components/api-error';
 import { SectionHeader } from '@/components/Card';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
 
@@ -27,7 +28,7 @@ async function setPortalEnabled(applicationId: string, enabled: boolean): Promis
   await patchPortal(applicationId, { enabled }, `portal_${enabled ? 'enabled' : 'disabled'}`);
 }
 
-/** Only absolute http(s) URLs survive — reject javascript:/data:/other schemes. */
+/** Only absolute http(s) URLs survive, reject javascript:/data:/other schemes. */
 function httpUrlOrEmpty(value: string): string {
   if (!value) return '';
   try {
@@ -124,7 +125,7 @@ export default async function PortalPage({
         description={
           <>
             A Rekey-hosted page where <strong>your end-users</strong> sign in and manage their own
-            subscription, plan, and billing — no UI to build, no backend to deploy. Runs on your
+            subscription, plan, and billing, with no UI to build and no backend to deploy. Runs on your
             Application's <strong>publishable key</strong> + each customer's own session; you never
             expose a secret key.
           </>
@@ -146,11 +147,11 @@ export default async function PortalPage({
               {enabled ? 'Customers can sign in and self-serve at the URL below.' : 'Turn it on to give customers a self-service billing page.'}
             </p>
           </div>
-          <form action={setPortalEnabled.bind(null, id, !enabled)}>
+          <ActionForm action={setPortalEnabled.bind(null, id, !enabled)}>
             <SubmitButton pendingLabel={enabled ? 'Disabling…' : 'Enabling…'}>
               {enabled ? 'Disable portal' : 'Enable portal'}
             </SubmitButton>
-          </form>
+          </ActionForm>
         </div>
         {enabled && (
           <div className="flex items-center gap-3 border-t border-[var(--color-border)] pt-4">
@@ -166,7 +167,7 @@ export default async function PortalPage({
       <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h2 className="mb-1 text-sm font-semibold text-[var(--color-fg)]">Branding</h2>
         <p className="mb-3 text-xs text-[var(--color-muted-fg)]">How the portal looks to your customers. Leave blank to use defaults.</p>
-        <form action={saveBranding.bind(null, id)} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <ActionForm action={saveBranding.bind(null, id)} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <label className="space-y-1">
             <span className="text-xs font-medium">Display name</span>
             <input name="displayName" defaultValue={b.displayName ?? ''} placeholder={app.name} className={inputCls} />
@@ -205,7 +206,7 @@ export default async function PortalPage({
           <div className="sm:col-span-2">
             <SubmitButton pendingLabel="Saving…">Save branding</SubmitButton>
           </div>
-        </form>
+        </ActionForm>
       </div>
 
       {/* Custom domain */}
@@ -215,7 +216,7 @@ export default async function PortalPage({
           Serve the portal on your own domain (e.g. <code>billing.yourapp.com</code>) instead of{' '}
           <code>{PORTAL_HOST}/{app.slug}</code>.
         </p>
-        <form action={saveDomain.bind(null, id)} className="space-y-3">
+        <ActionForm action={saveDomain.bind(null, id)} className="space-y-3">
           <div className="flex items-center gap-2">
             <input name="portalDomain" defaultValue={domain} placeholder="billing.yourapp.com" className={inputCls} />
             <SubmitButton pendingLabel="Saving…">Save</SubmitButton>
@@ -225,7 +226,7 @@ export default async function PortalPage({
               <p className="font-medium text-[var(--color-fg)]">
                 Status:{' '}
                 {domainVerified ? (
-                  <span className="text-green-600">Verified — live</span>
+                  <span className="text-green-600">Verified and live</span>
                 ) : (
                   <span className="text-amber-600">Pending DNS verification</span>
                 )}
@@ -237,7 +238,7 @@ export default async function PortalPage({
               <p className="text-[var(--color-faint-fg)]">TLS is provisioned automatically once the record resolves. Clear the field and save to remove the domain.</p>
             </div>
           )}
-        </form>
+        </ActionForm>
       </div>
 
       <p className="text-xs text-[var(--color-muted-fg)]">The portal needs billing enabled on this Application.</p>

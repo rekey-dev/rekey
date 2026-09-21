@@ -1,5 +1,5 @@
 /**
- * Credits service — prepaid balance + append-only ledger.
+ * Credits service, prepaid balance + append-only ledger.
  *
  * The "lead pack / pay-as-you-go" model: a buyer purchases a CREDIT-kind plan
  * (or a CREDIT entitlement) and the customer's app draws the balance down per
@@ -11,8 +11,10 @@
  * the unique + all lookups (sidesteps Prisma's nullable-compound-unique).
  *
  * Correctness:
- *   - Never overspend — guarded atomic `UPDATE … WHERE balance >= need`.
- *   - Idempotent — `(applicationId, idempotencyKey)` unique on the ledger.
+ *   - Never overspend, guarded atomic `UPDATE … WHERE balance >= need`.
+ *   - Idempotent PER SUBJECT, `(applicationId, subjectKey, idempotencyKey)`
+ *     unique on the ledger. The subject is in the key because a client-supplied
+ *     idempotency key names what is being paid for, not who is paying (#492).
  */
 
 import type { Prisma, PrismaClient, CreditReason } from '@prisma/client';
@@ -23,7 +25,7 @@ function isUniqueViolation(e: unknown): boolean {
   return (e as { code?: string }).code === 'P2002';
 }
 
-/** A credit subject — exactly one of endUserId / organizationId. */
+/** A credit subject, exactly one of endUserId / organizationId. */
 export interface CreditSubjectInput {
   endUserId?: string | null;
   organizationId?: string | null;
@@ -62,9 +64,9 @@ interface ApplyDeltaInput extends CreditSubjectInput {
    * Join a transaction the caller already has open, instead of opening one.
    *
    * Needed because Prisma has no nested interactive transactions: a caller
-   * that must succeed or fail *together* with the debit — usage recording
+   * that must succeed or fail *together* with the debit, usage recording
    * against a priced meter, where a recorded unit that was not paid for is
-   * exactly the bug — cannot call this from inside its own `$transaction`
+   * exactly the bug, cannot call this from inside its own `$transaction`
    * without it hanging or committing separately.
    *
    * The caller owns the rollback. Note the idempotency fallback below is
@@ -99,8 +101,13 @@ async function applyDelta(input: ApplyDeltaInput): Promise<ApplyDeltaResult> {
     if (input.idempotencyKey) {
       const prior = await tx.creditLedger.findUnique({
         where: {
-          applicationId_idempotencyKey: {
+          applicationId_subjectKey_idempotencyKey: {
             applicationId: input.applicationId,
+            // Keyed by SUBJECT, not just application: a client-supplied key
+            // names what is being paid for (e.g. a lead id), not who is
+            // paying. Without this, a second buyer drawing down for the same
+            // lead found the first buyer's row and consumed for free (#492).
+            subjectKey: subject.subjectKey,
             idempotencyKey: input.idempotencyKey,
           },
         },
@@ -124,7 +131,7 @@ async function applyDelta(input: ApplyDeltaInput): Promise<ApplyDeltaResult> {
       balanceAfter = bal.balance;
     } else {
       const need = -input.delta;
-      // Atomic guarded debit — prevents lost-update overspend.
+      // Atomic guarded debit, prevents lost-update overspend.
       const res = await tx.creditBalance.updateMany({
         where: { applicationId: input.applicationId, subjectKey: subject.subjectKey, balance: { gte: need } },
         data: { balance: { decrement: need } },
@@ -155,7 +162,7 @@ async function applyDelta(input: ApplyDeltaInput): Promise<ApplyDeltaResult> {
   };
 
   // Caller-owned transaction: run inline and let their rollback cover us. The
-  // P2002 recovery below deliberately does not apply — a failed statement has
+  // P2002 recovery below deliberately does not apply, a failed statement has
   // already aborted their transaction, so a read inside it would fail too.
   if (input.tx) return run(input.tx);
 
@@ -165,8 +172,10 @@ async function applyDelta(input: ApplyDeltaInput): Promise<ApplyDeltaResult> {
     if (isUniqueViolation(e) && input.idempotencyKey) {
       const prior = await prisma.creditLedger.findUnique({
         where: {
-          applicationId_idempotencyKey: {
+          applicationId_subjectKey_idempotencyKey: {
             applicationId: input.applicationId,
+            // Keyed by SUBJECT, not just application: see the same check above.
+            subjectKey: subject.subjectKey,
             idempotencyKey: input.idempotencyKey,
           },
         },

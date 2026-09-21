@@ -58,7 +58,7 @@ The API keeps two revocation levers that an offline verifier, by construction, c
 - **The per-app kill-switch.** Bumping `Application.tokenGeneration` ("log everyone out now") still revokes RS256 tokens *at the API* — they embed the generation as a `gen` claim and the API rejects mismatches. Offline verifiers don't know the current generation.
 - **User deletion / session revocation.**
 
-Access tokens live **15 minutes**, so that is the maximum staleness window. If a use case needs hard revocation guarantees, keep using `auth.getCurrentUser` for it.
+Access tokens live `END_USER_ACCESS_TOKEN_TTL_SECONDS` (15 minutes by default), so that is the maximum staleness window for an offline verifier; the API itself refuses a token the user's last revocation predates. If a use case needs hard revocation guarantees, keep using `auth.getCurrentUser` for it.
 
 ## Key management & rotation
 

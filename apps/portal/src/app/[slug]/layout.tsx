@@ -6,7 +6,7 @@ import { getPortalUser } from '@/lib/session';
 import { signOutAction } from '@/lib/actions';
 import { Button } from '@/components/button';
 
-// Tab title carries the merchant's brand — the only name a customer knows.
+// Tab title carries the merchant's brand, the only name a customer knows.
 // getPortalConfig is React-cached, so the layout render reuses this fetch.
 export async function generateMetadata({
   params,

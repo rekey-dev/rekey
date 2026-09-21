@@ -5,7 +5,7 @@
  * That works in Next, where these hydrate anyway, and fails everywhere they
  * are rendered server-only: Astro without a client directive produced correct
  * markup with no styling at all. The workaround was `client:load`, which ships
- * React to a page that needs none purely to obtain a stylesheet — so the whole
+ * React to a page that needs none purely to obtain a stylesheet, so the whole
  * component set was effectively Next-only.
  *
  * `renderToStaticMarkup` is exactly that condition: no hydration, no effects.
@@ -34,7 +34,7 @@ describe('server-only rendering', () => {
   it('carries its own styles, with no client JavaScript', () => {
     const html = renderToStaticMarkup(<SignIn actionUrl="/api/sign-in" />);
     expect(sheets(html)).toBe(1);
-    // Not merely a <style> tag — the actual rules the classNames reference.
+    // Not merely a <style> tag, the actual rules the classNames reference.
     expect(html).toContain('.rekey-card');
     expect(html).toContain('action="/api/sign-in"');
   });

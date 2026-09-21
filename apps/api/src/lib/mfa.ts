@@ -8,7 +8,7 @@
  *   the matching hash from the array.
  *
  * The MFA secret + the array of backup-code hashes are persisted via
- * `lib/secrets.ts` (AES-256-GCM JSON) — never in plaintext.
+ * `lib/secrets.ts` (AES-256-GCM JSON), never in plaintext.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
@@ -22,9 +22,9 @@ export interface GeneratedSecret {
 }
 
 export interface GeneratedBackupCodes {
-  /** Plaintext codes — show to user once, then discard. */
+  /** Plaintext codes, show to user once, then discard. */
   plaintext: string[];
-  /** SHA-256 hashes — store these. */
+  /** SHA-256 hashes, store these. */
   hashes: string[];
 }
 
@@ -74,10 +74,9 @@ export function verifyTotp(secretBase32: string, code: string): boolean {
 }
 
 const BACKUP_CODE_COUNT = 10;
-const BACKUP_CODE_BYTES = 5; // 5 bytes → 8 base32-ish chars; we format as XXXX-XXXX
+const BACKUP_CODE_BYTES = 5; // 5 bytes -> 8 base32-ish chars, formatted as XXXX-XXXX
 
 function generateBackupCode(): string {
-  // Format: XXXX-XXXX (8 alphanumeric, no easily-confused chars).
   const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I, O, 0, 1
   const buf = randomBytes(BACKUP_CODE_BYTES);
   let s = '';

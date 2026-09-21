@@ -1,9 +1,14 @@
 /**
- * `rekey apps …` — Application management.
+ * `rekey apps …`, Application management.
  *
  *   rekey apps list [--tenant <id>]
  *   rekey apps get <id>
  *   rekey apps create --tenant <id> --name <name> --slug <slug>
+ *                       [--environment PRODUCTION|STAGING|DEVELOPMENT]
+ *
+ * `--environment` decides the Application's key prefix (`rp_live_` versus
+ * `rp_test_`) and whether it counts against the workspace's
+ * `maxProductionApps`. Omitted, the API defaults to DEVELOPMENT.
  */
 
 import type { Command } from 'commander';
@@ -17,8 +22,12 @@ interface ApplicationDto {
   name: string;
   slug: string;
   publicKey: string;
+  environment?: string;
   createdAt: string;
 }
+
+/** What `AppEnvironmentSchema` on the API accepts. */
+const ENVIRONMENTS = ['PRODUCTION', 'STAGING', 'DEVELOPMENT'] as const;
 
 export function registerAppsCommand(program: Command): void {
   const apps = program.command('apps').description('Manage Applications');
@@ -84,9 +93,13 @@ export function registerAppsCommand(program: Command): void {
     .requiredOption('--tenant <id>')
     .requiredOption('--name <name>')
     .requiredOption('--slug <slug>')
+    .option(
+      '--environment <env>',
+      'PRODUCTION | STAGING | DEVELOPMENT. Defaults to DEVELOPMENT, and decides the key prefix',
+    )
     .action(async function (
       this: Command,
-      opts: { tenant?: string; name?: string; slug?: string },
+      opts: { tenant?: string; name?: string; slug?: string; environment?: string },
     ) {
       const ctx = readGlobalOpts(this);
       if (!opts.tenant || !opts.name || !opts.slug) {
@@ -96,14 +109,29 @@ export function registerAppsCommand(program: Command): void {
           fix: 'Pass all three. See `rekey apps create --help`.',
         });
       }
+      if (opts.environment !== undefined && !ENVIRONMENTS.includes(opts.environment as never)) {
+        fail(ctx, {
+          code: 'CLI_APPS_ENVIRONMENT_INVALID',
+          message: `--environment must be ${ENVIRONMENTS.join(', ')}. Got "${opts.environment}".`,
+          fix: `Use one of ${ENVIRONMENTS.join(', ')}, or omit the flag to take the DEVELOPMENT default.`,
+        });
+      }
       const data = await adminRequest<ApplicationDto>({
         ctx,
         method: 'POST',
         path: '/api/v1/admin/applications',
-        body: { tenantId: opts.tenant, name: opts.name, slug: opts.slug },
+        body: {
+          tenantId: opts.tenant,
+          name: opts.name,
+          slug: opts.slug,
+          // Only when asked. The API owns the default, and sending one from
+          // here would freeze today's default into the CLI.
+          ...(opts.environment !== undefined && { environment: opts.environment }),
+        },
       });
       ok(ctx, data, (d) => {
-        process.stdout.write(`✓ ${d.id}  ${d.slug}  (${d.publicKey})\n`);
+        const env = d.environment !== undefined ? `  [${d.environment}]` : '';
+        process.stdout.write(`✓ ${d.id}  ${d.slug}${env}  (${d.publicKey})\n`);
       });
     });
 }

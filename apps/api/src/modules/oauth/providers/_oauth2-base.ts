@@ -4,9 +4,10 @@
  * and how to map the provider's user response to {providerAccountId, email}.
  *
  * For OIDC (`oidc.ts`) we discover endpoints from the issuer's
- * `/.well-known/openid-configuration` instead — see that file.
+ * `/.well-known/openid-configuration` instead, see that file.
  */
 
+import { readCappedBody } from '../../../lib/capped-body.js';
 import type {
   BuildAuthUrlInput,
   ExchangeInput,
@@ -21,6 +22,18 @@ import type {
  */
 const OUTBOUND_TIMEOUT_MS = 10_000;
 
+/**
+ * Largest body accepted from a provider endpoint.
+ *
+ * Everything read here is small JSON: a discovery document is a few KB (the
+ * big public issuers publish 2 to 6 KB), a token response is an access token
+ * plus an id_token, and userinfo is a handful of claims. 1 MB is two orders of
+ * magnitude above any of those, so no real issuer comes near it, while a
+ * hostile one (the OIDC issuer URL is set by a tenant's operator) can no longer
+ * stream an unbounded body inside the timeout into memory the whole API shares.
+ */
+export const MAX_PROVIDER_RESPONSE_BYTES = 1024 * 1024;
+
 export interface TimedJsonResponse {
   ok: boolean;
   status: number;
@@ -30,8 +43,12 @@ export interface TimedJsonResponse {
 
 /**
  * `fetch` + JSON parse under one AbortController timeout. The timer covers
- * the body read too — a server that returns headers promptly but trickles
+ * the body read too, a server that returns headers promptly but trickles
  * the body can't hold us past the deadline.
+ *
+ * A body over MAX_PROVIDER_RESPONSE_BYTES is refused, not truncated: the read
+ * stops and this throws, the same way an unreachable or timed-out provider
+ * already fails the exchange.
  */
 export async function fetchJsonWithTimeout(
   url: string,
@@ -42,11 +59,18 @@ export async function fetchJsonWithTimeout(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, { ...init, signal: controller.signal });
+    // One byte over the limit, so a body of exactly the limit is still whole.
+    const { text, bytesRead } = await readCappedBody(res, MAX_PROVIDER_RESPONSE_BYTES + 1);
+    if (bytesRead > MAX_PROVIDER_RESPONSE_BYTES) {
+      throw new Error(
+        `Provider response from ${new URL(url).host} exceeded ${MAX_PROVIDER_RESPONSE_BYTES} bytes`,
+      );
+    }
     let data: unknown = null;
     try {
-      data = await res.json();
+      data = JSON.parse(text);
     } catch {
-      // Non-JSON / empty body — callers treat `data: null` as missing fields.
+      // Non-JSON / empty body, callers treat `data: null` as missing fields.
     }
     return { ok: res.ok, status: res.status, data };
   } finally {
@@ -85,7 +109,7 @@ export function decodeJwtPayload(jwt: string): Record<string, unknown> {
  * (Google, Microsoft, Slack, OIDC, etc.).
  *
  * Falls back to `preferred_username` when `email` is missing but the
- * username happens to be an email-shaped string — Microsoft consumer
+ * username happens to be an email-shaped string, Microsoft consumer
  * accounts hit this path.
  *
  * **Default is unverified.** `email_verified` must be exactly `true` to

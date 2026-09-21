@@ -9,7 +9,7 @@
  * access token does not carry, so the two routes that can remove it are the
  * two an attacker holding that token will reach for. Both were open:
  *
- *   - `/disable` required nothing at all — a session was sufficient.
+ *   - `/disable` required nothing at all, a session was sufficient.
  *   - `/setup` was worse, because it looked harmless. It resets
  *     `enrolledAt: null` on the existing credential, so calling it silently
  *     un-enrolls the operator's real authenticator and binds a new secret the
@@ -18,7 +18,7 @@
  *
  * So both step up through `assertTenantStepUp` with `requireMfaWhenEnrolled`,
  * which accepts ONLY a current TOTP or unused backup code once enrollment is
- * complete — deliberately not the account password, which a session thief may
+ * complete, deliberately not the account password, which a session thief may
  * well also have. This mirrors `mfaService.disable` on the end-user side.
  *
  * Neither demands anything when enrollment is NOT complete: first-time setup
@@ -33,6 +33,7 @@ import { requireTenantSession } from '../../middleware/tenant-session.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
 import { assertTenantStepUp } from '../../lib/step-up.js';
 import { ok, okFlag, errs } from '../../lib/openapi.js';
+import { CREDENTIAL_BODY_LIMIT } from '../../lib/body-limits.js';
 
 /**
  * The 401/403 pair `requireTenantSession` (middleware/tenant-session.ts) produces, shared by
@@ -116,11 +117,12 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/setup',
     {
-      // Code-guessing surface once a factor is enrolled — same cap as confirm.
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
+      // Code-guessing surface once a factor is enrolled, same cap as confirm.
       config: { rateLimit: authRateLimit(10) },
       // `code`/`password` are optional (first-time setup sends neither), so a
       // caller may POST no body at all. Fastify validates a missing body
-      // against `{type:'object'}` and answers 400 "body must be object" — the
+      // against `{type:'object'}` and answers 400 "body must be object", the
       // same trap that broke the end-user mfa/disable route.
       preValidation: async (req) => {
         if (req.body === undefined || req.body === null) req.body = {};
@@ -131,8 +133,8 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
         summary: 'Mint a new TOTP secret + 10 backup codes',
         description:
           'Returns the otpauth URI for QR + backup codes (one-time-show). Not enrolled until /setup-confirm.\n\n' +
-          'When MFA is **already enrolled**, this is a credential change — re-enrolling ' +
-          'unbinds the current authenticator — so it requires `code`: a current 6-digit ' +
+          'When MFA is **already enrolled**, this is a credential change, re-enrolling ' +
+          'unbinds the current authenticator, so it requires `code`: a current 6-digit ' +
           'authenticator code or an unused backup code. The account password is not accepted ' +
           'while an authenticator is enrolled. First-time setup requires nothing.',
         body: proofJsonSchema,
@@ -141,7 +143,7 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
             {
               type: 'object',
               properties: {
-                otpauthUrl: { type: 'string', description: 'otpauth:// URI — render as a QR code.' },
+                otpauthUrl: { type: 'string', description: 'otpauth:// URI, render as a QR code.' },
                 backupCodes: {
                   type: 'array',
                   items: { type: 'string' },
@@ -188,7 +190,8 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/setup-confirm',
     {
-      // Code-guessing surface — tight per-route HTTP cap.
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
+      // Code-guessing surface, tight per-route HTTP cap.
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · MFA'],
@@ -226,6 +229,7 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/disable',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       preValidation: async (req) => {
         if (req.body === undefined || req.body === null) req.body = {};
@@ -235,7 +239,7 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
         security: [{ tenantSession: [] }],
         summary: 'Disable MFA for the operator',
         description:
-          'Requires `code` — a current 6-digit authenticator code or an unused backup code. ' +
+          'Requires `code`, a current 6-digit authenticator code or an unused backup code. ' +
           'The account password is deliberately not accepted: someone holding a stolen ' +
           'session and the password is precisely who the second factor exists to stop. ' +
           'Cancelling a half-finished enrollment (never confirmed) requires nothing.',

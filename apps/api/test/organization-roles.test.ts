@@ -24,7 +24,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 
@@ -130,7 +130,7 @@ describe('Custom organization roles', () => {
   function defineRole(
     b: Bootstrapped,
     payload: Record<string, unknown>,
-  ): ReturnType<FastifyInstance['inject']> {
+  ): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'POST',
       url: `/api/v1/tenant/applications/${b.applicationId}/organization-roles`,
@@ -146,7 +146,7 @@ describe('Custom organization roles', () => {
     method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     url: string,
     payload?: Record<string, unknown>,
-  ): ReturnType<FastifyInstance['inject']> {
+  ): Promise<LightMyRequestResponse> {
     return app.inject({
       method,
       url,
@@ -780,7 +780,7 @@ describe('Custom organization roles', () => {
     await prisma.organizationMembership.create({
       data: { organizationId: orgId, endUserId: lead.id, role: 'studio-lead' },
     });
-    const patch = (disabled: boolean): ReturnType<FastifyInstance['inject']> =>
+    const patch = (disabled: boolean): Promise<LightMyRequestResponse> =>
       app.inject({
         method: 'PATCH',
         url: `/api/v1/tenant/applications/${b.applicationId}/organization-roles/studio-lead`,

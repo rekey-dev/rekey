@@ -8,7 +8,7 @@
  * twice, and a balance can never go negative.
  *
  * Prepaid rather than an invoice at period end because postpaid needs a stored
- * mandate, which is gated per provider — see docs/billing-architecture.md.
+ * mandate, which is gated per provider, see docs/billing-architecture.md.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -238,7 +238,7 @@ describe('Usage — prepaid credit billing', () => {
     const before = await prisma.usageRecord.findFirstOrThrow({ where: { endUserId: eu } });
     expect(before.creditsCharged).toBe(8);
 
-    // Re-price by writing the entitlement again — the same route an operator's
+    // Re-price by writing the entitlement again, the same route an operator's
     // panel edit goes through.
     const plan = await prisma.plan.findFirstOrThrow({
       where: { applicationId: appId, entitlements: { some: { key: 'calls' } } },
@@ -268,7 +268,7 @@ describe('Usage — prepaid credit billing', () => {
 
   it('meters without charging when the rate is zero', async () => {
     // Zero is admitted by the route, the validator and the panel. It must mean
-    // "free", not "every record 400s" — `consume` rejects a non-positive
+    // "free", not "every record 400s", `consume` rejects a non-positive
     // amount, so the debit has to be skipped rather than attempted.
     await makeMeter('calls', null);
     const eu = await makeEndUser();
@@ -331,8 +331,8 @@ describe('Usage — prepaid credit billing', () => {
   });
 
   it('does not let one subject\'s idempotency key return another\'s record', async () => {
-    // The key was scoped (meter, key) with no subject, so B reusing A's key —
-    // by accident or otherwise — got back A's record: B's usage unrecorded and
+    // The key was scoped (meter, key) with no subject, so B reusing A's key,
+    // by accident or otherwise, got back A's record: B's usage unrecorded and
     // uncharged, one record standing for two subjects' consumption.
     await makeMeter('calls', null);
     const a = await makeEndUser();

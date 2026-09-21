@@ -1,16 +1,16 @@
 /**
- * Regressions for the second batch of #298 findings — the error contract, the
+ * Regressions for the second batch of #298 findings, the error contract, the
  * audit trail, and the two surfaces that were withholding what an operator
  * needs.
  *
  *  1. A bad query param answered `500 INTERNAL_ERROR`. The `/admin/metrics/*`
  *     routes declare no Fastify `querystring` schema, so the handler's Zod
- *     parse is the only validator — and `rekeyErrorHandler` had no ZodError
+ *     parse is the only validator, and `rekeyErrorHandler` had no ZodError
  *     branch, so a raw ZodError fell through to the generic 500 with "share
  *     this request id with support". Two independent reviewers hit the same
  *     class on different routes.
  *  2. `PATCH .../billing-config` answered 200 for a misspelled key and did
- *     nothing — every key is optional, so a non-strict object had nothing left
+ *     nothing, every key is optional, so a non-strict object had nothing left
  *     to fail on.
  *  3. Failed sign-ins were never recorded anywhere, so "why can't this user
  *     sign in?" was not answerable from the panel.
@@ -296,7 +296,7 @@ describe('Error contract, audit trail, and withheld operator data', () => {
 
     describe('delivery inspection', () => {
       beforeEach(() => {
-        // No delivery attempts — the rows are what this asserts on.
+        // No delivery attempts, the rows are what this asserts on.
         setDeliveryScheduler(() => undefined);
       });
       afterEach(() => {
@@ -381,7 +381,7 @@ describe('Error contract, audit trail, and withheld operator data', () => {
         });
         const { items: rows, page } = (res.json() as { data: DeliveryPage }).data;
         expect(rows).toHaveLength(1);
-        // The count respects ?status= too — the unfiltered 2 must not leak into it.
+        // The count respects ?status= too, the unfiltered 2 must not leak into it.
         expect(page.total).toBe(1);
         expect(rows[0]!.status).toBe('FAILED');
       });

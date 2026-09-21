@@ -4,7 +4,7 @@
  * The MCP `tools/list` response wants each tool's `inputSchema` as a JSON
  * Schema object. We only use a small Zod subset (objects of strings /
  * booleans / optionals with descriptions), so reaching for `zod-to-json-schema`
- * as a full dependency is overkill — this 30-line implementation covers it
+ * as a full dependency is overkill, this 30-line implementation covers it
  * and stays auditable. If the tool surface grows, swap in the npm package.
  */
 
@@ -20,7 +20,7 @@ interface JsonSchema {
 }
 
 export function zodToJsonSchema(schema: z.ZodTypeAny): JsonSchema {
-  // Object — the common top-level case for tool args.
+  // Object, the common top-level case for tool args.
   if (schema instanceof z.ZodObject) {
     const shape = schema.shape as Record<string, z.ZodTypeAny>;
     const properties: Record<string, JsonSchema> = {};
@@ -44,7 +44,7 @@ export function zodToJsonSchema(schema: z.ZodTypeAny): JsonSchema {
   if (schema instanceof z.ZodArray) {
     return { type: 'array', items: zodToJsonSchema(schema.element) };
   }
-  // Fallback — let MCP receive an open object.
+  // Fallback, let MCP receive an open object.
   return { type: 'object' };
 }
 

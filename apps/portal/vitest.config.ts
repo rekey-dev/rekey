@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
-// Copied from the marketing app's vitest config — the whole setup for testing a
+// Copied from the marketing app's vitest config, the whole setup for testing a
 // Next app's server-side glue is this file plus test/stubs/server-only.ts.
 //
 // Node environment, not jsdom: everything under test here is server-side.

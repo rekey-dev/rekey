@@ -1,5 +1,5 @@
 /**
- * Route-level loading skeleton — shown while the dashboard's server render
+ * Route-level loading skeleton, shown while the dashboard's server render
  * awaits the subscription / plans / providers fetches. Mirrors the real layout
  * (two cards) so the page doesn't jump when content arrives.
  */

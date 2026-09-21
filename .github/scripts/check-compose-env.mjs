@@ -6,21 +6,21 @@
  * ## Why this exists
  *
  * A compose `environment:` block is an ALLOWLIST. A variable that is not named
- * there never reaches the process, so setting it in Dokploy — or in `.env`, or
- * in the hosting dashboard — silently does nothing. The variable validates, the
+ * there never reaches the process, so setting it in Dokploy, or in `.env`, or
+ * in the hosting dashboard, silently does nothing. The variable validates, the
  * container boots, the feature is simply off.
  *
  * That has now happened five separate times in this repo, and each occurrence
  * left behind a comment saying so and no guard:
  *
- *   - ADMIN_IP_ALLOWLIST   — the super-admin network gate was inert on every
- *                            deployment (comment in docker-compose.api.yml).
- *   - DEFAULT_APP_URL      — transactional emails silently omitted their button.
- *   - DEFAULT_TENANT_LIMITS— new workspaces were unlimited on a deploy that
+ *   - ADMIN_IP_ALLOWLIST  , the super-admin network gate was inert on every
+ *                            deployment (comment in a compose file).
+ *   - DEFAULT_APP_URL     , transactional emails silently omitted their button.
+ *   - DEFAULT_TENANT_LIMITS: new workspaces were unlimited on a deploy that
  *                            believed it had set a ceiling.
- *   - PANEL_URL            — the hosted API relied on a default that was later
+ *   - PANEL_URL           , the hosted API relied on a default that was later
  *                            removed, and nothing set the variable.
- *   - OPERATOR_SIGNUP_MODE — a sibling compose file carries a comment warning
+ *   - OPERATOR_SIGNUP_MODE, a sibling compose file carries a comment warning
  *                            about this exact mistake having already no-opped
  *                            this exact variable once, and it was STILL missing
  *                            from docker-compose.prod.yml, the file DEPLOY.md
@@ -28,7 +28,7 @@
  *                            no way to close operator registration on a
  *                            documented self-host.
  *
- * Comments do not fail builds. This does — the same shape as the
+ * Comments do not fail builds. This does, the same shape as the
  * `prisma migrate diff --exit-code` step next to it in ci.yml: a mechanical
  * comparison of two artifacts that are supposed to agree, with a non-zero exit
  * and an actionable message when they don't.
@@ -37,13 +37,21 @@
  *
  *   1. Every key declared in the `server` block of apps/api/src/config/env.ts
  *      appears in the `api` service's `environment:` block of each production
- *      compose file — or is listed in EXEMPT below with a reason.
- *   2. docker-compose.prod.yml — the self-host stack, and the one that ships to
- *      the public mirror — contains no `rekey.dev` literal. It carried five of
+ *      compose file, or is listed in EXEMPT below with a reason.
+ *   2. docker-compose.prod.yml, the self-host stack, and the one that ships to
+ *      the public mirror, contains no `rekey.dev` literal. It carried five of
  *      them (API_URL, PUBLIC_WEBHOOK_BASE_URL, PUBLIC_PORTAL_URL,
  *      CORS_ALLOWED_ORIGINS, RESEND_DEFAULT_FROM) until 2.0.0-rc.3, which meant
  *      a self-hoster's Stripe account was configured to POST payment webhooks at
  *      Rekey's server.
+ *   3. Every key from the same env.ts block is mentioned in `.env.example`,
+ *      either set (`KEY=value`) or as a commented line (`# KEY=`), or is listed
+ *      in ENV_EXAMPLE_EXEMPT with a reason. The file is where a self-hoster
+ *      learns a setting exists; a key that is missing there cannot be found
+ *      without reading source. By 2.2.0 it had fallen six keys behind
+ *      (ORG_ROLE_CACHE_TTL_MS, PANEL_OAUTH_REKEY_*, OPERATOR_OIDC_*). It reuses
+ *      envKeys() below, so the compose check and this one cannot disagree about
+ *      what the API reads.
  *
  * docker-compose.yml is deliberately NOT checked. It is the development stack:
  * the apps are normally run from a shell against it with the root `.env`, and
@@ -60,7 +68,7 @@ const ENV_TS = 'apps/api/src/config/env.ts';
 
 /**
  * Keys a compose file is allowed to omit, with the reason. Adding an entry is a
- * deliberate act that shows up in review — which is the whole point, since the
+ * deliberate act that shows up in review, which is the whole point, since the
  * alternative (say nothing, omit the key) is the bug this file exists to catch.
  */
 const EXEMPT = {
@@ -104,7 +112,7 @@ function envKeys() {
 /**
  * The keys named in one service's `environment:` block.
  *
- * Same reasoning as above — no YAML dependency. Indentation is the structure:
+ * Same reasoning as above, no YAML dependency. Indentation is the structure:
  * the service is at two spaces, `environment:` at four, its keys at six.
  */
 function composeEnvKeys(file, service) {
@@ -148,7 +156,7 @@ for (const { file, service } of TARGETS) {
   }
 }
 
-// Guard 2 — no Rekey-owned hostname in the self-host stack.
+// Guard 2, no Rekey-owned hostname in the self-host stack.
 const selfHost = readFileSync('docker-compose.prod.yml', 'utf8');
 const leaked = selfHost
   .split('\n')
@@ -161,11 +169,44 @@ if (leaked.length > 0) {
   );
 }
 
+// Guard 3, every key the API reads is documented in .env.example.
+//
+// Documented means the key starts a line, set or commented out: `KEY=value`,
+// `# KEY=`, or `#   KEY=example`. A key named only mid-sentence in prose does
+// not count, since nobody copies a setting out of the middle of a paragraph.
+const ENV_EXAMPLE = '.env.example';
+
+/**
+ * Keys .env.example is allowed to leave out, with the reason. Empty today:
+ * every server key the API reads is one a self-hoster may set. A test-only or
+ * internal key belongs here rather than in the file.
+ */
+const ENV_EXAMPLE_EXEMPT = {};
+
+{
+  const documented = new Set(
+    [...readFileSync(ENV_EXAMPLE, 'utf8').matchAll(/^#?[ \t]*([A-Z][A-Z0-9_]*)=/gm)].map(
+      (m) => m[1],
+    ),
+  );
+  const undocumented = declared.filter((k) => !documented.has(k) && !(k in ENV_EXAMPLE_EXEMPT));
+  if (undocumented.length > 0) {
+    problems.push(
+      `${ENV_EXAMPLE} does not mention ${undocumented.length} key(s) the API reads:\n` +
+        undocumented.map((k) => `    ${k}`).join('\n') +
+        '\n\n  Add each one in the section it belongs to, set (`KEY=value`) or commented out\n' +
+        '  (`# KEY=`), with a comment line saying what it does. A key that truly should\n' +
+        '  not be documented there goes in ENV_EXAMPLE_EXEMPT in\n' +
+        '  .github/scripts/check-compose-env.mjs, with the reason.',
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Build args have the same allowlist problem, one layer down.
 //
 // A `NEXT_PUBLIC_*` passed under `build.args:` in a compose file reaches Docker,
-// and Docker DISCARDS it unless the Dockerfile declares a matching `ARG` — no
+// and Docker DISCARDS it unless the Dockerfile declares a matching `ARG`, no
 // error, just a build where Next inlines nothing and the app silently falls back
 // to whatever its unset branch does. That is how the panel's "Continue with …"
 // button shipped reading "your account" with the label set correctly in the
@@ -181,7 +222,7 @@ if (leaked.length > 0) {
   );
   const missing = [];
   // Discovered, not listed. A hardcoded list would have to name every hosted
-  // unit's compose file, including ones the public strip removes — and this
+  // unit's compose file, including ones the public strip removes, and this
   // script is the one thing under .github/scripts that survives that strip, so
   // naming them would fail the release tripwire. Discovery also means a compose
   // file added later is covered without anyone remembering to add it here.
@@ -206,10 +247,10 @@ if (leaked.length > 0) {
 }
 
 if (problems.length > 0) {
-  console.error('Compose environment check FAILED.\n');
+  console.error('Environment check FAILED.\n');
   for (const p of problems) console.error(`  ${p}\n`);
   console.error(
-    'A compose `environment:` block is an allowlist: a variable missing from it\n' +
+    'For a compose file: an `environment:` block is an allowlist, a variable missing from it\n' +
       'never reaches the container, so setting it in the hosting dashboard does\n' +
       'nothing. Add each key as `KEY: ${KEY:-}` (empty is the same as unset — the\n' +
       "API's env schema sets `emptyStringAsUndefined`), or add it to EXEMPT in\n" +
@@ -218,6 +259,6 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log(
-  `Compose environment check passed — ${declared.length} keys from ${ENV_TS} accounted for in ${TARGETS.length} compose file(s).`,
+process.stdout.write(
+  `Environment check passed: ${declared.length} keys from ${ENV_TS} accounted for in ${TARGETS.length} compose file(s) and ${ENV_EXAMPLE}.\n`,
 );

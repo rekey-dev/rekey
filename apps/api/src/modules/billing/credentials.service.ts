@@ -7,29 +7,30 @@
  * encrypted via lib/secrets.ts.
  *
  * **Reads decrypt; never expose ciphertext or plaintext on any HTTP
- * response.** The route layer returns only `CredentialsStatus` shapes —
- * `{provider, configured, enabled, mode, countries, priority, webhookConfigured}`
- * — see `list` below.
+ * response.** The route layer returns only `CredentialsStatus` shapes,
+ * `{provider, configured, enabled, mode, countries, priority, webhookConfigured}`,
+ * see `list` below.
  *
  * Credential shapes are declared by each provider module's
  * `credentialSchema` (providers/modules/<name>/), and this service is
  * generic over them (P3): validation, mode detection, and the
  * webhook-configured check all derive from the registry. The stored JSON
- * keys are pinned by the registry-integrity test — zero data migration:
+ * keys are pinned by the registry-integrity test, zero data migration:
  *   stripe   → { apiKey: 'sk_live_…', webhookSecret: 'whsec_…' }
  *   paypal   → { clientId, clientSecret, webhookId }
  *   razorpay → { keyId, keySecret, webhookSecret }
+ *   external → { webhookSecret }
  *
  * Backwards-compat: rows backfilled from the legacy
  * `applications.billing_credentials_ciphertext` column store the *wrapped*
  * `{provider, data}` shape (because that's what the old codepath encrypted).
- * `loadDecrypted` accepts both — wrapped and unwrapped — and unwraps
+ * `loadDecrypted` accepts both, wrapped and unwrapped, and unwraps
  * transparently. New writes encrypt only the inner `data`.
  *
  * The unwrap is KEPT deliberately (reviewed for removal in 2.0.0): the blobs
  * are ENCRYPTION_KEY-encrypted so no SQL migration can rewrite them, and
  * without it a wrapped row yields `{provider, data}` where `{apiKey, …}` is
- * expected — the provider SDK would then authenticate with `undefined` and
+ * expected, the provider SDK would then authenticate with `undefined` and
  * the operator's money path would fail at the processor, not here.
  */
 
@@ -39,14 +40,14 @@ import { RekeyError } from '../../lib/error.js';
 import { getModule, credentialRulesSchema } from './providers/registry.js';
 import type { ProviderModule } from './providers/module-types.js';
 
-export type BillingProviderName = 'stripe' | 'paypal' | 'razorpay';
+export type BillingProviderName = 'stripe' | 'paypal' | 'razorpay' | 'external';
 
 /**
- * Typed handles on the three built-in credential shapes. The *authoritative*
+ * Typed handles on the built-in credential shapes. The *authoritative*
  * declaration is each module's `credentialSchema` (that is what validates and
  * what the registry-integrity test pins); these exist so the `Real*Provider`
  * constructors take something better than `Record<string, string>`. Not
- * deprecated — the deprecated `upsertStripe`/`upsertPaypal`/`upsertRazorpay`
+ * deprecated, the deprecated `upsertStripe`/`upsertPaypal`/`upsertRazorpay`
  * wrappers that once paired with them were removed in 2.0.0.
  */
 export type StripeCredentials = {
@@ -66,10 +67,16 @@ export type RazorpayCredentials = {
   webhookSecret: string;
 };
 
+/** The external billing system holds one secret: what it signs events with. */
+export type ExternalCredentials = {
+  webhookSecret: string;
+};
+
 export type CredentialsByProvider = {
   stripe: StripeCredentials;
   paypal: PaypalCredentials;
   razorpay: RazorpayCredentials;
+  external: ExternalCredentials;
 };
 
 export type BillingMode = 'test' | 'live';
@@ -79,7 +86,7 @@ export type BillingMode = 'test' | 'live';
  *
  * It is NOT constrained by the Application's environment. An operator may
  * store live credentials against a DEVELOPMENT Application if that is what
- * they want to do — deliberately testing against a live processor is a real
+ * they want to do, deliberately testing against a live processor is a real
  * workflow, and it is their processor account and their customers.
  *
  * We tried the opposite (a PRODUCTION-only-live / non-production-only-test
@@ -89,7 +96,7 @@ export type BillingMode = 'test' | 'live';
  * apply to one provider is worse than no property, because operators
  * generalise from the two where it does.
  *
- * What we DO enforce is that the stored mode is not a lie — see `resolveMode`.
+ * What we DO enforce is that the stored mode is not a lie, see `resolveMode`.
  * Where the key states its own mode (Stripe `sk_live_`/`sk_test_`, Razorpay
  * `rzp_live_`/`rzp_test_`) that is what gets stored, because the provider SDK
  * reads the key and ignores this column: a live key labelled `test` would make
@@ -115,7 +122,7 @@ export interface CredentialsStatus {
 /**
  * Does this provider's decrypted creds carry the webhook secret/id it needs?
  * Registry-driven: reads the module's single `webhookRole` field (Stripe /
- * Razorpay declare `webhookSecret`, PayPal `webhookId` — same checks the
+ * Razorpay declare `webhookSecret`, PayPal `webhookId`, same checks the
  * hand-written version made). A provider without a registered module or a
  * `webhookRole` field can never verify inbound webhooks → false.
  */
@@ -129,7 +136,7 @@ export function hasWebhookConfigured(provider: BillingProviderName, data: unknow
 /**
  * Read the mode out of the key material, when the provider's credentials say
  * so. `null` means "this provider's credentials carry no marker, or the shape
- * is unrecognised" — see `ProviderModule.detectMode`.
+ * is unrecognised", see `ProviderModule.detectMode`.
  */
 function detectMode(provider: BillingProviderName, data: unknown): BillingMode | null {
   return getModule(provider)?.detectMode?.((data ?? {}) as Record<string, string>) ?? null;
@@ -144,7 +151,7 @@ function detectMode(provider: BillingProviderName, data: unknown): BillingMode |
  * the provider SDK authenticates with the *key*, never with our label, so a
  * `mode: 'test'` sticker on an `sk_live_…` key would leave the panel's badge,
  * the revenue stats and dunning all reporting a real Stripe account as
- * sandbox. Refusing is also strictly more useful than silently correcting — an
+ * sandbox. Refusing is also strictly more useful than silently correcting, an
  * operator who typed the wrong one wants to know.
  *
  * Note the scope of that: `mode` records what the key IS, it does not decide
@@ -153,7 +160,7 @@ function detectMode(provider: BillingProviderName, data: unknown): BillingMode |
  *
  * An explicit label only decides when detection is structurally impossible
  * (PayPal: a sandbox client id is byte-indistinguishable from a live one).
- * With neither, we store `test` — least privilege, and the reading that
+ * With neither, we store `test`, least privilege, and the reading that
  * understates rather than overstates what a figure means.
  */
 function resolveMode(
@@ -174,7 +181,7 @@ function resolveMode(
   return detected;
 }
 
-/** Resolve a registered module or 400 — providers only exist via the registry. */
+/** Resolve a registered module or 400, providers only exist via the registry. */
 function requireModule(provider: string): ProviderModule {
   const module = getModule(provider);
   if (!module) {
@@ -198,7 +205,7 @@ function unwrap<P extends BillingProviderName>(
   } catch (e) {
     // Bad ciphertext means either (a) the encryption key rotated and this
     // row predates the new one, or (b) the row is corrupted. Either way
-    // we cannot safely fall through to a billing call — refuse with a
+    // we cannot safely fall through to a billing call, refuse with a
     // 500-class error that points operators at the re-enter path.
     throw new RekeyError({
       statusCode: 500,
@@ -215,7 +222,7 @@ function unwrap<P extends BillingProviderName>(
       fix: 'Re-enter credentials via PUT /tenant/applications/:id/billing-credentials/:provider.',
     });
   }
-  // Legacy wrapped shape: { provider, data } — unwrap.
+  // Legacy wrapped shape: { provider, data }, unwrap.
   if ('provider' in decrypted && 'data' in decrypted) {
     const w = decrypted as { provider: string; data: unknown };
     if (w.provider !== expected) {
@@ -239,14 +246,14 @@ export const billingCredentialsService = {
       orderBy: { priority: 'asc' },
     });
     return rows.map((r) => {
-      let webhookConfigured = false;
+      let webhookConfigured: boolean;
       try {
         webhookConfigured = hasWebhookConfigured(
           r.provider as BillingProviderName,
           unwrap(r.ciphertext, r.provider as BillingProviderName),
         );
       } catch {
-        // Undecryptable row (rotated key / corruption) — surface as not
+        // Undecryptable row (rotated key / corruption), surface as not
         // configured rather than failing the whole list.
         webhookConfigured = false;
       }
@@ -264,7 +271,7 @@ export const billingCredentialsService = {
 
   /**
    * Is this provider configured at all for the Application? A bare existence
-   * check — no decryption, no enabled/mode filtering — for callers that only
+   * check, no decryption, no enabled/mode filtering, for callers that only
    * need to know whether reaching for a provider instance would throw.
    */
   async isConfigured(applicationId: string, provider: BillingProviderName): Promise<boolean> {
@@ -311,7 +318,7 @@ export const billingCredentialsService = {
 
   /**
    * Return all enabled providers, sorted for "best for this country first".
-   * Always returns *every* enabled provider — the country argument only
+   * Always returns *every* enabled provider, the country argument only
    * affects ordering, not filtering. The /providers listing surface and the
    * pickProvider geo-router both read from here:
    *
@@ -321,9 +328,9 @@ export const billingCredentialsService = {
    *     providers don't auto-pick for non-matching countries).
    *
    * Sort order:
-   *   1. Country-specific match (countries[] contains country) — by priority.
-   *   2. Global / fallback (countries[] empty) — by priority.
-   *   3. Other country-restricted that don't match — by priority.
+   *   1. Country-specific match (countries[] contains country), by priority.
+   *   2. Global / fallback (countries[] empty), by priority.
+   *   3. Other country-restricted that don't match, by priority.
    */
   async listEnabled(
     applicationId: string,
@@ -353,12 +360,30 @@ export const billingCredentialsService = {
   },
 
   /**
+   * `listEnabled` restricted to providers a buyer can be sent to.
+   *
+   * An inbound-only module (`capabilities.checkout: false`) is configured and
+   * enabled like any other, and must be for its webhooks to verify, but it
+   * cannot host a checkout. The geo router and the public provider list read
+   * this; the credential surfaces and the bound-provider checks read
+   * `listEnabled`, because "is this provider configured" is a different
+   * question from "can a buyer pay here".
+   */
+  async listCheckoutEnabled(
+    applicationId: string,
+    country?: string,
+  ): Promise<{ provider: BillingProviderName; priority: number; countries: string[]; mode: BillingMode }[]> {
+    const rows = await this.listEnabled(applicationId, country);
+    return rows.filter((r) => getModule(r.provider)?.capabilities.checkout !== false);
+  },
+
+  /**
    * The ONE generic upsert (P3): validates `data` against the module's
-   * `credentialSchema` rules (pattern prefixes, required fields — same
+   * `credentialSchema` rules (pattern prefixes, required fields, same
    * messages and precedence the hand-written per-provider validators had,
    * derived via `credentialRulesSchema`), runs the module's optional
    * `validateCredentials` escape hatch, then stores. Blank optional webhook
-   * fields are allowed — "Auto-configure webhook" (registerWebhook) fills
+   * fields are allowed, "Auto-configure webhook" (registerWebhook) fills
    * them in later via the provider API.
    */
   async upsertCredentials(
@@ -516,7 +541,7 @@ export const billingCredentialsService = {
 
   /**
    * Relabel a stored credential's mode. Same rule as the upsert: if the stored
-   * key material states its mode, this cannot contradict it — otherwise
+   * key material states its mode, this cannot contradict it, otherwise
    * `setMode` would be a second door to the exact hole `resolveMode` closes.
    */
   async setMode(
@@ -547,7 +572,7 @@ export const billingCredentialsService = {
    * a Prisma `update`/`delete`, which throws `P2025` on a missing row and
    * reaches the error handler as a 500. An external audit hit it on all three
    * providers. A caller asking to change or remove credentials that were never
-   * stored has made an ordinary mistake, not caused a server fault — and the
+   * stored has made an ordinary mistake, not caused a server fault, and the
    * in-module convention for it already existed one method up.
    */
   async assertConfigured(applicationId: string, provider: BillingProviderName): Promise<void> {

@@ -22,12 +22,12 @@ import { isIP } from 'node:net';
  * Reject:
  *   - non-HTTP(S) schemes (file://, gopher://, …)
  *   - hostnames that resolve to private/loopback/link-local/CGNAT IPs
- *   - bare IPs in private ranges (we don't deep-resolve here — DNS rebind
+ *   - bare IPs in private ranges (we don't deep-resolve here, DNS rebind
  *     is mitigated by the fact that we connect-then-validate via the
  *     receiver's response; but a stricter outbound proxy is a future
  *     hardening)
  *
- * We intentionally allow public-DNS hostnames without resolving — at
+ * We intentionally allow public-DNS hostnames without resolving, at
  * delivery time `fetch` follows DNS, and if a malicious domain returns
  * a private IP the worst case is a one-shot SSRF that hits a localhost
  * service. The mitigation for that lives in the deployment (egress proxy
@@ -130,7 +130,7 @@ export function signWebhook(input: SignaturePayload): {
  * `toleranceSeconds` of now (default 5 minutes). Constant-time on the
  * hash comparison.
  *
- * Not used by Rekey's own infrastructure — provided for tests and as
+ * Not used by Rekey's own infrastructure, provided for tests and as
  * the canonical implementation customers can crib from.
  */
 export function verifyWebhookSignature(args: {

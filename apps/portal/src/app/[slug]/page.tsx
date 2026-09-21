@@ -2,6 +2,7 @@ import { isEntitlingStatus } from '@rekey.dev/shared-types';
 import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { cancelCopy } from '@/lib/cancel-copy';
+import { managedElsewhere } from '@/lib/provider-capabilities';
 import { getPortalConfig, supportLink } from '@/lib/config';
 import { formatMoney, formatPlanPrice } from '@/lib/format';
 import { getPortalUser, portalClientFor } from '@/lib/session';
@@ -16,7 +17,7 @@ import { ProviderRadios } from '@/components/provider-radios';
  * Checkout / cancel failures, translated for the merchant's customer.
  *
  * Audience rule from not-found.tsx applies: no error codes, and none of the
- * API's operator `fix` text — "configure a provider in Panel → Billing" is an
+ * API's operator `fix` text, "configure a provider in Panel → Billing" is an
  * instruction the person reading this cannot act on. Each string says what it
  * means for them instead.
  *
@@ -28,6 +29,12 @@ import { ProviderRadios } from '@/components/provider-radios';
 const CHECKOUT_ERR: Record<string, string> = {
   BILLING_CREDENTIALS_NOT_CONFIGURED:
     'Payments aren’t set up here yet, so checkout isn’t available.',
+  // The payment option picked is not on offer (any more). Refused rather than
+  // quietly swapped for another processor the buyer did not choose.
+  BILLING_PROVIDER_NOT_AVAILABLE:
+    'That payment option isn’t available here any more. Reload the page and choose another.',
+  BILLING_PROVIDER_INBOUND_ONLY:
+    'That payment option isn’t available here any more. Reload the page and choose another.',
   PLAN_NOT_FOUND: 'That plan isn’t available any more.',
   PLAN_INACTIVE: 'That plan isn’t available any more.',
   BILLING_ORGANIZATION_REQUIRED:
@@ -45,6 +52,8 @@ const CHECKOUT_ERR: Record<string, string> = {
   BILLING_SUBSCRIPTION_SUBJECT_CONFLICT:
     'You already have this plan on another account of yours. It has to be canceled and finish before you can start it here.',
   SUBSCRIPTION_NOT_FOUND: 'We couldn’t find that subscription — it may already be canceled.',
+  SUBSCRIPTION_MANAGED_EXTERNALLY:
+    'This subscription is managed through your billing account, not here. Cancel it there and this page updates shortly after.',
 };
 
 export default async function DashboardPage({
@@ -86,11 +95,11 @@ export default async function DashboardPage({
     client!.getSubscription(session.accessToken, orgId ? { organizationId: orgId } : undefined),
     config!.billingEnabled ? client!.getPlans().then((r) => r.items) : Promise.resolve([]),
     // Powers the "Pay with…" picker. Public (publishable key, no token). A hiccup
-    // here must never break the dashboard — fall back to the auto-routed flow.
+    // here must never break the dashboard, fall back to the auto-routed flow.
     config!.billingEnabled
       ? client!.listBillingProviders().then((r) => r.providers).catch(() => [])
       : Promise.resolve([]),
-    // Billing history. Non-critical — never let it break the dashboard.
+    // Billing history. Non-critical, never let it break the dashboard.
     config!.billingEnabled
       ? client!
           .listPayments(session.accessToken, 12)
@@ -100,6 +109,10 @@ export default async function DashboardPage({
   ]);
   const currentPlan = subscription ? plans.find((p) => p.id === subscription.planId) : undefined;
   const canceling = Boolean(subscription?.cancelAt);
+  // Sold and billed by the operator's own system (an inbound-only provider):
+  // Rekey cannot stop the money there, so the cancel button would only 409.
+  // Asked of the provider's capabilities, not its name.
+  const managedExternally = managedElsewhere(subscription);
   /** Which of the two cancellations this customer is actually about to get. */
   const cancelText = cancelCopy(subscription ?? { status: 'NONE', currentPeriodEnd: null });
   /**
@@ -113,7 +126,7 @@ export default async function DashboardPage({
   // team the user can manage. Members of org-billed apps get a read-only view.
   const canCheckout = !isOrgBilled || billingOrg !== null;
   // Only offer a choice when there's more than one provider; with one (or none)
-  // the server-side geo router picks automatically — keep the current behavior.
+  // the server-side geo router picks automatically, keep the current behavior.
   const showProviderPicker = providers.length > 1;
 
   const error = typeof sp.error === 'string' ? sp.error : undefined;
@@ -172,7 +185,12 @@ export default async function DashboardPage({
                 {canceling ? 'Ends' : 'Renews'} on {new Date(endsOn).toLocaleDateString()}
               </p>
             )}
-            {isEntitlingStatus(subscription.status) && !canceling && canCheckout && (
+            {managedExternally && isEntitlingStatus(subscription.status) && (
+              <p className="text-xs text-[var(--color-muted-fg)]">
+                Managed through your billing account. Changes and cancellations are made there.
+              </p>
+            )}
+            {isEntitlingStatus(subscription.status) && !canceling && canCheckout && !managedExternally && (
               <form action={cancelSubscriptionAction.bind(null, slug, orgId)} className="pt-2">
                 <ConfirmSubmit
                   variant="neutral"

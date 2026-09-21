@@ -1,5 +1,5 @@
 /**
- * Money rendering for the hosted portal — ONE formatter, used everywhere the
+ * Money rendering for the hosted portal, ONE formatter, used everywhere the
  * portal shows an amount to a merchant's paying customer.
  *
  * ## Why this file exists at all (the duplication is deliberate)
@@ -19,15 +19,15 @@
  * ## Where this INTENTIONALLY differs from the SDK today
  *
  * Zero-decimal currencies. The SDK divides every amount by 100 unconditionally,
- * so a ¥1000 plan renders as `¥10` — a 100× understatement shown to a paying
+ * so a ¥1000 plan renders as `¥10`, a 100× understatement shown to a paying
  * customer. JPY, KRW, VND and friends have no minor unit: the stored integer IS
  * the amount. This module consults {@link minorUnitDivisor} instead. The SDK
  * needs the identical change; until it lands, treat THIS file as the correct
  * one and the divergence as known rather than as drift.
  *
- * Everything else — the `Free` short-circuit, dropping `.00` on whole amounts,
+ * Everything else, the `Free` short-circuit, dropping `.00` on whole amounts,
  * the symbol table, the `/month` and `· N credits` suffixes, and the fact that a
- * non-SUBSCRIPTION plan gets NO cadence suffix — matches `formatPrice` exactly.
+ * non-SUBSCRIPTION plan gets NO cadence suffix, matches `formatPrice` exactly.
  */
 
 /**
@@ -52,7 +52,7 @@ export function minorUnitDivisor(currency: string): number {
 
 /**
  * Currency symbol. Same table as the SDK's private `currencySymbol`, including
- * the `"USD "`-style fallback for codes it doesn't know — matching the SDK
+ * the `"USD "`-style fallback for codes it doesn't know, matching the SDK
  * matters more than being clever, because both strings are read side by side.
  */
 function currencySymbol(code: string): string {
@@ -70,7 +70,7 @@ function currencySymbol(code: string): string {
  * Render an integer amount in the smallest currency unit.
  *
  * Decimals are dropped when the amount is a whole major unit (`$9`, not
- * `$9.00`) and shown otherwise (`$9.99`) — the SDK's rule. Zero-decimal
+ * `$9.00`) and shown otherwise (`$9.99`), the SDK's rule. Zero-decimal
  * currencies never show decimals because they have none.
  */
 export function formatMoney(amount: number, currency: string): string {
@@ -90,7 +90,7 @@ export interface PricePlan {
   currency: string;
   /** SUBSCRIPTION / LICENSE / USAGE / CREDIT. */
   kind?: string;
-  /** Billing interval — only meaningful for SUBSCRIPTION plans. */
+  /** Billing interval, only meaningful for SUBSCRIPTION plans. */
   interval?: string | null;
   /** Credits granted, for CREDIT-kind plans. */
   creditsAmount?: number | null;

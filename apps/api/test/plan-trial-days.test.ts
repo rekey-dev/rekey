@@ -27,7 +27,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { resolveCheckoutTrial } from '../src/modules/billing/checkout-trial.js';
@@ -76,7 +76,7 @@ describe('plan trialDays reaches the database and the checkout', () => {
     token: string,
     appId: string,
     payload: Record<string, unknown>,
-  ): ReturnType<FastifyInstance['inject']> {
+  ): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'POST',
       url: `/api/v1/tenant/applications/${appId}/plans`,
@@ -85,7 +85,9 @@ describe('plan trialDays reaches the database and the checkout', () => {
     });
   }
 
-  it('refuses a trial on create, naming the hold rather than a validation error', async () => {
+  it('a trial on a plan that materialises nothing is now accepted', async () => {
+    // The 2.1.0 hold is lifted. What replaced it is narrower: a trial is
+    // refused only on a plan that would hand something over on day 0.
     const { token, appId } = await setup('held-create');
     const res = await createPlan(token, appId, {
       slug: 'pro',
@@ -94,18 +96,90 @@ describe('plan trialDays reaches the database and the checkout', () => {
       kind: 'SUBSCRIPTION',
       trialDays: 14,
     });
-    expect(res.statusCode).toBe(400);
-    const err = res.json().error as { code: string; fix: string };
-    expect(err.code).toBe('PLAN_TRIAL_UNAVAILABLE');
-    // The refusal has to say why, or an operator reads it as a bug in their request.
-    expect(err.fix).toMatch(/eligibility/i);
-
-    // And nothing was written. A refusal that half-creates is worse than either.
-    const stored = await prisma.plan.findFirst({ where: { applicationId: appId, slug: 'pro' } });
-    expect(stored).toBeNull();
+    expect(res.statusCode).toBe(201);
+    const stored = await prisma.plan.findFirstOrThrow({
+      where: { applicationId: appId, slug: 'pro' },
+    });
+    expect(stored.trialDays).toBe(14);
   });
 
-  it('refuses a trial through the SERVICE, which is what MCP reaches', async () => {
+  it('refuses a trial on a plan that grants credits, and says why', async () => {
+    // `provision` has no trial gate, so a CREDIT entitlement mints credits on
+    // day 0, before any money moves, with no inverse. The per-buyer limit
+    // bounds that to once, which is not the same as fixing it.
+    const { token, appId } = await setup('materialises');
+    expect(
+      (await createPlan(token, appId, { slug: 'gen', name: 'Gen', amount: 1000, kind: 'SUBSCRIPTION' }))
+        .statusCode,
+    ).toBe(201);
+    const plan = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'gen' } });
+    await prisma.planEntitlement.create({
+      data: { planId: plan.id, kind: 'CREDIT', key: '', quantity: 500 },
+    });
+
+    const patched = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/tenant/applications/${appId}/plans/gen`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { trialDays: 14 },
+    });
+    expect(patched.statusCode).toBe(400);
+    const err = patched.json().error as { code: string; message: string; fix: string };
+    expect(err.code).toBe('PLAN_TRIAL_MATERIALISES_ENTITLEMENTS');
+    expect(err.message).toMatch(/credits/i);
+    expect(err.message).toMatch(/day 0/i);
+    // The way through has to be nameable, or the operator reads it as "no trials".
+    expect(err.fix).toMatch(/FEATURE or USAGE/);
+    expect((await prisma.plan.findFirstOrThrow({ where: { id: plan.id } })).trialDays).toBeNull();
+  });
+
+  it('refuses credits ADDED to a plan that already carries a trial', async () => {
+    // The same giveaway through the other door: entitlements are written after
+    // the plan, so guarding only the plan write leaves this open.
+    const { token, appId } = await setup('materialises-2');
+    expect(
+      (await createPlan(token, appId, {
+        slug: 'tri',
+        name: 'Tri',
+        amount: 1000,
+        kind: 'SUBSCRIPTION',
+        trialDays: 7,
+      })).statusCode,
+    ).toBe(201);
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/tenant/applications/${appId}/plans/tri/entitlements`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { kind: 'CREDIT', quantity: 500 },
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.json().error as { code: string }).code).toBe('PLAN_TRIAL_MATERIALISES_ENTITLEMENTS');
+  });
+
+  it('allows a FEATURE entitlement on a plan carrying a trial', async () => {
+    // FEATURE resolves at read time and lapses with the subscription, which is
+    // the ordinary feature-gated SaaS trial `trialDays` exists for.
+    const { token, appId } = await setup('feature-ok');
+    expect(
+      (await createPlan(token, appId, {
+        slug: 'feat',
+        name: 'Feat',
+        amount: 1000,
+        kind: 'SUBSCRIPTION',
+        trialDays: 7,
+      })).statusCode,
+    ).toBe(201);
+    const res = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/tenant/applications/${appId}/plans/feat/entitlements`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { kind: 'FEATURE', key: 'seats_ui', valueType: 'BOOL', value: 'true' },
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('applies the materialisation rule through the SERVICE, which is what MCP reaches', async () => {
     // The MCP dispatcher does not validate arguments against a tool's
     // inputSchema, so a guard living only in route zod is not a guard.
     const { appId } = await setup('held-service');
@@ -118,10 +192,28 @@ describe('plan trialDays reaches the database and the checkout', () => {
         kind: 'SUBSCRIPTION',
         trialDays: 7,
       }),
-    ).rejects.toMatchObject({ code: 'PLAN_TRIAL_UNAVAILABLE' });
+    ).resolves.toMatchObject({ trialDays: 7 });
+
+
+    // `creditsAmount` alongside a trial is NOT refused, and must not be: it is
+    // the legacy credit column, `synthesizeLegacy` returns [] for SUBSCRIPTION,
+    // and `trialDays` is legal only on SUBSCRIPTION, so the pair materialises
+    // nothing. An earlier version of this guard refused it and the comment
+    // explaining why was simply wrong.
+    await expect(
+      plansService.create({
+        applicationId: appId,
+        slug: 'svc-credits',
+        name: 'Svc',
+        amount: 1000,
+        kind: 'SUBSCRIPTION',
+        trialDays: 7,
+        creditsAmount: 100,
+      }),
+    ).resolves.toMatchObject({ trialDays: 7 });
   });
 
-  it('refuses a trial added to an existing plan', async () => {
+  it('a trial added to an existing plain plan is accepted', async () => {
     const { token, appId } = await setup('held-update');
     expect(
       (await createPlan(token, appId, { slug: 'basic', name: 'Basic', amount: 500 })).statusCode,
@@ -133,19 +225,25 @@ describe('plan trialDays reaches the database and the checkout', () => {
       headers: { authorization: `Bearer ${token}` },
       payload: { trialDays: 30 },
     });
-    expect(patched.statusCode).toBe(400);
-    expect((patched.json().error as { code: string }).code).toBe('PLAN_TRIAL_UNAVAILABLE');
+    expect(patched.statusCode).toBe(200);
+    const stored = await prisma.plan.findFirstOrThrow({
+      where: { applicationId: appId, slug: 'basic' },
+    });
+    expect(stored.trialDays).toBe(30);
   });
 
-  it('names an out-of-range value as out of range, not as held', () => {
+  it('names an out-of-range value as out of range, not as held', async () => {
     // Through the SERVICE, deliberately. The create route's zod is `min(1)`, so
     // over the wire these are VALIDATION_ERROR and never reach this code. The
     // MCP dispatcher does not validate against a tool's inputSchema, so the
-    // service is where an out-of-range value actually arrives — and bounds run
+    // service is where an out-of-range value actually arrives, and bounds run
     // BEFORE the hold, or a typo of 400 and a deliberate 14 would give the same
     // answer and the typo would read as a policy decision.
     for (const bad of [400, -1, 14.5]) {
-      expect(() =>
+      // Awaited. It was not, so the rejection was never actually asserted:
+      // vitest auto-awaited it at the end of the test and warned, and the
+      // linter's `no-floating-promises` is what finally made it a build error.
+      await expect(
         plansService.create({
           applicationId: 'irrelevant',
           slug: 'b',
@@ -187,5 +285,44 @@ describe('plan trialDays reaches the database and the checkout', () => {
     await createPlan(token, appId, { slug: 'sub', name: 'Sub', amount: 1000 });
     const row = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'sub' } });
     expect(resolveCheckoutTrial({ plan: row, provider: 'stripe', isOneTime: false })).toBeNull();
+  });
+  it('a plan that already holds the forbidden pair can still be archived', async () => {
+    // The remedy has to be reachable. Guarding on the row's EXISTING trialDays
+    // meant a plan written before this rule could not be renamed or archived
+    // without first clearing the trial, and the refusal never said so.
+    const { token, appId } = await setup('archivable');
+    expect(
+      (await createPlan(token, appId, {
+        slug: 'legacy',
+        name: 'Legacy',
+        amount: 1000,
+        kind: 'SUBSCRIPTION',
+        trialDays: 14,
+      })).statusCode,
+    ).toBe(201);
+    const plan = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'legacy' } });
+    // Written straight to the row: the guarded paths would refuse this, which
+    // is the point, it is the pre-existing state, not a new one.
+    await prisma.planEntitlement.create({
+      data: { planId: plan.id, kind: 'CREDIT', key: '', quantity: 500 },
+    });
+
+    const archived = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/tenant/applications/${appId}/plans/legacy`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { active: false },
+    });
+    expect(archived.statusCode).toBe(200);
+
+    // ...but adding or re-confirming a trial on it is still refused.
+    const retrial = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/tenant/applications/${appId}/plans/legacy`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { trialDays: 30 },
+    });
+    expect(retrial.statusCode).toBe(400);
+    expect((retrial.json().error as { code: string }).code).toBe('PLAN_TRIAL_MATERIALISES_ENTITLEMENTS');
   });
 });

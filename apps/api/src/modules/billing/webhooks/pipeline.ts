@@ -11,11 +11,11 @@
  *   → load + decrypt app credentials (503 when the webhook secret/id is absent)
  *   → module.webhook.verify         (test-skip decided HERE, never per-module)
  *   → 401 on failure
- *   → idempotency insert UNIQUE(provider, providerEventId) — same
+ *   → idempotency insert UNIQUE(provider, providerEventId), same
  *     webhook_events storage/constraint as always; conflict = 200 replay-ack
  *     (unless the earlier dispatch failed, then re-attempt)
  *   → module.webhook.translate → null = 200 ignored (receipt still marked)
- *   → per event: applyBillingEvent — appliers own atomicity + post-commit
+ *   → per event: applyBillingEvent, appliers own atomicity + post-commit
  *   → 200; applier throw = processing_error persisted + 5xx so the provider
  *     retries (the retry takes the re-attempt path, not the duplicate skip)
  *
@@ -24,8 +24,8 @@
  * Mitigation: body size cap, and nothing but resolveApplication executes
  * pre-verify.
  *
- * The legacy per-provider URLs stay registered forever — providers have
- * them configured — as thin aliases forwarding here
+ * The legacy per-provider URLs stay registered forever, providers have
+ * them configured, as thin aliases forwarding here
  * (stripe/razorpay/paypal .routes.ts).
  */
 
@@ -43,16 +43,16 @@ import { errs, type JsonSchema } from '../../../lib/openapi.js';
 // ---------------------------------------------------------------------------
 // Response modelling. This is provider ingress: no credential, the provider
 // signature IS the auth, and every ack body below reproduces the legacy
-// stripe.routes.ts contract exactly (see the module header) — NONE of it is
+// stripe.routes.ts contract exactly (see the module header), NONE of it is
 // the Rekey `{success, data}` / `{success, error}` envelope. Errors, by
 // contrast, ARE the Rekey envelope: everything the pipeline itself throws
 // below is a `RekeyError`, which `rekeyErrorHandler` renders in the standard
-// shape — the ONE exception is the 500 in the catch block at the bottom of
+// shape, the ONE exception is the 500 in the catch block at the bottom of
 // `handleBillingProviderWebhook`, which is a bare `reply.send()` and so
 // deliberately modelled separately from `errs()`.
 // ---------------------------------------------------------------------------
 
-/** The two shapes a 200 ack can take — see `handleBillingProviderWebhook`. */
+/** The two shapes a 200 ack can take, see `handleBillingProviderWebhook`. */
 const WebhookAckSuccess: JsonSchema = {
   oneOf: [
     {
@@ -61,14 +61,14 @@ const WebhookAckSuccess: JsonSchema = {
       properties: {
         received: { type: 'boolean', enum: [true] },
         processed: { type: 'boolean', enum: [true] },
-        eventId: { type: 'string', description: "The provider's event id — the idempotency key." },
+        eventId: { type: 'string', description: "The provider's event id, the idempotency key." },
       },
       required: ['received', 'processed', 'eventId'],
     },
     {
       type: 'object',
       description:
-        'A replay of an event already fully processed (`processedAt` set) — re-acknowledged so ' +
+        'A replay of an event already fully processed (`processedAt` set), re-acknowledged so ' +
         'the provider stops retrying, nothing re-applied.',
       properties: {
         received: { type: 'boolean', enum: [true] },
@@ -81,10 +81,10 @@ const WebhookAckSuccess: JsonSchema = {
 };
 
 /**
- * 500 — an applier threw while dispatching a not-yet-processed event. Still
+ * 500, an applier threw while dispatching a not-yet-processed event. Still
  * `received: true` (the idempotency row is durable, so a provider retry takes
  * the re-attempt path rather than being skipped as a duplicate) but this is
- * NOT the Rekey error envelope — a provider retry loop expects a body it can
+ * NOT the Rekey error envelope, a provider retry loop expects a body it can
  * log, not `{success, error}`.
  */
 const WebhookApplyFailed: JsonSchema = {
@@ -92,7 +92,7 @@ const WebhookApplyFailed: JsonSchema = {
   properties: {
     received: { type: 'boolean', enum: [true] },
     processed: { type: 'boolean', enum: [false] },
-    eventId: { type: 'string', description: "The provider's event id — the idempotency key." },
+    eventId: { type: 'string', description: "The provider's event id, the idempotency key." },
   },
   required: ['received', 'processed', 'eventId'],
 };
@@ -105,14 +105,15 @@ const WebhookApplyFailed: JsonSchema = {
 const WEBHOOK_ERRORS = {
   400:
     'WEBHOOK_RAW_BODY_MISSING — internal: fastify-raw-body did not run for this route; or ' +
-    'WEBHOOK_PAYLOAD_INVALID — (PayPal only) the body is not a recognisable event shape; or ' +
+    'WEBHOOK_PAYLOAD_INVALID — (PayPal, external) the body is not a recognisable event shape, or an external event fails envelope validation; or ' +
     'WEBHOOK_APPLICATION_MISMATCH — the event names a different Application than the one whose ' +
     'BYO credentials verified the signature.',
   401:
     'WEBHOOK_APPLICATION_UNRESOLVED — (Stripe/Razorpay, slug-less route only) no application ' +
     'slug in the URL and none resolvable from the payload; or WEBHOOK_SIGNATURE_MISSING / ' +
     "WEBHOOK_SIGNATURE_INVALID — the provider signature header is absent or does not verify " +
-    "against this Application's BYO secret.",
+    "against this Application's BYO secret; or WEBHOOK_SIGNATURE_STALE — (external only) the " +
+    'signature timestamp is outside the five-minute window.',
   404:
     'WEBHOOK_PROVIDER_UNKNOWN — the `:provider` segment is not a registered billing provider; or ' +
     'APPLICATION_NOT_FOUND — no Application matches the resolved slug/id.',
@@ -125,7 +126,7 @@ const WEBHOOK_ERRORS = {
 
 /**
  * Body size cap. Matches Fastify's default limit (which already governed
- * the legacy routes) — made explicit here because the spec's
+ * the legacy routes), made explicit here because the spec's
  * parse-before-verify mitigation depends on it, not on a framework default
  * someone might raise globally.
  */
@@ -143,7 +144,7 @@ const RouteParams = z.object({
 /**
  * Run one inbound webhook request through the pipeline for `module`.
  * Response bodies/status codes reproduce the legacy stripe.routes.ts
- * contract exactly — the alias routes forward here and MUST stay
+ * contract exactly, the alias routes forward here and MUST stay
  * byte-compatible for provider retries (CI's webhook suites pin this).
  */
 export async function handleBillingProviderWebhook(
@@ -157,7 +158,7 @@ export async function handleBillingProviderWebhook(
       statusCode: 400,
       code: 'WEBHOOK_RAW_BODY_MISSING',
       message: 'Webhook handler did not receive a raw body.',
-      fix: 'Internal — fastify-raw-body should be configured. Check src/app.ts plugin order.',
+      fix: 'Internal, fastify-raw-body should be configured. Check src/app.ts plugin order.',
     });
   }
   const req: RawWebhookReq = {
@@ -177,7 +178,7 @@ export async function handleBillingProviderWebhook(
       : await applicationsService.get(ref.applicationId);
 
   // --- Credentials ------------------------------------------------------
-  // BYO, per-application only — a deployment-wide secret would be a
+  // BYO, per-application only, a deployment-wide secret would be a
   // cross-tenant trust boundary (one leak signs events for every app).
   // Loaded with the row's mode: online verifiers (PayPal) have per-mode
   // base URLs.
@@ -201,7 +202,7 @@ export async function handleBillingProviderWebhook(
   }
 
   // --- Signature verification -------------------------------------------
-  // Centralized test-skip, in ONE place — never per-module. Only ONLINE
+  // Centralized test-skip, in ONE place, never per-module. Only ONLINE
   // verification (a call to the provider's API, e.g. PayPal) is skipped
   // under NODE_ENV=test; offline-HMAC providers verify even in tests, which
   // sign their fixtures with the app's stored secret. NEVER skipped in
@@ -219,7 +220,7 @@ export async function handleBillingProviderWebhook(
         'billing webhook signature verification failed',
       );
       throw new RekeyError({
-        // 401 unless the module says otherwise — an ONLINE verifier that
+        // 401 unless the module says otherwise, an ONLINE verifier that
         // could not reach its provider answers 503 so the provider retries
         // instead of reading "your signature is bad".
         statusCode: result.statusCode ?? 401,
@@ -232,13 +233,13 @@ export async function handleBillingProviderWebhook(
 
   // --- Durable idempotency ----------------------------------------------
   // Storage: webhook_events UNIQUE(applicationId, provider, providerEventId).
-  // The DB is the source of truth — never Redis.
+  // The DB is the source of truth, never Redis.
   //
   // The applicationId is IN the key, and has to be: a provider event id is
   // unique within the provider ACCOUNT, and two Applications can share one
   // (staging + production, a cloned app). While the key was global, the second
   // tenant's genuine event collided with the first's, took the duplicate-skip
-  // branch below, and answered 200 — so the provider stopped retrying and that
+  // branch below, and answered 200, so the provider stopped retrying and that
   // tenant's invoice.paid was lost for good.
   const providerEventId = module.webhook.extractEventId(req.payload, req);
   const eventType = module.webhook.extractEventType(req.payload);
@@ -258,7 +259,7 @@ export async function handleBillingProviderWebhook(
     // The event id already exists. Two cases:
     //   - processedAt set → a true duplicate, skip (200 so the provider stops).
     //   - processedAt null → a provider RETRY of an event whose dispatch
-    //     failed earlier (we returned 5xx below). Re-attempt it now —
+    //     failed earlier (we returned 5xx below). Re-attempt it now,
     //     the appliers are replay-safe (payments dedupe on providerPaymentId,
     //     coupon redemption commits atomically with the payment, provision
     //     is idempotent per period, status updates are absolute).
@@ -282,7 +283,13 @@ export async function handleBillingProviderWebhook(
       { provider: module.name, eventId: providerEventId },
       'retrying previously-failed billing webhook',
     );
-    webhookRow = existing;
+    // The retry may carry a different body than the delivery that failed
+    // (a sender that fixed its payload and re-sent under the same id). What
+    // is applied below is THIS body, so the receipt records this body.
+    webhookRow = await prisma.webhookEvent.update({
+      where: { id: existing.id },
+      data: { eventType, payload: req.payload as never },
+    });
   }
 
   // --- Translate + apply -------------------------------------------------
@@ -293,7 +300,7 @@ export async function handleBillingProviderWebhook(
       providerEventId,
     });
     if (events === null) {
-      // Unhandled event type: deliberately conservative — receipt is still
+      // Unhandled event type: deliberately conservative, receipt is still
       // marked processed below so replays short-circuit as duplicates.
       request.log.info(
         { provider: module.name, eventType, eventId: providerEventId },
@@ -366,7 +373,7 @@ export async function billingProviderWebhookRoutes(app: FastifyInstance): Promis
         statusCode: 404,
         code: 'WEBHOOK_PROVIDER_UNKNOWN',
         message: `"${params.provider}" is not a registered billing provider.`,
-        fix: 'Check the webhook URL — the segment after /webhooks/billing/ must be a provider name (e.g. "stripe").',
+        fix: 'Check the webhook URL, the segment after /webhooks/billing/ must be a provider name (e.g. "stripe").',
       });
     }
     return handleBillingProviderWebhook(module, request, reply);
@@ -382,17 +389,17 @@ export async function billingProviderWebhookRoutes(app: FastifyInstance): Promis
       description:
         'Generic ingress for registered provider modules. The optional slug scopes the ' +
         "Application whose BYO credentials verify the signature; providers whose payloads carry " +
-        '`metadata.applicationId` (Stripe) may omit it. No bearer auth — the signature IS the auth.',
+        '`metadata.applicationId` (Stripe) may omit it. No bearer auth, the signature IS the auth.',
       response: {
         200: {
           description:
-            'Webhook received and acknowledged — NOT the Rekey `{success, data}` envelope, and ' +
+            'Webhook received and acknowledged, NOT the Rekey `{success, data}` envelope, and ' +
             'byte-compatible with the legacy per-provider routes providers already have configured.',
           ...WebhookAckSuccess,
         },
         500: {
           description:
-            'An applier threw while dispatching the event. Still acknowledges receipt — the ' +
+            'An applier threw while dispatching the event. Still acknowledges receipt, the ' +
             "idempotency row is left unprocessed so the provider's retry re-attempts rather than " +
             'being skipped as a duplicate. NOT the Rekey error envelope.',
           ...WebhookApplyFailed,

@@ -14,7 +14,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { createHmac, createPublicKey, generateKeyPairSync, verify as cryptoVerify, sign as cryptoSign } from 'node:crypto';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
@@ -84,7 +84,7 @@ describe('JWKS / RS256 end-user access tokens', () => {
   beforeEach(async () => {
     hsApp = await bootstrapApplication('jwks-hs');
     rsApp = await bootstrapApplication('jwks-rs');
-    // Per-app opt-in — exercises the same updateAuthConfig path the
+    // Per-app opt-in, exercises the same updateAuthConfig path the
     // PATCH /tenant/applications/:id/auth-config route calls.
     await applicationsService.updateAuthConfig({
       applicationId: rsApp.applicationId,
@@ -112,7 +112,7 @@ describe('JWKS / RS256 end-user access tokens', () => {
   }
 
   async function fetchJwks(): Promise<{
-    res: Awaited<ReturnType<FastifyInstance['inject']>>;
+    res: Awaited<Promise<LightMyRequestResponse>>;
     keys: Array<{ kty: string; kid: string; alg: string; use: string; n: string; e: string }>;
   }> {
     const res = await app.inject({ method: 'GET', url: '/.well-known/jwks.json' });
@@ -133,10 +133,10 @@ describe('JWKS / RS256 end-user access tokens', () => {
       expect(key.e).toBe('AQAB');
       expect(key).not.toHaveProperty('d'); // never the private half
     }
-    // Raw JWKS body — NOT the { success, data } envelope (jose/jwks-rsa compat).
+    // Raw JWKS body, NOT the { success, data } envelope (jose/jwks-rsa compat).
     expect(res.json()).not.toHaveProperty('success');
 
-    // Stable across calls — same active key, same kid.
+    // Stable across calls, same active key, same kid.
     const again = await fetchJwks();
     expect(again.keys.map((k) => k.kid)).toEqual(keys.map((k) => k.kid));
   });
@@ -234,7 +234,7 @@ describe('JWKS / RS256 end-user access tokens', () => {
 
   it('rejects an HS256 token HMAC-signed with the published RSA public key (classic confusion)', async () => {
     // Attacker downloads the JWKS, reconstructs the public PEM, and HMACs a
-    // token with it — hoping the verifier feeds the public key to HS256.
+    // token with it, hoping the verifier feeds the public key to HS256.
     const { keys } = await fetchJwks();
     const jwk = keys[0]!;
     const publicPem = createPublicKey({ key: { kty: 'RSA', n: jwk.n, e: jwk.e }, format: 'jwk' })

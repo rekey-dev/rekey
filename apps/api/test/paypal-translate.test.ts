@@ -1,5 +1,5 @@
 /**
- * PayPal module `translate` unit tests — fixture payloads in, normalized
+ * PayPal module `translate` unit tests, fixture payloads in, normalized
  * DomainBillingEvents out. No DB writes: translate is pure mapping (the
  * appliers own persistence, pinned by paypal-webhook.test.ts + dunning +
  * outbound-events through the pipeline). These fixtures pin the mapping
@@ -44,7 +44,7 @@ describe('paypal module translate', () => {
         checkoutSessionId: 'I-SUB',
         providerSubscriptionId: 'I-SUB',
         // Bespoke provision anchored currentPeriodEnd ?? 'initial', not the
-        // pinned 'initial' — false preserves that on reactivations.
+        // pinned 'initial', false preserves that on reactivations.
         firstPeriod: false,
       },
     ]);
@@ -245,7 +245,7 @@ describe('paypal module translate', () => {
           // The local row is keyed by the order id, which is what checkout
           // stored; the capture id has never been seen before.
           checkoutSessionId: 'ORDER-1',
-          // A capture is never a recurring charge — that is PAYMENT.SALE.*.
+          // A capture is never a recurring charge, that is PAYMENT.SALE.*.
           providerSubscriptionId: null,
           amount: 4999,
           currency: 'EUR',

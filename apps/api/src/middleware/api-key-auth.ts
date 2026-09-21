@@ -8,7 +8,7 @@
  *
  * **What this middleware does NOT accept:**
  *   - The bootstrap `SUPER_ADMIN_KEY` (use `requireSuperAdmin` for admin routes).
- *   - Public keys (`rp_pub_*`) — those are browser-safe identifiers, not credentials.
+ *   - Public keys (`rp_pub_*`), those are browser-safe identifiers, not credentials.
  *
  * Verification chokepoint contract: a key is valid iff it is found by hash AND
  * not revoked AND not past its expiry. Anything else is a bug, here.
@@ -29,12 +29,12 @@ declare module 'fastify' {
   interface FastifyRequest {
     /** Set by `requireApiKey` / `requirePublishableOrSecretKey` after successful auth. */
     application?: Application;
-    /** Set by `requireApiKey` after successful auth. The hash is intentionally on this object — it never leaves the server. Unset for publishable requests. */
+    /** Set by `requireApiKey` after successful auth. The hash is intentionally on this object, it never leaves the server. Unset for publishable requests. */
     apiKey?: ApiKey;
     /**
      * How this request authenticated:
-     *   - `'secret'`      — server-side secret key (`rp_live_*`/`rp_test_*`).
-     *   - `'publishable'` — browser public key (`rp_pub_*`). Only ever set on
+     *   - `'secret'`     , server-side secret key (`rp_live_*`/`rp_test_*`).
+     *   - `'publishable'`, browser public key (`rp_pub_*`). Only ever set on
      *     public-bootstrap routes guarded by `requirePublishableOrSecretKey`,
      *     so `requireScope` treats it as pre-authorized (the route-membership
      *     gate: a pub key can never reach a secret-only route).
@@ -89,7 +89,7 @@ export async function requireApiKey(
   const looksLikeSecretKey = SECRET_KEY_PREFIXES.some((p) => presented.startsWith(p));
   if (!looksLikeSecretKey) {
     // Could be a public key or the super-admin key, both wrong here. Same code
-    // either way — refuse to identify which kind of mistake it was, so an
+    // either way, refuse to identify which kind of mistake it was, so an
     // attacker can't probe.
     throw new RekeyError({
       statusCode: 401,
@@ -104,35 +104,31 @@ export async function requireApiKey(
     throw new RekeyError({
       statusCode: 401,
       code: 'API_KEY_INVALID',
-      // Name the deployment that rejected it.
-      //
-      // Keys are per-deployment: one minted on a local instance does not exist
-      // on Rekey Cloud and vice versa, and the single commonest integration
-      // mistake is pointing half a configuration at one and half at the other
-      // (server `REKEY_URL` still on localhost while the browser's
-      // `NEXT_PUBLIC_REKEY_URL` moved to Cloud, say). The old message described
-      // three states the key could be in and never mentioned the one thing that
-      // makes the difference — WHERE it was checked — so the reader went
-      // looking for a revoked key that was never revoked. Reported as #29.
-      //
-      // This discloses nothing: the caller already knows the origin they sent
-      // the request to, and `API_URL` is public.
+      // Name the deployment that rejected it. Keys are per-deployment: one
+      // minted on a local instance does not exist on Rekey Cloud and vice
+      // versa, and the commonest integration mistake is pointing half a
+      // configuration at one and half at the other (server `REKEY_URL` still
+      // on localhost while browser `NEXT_PUBLIC_REKEY_URL` moved to Cloud).
+      // #29: the prior message omitted WHERE the key was checked, so readers
+      // went looking for a revoked key that was never revoked.
+      // Discloses nothing: the caller already knows the origin it called and
+      // `API_URL` is public.
       message: `API key is unknown, revoked, or expired at ${env.API_URL}.`,
       fix: `Keys belong to the deployment that minted them. Confirm this key came from ${env.API_URL} (Panel → Application → API Keys) and not from another Rekey deployment — a key from a local or staging instance is unknown here. If the origin is right, list your active keys in the panel and mint a new one if needed.`,
     });
   }
 
   // The Application arrives on the same query as the key (include in
-  // `verify`) — this used to be a second sequential round trip. The null
+  // `verify`), this used to be a second sequential round trip. The null
   // check stays as defence in depth: FK CASCADE makes it unreachable, and if
-  // that ever breaks, 401 not 500 — the credential's referent is gone.
+  // that ever breaks, 401 not 500, the credential's referent is gone.
   const application = verified.application;
   if (!application) {
     throw new RekeyError({
       statusCode: 401,
       code: 'API_KEY_INVALID',
       message: 'API key references an application that no longer exists.',
-      fix: 'This key is dead — mint a new one under a current application.',
+      fix: 'This key is dead, mint a new one under a current application.',
     });
   }
 
@@ -144,7 +140,7 @@ export async function requireApiKey(
   // is what makes the freeze reversible.
   if (application.disabledAt !== null) throw applicationDisabled();
 
-  // Per-Application IP allowlist (server-side secret keys only — this is the
+  // Per-Application IP allowlist (server-side secret keys only, this is the
   // secret-key middleware; public keys never reach here). When the app has set
   // an allowlist, the request IP must be in it. `request.ip` honours trustProxy
   // (set in production) so it reflects the real client behind the LB.
@@ -187,26 +183,26 @@ export async function requireApiKey(
 /**
  * Auth for routes a **browser client** must be able to reach. Accepts EITHER:
  *
- *   - a server-side secret key (`rp_live_*`/`rp_test_*`) — delegates to
+ *   - a server-side secret key (`rp_live_*`/`rp_test_*`), delegates to
  *     `requireApiKey`, identical behaviour (scopes, IP allowlist); or
- *   - a browser **publishable** key (`rp_pub_*`) — a real credential here.
+ *   - a browser **publishable** key (`rp_pub_*`), a real credential here.
  *
  * The publishable key is **identity, not authorization**: it names the
  * Application and asserts "legit public client". It grants nothing by itself.
  * Two families of route use it, and each carries its own real authorizer:
  *
  *   1. **Public-bootstrap** (sign-in/up, magic-link, passkey authenticate,
- *      license verify, plan listing) — no user exists yet, so the per-route
+ *      license verify, plan listing), no user exists yet, so the per-route
  *      credential is the gate: password, passkey assertion, emailed token,
  *      license key.
  *   2. **End-user self-service** (MFA enrollment, passkey/session management,
- *      change-password, OAuth linking, org/team management, coupon validate) —
+ *      change-password, OAuth linking, org/team management, coupon validate),
  *      gated by `requireUserSession`, which verifies the end-user JWT's
  *      signature and `typ`, and that its `applicationId` claim matches *this*
- *      Application — nothing beyond that. That session is
+ *      Application, nothing beyond that. That session is
  *      strictly stronger than the secret key here: it names the single user the
  *      route may act on. Demanding a secret key on top adds no authorization,
- *      it only forbids the credential a browser is allowed to hold — which
+ *      it only forbids the credential a browser is allowed to hold, which
  *      makes the flow unreachable from `@rekey.dev/react`.
  *
  * Beyond that, safety rests on the per-route rate limits and the per-app CORS
@@ -214,17 +210,17 @@ export async function requireApiKey(
  * allowlist).
  *
  * NEVER attach this where the Application credential is the ONLY gate and the
- * route can move money or read across users — no user session, no per-request
+ * route can move money or read across users, no user session, no per-request
  * secret. Those keep `requireApiKey`, which rejects `rp_pub_*` outright, so a
  * publishable request can structurally never reach them.
  */
 /**
- * IMPORTANT — the origin allowlist is NOT the browser equivalent of the IP
+ * IMPORTANT, the origin allowlist is NOT the browser equivalent of the IP
  * allowlist, and it must not be described as one.
  *
  * `ipAllowlist` (secret-key path) constrains a NETWORK POSITION: a request from
  * the wrong host is refused no matter what it carries. `corsOrigins`
- * (publishable path) constrains only HONEST BROWSERS — `Origin` is a request
+ * (publishable path) constrains only HONEST BROWSERS, `Origin` is a request
  * header, so any non-browser client sets it freely. It defends against a
  * third-party SITE misusing your publishable key; it does not defend against
  * replay of a stolen end-user token from an arbitrary host.
@@ -242,8 +238,8 @@ export async function requirePublishableOrSecretKey(
   const header = request.headers.authorization ?? '';
   const presented = header.startsWith('Bearer ') ? header.slice(7) : '';
 
-  // Anything that isn't a publishable key — including a missing header, a
-  // secret key, or junk — goes through the secret-key path, which owns all the
+  // Anything that isn't a publishable key, including a missing header, a
+  // secret key, or junk, goes through the secret-key path, which owns all the
   // missing/invalid-credential error messages.
   if (!presented.startsWith(PUBLISHABLE_KEY_PREFIX)) {
     return requireApiKey(request, reply);
@@ -281,11 +277,11 @@ export async function requirePublishableOrSecretKey(
   if (application.disabledAt !== null) throw applicationDisabled();
 
   // Per-app CORS origin allowlist. When the tenant has declared origins, a
-  // publishable request must carry a matching `Origin` header — this is the
+  // publishable request must carry a matching `Origin` header, this is the
   // browser-appropriate analogue of the secret key's IP allowlist. Empty list =
   // open (rate-limited); tenants add origins in Panel → Application → Access.
   // The hosted-portal origin(s) are always allowed for portal-enabled apps
-  // (additive — they don't flip an empty/open allowlist into enforcement), so
+  // (additive, they don't flip an empty/open allowlist into enforcement), so
   // the portal works without the operator hand-adding its host.
   if (application.corsOrigins.length > 0) {
     const origin = request.headers.origin;
@@ -319,7 +315,7 @@ export async function requirePublishableOrSecretKey(
  *   - `billing:write` implies `billing:read`.
  *
  * Read scopes never imply write. Other scopes (e.g. `webhooks:read`) are
- * leaf scopes — they must be granted explicitly.
+ * leaf scopes, they must be granted explicitly.
  */
 const SCOPE_IMPLICATIONS: Record<string, string[]> = {
   '*': [
@@ -355,7 +351,7 @@ export function hasScope(
  * hook that runs **after** `requireApiKey` and refuses with 403 if the
  * presented key lacks the required scope (or an implying scope).
  *
- * `["*"]` accepts everything. This is not a legacy artefact — it is still
+ * `["*"]` accepts everything. This is not a legacy artefact, it is still
  * `DEFAULT_SCOPES` in api-keys.service.ts, so every key minted without an
  * explicit `scopes` array gets it. Narrower keys (`["auth:read"]`) get
  * rejected from write endpoints with a clear `API_KEY_SCOPE_INSUFFICIENT`
@@ -374,7 +370,7 @@ export function requireScope(
     // Publishable requests are the route-membership gate: this route opted into
     // `requirePublishableOrSecretKey`, so it is a public-bootstrap route and a
     // pub key is pre-authorized for it. (A pub key can never reach a secret-only
-    // route — those use `requireApiKey`, which rejects `rp_pub_*`.) No scope row
+    // route, those use `requireApiKey`, which rejects `rp_pub_*`.) No scope row
     // exists for a pub key, so don't evaluate scopes; allow.
     if (request.authKind === 'publishable') return;
     if (!request.apiKey) {

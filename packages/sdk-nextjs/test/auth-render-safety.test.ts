@@ -2,7 +2,7 @@
  * `auth()` must not throw because of where it was called.
  *
  * It refreshes an expired access token by writing cookies, and Next seals the
- * cookie jar outside an action or route handler — `set` and `delete` both
+ * cookie jar outside an action or route handler, `set` and `delete` both
  * throw there. Since `auth()` is documented for use in server components, and
  * the access cookie lasts fifteen minutes while the refresh cookie lasts
  * thirty days, every signed-in user hit this a quarter of an hour after
@@ -80,7 +80,7 @@ describe('auth() during a render, with the cookie jar sealed', () => {
     expect(session).toBeNull();
 
     // The important half. The API rotates on every refresh and treats a replay
-    // of the rotated token as compromise — `revokeAllForEndUser`. Refreshing
+    // of the rotated token as compromise, `revokeAllForEndUser`. Refreshing
     // here would leave the browser holding the old token, and the next request
     // would sign the user out of every device.
     expect(refresh).not.toHaveBeenCalled();

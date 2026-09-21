@@ -4,7 +4,7 @@ import type { ApiRequestLogRow } from '@/lib/api';
 
 /**
  * Read-only table for the per-request access log. Shared by the per-Application
- * Requests tab and the operator's "My requests" account view — both render the
+ * Requests tab and the operator's "My requests" account view, both render the
  * same row shape (api_request_logs), so the markup lives here once.
  */
 
@@ -33,9 +33,18 @@ function methodTone(method: string): string {
 
 export function RequestLogTable({
   rows,
+  showScope,
 }: {
   rows: ApiRequestLogRow[];
+  /**
+   * Whether to render the admitting-scope column. Defaults to "only when a
+   * row has one": the per-Application Requests tab is API-key traffic, where
+   * no scope gate ever runs, and a permanently empty column there says
+   * nothing. "My requests" for a restricted member is where it carries data.
+   */
+  showScope?: boolean;
 }): React.JSX.Element {
+  const scope = showScope ?? rows.some((r) => r.admittedScope);
   return (
     <div className="overflow-x-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
       <table className="w-full text-sm">
@@ -46,6 +55,14 @@ export function RequestLogTable({
             <th className="px-4 py-2 font-medium">Status</th>
             <th className="px-4 py-2 font-medium">Duration</th>
             <th className="px-4 py-2 font-medium">IP</th>
+            {scope && (
+              <th
+                className="px-4 py-2 font-medium"
+                title="The membership scope that admitted the request. Blank when no scope gate ran: owners and admins, role-floor routes, open routes and API-key traffic."
+              >
+                Scope
+              </th>
+            )}
             <th className="px-4 py-2 font-medium">When</th>
           </tr>
         </thead>
@@ -67,6 +84,11 @@ export function RequestLogTable({
               <td className="px-4 py-2 text-xs font-mono text-neutral-600 dark:text-neutral-400">
                 {r.ip ?? '—'}
               </td>
+              {scope && (
+                <td className="px-4 py-2 text-xs font-mono text-neutral-600 dark:text-neutral-400 whitespace-nowrap">
+                  {r.admittedScope ?? '—'}
+                </td>
+              )}
               <td className="px-4 py-2 text-xs text-neutral-600 dark:text-neutral-400 whitespace-nowrap">
                 {formatDateTime(r.createdAt)}
               </td>

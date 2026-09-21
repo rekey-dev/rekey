@@ -3,8 +3,8 @@
  *
  * `coupon-discount-provider.test.ts` proves the discount leaves Rekey; this
  * proves it arrives in the shape the processor expects, which is where the
- * three of them stop resembling each other. The SDKs / `fetch` are stubbed —
- * nothing here dials a payment processor — so what is under test is the
+ * three of them stop resembling each other. The SDKs / `fetch` are stubbed,
+ * nothing here dials a payment processor, so what is under test is the
  * request body, and only that.
  *
  * These construct the provider classes directly, so the `getProviderForApplication`
@@ -200,7 +200,7 @@ describe('PayPal — Orders v2 takes a discount line, Subscriptions v1 takes not
     expect(unit.amount.breakdown?.item_total.value).toBe('50.00');
     expect(unit.amount.breakdown?.discount.value).toBe('12.50');
     expect(unit.items?.[0]?.unit_amount.value).toBe('50.00');
-    // No free-form metadata on a purchase unit — the code goes where the buyer
+    // No free-form metadata on a purchase unit, the code goes where the buyer
     // and the operator will both see it.
     expect(unit.description).toContain('half-off');
   });
@@ -219,7 +219,7 @@ describe('PayPal — Orders v2 takes a discount line, Subscriptions v1 takes not
     await expect(provider().createCheckoutSession(checkoutInput({ discount }))).rejects.toMatchObject(
       { code: 'BILLING_DISCOUNT_UNSUPPORTED', statusCode: 400 },
     );
-    // Refused before a token is even minted — nothing exists at PayPal to undo.
+    // Refused before a token is even minted, nothing exists at PayPal to undo.
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

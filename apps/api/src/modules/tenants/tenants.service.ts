@@ -18,7 +18,7 @@
  * resolves the deployment's `DEFAULT_TENANT_LIMITS` against any explicitly
  * passed limits and returns the `limits` fragment to spread into the create.
  * All four sites spread it. If you add a fifth `tenant.create`, spread it there
- * too — a workspace created without it starts unlimited, which is precisely the
+ * too, a workspace created without it starts unlimited, which is precisely the
  * hole the variable exists to close.
  */
 
@@ -45,7 +45,7 @@ export interface CreateTenantInput {
   limits?: TenantLimits | undefined;
 }
 
-/** What the limits endpoints return — the ceilings plus what's used against them. */
+/** What the limits endpoints return, the ceilings plus what's used against them. */
 export interface TenantLimitsView {
   limits: TenantLimits;
   usage: {
@@ -65,7 +65,7 @@ export const tenantsService = {
     });
   },
 
-  /** Total workspaces, ignoring take/skip — the `page.total` of `list`. */
+  /** Total workspaces, ignoring take/skip, the `page.total` of `list`. */
   async count(): Promise<number> {
     return prisma.tenant.count();
   },
@@ -92,7 +92,7 @@ export const tenantsService = {
 
   /**
    * Read a workspace's ceilings plus current usage. Absent keys mean
-   * unlimited — see lib/tenant-limits.ts.
+   * unlimited, see lib/tenant-limits.ts.
    */
   async getLimits(id: string): Promise<TenantLimitsView> {
     const tenant = await this.get(id);
@@ -109,7 +109,7 @@ export const tenantsService = {
    * Grant an EXISTING operator a membership in a workspace.
    *
    * Exists because `create()` above writes a Tenant and nothing else, and
-   * `ownerEmail` on that row is a denormalised label — access runs entirely
+   * `ownerEmail` on that row is a denormalised label, access runs entirely
    * through `TenantMembership`. Without this, an admin-created workspace is one
    * nobody can open.
    *
@@ -119,7 +119,7 @@ export const tenantsService = {
    * is a separate, explicit operation.
    *
    * Never creates the operator. An email with no operator behind it is a 404,
-   * not an invitation — creating one here would bypass `OPERATOR_SIGNUP_MODE`
+   * not an invitation, creating one here would bypass `OPERATOR_SIGNUP_MODE`
    * entirely, which is the gate the whole invite system rests on.
    */
   async addMember(input: {
@@ -173,7 +173,7 @@ export const tenantsService = {
   },
 
   /**
-   * Replace a workspace's ceilings wholesale (PUT semantics — a key you omit
+   * Replace a workspace's ceilings wholesale (PUT semantics, a key you omit
    * becomes unlimited, it does not keep its previous value).
    *
    * Setting a limit BELOW current usage is allowed on purpose: a workspace has

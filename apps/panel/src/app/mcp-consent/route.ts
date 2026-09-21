@@ -1,5 +1,5 @@
 /**
- * Operator MCP OAuth consent — entry point.
+ * Operator MCP OAuth consent, entry point.
  *
  * The API's `/api/v1/tenant/mcp/oauth/authorize` redirects the browser here
  * with the OAuth params. This is a Route Handler (not a page) because it must
@@ -38,7 +38,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const v = sp.get(k);
     if (v) params[k] = v;
   }
-  // Minimal sanity — the API already validated the client/redirect before
+  // Minimal sanity, the API already validated the client/redirect before
   // redirecting here, but never trust that blindly.
   if (!params.client_id || !params.redirect_uri) {
     return new NextResponse('Invalid authorization request.', {
@@ -49,7 +49,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const jar = await cookies();
   const authed = Boolean(jar.get(ACCESS_COOKIE)?.value);
-  // Relative Location — both targets are same-origin (this panel). Do NOT build
+  // Relative Location, both targets are same-origin (this panel). Do NOT build
   // an absolute URL from `req.nextUrl.origin`: behind a reverse proxy
   // (Dokploy/Traefik) that resolves to the container's internal bind address
   // (e.g. 0.0.0.0:3031), so the browser would be sent to a dead host. A

@@ -10,7 +10,7 @@
  *
  * So: build two workspaces, then for every sub-resource of A's Application ask
  * B's OWNER for it and require the non-disclosing 404. 404 rather than 403 is
- * deliberate — `notFound()` in app-access.ts returns `APPLICATION_NOT_FOUND`
+ * deliberate, `notFound()` in app-access.ts returns `APPLICATION_NOT_FOUND`
  * precisely so the endpoint is not an existence oracle. Asserting 403 here
  * would be asserting a regression.
  *
@@ -28,7 +28,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance, InjectOptions } from 'fastify';
+import type { FastifyInstance, InjectOptions, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 
 const BASE = '/api/v1/tenant/applications';
@@ -36,11 +36,11 @@ const BASE = '/api/v1/tenant/applications';
 // `light-my-request` is a transitive dependency of fastify, not one apps/api
 // declares, so its types are not resolvable here. Derive the response type
 // from `inject` itself instead of adding a dependency for one annotation.
-type InjectResponse = Awaited<ReturnType<FastifyInstance['inject']>>;
+type InjectResponse = Awaited<Promise<LightMyRequestResponse>>;
 
 interface Probe {
   /**
-   * First path segment after `:id` — '' for the Application resource itself.
+   * First path segment after `:id`, '' for the Application resource itself.
    * Matched against the live route table by the completeness guard below.
    */
   subResource: string;
@@ -54,7 +54,7 @@ interface Probe {
  * One probe per sub-resource. A read is preferred where the sub-resource has
  * one (cheapest, and a leaked read is the damaging direction); write-only
  * sub-resources use their mutating verb. The probe only has to reach
- * `ensureAppAccess` — what the handler does afterwards is other tests' job.
+ * `ensureAppAccess`, what the handler does afterwards is other tests' job.
  */
 const PROBES: Probe[] = [
   { subResource: '', method: 'GET', suffix: '' },
@@ -76,7 +76,7 @@ const PROBES: Probe[] = [
   // would let anyone holding an application id switch off someone else's
   // product, which is the highest-impact write in the whole table.
   // A subscription id is a cuid an operator of another workspace could hold, and
-  // this route rewrites what that subscription GRANTS — the commercial terms of
+  // this route rewrites what that subscription GRANTS, the commercial terms of
   // someone else's customer. The scope lives in the service's query; this proves
   // it.
   {
@@ -115,6 +115,43 @@ const PROBES: Probe[] = [
   // longer appears in the route table this test reads.
   { subResource: 'application-roles', method: 'GET', suffix: '/application-roles' },
   { subResource: 'end-users', method: 'GET', suffix: '/end-users' },
+  // The email-control and subscription-import surfaces. Both read and write
+  // per-Application configuration, and the import one reads a book of business:
+  // exactly the shape that must answer 404 to a stranger rather than
+  // confirming the Application exists.
+  { subResource: 'email-send-control', method: 'GET', suffix: '/email-send-control' },
+  {
+    subResource: 'email-send-control',
+    method: 'PATCH',
+    suffix: '/email-send-control',
+    payload: { emailsEnabled: false },
+  },
+  {
+    subResource: 'email-send-control',
+    method: 'PATCH',
+    suffix: '/email-send-control/welcome',
+    payload: { enabled: false },
+  },
+  { subResource: 'email-stats', method: 'GET', suffix: '/email-stats' },
+  { subResource: 'email-suppressions', method: 'GET', suffix: '/email-suppressions' },
+  {
+    subResource: 'email-suppressions',
+    method: 'POST',
+    suffix: '/email-suppressions',
+    payload: { address: 'stranger@example.com', reason: 'manual' },
+  },
+  {
+    subResource: 'email-suppressions',
+    method: 'DELETE',
+    suffix: '/email-suppressions/stranger@example.com',
+  },
+  { subResource: 'subscription-imports', method: 'GET', suffix: '/subscription-imports' },
+  {
+    subResource: 'subscription-imports',
+    method: 'POST',
+    suffix: '/subscription-imports',
+    payload: { provider: 'external', matchStrategy: 'email' },
+  },
   { subResource: 'licenses', method: 'GET', suffix: '/licenses' },
   { subResource: 'oauth-config', method: 'DELETE', suffix: '/oauth-config/google' },
   { subResource: 'organization-roles', method: 'GET', suffix: '/organization-roles' },
@@ -131,7 +168,7 @@ const PROBES: Probe[] = [
   // not just the list. A cross-tenant refund would pay a stranger's buyer back
   // out of this operator's balance; a cross-tenant extend would hand a
   // stranger's customer free access. The case id is a non-existent one on
-  // purpose — the tenant check has to refuse before anything looks it up, so a
+  // purpose, the tenant check has to refuse before anything looks it up, so a
   // 404 for "wrong workspace" and a 404 for "no such case" must be
   // indistinguishable from outside.
   { subResource: 'unapplied-payments', method: 'GET', suffix: '/unapplied-payments' },
@@ -242,7 +279,7 @@ describe('cross-tenant isolation matrix', () => {
   );
 
   it('every :id sub-resource in the live route table has a probe', () => {
-    // The route table, not a source grep — this is what the server actually
+    // The route table, not a source grep, this is what the server actually
     // serves. A new sub-resource lands here the moment it is registered.
     const doc = (app as unknown as { swagger: () => { paths: Record<string, unknown> } }).swagger();
     const registered = new Set<string>();

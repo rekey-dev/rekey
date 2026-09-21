@@ -5,7 +5,7 @@
  * The bug this file exists to prevent is a single confusion: reading an ABSENT
  * ceiling as `0`. Unset is the default for every workspace and the permanent
  * state of every self-host that never touches the feature, so getting it wrong
- * does not produce a rare edge case — it tells the most common configuration
+ * does not produce a rare edge case, it tells the most common configuration
  * there is that it is completely full.
  *
  * Rendered rather than unit-tested around, because every failure mode here is
@@ -46,7 +46,7 @@ describe('WorkspaceLimits', () => {
       expect(text(html)).toContain('sets no ceilings');
       // A meter at all would imply a ceiling to fill.
       expect(meterWidths(html)).toEqual([]);
-      // The usage numbers are still shown — unlimited is not unknown.
+      // The usage numbers are still shown, unlimited is not unknown.
       expect(text(html)).toContain('12,842');
     });
 
@@ -88,7 +88,7 @@ describe('WorkspaceLimits', () => {
       limits: { maxProductionApps: 1_000_000, maxActiveEndUsers: 250_000_000 },
       usage: { productionApps: 1, activeEndUsers: 3 },
     });
-    // 1 of 1,000,000 is 0.0001% — a bar that paints nothing and reads as "zero
+    // 1 of 1,000,000 is 0.0001%, a bar that paints nothing and reads as "zero
     // used" when it is not. Floored so it stays visible.
     for (const w of meterWidths(html)) {
       expect(Number.parseFloat(w)).toBeGreaterThanOrEqual(1.5);

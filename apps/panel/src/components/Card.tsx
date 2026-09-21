@@ -1,7 +1,7 @@
 import * as React from 'react';
 
 /**
- * Surface container primitive — the standard "panel card" used to group content
+ * Surface container primitive, the standard "panel card" used to group content
  * (forms, tables, stat blocks) on a page. Replaces the hand-rolled
  * `rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]`
  * string that was copy-pasted across ~every page.
@@ -38,7 +38,7 @@ export function Card({
 }
 
 /**
- * Section heading that sits *above* a card or table — a title, optional
+ * Section heading that sits *above* a card or table, a title, optional
  * count/description, and an optional right-aligned action (button/modal
  * trigger). Gives every "Members (3)" / "Roles" block the same rhythm instead
  * of each page inventing its own `flex justify-between` header.

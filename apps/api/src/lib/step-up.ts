@@ -3,7 +3,7 @@
  *
  * The problem this exists to solve: an end-user access token is a bearer
  * credential, and some self-service actions are worth more than the token that
- * reaches them. Enrolling a passkey is the sharpest example — a passkey bypasses
+ * reaches them. Enrolling a passkey is the sharpest example, a passkey bypasses
  * the MFA challenge at sign-in, and neither `change-password` (which requires the
  * current password) nor `sign-out-everywhere` removes an attacker's enrolled
  * credential. So a stolen token that can enroll one buys persistent account
@@ -35,14 +35,21 @@
  *
  * `assertTenantStepUp` at the bottom of this file is the OPERATOR twin, for
  * the panel's own credential-rebinding actions. It has no publishable/secret
- * split — a panel session is always a browser session — so it is
+ * split, a panel session is always a browser session, so it is
  * unconditional.
  */
 
-import type { EndUser } from '@prisma/client';
 import { prisma } from './prisma.js';
 import { RekeyError } from './error.js';
 import { verifyPassword } from './passwords.js';
+import {
+  assertNotLocked,
+  clearFailures,
+  euLoginLockScope,
+  LOGIN_POLICY,
+  operatorLoginLockScope,
+  registerFailure,
+} from './brute-force.js';
 
 /** Proof material a caller may supply. Both optional; any ONE that verifies passes. */
 export interface StepUpProof {
@@ -73,7 +80,7 @@ export async function assertStepUp(args: {
   // rather than trusting whatever the caller passed in.
   const row = await prisma.endUser.findUnique({
     where: { id: endUserId },
-    select: { passwordHash: true },
+    select: { passwordHash: true, email: true, applicationId: true },
   });
   const enrolled = await prisma.mfaCredential.findUnique({
     where: { endUserId },
@@ -84,7 +91,7 @@ export async function assertStepUp(args: {
   const hasMfa = enrolled?.enrolledAt != null;
 
   // Nothing to prove WITH. An OAuth-only account with no MFA has exactly one
-  // credential — the access token now being presented — so no challenge we could
+  // credential, the access token now being presented, so no challenge we could
   // issue would tell the real owner apart from someone holding a stolen token.
   // Refuse rather than wave it through: waving it through is the takeover this
   // function exists to prevent, and pretending otherwise would be worse than
@@ -103,7 +110,15 @@ export async function assertStepUp(args: {
   }
 
   if (proof.password !== undefined && proof.password !== '' && hasPassword) {
-    if (await verifyPassword(row!.passwordHash, proof.password)) return;
+    // Same secret sign-in checks, so the same lockout: a stolen session must
+    // not be a second, unlocked place to guess the password.
+    const lockScope = euLoginLockScope(row!.applicationId, row!.email);
+    await assertNotLocked(lockScope);
+    if (await verifyPassword(row!.passwordHash, proof.password)) {
+      await clearFailures(lockScope);
+      return;
+    }
+    await registerFailure(lockScope, LOGIN_POLICY);
   }
 
   // One message for "you sent nothing" and "what you sent was wrong". Splitting
@@ -131,7 +146,7 @@ export type TenantMfaCodeVerifier = (args: {
  *
  * There is no publishable/secret distinction to key off here: a panel session
  * is always a browser session, so the step-up is unconditional. Which is the
- * whole reason it is needed — the operator surface had *no* second-factor
+ * whole reason it is needed, the operator surface had *no* second-factor
  * demand on any of the actions that rebind an operator's own credentials, so a
  * stolen panel access token could re-enroll MFA onto an attacker's
  * authenticator, turn MFA off outright, or enroll a passkey, none of which the
@@ -140,7 +155,7 @@ export type TenantMfaCodeVerifier = (args: {
  * `requireMfaWhenEnrolled` is the sharp part, and it is the same rule
  * `mfaService.disable` applies for end-users: when the operator HAS an enrolled
  * authenticator, only a current code counts. Accepting the password there would
- * defeat the point — someone who has stolen a session and phished the password
+ * defeat the point, someone who has stolen a session and phished the password
  * is exactly who the second factor exists to stop, and letting them strip it
  * with those two things is no protection at all. It is set for the MFA routes
  * and left off for passkey enrolment, which mirrors the end-user
@@ -158,7 +173,7 @@ export async function assertTenantStepUp(args: {
 
   const row = await prisma.tenantUser.findUnique({
     where: { id: tenantUserId },
-    select: { passwordHash: true },
+    select: { passwordHash: true, email: true },
   });
   const enrolled = await prisma.tenantMfaCredential.findUnique({
     where: { tenantUserId },
@@ -186,7 +201,14 @@ export async function assertTenantStepUp(args: {
   }
 
   if (!mfaOnly && proof.password !== undefined && proof.password !== '' && hasPassword) {
-    if (await verifyPassword(row!.passwordHash, proof.password)) return;
+    // Counts toward the sign-in lockout, as in `assertStepUp`.
+    const lockScope = operatorLoginLockScope(row!.email);
+    await assertNotLocked(lockScope);
+    if (await verifyPassword(row!.passwordHash, proof.password)) {
+      await clearFailures(lockScope);
+      return;
+    }
+    await registerFailure(lockScope, LOGIN_POLICY);
   }
 
   throw new RekeyError({

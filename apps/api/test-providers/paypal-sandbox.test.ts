@@ -1,5 +1,5 @@
 /**
- * PayPal sandbox — plan registration, checkout, and the one verification path
+ * PayPal sandbox, plan registration, checkout, and the one verification path
  * the ordinary test suite structurally cannot reach.
  *
  * That last one is the reason this file exists. PayPal does not sign webhooks
@@ -7,7 +7,7 @@
  * ONLINE call to `/v1/notifications/verify-webhook-signature`. The shared
  * pipeline skips exactly that under `NODE_ENV=test`
  * (`capabilities.onlineVerify && !isProduction && NODE_ENV === 'test'`), which
- * is correct — a unit suite must not depend on PayPal being up — but it means
+ * is correct, a unit suite must not depend on PayPal being up, but it means
  * `verifyPaypalWebhook` has never once been executed against PayPal by any
  * test in this repository.
  *
@@ -16,8 +16,8 @@
  * fails open would pass every existing test and hand an attacker the money
  * path; only a real call can tell the difference.
  *
- * PayPal cannot discount a recurring subscription — the module declares
- * `discounts: { oneTime: true, recurring: false }` — so the coupon assertions
+ * PayPal cannot discount a recurring subscription, the module declares
+ * `discounts: { oneTime: true, recurring: false }`, so the coupon assertions
  * here are about the refusal, not about a discounted total.
  */
 
@@ -43,7 +43,7 @@ describeSandbox('paypal', 'PayPal sandbox', paypalSandbox, (creds) => {
 
   afterAll(async () => {
     // PayPal sandbox plans and products cannot be deleted through the REST
-    // API — a plan can only be DEACTIVATED. Everything created here is
+    // API, a plan can only be DEACTIVATED. Everything created here is
     // therefore named with the harness prefix and left inactive rather than
     // removed, which is the most a caller can do. Documented in
     // docs/provider-sandbox-testing.md so nobody is surprised by the residue.
@@ -63,7 +63,7 @@ describeSandbox('paypal', 'PayPal sandbox', paypalSandbox, (creds) => {
   it('registers a plan and mints a real approval URL', async () => {
     const fixture = await paypalFixture('pp-checkout');
 
-    // PayPal registers lazily at first checkout — `plansService.create` only
+    // PayPal registers lazily at first checkout, `plansService.create` only
     // eager-registers when STRIPE credentials exist. So the plan is created
     // NOT_REQUIRED and the provider round-trip happens below.
     const plan = await plansService.create({
@@ -80,14 +80,14 @@ describeSandbox('paypal', 'PayPal sandbox', paypalSandbox, (creds) => {
     expect(res.statusCode).toBe(200);
     const data = res.json().data as { url: string; provider: string };
     expect(data.provider).toBe('paypal');
-    // A sandbox approval link, from PayPal's own `links` array — proof the
+    // A sandbox approval link, from PayPal's own `links` array, proof the
     // OAuth token exchange, the plan create and the subscription create all
     // succeeded against api-m.sandbox.paypal.com.
     expect(data.url).toMatch(/^https:\/\/www\.sandbox\.paypal\.com\//);
 
     // Pinning current behaviour, and it is worth staring at: `createCheckoutSession`
     // READS `plan.metadata.paypal.planId` and falls back to
-    // `ensurePlanRegistered` when it is missing — but NOTHING ever writes that
+    // `ensurePlanRegistered` when it is missing, but NOTHING ever writes that
     // key. Only the Stripe path persists a provider plan id (via
     // `registerAndSettle`). So every PayPal checkout re-registers the plan,
     // relying on `PayPal-Request-Id` idempotency to dedupe, and once that
@@ -122,7 +122,7 @@ describeSandbox('paypal', 'PayPal sandbox', paypalSandbox, (creds) => {
       couponCode: `${HARNESS_PREFIX}-pp-10`,
     });
     // The refusal is local (`checkout-discount.ts`) and happens before PayPal
-    // is dialled — but it is asserted HERE, in the suite with real
+    // is dialled, but it is asserted HERE, in the suite with real
     // credentials, because the failure mode it guards is "the provider
     // silently ignored the discount", which only a real provider can exhibit.
     expect(res.statusCode).toBe(400);

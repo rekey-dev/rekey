@@ -1,5 +1,5 @@
 /**
- * `pickProvider` + `countryFromRequest` — the geo router that decides which
+ * `pickProvider` + `countryFromRequest`, the geo router that decides which
  * payment processor receives the money.
  *
  * 47 lines with no test reference anywhere in the suite. A bug here does not
@@ -8,7 +8,7 @@
  *
  * These call the real implementations. `test/setup.ts` mocks the sibling
  * `getProviderForApplication` (so nothing dials Stripe) but spreads the real
- * module for everything else — routing logic is under test, the network call
+ * module for everything else, routing logic is under test, the network call
  * is not.
  *
  * The invariant the routing table exists to protect, spelled out in
@@ -35,6 +35,7 @@ const CREDS: Record<BillingProviderName, Record<string, string>> = {
   stripe: { apiKey: 'sk_test_router', webhookSecret: 'whsec_router' },
   paypal: { clientId: 'pp_router', clientSecret: 'pp_secret', webhookId: 'WH-router' },
   razorpay: { keyId: 'rzp_test_router', keySecret: 'rzp_secret', webhookSecret: 'rzp_whsec' },
+  external: { webhookSecret: 'ext_whsec_router' },
 };
 
 describe('pickProvider (billing geo router)', () => {
@@ -158,7 +159,7 @@ describe('pickProvider (billing geo router)', () => {
   it('a country with no match falls back to the global provider', async () => {
     await configure('razorpay', { countries: ['IN'], priority: 1 });
     await configure('stripe', { countries: [], priority: 99 });
-    // Priority 1 vs 99 — but razorpay is India-only and the buyer is not in
+    // Priority 1 vs 99, but razorpay is India-only and the buyer is not in
     // India, so the global is correct even though it sorts last.
     await expect(pickProvider({ application, country: 'BR' })).resolves.toBe('stripe');
   });
@@ -204,7 +205,7 @@ describe('countryFromRequest', () => {
   });
 
   it('treats Cloudflare\'s unknown/Tor sentinels as no country', () => {
-    // XX and T1 are placeholders, not countries — routing on them would send
+    // XX and T1 are placeholders, not countries, routing on them would send
     // every Tor visitor to whichever provider happened to list them.
     expect(countryFromRequest({ 'cf-ipcountry': 'XX' })).toBeUndefined();
     expect(countryFromRequest({ 'cf-ipcountry': 'T1' })).toBeUndefined();

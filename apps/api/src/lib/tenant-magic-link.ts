@@ -59,7 +59,7 @@ export async function lookupTenantMagicLinkToken(raw: string): Promise<TenantMag
   return { kind: 'ok', token };
 }
 
-/** Single-use consume — race-safe (only the first caller flips consumedAt). */
+/** Single-use consume, race-safe (only the first caller flips consumedAt). */
 export async function consumeTenantMagicLinkToken(token: TenantMagicLinkToken): Promise<boolean> {
   const result = await prisma.tenantMagicLinkToken.updateMany({
     where: { id: token.id, consumedAt: null },

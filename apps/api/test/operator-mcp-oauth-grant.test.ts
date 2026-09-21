@@ -1,5 +1,5 @@
 /**
- * Operator MCP OAuth — panel-IdP authorize + grant flow.
+ * Operator MCP OAuth, panel-IdP authorize + grant flow.
  *
  * The API no longer hosts a login form: GET /oauth/authorize validates the
  * client + PKCE and redirects to the panel's /mcp-consent. The panel, once the

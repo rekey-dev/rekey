@@ -6,6 +6,7 @@ import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { ApiErrorText } from '@/components/api-error';
 import { Modal } from '@/components/Modal';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
 import { SavedBanner } from '@/components/SavedBanner';
@@ -100,7 +101,7 @@ export default async function UsagePage({
       <div className="space-y-5">
         <SectionHeader
           title="Usage meters"
-          description="Usage meters define what you charge for — create a meter, then reference it in a usage-based plan."
+          description="Usage meters define what you charge for. Create a meter, then reference it in a usage-based plan."
         />
         <BillingDisabledState applicationId={id} />
       </div>
@@ -130,30 +131,30 @@ export default async function UsagePage({
           <Modal
             modalKey="newMeter"
             title="Add a usage meter"
-            description="Slug is the stable identifier your code reports against. Unit is a free-form label (calls, MB, minutes) — shown back to operators in dashboards but not enforced."
+            description="Slug is the stable identifier your code reports against. Unit is a free-form label (calls, MB, minutes), shown back to operators in dashboards but not enforced."
             trigger="+ New meter"
           >
-            <form action={createMeter.bind(null, id)} className="space-y-3">
+            <ActionForm action={createMeter.bind(null, id)} className="space-y-3">
               {error && (
                 <Banner tone="error">
                   <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
                 </Banner>
               )}
-              <Field label="Slug" hint="URL-safe identifier — what your SDK calls report against.">
+              <Field label="Slug" hint="URL-safe identifier: what your SDK calls report against.">
                 <input
                   type="text" name="slug" required autoFocus placeholder="api_calls"
                   pattern="^[a-z0-9](?:[a-z0-9_\-]{0,38}[a-z0-9])?$"
                   className={`${inputCls} font-mono`}
                 />
               </Field>
-              <Field label="Name" hint="Human label — shown in operator dashboards.">
+              <Field label="Name" hint="Human label, shown in operator dashboards.">
                 <input type="text" name="name" required placeholder="API calls" className={inputCls} />
               </Field>
-              <Field label="Unit" hint="Free-form: calls, MB, seats, minutes — anything that reads naturally.">
+              <Field label="Unit" hint="Free-form: calls, MB, seats, minutes, or anything that reads naturally.">
                 <input type="text" name="unit" required placeholder="calls" className={inputCls} />
               </Field>
               <SubmitButton pendingLabel="Adding meter…">Add meter</SubmitButton>
-            </form>
+            </ActionForm>
           </Modal>
         }
       />
@@ -202,21 +203,21 @@ export default async function UsagePage({
                 </TD>
                 <TD align="right">
                   <div className="flex items-center justify-end gap-3">
-                    <form action={setMeterActive.bind(null, id, m.slug, !m.active)} className="inline">
+                    <ActionForm action={setMeterActive.bind(null, id, m.slug, !m.active)} className="inline">
                       <SubmitButton
                         pendingLabel={m.active ? 'Disabling…' : 'Enabling…'}
                         className="rounded text-xs font-medium text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
                       >
                         {m.active ? 'Disable' : 'Enable'}
                       </SubmitButton>
-                    </form>
-                    <form action={deleteMeter.bind(null, id, m.slug)} className="inline">
+                    </ActionForm>
+                    <ActionForm action={deleteMeter.bind(null, id, m.slug)} className="inline">
                       <ConfirmButton
                         confirm={`Delete meter "${m.slug}"? All recorded usage events for this meter will be deleted too. To preserve history, Disable instead.`}
                       >
                         Delete
                       </ConfirmButton>
-                    </form>
+                    </ActionForm>
                   </div>
                 </TD>
               </TR>

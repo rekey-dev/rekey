@@ -1,5 +1,5 @@
 /**
- * Razorpay module `translate` unit tests — fixture payloads in, normalized
+ * Razorpay module `translate` unit tests, fixture payloads in, normalized
  * DomainBillingEvents out. No DB writes: translate is pure mapping (the
  * appliers own persistence, pinned by razorpay-webhook.test.ts through the
  * pipeline). These fixtures pin the mapping itself: the 7-event coverage
@@ -83,7 +83,7 @@ describe('razorpay module translate', () => {
       firstPeriod: true,
       currentPeriodEnd: new Date(1_788_000_000 * 1000),
     });
-    // 2nd+ charge is a renewal — provisions against the mirrored new period.
+    // 2nd+ charge is a renewal, provisions against the mirrored new period.
     expect(fire(2)?.[0]).toMatchObject({ firstPeriod: false });
   });
 
@@ -198,7 +198,7 @@ describe('razorpay module translate', () => {
   });
 
   // The header is OUTSIDE the HMAC, so preferring it meant one captured signed
-  // body replayed forever under fresh header ids — defeating the
+  // body replayed forever under fresh header ids, defeating the
   // (applicationId, provider, providerEventId) uniqueness that stops replays.
   // The id is now derived from signed content only.
   it('extractEventId ignores the unsigned x-razorpay-event-id header', () => {
@@ -218,10 +218,10 @@ describe('razorpay module translate', () => {
     expect(withHeader).toBe(without);
     expect(withHeader).not.toBe('evt_h');
     const fallback = razorpayModule.webhook.extractEventId(payload, req({}));
-    // Full sha256 of the signed body — length is an implementation detail,
+    // Full sha256 of the signed body, length is an implementation detail,
     // that it is derived from the body is the property that matters.
     expect(fallback).toMatch(/^rzp_subscription\.charged_123_[0-9a-f]+$/);
-    // Deterministic — the same body yields the same idempotency key.
+    // Deterministic, the same body yields the same idempotency key.
     expect(razorpayModule.webhook.extractEventId(payload, req({}))).toBe(fallback);
   });
 

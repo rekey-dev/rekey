@@ -197,7 +197,7 @@ const { endUser, accessToken, refreshToken } = await rekey.auth.signUp({
 const me = await rekey.auth.getCurrentUser(accessToken);
 console.log(me.email); // → "alice@example.com"
 
-// When the access expires (~15 min later), exchange the refresh for a new pair.
+// When the access expires (see accessTokenExpiresAt; 15 min by default), exchange the refresh for a new pair.
 // The presented refresh is single-use — store the new one immediately.
 const next = await rekey.auth.refresh(refreshToken);
 ```

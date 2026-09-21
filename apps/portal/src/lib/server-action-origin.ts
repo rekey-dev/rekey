@@ -12,7 +12,7 @@ import type { NextRequest } from 'next/server';
  *         : undefined;
  *
  * A browser sends the LITERAL STRING `"null"` as `Origin` whenever the page
- * sits in an opaque origin — a sandboxed iframe, a `data:` document, or a
+ * sits in an opaque origin, a sandboxed iframe, a `data:` document, or a
  * form POST that followed a cross-origin redirect. That value is a string, so
  * the guard passes, `new URL('null')` throws `TypeError [ERR_INVALID_URL]`,
  * and nothing catches it. Every Server Action from such a client answers 500.
@@ -25,7 +25,7 @@ import type { NextRequest } from 'next/server';
  *
  * Deleting the header rather than repairing it is the deliberate choice.
  * Next's own next branch treats an ABSENT origin as an old browser, warns, and
- * proceeds — so removal restores exactly the behaviour Next already ships for
+ * proceeds, so removal restores exactly the behaviour Next already ships for
  * a request it cannot attribute. Rewriting the header to this deployment's own
  * origin would instead ASSERT same-origin on a request that is provably not,
  * which is the one thing the check exists to prevent. What actually defends

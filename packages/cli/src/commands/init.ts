@@ -1,5 +1,5 @@
 /**
- * `rekey init` — bootstrap a fresh deployment.
+ * `rekey init`, bootstrap a fresh deployment.
  *
  * One-shot, non-interactive when given the required flags:
  *
@@ -12,13 +12,14 @@
  *   2. An Application under that Tenant.
  *   3. The first API key for that Application.
  *
- * The key's prefix follows the Application's `environment`, which the
- * super-admin create route does not accept — so this always produces an
- * `rp_test_` key on a DEVELOPMENT app. Environment is fixed at creation with no
- * promotion path, so a PRODUCTION Application has to be created from the panel
- * (or `POST /api/v1/tenant/applications`, which does take `environment`).
+ * The key's prefix follows the Application's `environment`. `init` does not
+ * send one, so it bootstraps a DEVELOPMENT app and an `rp_test_` key, which is
+ * the right default for a first run. Two ways out, neither of them the panel:
+ * `rekey apps create --environment PRODUCTION` (the super-admin create route
+ * has always accepted the field), or `POST /api/v1/tenant/applications/:id/promote`,
+ * which raises an existing app to PRODUCTION once, one way.
  *
- * Returns all three. The raw API key is shown ONCE — store it immediately.
+ * Returns all three. The raw API key is shown ONCE, store it immediately.
  */
 
 import type { Command } from 'commander';

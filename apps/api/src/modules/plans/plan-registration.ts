@@ -3,8 +3,8 @@
  *
  * Two call sites raise it and they are deliberately the same error:
  *
- *   - `plansService` — an operator trying to put an unregistered plan on sale.
- *   - the provider classes — a buyer reaching checkout for a plan whose
+ *   - `plansService`, an operator trying to put an unregistered plan on sale.
+ *   - the provider classes, a buyer reaching checkout for a plan whose
  *     provider price id is missing.
  *
  * The second used to be a bare `throw new Error(...)`, which the Fastify error
@@ -13,7 +13,7 @@
  * named, operator-fixable state, and collapsing it to a 500 meant the only
  * description of what was wrong lived in a server log the buyer's operator was
  * not reading. `fix` is written for the OPERATOR even though a buyer may be the
- * one who sees it — they are the only party who can act on it.
+ * one who sees it, they are the only party who can act on it.
  *
  * Its own module so both sides can share it: `plans.service.ts` already imports
  * from `billing/providers/`, so the reverse import has to stay dependency-free.

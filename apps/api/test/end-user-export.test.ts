@@ -3,8 +3,8 @@
  *   GET /tenant/applications/:id/end-users/:euid/export
  *
  * Covers: document shape (every section present + populated), the
- * OWNER/ADMIN role gate, cross-tenant + cross-application 404s, and —
- * critically — that no credential material (password hashes, token hashes,
+ * OWNER/ADMIN role gate, cross-tenant + cross-application 404s, and,
+ * critically, that no credential material (password hashes, token hashes,
  * MFA ciphertexts, license key hashes, passkey public keys) ever appears in
  * the serialized output.
  */
@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { recordSecurityEvent } from '../src/lib/security-events.js';
 
 interface Bootstrapped {
   applicationId: string;
@@ -166,15 +167,35 @@ describe('end-user data export (GDPR/DSAR)', () => {
     await prisma.usageRecord.create({
       data: { meterId: meter.id, endUserId: euid, quantity: 42 },
     });
-    await prisma.securityEvent.create({
-      data: {
-        tenantId: b.tenantId,
-        applicationId: b.applicationId,
-        actorType: 'end_user',
-        actorId: euid,
-        type: 'user.signed_in',
-        ip: '203.0.113.9',
-      },
+    // Seeded through recordSecurityEvent, the only path production writes
+    // events through, so each row carries the subject it is about.
+    await recordSecurityEvent({
+      tenantId: b.tenantId,
+      applicationId: b.applicationId,
+      actorType: 'end_user',
+      actorId: euid,
+      type: 'user.signed_in',
+      ip: '203.0.113.9',
+    });
+    // Done TO the subject by an operator: the operator is the actor. The
+    // export used to filter on actorType=end_user and omit this entirely.
+    await recordSecurityEvent({
+      tenantId: b.tenantId,
+      applicationId: b.applicationId,
+      actorType: 'operator',
+      actorId: 'op-dsar-event-actor',
+      type: 'end_user.device_blocked',
+      metadata: { endUserId: euid },
+    });
+    // Somebody else in the same application. Must not appear; the IP is the
+    // marker because the event type alone would collide with the subject's.
+    await recordSecurityEvent({
+      tenantId: b.tenantId,
+      applicationId: b.applicationId,
+      actorType: 'end_user',
+      actorId: 'eu-someone-else',
+      type: 'user.signed_in',
+      ip: '198.51.100.77',
     });
     await prisma.impersonationAudit.create({
       data: {
@@ -244,7 +265,13 @@ describe('end-user data export (GDPR/DSAR)', () => {
     expect(doc.usageRecords).toHaveLength(1);
     expect(doc.usageRecords[0]).toMatchObject({ meterSlug: 'api_calls', quantity: 42 });
     // Sign-up itself recorded a user.signed_up event alongside the seeded one.
-    expect(doc.securityEvents.map((e) => e['type'])).toContain('user.signed_in');
+    const eventTypes = doc.securityEvents.map((e) => e['type']);
+    expect(eventTypes).toContain('user.signed_in');
+    // Everything done TO the person, not only what they did themselves.
+    expect(eventTypes).toContain('end_user.device_blocked');
+    expect(res.body).not.toContain('198.51.100.77');
+    // The acting operator's id is staff data, not the subject's: never exported.
+    expect(res.body).not.toContain('op-dsar-event-actor');
     expect(doc.impersonations).toHaveLength(1);
 
     // SECURITY: the raw serialized body must contain neither credential field

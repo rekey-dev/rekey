@@ -3,7 +3,7 @@
  *
  * PayPal reports `amount.value` as a decimal string in the currency's own
  * units, and the module multiplied every one of them by 100. For a currency
- * with no minor unit that is a clean 100× — a ¥5000 sale arrives as "5000",
+ * with no minor unit that is a clean 100×, a ¥5000 sale arrives as "5000",
  * where 5000 already IS the smallest unit, and was recorded as ¥500,000
  * straight into the operator's revenue figures.
  *
@@ -12,7 +12,7 @@
  * accepts decimals for it, and Stripe treats HUF and TWD as two-decimal for
  * charges where PayPal refuses decimals on them outright. A single shared
  * table would therefore be wrong for somebody, which is why this one is scoped
- * to the module that talks to PayPal — the same shape as `capabilities`: a
+ * to the module that talks to PayPal, the same shape as `capabilities`: a
  * provider that differs declares it, rather than core pretending it does not.
  *
  * Source: PayPal's currency-codes reference, "currencies that do not support
@@ -29,8 +29,8 @@ export function paypalScale(currency: string | undefined): number {
  * Format an integer minor-unit amount as the decimal string PayPal expects.
  *
  * The outbound half of the same problem. Plan registration and one-off orders
- * hardcoded `(amount / 100).toFixed(2)`, so a ¥5000 plan — where 5000 already
- * IS the amount, the yen having no minor unit — was registered at "50.00", a
+ * hardcoded `(amount / 100).toFixed(2)`, so a ¥5000 plan, where 5000 already
+ * IS the amount, the yen having no minor unit, was registered at "50.00", a
  * hundredth of its price. And PayPal rejects decimals outright on exactly
  * these currencies, so those checkouts failed rather than merely undercharging.
  */
@@ -41,7 +41,7 @@ export function paypalMajorString(minor: number, currency: string | undefined): 
 
 /**
  * The exact inverse of `paypalMajorString`, for reading an amount back off a
- * PayPal API RESPONSE — today, the refund we just issued.
+ * PayPal API RESPONSE, today, the refund we just issued.
  *
  * Deliberately separate from the webhook path's `paypalAmountToMinor`, which
  * looks like it does the same arithmetic and does not do the same job. That

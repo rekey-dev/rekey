@@ -1,7 +1,8 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { getApplication } from '@/lib/api';
 import { AppNav } from '@/components/AppNav';
+import { Breadcrumb } from '@/components/Breadcrumb';
 import { CopyButton } from '@/components/CopyButton';
 import { EnvironmentBadge } from '@/components/EnvironmentBadge';
 import { Banner } from '@/components/Banner';
@@ -18,37 +19,58 @@ export default async function ApplicationDetailLayout({
 
   return (
     <section className="mx-auto max-w-7xl space-y-5 px-6 py-8 lg:px-8">
-      <header className="space-y-1.5">
-        <Link
-          href="/applications"
-          className="inline-flex items-center gap-1 rounded text-xs text-[var(--color-muted-fg)] transition-colors hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
-        >
-          ← All applications
-        </Link>
-        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h1 className="text-xl font-semibold tracking-tight text-[var(--color-fg)]">{app.name}</h1>
-          {/* In the identity row rather than on a settings tab: it is what the
-              application IS. It is now promotable (once, one-way) from the
-              Lifecycle tab, but it is still not a field you edit in place. */}
-          <EnvironmentBadge environment={app.environment} />
-          <span className="font-mono text-xs text-[var(--color-muted-fg)]">{app.slug}</span>
-          {/* --color-muted-fg, not --color-faint-fg: this is a value the
-              operator is meant to read off the screen and copy, and faint put
-              it at 3.72:1 (rgb(107,107,107) on #0a0a0a) at 12px — below AA for
-              a string where one wrong character is a silent auth failure.
-              Muted measures 7.85:1 on the same background. */}
-          <span title={app.publicKey} className="max-w-7xl truncate font-mono text-xs text-[var(--color-muted-fg)]">
-            {app.publicKey}
-          </span>
-          <CopyButton value={app.publicKey} label="Copy" />
+      {/* This header used to run the name, the environment badge, the slug and a
+          36-character public key along ONE baseline-aligned row. The key is by
+          a wide margin the longest string on that line, so it took the eye
+          first and the application's own name, the thing that tells you which
+          application you are about to change, read as a prefix to it.
+
+          Two clusters instead: identity left, the identifiers you copy right.
+          Nothing is hidden and nothing is newly truncated; they have simply
+          stopped competing for the same slot. */}
+      <header className="space-y-2">
+        <Breadcrumb
+          items={[{ label: 'Applications', href: '/applications' }, { label: app.name }]}
+        />
+        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+            <h1 className="text-xl font-semibold tracking-tight text-[var(--color-fg)]">
+              {app.name}
+            </h1>
+            {/* In the identity row rather than on a settings tab: it is what the
+                application IS. It is now promotable (once, one-way) from the
+                Lifecycle tab, but it is still not a field you edit in place. */}
+            <EnvironmentBadge environment={app.environment} />
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="font-mono text-xs text-[var(--color-muted-fg)]">{app.slug}</span>
+            <span aria-hidden="true" className="text-[var(--color-faint-fg)]">
+              ·
+            </span>
+            {/* --color-muted-fg, not --color-faint-fg: this is a value the
+                operator is meant to read off the screen and copy, and faint put
+                it at 3.72:1 (rgb(107,107,107) on #0a0a0a) at 12px, below AA for
+                a string where one wrong character is a silent auth failure.
+                Muted measures 7.85:1 on the same background.
+
+                Still not ellipsised, for the same reason. Moving it off the
+                title's line is what buys it room; shortening it would trade one
+                legibility problem for another. */}
+            <span className="font-mono text-xs text-[var(--color-muted-fg)]">{app.publicKey}</span>
+            <CopyButton value={app.publicKey} label="Copy" />
+          </div>
         </div>
       </header>
 
-      <AppNav id={id} billingEnabled={app.billingConfig.enabled} />
+      <AppNav
+        id={id}
+        billingEnabled={app.billingConfig.enabled}
+        scopes={app.access?.scopes ?? null}
+      />
 
       {/* In the LAYOUT, not on one page. A disabled application looks entirely
-          normal on every tab — the plans are there, the end-users are there,
-          the keys are there — and an operator debugging "why is sign-in
+          normal on every tab, the plans are there, the end-users are there,
+          the keys are there, and an operator debugging "why is sign-in
           failing" would otherwise have to guess to visit Lifecycle. It renders
           above the tab content on all of them. */}
       {app.disabledAt != null && (

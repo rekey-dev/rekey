@@ -246,7 +246,7 @@ describe('Operator MCP create_plan covers every plan kind', () => {
 
   it('refuses to let operator metadata forge a provider registration', async () => {
     // `metadata` is new on this tool, and it reaches `plansService.create`,
-    // which used to write it verbatim — the ONE writer that skipped the
+    // which used to write it verbatim, the ONE writer that skipped the
     // stripping `mergeMetadata` performs, because it has nothing to merge
     // against.
     //

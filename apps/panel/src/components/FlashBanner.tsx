@@ -1,7 +1,7 @@
 /**
  * Renders a flash payload consumed by the parent page.
  *
- * Pure presentation — the consume happens in the page server component so
+ * Pure presentation, the consume happens in the page server component so
  * we don't render this when the cookie is empty.
  */
 

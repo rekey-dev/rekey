@@ -20,12 +20,15 @@ There used to be a single-app V1 reference at `examples/portal` that took one Ap
 
 ## Environment
 
-`apps/portal` reads exactly two variables (`apps/portal/src/lib/env.ts`) — there is deliberately no per-app secret and no per-app display name, because both come from `GET /api/v1/portal/config/:slug` at request time. That is what lets one deployment serve every app.
+`apps/portal` reads two required variables (`apps/portal/src/lib/env.ts`) and one optional one. There is deliberately no per-app secret and no per-app display name, because both come from `GET /api/v1/portal/config/:slug` at request time. That is what lets one deployment serve every app.
 
 | Variable | Required | Meaning |
 |---|---|---|
 | `REKEY_URL` | yes | Base URL of the Rekey API (e.g. `https://api.your-deployment.com`) |
 | `PORTAL_BASE_URL` | **in production, yes** | Public URL of the portal itself; used for checkout success/cancel return URLs and magic-link targets. Outside production it defaults to `http://localhost:3050`; under `NODE_ENV=production` an unset value **throws at first use** rather than defaulting, because a localhost return URL strands customers after payment. |
+| `PORTAL_TRUSTED_PROXY_HOPS` | no | How many proxies you run in front of the portal (Traefik alone = `1`). The portal then forwards the visitor's address (the entry that many from the right of `X-Forwarded-For`) on its server-side API calls, so the API's per-IP limits count each visitor rather than the portal. Unset forwards nothing, which is right when nothing sits in front: any header the portal received then came from the client. `docker-compose.prod.yml` sets `1`. Believed only together with `PORTAL_PROXY_SECRET`. See [rate-limits.md](rate-limits.md). |
+| `PORTAL_PROXY_SECRET` | with the above | Your proxy sends it as `X-Rekey-Proxy-Secret` on every request (a Traefik header middleware in the compose files). The portal believes `X-Forwarded-For` only on a request that carries it, so a caller that reaches the portal around the proxy cannot choose the forwarded address. |
+| `INTERNAL_CALLER_SECRET` | when the portal calls the API's public origin | Sent to the API as `X-Rekey-Caller-Secret` on every server-side call; must equal the API's value. Without it the API cannot tell the portal's calls from anyone else's through the same edge, and counts every visitor as the portal's outgoing address. |
 
 ```bash
 # local dev
@@ -52,8 +55,9 @@ docker compose --profile full up --build portal
 
 **Production** (`docker-compose.prod.yml`, Dokploy/Traefik): the `portal`
 service is routed at `portal.rekey.dev`, `restart: unless-stopped`,
-`depends_on: api`, and reaches the API over the private network
-(`REKEY_URL=http://api:3030`). `PORTAL_BASE_URL` is preset to
+`depends_on: api`, and reaches the API over the private `rekey-edge` network
+(`REKEY_URL=http://rekey-api-edge:3030`) from a fixed address the API trusts
+to forward visitor IPs. `PORTAL_BASE_URL` is preset to
 `https://portal.rekey.dev`. Nothing else to configure — **one** deployment
 serves every opted-in Application at `/<slug>`, which was the entire point of
 V2; there is no per-Application service, hostname or secret to provision. Full

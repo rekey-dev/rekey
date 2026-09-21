@@ -1,25 +1,27 @@
 /**
- * `rekey plans …` — Plan management.
+ * `rekey plans …`, Plan management.
  *
  *   rekey plans list --app <id> [--include-inactive]
  *   rekey plans create --app <id> --slug <slug> --name <name> --amount <int>
  *                        [--currency USD] [--interval MONTH|YEAR]
- *                        [--kind SUBSCRIPTION|LICENSE|USAGE|CREDIT]
- *                        [--license-kind PERPETUAL|TIMED|SEATS]
- *                        [--license-duration-days <int>] [--license-seats-allowed <int>]
- *                        [--meter-slug <slug>] [--price-per-unit-cents <int>]
- *                        [--credits-amount <int>]
  *   rekey plans set-active --app <id> --slug <slug> --active true|false
  *
- * Money is the smallest currency unit (cents) — never floats. The CLI
- * refuses fractional `--amount` / `--price-per-unit-cents` values to prevent
- * silent rounding bugs. Per-kind field requirements (LICENSE needs
- * --license-kind, TIMED needs a duration, USAGE needs a meter + per-unit
- * price, CREDIT needs --credits-amount) are validated server-side; the API
- * returns a typed RekeyError.
+ * Money is the smallest currency unit (cents), never floats. The CLI refuses
+ * fractional `--amount` values to prevent silent rounding bugs.
+ *
+ * `create` posts to the super-admin route, which builds SUBSCRIPTION plans and
+ * nothing else. This command used to carry LICENSE / USAGE / CREDIT flags and
+ * claim the API validated the per-kind combinations for us. It never did: that
+ * route's body schema has no such fields, so it discarded them and answered
+ * 201 for a SUBSCRIPTION plan. `--kind LICENSE --credits-amount 500` reported
+ * success and created the wrong plan. The flags are refused here now, and the
+ * route rejects an unknown key rather than dropping it.
+ *
+ * Per-kind plans are created from the panel, or from
+ * POST /api/v1/tenant/applications/:id/plans, which implements every kind.
  */
 
-import type { Command } from 'commander';
+import { Option, type Command } from 'commander';
 import type { Paged } from '@rekey.dev/node';
 import { ok, fail, readGlobalOpts } from '../lib/output.js';
 import { adminRequest, listQuery, readListOpts, withListOptions } from '../lib/api.js';
@@ -62,7 +64,7 @@ export function registerPlansCommand(program: Command): void {
         ...readListOpts(opts),
       });
       const path = `/api/v1/admin/applications/${encodeURIComponent(opts.app)}/plans${qs}`;
-      // `{items, page}` since 2.0.0-rc.3 — see `apps list` for why the page is
+      // `{items, page}` since 2.0.0-rc.3, see `apps list` for why the page is
       // printed rather than silently dropped.
       const data = await adminRequest<Paged<PlanDto>>({ ctx, method: 'GET', path });
       ok(ctx, { plans: data.items, page: data.page }, (d) => {
@@ -95,13 +97,19 @@ export function registerPlansCommand(program: Command): void {
     .requiredOption('--amount <int>', 'Smallest currency unit, e.g. cents')
     .option('--currency <code>', 'ISO 4217 — defaults to USD', 'USD')
     .option('--interval <interval>', 'MONTH | YEAR', 'MONTH')
-    .option('--kind <kind>', 'SUBSCRIPTION | LICENSE | USAGE | CREDIT', 'SUBSCRIPTION')
-    .option('--license-kind <kind>', 'PERPETUAL | TIMED | SEATS (LICENSE plans)')
-    .option('--license-duration-days <int>', 'Key lifetime in days (TIMED licenses)')
-    .option('--license-seats-allowed <int>', 'Concurrent activations (SEATS licenses)')
-    .option('--meter-slug <slug>', 'Usage meter to bill against (USAGE plans)')
-    .option('--price-per-unit-cents <int>', 'Per-unit price in cents (USAGE plans)')
-    .option('--credits-amount <int>', 'Credits granted per purchase (CREDIT plans)')
+    // Hidden, not deleted. `--help` must not advertise a flag this route
+    // cannot honour, but a script or agent written against the old contract
+    // deserves the explanation below rather than commander's bare "unknown
+    // option". Every one of these is refused in the action.
+    .addOption(
+      new Option('--kind <kind>', 'SUBSCRIPTION only on this route').default('SUBSCRIPTION').hideHelp(),
+    )
+    .addOption(new Option('--license-kind <kind>', 'Not supported here').hideHelp())
+    .addOption(new Option('--license-duration-days <int>', 'Not supported here').hideHelp())
+    .addOption(new Option('--license-seats-allowed <int>', 'Not supported here').hideHelp())
+    .addOption(new Option('--meter-slug <slug>', 'Not supported here').hideHelp())
+    .addOption(new Option('--price-per-unit-cents <int>', 'Not supported here').hideHelp())
+    .addOption(new Option('--credits-amount <int>', 'Not supported here').hideHelp())
     .action(async function (
       this: Command,
       opts: {
@@ -121,26 +129,6 @@ export function registerPlansCommand(program: Command): void {
       },
     ) {
       const ctx = readGlobalOpts(this);
-
-      // Parse + range-check an optional integer flag. Returns undefined when
-      // the flag was not passed; calls fail() (which exits) on a bad value.
-      const intOpt = (
-        raw: string | undefined,
-        flag: string,
-        code: string,
-        min: number,
-      ): number | undefined => {
-        if (raw === undefined) return undefined;
-        const n = Number(raw);
-        if (!Number.isInteger(n) || n < min) {
-          fail(ctx, {
-            code,
-            message: `${flag} must be an integer >= ${min}. Got "${raw}".`,
-            fix: 'Pass a whole number. Floats are rejected to prevent silent rounding.',
-          });
-        }
-        return n;
-      };
 
       const amountInt = Number(opts.amount);
       if (!Number.isInteger(amountInt) || amountInt < 0) {
@@ -164,60 +152,50 @@ export function registerPlansCommand(program: Command): void {
           fix: 'Use SUBSCRIPTION, LICENSE, USAGE, or CREDIT.',
         });
       }
-      if (opts.licenseKind !== undefined && !['PERPETUAL', 'TIMED', 'SEATS'].includes(opts.licenseKind)) {
+      // The per-kind flags are refused BEFORE the request, not after it. The
+      // super-admin route implements SUBSCRIPTION only; it used to validate
+      // these fields away and answer 201, so the CLI reported success for a
+      // plan of the wrong kind. Fail here, and name the surface that does
+      // implement them, rather than letting the operator find out from a
+      // pricing page that sells the wrong thing.
+      const unsupported: string[] = [];
+      if (opts.kind !== 'SUBSCRIPTION') unsupported.push(`--kind ${opts.kind}`);
+      for (const [value, flag] of [
+        [opts.licenseKind, '--license-kind'],
+        [opts.licenseDurationDays, '--license-duration-days'],
+        [opts.licenseSeatsAllowed, '--license-seats-allowed'],
+        [opts.meterSlug, '--meter-slug'],
+        [opts.pricePerUnitCents, '--price-per-unit-cents'],
+        [opts.creditsAmount, '--credits-amount'],
+      ] as const) {
+        if (value !== undefined) unsupported.push(flag);
+      }
+      if (unsupported.length > 0) {
         fail(ctx, {
-          code: 'CLI_PLANS_LICENSE_KIND_INVALID',
-          message: `--license-kind must be PERPETUAL, TIMED, or SEATS. Got "${opts.licenseKind}".`,
-          fix: 'Use PERPETUAL, TIMED, or SEATS.',
+          code: 'CLI_PLANS_KIND_UNSUPPORTED',
+          message:
+            '`rekey plans create` builds SUBSCRIPTION plans only, so it cannot honour ' +
+            `${unsupported.join(', ')}.`,
+          fix:
+            'Create LICENSE, USAGE and CREDIT plans in the panel (Application to Plans), or with ' +
+            'POST /api/v1/tenant/applications/:id/plans and an operator token, which implements ' +
+            'every kind.',
         });
       }
-
-      // Combination rules (e.g. LICENSE needs --license-kind, TIMED needs a
-      // duration, USAGE needs a meter + per-unit price, CREDIT needs
-      // --credits-amount) are enforced by the API; it returns a typed
-      // RekeyError we surface as-is.
-      const licenseDurationDays = intOpt(
-        opts.licenseDurationDays,
-        '--license-duration-days',
-        'CLI_PLANS_LICENSE_DURATION_INVALID',
-        1,
-      );
-      const licenseSeatsAllowed = intOpt(
-        opts.licenseSeatsAllowed,
-        '--license-seats-allowed',
-        'CLI_PLANS_LICENSE_SEATS_INVALID',
-        1,
-      );
-      const pricePerUnitCents = intOpt(
-        opts.pricePerUnitCents,
-        '--price-per-unit-cents',
-        'CLI_PLANS_PRICE_PER_UNIT_INVALID',
-        0,
-      );
-      const creditsAmount = intOpt(
-        opts.creditsAmount,
-        '--credits-amount',
-        'CLI_PLANS_CREDITS_AMOUNT_INVALID',
-        1,
-      );
 
       const data = await adminRequest<PlanDto>({
         ctx,
         method: 'POST',
         path: `/api/v1/admin/applications/${encodeURIComponent(opts.app)}/plans`,
+        // Exactly the fields the admin route implements. It rejects an unknown
+        // key now instead of dropping it, so sending `kind` (even the correct
+        // SUBSCRIPTION) would be a 400 rather than a no-op.
         body: {
           slug: opts.slug,
           name: opts.name,
           amount: amountInt,
           currency: opts.currency,
           interval: opts.interval,
-          kind: opts.kind,
-          ...(opts.licenseKind !== undefined && { licenseKind: opts.licenseKind }),
-          ...(licenseDurationDays !== undefined && { licenseDurationDays }),
-          ...(licenseSeatsAllowed !== undefined && { licenseSeatsAllowed }),
-          ...(opts.meterSlug !== undefined && { meterSlug: opts.meterSlug }),
-          ...(pricePerUnitCents !== undefined && { pricePerUnitCents }),
-          ...(creditsAmount !== undefined && { creditsAmount }),
         },
       });
       ok(ctx, data, (d) => {

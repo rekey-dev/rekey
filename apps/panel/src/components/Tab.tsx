@@ -7,7 +7,8 @@
  */
 
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
+import { LinkPending } from '@/components/LinkPending';
 import { usePathname } from 'next/navigation';
 
 export function Tab({
@@ -18,7 +19,7 @@ export function Tab({
 }: {
   href: string;
   children: React.ReactNode;
-  /** Optional override — defaults to `href`. Use when one tab matches several routes. */
+  /** Optional override, defaults to `href`. Use when one tab matches several routes. */
   matchPrefix?: string;
   /** Active only on exact pathname match. Use for "Overview"-style parent links. */
   exact?: boolean;
@@ -28,8 +29,13 @@ export function Tab({
   const active = exact
     ? pathname === prefix
     : pathname === prefix || pathname.startsWith(prefix + '/');
-  // Active: red underline, full-fg text. Inactive: muted, hover lifts to fg
-  // and shows a faint border. See design.md §13.
+  // Active: teal (--color-primary) underline, full-fg text. Inactive: muted,
+  // hover lifts to fg and shows a faint border.
+  //
+  // design.md §15 (Tabs) still describes this as "underline-on-active in
+  // primary red", left over from before the red-to-teal rebrand. The token
+  // has been --color-primary (teal) throughout this component; treat the doc
+  // as stale, not this file.
   const base =
     'px-3 py-2 text-sm whitespace-nowrap border-b-2 -mb-px transition-colors ' +
     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-primary)] focus-visible:rounded-sm';
@@ -48,9 +54,12 @@ export function Tab({
     }
   }, [active]);
 
+  // `aria-current` was missing entirely, while AppNav and Sidebar both set it.
+  // A screen-reader user got three tab strips of which only two announced
+  // which item was current, and this is the strip the nested sections used.
   return (
-    <Link href={href} ref={ref} className={cls}>
-      {children}
+    <Link href={href} ref={ref} aria-current={active ? 'page' : undefined} className={cls}>
+      <LinkPending>{children}</LinkPending>
     </Link>
   );
 }

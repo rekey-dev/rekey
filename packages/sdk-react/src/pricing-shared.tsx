@@ -7,17 +7,17 @@
  * they're safe to render from a Server Component. Both the server-friendly
  * `<PricingTable>` (in `billing-components.tsx`) and the interactive,
  * provider-aware variant (`<PricingTableInteractive>`, a client component in
- * `provider-picker.tsx`) import the grid renderer from here — keeping that body
+ * `provider-picker.tsx`) import the grid renderer from here, keeping that body
  * in one place without creating an import cycle between the two modules.
  */
 
 import * as React from 'react';
 import { useCx } from './theme.js';
 import type { FormAction } from './auth-components.js';
-import type { PlanDto } from '@rekey.dev/shared-types';
+import type { PlanDto, TrialEligibilityItemDto } from '@rekey.dev/shared-types';
 
 /**
- * The plan fields `<PricingTable>` renders — a genuine slice of `PlanDto`
+ * The plan fields `<PricingTable>` renders, a genuine slice of `PlanDto`
  * rather than a look-alike interface, so a rename in shared-types breaks the
  * build here instead of quietly rendering `undefined` (the same class of bug
  * that made `<OrganizationProfile>` post the wrong id).
@@ -28,13 +28,28 @@ import type { PlanDto } from '@rekey.dev/shared-types';
 export type PricingPlan = Pick<PlanDto, 'id' | 'slug' | 'name' | 'amount' | 'currency'> & {
   /** Billing interval for SUBSCRIPTION plans. */
   interval?: PlanDto['interval'] | undefined;
-  /** Plan kind — SUBSCRIPTION / CREDIT / LICENSE / USAGE. */
+  /** Plan kind, SUBSCRIPTION / CREDIT / LICENSE / USAGE. */
   kind?: PlanDto['kind'] | undefined;
   /** Credits granted (CREDIT-kind plans). */
   creditsAmount?: number | null | undefined;
   /** Optional marketing description / feature bullets. */
   description?: string | undefined;
   features?: string[] | undefined;
+  /**
+   * Free-trial length in days, when this plan offers one.
+   *
+   * NOT picked from `PlanDto`: the public plan catalogue carries no trial
+   * field, so a signed-out pricing page has nothing to read. Supply it from
+   * your own copy, or leave it off and let `trialEligibility` carry it, that
+   * endpoint reports each plan's real `trialDays` alongside the answer.
+   *
+   * On its own this only labels a plan as having a trial. Whether THIS buyer
+   * may start it is a separate question, answered by `trialEligibility` on the
+   * grid; without that, the CTA stays the ordinary one, because rendering
+   * "Start free" for someone checkout will refuse is the failure the
+   * eligibility endpoint exists to prevent.
+   */
+  trialDays?: number | null | undefined;
 };
 
 /** Format a plan price from minor units. */
@@ -67,6 +82,31 @@ function currencySymbol(code: string): string {
 }
 
 /**
+ * What the grid needs from one plan's trial answer. A slice of
+ * `TrialEligibilityItemDto` (the shape `billing.getTrialEligibility()` and
+ * `getTrialEligibility()` return), so field drift in shared-types is a compile
+ * error here rather than a silently unlabelled button.
+ */
+export type PlanTrialEligibility = Pick<
+  TrialEligibilityItemDto,
+  'planSlug' | 'trialDays' | 'eligible'
+>;
+
+/** Trial days to advertise for a plan, or null when there is no trial to offer. */
+function trialDaysFor(
+  plan: PricingPlan,
+  answer: PlanTrialEligibility | undefined,
+): number | null {
+  // No answer means nobody asked the eligibility endpoint. `trialDays` alone
+  // says the plan HAS a trial, never that this buyer may start it, so a CTA
+  // promising one would be exactly the "finds out at the 409" flow the endpoint
+  // was added to remove.
+  if (!answer || !answer.eligible) return null;
+  const days = answer.trialDays ?? plan.trialDays ?? null;
+  return days !== null && days > 0 ? days : null;
+}
+
+/**
  * Prefer the Server Action; otherwise POST to the URL. Same shape the auth
  * components have always used, lifted here so billing behaves identically.
  */
@@ -88,8 +128,8 @@ export interface CheckoutFormBodyProps {
   /**
    * Or the URL a plain form POSTs to.
    *
-   * A Server Action is Next-only. Everywhere else — Astro, Remix, SvelteKit,
-   * an Express app rendering React — a form posts to a route, which is what
+   * A Server Action is Next-only. Everywhere else, Astro, Remix, SvelteKit,
+   * an Express app rendering React, a form posts to a route, which is what
    * `<SignIn>` has always accepted via `actionUrl`. The billing components
    * required the action, so they simply could not be used outside Next.
    *
@@ -155,10 +195,25 @@ export interface PricingGridProps {
   orgGate?: React.ReactNode;
   hideFreeCta?: boolean;
   ctaLabel?: string;
+  /**
+   * Per-plan trial answers for the SIGNED-IN buyer, from
+   * `GET /billing/trial-eligibility` (`billing.getTrialEligibility()` on the
+   * server, `getTrialEligibility()` in the browser). Pass the `items` array.
+   *
+   * A plan whose answer is `eligible` and carries a positive `trialDays`
+   * renders "Start N days free" instead of the ordinary CTA, and every other
+   * plan is untouched. Omit this and the grid behaves exactly as before, which
+   * is what keeps it a Server Component and keeps existing callers working.
+   *
+   * Eligibility is per buyer, so this must come from a signed-in read; a
+   * signed-out pricing page should leave it off rather than advertise a trial
+   * the buyer may not be able to start.
+   */
+  trialEligibility?: readonly PlanTrialEligibility[] | undefined;
 }
 
 /**
- * The plan grid itself (no `<Themed>` wrapper — callers provide one). Renders the
+ * The plan grid itself (no `<Themed>` wrapper, callers provide one). Renders the
  * org-gate when `orgGateBlocking`, otherwise a card per plan with an upgrade
  * button wired to `checkoutAction`. `hiddenFields` rides along on every form, so
  * the interactive variant threads the chosen `provider` through here.
@@ -166,12 +221,19 @@ export interface PricingGridProps {
 export function PricingGrid({
   plans, checkoutAction, checkoutUrl, currentPlanSlug = null, hiddenFields,
   orgGateBlocking = false, orgGate, hideFreeCta = true, ctaLabel = 'Choose',
+  trialEligibility,
 }: PricingGridProps): React.JSX.Element {
   const cx = useCx();
 
   if (orgGateBlocking) {
     return <>{orgGate ?? <DefaultOrgGate />}</>;
   }
+
+  // Built inline rather than memoised: this component is deliberately
+  // hook-light so it can render from a Server Component.
+  const trialBySlug = new Map<string, PlanTrialEligibility>(
+    (trialEligibility ?? []).map((item) => [item.planSlug, item]),
+  );
 
   return (
     <div className={cx('rekey-pricing', 'card')}>
@@ -180,6 +242,7 @@ export function PricingGrid({
         const isCurrent = currentPlanSlug != null && plan.slug === currentPlanSlug;
         const isFree = plan.amount === 0;
         const isCredit = plan.kind === 'CREDIT';
+        const trialDays = trialDaysFor(plan, trialBySlug.get(plan.slug));
         return (
           <div
             key={plan.id}
@@ -213,7 +276,9 @@ export function PricingGrid({
                   {...(hiddenFields ? { hiddenFields } : {})}
                   block
                 >
-                  {isCredit ? 'Buy' : ctaLabel}
+                  {trialDays !== null
+                    ? `Start ${trialDays} day${trialDays === 1 ? '' : 's'} free`
+                    : isCredit ? 'Buy' : ctaLabel}
                 </CheckoutFormBody>
               )}
             </div>

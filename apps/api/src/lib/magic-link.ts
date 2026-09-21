@@ -2,7 +2,7 @@
  * Magic-link sign-in tokens.
  *
  * Same lifecycle shape as `lib/email-verification.ts` but:
- *   - 15-minute lifetime (shorter — this IS the credential, not a confirmation).
+ *   - 15-minute lifetime (shorter, this IS the credential, not a confirmation).
  *   - `endUserId` may be null at issue time when the email doesn't yet have an
  *     account; the consume path is responsible for creating the EndUser
  *     atomically with the token consumption, subject to `authConfig.signupEnabled`.
@@ -62,7 +62,7 @@ export async function lookupMagicLinkToken(raw: string): Promise<MagicLinkLookup
 }
 
 /**
- * Atomically mark consumed. Race-safe — concurrent requests can't both
+ * Atomically mark consumed. Race-safe, concurrent requests can't both
  * succeed (the second sees `consumedAt !== null` and bails).
  */
 export async function consumeMagicLinkToken(token: MagicLinkToken): Promise<boolean> {

@@ -2,7 +2,7 @@
  * One refresh per expiry, however many components hit a 401 at once.
  *
  * Refresh tokens rotate and are single-use, so a second concurrent exchange of
- * the same token gets a 401 from the API — correct behaviour, but it means the
+ * the same token gets a 401 from the API, correct behaviour, but it means the
  * loser of the race is thrown out to `/login?reason=expired`. Every RSC on a
  * page calls `api()` independently, so a navigation just after the 15-minute
  * access token expires used to fire several refreshes in the same millisecond
@@ -88,7 +88,7 @@ beforeEach(() => {
       refreshCalls += 1;
       // Single-use: the API invalidates the presented token on first use, so a
       // SECOND exchange of the same token is a 401. This stub reproduces that
-      // exactly — which is what makes the assertion meaningful. Without the
+      // exactly, which is what makes the assertion meaningful. Without the
       // dedupe, the second caller lands here and is signed out.
       if (refreshesRemaining <= 0) {
         return jsonResponse(401, { success: false, error: { code: 'INVALID_REFRESH_TOKEN', message: 'spent' } });

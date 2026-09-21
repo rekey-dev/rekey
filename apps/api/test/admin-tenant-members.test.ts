@@ -3,7 +3,7 @@
  *
  * Closes the gap that made admin-created workspaces useless: `POST
  * /api/v1/admin/tenants` writes a Tenant and nothing else, and `ownerEmail` on
- * that row is a denormalised label rather than an access grant — everything
+ * that row is a denormalised label rather than an access grant, everything
  * that actually reaches a workspace runs through `TenantMembership`. So an
  * admin-created workspace was one nobody could open.
  *
@@ -84,7 +84,7 @@ describe('admin: add an operator to a workspace', () => {
     const fx = await fixture();
     expect((await addMember(fx.bareTenantId, { email: fx.email })).statusCode).toBe(200);
 
-    // Sign in fresh and switch into the provisioned workspace — the real proof
+    // Sign in fresh and switch into the provisioned workspace, the real proof
     // that the membership is what access depends on.
     const signIn = await app.inject({
       method: 'POST',

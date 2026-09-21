@@ -1,15 +1,15 @@
 /**
- * Hosted customer portal — public config endpoint.
+ * Hosted customer portal, public config endpoint.
  *
  * `GET /api/v1/portal/config/:slug` is how the Rekey-hosted portal
  * (portal.rekey.dev/<slug>) bootstraps itself: given the slug from the URL,
- * it returns the **public** facts a browser portal needs — the app name, its
+ * it returns the **public** facts a browser portal needs, the app name, its
  * **publishable** key (public by design), whether billing is on, and branding.
  * No secret material. Unauthenticated by design (the portal is signed-out at
  * this point); the publishable key it returns is itself a public credential.
  *
  * Returns 404 (not 403) when the app doesn't exist OR hasn't opted into the
- * hosted portal — same response either way, so a disabled portal can't be told
+ * hosted portal, same response either way, so a disabled portal can't be told
  * apart from a non-existent slug.
  */
 
@@ -19,14 +19,21 @@ import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { BillingConfigSchema } from '@rekey.dev/shared-types';
 import { ok, errs, type JsonSchema } from '../../lib/openapi.js';
+import { env } from '../../config/env.js';
+import {
+  globalRateLimitMax,
+  portalConfigRateLimitKey,
+  rateLimitedAfter,
+  skipUnvouchedIp,
+} from '../../lib/rate-limit.js';
 
-/** `data` for `GET /config/:slug` — no registered component matches this projection. */
+/** `data` for `GET /config/:slug`, no registered component matches this projection. */
 const PortalConfig: JsonSchema = {
   type: 'object',
   properties: {
     slug: { type: 'string' },
     name: { type: 'string' },
-    publishableKey: { type: 'string', description: 'Public by design — safe to ship in a browser bundle.' },
+    publishableKey: { type: 'string', description: 'Public by design, safe to ship in a browser bundle.' },
     billingEnabled: { type: 'boolean' },
     billingSubject: {
       type: 'string',
@@ -41,15 +48,42 @@ const PortalConfig: JsonSchema = {
 const SlugParam = z.object({ slug: z.string().min(1).max(120) });
 
 export async function portalConfigRoutes(app: FastifyInstance): Promise<void> {
+  // Per-IP ceiling across ALL slugs, at the anonymous budget. The route's own
+  // bucket is per (slug, IP), so without this each guessed slug would open a
+  // fresh bucket and the route would enumerate slugs at no cost.
+  const perIpCeiling = app.createRateLimit({
+    max: globalRateLimitMax(env.RATE_LIMIT_MAX),
+    timeWindow: env.RATE_LIMIT_WINDOW_MS,
+    keyGenerator: (req) => `portalip:${req.ip}`,
+  });
+
   app.get(
     '/config/:slug',
     {
+      onRequest: async (req) => {
+        // Only a vouched client address; behind an unidentified proxy the
+        // address is every visitor's, and the per-slug bucket is skipped too.
+        if (!req.clientIpVouched) return;
+        const result = await perIpCeiling(req);
+        if (result.isAllowed || !result.isExceeded) return;
+        throw rateLimitedAfter(result.ttl, result.max);
+      },
       // Unauthenticated by design, but tightened so it isn't a cheap oracle for
       // enumerating which Application slugs exist on a deployment. The
       // publishable key it returns is public by design (it ships in browser
-      // bundles), so this is about discovery volume, not the key itself — a
+      // bundles), so this is about discovery volume, not the key itself, a
       // real portal visitor makes one call per page load, not thousands.
-      config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+      // Keyed on (slug, client IP). Per visitor only because the portal
+      // forwards a visitor IP the API trusts from the portal's fixed address;
+      // see `portalConfigRateLimitKey`.
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: '1 minute',
+          keyGenerator: portalConfigRateLimitKey,
+          allowList: skipUnvouchedIp,
+        },
+      },
       schema: {
         tags: ['Public · Portal'],
         security: [],

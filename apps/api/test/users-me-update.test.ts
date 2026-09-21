@@ -1,11 +1,11 @@
 /**
- * PATCH /api/v1/users/me — end-user self-service metadata writes.
+ * PATCH /api/v1/users/me, end-user self-service metadata writes.
  *
  * Two properties carry the weight here:
  *
  *   1. **Merge, not replace.** The route promises a top-level shallow merge.
  *      If that ever silently flips to wholesale replace, every integrator doing
- *      read-edit-write loses the keys they did not resend — a data-loss bug
+ *      read-edit-write loses the keys they did not resend, a data-loss bug
  *      that no type checker catches, so it is asserted directly.
  *   2. **The token is the only subject.** There is no user id in the path or
  *      the body, and neither a body field nor a foreign token may redirect the
@@ -178,7 +178,7 @@ describe('PATCH /api/v1/users/me — self-service metadata', () => {
 
     const res = await patch(appA, user.accessToken, { metadata: { prefs: { theme: 'light' } } });
 
-    // `locale` is gone — the route documents wholesale top-level replacement,
+    // `locale` is gone, the route documents wholesale top-level replacement,
     // and pretending otherwise (deep merge) is the surprise that makes nested
     // deletes impossible.
     expect(res.json().data.metadata).toEqual({ prefs: { theme: 'light' } });
@@ -232,7 +232,7 @@ describe('PATCH /api/v1/users/me — self-service metadata', () => {
     const row = await prisma.endUser.findUnique({ where: { id: user.id } });
     expect(row?.email).toBe('identity@example.com');
     expect(row?.erasedAt).toBeNull();
-    // The mixed body was rejected as a whole — no partial write.
+    // The mixed body was rejected as a whole, no partial write.
     expect(row?.metadata).toBeNull();
   });
 
@@ -248,7 +248,7 @@ describe('PATCH /api/v1/users/me — self-service metadata', () => {
       metadata: { owner: 'stolen' },
     });
 
-    // The extra ids are not on the allowlist, so the whole body is refused —
+    // The extra ids are not on the allowlist, so the whole body is refused,
     // but the assertion that matters is that Bob is untouched either way.
     expect(res.statusCode).toBe(400);
     await expect(storedMetadata(bob.id)).resolves.toEqual({ owner: 'bob' });

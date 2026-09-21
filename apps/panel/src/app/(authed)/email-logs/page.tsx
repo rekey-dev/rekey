@@ -5,7 +5,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { Pager, readPageSize, readOffset } from '@/components/Pager';
 import type { Page } from '@/lib/paginate';
 
-const STATUSES = new Set(['sent', 'error', 'no_transport']);
+const STATUSES = new Set(['sent', 'error', 'no_transport', 'suppressed']);
 
 export default async function WorkspaceEmailLogsPage({
   searchParams,
@@ -37,7 +37,7 @@ export default async function WorkspaceEmailLogsPage({
             </span>
           </>
         }
-        description="Workspace SYSTEM mail only — operator magic-link / password-reset and member invitations (sends not tied to an Application). Per-application email lives inside each Application → Email. Metadata only; bodies are never stored."
+        description="Workspace SYSTEM mail only: operator magic-link / password-reset and member invitations (sends not tied to an Application). Per-application email lives inside each Application → Email. Metadata only; bodies are never stored."
         action={<EmailLogStatusFilter basePath="/email-logs" active={status} pageSize={PAGE_SIZE} />}
       />
 

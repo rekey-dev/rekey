@@ -1,11 +1,11 @@
 /**
- * OAuth orchestration — manages the per-Application config layer above the
+ * OAuth orchestration, manages the per-Application config layer above the
  * provider implementations.
  *
  * Per-Application OAuth config lives in two columns:
- *   - `Application.oauthConfig: Json`           — public bits per provider
+ *   - `Application.oauthConfig: Json`          , public bits per provider
  *     ({ google: { clientId, redirectUri, scopes? }, github: { … } })
- *   - `Application.oauthCredentialsCiphertext`  — encrypted secrets
+ *   - `Application.oauthCredentialsCiphertext` , encrypted secrets
  *     ({ google: { clientSecret }, github: { clientSecret } })
  *
  * The service merges these into a `OAuthProviderConfig` at request time,
@@ -18,6 +18,7 @@ import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { assertSignupAllowed, type AuthKind } from '../../lib/signup-policy.js';
+import { assertDeviceBindingSatisfiable } from '../auth/auth.service.js';
 import { deliverVerificationEmail } from '../auth/auth.service.js';
 import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
@@ -39,7 +40,7 @@ export interface OAuthPublicConfigEntry {
 }
 
 /**
- * OAuth callback outcome — same discriminated union as password sign-in so
+ * OAuth callback outcome, same discriminated union as password sign-in so
  * MFA-enrolled users get the challenge-token path uniformly.
  */
 export type OAuthSignInResult = SignInOutcome;
@@ -122,7 +123,7 @@ export const oauthService = {
     providerName: string;
     code: string;
     device?: DeviceContext;
-    /** Calling key kind — a `secret_only` app refuses creation via pub key. */
+    /** Calling key kind, a `secret_only` app refuses creation via pub key. */
     authKind?: AuthKind;
   }): Promise<OAuthSignInResult> {
     const provider = getOAuthProvider(args.providerName);
@@ -141,7 +142,7 @@ export const oauthService = {
     const existing = await prisma.oAuthIdentity.findUnique({
       where: {
         // Scoped by Application. Globally unique meant the first Application to
-        // link a Google account claimed it deployment-wide — the same person
+        // link a Google account claimed it deployment-wide, the same person
         // signing in to another Application got a hard 401 they could never
         // clear.
         applicationId_provider_providerAccountId: {
@@ -158,7 +159,7 @@ export const oauthService = {
       //
       // Kept because it is one branch and it fails closed if that query is ever
       // widened again. The previous version of this comment claimed the case
-      // "should never happen via normal flows" while the lookup WAS global —
+      // "should never happen via normal flows" while the lookup WAS global,
       // so it happened to every multi-Application deployment, and the person
       // hitting it could never clear it.
       if (existing.applicationId !== args.application.id) {
@@ -176,7 +177,7 @@ export const oauthService = {
     //
     // **Auto-link is gated on `identity.emailVerified`.** A provider that
     // returns an unverified email cannot prove the OAuth-side caller
-    // actually owns that mailbox — auto-linking on an unverified address
+    // actually owns that mailbox, auto-linking on an unverified address
     // would let an attacker with an unverified provider account (Microsoft
     // consumer aliases, self-hosted IdPs, etc.) hijack a pre-existing
     // password account by claiming the same email.
@@ -229,13 +230,15 @@ export const oauthService = {
       }
     }
 
-    // 4. New user. Gate creation on the signup policy first — an OAuth-first
+    // 4. New user. Gate creation on the signup policy first, an OAuth-first
     //    login is a sign-up, so `secret_only` (pub key) and `invite_only` must
     //    refuse it just like password / magic-link sign-up.
     assertSignupAllowed(
       AuthConfigSchema.parse(args.application.authConfig),
       args.authKind,
     );
+    // Before the row exists, for the same reason sign-up asks first.
+    assertDeviceBindingSatisfiable(args.application, args.device);
     if (!identity.email) {
       throw new RekeyError({
         statusCode: 400,
@@ -252,7 +255,7 @@ export const oauthService = {
       data: {
         applicationId: args.application.id,
         email: identity.email.toLowerCase(),
-        // Reflect the provider's verification claim faithfully — the
+        // Reflect the provider's verification claim faithfully, the
         // EndUser.emailVerified column was previously hardcoded `true`
         // which silently laundered unverified emails into trusted state.
         emailVerified: identity.emailVerified,
@@ -287,7 +290,7 @@ export const oauthService = {
         endUser: created,
       });
     }
-    // Outbound webhook for new-via-OAuth users — mirrors password sign-up.
+    // Outbound webhook for new-via-OAuth users, mirrors password sign-up.
     emitDetached({
       applicationId: args.application.id,
       type: 'user.created',
@@ -315,7 +318,7 @@ export const oauthService = {
    * unauthenticated OAuth start).
    *
    * Sharing this code path with the unauthenticated `buildAuthUrl` would
-   * conflate trust models — keep them parallel.
+   * conflate trust models, keep them parallel.
    */
   async buildLinkAuthUrl(args: {
     application: Application;
@@ -332,8 +335,8 @@ export const oauthService = {
    * Refuses if:
    *   - The provider's email is unverified (same gate as sign-in auto-link).
    *   - The provider account is already linked to ANOTHER user in this
-   *     Application — that would be a silent merge.
-   *   - The provider is already linked to THIS user — idempotency
+   *     Application, that would be a silent merge.
+   *   - The provider is already linked to THIS user, idempotency
    *     guarantees no duplicate rows but the response signals what happened.
    */
   async linkIdentity(args: {
@@ -356,7 +359,7 @@ export const oauthService = {
 
     if (!identity.emailVerified) {
       // Same gate as the sign-in path. An unverified email cannot prove
-      // the OAuth caller actually owns the mailbox — refuse to link.
+      // the OAuth caller actually owns the mailbox, refuse to link.
       throw new RekeyError({
         statusCode: 401,
         code: 'OAUTH_EMAIL_NOT_VERIFIED',
@@ -365,11 +368,10 @@ export const oauthService = {
       });
     }
 
-    // Already linked anywhere? Decide.
     const existing = await prisma.oAuthIdentity.findUnique({
       where: {
         // Scoped by Application. Globally unique meant the first Application to
-        // link a Google account claimed it deployment-wide — the same person
+        // link a Google account claimed it deployment-wide, the same person
         // signing in to another Application got a hard 401 they could never
         // clear.
         applicationId_provider_providerAccountId: {

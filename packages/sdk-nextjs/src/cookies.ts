@@ -1,6 +1,6 @@
 /**
  * Shared cookie names + helpers. Used by both middleware (Edge runtime) and
- * server-component code (Node runtime) — must stay edge-compatible
+ * server-component code (Node runtime), must stay edge-compatible
  * (no Node-only deps, no `node:crypto`).
  */
 
@@ -19,8 +19,8 @@ export interface CookieOptions {
  * `secure: true` instructs browsers to refuse setting the cookie over plain
  * HTTP. That is the only correct posture anywhere but local development.
  *
- * These constants used to decide it with `process.env.NODE_ENV === 'production'`
- * — a BUILD-time answer to a REQUEST-time question, and one that fails in the
+ * These constants used to decide it with `process.env.NODE_ENV === 'production'`,
+ * a BUILD-time answer to a REQUEST-time question, and one that fails in the
  * direction that costs you the session. A Next app behind TLS whose NODE_ENV
  * was unset, or `staging`, or anything the bundler did not inline as exactly
  * `"production"`, emitted its session cookies WITHOUT `Secure`, and a browser
@@ -31,7 +31,7 @@ export interface CookieOptions {
  * but the real decision now happens per-request in `cookieSecureFrom` below,
  * which `./server.js` applies at set time.
  *
- * Edge-runtime compatible, and deliberately dependency-free — this module is
+ * Edge-runtime compatible, and deliberately dependency-free, this module is
  * the one entrypoint a client component can import for nothing but the cookie
  * names.
  */
@@ -55,12 +55,12 @@ function isLoopbackHost(host: string): boolean {
  * Whether a cookie written on this request must carry `Secure`.
  *
  * Precedence: an explicit `REKEY_COOKIE_SECURE` wins (the only way to end up
- * with an insecure cookie on a real host — an opt-in, not something you fall
+ * with an insecure cookie on a real host, an opt-in, not something you fall
  * into); then `X-Forwarded-Proto`'s first hop; then the host, where anything
  * that is not loopback is treated as internet-facing.
  *
  * The fallback is deliberately fail-secure. Guessing wrong on a real host
- * means the browser refuses the cookie — loud, immediate, one env var to fix.
+ * means the browser refuses the cookie, loud, immediate, one env var to fix.
  * Guessing wrong the other way means a session credential in cleartext.
  */
 export function cookieSecureFrom(headers: {

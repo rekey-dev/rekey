@@ -5,8 +5,8 @@
  *   - The hook records one row per response, fire-and-forget, with identity
  *     resolved AFTER auth middleware (applicationId/tenantId for API-key
  *     traffic; operatorUserId/tenantId for operator traffic; null otherwise).
- *   - GET /tenant/applications/:id/requests — per-app, OWNER/ADMIN, tenant-scoped.
- *   - GET /tenant/auth/requests — the calling operator's own requests.
+ *   - GET /tenant/applications/:id/requests, per-app, OWNER/ADMIN, tenant-scoped.
+ *   - GET /tenant/auth/requests, the calling operator's own requests.
  *   - pruneApiRequestLogs caps each app/operator to the last N rows.
  *
  * The insert is intentionally async (the response is already flushed when the
@@ -245,7 +245,7 @@ describe('API request log', () => {
       page: { total: number; limit: number; offset: number; hasMore: boolean };
     };
     expect(p1.items.length).toBe(2);
-    // Two rows requested, more behind them — the caller is told rather than
+    // Two rows requested, more behind them, the caller is told rather than
     // left to infer truncation from getting exactly `limit` rows back.
     expect(p1.page.limit).toBe(2);
     expect(p1.page.offset).toBe(0);

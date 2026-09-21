@@ -13,7 +13,7 @@
  *     no `Payment` was written and no coupon was redeemed. They had paid.
  *   - **An ACTIVE subscriber was downgraded to PENDING** just for looking. The
  *     upsert set `status: 'PENDING'` unconditionally, and PENDING is not an
- *     entitling status — so pressing Upgrade, or typing a coupon into the form
+ *     entitling status, so pressing Upgrade, or typing a coupon into the form
  *     the account page shows existing subscribers, revoked entitlement on the
  *     spot without a single provider event having happened.
  */
@@ -177,7 +177,7 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
       // Each session is minted with its own provider coupon, so completing an
       // old session spends the code that session was priced with. Reading the
       // row-level `couponId` would have redeemed whichever code was typed
-      // most recently — or, worse, a code the completed checkout never used.
+      // most recently, or, worse, a code the completed checkout never used.
       await createCoupon({ code: 'oldcode', discountType: 'AMOUNT', amountOff: 1000 });
       await createCoupon({ code: 'newcode', discountType: 'AMOUNT', amountOff: 2000 });
       const oldCoupon = await prisma.coupon.findFirstOrThrow({ where: { applicationId, code: 'oldcode' } });
@@ -196,7 +196,7 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
 
       // CONFIRMED only. Checkout now also writes RESERVED rows to hold the
       // slot, so an unfiltered count no longer means "how many redemptions
-      // happened" — which is what this assertion is about.
+      // happened", which is what this assertion is about.
       const rows = await prisma.couponRedemption.findMany({
         where: { applicationId, status: 'CONFIRMED' },
       });
@@ -232,10 +232,22 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
       ).toBe(0);
     });
 
-    it('completing both sessions grants once and pays twice — one purchase per charge', async () => {
-      // Not a hypothetical: the buyer can genuinely pay on both tabs. Each
-      // charge is its own `Payment`; the credits are anchored per period so
-      // the second completion re-provisions idempotently rather than doubling.
+    it('completing both sessions pays twice and grants twice — one pack per charge', async () => {
+      // Not a hypothetical: the buyer can genuinely pay on both tabs.
+      //
+      // This asserted ONE grant for two charges until #490. The justification
+      // in this comment was that "the credits are anchored per period so the
+      // second completion re-provisions idempotently", but a one-off plan has
+      // no period, so that anchor was the same constant for every purchase this
+      // buyer ever made, and it was the defect rather than the design. The
+      // effect was that the operator kept the second payment and the buyer got
+      // nothing for it, with nothing anywhere surfacing the duplicate: the
+      // payment is attributed to a subscription, so it never reaches the
+      // unapplied-payment queue either.
+      //
+      // Two charges are two purchases. A buyer who did not mean to pay twice is
+      // made whole by refunding one, which the operator can see and do; a buyer
+      // silently short one pack has no such recourse.
       const first = await checkout({ planSlug: 'pack' });
       const second = await checkout({ planSlug: 'pack' });
 
@@ -254,7 +266,9 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
       }
 
       expect(await prisma.payment.count({ where: { applicationId } })).toBe(2);
-      expect(await creditsService.getBalance(applicationId, { endUserId })).toBe(100);
+      // Was 100. Each session is its own purchase and each is anchored on its
+      // own session id, so both grant.
+      expect(await creditsService.getBalance(applicationId, { endUserId })).toBe(200);
     });
   });
 
@@ -278,7 +292,7 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
 
       const after = await prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
       expect(after.status).toBe('ACTIVE');
-      // The provider link is untouched too — this row is still the live
+      // The provider link is untouched too, this row is still the live
       // subscription, not a fresh checkout record.
       expect(after.providerSubId).toBe('sub_active_1');
     });
@@ -298,7 +312,7 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
 
     it('keeps the subscription visible to the portal after re-opening checkout', async () => {
       // PENDING is not an entitling status, so the downgrade did not merely
-      // look wrong — every entitlement gate started refusing.
+      // look wrong, every entitlement gate started refusing.
       await activate();
       await checkout({ planSlug: 'pro' });
 

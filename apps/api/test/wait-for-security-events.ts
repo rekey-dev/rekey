@@ -4,8 +4,8 @@ import { prisma } from '../src/lib/prisma.js';
 /**
  * Wait for security events to land, instead of assuming they already have.
  *
- * `recordSecurityEvent` is called as `void recordSecurityEvent(...)` everywhere
- * — deliberately, so that writing an audit row can never block or fail the
+ * `recordSecurityEvent` is called as `void recordSecurityEvent(...)` everywhere,
+ * deliberately, so that writing an audit row can never block or fail the
  * request that triggered it (decisions.md, 2026-05-31). The row therefore lands
  * some time *after* the response the test just awaited.
  *
@@ -18,8 +18,8 @@ import { prisma } from '../src/lib/prisma.js';
  * Polling rather than a fixed sleep, so the common case stays fast.
  *
  * This is only for asserting events **are** written. A test asserting that
- * nothing was recorded has the opposite problem — there is no moment at which
- * "still absent" becomes conclusive — and polling cannot fix it.
+ * nothing was recorded has the opposite problem, there is no moment at which
+ * "still absent" becomes conclusive, and polling cannot fix it.
  */
 export async function waitForSecurityEvents(
   where: Prisma.SecurityEventWhereInput,

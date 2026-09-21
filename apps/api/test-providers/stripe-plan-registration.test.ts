@@ -5,7 +5,7 @@
  *   1. **Does the Price Stripe minted mean what our Plan row says?** The mock
  *      answered `{ providerPlanId: 'price_fake' }` and agreed with whatever we
  *      sent. Here the Price is read back OUT of Stripe and compared field by
- *      field with the Plan — currency case, amount units, interval mapping,
+ *      field with the Plan, currency case, amount units, interval mapping,
  *      the metadata the webhook path later relies on.
  *
  *   2. **What actually happens when Stripe refuses.** PR #325 made a refused
@@ -13,7 +13,7 @@
  *      feature was written against a mock that threw whatever the test told it
  *      to. A genuinely invalid `sk_test_` key produces a real
  *      `StripeAuthenticationError` with a real status, a real message and a
- *      real shape — which is what `providerError` and `registerAndSettle` have
+ *      real shape, which is what `providerError` and `registerAndSettle` have
  *      to cope with.
  *
  * The invalid-key case is also where a credential is most likely to be printed:
@@ -56,7 +56,7 @@ describeSandbox('stripe', 'Stripe sandbox · plan registration', stripeSandbox, 
     const plan = await plansService.create({
       applicationId: fixture.applicationId,
       slug: 'pro-monthly',
-      // The product name is what the sweep matches on — keep the prefix.
+      // The product name is what the sweep matches on, keep the prefix.
       name: `${HARNESS_PREFIX} Pro Monthly ${runId}`,
       amount: 2499,
       currency: 'usd',
@@ -73,7 +73,7 @@ describeSandbox('stripe', 'Stripe sandbox · plan registration', stripeSandbox, 
     janitor.track('product', product.id);
 
     // Units. `plan.amount` is the smallest currency unit and Stripe's
-    // `unit_amount` is too — a mismatch here would be the classic
+    // `unit_amount` is too, a mismatch here would be the classic
     // dollars-vs-cents defect, and no mock can catch it.
     expect(price.unit_amount).toBe(2499);
     // Case. We store `currency` as given and lowercase it on the way out;
@@ -114,7 +114,7 @@ describeSandbox('stripe', 'Stripe sandbox · plan registration', stripeSandbox, 
   it('a key Stripe genuinely refuses leaves the plan off sale, repairable, and un-buyable', async () => {
     const fixture = await createFixture('reg-bad');
     // Syntactically a test key, so it passes our own `pattern` validation and
-    // reaches Stripe — which is the only party that can tell us it is wrong.
+    // reaches Stripe, which is the only party that can tell us it is wrong.
     const badKey = fakeCredential('sk_test_', 'deliberately-invalid-stripe-key');
     await configureStripe(fixture, badKey);
 
@@ -140,14 +140,14 @@ describeSandbox('stripe', 'Stripe sandbox · plan registration', stripeSandbox, 
     });
     expect(row.registrationStatus).toBe('FAILED');
     expect(row.active).toBe(false);
-    // Stripe's own words, kept for the operator — the whole point of storing
+    // Stripe's own words, kept for the operator, the whole point of storing
     // the raw text is that it names which credential is wrong.
     expect(row.registrationError ?? '').toMatch(/api key/i);
     // …but never the key itself. Stripe masks the middle of the key it echoes;
     // this asserts we are not the ones un-masking it.
     expect(row.registrationError ?? '').not.toContain(badKey);
 
-    // Off the public catalogue — read through the pricing-page endpoint a
+    // Off the public catalogue, read through the pricing-page endpoint a
     // buyer's browser would hit, not through the row we just asserted on.
     const catalogue = await fixture.app.inject({
       method: 'GET',
@@ -162,7 +162,7 @@ describeSandbox('stripe', 'Stripe sandbox · plan registration', stripeSandbox, 
     expect(checkout.statusCode).toBeGreaterThanOrEqual(400);
     expect(checkout.json().error?.code).toMatch(/PLAN_INACTIVE|PLAN_NOT_REGISTERED_WITH_PROVIDER/);
 
-    // The repair: fix the credential, re-register, back on sale — same slug.
+    // The repair: fix the credential, re-register, back on sale, same slug.
     await configureStripe(fixture, creds.apiKey);
     const repaired = await plansService.registerWithProvider(fixture.applicationId, 'refused');
     expect(repaired.registrationStatus).toBe('REGISTERED');
@@ -186,7 +186,7 @@ describeSandbox('stripe', 'Stripe sandbox · plan registration', stripeSandbox, 
     const provider = await getProviderForApplication(application, 'stripe');
 
     // example.com is RFC 2606 reserved, so a stray endpoint that outlives
-    // cleanup delivers to nothing rather than to a host somebody owns — and
+    // cleanup delivers to nothing rather than to a host somebody owns, and
     // the `rekey-harness` label in it is what the entry sweep matches on.
     const url = harnessWebhookUrl(runId, fixture.applicationSlug);
     const first = await provider.registerWebhook!(url);
@@ -195,7 +195,7 @@ describeSandbox('stripe', 'Stripe sandbox · plan registration', stripeSandbox, 
     expect(first.webhookId).toMatch(/^we_/);
     // Stripe reveals a signing secret exactly once, at creation. If this is
     // ever absent, auto-configuration silently stores nothing and every
-    // inbound webhook 503s — worth an assertion of its own.
+    // inbound webhook 503s, worth an assertion of its own.
     expect(first.secret).toMatch(/^whsec_/);
 
     const endpoint = await stripe.webhookEndpoints.retrieve(first.webhookId!);
@@ -212,7 +212,7 @@ describeSandbox('stripe', 'Stripe sandbox · plan registration', stripeSandbox, 
 
     // Re-registering the SAME url: our implementation deletes and recreates,
     // because Stripe will not re-reveal a secret. Verify that is what happens
-    // rather than trusting the comment — a duplicate endpoint would mean every
+    // rather than trusting the comment, a duplicate endpoint would mean every
     // event delivered twice, and a missing secret would mean none verified.
     const second = await provider.registerWebhook!(url);
     janitor.track('webhookEndpoint', second.webhookId);

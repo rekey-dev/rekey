@@ -196,6 +196,21 @@ Retry semantics: a repeat with the same key (timeout retry, queue redelivery, do
 | Method | Description |
 | --- | --- |
 | `verify({ key, machineFingerprint, label? })` | Verify a license key + record an activation. Always 200 — branch on `result.ok`. |
+| `deactivate({ key, machineFingerprint })` | Give a machine's seat back. Same deterministic body as `verify`; idempotent. |
+
+### `rekey.devices` (secret key)
+| Method | Description |
+| --- | --- |
+| `list(endUserId, { status? })` | The machines an end-user has signed in from. |
+| `release(deviceId, endUserId)` | Give the slot back and revoke that device's sessions. |
+
+### `rekey.users` (secret key)
+| Method | Description |
+| --- | --- |
+| `getByEmail(email)` / `get(id)` | Exact-match lookup, scoped to the Application. |
+| `import({ users })` | Bring users over from another auth system with their argon2id or bcrypt hashes and OAuth identities. Reports `created`, `skipped` and `unlinked`. |
+
+`rekey.billing.getEntitlementsFor(endUserId)` answers "what may this user use" for a backend holding no user token. See `docs/devices.md`.
 
 ### `rekey.mcp` (bring-your-own MCP server)
 | Method | Description |
@@ -207,7 +222,7 @@ Retry semantics: a repeat with the same key (timeout retry, queue redelivery, do
 | Export | Description |
 | --- | --- |
 | `verifyWebhookSignature({ header, payload, secret, toleranceSeconds? })` | Verify the HMAC on a webhook **Rekey sends to your app** (user-lifecycle + billing events) against the **raw body bytes** + the `X-Rekey-Signature` header. Not for Stripe/PayPal webhooks — those go to Rekey, never to you (see [docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md)). |
-| `verifyAccessToken(token, { applicationId, jwksUrl \| jwks })` | Verify an end-user access token **offline** (no API round-trip) against your deployment's `GET /.well-known/jwks.json`. RS256 only — the Application must opt in via `authConfig.tokenAlg: "RS256"`; default HS256 tokens still need `auth.getCurrentUser`. Fetches + caches the JWKS for 5 minutes, checks `kid`/signature/`exp`/`typ`, and returns the claims (`sub`, `applicationId`, `oid?`, …). **`applicationId` is required** — the RS256 keypair is deployment-wide, so without it a token minted for any other Application on the same deployment would verify here. (The HS256 default is unaffected: its key is derived per Application.) See [docs/jwks.md](https://github.com/rekey-dev/rekey/blob/main/docs/jwks.md). |
+| `verifyAccessToken(token, { applicationId, jwksUrl \| jwks })` | Verify an end-user access token **offline** (no API round-trip) against your deployment's `GET /.well-known/jwks.json`. RS256 only — the Application must opt in via `authConfig.tokenAlg: "RS256"`; default HS256 tokens still need `auth.getCurrentUser`. Fetches + caches the JWKS for 5 minutes, checks `kid`/signature/`exp`/`typ`, and returns the claims (`sub`, `applicationId`, `oid?`, …). **`applicationId` is required** — the RS256 keypair is deployment-wide, so without it a token minted for any other Application on the same deployment would verify here. (The HS256 default is unaffected: its key is derived per Application.) It cannot see a server-side revocation: a locally verified token stays valid until it expires, even after sign-out everywhere, a session revoke or a device release, so call the API when immediate revocation matters. See [docs/jwks.md](https://github.com/rekey-dev/rekey/blob/main/docs/jwks.md). |
 | `WEBHOOK_EVENTS` / `KNOWN_WEBHOOK_EVENTS` / `isKnownWebhookEvent` | The full outbound-event registry — `{ name, description }` pairs (and just the names) for the 18 events Rekey can send: `user.created/updated/deleted/erased`, `session.revoked`, `mfa.enabled/disabled`, `password.changed`, `email.verified`, `subscription.activated/canceled/past_due/entitlements_updated`, `payment.succeeded/failed`, `dunning.case_opened/case_recovered/case_exhausted`. Mirrors the API exactly; use it for event pickers / autocompleting an endpoint's `events` array rather than hardcoding this list. See [docs/webhooks.md](https://github.com/rekey-dev/rekey/blob/main/docs/webhooks.md). |
 | `WebhookEventType` / `WebhookEventEnvelope<TData>` | Types for the event-name union and the delivery envelope (`{ eventId, occurredAt, type, applicationId, data }`). Dedupe on `eventId` — retries reuse it. |
 | `RekeyError` | The canonical error class — `instanceof`-consistent across SDK packages. |

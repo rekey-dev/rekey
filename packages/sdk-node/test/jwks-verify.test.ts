@@ -1,8 +1,8 @@
 /**
- * Offline access-token verification (`verifyAccessToken`) — unit tests
+ * Offline access-token verification (`verifyAccessToken`), unit tests
  * against a locally generated RSA keypair. Hermetic: JWKS "fetches" are a
  * stubbed `fetch`; tokens are signed with node:crypto directly (no
- * jsonwebtoken dependency — pins the raw JWS wire format).
+ * jsonwebtoken dependency, pins the raw JWS wire format).
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -31,7 +31,7 @@ function makeKeypair(): { privateKey: KeyObject; jwk: Record<string, string>; ki
     n: string;
     e: string;
   };
-  // RFC 7638 thumbprint — matches the API's kid derivation.
+  // RFC 7638 thumbprint, matches the API's kid derivation.
   const kid = createHash('sha256')
     .update(JSON.stringify({ e: exported.e, kty: exported.kty, n: exported.n }))
     .digest('base64url');
@@ -43,7 +43,7 @@ function makeKeypair(): { privateKey: KeyObject; jwk: Record<string, string>; ki
 }
 
 const keyA = makeKeypair();
-const keyB = makeKeypair(); // a second, UNpublished key — forged-token source
+const keyB = makeKeypair(); // a second, UNpublished key, forged-token source
 const jwks = { keys: [keyA.jwk] } as never;
 
 function signRs256(
@@ -88,6 +88,36 @@ describe('verifyAccessToken — happy path', () => {
       applicationId: 'app_1',
       oid: 'org_9',
     });
+  });
+
+  it('exposes the session and device bindings (sid / dev)', async () => {
+    // The API mints both (see lib/jwt.ts), but the claims interface declared
+    // neither, so an offline verifier could not read which session or which
+    // machine a token belonged to without casting the result. `dev` is the id
+    // that matches a row from `devices.listMine()`, which is how a client marks
+    // "this device" and how it knows releasing it signs the caller out.
+    const token = signRs256(
+      claims({ sid: 'sess_42', dev: 'dev_7' }),
+      keyA.privateKey,
+      keyA.kid,
+    );
+
+    const verified = await verifyAccessToken(token, { jwks, now, applicationId: 'app_1' });
+
+    expect(verified.sid).toBe('sess_42');
+    expect(verified.dev).toBe('dev_7');
+  });
+
+  it('leaves sid / dev undefined when the session bound neither', async () => {
+    // Both are conditional at mint time, so absence means "this flow bound
+    // none", never "the session ended". A verifier must not read it as a
+    // revocation.
+    const token = signRs256(claims(), keyA.privateKey, keyA.kid);
+
+    const verified = await verifyAccessToken(token, { jwks, now, applicationId: 'app_1' });
+
+    expect(verified.sid).toBeUndefined();
+    expect(verified.dev).toBeUndefined();
   });
 
   it('verifies via jwksUrl and caches the fetch for subsequent calls', async () => {
@@ -203,7 +233,7 @@ describe('verifyAccessToken — Application binding', () => {
    * The RS256 keypair is deployment-wide: `SigningKey` has no `applicationId`
    * column and `eu_access` tokens carry no `iss`/`aud`. So a token minted for a
    * DIFFERENT Application on the same deployment is cryptographically valid
-   * here — signature, kid, expiry and `typ` all check out. Only the claim
+   * here, signature, kid, expiry and `typ` all check out. Only the claim
    * comparison stops it.
    *
    * Note this does NOT apply to the HS256 default path, where the key is

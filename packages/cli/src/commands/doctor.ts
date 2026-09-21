@@ -1,5 +1,5 @@
 /**
- * `rekey doctor` — diagnose connectivity + config.
+ * `rekey doctor`, diagnose connectivity + config.
  *
  * Designed for AI agents to read structured output and self-heal. Each check
  * has a `name`, a `status` (`ok` / `warn` / `fail`), a human `message`, and
@@ -47,7 +47,7 @@ async function runDoctorChecks(ctx: OutputContext): Promise<Check[]> {
     checks.push({
       name: 'admin-key',
       status: 'warn',
-      message: 'SUPER_ADMIN_KEY is not set — admin commands will fail.',
+      message: 'SUPER_ADMIN_KEY is not set, admin commands will fail.',
       fix: 'Set SUPER_ADMIN_KEY in your environment, or pass --admin-key=<hex>.',
     });
   } else {

@@ -19,7 +19,7 @@
  *     SDK's 80s default.
  *
  * Both applications here are wired to the SAME provider account (same webhook
- * secret, same event ids) on purpose — that is the mundane configuration the
+ * secret, same event ids) on purpose, that is the mundane configuration the
  * finding is about (staging + production, or a cloned app), not an attack.
  */
 
@@ -39,7 +39,7 @@ import { RealStripeProvider } from '../src/modules/billing/providers/stripe-real
 import { getModule } from '../src/modules/billing/providers/registry.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
-// One provider account, two Applications — so both verify against this.
+// One provider account, two Applications, so both verify against this.
 const WEBHOOK_SECRET = 'whsec_shared_between_two_apps';
 
 const stripe = new Stripe('sk_for_signing_only', {
@@ -106,7 +106,7 @@ describe('Cross-tenant billing keys + transactional outbox', () => {
       })
       .then((r) => r.json().data as { rawKey: string });
 
-    // The same credentials for both apps — one provider account, two tenants.
+    // The same credentials for both apps, one provider account, two tenants.
     await billingCredentialsService.upsertCredentials(
       application.id,
       'stripe',
@@ -171,7 +171,7 @@ describe('Cross-tenant billing keys + transactional outbox', () => {
 
       // The SAME provider event id, arriving for the OTHER application. This
       // is the one that used to be answered `{processed:false,
-      // reason:"duplicate"}` — after which Stripe stops retrying and the event
+      // reason:"duplicate"}`, after which Stripe stops retrying and the event
       // is gone.
       const b = signed(evt(appB.id));
       const second = await app.inject({
@@ -233,7 +233,7 @@ describe('Cross-tenant billing keys + transactional outbox', () => {
         type: 'invoice.paid',
         data: {
           object: {
-            // The SAME charge id for both — one provider account issues one id.
+            // The SAME charge id for both, one provider account issues one id.
             id: 'in_shared_charge',
             subscription: 'sub_shared_account',
             amount_paid: 999,
@@ -263,7 +263,7 @@ describe('Cross-tenant billing keys + transactional outbox', () => {
       });
       expect(payments).toHaveLength(2);
       expect(payments.map((p) => p.applicationId).sort()).toEqual([appA.id, appB.id].sort());
-      // Each payment is linked to a subscription in ITS OWN application — the
+      // Each payment is linked to a subscription in ITS OWN application, the
       // symptom of the old global key was tenant B's event resolving onto
       // tenant A's row.
       for (const p of payments) {
@@ -430,7 +430,7 @@ describe('Cross-tenant billing keys + transactional outbox', () => {
 
       expect(await send('evt_outbox_replay_1')).toBe(200);
       const afterFirst = await prisma.webhookDelivery.count({ where: { endpointId } });
-      // A DIFFERENT event id carrying the SAME charge — the P2002 replay path.
+      // A DIFFERENT event id carrying the SAME charge, the P2002 replay path.
       expect(await send('evt_outbox_replay_2')).toBe(200);
       expect(await prisma.webhookDelivery.count({ where: { endpointId } })).toBe(afterFirst);
       expect(await prisma.payment.count({ where: { providerPaymentId: 'in_outbox_replay' } })).toBe(1);
@@ -474,7 +474,7 @@ describe('Cross-tenant billing keys + transactional outbox', () => {
 
       // Fail-closed, and reported as an outage rather than a bad signature.
       expect(outcome).toEqual({ ok: false, reason: 'unreachable' });
-      // Comfortably above the 4s budget, comfortably below "forever" — before
+      // Comfortably above the 4s budget, comfortably below "forever", before
       // the fix this promise never settled at all.
       expect(elapsed).toBeLessThan(10_000);
     });
@@ -566,10 +566,10 @@ describe('Cross-tenant billing keys + transactional outbox', () => {
     });
 
     it('the Razorpay SDK is constructed with a request timeout', () => {
-      const provider = new RealRazorpayProvider({ keyId: 'rzp_test_x', keySecret: 'y' });
+      const provider = new RealRazorpayProvider({ keyId: 'rzp_test_x', keySecret: 'y', webhookSecret: 'w' });
       // The SDK takes no timeout option, so the fix reaches for the axios
       // instance it built. If a future version moves this, the assertion is
-      // what tells us — see the constructor comment.
+      // what tells us, see the constructor comment.
       const axiosTimeout = (
         provider as unknown as { client: { api?: { rq?: { defaults?: { timeout?: number } } } } }
       ).client.api?.rq?.defaults?.timeout;
@@ -581,7 +581,11 @@ describe('Cross-tenant billing keys + transactional outbox', () => {
         apiKey: 'sk_test_for_ci_only',
         webhookSecret: 'whsec_x',
       });
-      const stripeClient = (provider as unknown as { stripe: Stripe }).stripe;
+      // `getApiField` is a real Stripe method but is not in its public types,
+      // so the shape is stated here rather than reaching through `Stripe`.
+      const stripeClient = (provider as unknown as {
+        stripe: { getApiField: (k: string) => unknown };
+      }).stripe;
       expect(stripeClient.getApiField('timeout')).toBe(10_000);
       expect(stripeClient.getApiField('maxNetworkRetries')).toBe(1);
     });

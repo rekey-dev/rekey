@@ -1,7 +1,7 @@
 /**
  * Password reset token issuance + verification.
  *
- * This module only mints, looks up and consumes tokens — it does not deliver
+ * This module only mints, looks up and consumes tokens, it does not deliver
  * them. `authService.requestPasswordReset` hands the raw token to
  * `emailService.dispatch` first; only when no transport is configured does it
  * fall back to returning the raw token to the calling *server* (and never to a
@@ -70,7 +70,7 @@ export async function lookupResetToken(raw: string): Promise<ResetLookup> {
 }
 
 /**
- * Atomically mark the token consumed. Race-safe via updateMany — concurrent
+ * Atomically mark the token consumed. Race-safe via updateMany, concurrent
  * reset attempts won't both succeed.
  */
 export async function consumeResetToken(token: PasswordResetToken): Promise<boolean> {

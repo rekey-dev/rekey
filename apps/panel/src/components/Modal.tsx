@@ -13,7 +13,7 @@
  *
  * The form's server action runs on submit; on success it `redirect()`s,
  * which navigates the page and closes the dialog naturally. On validation
- * failure the action `redirect()`s back with `?error=…` in the query — the
+ * failure the action `redirect()`s back with `?error=…` in the query, the
  * page rerenders with the error rendered inside the form, modal still open
  * (because the trigger detects `searchParams[modalKey]` and reopens it).
  *
@@ -21,18 +21,18 @@
  * use the modal pass it both here and in their server-action redirects:
  *   redirect(`/.../page?error=…&newPlan=1`) → modalKey="newPlan"
  *
- * When a page renders ONE modal PER ROW, the flag has to say which row —
+ * When a page renders ONE modal PER ROW, the flag has to say which row,
  * pass `modalValue` and redirect with that value instead of `1`:
  *   redirect(`/.../page?error=…&editUser=${id}`) → modalKey="editUser"
  *                                                  modalValue={user.id}
  * Only the row whose value matches reopens. Encoding the row into the key
  * itself (modalKey={`editUser_${id}`} + `?editUser=${id}`) does NOT work:
  * the lookup is by key, so it misses and the modal silently stays shut while
- * the error renders inside a closed <dialog> — invisible.
+ * the error renders inside a closed <dialog>, invisible.
  *
  * If you don't need reopen-on-error, omit `modalKey`.
  *
- * **A11y model (post-Audit-3):**
+ * **A11y model:**
  *   - Trigger is a real `<button>` (or, if `trigger` is itself an element with
  *     a click target, we render it inline and bind keyboard events). Keyboard
  *     users get Enter/Space activation; SR users hear "button".
@@ -57,7 +57,7 @@ import { shouldReopen } from '@/lib/modal-reopen';
  * client produced `-3-`. React logged "This won't be patched up" on every
  * page containing a Modal, and one load escalated to a full document reload.
  *
- * `useId()` is React's answer to exactly this — it derives the id from the
+ * `useId()` is React's answer to exactly this, it derives the id from the
  * component's position in the tree, so both renders compute the same string.
  */
 function useModalId(): string {
@@ -76,8 +76,8 @@ const SIZE_CLS: Record<ModalSize, string> = {
 /**
  * The `<dialog>` chrome, shared by every modal in the panel.
  *
- * There used to be two dialog looks. This one — left-aligned, header rule, an X
- * — and a second, hand-rolled inside TypedConfirmButton: centred, narrower, no
+ * There used to be two dialog looks. This one, left-aligned, header rule, an X,
+ * and a second, hand-rolled inside TypedConfirmButton: centred, narrower, no
  * rule, no X. Same product, same interaction, two visual languages, and a
  * confirm dialog that didn't look like it belonged to the app that opened it.
  * Both now render from these two exports.
@@ -164,7 +164,7 @@ export function Modal({
   triggerClassName?: string;
   /**
    * Ref to the trigger `<button>`. Lets a parent open the modal
-   * programmatically via `ref.current?.click()` — pass `triggerClassName="hidden"`
+   * programmatically via `ref.current?.click()`, pass `triggerClassName="hidden"`
    * to drive it from a different control without rendering a visible button.
    * Do NOT pass a `<button>` as `trigger`; that would nest buttons.
    */
@@ -197,13 +197,13 @@ export function Modal({
   React.useEffect(() => {
     if (reopen && ref.current && !ref.current.open) {
       // showModal() may throw `InvalidStateError` if the dialog is already in
-      // the modal-state (e.g. duplicate mount). Catch and ignore — the second
+      // the modal-state (e.g. duplicate mount). Catch and ignore, the second
       // instance becoming a no-op is preferable to crashing the page.
       try {
         ref.current.showModal();
         lockScroll();
       } catch {
-        /* already-open or detached — safe to ignore */
+        /* already-open or detached, safe to ignore */
       }
     }
   }, [reopen]);
@@ -211,8 +211,28 @@ export function Modal({
   // Always release the scroll lock if the component unmounts while open.
   React.useEffect(() => () => unlockScroll(), []);
 
+  /**
+   * Put every form in the dialog back to the markup it was rendered with.
+   *
+   * These dialogs are not unmounted when they close, so whatever was typed
+   * into them is still there the next time they open. After a mint the
+   * operator reopened "New API key" onto the previous key's name, and typing
+   * went on the end of it, producing names like
+   * "Trial secret keyProduction server". Nothing warned them, and the name is
+   * the only label the key ever gets.
+   *
+   * `form.reset()` rather than blanking the fields, because it restores the
+   * DEFAULTS: a modal that reopens on a validation failure re-renders with the
+   * operator's values as `defaultValue` (the subscription grant does this), and
+   * those are meant to survive.
+   */
+  function resetForms(): void {
+    for (const form of ref.current?.querySelectorAll('form') ?? []) form.reset();
+  }
+
   function open(): void {
     try {
+      resetForms();
       ref.current?.showModal();
       lockScroll();
     } catch {
@@ -268,14 +288,14 @@ export function Modal({
     return false;
   }
 
-  // Fires for every close path (X button, backdrop click, native Esc — all of
+  // Fires for every close path (X button, backdrop click, native Esc, all of
   // which end in the dialog's `close` event).
   function handleClose(): void {
     unlockScroll();
     stripModalParam();
   }
 
-  // When the dialog closes (X button, backdrop click, or native Esc — all fire
+  // When the dialog closes (X button, backdrop click, or native Esc, all fire
   // the dialog's `close` event), strip the `?modalKey=1` flag from the URL.
   // Otherwise the URL stays at `?modalKey=1` while the dialog is shut, so a
   // trigger that navigates back to the same `?modalKey=1` is a no-op (URL
@@ -295,7 +315,7 @@ export function Modal({
 
   // Only style the wrapping <button> when `trigger` is a string (default =
   // primary pill, override via triggerClassName). If `trigger` is an element it
-  // styles itself — applying the pill too would double the styling (a pill
+  // styles itself, applying the pill too would double the styling (a pill
   // inside a pill). Pass triggerClassName explicitly to style the button.
   const triggerCls =
     triggerClassName ?? (typeof trigger === 'string' ? defaultTriggerClass : '');

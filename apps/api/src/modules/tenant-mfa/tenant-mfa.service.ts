@@ -1,5 +1,5 @@
 /**
- * Operator (TenantUser) MFA — mirrors `modules/mfa` for the operator side.
+ * Operator (TenantUser) MFA, mirrors `modules/mfa` for the operator side.
  * Writes to `tenant_mfa_credentials`. Same TOTP + backup-code primitives
  * via lib/mfa.ts.
  */
@@ -64,7 +64,7 @@ export const tenantMfaService = {
     }
     const { base32 } = decryptJson<{ base32: string }>(cred.secretCiphertext);
     if (!verifyTotp(base32, args.code)) {
-      // 422 (not 401): the operator's *session* is valid — only the submitted
+      // 422 (not 401): the operator's *session* is valid, only the submitted
       // code is wrong. A 401 here makes the panel's api() client treat the
       // session as expired and log the operator out mid-enrollment.
       throw new RekeyError({
@@ -111,14 +111,14 @@ export const tenantMfaService = {
 
   /**
    * Turn operator MFA off. The step-up is at the route, for the same reason as
-   * `setup` — and it is the whole control here: nothing else stands between a
+   * `setup`, and it is the whole control here: nothing else stands between a
    * stolen panel access token and the factor that exists to survive one.
    */
   async disable(tenantUserId: string): Promise<void> {
     await prisma.tenantMfaCredential.deleteMany({ where: { tenantUserId } });
   },
 
-  /** Whether this operator has COMPLETED enrollment — the gate the step-up keys off. */
+  /** Whether this operator has COMPLETED enrollment, the gate the step-up keys off. */
   async enrollmentComplete(tenantUserId: string): Promise<boolean> {
     const cred = await prisma.tenantMfaCredential.findUnique({
       where: { tenantUserId },
@@ -134,7 +134,7 @@ export const tenantMfaService = {
     return { enabled: true, remainingBackupCodes: stored.length };
   },
 
-  /** Mirror of mfaService.isEnrolled — used by sign-in to gate the session. */
+  /** Mirror of mfaService.isEnrolled, used by sign-in to gate the session. */
   async isEnrolled(tenantUserId: string): Promise<boolean> {
     const cred = await prisma.tenantMfaCredential.findUnique({ where: { tenantUserId } });
     return Boolean(cred?.enrolledAt);

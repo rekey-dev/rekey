@@ -2,7 +2,7 @@
  * Narrow an API error code to one the page has copy for.
  *
  * The unauthenticated pages round-trip failures through `?error=<code>` and
- * render only codes present in their own message map — deliberately, because
+ * render only codes present in their own message map, deliberately, because
  * `?error=` sits in the URL and an unrecognised value would otherwise let
  * anyone paint a real-looking failure onto a healthy form by editing the link.
  *

@@ -108,7 +108,7 @@ Every tool error is a JSON object — `error: { code, message, fix?, statusCode?
 ## Gotchas
 
 - **Money is integers in the smallest currency unit** (cents/paise/sen). Render `999 USD/MONTH` as `$9.99/month` — never assume a `.00` decimal (`¥100` is a hundred whole yen).
-- **Only call `mint_api_key` when the user explicitly asks** to create/mint a key. For other mutations (create plan, refund, deactivate coupon — not yet exposed), use the read tools to figure out what to do, then the `rekey` CLI or the Panel.
+- **Only call `mint_api_key` when the user explicitly asks** to create/mint a key. It is the only write tool here. For other mutations, use the read tools to work out what to do, then the `rekey` CLI or the Panel. A hosted deployment also runs a separate operator MCP server at `/api/v1/tenant/mcp` with a far larger tool set; this package does not reach it.
 - **Coupon discounts**: PERCENT uses basis points (`1500` = 15%); AMOUNT uses the smallest currency unit.
 
 ## Links

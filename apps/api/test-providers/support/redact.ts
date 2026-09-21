@@ -6,15 +6,15 @@
  * one: vitest renders the full `expected`/`actual` of a failing assertion, and
  * provider SDKs put request context (sometimes including a key fragment) into
  * the exceptions they throw. A green run that leaks `sk_test_…` into a CI log
- * is worse than no run at all — the key is then in a log retention system, a
+ * is worse than no run at all, the key is then in a log retention system, a
  * PR check page, and anywhere the log was forwarded.
  *
  * Two layers, because either alone has a hole:
  *
- *   1. `registerSecret` — exact-value replacement for every credential the
+ *   1. `registerSecret`, exact-value replacement for every credential the
  *      harness read out of the environment. Catches anything that quotes a key
  *      verbatim.
- *   2. Prefix patterns — `sk_test_…`, `whsec_…`, `rzp_test_…` and friends,
+ *   2. Prefix patterns, `sk_test_…`, `whsec_…`, `rzp_test_…` and friends,
  *      matched structurally. Catches keys the harness never saw: a secret
  *      echoed back by a provider in a masked form (`sk_test_51A****9Z`), one
  *      that arrived from a config file rather than `registerSecret`, or a
@@ -38,7 +38,7 @@ const exactSecrets = new Map<string, string>();
  * Structural patterns for provider credentials, applied to every line of
  * output whether or not the value was ever registered.
  *
- * `[A-Za-z0-9_*]` includes `*` on purpose — see the module header.
+ * `[A-Za-z0-9_*]` includes `*` on purpose, see the module header.
  */
 const PATTERNS: Array<{ re: RegExp; label: string }> = [
   { re: /sk_(?:test|live)_[A-Za-z0-9_*]{6,}/g, label: 'stripe-secret-key' },
@@ -54,7 +54,7 @@ const PATTERNS: Array<{ re: RegExp; label: string }> = [
  * Register a credential value for exact redaction.
  *
  * `label` names the ENV VAR it came from, so a redacted line still tells the
- * reader which credential was involved — `[redacted:STRIPE_TEST_SECRET_KEY]`
+ * reader which credential was involved, `[redacted:STRIPE_TEST_SECRET_KEY]`
  * is diagnostic; `[redacted]` is not.
  */
 export function registerSecret(value: string | undefined | null, label: string): void {
@@ -84,7 +84,7 @@ let installed = false;
  * Wrap `process.stdout.write` / `process.stderr.write` so nothing reaches a
  * terminal or a CI log without passing through `redact`.
  *
- * Idempotent — setup files can run more than once per worker.
+ * Idempotent, setup files can run more than once per worker.
  */
 export function installOutputScrubber(): void {
   if (installed) return;
@@ -92,7 +92,7 @@ export function installOutputScrubber(): void {
   for (const stream of [process.stdout, process.stderr]) {
     const original = stream.write.bind(stream);
     // The overloads of `Writable.write` differ only in argument order, and the
-    // harness never needs to distinguish them — pass everything through.
+    // harness never needs to distinguish them, pass everything through.
     stream.write = ((chunk: unknown, ...rest: unknown[]): boolean => {
       if (typeof chunk === 'string') {
         return (original as (c: string, ...r: unknown[]) => boolean)(redact(chunk), ...rest);
@@ -110,7 +110,7 @@ export function installOutputScrubber(): void {
 
 /**
  * A credential-shaped value that is syntactically valid and definitely not a
- * real key — for the "provider refuses this" tests, and for the local webhook
+ * real key, for the "provider refuses this" tests, and for the local webhook
  * signing secret.
  *
  * Generated per call rather than hard-coded so it can never be mistaken for

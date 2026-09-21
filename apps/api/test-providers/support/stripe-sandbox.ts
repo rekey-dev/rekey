@@ -3,7 +3,7 @@
  * test account. (The naming rule itself is provider-neutral and lives in
  * `naming.ts`.)
  *
- * A sandbox account is shared — with the operator's own manual experiments,
+ * A sandbox account is shared, with the operator's own manual experiments,
  * with other contributors, with every previous run of this suite. Two rules
  * follow, and both are enforced here rather than left to each test:
  *
@@ -42,14 +42,14 @@ const STALE_AFTER_MS = 60 * 60 * 1000; // 1 hour
  * How many objects of each kind the entry sweep will look at.
  *
  * Stripe's auto-pagination will happily walk an entire account, and the sweep
- * runs before any test — an unbounded scan of somebody's long-lived sandbox
+ * runs before any test, an unbounded scan of somebody's long-lived sandbox
  * turns `pnpm test:providers` into a five-minute wait for nothing. Leftovers
  * are newest-first in every list this touches, so a bound only ever misses
  * residue that is already very old, and the next run gets another shot at it.
  */
 const SWEEP_SCAN_LIMIT = 300;
 
-/** Stripe API version this harness pins — the one `stripe-real.ts` uses. */
+/** Stripe API version this harness pins, the one `stripe-real.ts` uses. */
 const API_VERSION = '2024-11-20.acacia' as Stripe.LatestApiVersion;
 
 export function stripeClient(apiKey: string): Stripe {
@@ -118,7 +118,7 @@ export class StripeJanitor {
     switch (kind) {
       case 'checkoutSession':
         // Expiring is the only "undo" a session has, and it only applies while
-        // the session is still open — a completed one 400s, which is fine.
+        // the session is still open, a completed one 400s, which is fine.
         await this.stripe.checkout.sessions.expire(id).catch(() => undefined);
         return;
       case 'webhookEndpoint':
@@ -147,7 +147,7 @@ export class StripeJanitor {
  * Archive a product and every price under it.
  *
  * Deletion is attempted first and expected to fail for any product that has
- * been through `ensurePlanRegistered` — Stripe refuses to delete a product
+ * been through `ensurePlanRegistered`, Stripe refuses to delete a product
  * with prices. Archiving is the real outcome; the delete is there for the
  * products that happen to have none.
  */
@@ -167,7 +167,7 @@ export async function archiveProduct(stripe: Stripe, productId: string): Promise
  *
  * Called once from the harness's global setup, before any suite runs. Only
  * touches objects whose name or metadata carries the harness marker AND that
- * are older than `STALE_AFTER_MS` — the age check is what stops this from
+ * are older than `STALE_AFTER_MS`, the age check is what stops this from
  * eating the objects of a run happening at the same moment on another machine
  * pointed at the same sandbox.
  *
@@ -183,7 +183,7 @@ export async function sweepStaleHarnessObjects(stripe: Stripe): Promise<Record<s
 
   /**
    * Walk at most `SWEEP_SCAN_LIMIT` objects of one kind, removing the stale
-   * harness ones. Never throws — the suite about to run matters more than the
+   * harness ones. Never throws, the suite about to run matters more than the
    * tidiness of an account we do not own.
    */
   const sweep = async <T extends { created: number }>(
@@ -236,7 +236,7 @@ export async function sweepStaleHarnessObjects(stripe: Stripe): Promise<Record<s
     stripe.webhookEndpoints.list({ limit: 100 }),
     // Matched on the URL: `registerWebhook` writes its own fixed description
     // ('Rekey (auto-configured)') that the harness does not control, but the
-    // harness owns the whole hostname it points them at — see `harnessWebhookUrl`.
+    // harness owns the whole hostname it points them at, see `harnessWebhookUrl`.
     (endpoint) => endpoint.url.includes(`${HARNESS_PREFIX}.example.com`),
     (endpoint) => stripe.webhookEndpoints.del(endpoint.id),
   );

@@ -193,8 +193,8 @@ describe('Active organization (oid claim)', () => {
     // external audit removed a member and found `GET /users/me` still
     // returning the removed org as `activeOrganizationId` for the remaining
     // life of the access token, because the `oid` claim was echoed without
-    // being checked. Authorization was never affected — org endpoints 403'd
-    // correctly — but a UI driving "current team" off /users/me showed the
+    // being checked. Authorization was never affected, org endpoints 403'd
+    // correctly, but a UI driving "current team" off /users/me showed the
     // wrong team and then failed every call inside it.
     const owner = await signUpUser(`sv-own-${Math.random().toString(36).slice(2, 7)}@example.com`);
     const member = await signUpUser(`sv-mem-${Math.random().toString(36).slice(2, 7)}@example.com`);
@@ -217,7 +217,7 @@ describe('Active organization (oid claim)', () => {
       .then((r) => r.json().data as { activeOrganizationId: string | null });
     expect(meBefore.activeOrganizationId).toBe(orgId);
 
-    // Removed — but deliberately NOT refreshed. The same access token is
+    // Removed, but deliberately NOT refreshed. The same access token is
     // reused below, which is the situation the audit was in.
     await prisma.organizationMembership.deleteMany({
       where: { organizationId: orgId, endUserId: member.endUser.id },
@@ -232,8 +232,8 @@ describe('Active organization (oid claim)', () => {
       .then((r) => r.json().data as { activeOrganizationId: string | null });
     expect(meAfter.activeOrganizationId).toBeNull();
 
-    // The token itself stays valid — removal from an organization is not a
-    // reason to end a session — and the org's shared pool is no longer visible
+    // The token itself stays valid, removal from an organization is not a
+    // reason to end a session, and the org's shared pool is no longer visible
     // through it, which is what the claim was defaulting the subject to.
     expect((await entitlements(switched.accessToken)).creditBalance).toBe(0);
   });

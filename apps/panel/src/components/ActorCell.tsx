@@ -1,10 +1,10 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { Badge } from '@/components/Badge';
 import type { ActorEmails } from '@/lib/security-events';
 
 /**
- * Who did this — by email, linked, the way Payments and Dunning already do it.
+ * Who did this, by email, linked, the way Payments and Dunning already do it.
  *
  * The audit log and Activity used to print `actorId` verbatim: a 25-character
  * CUID, truncated to 12rem, with the person's identity available nowhere on

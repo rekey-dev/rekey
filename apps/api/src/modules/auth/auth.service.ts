@@ -3,15 +3,15 @@
  *
  * Sign-up and sign-in for an Application's end-users. Honours the
  * Application's `authConfig`:
- *   - `methods` array — sign-up/sign-in are refused if `"password"` isn't enabled.
- *   - `passwordMinLength` — enforced on sign-up.
- *   - `sendVerificationEmailOnSignUp` — sign-up posts the verification link
+ *   - `methods` array, sign-up/sign-in are refused if `"password"` isn't enabled.
+ *   - `passwordMinLength`, enforced on sign-up.
+ *   - `sendVerificationEmailOnSignUp`, sign-up posts the verification link
  *     alongside the welcome mail (default on; forced on when the gate below is).
- *   - `requireEmailVerification` — an unconfirmed address gets NO session, from
+ *   - `requireEmailVerification`, an unconfirmed address gets NO session, from
  *     any door: sign-up, sign-in, MFA verification, org switch, refresh
  *     (default off).
  *
- * Email is unique **per Application**, not globally — `(applicationId, email)`
+ * Email is unique **per Application**, not globally, `(applicationId, email)`
  * is the unique constraint in the schema. The same email may exist as
  * separate users across separate Applications.
  *
@@ -27,7 +27,12 @@ import { Prisma } from '@prisma/client';
 import type { Application, EndUser } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
-import { hashPassword, verifyPassword } from '../../lib/passwords.js';
+import { sessionEnded } from '../../lib/session-stamp.js';
+import { impersonationForbidden } from '../../middleware/impersonation.js';
+import type { ImpersonationContext } from '../../middleware/user-session.js';
+import { devicesService, type PreflightDeviceOutcome } from '../devices/devices.service.js';
+import { hashPassword, needsRehash, verifyPassword, verifyPasswordOrDecoy } from '../../lib/passwords.js';
+import { assertMetadataWithinLimit } from '../../lib/metadata-limit.js';
 import { checkPasswordBreached } from '../../lib/breached-password.js';
 import { env } from '../../config/env.js';
 import {
@@ -58,7 +63,6 @@ import {
 import {
   issueMagicLinkToken,
   lookupMagicLinkToken,
-  consumeMagicLinkToken,
 } from '../../lib/magic-link.js';
 import {
   buildRegistrationOptions,
@@ -114,7 +118,7 @@ export interface SignInInput {
  * The one body a PUBLISHABLE caller ever gets back from a
  * "send a credential by email" endpoint, whatever actually happened.
  *
- * Unknown address, delivered, transport broken, no transport configured — all
+ * Unknown address, delivered, transport broken, no transport configured, all
  * four return this. Anything that varies with account existence is an
  * enumeration oracle, and a publishable key ships in browser bundles, so
  * "reachable by an attacker" means "reachable by anyone who opens devtools".
@@ -134,7 +138,7 @@ const PUBLISHABLE_SEND_RESPONSE = {
  * rather than three.
  *
  * Unknown address, already-verified address, delivered, transport broken, no
- * transport, no resolvable link — every one of them returns this to a
+ * transport, no resolvable link, every one of them returns this to a
  * publishable caller. "Already verified" matters as much as "unknown" here:
  * distinguishing them answers *does this address have a confirmed account*,
  * which is the enumeration oracle the constant exists to close.
@@ -151,12 +155,11 @@ const PUBLISHABLE_MAGIC_LINK_RESPONSE = {
   magicLinkToken: null,
 } as const;
 
-/** Public-safe shape of an EndUser — `passwordHash` stripped. */
-export type PublicEndUser = Omit<EndUser, 'passwordHash'>;
+/** Public-safe shape of an EndUser, `passwordHash` stripped. */
+export type PublicEndUser = Omit<EndUser, 'passwordHash' | 'sessionsInvalidBefore'>;
 
 function redact(user: EndUser): PublicEndUser {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { passwordHash, ...rest } = user;
+  const { passwordHash, sessionsInvalidBefore, ...rest } = user;
   return rest;
 }
 
@@ -178,24 +181,12 @@ function redact(user: EndUser): PublicEndUser {
  * failed on bytes the user could no longer remove. A ceiling one writer
  * enforces is a bug in the other writers, not a ceiling.
  */
-export const METADATA_MAX_BYTES = 16 * 1024;
-
-export function assertMetadataWithinLimit(metadata: Record<string, unknown>): void {
-  const bytes = Buffer.byteLength(JSON.stringify(metadata), 'utf8');
-  if (bytes > METADATA_MAX_BYTES) {
-    throw new RekeyError({
-      statusCode: 400,
-      code: 'METADATA_TOO_LARGE',
-      message: `Metadata would be ${bytes} bytes after merging; the limit is ${METADATA_MAX_BYTES}.`,
-      fix: 'Store large values (files, documents, long text) in your own storage and keep only a reference here.',
-    });
-  }
-}
+export { METADATA_MAX_BYTES, assertMetadataWithinLimit } from '../../lib/metadata-limit.js';
 
 /**
  * GDPR erasure gate (roadmap §10). A tombstoned EndUser (`erasedAt` set) has
  * had its credentials hard-deleted and must NEVER be able to authenticate
- * again — the row only survives to anchor retained financial records. Every
+ * again, the row only survives to anchor retained financial records. Every
  * SESSION-API path that mints a session or resolves an access token runs
  * through here, so an erased user is uniformly rejected with a single, clear
  * code regardless of which auth method is attempted (password, magic-link,
@@ -206,10 +197,10 @@ export function assertMetadataWithinLimit(metadata: Record<string, unknown>): vo
  * claim it was. The per-Application OAuth/OIDC surface has to answer in the
  * `{ error, error_description }` dialect its clients parse, not the Rekey
  * envelope, so it enforces the identical rule through `liveGrantSubject` in
- * modules/mcp/oauth.service.ts — code redemption, the refresh grant,
+ * modules/mcp/oauth.service.ts, code redemption, the refresh grant,
  * `/userinfo` and the MCP endpoint. Change one, change both.
  *
- * 410 Gone (not 401): the account existed and was deliberately erased — a
+ * 410 Gone (not 401): the account existed and was deliberately erased, a
  * distinct, non-retryable terminal state. The customer's app should treat it
  * as "this user is gone" and stop re-prompting for credentials.
  */
@@ -234,6 +225,11 @@ export interface AuthResult {
   refreshToken: string;
   /** Absolute expiry timestamp of the refresh token. */
   refreshTokenExpiresAt: Date;
+  /**
+   * The device this session is bound to (the access token's `dev` claim), or
+   * null when the client sent no fingerprint.
+   */
+  deviceId: string | null;
 }
 
 /**
@@ -244,7 +240,7 @@ export interface AuthResult {
  * as a real access token (see lib/jwt.ts `typ` claim).
  */
 export interface MfaChallengeResult {
-  /** Discriminator — clients branch on this. */
+  /** Discriminator, clients branch on this. */
   mfaRequired: true;
   /** Tells the UI which user is being challenged, but holds no session. */
   endUser: PublicEndUser;
@@ -261,32 +257,259 @@ export type SignInOutcome =
 export interface DeviceContext {
   userAgent?: string | null;
   ip?: string | null;
+  /**
+   * Client-computed device fingerprint from the request body's `device`
+   * object. Present → the session is bound to that device (registered or
+   * refreshed through `devicesService.touch`, limit enforced).
+   */
+  fingerprint?: string | null;
+  label?: string | null;
+  /**
+   * An ALREADY-bound device, for flows that re-mint a session from an existing
+   * one (org switch, refresh) and therefore know the device by id rather than
+   * by fingerprint. Ignored when `fingerprint` is present.
+   */
+  deviceId?: string | null;
+  /**
+   * Whether this is a primary sign-in (the flows `authConfig.deviceBinding =
+   * 'required'` gates) or a re-mint of an existing session. Defaults to
+   * primary; `refresh` and org switch pass `false`.
+   */
+  primary?: boolean;
 }
+
+/**
+ * Refuse a primary sign-in that carries no fingerprint when the Application
+ * requires one. Split out of `bindDevice` so the paths that CREATE an account
+ * (sign-up, first OAuth login, first magic-link login) can ask before the row
+ * exists. Asked only afterwards, a client that forgot `device` would have the
+ * account created, the welcome mail sent and `user.created` emitted, and its
+ * corrected retry would meet EMAIL_ALREADY_EXISTS.
+ */
+export function assertDeviceBindingSatisfiable(
+  application: Application,
+  device: DeviceContext | undefined,
+): void {
+  if (device?.fingerprint || device?.deviceId) return;
+  const { deviceBinding } = AuthConfigSchema.parse(application.authConfig);
+  if (deviceBinding === 'required' && device?.primary !== false) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'DEVICE_FINGERPRINT_REQUIRED',
+      message: 'This Application requires a device binding on sign-in.',
+      fix: 'Send `device: { fingerprint, label? }` in the request body, see docs/devices.md.',
+    });
+  }
+}
+
+/**
+ * A device binding that has been decided but not yet written: the machine a
+ * session is about to be bound to, and the path that is binding it.
+ */
+interface DeviceBindingPlan {
+  fingerprint: string;
+  via: 'sign_in' | 'refresh';
+  label: string | null | undefined;
+  ip: string | null;
+}
+
+/** The route-documented error for a device the service will not admit. */
+function deviceRefusal(
+  outcome: Exclude<PreflightDeviceOutcome, { kind: 'ok' }>,
+): RekeyError {
+  if (outcome.kind === 'blocked') {
+    return new RekeyError({
+      statusCode: 403,
+      code: 'DEVICE_BLOCKED',
+      message: 'Sign-in from this device has been blocked.',
+      fix: 'Contact the application\'s support, only an operator can unblock a device.',
+    });
+  }
+  return new RekeyError({
+    statusCode: 403,
+    code: 'DEVICE_LIMIT_REACHED',
+    message: `This account is already signed in on ${outcome.limit} device${outcome.limit === 1 ? '' : 's'}, the most its plan allows.`,
+    fix:
+      'Release one of the devices listed in `details.devices`: sign in without `device` (when binding is optional) ' +
+      'and call DELETE /api/v1/users/me/devices/:id, have your backend call POST /api/v1/devices/:id/release, ' +
+      'or upgrade the plan. See docs/devices.md.',
+    details: {
+      limit: outcome.limit,
+      devices: outcome.devices.map((d) => ({
+        id: d.id,
+        label: d.label,
+        firstSeenAt: d.firstSeenAt.toISOString(),
+        lastSeenAt: d.lastSeenAt.toISOString(),
+      })),
+    },
+  });
+}
+
+/**
+ * Resolve the device a new session should be bound to, or null.
+ *
+ * Three inputs, one outcome: a fingerprint registers/refreshes the device
+ * (the limit is enforced here, so a new machine over the cap never gets a
+ * token); a bare `deviceId` re-touches a device the session was already bound
+ * to (a blocked one still refuses); neither leaves the session unbound,
+ * unless the Application requires binding and this is a primary sign-in.
+ *
+ * Refusals are thrown as the errors the route documents. The device list on
+ * DEVICE_LIMIT_REACHED rides in `details` so a client can offer "release one"
+ * rather than a dead end.
+ *
+ * Two phases, because the refresh flow needs them apart. `planDeviceBinding`
+ * decides WHICH machine (and refuses a blocked or released binding) without
+ * writing anything; `commitDeviceBinding` registers or refreshes it, which is
+ * the write that inserts a row and emits `device.registered`. Sign-in runs
+ * both back to back; refresh runs the plan (plus a `preflight`) before it
+ * spends the presented token and the commit after, so a refusal costs the
+ * client nothing and a replayed token registers nothing.
+ */
+async function bindDevice(
+  application: Application,
+  endUser: EndUser,
+  device: DeviceContext | undefined,
+): Promise<string | null> {
+  const plan = await planDeviceBinding(application, endUser, device);
+  if (!plan) return null;
+  return commitDeviceBinding(application, endUser, plan);
+}
+
+async function planDeviceBinding(
+  application: Application,
+  endUser: EndUser,
+  device: DeviceContext | undefined,
+): Promise<DeviceBindingPlan | null> {
+  let fingerprint = device?.fingerprint ?? null;
+  let via: 'sign_in' | 'refresh' = device?.primary === false ? 'refresh' : 'sign_in';
+  if (!fingerprint && device?.deviceId) {
+    // Re-mint from an existing binding: the row is the source of the
+    // fingerprint. A device that no longer exists (deleted with its user)
+    // simply leaves the new session unbound.
+    const bound = await prisma.device.findUnique({ where: { id: device.deviceId } });
+    if (bound && bound.endUserId === endUser.id && bound.applicationId === application.id) {
+      // A re-mint rides on a device that is still ACTIVE. Release revokes
+      // the device's refresh chain, but an access token minted before the
+      // release stays valid for up to fifteen minutes, and an org switch on
+      // that token would otherwise walk the released device straight back to
+      // ACTIVE through `touch`, slot and all. Only a primary sign-in may
+      // bring a released device back; a blocked one needs an operator.
+      if (bound.status === 'BLOCKED') {
+        throw new RekeyError({
+          statusCode: 403,
+          code: 'DEVICE_BLOCKED',
+          message: 'The device this session is bound to has been blocked.',
+          fix: "Contact the application's support, only an operator can unblock a device.",
+        });
+      }
+      if (bound.status === 'RELEASED') {
+        throw new RekeyError({
+          statusCode: 401,
+          code: 'SESSION_DEVICE_RELEASED',
+          message: 'The device this session is bound to has been released.',
+          fix: 'Sign the user in again from this device.',
+        });
+      }
+      fingerprint = bound.fingerprint;
+      via = 'refresh';
+    }
+  }
+  if (!fingerprint) {
+    // A bare deviceId whose row is gone is an unbound re-mint, never a
+    // primary sign-in, so the gate is asked without the id.
+    assertDeviceBindingSatisfiable(application, device ? { ...device, deviceId: null } : undefined);
+    return null;
+  }
+  return { fingerprint, via, label: device?.label ?? undefined, ip: device?.ip ?? null };
+}
+
+/**
+ * A device refusal that lands AFTER the presented refresh token was spent,
+ * re-coded as the terminal `REFRESH_TOKEN_REVOKED` (the session was ended),
+ * with the device reason in `details.reason` and the refusal's own details
+ * (the devices to release) beside it. Anything else passes through.
+ */
+function refusalAfterRotation(e: unknown): unknown {
+  if (!(e instanceof RekeyError) || (e.code !== 'DEVICE_LIMIT_REACHED' && e.code !== 'DEVICE_BLOCKED')) return e;
+  return new RekeyError({
+    statusCode: 401,
+    code: 'REFRESH_TOKEN_REVOKED',
+    message: `This session was ended: its refresh token had been spent when the device was refused (${e.code}).`,
+    fix: 'Discard the stored tokens and sign in again. `details.reason` says why the device was refused.',
+    details: { ...(e.details ?? {}), reason: e.code },
+  });
+}
+
+/** Register or refresh the planned device. Throws the refusal `touch` returns. */
+async function commitDeviceBinding(
+  application: Application,
+  endUser: EndUser,
+  plan: DeviceBindingPlan,
+): Promise<string> {
+  const outcome = await devicesService.touch({
+    applicationId: application.id,
+    endUserId: endUser.id,
+    fingerprint: plan.fingerprint,
+    label: plan.label,
+    ip: plan.ip,
+    via: plan.via,
+  });
+  if (outcome.kind !== 'ok') throw deviceRefusal(outcome);
+  return outcome.device.id;
+}
+
+/**
+ * Where a new session pair comes from. Required on every `issuePair` call so
+ * a caller has to say it: `'credential'` when a sign-in factor was just
+ * verified (password, MFA code, passkey, magic link, OAuth), or the session
+ * the request is acting from, carrying its impersonation context if any.
+ */
+type PairOrigin = 'credential' | { session: { impersonation: ImpersonationContext | undefined } };
 
 async function issuePair(
   application: Application,
   endUser: EndUser,
+  origin: PairOrigin,
   device?: DeviceContext,
   activeOrganizationId?: string,
 ): Promise<AuthResult> {
+  // Impersonation chokepoint. An impersonation token is 5 minutes long, carries
+  // `imp`, and dies when its audit row ends; the pair minted here is a 30-day
+  // rotating session with none of that. Minting one from an impersonated
+  // session hands the operator a durable, unattributed, MFA-free session as the
+  // end-user, which is what the org switch routes did before they refused.
+  // The routes refuse first with the same error; this is the backstop, so a
+  // future route that re-mints from a session cannot reopen it.
+  if (origin !== 'credential' && origin.session.impersonation) {
+    throw impersonationForbidden('mint a new session');
+  }
   // Email-verification chokepoint. THE place a session comes into existence in
-  // this service — sign-up, sign-in, MFA verification and org switching all end
-  // up here — which is why the gate lives here rather than beside each caller.
+  // this service, sign-up, sign-in, MFA verification and org switching all end
+  // up here, which is why the gate lives here rather than beside each caller.
   // It used to guard `signIn` alone, so `POST /auth/sign-up` handed out a
   // working access token and a 30-day refresh chain with the flag on, to
   // exactly the population the flag exists for: an attacker who registers an
   // address they cannot read never had to open the mailbox.
   ensureEmailVerified(application, endUser);
-  // Honours the app's `authConfig.tokenAlg` (HS256 default, RS256 = JWKS).
-  const access = await issueUserAccessTokenForApp(
-    application,
-    endUser.id,
-    activeOrganizationId ? { activeOrganizationId } : {},
-  );
+  // Device binding sits at the same chokepoint for the same reason: every
+  // session passes through here, so the device limit cannot be bypassed by
+  // picking a different sign-in method. It runs AFTER the verification gate so
+  // an unconfirmed address does not register devices it cannot use.
+  const deviceId = await bindDevice(application, endUser, device);
+  // The refresh row first: it mints the session id the access token carries
+  // as `sid`, which is what lets a single-session revoke end this pair.
   const refresh = await issueRefreshToken(application.id, endUser.id, {
     userAgent: device?.userAgent ?? null,
     ip: device?.ip ?? null,
     activeOrganizationId: activeOrganizationId ?? null,
+    deviceId,
+  });
+  // Honours the app's `authConfig.tokenAlg` (HS256 default, RS256 = JWKS).
+  const access = await issueUserAccessTokenForApp(application, endUser.id, {
+    ...(activeOrganizationId && { activeOrganizationId }),
+    ...(deviceId && { deviceId }),
+    sessionId: refresh.record.sessionId,
   });
   return {
     endUser: redact(endUser),
@@ -294,6 +517,7 @@ async function issuePair(
     accessTokenExpiresAt: access.expiresAt,
     refreshToken: refresh.raw,
     refreshTokenExpiresAt: refresh.record.expiresAt,
+    deviceId,
   };
 }
 
@@ -301,7 +525,7 @@ async function issuePair(
  * Bridge for sign-in flows: if the user has MFA enrolled, return a
  * challenge token instead of a real session. Otherwise mint the session.
  *
- * Used by password sign-in and OAuth callback — both flows authenticate
+ * Used by password sign-in and OAuth callback, both flows authenticate
  * the user via *some* primary factor (password, OAuth) and then must
  * gate on MFA before issuing tokens.
  */
@@ -317,7 +541,7 @@ export async function issueSessionOrMfaChallenge(
   // Same gate `issuePair` runs, repeated here for the branch that returns
   // BEFORE it: an MFA-enrolled user with an unconfirmed address would otherwise
   // be asked for a TOTP code and only then told to go and read their email.
-  // The challenge token holds no session, so this is UX rather than a hole —
+  // The challenge token holds no session, so this is UX rather than a hole,
   // but a login form that asks for a factor it will not accept is its own bug.
   ensureEmailVerified(application, endUser);
   if (await mfaService.isEnrolled(endUser.id)) {
@@ -329,7 +553,7 @@ export async function issueSessionOrMfaChallenge(
       mfaChallengeExpiresAt: challenge.expiresAt,
     };
   }
-  const result = await issuePair(application, endUser, device);
+  const result = await issuePair(application, endUser, 'credential', device);
   // When the app requires MFA but the user hasn't enrolled, still issue the
   // session but flag it so the customer app can force enrollment.
   const policy = AuthConfigSchema.parse(application.authConfig).mfa;
@@ -357,7 +581,7 @@ function ensurePasswordMethodEnabled(application: Application): void {
  * Refuse `password` if it appears in the HIBP Pwned Passwords corpus.
  * Honours per-Application opt-out (`authConfig.passwordBreachCheckEnabled`)
  * and the env-level kill switch (`HIBP_BREACH_CHECK_DISABLED`). Errors /
- * timeouts let the password through — see `lib/breached-password.ts` for
+ * timeouts let the password through, see `lib/breached-password.ts` for
  * the rationale.
  */
 async function ensurePasswordNotBreached(
@@ -396,7 +620,7 @@ function ensureMagicLinkMethodEnabled(application: Application): void {
  * Application has `authConfig.requireEmailVerification` on.
  *
  * Its own code rather than `INVALID_CREDENTIALS`: the credential was right, and
- * the only way through is a link sitting in the user's inbox — an app that
+ * the only way through is a link sitting in the user's inbox, an app that
  * cannot tell them that sends them round the reset-password loop forever. Same
  * shape as the other "credential fine, account not permitted" refusals
  * (lockout, erasure): distinct code, and a `fix` the customer's UI can act on.
@@ -413,16 +637,16 @@ function ensureEmailVerified(application: Application, endUser: EndUser): void {
   throw new RekeyError({
     statusCode: 403,
     code: 'EMAIL_NOT_VERIFIED',
-    message: 'Confirm your email address before using this account — check your inbox for the verification link.',
+    message: 'Confirm your email address before using this account, check your inbox for the verification link.',
     // The precondition in the middle sentence is load-bearing and used to be
-    // missing. An external audit followed this `fix` on a bare deployment —
-    // no mail transport, no `authConfig.appUrl` — and got
+    // missing. An external audit followed this `fix` on a bare deployment,
+    // no mail transport, no `authConfig.appUrl`, and got
     // `{"emailSent":false,"verificationToken":null}`: no token, no mail, and
     // sign-in still refused, so the account was unreachable and the error that
     // sent them there gave no hint why. `deliverVerificationEmail` declines to
     // mint a token when no link would resolve, which is correct, but the
     // caller has to know that to get out of the loop.
-    fix: 'The user has to click the link in their verification email; sign-up always sends one while this setting is on. If it never arrived, POST /api/v1/auth/resend-verification with their address — it needs no session, precisely because this refusal denies them one. That call only returns a token if a link can be built, so pass `verifyUrl` explicitly or set `authConfig.appUrl` first; without either it answers `verificationToken: null` and nothing is sent. Failing that, an operator can mark the address verified from Panel → Application → End-users.',
+    fix: 'The user has to click the link in their verification email; sign-up always sends one while this setting is on. If it never arrived, POST /api/v1/auth/resend-verification with their address, it needs no session, precisely because this refusal denies them one. That call only returns a token if a link can be built, so pass `verifyUrl` explicitly or set `authConfig.appUrl` first; without either it answers `verificationToken: null` and nothing is sent. Failing that, an operator can mark the address verified from Panel → Application → End-users.',
   });
 }
 
@@ -441,20 +665,20 @@ export async function deliverVerificationEmail(args: {
   endUser: Pick<EndUser, 'id' | 'email'>;
   /** Caller-supplied link template; `{token}` is substituted. */
   verifyUrl?: string;
-  /** Caller-supplied base URL — first rung of the `resolveAppUrl` chain. */
+  /** Caller-supplied base URL, first rung of the `resolveAppUrl` chain. */
   appUrl?: string;
   /**
    * Refuse the send outright when no link resolves, instead of mailing a
    * verification email with no button in it.
    *
    * `buildTokenUrl(null, …)` returns '' and `{{#if verifyUrl}}` then drops the
-   * button (lib/app-url.ts) — right for the welcome mail, whose body still
+   * button (lib/app-url.ts), right for the welcome mail, whose body still
    * reads without its CTA, and useless here: the `email_verification` template
    * says "click the button below to confirm this is your email address" and
    * there is no button. Composed with `requireEmailVerification`, that mail is
    * the only route into the account, so shipping it strands the user.
    *
-   * Set by the UNATTENDED senders — sign-up and the public re-send — where
+   * Set by the UNATTENDED senders, sign-up and the public re-send, where
    * nobody asked for a token and the mail is the entire product of the call.
    * The authenticated `/auth/send-verification` deliberately does NOT set it:
    * that is an explicit integrator call whose documented no-transport contract
@@ -467,12 +691,12 @@ export async function deliverVerificationEmail(args: {
 }): Promise<{ emailSent: boolean; verificationToken: string | null }> {
   // Resolved BEFORE the token is minted: a send we are about to refuse should
   // not leave a live token in the table either.
-  // Refuse a destination this Application has not declared — see
+  // Refuse a destination this Application has not declared, see
   // assertAllowedTokenUrl. This link carries a live token in an email we send.
   assertAllowedTokenUrl(args.application, args.verifyUrl, 'verifyUrl');
   const base = args.verifyUrl === undefined ? resolveAppUrl(args.application, args.appUrl) : null;
   if (args.requireResolvableUrl === true && args.verifyUrl === undefined && base === null) {
-    // The only trace this leaves — nothing reaches the transport, so there is
+    // The only trace this leaves, nothing reaches the transport, so there is
     // no `email_logs` row. Without it the fix would be a silent drop, which is
     // the same class of bug as the button-less mail it replaces.
     void recordAuthEmailDeliveryFailure({
@@ -496,7 +720,7 @@ export async function deliverVerificationEmail(args: {
     to: args.endUser.email,
     variables: {
       userEmail: args.endUser.email,
-      // `!== undefined`, matching how `base` was decided above — a truthiness
+      // `!== undefined`, matching how `base` was decided above, a truthiness
       // test here would send an empty caller template down the `base` branch,
       // where `base` is deliberately null.
       verifyUrl:
@@ -513,13 +737,19 @@ export async function deliverVerificationEmail(args: {
     // Lower stakes than reset/magic-link (this token only flips
     // emailVerified) but the same reasoning: a failed send is not a
     // no-transport deployment, and the token should not land in logs.
-    void recordAuthEmailDeliveryFailure({
-      applicationId: args.application.id,
-      tenantId: args.application.tenantId,
-      eventKey: 'email_verification',
-      endUserId: args.endUser.id,
-      reason: outcome.message,
-    });
+    // Skipped for a SUPPRESSED send: that was the operator's own choice, not
+    // a transport fault, and alarming them about it is noise.
+    if (!outcome.suppressed) {
+      void recordAuthEmailDeliveryFailure({
+        applicationId: args.application.id,
+        tenantId: args.application.tenantId,
+        eventKey: 'email_verification',
+        endUserId: args.endUser.id,
+        reason: outcome.message,
+      });
+    }
+    // OUTSIDE the guard. A suppressed send is still a send that did not
+    // happen, so the token stays withheld, only the alarm is skipped.
     return { emailSent: false, verificationToken: null };
   }
   return { emailSent: false, verificationToken: issued.raw };
@@ -531,6 +761,7 @@ export const authService = {
 
     const config = AuthConfigSchema.parse(input.application.authConfig);
     assertSignupAllowed(config, input.authKind);
+    assertDeviceBindingSatisfiable(input.application, input.device);
     if (input.password.length < config.passwordMinLength) {
       throw new RekeyError({
         statusCode: 400,
@@ -541,23 +772,23 @@ export const authService = {
     }
     await ensurePasswordNotBreached(input.application, input.password);
     if (input.metadata !== undefined) {
-      // Same ceiling `updateSelf` applies, applied here too — see
+      // Same ceiling `updateSelf` applies, applied here too, see
       // `METADATA_MAX_BYTES`. Sign-up is reachable with a publishable key, so
       // "the caller is our own backend" was never true of this path.
       assertMetadataWithinLimit(input.metadata);
       // Identity claims are the operator's to assert, never the subject's. A
       // browser-shipped key must not be able to seed `metadata.oidc` at
-      // creation time and pick its own `preferred_username` — that is the same
+      // creation time and pick its own `preferred_username`, that is the same
       // hole as the self-service PATCH, through a different door. A SECRET key
       // is the customer's own server, which IS the operator here.
       if (input.authKind === 'publishable') assertNoReservedMetadataKey(input.metadata);
     }
-    // Workspace ceiling. Creation-only — see lib/tenant-limits.ts.
+    // Workspace ceiling. Creation-only, see lib/tenant-limits.ts.
     await assertEndUserQuota(input.application.tenantId);
 
     const passwordHash = await hashPassword(input.password);
     // Look up the Application's default end-user role. New sign-ups always
-    // start in the default role — operators can promote later via the
+    // start in the default role, operators can promote later via the
     // tenant PATCH endpoint.
     const defaultRole = await applicationRolesService.getDefault(input.application.id);
 
@@ -586,7 +817,7 @@ export const authService = {
       throw e;
     }
 
-    // Welcome email — fire-and-forget. A delivery failure must not break
+    // Welcome email, fire-and-forget. A delivery failure must not break
     // sign-up (the account was created successfully and the user has a
     // session; the email is best-effort).
     void emailService
@@ -605,7 +836,7 @@ export const authService = {
       })
       .catch(() => undefined);
 
-    // Verification email — same fire-and-forget contract as the welcome mail
+    // Verification email, same fire-and-forget contract as the welcome mail
     // it rides alongside (it does not replace it). On by default: a new
     // account should be able to confirm its address without the customer's
     // server having to call /auth/send-verification itself. An Application
@@ -620,7 +851,7 @@ export const authService = {
     //
     // Forced when `requireEmailVerification` is on, whatever the send switch
     // says. The gate below refuses this sign-up a session, so the link is the
-    // only route into the account — the two settings together would otherwise
+    // only route into the account, the two settings together would otherwise
     // create accounts nobody, including their owner, could reach. (A user who
     // never got the mail can ask for another from /auth/resend-verification,
     // which needs no session.)
@@ -633,7 +864,7 @@ export const authService = {
       }).catch(() => undefined);
     }
 
-    // Outbound webhook — `user.created`. Same fire-and-forget contract;
+    // Outbound webhook, `user.created`. Same fire-and-forget contract;
     // the dispatcher's delivery worker handles retries on its own.
     emitDetached({
       applicationId: input.application.id,
@@ -651,13 +882,13 @@ export const authService = {
     });
 
     // Throws 403 EMAIL_NOT_VERIFIED when the Application requires a confirmed
-    // address. The account IS created and the verification mail IS on its way —
+    // address. The account IS created and the verification mail IS on its way,
     // what the caller does not get is a session, which is the whole point of
     // the setting. Deliberately not a 201-with-null-tokens: `AuthResult` is a
     // published type across four SDKs, and making the tokens nullable to
     // describe a state only one Application in a hundred is in would push the
     // branch into every integrator's code.
-    return issuePair(input.application, endUser, input.device);
+    return issuePair(input.application, endUser, 'credential', input.device);
   },
 
   async signIn(input: SignInInput): Promise<SignInOutcome> {
@@ -674,7 +905,7 @@ export const authService = {
 
     // Per-(app, email) lockout via the Redis brute-force limiter. We surface
     // 429 TOO_MANY_FAILED_ATTEMPTS (with Retry-After) during the lock window
-    // rather than silent INVALID_CREDENTIALS — yes this leaks "this email has
+    // rather than silent INVALID_CREDENTIALS, yes this leaks "this email has
     // been signed-in-against recently," but the alternative is a legit user
     // staring at "wrong password" while their real password works. Matches
     // Clerk's posture. Keyed by email so it works whether or not the user
@@ -686,9 +917,27 @@ export const authService = {
     const lockScope = euLoginLockScope(input.application.id, input.email);
     await assertNotLocked(lockScope);
 
-    // Single error code — never disclose whether email or password was wrong.
+    // Single error code, never disclose whether email or password was wrong.
     const valid =
-      endUser !== null && (await verifyPassword(endUser.passwordHash, input.password));
+      // The decoy variant: an unknown address, or one with no password, costs
+      // the same argon2 work as a wrong password, so the response time does
+      // not say which accounts exist. The operator sign-in has always done
+      // this; the end-user one is reachable with a publishable key.
+      (await verifyPasswordOrDecoy(endUser?.passwordHash ?? null, input.password)) && endUser !== null;
+    if (valid && endUser !== null && endUser.passwordHash && needsRehash(endUser.passwordHash)) {
+      // An imported bcrypt hash just verified: this is the one moment the
+      // plaintext is in hand, so upgrade to argon2id now. Best-effort, a
+      // failed upgrade leaves a working bcrypt hash for next time and must
+      // not turn a correct password into a failed sign-in.
+      try {
+        await prisma.endUser.update({
+          where: { id: endUser.id },
+          data: { passwordHash: await hashPassword(input.password) },
+        });
+      } catch {
+        /* keep the bcrypt hash; retried on the next sign-in */
+      }
+    }
     if (!valid || endUser === null) {
       if (endUser) {
         const failure = await registerFailure(lockScope, LOGIN_POLICY);
@@ -697,7 +946,7 @@ export const authService = {
         // all: the only record of a failure was a Redis counter with a TTL,
         // which is gone by the time anyone asks.
         //
-        // Fire-and-forget, like every other `recordSecurityEvent` call — the
+        // Fire-and-forget, like every other `recordSecurityEvent` call, the
         // response below must not wait on a log write, and must not change
         // shape or timing because of one.
         //
@@ -719,7 +968,7 @@ export const authService = {
           metadata: { via: 'password', failuresInWindow: failure.failures },
         });
         if (failure.locked) {
-          // Once per lockout — on the attempt that tripped it, not on every
+          // Once per lockout, on the attempt that tripped it, not on every
           // attempt refused during the window.
           void recordSecurityEvent({
             type: 'user.locked_out',
@@ -745,7 +994,7 @@ export const authService = {
       });
     }
 
-    // Success — clear the failure counter + any lock.
+    // Success, clear the failure counter + any lock.
     await clearFailures(lockScope);
 
     // MFA-aware: returns a challenge token instead of a session when enrolled.
@@ -806,18 +1055,22 @@ export const authService = {
       });
     }
     const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: claims.sub } });
-    return issuePair(input.application, endUser, input.device);
+    return issuePair(input.application, endUser, 'credential', input.device);
   },
 
   /**
    * Exchange a refresh token for a fresh {access, refresh} pair. The
-   * presented refresh is revoked atomically with issuing the replacement
-   * — concurrent rotation requests don't both succeed.
+   * presented refresh is revoked atomically with issuing the replacement,
+   * concurrent rotation requests don't both succeed.
    *
    * Cross-application guard: the refresh token's `applicationId` must
    * match the calling secret key's Application.
    */
-  async refresh(application: Application, presentedRaw: string): Promise<AuthResult> {
+  async refresh(
+    application: Application,
+    presentedRaw: string,
+    device?: DeviceContext,
+  ): Promise<AuthResult> {
     const outcome = await lookupRefreshToken(presentedRaw);
     if (outcome.kind === 'unknown') {
       throw new RekeyError({
@@ -831,15 +1084,15 @@ export const authService = {
       // Two very different things arrive here, and collapsing them made
       // "revoke this one device" revoke every device.
       //
-      // `replacedById !== null` — the token was ROTATED and its replacement
+      // `replacedById !== null`, the token was ROTATED and its replacement
       // issued, and someone is now replaying the spent one. That is the
       // compromise signal: either a stolen token or a client racing itself,
       // and we cannot tell which, so the whole chain loses value.
       //
-      // `replacedById === null` — the token was DELIBERATELY revoked, by an
+      // `replacedById === null`, the token was DELIBERATELY revoked, by an
       // operator or by the user hitting "sign out this device". The revoked
       // device does not know it was revoked, so its next scheduled refresh
-      // replays a dead token — and treating that as compromise signed the
+      // replays a dead token, and treating that as compromise signed the
       // user out everywhere, which is the opposite of what they asked for.
       //
       // The operator surface has discriminated on this since it was written
@@ -855,8 +1108,8 @@ export const authService = {
         });
       }
       // Deliberately says nothing about OTHER sessions. A token reaches here
-      // either because this one device was signed out — in which case the
-      // others are fine — or because it was caught in a family revocation
+      // either because this one device was signed out, in which case the
+      // others are fine, or because it was caught in a family revocation
       // triggered elsewhere, in which case they are not. `replacedById` cannot
       // tell those apart, so the message does not guess.
       throw new RekeyError({
@@ -882,7 +1135,7 @@ export const authService = {
         fix: 'Issue a fresh token under the Application the calling secret key represents.',
       });
     }
-    // Reject MCP-surface refresh tokens at the session endpoint — they're only
+    // Reject MCP-surface refresh tokens at the session endpoint, they're only
     // valid at the per-app OAuth /token endpoint. Prevents cross-surface
     // confusion (an mcp_account token shouldn't mint a full session).
     if (outcome.token.kind !== 'session') {
@@ -894,13 +1147,82 @@ export const authService = {
       });
     }
 
+    // Everything that can refuse runs BEFORE the rotation. `rotateRefreshToken`
+    // spends the presented token: once it has run, a refusal below would leave
+    // the client holding a token that is already replaced, and its retry would
+    // read as a replay and burn the whole family. A device over the cap, a
+    // blocked device and an unverified address are ordinary refusals, not
+    // compromise signals, and must cost the client nothing but this request.
+    const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: outcome.token.endUserId } });
+    // GDPR erasure: a refresh token issued before erasure must not mint a fresh
+    // access token. (Erasure also revokes all refresh tokens, but a token
+    // rotated in a concurrent request could still reach here, belt and braces.)
+    assertEndUserNotErased(endUser);
+    // Email-verification gate, re-checked rather than trusted from issue time.
+    // A refresh chain lasts 30 days: without this, an operator who switches
+    // `requireEmailVerification` on is switching it on for future sign-ins
+    // only, and every unconfirmed account that already holds a refresh token
+    // keeps renewing for a month. Re-checking bounds that to one access-token
+    // lifetime.
+    ensureEmailVerified(application, endUser);
+    // Device binding across the rotation.
+    //
+    // A chain bound at sign-in stays bound: the presented row carries
+    // `deviceId` and the rotation copies it. If the caller ALSO sent a
+    // fingerprint it must be the same machine, a refresh token replayed from
+    // a different device is the stolen-token case, and it is treated like a
+    // reuse: the whole family is revoked. A chain that was never bound may be
+    // bound now (a client upgraded to send fingerprints mid-session); one that
+    // stays unbound is left alone, `deviceBinding: required` gates primary
+    // sign-in only, so flipping it never signs existing users out.
+    let deviceId = outcome.token.deviceId;
+    if (deviceId && device?.fingerprint) {
+      const bound = await prisma.device.findUnique({ where: { id: deviceId } });
+      if (bound && bound.fingerprint !== device.fingerprint) {
+        await revokeAllForEndUser(endUser.id);
+        throw new RekeyError({
+          statusCode: 401,
+          code: 'REFRESH_TOKEN_DEVICE_MISMATCH',
+          message:
+            'This session is bound to a different device. All sessions for this user have been revoked as a precaution.',
+          fix: 'Sign the user in again from this device.',
+        });
+      }
+    }
+    //
+    // Decision before the rotation, write after it. The device row insert and
+    // the `device.registered` webhook are side effects of admitting a machine,
+    // and they must wait until the presented token has actually been spent
+    // by THIS request: two requests presenting the same token both pass the
+    // lookup above, and only one of them wins the rotation. If the loser is a
+    // stolen token from a new machine, writing the device first would
+    // register the thief's machine and announce it to the operator before
+    // the reuse detection burned the family. So the decision (blocked, over
+    // the limit, released) is made here with nothing written, and the write
+    // happens once `rotateRefreshToken` has succeeded.
+    const plan = await planDeviceBinding(application, endUser, {
+      ...device,
+      deviceId,
+      primary: false,
+    });
+    if (plan) {
+      const check = await devicesService.preflight({
+        applicationId: application.id,
+        endUserId: endUser.id,
+        fingerprint: plan.fingerprint,
+        ip: plan.ip,
+        via: plan.via,
+      });
+      if (check.kind !== 'ok') throw deviceRefusal(check);
+    }
+
     let replacement;
     try {
       replacement = await rotateRefreshToken(outcome.token);
     } catch (e) {
       // `rotateRefreshToken` throws `REFRESH_TOKEN_RACE` when a concurrent
       // rotation already flipped the same row. From the caller's point of
-      // view that's indistinguishable from a replayed token — surface the
+      // view that's indistinguishable from a replayed token, surface the
       // same 401 REUSED code and revoke the family for safety. Without
       // this catch the race propagated as an unhandled 500, leaking timing
       // info AND keeping the chain live.
@@ -916,18 +1238,31 @@ export const authService = {
       }
       throw e;
     }
-    const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: outcome.token.endUserId } });
-    // GDPR erasure: a refresh token issued before erasure must not mint a fresh
-    // access token. (Erasure also revokes all refresh tokens, but a token
-    // rotated in a concurrent request could still reach here — belt and braces.)
-    assertEndUserNotErased(endUser);
-    // Email-verification gate, re-checked rather than trusted from issue time.
-    // A refresh chain lasts 30 days: without this, an operator who switches
-    // `requireEmailVerification` on is switching it on for future sign-ins
-    // only, and every unconfirmed account that already holds a refresh token
-    // keeps renewing for a month. Re-checking bounds that to one access-token
-    // lifetime.
-    ensureEmailVerified(application, endUser);
+    // The write. `touch` re-decides under the device lock, so the only way it
+    // refuses now is a machine of the same user admitted between the
+    // preflight and here. The presented token is already spent, so the
+    // replacement is revoked too rather than handed out unbound: the chain
+    // ends and the client signs in again, which is what a refusal on a
+    // primary sign-in would have told it anyway.
+    //
+    // And the refusal is re-coded as a REFRESH_TOKEN_* verdict. Thrown as
+    // DEVICE_LIMIT_REACHED or DEVICE_BLOCKED, an SDK that clears its cookies
+    // only on token verdicts (sdk-nextjs matches the REFRESH_TOKEN_ prefix)
+    // kept the spent token, replayed it on the next request, and reuse
+    // detection revoked every session the user had. Before the rotation the
+    // DEVICE_* codes stay: there the presented token is unspent and valid.
+    let rebound = deviceId;
+    if (plan) {
+      try {
+        rebound = await commitDeviceBinding(application, endUser, plan);
+      } catch (e) {
+        await prisma.refreshToken.updateMany({
+          where: { id: replacement.record.id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+        throw refusalAfterRotation(e);
+      }
+    }
     // Preserve the session's active org across refresh, but self-heal: if the
     // user left the org since the last token, drop the `oid` (and clear it on
     // the rotated refresh row) so a stale active org can't linger.
@@ -945,17 +1280,27 @@ export const authService = {
         });
       }
     }
-    const access = await issueUserAccessTokenForApp(
-      application,
-      endUser.id,
-      oid ? { activeOrganizationId: oid } : {},
-    );
+    if (rebound !== deviceId) {
+      // Unbound chain that just identified itself: persist the binding so the
+      // next rotation carries it without the client repeating the fingerprint.
+      await prisma.refreshToken.update({
+        where: { id: replacement.record.id },
+        data: { deviceId: rebound },
+      });
+      deviceId = rebound;
+    }
+    const access = await issueUserAccessTokenForApp(application, endUser.id, {
+      ...(oid && { activeOrganizationId: oid }),
+      ...(deviceId && { deviceId }),
+      sessionId: replacement.record.sessionId,
+    });
     return {
       endUser: redact(endUser),
       accessToken: access.token,
       accessTokenExpiresAt: access.expiresAt,
       refreshToken: replacement.raw,
       refreshTokenExpiresAt: replacement.record.expiresAt,
+      deviceId,
     };
   },
 
@@ -965,24 +1310,30 @@ export const authService = {
    * validated by the caller (the route does `requireMembership`) before
    * calling this with a non-null org. Pass `null` to switch back to the
    * personal pool. Mirrors the operator-side `switchWorkspace`.
+   *
+   * `impersonation` is required, not optional: pass `req.impersonation`. An
+   * impersonated session is refused by `issuePair` (403
+   * IMPERSONATION_ACTION_FORBIDDEN) before anything is written.
    */
   async switchActiveOrganization(args: {
     application: Application;
     endUserId: string;
     activeOrganizationId: string | null;
+    impersonation: ImpersonationContext | undefined;
     device?: DeviceContext;
   }): Promise<AuthResult> {
     const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: args.endUserId } });
     return issuePair(
       args.application,
       endUser,
+      { session: { impersonation: args.impersonation } },
       args.device,
       args.activeOrganizationId ?? undefined,
     );
   },
 
   /**
-   * Revoke a refresh token. Idempotent — calling on an already-revoked or
+   * Revoke a refresh token. Idempotent, calling on an already-revoked or
    * unknown token is a no-op (we don't disclose whether it existed).
    */
   async signOut(presentedRaw: string): Promise<void> {
@@ -992,7 +1343,7 @@ export const authService = {
   /**
    * Issue a password-reset token.
    *
-   * ENUMERATION — a PUBLISHABLE caller always gets the same body, whatever
+   * ENUMERATION, a PUBLISHABLE caller always gets the same body, whatever
    * happened: `{ delivered: true, emailSent: true, resetToken: null }`. That is
    * the classic "if an account exists we have emailed it" response, and for a
    * browser it is the only safe one: the key ships in a JS bundle, so anything
@@ -1000,7 +1351,7 @@ export const authService = {
    *
    * Those two booleans therefore carry NO information for a publishable caller.
    * They are not a report on what happened, and a browser cannot act on them
-   * anyway — it never receives a token in either case.
+   * anyway, it never receives a token in either case.
    *
    * A SECRET-key caller still gets the truth, because it needs it: the
    * no-transport contract hands it the raw token to forward, so it must be able
@@ -1014,7 +1365,7 @@ export const authService = {
    *     `{ delivered: true, emailSent: true, resetToken: null }`. The
    *     customer's server has no further work.
    *   - Otherwise (no transport configured) a SECRET-key caller gets the raw
-   *     token in `resetToken` — the legacy "Rekey does not send email"
+   *     token in `resetToken`, the legacy "Rekey does not send email"
    *     contract where the customer's server forwards it via their own
    *     provider. A PUBLISHABLE-key caller never does: that key ships in
    *     browser code, so handing it a reset token is account takeover.
@@ -1030,7 +1381,7 @@ export const authService = {
     resetUrl?: string;
     /**
      * Which credential the caller presented. A publishable key is meant to be
-     * embedded in browser code, so it must NEVER receive the raw reset token —
+     * embedded in browser code, so it must NEVER receive the raw reset token,
      * see the fallback branch below.
      */
     authKind?: AuthKind;
@@ -1067,7 +1418,7 @@ export const authService = {
       variables: {
         userEmail: endUser.email,
         // Caller-supplied template wins; otherwise build one on the resolved
-        // app URL. Empty string when nothing resolves — the template then
+        // app URL. Empty string when nothing resolves, the template then
         // renders no button at all instead of linking a live reset token to
         // a domain the operator does not own.
         resetUrl: input.resetUrl
@@ -1078,7 +1429,7 @@ export const authService = {
     });
 
     if (outcome.kind === 'sent') {
-      // Email delivered via our transport — never expose the raw token to
+      // Email delivered via our transport, never expose the raw token to
       // the API caller. The user receives it in their inbox.
       return { delivered: true, emailSent: true, resetToken: null };
     }
@@ -1086,26 +1437,37 @@ export const authService = {
     // publishable caller must not learn. Collapse it to the constant response;
     // the security event still records the real outcome for the operator.
     if (outcome.kind === 'error') {
-      // Send FAILED (bad key, quota, network) — withhold the token rather than
+      // Send FAILED (bad key, quota, network), withhold the token rather than
       // hand a live credential to whatever is logging responses.
       //
       // `emailSent: false` deliberately differs from the delivered path above.
       // It reports TRANSPORT health, not account existence: both branches are
       // reached only by an existing user, so it tells a prober nothing about
       // whether an address has an account. (What does differ on existence is
-      // `delivered` — see the caveat on this method's docblock.)
-      void recordAuthEmailDeliveryFailure({
-        applicationId: input.application.id,
-        tenantId: input.application.tenantId,
-        eventKey: 'password_reset',
-        endUserId: endUser.id,
-        reason: outcome.message,
-      });
+      // `delivered`, see the caveat on this method's docblock.)
+      //
+      // The alarm is skipped for a SUPPRESSED send: that was the operator's
+      // own configuration choice, and filling their activity feed with
+      // `auth.email_delivery_failed` about it is noise, not a signal.
+      if (!outcome.suppressed) {
+        void recordAuthEmailDeliveryFailure({
+          applicationId: input.application.id,
+          tenantId: input.application.tenantId,
+          eventKey: 'password_reset',
+          endUserId: endUser.id,
+          reason: outcome.message,
+        });
+      }
+      // The RETURN stays outside that guard, and this is exactly why
+      // suppression returns `error` rather than `no_transport`: falling
+      // through from here would reach the legacy branch that hands the RAW
+      // RESET TOKEN back to the caller. Turning email off must never turn the
+      // API into a token dispenser.
       if (input.authKind === 'publishable') return PUBLISHABLE_SEND_RESPONSE;
       return { delivered: true, emailSent: false, resetToken: null };
     }
     // No transport. The legacy contract hands the raw token back
-    // so the customer's SERVER can forward it via its own provider — but that
+    // so the customer's SERVER can forward it via its own provider, but that
     // is only ever safe for a secret-key caller. A publishable key lives in
     // browser code, so returning the token there let anyone holding it reset
     // any end-user's password and sign in as them (full account takeover).
@@ -1117,7 +1479,7 @@ export const authService = {
 
   /**
    * Consume a reset token + set the new password. On success, every existing
-   * refresh token for this user is revoked — anyone holding a session via the
+   * refresh token for this user is revoked, anyone holding a session via the
    * compromised credential is signed out.
    */
   async resetPassword(input: {
@@ -1192,11 +1554,13 @@ export const authService = {
       });
       return tx.endUser.update({
         where: { id: outcome.token.endUserId },
-        data: { passwordHash },
+        // A reset is the compromise-recovery path: the attacker's access token
+        // must stop now, not at its expiry.
+        data: { passwordHash, sessionsInvalidBefore: new Date() },
       });
     });
 
-    // Notify the user that the password changed — security-critical event.
+    // Notify the user that the password changed, security-critical event.
     // Fire-and-forget; we never let a delivery failure block the reset.
     void emailService
       .dispatch({
@@ -1239,8 +1603,6 @@ export const authService = {
         fix: `Send a password of length >= ${config.passwordMinLength}.`,
       });
     }
-    await ensurePasswordNotBreached(input.application, input.newPassword);
-
     const endUser = await prisma.endUser.findUnique({ where: { id: input.endUserId } });
     if (!endUser || endUser.applicationId !== input.application.id) {
       throw new RekeyError({
@@ -1251,8 +1613,14 @@ export const authService = {
       });
     }
 
+    // The current password is the secret sign-in checks, so a wrong guess
+    // counts toward the same account lockout, and the check runs BEFORE the
+    // breach lookup so a guesser cannot spend it (it calls out to HIBP).
+    const lockScope = euLoginLockScope(input.application.id, endUser.email);
+    await assertNotLocked(lockScope);
     const ok = await verifyPassword(endUser.passwordHash, input.currentPassword);
     if (!ok) {
+      await registerFailure(lockScope, LOGIN_POLICY);
       throw new RekeyError({
         statusCode: 401,
         code: 'INVALID_CREDENTIALS',
@@ -1260,6 +1628,9 @@ export const authService = {
         fix: 'Verify the current password and try again.',
       });
     }
+    await clearFailures(lockScope);
+
+    await ensurePasswordNotBreached(input.application, input.newPassword);
 
     const newHash = await hashPassword(input.newPassword);
     await prisma.endUser.update({
@@ -1289,7 +1660,7 @@ export const authService = {
   },
 
   /**
-   * Revoke every active refresh token for this end-user — "sign out
+   * Revoke every active refresh token for this end-user, "sign out
    * everywhere". The caller's access token stays valid until its 15-min
    * expiry; clear it client-side for a true full logout.
    */
@@ -1303,13 +1674,13 @@ export const authService = {
    *
    * Enumeration-safe: same response shape whether the email exists or not.
    * When transport is configured (BYO Resend or RESEND_DEFAULT_*), we send
-   * and hide the token. Otherwise the legacy contract applies — caller
+   * and hide the token. Otherwise the legacy contract applies, caller
    * receives the raw token in `magicLinkToken` to forward via their own
    * provider.
    *
    * When sign-up is enabled and the email has no account yet, we issue a
    * token with `endUserId = null`. The verify path creates the EndUser
-   * atomically with the consume — so the token can't be replayed to mint
+   * atomically with the consume, so the token can't be replayed to mint
    * multiple accounts, AND the welcome / verified-email side-effects fire
    * exactly once.
    */
@@ -1318,7 +1689,7 @@ export const authService = {
     email: string;
     /** Optional URL containing the literal `{token}` placeholder. */
     signInUrl?: string;
-    /** Calling key kind — gates new-user link issuance under `secret_only`. */
+    /** Calling key kind, gates new-user link issuance under `secret_only`. */
     authKind?: AuthKind;
   }): Promise<{
     delivered: boolean;
@@ -1335,13 +1706,13 @@ export const authService = {
 
     // Refuse to mint a magic link that would auto-create a user when this
     // caller isn't allowed to create one (invite_only, or secret_only reached
-    // with a publishable key) — preserves the invite-only / secret-only posture.
+    // with a publishable key), preserves the invite-only / secret-only posture.
     // Existing users still get a sign-in link.
     //
     // Under the default `public` signup mode this branch is unreachable, so a
     // known and an unknown address are genuinely indistinguishable. Under
     // invite_only / secret_only it is reachable, and then `delivered` differs on
-    // existence — the same caveat as requestPasswordReset. Silent refusal and
+    // existence, the same caveat as requestPasswordReset. Silent refusal and
     // padded timing narrow it; they do not close it.
     if (!endUser && !signupAllowed(config, input.authKind)) {
       // Sleep to flatten the timing side channel. A publishable caller gets the
@@ -1379,18 +1750,24 @@ export const authService = {
     }
     if (outcome.kind === 'error') {
       // As above, and the stakes are higher: this token IS a session.
-      void recordAuthEmailDeliveryFailure({
-        applicationId: input.application.id,
-        tenantId: input.application.tenantId,
-        eventKey: 'magic_link_signin',
-        endUserId: endUser?.id ?? null,
-        reason: outcome.message,
-      });
+      //
+      // Skipped for a SUPPRESSED send, the operator's own choice, not a fault.
+      if (!outcome.suppressed) {
+        void recordAuthEmailDeliveryFailure({
+          applicationId: input.application.id,
+          tenantId: input.application.tenantId,
+          eventKey: 'magic_link_signin',
+          endUserId: endUser?.id ?? null,
+          reason: outcome.message,
+        });
+      }
+      // The RETURN stays outside that guard. A magic-link token IS a session,
+      // so a suppressed send must withhold it exactly as a failed one does.
       if (input.authKind === 'publishable') return PUBLISHABLE_MAGIC_LINK_RESPONSE;
       return { delivered: true, emailSent: false, magicLinkToken: null };
     }
     // Same rule as requestPasswordReset, and the stakes are higher: a
-    // magic-link token IS a session — verifying it signs the holder in with no
+    // magic-link token IS a session, verifying it signs the holder in with no
     // password involved. The raw-token fallback is for a customer's SERVER to
     // forward via its own provider, so it is only ever safe for a secret key.
     // A publishable key lives in browser code; handing it this token is
@@ -1402,8 +1779,8 @@ export const authService = {
   /**
    * Consume a magic-link token and complete sign-in.
    *
-   * Returns the same `SignInOutcome` discriminated union as password sign-in
-   * — so MFA-enrolled users get a challenge token, others get a session.
+   * Returns the same `SignInOutcome` discriminated union as password sign-in,
+   * so MFA-enrolled users get a challenge token, others get a session.
    *
    * For tokens issued without an `endUserId` (new-user magic link), the
    * EndUser is created atomically inside the consume transaction, with
@@ -1412,7 +1789,7 @@ export const authService = {
    * lifecycle side-effects (welcome email, user.created webhook) fire.
    *
    * An EXISTING user's `emailVerified` is promoted to true on the same
-   * reasoning — the proof is identical whether or not the account predates the
+   * reasoning, the proof is identical whether or not the account predates the
    * link. It is only ever set, never cleared.
    *
    * Stale-email guard: if the user's email changed between issue and
@@ -1423,7 +1800,7 @@ export const authService = {
     application: Application;
     token: string;
     device?: DeviceContext;
-    /** Calling key kind — a `secret_only` app refuses creation via pub key. */
+    /** Calling key kind, a `secret_only` app refuses creation via pub key. */
     authKind?: AuthKind;
   }): Promise<SignInOutcome> {
     ensureMagicLinkMethodEnabled(input.application);
@@ -1450,7 +1827,7 @@ export const authService = {
         statusCode: 401,
         code: 'MAGIC_LINK_EXPIRED',
         message: 'Magic-link token has expired.',
-        fix: 'Magic links last 15 minutes — request a fresh one.',
+        fix: 'Magic links last 15 minutes, request a fresh one.',
       });
     }
     if (outcome.token.applicationId !== input.application.id) {
@@ -1464,7 +1841,7 @@ export const authService = {
 
     // Atomic: consume the token + (when needed) create the user. If
     // anything fails, the token stays unconsumed and the user isn't
-    // created — operator retry is safe.
+    // created, operator retry is safe.
     const endUser = await prisma.$transaction(async (tx) => {
       const consumed = await tx.magicLinkToken.updateMany({
         where: { id: outcome.token.id, consumedAt: null },
@@ -1498,8 +1875,8 @@ export const authService = {
         // mailbox and nowhere else. That is the same proof the verification
         // link collects, and the stale-email check above is what makes it
         // proof of the address *currently* on the account. Recording it here
-        // is what makes the documented claim — "magic-link and OAuth sign-in
-        // each carry their own proof of the address" — actually true: the
+        // is what makes the documented claim, "magic-link and OAuth sign-in
+        // each carry their own proof of the address", actually true: the
         // create branch below always set the flag, so only the account that
         // already existed threw the evidence away, and it kept shipping
         // `email_verified: false` to relying parties forever afterwards.
@@ -1511,12 +1888,13 @@ export const authService = {
       }
 
       // New user: create with verified email + default role. Re-check the
-      // signup policy at the moment of creation — a token minted earlier must
+      // signup policy at the moment of creation, a token minted earlier must
       // not let a publishable key create a user in a `secret_only` app.
       assertSignupAllowed(
         AuthConfigSchema.parse(input.application.authConfig),
         input.authKind,
       );
+      assertDeviceBindingSatisfiable(input.application, input.device);
       // Workspace ceiling, checked inside the same transaction as the create.
       // Throwing here rolls the token consume back too, so a link rejected for
       // quota stays usable and works once the workspace has room again.
@@ -1533,7 +1911,7 @@ export const authService = {
         });
       } catch (e) {
         // Race: another magic-link consume for the same email won the
-        // create. Fetch and return — both consumes converge on the same
+        // create. Fetch and return, both consumes converge on the same
         // user, which is the right semantic.
         if ((e as { code?: string }).code === 'P2002') {
           return tx.endUser.findUniqueOrThrow({
@@ -1588,7 +1966,7 @@ export const authService = {
 
   /**
    * Send (or re-send) an email-verification link for the current user.
-   * Idempotent — repeated calls mint new tokens (a previous token stays
+   * Idempotent, repeated calls mint new tokens (a previous token stays
    * valid until expiry/consume, but real-world this is fine because each
    * one is single-use and the user will click the most recent one).
    *
@@ -1633,7 +2011,7 @@ export const authService = {
    * Re-send a verification link to an address, with **no session**.
    *
    * The route above needs one, and `requireEmailVerification` is precisely the
-   * setting that refuses one — so a user whose verification mail never arrived
+   * setting that refuses one, so a user whose verification mail never arrived
    * had no self-service way back into their own account, and the only fix was
    * an operator marking the address verified by hand.
    *
@@ -1642,7 +2020,7 @@ export const authService = {
    * credential-send that already exists:
    *
    *   - **Constant response.** A publishable caller always gets
-   *     `PUBLISHABLE_VERIFICATION_SEND_RESPONSE` — unknown address, verified
+   *     `PUBLISHABLE_VERIFICATION_SEND_RESPONSE`, unknown address, verified
    *     address, delivered, broken transport, all identical. A SECRET caller
    *     gets the real outcome (and the raw token when no transport is
    *     configured), because that key is the customer's own server, which can
@@ -1651,10 +2029,10 @@ export const authService = {
    *     50ms the reset path does, so "no account" and "account, mail sent" are
    *     not trivially separable by a stopwatch.
    *   - **One status code.** Never throws for a business outcome. There is no
-   *     `EMAIL_ALREADY_VERIFIED` here — the authenticated route can afford
+   *     `EMAIL_ALREADY_VERIFIED` here, the authenticated route can afford
    *     that 400 because the caller already proved who they are.
    *   - **Rate limited** per (Application, address, IP) plus the
-   *     per-Application ceiling, by `authRateLimit` on the route — the same
+   *     per-Application ceiling, by `authRateLimit` on the route, the same
    *     cap `/forgot-password` carries, which is the identical surface: an
    *     unauthenticated, address-keyed request that puts one email in flight.
    *
@@ -1679,7 +2057,7 @@ export const authService = {
       },
     });
     // No account, or nothing to verify. Same flattening sleep and the same
-    // answer for both — see the docblock.
+    // answer for both, see the docblock.
     if (!endUser || endUser.emailVerified || endUser.erasedAt !== null) {
       await new Promise((r) => setTimeout(r, 50));
       if (input.authKind === 'publishable') return PUBLISHABLE_VERIFICATION_SEND_RESPONSE;
@@ -1722,7 +2100,7 @@ export const authService = {
         statusCode: 401,
         code: 'EMAIL_VERIFICATION_TOKEN_USED',
         message: 'Verification token has already been used.',
-        fix: 'No further action needed — the email is already verified.',
+        fix: 'No further action needed, the email is already verified.',
       });
     }
     if (outcome.kind === 'expired') {
@@ -1747,10 +2125,10 @@ export const authService = {
     // A GDPR-erased account cannot be verified into existence again.
     //
     // `resendVerificationEmail` has always short-circuited on `erasedAt`, but
-    // this path did not — so a token minted BEFORE the erasure stayed
+    // this path did not, so a token minted BEFORE the erasure stayed
     // redeemable after it. Redeeming flipped `emailVerified`, emitted
     // `email.verified` about a record that is supposed to be erased, and told
-    // the person "Email confirmed" — after which every sign-in was refused by
+    // the person "Email confirmed", after which every sign-in was refused by
     // `assertEndUserNotErased` at the session chokepoint. The success message
     // was a lie and the write should not have happened.
     //
@@ -1764,7 +2142,7 @@ export const authService = {
     // EMAIL_VERIFICATION_TOKEN_INVALID.
     assertEndUserNotErased(endUser);
     if (endUser.email !== outcome.token.email) {
-      // Email changed since token was issued — verification belongs to a
+      // Email changed since token was issued, verification belongs to a
       // stale address. Refuse rather than retroactively trust the old one.
       throw new RekeyError({
         statusCode: 401,
@@ -1839,7 +2217,7 @@ export const authService = {
    * `expectedChallenge`. The challenge is persisted server-side
    * (`lib/webauthn-challenge.ts`) and atomically consumed on complete
    * (single-use, 5-minute TTL), so the posted value is validated against
-   * the store rather than trusted — a replayed ceremony fails.
+   * the store rather than trusted, a replayed ceremony fails.
    */
   async passkeyRegisterStart(input: {
     application: Application;
@@ -1903,7 +2281,7 @@ export const authService = {
         statusCode: 401,
         code: 'WEBAUTHN_REGISTRATION_FAILED',
         message: 'Passkey registration did not verify.',
-        fix: 'Retry the ceremony. Most failures are due to a stale challenge — start a fresh /register/start before /register/complete.',
+        fix: 'Retry the ceremony. Most failures are due to a stale challenge, start a fresh /register/start before /register/complete.',
       });
     }
     const info = verified.registrationInfo.credential;
@@ -1927,13 +2305,13 @@ export const authService = {
       return { credentialId: created.credentialId, deviceName: created.deviceName };
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
-        // Credential id already registered — should be caught by the
+        // Credential id already registered, should be caught by the
         // excludeCredentials list at /start, so this means a race.
         throw new RekeyError({
           statusCode: 409,
           code: 'WEBAUTHN_ALREADY_REGISTERED',
           message: 'This passkey is already registered.',
-          fix: 'Use the existing credential — registering the same authenticator twice is a no-op.',
+          fix: 'Use the existing credential, registering the same authenticator twice is a no-op.',
         });
       }
       throw e;
@@ -1949,7 +2327,7 @@ export const authService = {
    *     authenticator to surface any matching resident-key passkey. The
    *     complete path then resolves the user from the credential id the
    *     browser returns (`webauthn_credentials.credential_id` is globally
-   *     unique) — there is no `userHandle` column.
+   *     unique), there is no `userHandle` column.
    *   - **Email-first** (`email` provided): we scope `allowCredentials`
    *     to that user's registered passkeys.
    *
@@ -2016,7 +2394,7 @@ export const authService = {
       });
     }
     // Burn the challenge first (single-use, bound to this app) so a captured
-    // assertion can't be replayed into a session — the counter check is a
+    // assertion can't be replayed into a session, the counter check is a
     // no-op for synced platform passkeys (counter = 0), so this is the
     // load-bearing anti-replay control.
     await consumeChallenge({
@@ -2048,11 +2426,11 @@ export const authService = {
         statusCode: 401,
         code: 'WEBAUTHN_AUTH_INVALID',
         message: 'Passkey authentication failed.',
-        fix: 'Retry — most failures are a stale challenge. Start a fresh /authenticate/start before /authenticate/complete.',
+        fix: 'Retry, most failures are a stale challenge. Start a fresh /authenticate/start before /authenticate/complete.',
       });
     }
     const newCounter = verified.authenticationInfo.newCounter;
-    // Advance the counter monotonically — cloned-authenticator detection.
+    // Advance the counter monotonically, cloned-authenticator detection.
     // If the new counter is less-than-or-equal, SimpleWebAuthn would have
     // already thrown above, but we still persist defensively.
     await prisma.webAuthnCredential.update({
@@ -2067,12 +2445,12 @@ export const authService = {
     // `verifyAuthentication` is what earns that: it requires user
     // verification, so the assertion above proves possession of the
     // authenticator AND that the human unlocked it. Without that requirement
-    // this line downgraded password + TOTP to a bare touch — see the "User
+    // this line downgraded password + TOTP to a bare touch, see the "User
     // verification is REQUIRED" note in lib/webauthn.ts.
     //
     // Customers who want passkey + TOTP belt-and-braces can opt in by not
     // bypassing here in their own flow; we make the simpler trade.
-    const result = await issuePair(input.application, endUser, input.device);
+    const result = await issuePair(input.application, endUser, 'credential', input.device);
     return { mfaRequired: false, ...result };
   },
 
@@ -2143,12 +2521,56 @@ export const authService = {
   },
 
   /**
+   * `getById` plus what the session middleware needs and never returns:
+   * `sessionsInvalidBefore` (the per-user stamp), and whether the token's own
+   * session is over (`sid` head revoked, or `dev` no longer ACTIVE, see
+   * lib/session-stamp.ts). The session and device rows are read in parallel
+   * with the user row, each by an index and only when the claim is present.
+   * Same 404 and erasure rules as `getById`.
+   */
+  async getByIdForSession(
+    applicationId: string,
+    endUserId: string,
+    session: { sid?: string; dev?: string } = {},
+  ): Promise<{ endUser: PublicEndUser; sessionsInvalidBefore: Date | null; sessionEnded: boolean }> {
+    const [row, head, device] = await Promise.all([
+      prisma.endUser.findUnique({ where: { id: endUserId } }),
+      session.sid
+        ? prisma.refreshToken.findFirst({
+            // The LIVE head only. A revoked head and no head both end the
+            // session, and this exact filter is the predicate of the unique
+            // index that keeps the lookup an index scan for old sessions.
+            where: { sessionId: session.sid, endUserId, replacedById: null, revokedAt: null },
+            select: { revokedAt: true },
+          })
+        : null,
+      session.dev
+        ? prisma.device.findFirst({ where: { id: session.dev, endUserId }, select: { status: true } })
+        : null,
+    ]);
+    if (!row || row.applicationId !== applicationId) {
+      throw new RekeyError({
+        statusCode: 404,
+        code: 'END_USER_NOT_FOUND',
+        message: `EndUser "${endUserId}" not found in this application.`,
+        fix: 'Verify the user id and that the calling secret key belongs to the right Application.',
+      });
+    }
+    assertEndUserNotErased(row);
+    return {
+      endUser: redact(row),
+      sessionsInvalidBefore: row.sessionsInvalidBefore,
+      sessionEnded: sessionEnded(session, head, device),
+    };
+  },
+
+  /**
    * Self-service update of the caller's OWN EndUser record.
    *
    * The field list is a **closed allowlist**, and it is closed rather than
    * open (i.e. "everything except a deny-list") on purpose: an open list
    * silently grants whatever column the next schema migration adds. `role` is
-   * the concrete danger — it is the per-app RBAC field, so an open shape would
+   * the concrete danger, it is the per-app RBAC field, so an open shape would
    * let any signed-in user promote themselves the moment the request body
    * happened to name it. `email` is an identity change that must go through
    * verification, `passwordHash` has its own step-up-guarded route, and
@@ -2159,7 +2581,7 @@ export const authService = {
    * **Merge semantics for `metadata`: top-level shallow merge.**
    *   - key omitted from the patch → left exactly as it was
    *   - key present with a value  → replaces that top-level key **wholesale**
-   *     (nested objects are NOT deep-merged — `{a:{b:1}}` over `{a:{c:2}}`
+   *     (nested objects are NOT deep-merged, `{a:{b:1}}` over `{a:{c:2}}`
    *     leaves `{a:{b:1}}`)
    *   - key present with `null`   → deleted from the stored object
    *   - `metadata: null`          → clears the whole column to SQL NULL
@@ -2188,7 +2610,7 @@ export const authService = {
     const data: Prisma.EndUserUpdateInput = {};
     if (args.metadata === null) {
       // Clearing the whole object drops the reserved namespace with it, which
-      // is a self-inflicted loss of the user's own claims, not an escalation —
+      // is a self-inflicted loss of the user's own claims, not an escalation,
       // they cannot write different ones.
       data.metadata = Prisma.DbNull;
     } else if (args.metadata !== undefined) {
@@ -2206,7 +2628,7 @@ export const authService = {
       data.metadata = merged as Prisma.InputJsonValue;
     }
 
-    // Nothing to write — return the current record rather than bumping
+    // Nothing to write, return the current record rather than bumping
     // `updatedAt` for a no-op request.
     if (Object.keys(data).length === 0) return current;
 

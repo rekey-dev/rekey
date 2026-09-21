@@ -7,7 +7,7 @@ import { normalizeErrorCode, UNKNOWN_ERROR_CODE } from '@/lib/error-code';
  * The unauthenticated pages render only `?error=` codes they have copy for, so
  * that a hand-edited link cannot paint a fake failure. Forwarding the API's raw
  * code into that scheme meant any code the page had not enumerated rendered
- * NOTHING — and the API answers `BAD_REQUEST`, not `PASSWORD_TOO_SHORT`, for a
+ * NOTHING, and the API answers `BAD_REQUEST`, not `PASSWORD_TOO_SHORT`, for a
  * password under 8 characters. Submitting one returned a blank form with no
  * message at all.
  */

@@ -1,9 +1,9 @@
 import * as React from 'react';
 
 /**
- * Loading skeletons for route-level `loading.tsx` boundaries (WP15).
+ * Loading skeletons for route-level `loading.tsx` boundaries.
  *
- * Pure server components — no JS shipped. Uses the design-token surfaces
+ * Pure server components, no JS shipped. Uses the design-token surfaces
  * + `animate-pulse` so the placeholder reads correctly in both themes.
  * Shapes intentionally mirror the real layouts (page title, table rows,
  * stat cards) so the swap-in doesn't jump.

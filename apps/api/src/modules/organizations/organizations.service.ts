@@ -2,7 +2,7 @@
  * End-user organizations / teams.
  *
  * Mirrors the operator-side workspace model (`tenant-workspaces`) but
- * scoped *inside* an Application — distinct hierarchy:
+ * scoped *inside* an Application, distinct hierarchy:
  *
  *   Application
  *     └─ Organization (this module)
@@ -18,7 +18,7 @@
  * Base-tier rules (intentionally close to Clerk's contract):
  *   - OWNER: invite anyone, change anyone's role, remove anyone, transfer
  *     ownership. There must always be at least one OWNER-tier member per Org.
- *   - ADMIN: manage anyone below OWNER — so ADMINs can add, re-role and remove
+ *   - ADMIN: manage anyone below OWNER, so ADMINs can add, re-role and remove
  *     other ADMINs as well as MEMBERs (see `canManage`).
  *   - MEMBER: read-only.
  *
@@ -31,15 +31,15 @@
  * `authConfig.organizationsEnabled` gates org **creation** only
  * (`ensureOrgsEnabled` has one call site, in `create`). Turning the toggle off
  * does not freeze existing orgs: invitations can still be minted and accepted,
- * roles changed, members removed. That is deliberate — an operator disabling the
- * feature still needs to wind existing teams down — but it means this is not a
+ * roles changed, members removed. That is deliberate, an operator disabling the
+ * feature still needs to wind existing teams down, but it means this is not a
  * kill-switch, so don't rely on it to stop membership churn.
  *
  * The active organization for a session is carried on the `eu_access`
  * JWT as the `oid` claim (mirrors the operator-side `tid`). Users
  * without an active org get `oid: undefined`; switching org re-mints the
  * pair via `/me/organizations/:id/switch`. Invariants are enforced by
- * the service, not the JWT — the middleware re-confirms membership on
+ * the service, not the JWT, the middleware re-confirms membership on
  * every request.
  */
 
@@ -52,6 +52,7 @@ import type {
 import { createHash, randomBytes } from 'node:crypto';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
+import { assertMetadataWithinLimit } from '../../lib/metadata-limit.js';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 
@@ -171,7 +172,7 @@ async function withOrganizationMembershipLock<T>(
 export const organizationsService = {
   /**
    * Create a new Organization with the calling EndUser as its OWNER.
-   * Atomic — if either the org row or the membership row fails the whole
+   * Atomic, if either the org row or the membership row fails the whole
    * thing rolls back.
    */
   async create(args: {
@@ -191,6 +192,7 @@ export const organizationsService = {
         fix: 'Use e.g. "acme-prod" or "team-42".',
       });
     }
+    if (args.metadata !== undefined) assertMetadataWithinLimit(args.metadata);
     try {
       return await prisma.$transaction(async (tx) => {
         const org = await tx.organization.create({
@@ -290,6 +292,7 @@ export const organizationsService = {
     metadata?: Record<string, unknown>;
   }): Promise<OrganizationDto> {
     const m = await this.requireRole(args, ['OWNER', 'ADMIN']);
+    if (args.metadata !== undefined) assertMetadataWithinLimit(args.metadata);
     const updated = await prisma.organization.update({
       where: { id: m.organizationId },
       data: {
@@ -329,7 +332,7 @@ export const organizationsService = {
    * Total members of an org, ignoring take/skip.
    *
    * Runs the same `requireMembership` gate as `listMembers` rather than
-   * trusting the caller to have run it — the two are invoked concurrently
+   * trusting the caller to have run it, the two are invoked concurrently
    * from the route, so a count that skipped the check would leak a member
    * tally for an org the caller does not belong to.
    */
@@ -380,7 +383,6 @@ export const organizationsService = {
       });
     }
     const email = args.email.toLowerCase();
-    // Block invite to an already-member.
     const existing = await prisma.organizationMembership.findFirst({
       where: { organizationId: args.organizationId, endUser: { email } },
     });
@@ -407,16 +409,16 @@ export const organizationsService = {
   },
 
   /**
-   * Accept an invitation. Caller must be authenticated — we use their EndUser
-   * id for the membership row — and their email must MATCH the address the
+   * Accept an invitation. Caller must be authenticated, we use their EndUser
+   * id for the membership row, and their email must MATCH the address the
    * invitation was issued to.
    *
    * That binding used to be absent, on the reasoning that "the customer's app
-   * can decide whether to gate accept on email match. (Most apps do — at the
+   * can decide whether to gate accept on email match. (Most apps do, at the
    * UI layer.)" Both halves were wrong. A UI-layer check is not a check: the
    * token travels by email, Slack, or text and the accept endpoint is reachable
    * with any authenticated session, so anyone who obtains a forwarded or leaked
-   * invite link joins the organization at the invited role — up to OWNER, which
+   * invite link joins the organization at the invited role, up to OWNER, which
    * is organization takeover. And it is not the customer's decision to make,
    * because there is no field they can send to turn it on.
    *
@@ -428,7 +430,7 @@ export const organizationsService = {
    * differs from the invited address now answers 403
    * ORGANIZATION_INVITATION_EMAIL_MISMATCH instead of silently succeeding.
    * Integrations that invite `a@x.com` and accept as `b@x.com` will break, and
-   * that is the point — they were relying on the hole.
+   * that is the point, they were relying on the hole.
    */
   async acceptInvitation(args: {
     application: { id: string };
@@ -458,7 +460,6 @@ export const organizationsService = {
         });
       }
       if (inv.organization.applicationId !== args.application.id) {
-        // Cross-Application: this invitation belongs to a different App.
         throw new RekeyError({
           statusCode: 401,
           code: 'ORGANIZATION_INVITATION_WRONG_APPLICATION',
@@ -478,7 +479,7 @@ export const organizationsService = {
           statusCode: 403,
           code: 'ORGANIZATION_INVITATION_EMAIL_MISMATCH',
           message: 'This invitation was issued to a different email address.',
-          fix: 'Sign in as the invited address, then accept — or ask an OWNER / ADMIN to re-invite the address you are signed in as.',
+          fix: 'Sign in as the invited address, then accept, or ask an OWNER / ADMIN to re-invite the address you are signed in as.',
         });
       }
       // Idempotent member-already-joined check (concurrent accept retry).
@@ -707,7 +708,7 @@ export const organizationsService = {
   /**
    * Caller self-leaves. An OWNER cannot leave: billing (payment + benefits) is
    * tied to the owner, and ownership transfer is operator-only (via the Panel /
-   * support — see decisions 2026-05-27 22:55). A co-owner must demote themselves
+   * support, see decisions 2026-05-27 22:55). A co-owner must demote themselves
    * to ADMIN first; a sole owner must have support re-point ownership. Non-owners
    * leave via removeMember (which keeps the last-OWNER guard for the admin path).
    */
@@ -725,7 +726,7 @@ export const organizationsService = {
       throw new RekeyError({
         statusCode: 409,
         code: 'ORGANIZATION_OWNER_CANNOT_LEAVE',
-        message: 'An OWNER cannot leave — payment and benefits are tied to the owner.',
+        message: 'An OWNER cannot leave, payment and benefits are tied to the owner.',
         fix: 'Transfer ownership first (via the Panel / Rekey support), or demote yourself to ADMIN if there is another OWNER.',
       });
     }
@@ -738,7 +739,7 @@ export const organizationsService = {
   },
 
   /**
-   * Internal — assert the caller is a member of the org under the given
+   * Internal, assert the caller is a member of the org under the given
    * Application. Returns the membership row (with role) on success.
    */
   async requireMembership(args: {
@@ -873,7 +874,7 @@ export const organizationsService = {
   // ---------------------------------------------------------------------------
   // Operator / admin surface (panel).
   //
-  // Scoped by `applicationId` ONLY — there is no membership requirement
+  // Scoped by `applicationId` ONLY, there is no membership requirement
   // because the operator owns the Application, not the org. The end-user
   // CRUD above always proves membership; these methods deliberately don't.
   //
@@ -959,7 +960,7 @@ export const organizationsService = {
     return { deleted: true };
   },
 
-  /** Internal — load an org and assert it belongs to the Application, else 404. */
+  /** Internal, load an org and assert it belongs to the Application, else 404. */
   async adminLoadOrThrow(args: {
     applicationId: string;
     organizationId: string;
@@ -979,7 +980,7 @@ export const organizationsService = {
   /**
    * Operator-create an organization (no end-user caller). Optionally seed an
    * initial OWNER from an existing end-user of the app. Unlike the end-user
-   * `create`, this assigns no caller membership and applies no role checks —
+   * `create`, this assigns no caller membership and applies no role checks,
    * the operator is the app's administrator.
    */
   async adminCreate(args: {
@@ -1001,6 +1002,7 @@ export const organizationsService = {
     if (args.ownerEndUserId) {
       await this.adminAssertEndUserInApp(args.applicationId, args.ownerEndUserId);
     }
+    if (args.metadata !== undefined) assertMetadataWithinLimit(args.metadata);
     try {
       const org = await prisma.$transaction(async (tx) => {
         const created = await tx.organization.create({
@@ -1040,6 +1042,7 @@ export const organizationsService = {
     metadata?: Record<string, unknown>;
   }): Promise<OrganizationDto> {
     const org = await this.adminLoadOrThrow(args);
+    if (args.metadata !== undefined) assertMetadataWithinLimit(args.metadata);
     const updated = await prisma.organization.update({
       where: { id: org.id },
       data: {
@@ -1153,7 +1156,7 @@ export const organizationsService = {
     }
   },
 
-  /** Internal — assert an end-user exists and belongs to the Application. */
+  /** Internal, assert an end-user exists and belongs to the Application. */
   async adminAssertEndUserInApp(
     applicationId: string,
     endUserId: string,

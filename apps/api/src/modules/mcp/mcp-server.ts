@@ -3,7 +3,7 @@
  *
  * Implements the MCP methods a read-only tools server needs (initialize,
  * tools/list, tools/call, ping) as plain JSON-RPC 2.0 over HTTP, responding
- * with `application/json` — which the Streamable HTTP transport permits when
+ * with `application/json`, which the Streamable HTTP transport permits when
  * the client accepts it. Kept transport-agnostic + SDK-free so it's directly
  * unit-testable; the HTTP/auth layer lives in mcp.routes.ts.
  */

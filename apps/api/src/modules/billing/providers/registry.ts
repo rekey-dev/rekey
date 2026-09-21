@@ -1,14 +1,16 @@
 /**
  * Static provider-module registry (docs/specs/billing-provider-modules.md).
  *
- * Static imports on purpose — no dynamic npm plugin loading in v1. The
+ * Static imports on purpose, no dynamic npm plugin loading in v1. The
  * webhook path mutates money state and this process holds the
  * credential-encryption key; in-tree modules get review, typechecking
  * against the appliers, and fixture-replay CI (see "Why not npm plugins
  * yet" in the spec).
  *
- * All three built-in providers are registered (P2); their legacy webhook
- * URLs are permanent aliases into the shared pipeline. The hand-written
+ * The three hosted providers are registered (P2); their legacy webhook URLs
+ * are permanent aliases into the shared pipeline. The fourth module,
+ * `external`, is inbound only (`capabilities.checkout: false`) and has no
+ * legacy URL. The hand-written
  * `z.enum(['stripe','paypal','razorpay'])` sites elsewhere are replaced by
  * `providerNameSchema` in P3/P4.
  */
@@ -18,11 +20,14 @@ import type { CredentialField, ProviderModule } from './module-types.js';
 import { stripeModule } from './modules/stripe/index.js';
 import { razorpayModule } from './modules/razorpay/index.js';
 import { paypalModule } from './modules/paypal/index.js';
+import { externalModule } from './modules/external/index.js';
 
 const modules = new Map<string, ProviderModule>([
   [stripeModule.name, stripeModule],
   [razorpayModule.name, razorpayModule],
   [paypalModule.name, paypalModule],
+  // Inbound only: an operator's own billing system posting what it sold.
+  [externalModule.name, externalModule],
 ]);
 
 /** Registered provider names, in registration order. */
@@ -46,7 +51,7 @@ export const providerNameSchema = z.enum(registryNames as [string, ...string[]])
  * optional ones (blank = "auto-configure the webhook later") default to ''.
  * Unknown keys are stripped, as the per-provider `z.object`s did.
  *
- * Deliberately does NOT enforce `pattern` rules — those belong to the
+ * Deliberately does NOT enforce `pattern` rules, those belong to the
  * credentials service (`credentialRulesSchema`), which converts violations
  * into the 400 BILLING_CREDENTIALS_INVALID envelope the tests pin. A
  * pattern failure here would surface as a generic zod validation error
@@ -77,10 +82,10 @@ export function credentialDataSchema(module: ProviderModule): z.ZodType<Record<s
  * One credential field as exposed by the tenant discovery endpoint (P4).
  * A deliberate PROJECTION of `CredentialField`: form-rendering fields only.
  * `pattern` is reduced to its operator-readable `message` (the prefix/regex
- * mechanics stay server-side — the panel never re-validates), and
+ * mechanics stay server-side, the panel never re-validates), and
  * `webhookRole` stays internal (the panel drives webhook UX off
  * `capabilities.autoWebhookRegister`, not per-field roles). Stored values
- * are structurally impossible here — the module never holds any.
+ * are structurally impossible here, the module never holds any.
  */
 export interface ProviderCredentialFieldInfo {
   key: string;
@@ -137,12 +142,12 @@ function keyList(fields: CredentialField[]): string {
 }
 
 /**
- * Semantic credential rules derived from `credentialSchema` — the single
+ * Semantic credential rules derived from `credentialSchema`, the single
  * validator for every provider (P3; it replaced hand-written per-provider
  * ones, removed in 2.0.0). Field order and precedence:
  *
  *   - `pattern` is checked first per field (required fields always; optional
- *    fields only when non-blank — a blank optional webhook field means
+ *    fields only when non-blank, a blank optional webhook field means
  *    "auto-configure later"), with the module's own message.
  *   - A blank required field without a failing pattern raises the aggregate
  *     "<Label> credentials require `a`, `b`, and `c`." message the legacy

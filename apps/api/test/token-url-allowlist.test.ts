@@ -4,7 +4,7 @@
  * The reset, magic-link and verification routes accept a `{token}` template
  * from the caller and render it into an `<a href>` in a message WE send, with
  * our branding and our SPF/DKIM. The URL was validated only for being
- * parseable, and all three accept the PUBLISHABLE key — public by design, and
+ * parseable, and all three accept the PUBLISHABLE key, public by design, and
  * served unauthenticated by the portal config endpoint.
  *
  * So anyone could have us mail a victim a genuine, correctly-branded,

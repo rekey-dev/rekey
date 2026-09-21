@@ -1,5 +1,5 @@
 /**
- * Panel analytics — a thin, typed wrapper over gtag (GA4).
+ * Panel analytics, a thin, typed wrapper over gtag (GA4).
  *
  * The panel is server-components + server-actions, so most "events" are the
  * RESULT of a server action that ends in redirect(). gtag only runs in the
@@ -11,7 +11,7 @@
  * Page-view-style events (login/register viewed, panel access) fire from
  * <TrackView/> on mount. Pure client interactions (copy) call track() directly.
  *
- * Everything is a safe no-op when gtag is absent — dev, before the GA script
+ * Everything is a safe no-op when gtag is absent, dev, before the GA script
  * loads, or if the visitor blocks it.
  */
 

@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * Small icon button that copies the current page URL — a shareable deep link
+ * Small icon button that copies the current page URL, a shareable deep link
  * for ops reviewers. Sibling of CopyButton (same visual language) but reads
  * `window.location.href` at click time instead of taking a value prop, so it
  * works inside server components without threading the URL through.
@@ -18,7 +18,7 @@ export function CopyLinkButton(): React.JSX.Element {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      // No clipboard API (insecure context) or user denied — no-op.
+      // No clipboard API (insecure context) or user denied, no-op.
     }
   }
 

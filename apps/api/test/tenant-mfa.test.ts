@@ -3,7 +3,7 @@
  *
  * Regression focus: a wrong code at /setup-confirm must return 422 (not 401).
  * A 401 makes the panel's api() client treat the operator's session as expired
- * and log them out mid-enrollment — the bug this guards against. The session
+ * and log them out mid-enrollment, the bug this guards against. The session
  * must stay usable, and a correct code must complete enrollment.
  */
 
@@ -50,12 +50,12 @@ describe('Operator TOTP enrollment', () => {
       headers: { authorization: `Bearer ${token}` },
       payload: { code: '000000' },
     });
-    // The key assertion: NOT 401 — a 401 trips the panel's "session expired →
+    // The key assertion: NOT 401, a 401 trips the panel's "session expired →
     // log out" path. 422 = authenticated, but the submitted code is wrong.
     expect(bad.statusCode).toBe(422);
     expect(bad.json().error.code).toBe('MFA_CODE_INVALID');
 
-    // Same token still works — the operator was not logged out.
+    // Same token still works, the operator was not logged out.
     const status = await app.inject({
       method: 'GET',
       url: '/api/v1/tenant/auth/mfa/status',

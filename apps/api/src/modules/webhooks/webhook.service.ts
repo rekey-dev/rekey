@@ -15,7 +15,7 @@
  * service kicks the HTTP call off with `void` and lets the delivery
  * worker (this same module) retry on failure.
  *
- * ## Enqueue vs. kick — the outbox seam
+ * ## Enqueue vs. kick, the outbox seam
  *
  * `emit()` does two separable things: WRITE the delivery rows (step 3), and
  * KICK the first attempt (step 4). Only the write has to be durable, and
@@ -23,10 +23,10 @@
  * commit with that change or not at all. So the two halves are exported
  * separately:
  *
- *   - `enqueueEvent(client, args)` — writes the rows through whatever client
+ *   - `enqueueEvent(client, args)`, writes the rows through whatever client
  *     it is handed (the global one, or a `$transaction` tx) and returns their
  *     ids. Never touches the network.
- *   - `kickDeliveries(ids)` — hands those ids to the active scheduler. Call it
+ *   - `kickDeliveries(ids)`, hands those ids to the active scheduler. Call it
  *     AFTER the transaction commits; a kick from inside one races a delivery
  *     against rows no other connection can see yet, and fires at all for a
  *     transaction that goes on to roll back.
@@ -40,13 +40,13 @@
  *
  * Scheduling goes through a pluggable seam (`scheduleAttempt`). In every real
  * runtime the BullMQ worker (webhook.queue.ts) installs a Redis-backed enqueue
- * at boot — required, no process-local fallback — so delayed retries live in
+ * at boot, required, no process-local fallback, so delayed retries live in
  * Redis (survive a crash) and distribute across replicas for microservice
  * deployments. The default scheduler is an in-process `setTimeout` that runs
  * ONLY under `NODE_ENV=test` (single-process suite, no external Redis); in any
  * other runtime it throws, so a delivery can never be silently pinned to one
  * process. A periodic poller (`processDueWebhookDeliveries`, registered in
- * app.ts) re-attempts PENDING rows whose `nextAttemptAt` has passed — the crash
+ * app.ts) re-attempts PENDING rows whose `nextAttemptAt` has passed, the crash
  * backstop for a row orphaned by a Redis flush or a job that never landed.
  * Every path funnels through an atomic claim (a guarded `updateMany` that
  * pushes `nextAttemptAt` forward) so a queue worker, the poller, and other
@@ -63,9 +63,7 @@ import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
 import { signWebhook, generateWebhookSecret } from '../../lib/webhook-signing.js';
-import type { LookupAddress, LookupOptions } from 'node:dns';
-import { Agent } from 'undici';
-import { assertSafeUrlResolved } from '../../lib/ssrf-guard.js';
+import { pinnedFetchInit, assertSafeUrlResolved } from '../../lib/ssrf-guard.js';
 import {
   endpointMatches,
   isKnownWebhookEvent,
@@ -74,7 +72,7 @@ import {
 } from './events.js';
 import { randomBytes } from 'node:crypto';
 
-// Total attempts, the first one included — so 4 retries, not 5.
+// Total attempts, the first one included, so 4 retries, not 5.
 const MAX_ATTEMPTS = 5;
 // Exponential backoff in seconds, indexed by `attempts - 1`. Only the first
 // FOUR entries are reachable: `attempts >= MAX_ATTEMPTS` marks the delivery
@@ -83,60 +81,17 @@ const MAX_ATTEMPTS = 5;
 //
 // That is a bug, not a design: the intent was ~5h of forgiveness for transient
 // downtime while still not holding rows PENDING forever. Fixing it means either
-// MAX_ATTEMPTS = 6 or dropping the 14400 — a behaviour change, so it is not being
+// MAX_ATTEMPTS = 6 or dropping the 14400, a behaviour change, so it is not being
 // done in a comments-only pass. Don't "clean up" the unreachable entry without
 // deciding which of the two the intent was.
 const RETRY_DELAYS_SECONDS = [30, 120, 600, 3600, 14400];
 const REQUEST_TIMEOUT_MS = 10_000;
 
-/**
- * An undici dispatcher whose DNS lookup answers only from a pre-validated set.
- *
- * This is what closes the rebinding window: the guard resolved the host and
- * approved these addresses, and the socket must go to one of *them* rather
- * than to whatever a second DNS query returns a moment later. TLS still
- * validates against the original hostname, because undici keeps the URL's
- * servername — pinning the address is not the same as connecting by IP, which
- * would break certificate verification.
- *
- * Built per delivery rather than cached: the validated set is specific to this
- * attempt, and a pool keyed on the host would outlive it.
- */
-function pinnedDispatcher(allowed: string[]): Agent {
-  return new Agent({
-    connect: {
-      lookup: (
-        _hostname: string,
-        options: LookupOptions,
-        callback: (
-          err: NodeJS.ErrnoException | null,
-          address: string | LookupAddress[],
-          family?: number,
-        ) => void,
-      ): void => {
-        const entries = allowed.map((address) => ({
-          address,
-          family: address.includes(':') ? 6 : 4,
-        }));
-        if (options.all) {
-          callback(null, entries);
-          return;
-        }
-        const first = entries[0];
-        if (!first) {
-          callback(new Error('no validated address to connect to'), '');
-          return;
-        }
-        callback(null, first.address, first.family);
-      },
-    },
-  });
-}
 
 
 // Max stored response-body bytes. We stop READING at this point too (not
 // just truncating after the fact) so a receiver streaming an endless body
-// can't balloon memory — see readBodyCapped.
+// can't balloon memory, see readBodyCapped.
 const MAX_RESPONSE_BODY_BYTES = 4096;
 // How long an atomic claim on a delivery row lasts. Generous vs the request
 // timeout so a slow-but-alive attempt is never double-sent; short enough
@@ -144,7 +99,7 @@ const MAX_RESPONSE_BODY_BYTES = 4096;
 const CLAIM_WINDOW_MS = 60_000;
 
 function cuid(): string {
-  // Inline a small cuid-ish id without adding a dep — base64url of 16
+  // Inline a small cuid-ish id without adding a dep, base64url of 16
   // random bytes is sufficient for our idempotency-key semantics.
   return randomBytes(16).toString('base64url');
 }
@@ -177,7 +132,7 @@ function listForEvent(
 
 /**
  * Write the delivery rows for one event through `client` and return their ids.
- * The write half of `emit` — see the module docblock. Does no network I/O and
+ * The write half of `emit`, see the module docblock. Does no network I/O and
  * schedules nothing, so it is safe to call inside a `$transaction`: the rows
  * commit with the state change that caused them, or not at all.
  *
@@ -205,7 +160,7 @@ export async function enqueueEvent(
   //
   // Dropped, not parked. There is no row to resume from and creating PENDING
   // rows for a frozen Application would hand its subscribers a burst of stale
-  // events on the thaw — events describing a window in which, from the
+  // events on the thaw, events describing a window in which, from the
   // outside world's point of view, the Application was not running. The
   // state change itself is still committed and still visible through the API;
   // only the outbound notification is suppressed.
@@ -244,7 +199,7 @@ export async function enqueueEvent(
 
 /**
  * Hand delivery ids to the active scheduler for an immediate first attempt.
- * The read half of `emit`'s second step — see the module docblock. Call this
+ * The read half of `emit`'s second step, see the module docblock. Call this
  * only AFTER the rows are committed. Skipping it entirely is safe but slow:
  * the rows are PENDING with `nextAttemptAt = now`, so the poller picks them up.
  */
@@ -263,8 +218,8 @@ export function kickDeliveries(deliveryIds: readonly string[]): void {
  * undefined)`. That discards the ONLY signal that an event was dropped: a
  * connection-pool timeout or a DB blip between the state change and the
  * enqueue silently loses the event, and nothing anywhere records it. This
- * cannot make the emit durable — that needs `enqueueEvent` in the caller's
- * transaction — but it makes the loss visible.
+ * cannot make the emit durable, that needs `enqueueEvent` in the caller's
+ * transaction, but it makes the loss visible.
  *
  * `console` rather than the Fastify logger, matching lib/brute-force.ts: these
  * callers are services with no request context, and the message deliberately
@@ -323,18 +278,12 @@ async function postOnce(args: {
     // The addresses are then PINNED to the connection. Validating a hostname
     // and handing the raw URL to `fetch` let the runtime resolve again
     // independently, so a record with a short TTL alternating public and
-    // private won the race — and the attacker got many attempts, since each
+    // private won the race, and the attacker got many attempts, since each
     // event allows up to 5 deliveries and a tenant can emit unlimited events
     // against their own application. The dispatcher's `lookup` below answers
     // from the validated set instead of asking DNS a second time.
     const allowed = await assertSafeUrlResolved(args.url);
-    // `dispatcher` is not in the DOM RequestInit that TS resolves here — Node's
-    // fetch accepts it and undici reads it. Narrowed at the call site rather
-    // than widening the global type.
-    const pinned =
-      allowed.length > 0
-        ? ({ dispatcher: pinnedDispatcher(allowed) } as unknown as RequestInit)
-        : ({} as RequestInit);
+    const pinned = pinnedFetchInit(allowed);
     const res = await fetch(args.url, {
       method: 'POST',
       headers: {
@@ -347,12 +296,12 @@ async function postOnce(args: {
       body: args.body,
       signal: controller.signal,
       ...pinned,
-      // Never follow redirects — a validated public URL could otherwise 3xx us
+      // Never follow redirects, a validated public URL could otherwise 3xx us
       // onto an internal host, bypassing the guard above.
       redirect: 'manual',
     });
     // Read at most the first 4 KB of the body so a misbehaving consumer
-    // can't fill our `WebhookDelivery.responseBody` column (or our memory —
+    // can't fill our `WebhookDelivery.responseBody` column (or our memory,
     // the read stops at the cap rather than buffering the full body). The
     // abort timer above stays armed until `finally`, covering this read.
     const bodyText = await readBodyCapped(res, MAX_RESPONSE_BODY_BYTES);
@@ -377,7 +326,7 @@ async function postOnce(args: {
 /**
  * Update the delivery row, but swallow `P2025` (row not found). The row
  * can disappear out from under us if the endpoint is deleted mid-flight
- * (cascade) or if a test cleanup ran first — neither is a real error.
+ * (cascade) or if a test cleanup ran first, neither is a real error.
  */
 async function safeUpdate(
   deliveryId: string,
@@ -401,10 +350,10 @@ async function safeUpdate(
 export type DeliveryScheduler = (deliveryId: string, delayMs: number, attempts: number) => void;
 
 // Default scheduler. Under test it's an in-process timer (single-process suite,
-// no external Redis — mirrors the rate-limiter's test convention). In any real
+// no external Redis, mirrors the rate-limiter's test convention). In any real
 // runtime the BullMQ worker MUST install a Redis-backed scheduler at boot
 // (startWebhookWorker), so reaching this default outside test means the queue
-// failed to start — throw loudly rather than silently pin retries to one
+// failed to start, throw loudly rather than silently pin retries to one
 // process and break multi-replica delivery. Errors in the test timer are
 // swallowed: a fire-and-forget attempt must not surface as an unhandled rejection.
 const defaultScheduler: DeliveryScheduler = (deliveryId, delayMs) => {
@@ -432,12 +381,6 @@ export function setDeliveryScheduler(fn: DeliveryScheduler | null): void {
 }
 
 /**
- * Run exactly one delivery attempt: atomically claim the row, POST, then
- * persist the outcome and — on a retryable failure — hand the next attempt to
- * the active scheduler. This is the unit of work both the in-process timer and
- * the BullMQ worker invoke. Exported for the worker processor.
- */
-/**
  * How long a delivery waits before re-checking whether its Application has
  * been re-enabled. Long enough that a freeze of any length is cheap (one row
  * read per delivery per interval), short enough that a thaw resumes promptly
@@ -445,6 +388,12 @@ export function setDeliveryScheduler(fn: DeliveryScheduler | null): void {
  */
 const DISABLED_APP_PARK_MS = 5 * 60_000;
 
+/**
+ * Run exactly one delivery attempt: atomically claim the row, POST, then
+ * persist the outcome and, on a retryable failure, hand the next attempt to
+ * the active scheduler. This is the unit of work both the in-process timer and
+ * the BullMQ worker invoke. Exported for the worker processor.
+ */
 export async function attemptDelivery(deliveryId: string): Promise<void> {
   // Atomic claim: only one caller (in-process timer OR the periodic poller)
   // may attempt a due delivery. The guarded update pushes `nextAttemptAt`
@@ -474,7 +423,7 @@ export async function attemptDelivery(deliveryId: string): Promise<void> {
   // Parked, not failed and not dropped. Failing them would burn the retry
   // budget on a condition that has nothing to do with the subscriber's
   // endpoint, and would mark as permanently FAILED a delivery that would have
-  // succeeded — the operator would thaw the Application and find a wall of
+  // succeeded, the operator would thaw the Application and find a wall of
   // failures caused by their own maintenance. So: leave the row PENDING with
   // its attempt count untouched and push `nextAttemptAt` out. The poller
   // re-checks on that cadence and the delivery resumes, unharmed, on the thaw.
@@ -539,10 +488,10 @@ export async function attemptDelivery(deliveryId: string): Promise<void> {
     nextAttemptAt: nextAt,
     error: result.error,
   });
-  // Schedule the next attempt through the active scheduler — a Redis-backed
+  // Schedule the next attempt through the active scheduler, a Redis-backed
   // delayed job in every real runtime (survives a crash, distributes across
   // replicas). The poller picks the row up off `nextAttemptAt` if the queued
-  // job is ever lost — the claim above stops any two from double-sending.
+  // job is ever lost, the claim above stops any two from double-sending.
   scheduleAttempt(deliveryId, delaySeconds * 1000, attempts);
 }
 
@@ -550,7 +499,7 @@ export async function attemptDelivery(deliveryId: string): Promise<void> {
  * Re-attempt every PENDING delivery whose `nextAttemptAt` has passed.
  * Crash-survivability for the in-process retry timers: registered as a
  * periodic interval in app.ts (like the request-log flush/prune jobs).
- * Deliveries are processed sequentially — this is a background sweep, not
+ * Deliveries are processed sequentially, this is a background sweep, not
  * a throughput path; per-row claims in attemptDelivery keep it safe to run
  * concurrently with timers and other instances. Returns how many due rows
  * were found.
@@ -571,7 +520,7 @@ export async function processDueWebhookDeliveries(limit = 50): Promise<number> {
 export const webhookService = {
   /**
    * Emit an event to every matching endpoint. Returns the delivery row
-   * ids that were enqueued. Fire-and-forget — callers MUST NOT await this;
+   * ids that were enqueued. Fire-and-forget, callers MUST NOT await this;
    * use `emitDetached` so the failure is at least logged.
    *
    * For a caller that is ALREADY inside a `$transaction` changing the state
@@ -636,8 +585,8 @@ export const webhookService = {
     events?: string[];
     enabled?: boolean;
   }): Promise<WebhookEndpoint> {
-    // Scope the write by (id, applicationId) — like deleteEndpoint/rotateSecret
-    // — so an endpointId from another application can never be mutated by
+    // Scope the write by (id, applicationId), like deleteEndpoint/rotateSecret
+    //, so an endpointId from another application can never be mutated by
     // passing a different applicationId. `update` keyed on id alone would let
     // a caller who only owns `applicationId` edit any endpoint by id.
     const { count } = await prisma.webhookEndpoint.updateMany({
@@ -747,7 +696,7 @@ export const webhookService = {
     });
     if (updated.count !== 1) return false;
     // Read the (unchanged) attempt count so the scheduler builds the same
-    // per-attempt jobId the row would use anyway — keeps the manual kick from
+    // per-attempt jobId the row would use anyway, keeps the manual kick from
     // duplicating a delayed job already queued for this attempt.
     const row = await prisma.webhookDelivery.findUnique({
       where: { id: deliveryId },

@@ -1,16 +1,16 @@
 /**
- * End-user sign-up policy — the single chokepoint that decides whether a
+ * End-user sign-up policy, the single chokepoint that decides whether a
  * given request is allowed to CREATE a new end-user.
  *
  * Driven by `authConfig.signupMode` (see @rekey.dev/shared-types):
- *   - `public`      — any caller may create users.
- *   - `secret_only` — only a server-side SECRET key may; a publishable
- *                     (`rp_pub_*`) request is refused. Sign-IN is unaffected —
+ *   - `public`     , any caller may create users.
+ *   - `secret_only`, only a server-side SECRET key may; a publishable
+ *                     (`rp_pub_*`) request is refused. Sign-IN is unaffected,
  *                     this gates creation only.
- *   - `invite_only` — nobody may self-sign-up; operators invite instead.
+ *   - `invite_only`, nobody may self-sign-up; operators invite instead.
  *
  * `authKind` comes from the api-key-auth middleware (`request.authKind`).
- * It is `undefined` only on code paths with no key context — treat that as
+ * It is `undefined` only on code paths with no key context, treat that as
  * "not a publishable browser caller" (i.e. server-side), so it never trips
  * the `secret_only` guard. Every public sign-up entry point runs through
  * `requirePublishableOrSecretKey`, which always sets it, so in practice it is
@@ -23,7 +23,7 @@ import { RekeyError } from './error.js';
 export type AuthKind = 'secret' | 'publishable';
 
 /**
- * Predicate form — `true` when this caller may create an end-user. Use when
+ * Predicate form, `true` when this caller may create an end-user. Use when
  * the caller needs to branch silently (e.g. enumeration-safe magic-link
  * request) rather than surface a specific error.
  */
@@ -37,7 +37,7 @@ export function signupAllowed(
 }
 
 /**
- * Throwing form — call immediately before any end-user create. Throws the
+ * Throwing form, call immediately before any end-user create. Throws the
  * precise error for the failing mode so the SDK/caller can react:
  *   - `invite_only`              → 403 `SIGNUP_DISABLED`
  *   - `secret_only` + publishable → 403 `SIGNUP_REQUIRES_SECRET_KEY`

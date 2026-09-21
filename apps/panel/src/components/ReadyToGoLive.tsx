@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * "You're ready to go live" card — the OnboardingChecklist's successor state.
+ * "You're ready to go live" card, the OnboardingChecklist's successor state.
  * Shown on the applications page once every onboarding step is complete, with
  * quick links to the go-live touchpoints. Dismissal persists per-workspace in
  * localStorage (same deliberate trade-off as the checklist: no new API
@@ -12,7 +12,7 @@
  */
 
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 
 export interface ReadyLink {
   label: string;
@@ -42,7 +42,7 @@ export function ReadyToGoLive({
     try {
       localStorage.setItem(storageKey, '1');
     } catch {
-      /* private mode — dismissal just won't persist */
+      /* private mode, dismissal just won't persist */
     }
     setVisible(false);
   }

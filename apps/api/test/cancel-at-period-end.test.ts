@@ -3,9 +3,9 @@
  * without a payment provider.
  *
  * `cancelCurrentSubscription` required `provider && providerSubId` before it
- * would schedule a cancellation. Everything else — including an ACTIVE
+ * would schedule a cancellation. Everything else, including an ACTIVE
  * subscription with a perfectly good `currentPeriodEnd` that simply had no
- * provider record — fell through to the immediate branch:
+ * provider record, fell through to the immediate branch:
  *
  *     data: { status: 'CANCELED', canceledAt: now, cancelAt: now }
  *
@@ -15,13 +15,13 @@
  *
  * This is not a hypothetical shape. Rekey Cloud sells with
  * `COMMERCE_CHECKOUT_ENABLED` off, so every subscription it has is
- * provisioned by hand and carries no provider record — the defect fires on
+ * provisioned by hand and carries no provider record, the defect fires on
  * every cancellation it processes.
  *
  * The fix has two halves and both are tested here, because either alone is a
  * bug in the opposite direction:
  *
- *   1. Scheduling no longer requires a provider — the row stays ACTIVE with
+ *   1. Scheduling no longer requires a provider, the row stays ACTIVE with
  *      `cancelAt` set, and entitlements survive to the date paid for.
  *   2. Something has to actually end it, or (1) leaves the buyer entitled
  *      forever. `expireIfDue` ends any ACTIVE row whose `cancelAt` has passed,
@@ -30,7 +30,7 @@
  * (2) was originally scoped to rows with NO provider, on the reasoning that a
  * provider-backed one is ended by its own webhook and the local expiry must not
  * race it. That held only for providers that can schedule a cancellation.
- * PayPal cannot — see the second provider-backed case below.
+ * PayPal cannot, see the second provider-backed case below.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -52,7 +52,7 @@ describe('cancel at period end without a payment provider', () => {
 
   /**
    * An Application with billing on, one end-user, and a hand-provisioned
-   * ACTIVE subscription with NO provider record — the exact shape Rekey Cloud
+   * ACTIVE subscription with NO provider record, the exact shape Rekey Cloud
    * sells today.
    */
   async function fixture(slug: string, periodEnd: Date) {
@@ -118,7 +118,7 @@ describe('cancel at period end without a payment provider', () => {
         planId: plan.id,
         status: 'ACTIVE',
         currentPeriodEnd: periodEnd,
-        // No `provider`, no `providerSubId` — provisioned by hand.
+        // No `provider`, no `providerSubId`, provisioned by hand.
       },
     });
 
@@ -249,7 +249,7 @@ describe('cancel at period end without a payment provider', () => {
   });
 
   it('expires a provider-backed subscription once its date HAS passed', async () => {
-    // This used to be the opposite assertion — provider-backed rows were
+    // This used to be the opposite assertion, provider-backed rows were
     // skipped outright, on the reasoning that the provider's webhook is the
     // source of truth and the lazy expiry must not race it.
     //
@@ -258,16 +258,16 @@ describe('cancel at period end without a payment provider', () => {
     // terminates the agreement now and the paid period is held open on our
     // side instead (see `applySubscriptionStatusMirror`, which declines to let
     // PayPal's own CANCELLED event shorten it). Under the old guard nothing
-    // would ever have ended those rows — PayPal has already said everything it
-    // is going to say about that subscription — so they would have stayed
+    // would ever have ended those rows, PayPal has already said everything it
+    // is going to say about that subscription, so they would have stayed
     // ACTIVE and entitled forever, which is bug (2) in this file's header
     // wearing a provider id.
     //
     // Racing is safe in the direction that matters: both sides write the same
     // terminal state, the conditional update means only one wins and only one
     // `subscription.canceled` is announced (asserted above), and `cancelAt` is
-    // only ever written after the provider CONFIRMED the cancellation — the
-    // cancel call throws on failure and leaves the row alone — so a date in the
+    // only ever written after the provider CONFIRMED the cancellation, the
+    // cancel call throws on failure and leaves the row alone, so a date in the
     // past means the billing has already stopped.
     const periodEnd = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000);
     const { liveKey, session, subscription } = await fixture('cape-prov', periodEnd);

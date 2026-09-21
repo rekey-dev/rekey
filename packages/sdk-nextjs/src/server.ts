@@ -16,13 +16,13 @@
  *   - `process.env.REKEY_URL` (the API URL)
  *   - `process.env.REKEY_SECRET` (the Application secret key, server-only)
  *
- * Pure server module — never bundled to the browser.
+ * Pure server module, never bundled to the browser.
  */
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { Rekey, RekeyError } from '@rekey.dev/node';
-import type { EndUserDto } from '@rekey.dev/shared-types';
+import type { DeviceBindingRequest, EndUserDto } from '@rekey.dev/shared-types';
 import {
   ACCESS_COOKIE,
   REFRESH_COOKIE,
@@ -62,8 +62,58 @@ function client(): Rekey {
 
 export interface Session {
   user: EndUserDto;
-  /** The access JWT — pass it to client components via the provider's `accessToken`. */
+  /** The access JWT, pass it to client components via the provider's `accessToken`. */
   accessToken: string;
+}
+
+/**
+ * Identify the machine to the API, for an Application that binds sessions to
+ * devices (docs/devices.md).
+ *
+ * Optional unless `authConfig.deviceBinding` is `'required'`, in which case
+ * every primary sign-in refuses without it (`DEVICE_FINGERPRINT_REQUIRED`).
+ * The fingerprint is yours to compute and opaque to Rekey: hash whatever you
+ * consider "the same machine", keep it stable across launches, 8 to 256
+ * characters.
+ *
+ * A browser has no such thing, and the browser SDKs deliberately never send
+ * one. This is for a Next.js server that fronts a desktop or mobile client and
+ * receives the fingerprint from it.
+ */
+export type { DeviceBindingRequest };
+
+export {
+  classifySignInError,
+  type SignInFailure,
+  type DeviceChoice,
+} from './errors.js';
+
+/**
+ * Rotate a refresh token, naming the device when the caller has one.
+ *
+ * The two calls are kept apart rather than passing `{ device: undefined }`,
+ * because an absent key and a present-undefined key are not the same thing to
+ * a `.strict()` validator once they have been through JSON.
+ */
+async function rotate(
+  token: string,
+  device?: DeviceBindingRequest,
+): Promise<{ accessToken: string; refreshToken: string }> {
+  return device ? client().auth.refresh(token, { device }) : client().auth.refresh(token);
+}
+
+/**
+ * Options shared by the two entry points that may rotate a refresh token.
+ *
+ * Passing `device` matters beyond sign-in. A chain bound at sign-in is checked
+ * on every rotation: a different fingerprint is `REFRESH_TOKEN_DEVICE_MISMATCH`
+ * and revokes every session the user has, so a client that identifies itself at
+ * sign-in must keep identifying itself. An unbound chain is bound by the first
+ * refresh that names a device, and a caller that passes nothing keeps exactly
+ * the behaviour it had.
+ */
+export interface SessionDeviceOptions {
+  device?: DeviceBindingRequest;
 }
 
 /**
@@ -78,8 +128,8 @@ export interface Session {
  * having failed? Only a verdict justifies throwing the session away.
  *
  * Matched by prefix rather than a literal list. `/auth/refresh` throws six
- * `REFRESH_TOKEN_*` codes — EXPIRED, INVALID, REUSED, REVOKED, RACE and
- * WRONG_APPLICATION — and every one is a 401 saying this token will never work
+ * `REFRESH_TOKEN_*` codes, EXPIRED, INVALID, REUSED, REVOKED, RACE and
+ * WRONG_APPLICATION, and every one is a 401 saying this token will never work
  * again. The list here held three of them, so REVOKED ("sign out my other
  * devices") and INVALID (any stale cookie) fell through to "the API failed":
  * the dead cookie was never cleared, and the browser re-presented it on every
@@ -118,7 +168,7 @@ function isAccessTokenSpent(code: string): boolean {
  *
  * This has to be asked BEFORE refreshing, not after. The API rotates the
  * refresh token on every use and treats a replay of a rotated token as a
- * compromise signal — `revokeAllForEndUser`, every session gone. So refreshing
+ * compromise signal, `revokeAllForEndUser`, every session gone. So refreshing
  * in a context that cannot persist the new token is not merely wasteful: the
  * browser keeps presenting the old one, and the next request destroys the
  * user's sessions everywhere. Silently, and harder than the 500 this function
@@ -152,7 +202,7 @@ const PROBE_COOKIE = '__rekey_probe';
  * unreachable API is not the same as a signed-out user, and reporting it as
  * one is how a blip becomes a mass logout.
  */
-export async function auth(): Promise<Session | null> {
+export async function auth(options?: SessionDeviceOptions): Promise<Session | null> {
   const jar = await cookies();
   const access = jar.get(ACCESS_COOKIE)?.value;
   if (access) {
@@ -172,16 +222,16 @@ export async function auth(): Promise<Session | null> {
   // Refreshing consumes the token. If the result cannot be stored, the browser
   // keeps presenting the old one and the API reads that replay as a leak,
   // revoking every session the user has. So a render reports "no session" and
-  // leaves the token alone — recoverable, and the middleware repairs it on the
+  // leaves the token alone, recoverable, and the middleware repairs it on the
   // next request by routing through `refreshSession()` in a route handler.
   if (!(await canWriteCookies(jar))) return null;
 
   let fresh;
   try {
-    fresh = await client().auth.refresh(refresh);
+    fresh = await rotate(refresh, options?.device);
   } catch (err) {
-    // Only a verdict about the token clears it. Anything else — a timeout, a
-    // 500 from the API — leaves the cookies alone so the next request can try
+    // Only a verdict about the token clears it. Anything else, a timeout, a
+    // 500 from the API, leaves the cookies alone so the next request can try
     // again, and is reported rather than disguised as a signed-out user.
     if (err instanceof RekeyError && isTokenVerdict(err.code)) {
       jar.delete(ACCESS_COOKIE);
@@ -204,20 +254,20 @@ export async function auth(): Promise<Session | null> {
  * cookie writes are allowed.
  *
  * `auth()` refreshes too, but cannot always persist the result. Calling this
- * from a place that can — a `/api/session/refresh` route the middleware sends
- * stale sessions through — means the rotation is written once instead of
+ * from a place that can, a `/api/session/refresh` route the middleware sends
+ * stale sessions through, means the rotation is written once instead of
  * being redone on every render.
  *
  * Returns null when there is nothing to refresh or the token is spent, having
  * cleared the cookies in the latter case.
  */
-export async function refreshSession(): Promise<Session | null> {
+export async function refreshSession(options?: SessionDeviceOptions): Promise<Session | null> {
   const jar = await cookies();
   const refresh = jar.get(REFRESH_COOKIE)?.value;
   if (!refresh) return null;
 
   try {
-    const fresh = await client().auth.refresh(refresh);
+    const fresh = await rotate(refresh, options?.device);
     jar.set(ACCESS_COOKIE, fresh.accessToken, await accessOpts());
     jar.set(REFRESH_COOKIE, fresh.refreshToken, await refreshOpts());
     const user = await client().auth.getCurrentUser(fresh.accessToken);
@@ -237,7 +287,7 @@ export async function refreshSession(): Promise<Session | null> {
  * `kind === "mfa_required"` means the user has MFA enrolled and the caller
  * must collect a TOTP / backup code and call `mfaVerify` to complete.
  *
- * No cookies are set on the `mfa_required` branch — the challenge token is
+ * No cookies are set on the `mfa_required` branch, the challenge token is
  * NOT a session and must never land in `rekey_access`.
  */
 export type SignInOutcome =
@@ -263,7 +313,7 @@ async function setSessionCookies(accessToken: string, refreshToken: string): Pro
  * the secure hand-off: the tokens land in httpOnly cookies (out of JS), so the
  * rest of the app uses `auth()` exactly as it would for a server-action login.
  *
- * This sets cookies verbatim — front it with your own CSRF/origin checks; never
+ * This sets cookies verbatim, front it with your own CSRF/origin checks; never
  * trust tokens from an untrusted origin.
  *
  * @example
@@ -293,10 +343,21 @@ export async function createSession(tokens: {
  *                       returned with **no cookies**. Pass the challenge
  *                       token + the user's code to `mfaVerify(...)` to
  *                       complete.
+ *
+ * Pass `device` to bind the session to a machine. It is required when the
+ * Application sets `authConfig.deviceBinding: 'required'`. Without it that
+ * Application refuses every sign-in with `DEVICE_FINGERPRINT_REQUIRED`, so
+ * this SDK could not sign anyone in at all while the input was narrowed to
+ * `{ email, password }`.
+ *
+ * On failure, run the error through {@link classifySignInError} before
+ * rendering it: `DEVICE_LIMIT_REACHED` and `PASSWORD_VERIFY_BUSY` are not
+ * wrong passwords, and showing them as one leaves the user with no way out.
  */
 export async function signIn(input: {
   email: string;
   password: string;
+  device?: DeviceBindingRequest;
 }): Promise<SignInOutcome> {
   const result = await client().auth.signIn(input);
   if (result.mfaRequired) {
@@ -317,12 +378,13 @@ export async function signIn(input: {
 /**
  * Server action: complete an MFA-required sign-in. Sets cookies on success.
  * Throws `RekeyError` with code `MFA_CODE_INVALID` /
- * `MFA_CHALLENGE_INVALID` on failure — surface the error message to the
+ * `MFA_CHALLENGE_INVALID` on failure, surface the error message to the
  * user and prompt to retry.
  */
 export async function mfaVerify(input: {
   mfaChallengeToken: string;
   code: string;
+  device?: DeviceBindingRequest;
 }): Promise<Session> {
   const result = await client().auth.mfaVerify(input);
   await setSessionCookies(result.accessToken, result.refreshToken);
@@ -339,6 +401,7 @@ export async function signUp(input: {
   email: string;
   password: string;
   metadata?: Record<string, unknown>;
+  device?: DeviceBindingRequest;
 }): Promise<Session> {
   const result = await client().auth.signUp(input);
   await setSessionCookies(result.accessToken, result.refreshToken);

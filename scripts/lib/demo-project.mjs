@@ -16,17 +16,17 @@ export const PROMPT = '~/northwind';
  * return their absolute paths.
  *
  * `pnpm pack` (not `npm pack`) because it rewrites `workspace:^` dependency
- * ranges to real versions — an `npm pack` tarball installs with
+ * ranges to real versions, an `npm pack` tarball installs with
  * `EUNSUPPORTEDPROTOCOL`.
  *
  * WHY LOCAL TARBALLS RATHER THAN THE REGISTRY. The same reason the panel
  * walkthrough boots this repository's API instead of api.rekey.dev: a video
  * that films `main` cannot advertise a product that no longer looks like that.
- * It also matters concretely right now — the packages published to npm are
+ * It also matters concretely right now, the packages published to npm are
  * behind this repository, in ways that break exactly what these videos show:
  *
  *   - `@rekey.dev/node`'s published `exports` map has only `types` and
- *     `import` — no `require`, no `default` — so it cannot be loaded from a
+ *     `import`, no `require`, no `default`, so it cannot be loaded from a
  *     CommonJS project at all. `nest new` scaffolds CommonJS. The fix (a
  *     `default` condition) is in this repository and unreleased.
  *   - `@rekey.dev/nextjs`'s published `exports` has no `./cookies` entry,
@@ -39,8 +39,8 @@ export const PROMPT = '~/northwind';
 /**
  * Where the walkthroughs get their SDKs from.
  *
- *   repo     — tarballs packed from this repository (default).
- *   registry — plain `npm i @rekey.dev/…` against the real npm registry.
+ *   repo    , tarballs packed from this repository (default).
+ *   registry, plain `npm i @rekey.dev/…` against the real npm registry.
  *
  * `registry` is what these videos SHOULD show, and what they will show as soon
  * as the two release-pipeline bugs described on `packSdks` are published. It is
@@ -55,7 +55,7 @@ export const PROMPT = '~/northwind';
 export const SDK_SOURCE = process.env.DEMO_SDK_SOURCE === 'registry' ? 'registry' : 'repo';
 
 /**
- * Stage the SDKs into the project and return { args, shown } —
+ * Stage the SDKs into the project and return { args, shown },
  * `args` is what npm is really invoked with, `shown` is what the recording
  * types. They describe the same command: `args` are the paths relative to the
  * project directory, which is also npm's cwd.

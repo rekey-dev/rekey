@@ -1,11 +1,10 @@
 import * as React from 'react';
-import Link from 'next/link';
 import { api, type EmailLogRow, type EmailLogWithApp } from '@/lib/api';
 import { EmailLogsTable, EmailLogStatusFilter } from '@/components/EmailLogsTable';
 import { Pager, readPageSize, readOffset } from '@/components/Pager';
 import type { Page } from '@/lib/paginate';
 
-const STATUSES = new Set(['sent', 'error', 'no_transport']);
+const STATUSES = new Set(['sent', 'error', 'no_transport', 'suppressed']);
 
 export default async function ApplicationEmailLogsPage({
   params,
@@ -34,22 +33,19 @@ export default async function ApplicationEmailLogsPage({
 
   return (
     <div className="space-y-4">
+      {/* No back-link or page title here: the Email layout shell already
+          provides the section switcher and heading, so this is just the
+          section content. */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <Link
-            href={`/applications/${id}/email`}
-            className="text-xs text-neutral-600 dark:text-neutral-500 hover:text-[var(--color-fg)]"
-          >
-            ← Email settings
-          </Link>
-          <h2 className="text-base font-medium mt-0.5">
+          <h3 className="text-sm font-semibold text-[var(--color-fg)]">
             Send logs{' '}
-            <span className="text-[var(--color-muted-fg)] text-sm font-normal">
+            <span className="text-xs font-normal text-[var(--color-muted-fg)]">
               ({rows.length === 0 ? 0 : `${offset + 1}–${offset + rows.length}`})
             </span>
-          </h2>
-          <p className="text-sm text-[var(--color-muted-fg)] mt-1 max-w-2xl">
-            Every transactional email this application attempted — verification, password reset,
+          </h3>
+          <p className="mt-1 max-w-2xl text-sm text-[var(--color-muted-fg)]">
+            Every transactional email this application attempted: verification, password reset,
             magic links, etc. Metadata only (recipient, subject, transport, status); message bodies
             are never stored.
           </p>

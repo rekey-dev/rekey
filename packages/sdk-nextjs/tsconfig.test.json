@@ -1,0 +1,18 @@
+{
+  // `tsconfig.json` includes only `src`, and vitest transpiles without
+  // checking types, so nothing type-checked the test files. That is not a
+  // tidiness problem here: the bug this package just fixed, `signIn` narrowing
+  // its input so `device` could not be passed, was invisible at runtime and
+  // only ever showed up as a compile error in a caller. A test that proves it
+  // therefore has to be type-checked, or it proves nothing.
+  //
+  // Mirrors `apps/api/tsconfig.test.json` (PR #506). `pnpm typecheck` runs
+  // both projects; CI picks it up through turbo with no workflow change.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "test/**/*"],
+  "exclude": ["dist", "node_modules"]
+}

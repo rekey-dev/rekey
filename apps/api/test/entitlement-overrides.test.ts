@@ -8,7 +8,7 @@
  *
  * `applyOverrides` drops a non-finite quantity, never matches a malformed key,
  * and only ADDs rows for `FEATURE:`. Every one of those is a value an operator
- * can store, believe they sold, and never deliver — with nothing reporting a
+ * can store, believe they sold, and never deliver, with nothing reporting a
  * problem. So the interesting assertions here are not the happy paths; they are
  * the refusals, each standing in for a support ticket that reads "I set it and
  * nothing happened".
@@ -113,9 +113,53 @@ describe('Per-subscription entitlement overrides', () => {
   const find = (ents: Resolved[], kind: string, key: string): Resolved | undefined =>
     ents.find((e) => e.kind === kind && e.key === key);
 
+  describe('licence quantity', () => {
+    it('still accepts a seat count on a SEATS licence', async () => {
+      // The door the refusal has to leave open. Without this, dropping the
+      // `!== 'SEATS'` conjunct, refusing EVERY licence quantity, including the
+      // only one the product supports, leaves the whole suite green.
+      const subId = await subscribe({ kind: 'LICENSE', licenseKind: 'SEATS', quantity: 5 });
+      const res = await patch(subId, { 'LICENSE:': 50 });
+      expect(res.statusCode).toBe(200);
+      expect(await stored(subId)).toEqual({ 'LICENSE:': 50 });
+    });
+
+    it('refuses a quantity on a TIMED licence too', async () => {
+      const subId = await subscribe({
+        kind: 'LICENSE',
+        licenseKind: 'TIMED',
+      });
+      const res = await patch(subId, { 'LICENSE:': 10 });
+      expect(res.statusCode).toBe(400);
+      const err = res.json().error as { message: string; fix: string };
+      expect(err.message).toMatch(/TIMED/);
+      // The FIX, and a negative control. Both arms share a prefix, so a
+      // positive-only match still passes if the ternary collapses to the other
+      // arm and tells a TIMED operator their licence has no term.
+      expect(err.fix).toMatch(/no per-subscription term override/);
+      expect(err.fix).not.toMatch(/PERPETUAL/);
+      expect(await stored(subId)).toBeNull();
+    });
+
+    it('refuses a quantity on a licence that has no seats', async () => {
+      // A licence quantity means seats and nothing else. `validate` constrains
+      // it only for SEATS, so a quantity on PERPETUAL passed every check and was
+      // then read by no code at all.
+      const subId = await subscribe({ kind: 'LICENSE', licenseKind: 'PERPETUAL' });
+      const res = await patch(subId, { 'LICENSE:': 10 });
+      expect(res.statusCode).toBe(400);
+      const err = res.json().error as { code: string; message: string; fix: string };
+      expect(err.code).toBe('ENTITLEMENT_OVERRIDE_INVALID');
+      expect(err.message).toMatch(/PERPETUAL/);
+      expect(err.fix).toMatch(/neither seats nor a term/);
+      expect(err.fix).not.toMatch(/TIMED/);
+      expect(await stored(subId)).toBeNull();
+    });
+  });
+
   /**
    * A quantity an operator can store today, believe they sold, and never
-   * deliver — the exact property this file's header says it defends, on the
+   * deliver, the exact property this file's header says it defends, on the
    * three kinds that carry money.
    *
    * The plan-level validator already refuses every shape below
@@ -128,8 +172,8 @@ describe('Per-subscription entitlement overrides', () => {
   describe('quantity bounds', () => {
     it('refuses a USAGE quota of 0 on an unpriced meter, which would UNCAP it', async () => {
       // The severe one. `includedQuotaFor` only sets `capped` when quantity > 0
-      // or the row carries a price. Override an unpriced hard cap to 0 — which
-      // reads as "no free units" — and it has neither, so the function returns
+      // or the row carries a price. Override an unpriced hard cap to 0, which
+      // reads as "no free units", and it has neither, so the function returns
       // null, which every caller reads as UNMETERED. The operator tightens the
       // plan and removes the limit.
       const subId = await subscribe({ kind: 'USAGE', key: 'api_calls', quantity: 1000 });
@@ -146,7 +190,7 @@ describe('Per-subscription entitlement overrides', () => {
 
     it('refuses a fractional quantity that the Int column cannot hold', async () => {
       // Stored happily, then thrown by Prisma inside `provision` at the NEXT
-      // renewal — so the failure surfaces as a retrying 500 on the renewal
+      // renewal, so the failure surfaces as a retrying 500 on the renewal
       // webhook, weeks later, nowhere near the operator who typed it.
       const subId = await subscribe({ kind: 'CREDIT', quantity: 500 });
       expect((await patch(subId, { 'CREDIT:': 1.5 })).statusCode).toBe(400);
@@ -159,7 +203,7 @@ describe('Per-subscription entitlement overrides', () => {
 
     it('refuses a CREDIT quantity of 0, which silently removes the grant', async () => {
       // `provision` grants only when `quantity > 0`, so 0 does not mean "no
-      // credits this period" — it means the grant never runs and nothing says so.
+      // credits this period", it means the grant never runs and nothing says so.
       const subId = await subscribe({ kind: 'CREDIT', quantity: 500 });
       expect((await patch(subId, { 'CREDIT:': 0 })).statusCode).toBe(400);
     });
@@ -197,7 +241,7 @@ describe('Per-subscription entitlement overrides', () => {
    *
    * Not a convenience. The first version of these tests called inject and
    * ignored the status, and the negative test ("emits nothing") passed
-   * vacuously because the endpoint had never been created at all — the event
+   * vacuously because the endpoint had never been created at all, the event
    * name was missing from `KNOWN_WEBHOOK_EVENTS`, so the `events` enum refused
    * it with a 400 nobody read. A negative assertion is only worth anything if
    * the positive setup is known to have worked.
@@ -321,7 +365,7 @@ describe('Per-subscription entitlement overrides', () => {
   it('REFUSES a non-numeric quantity', async () => {
     const subId = await subscribe({ kind: 'USAGE', key: 'api_calls', quantity: 1000 });
 
-    // Number('lots') is NaN, which applyOverrides discards — leaving the plan
+    // Number('lots') is NaN, which applyOverrides discards, leaving the plan
     // quantity in force with nothing reporting that the override did nothing.
     const res = await patch(subId, { 'USAGE:api_calls': 'lots' });
     expect(res.statusCode).toBe(400);
@@ -371,7 +415,7 @@ describe('Per-subscription entitlement overrides', () => {
 
     // `applyOverrides` replaces only `value` and keeps the plan's valueType, and
     // `parseFeatureValue` treats ONLY the exact string "true" as true. So "yes"
-    // would be stored, announced, and read back as FALSE — the operator turns a
+    // would be stored, announced, and read back as FALSE, the operator turns a
     // flag on and turns it off.
     const res = await patch(subId, { 'FEATURE:beta': 'yes' });
     expect(res.statusCode).toBe(400);
@@ -421,7 +465,7 @@ describe('Per-subscription entitlement overrides', () => {
 
   it('can override a LEGACY plan whose synthesized entitlement has an empty key', async () => {
     // A plan with `kind: CREDIT` and no explicit rows resolves through
-    // `synthesizeLegacy`, which emits `key: ''` — so `"CREDIT:"` is the ONLY key
+    // `synthesizeLegacy`, which emits `key: ''`, so `"CREDIT:"` is the ONLY key
     // that can reach it. Requiring a non-empty key refused exactly the form that
     // works, and said it "never matches an entitlement", which was backwards.
     const planSlug = `legacy-${Math.random().toString(36).slice(2, 7)}`;

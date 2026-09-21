@@ -1,5 +1,5 @@
 /**
- * Public OAuth endpoints — used by the customers' apps to sign their
+ * Public OAuth endpoints, used by the customers' apps to sign their
  * end-users in via Google / GitHub / etc.
  *
  *   POST /api/v1/auth/oauth/:provider/start    { state, ... }
@@ -19,19 +19,25 @@
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { DeviceBindingRequestSchema } from '@rekey.dev/shared-types';
 import { oauthService } from './oauth.service.js';
 import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
+import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { shapeSignInOutcome } from '../auth/auth.routes.js';
 import { ok, okArray, errs, ref } from '../../lib/openapi.js';
+import { CREDENTIAL_BODY_LIMIT, TOKEN_BODY_LIMIT } from '../../lib/body-limits.js';
 
 const ProviderParam = z.object({ provider: z.string().min(1).max(40) });
 const StartBody = z.object({ state: z.string().min(1).max(512) });
-const CallbackBody = z.object({ code: z.string().min(1).max(4096) });
+const CallbackBody = z.object({
+  code: z.string().min(1).max(4096),
+  device: DeviceBindingRequestSchema.optional(),
+});
 
 /**
- * Errors from `requirePublishableOrSecretKey` + `requireScope('auth:write')`
- * — every route in this module runs both as `onRequest` hooks.
+ * Errors from `requirePublishableOrSecretKey` + `requireScope('auth:write')`,
+ * every route in this module runs both as `onRequest` hooks.
  */
 const KEY_ERRORS = {
   401:
@@ -45,7 +51,7 @@ const KEY_ERRORS = {
   429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
 } as const;
 
-/** Additionally required by `oauthLinkRoutes` — `requireUserSession` runs after the key hooks. */
+/** Additionally required by `oauthLinkRoutes`, `requireUserSession` runs after the key hooks. */
 const USER_SESSION_ERRORS = {
   401:
     `${KEY_ERRORS[401]}; or USER_TOKEN_MISSING — no \`X-Rekey-User-Token\` header; or ` +
@@ -57,7 +63,7 @@ const USER_SESSION_ERRORS = {
 } as const;
 
 export async function oauthRoutes(app: FastifyInstance): Promise<void> {
-  // Pre-user OAuth login (start + callback) — part of the public-bootstrap
+  // Pre-user OAuth login (start + callback), part of the public-bootstrap
   // surface, so a browser-only app reaches it with the publishable key. The
   // account-linking routes below also accept it: they are authorized by the
   // signed-in user's JWT (`requireUserSession`), not by the key tier.
@@ -67,6 +73,7 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/:provider/start',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       schema: {
         tags: ['Public · OAuth'],
         summary: 'Get the authorization URL for an OAuth provider',
@@ -80,7 +87,7 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
         },
         security: [{ apiKey: [] }, { publishableKey: [] }],
         response: {
-          // No redirect happens here — this route returns JSON. It is the
+          // No redirect happens here, this route returns JSON. It is the
           // *customer's* app that redirects the end-user's browser to
           // `authorizationUrl`; the API never issues a 3xx itself.
           200: ok(
@@ -116,6 +123,7 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/:provider/callback',
     {
+      bodyLimit: TOKEN_BODY_LIMIT,
       schema: {
         tags: ['Public · OAuth'],
         summary: 'Exchange an OAuth code for a Rekey session',
@@ -125,11 +133,24 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
         body: {
           type: 'object',
           required: ['code'],
-          properties: { code: { type: 'string', minLength: 1, maxLength: 4096 } },
+          properties: {
+            code: { type: 'string', minLength: 1, maxLength: 4096 },
+            device: {
+              type: 'object',
+              required: ['fingerprint'],
+              description:
+                'Bind the session to a device (docs/devices.md). Optional unless the Application ' +
+                'sets `authConfig.deviceBinding = "required"`.',
+              properties: {
+                fingerprint: { type: 'string', minLength: 8, maxLength: 256 },
+                label: { type: 'string', minLength: 1, maxLength: 120 },
+              },
+            },
+          },
         },
         security: [{ apiKey: [] }, { publishableKey: [] }],
         response: {
-          // No redirect — this route returns JSON (a session, or an MFA
+          // No redirect, this route returns JSON (a session, or an MFA
           // challenge). The customer's *server* calls it after their app
           // already received `code` at their own registered redirect URI.
           200: ok(
@@ -170,6 +191,8 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
         device: {
           userAgent: typeof ua === 'string' && ua.length > 0 ? ua : null,
           ip: req.ip || null,
+          fingerprint: body.device?.fingerprint ?? null,
+          label: body.device?.label ?? null,
         },
         // Signup policy: refuse OAuth-first user creation via a pub key in
         // `secret_only` apps (and entirely in `invite_only`).
@@ -198,7 +221,7 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
  *
  *   DELETE /api/v1/auth/oauth/:provider
  *     Remove the link. Refuses if it would leave the account with no
- *     sign-in method (no password + no other OAuth) — lockout guard.
+ *     sign-in method (no password + no other OAuth), lockout guard.
  */
 export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
   // Same credential tier as the `/:provider/start` + `/callback` sign-in
@@ -220,7 +243,7 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
           { apiKey: [], userToken: [] },
         ],
         response: {
-          // Bounded by construction — the set of OAuth providers a deployment
+          // Bounded by construction, the set of OAuth providers a deployment
           // registers, not tenant data. A bare array is correct here.
           200: okArray(
             {
@@ -251,6 +274,7 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/:provider/link/start',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       schema: {
         tags: ['Public · OAuth'],
         summary: 'Begin an OAuth link flow for the current user',
@@ -265,7 +289,7 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
           { apiKey: [], userToken: [] },
         ],
         response: {
-          // No redirect — returns JSON, same contract as the unauthenticated
+          // No redirect, returns JSON, same contract as the unauthenticated
           // /:provider/start above.
           200: ok(
             {
@@ -297,9 +321,15 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  // Linking and unlinking change which credentials can sign the end-user in
+  // later, so an impersonated session is refused, like password, MFA and
+  // passkey changes. A provider identity the operator controls, linked during
+  // a 5-minute impersonation, would sign in as the end-user indefinitely.
   app.post(
     '/:provider/link/complete',
     {
+      bodyLimit: TOKEN_BODY_LIMIT,
+      preHandler: refuseWhileImpersonating('link a sign-in provider to this account'),
       schema: {
         tags: ['Public · OAuth'],
         summary: 'Complete an OAuth link — attaches the provider identity to the current user',
@@ -361,6 +391,7 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
   app.delete(
     '/:provider',
     {
+      preHandler: refuseWhileImpersonating('remove a sign-in provider from this account'),
       schema: {
         tags: ['Public · OAuth'],
         summary: 'Remove an OAuth provider from the current user. Refuses if it would lock the account out.',

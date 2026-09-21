@@ -11,7 +11,7 @@
  * assertion. In a query string it would sit in browser history, in the
  * `Referer` of every subsequent request, and in any proxy log along the way. In
  * a form body it is none of those. rekey.dev renders a self-submitting form
- * rather than issuing a redirect for exactly this reason — the same POST
+ * rather than issuing a redirect for exactly this reason, the same POST
  * binding SAML has used for the same problem for twenty years.
  *
  * The token is single-use and short-lived on the API side, so a replay of a
@@ -22,17 +22,15 @@
  */
 
 import { type NextRequest, NextResponse } from 'next/server';
-import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE } from '@/lib/api';
+import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE, sessionCookieMaxAges } from '@/lib/api';
 import { cookieSecure } from '@/lib/cookie-secure';
 
 type AssertResult =
   | { mfaRequired: true; mfaChallengeToken: string }
-  | { mfaRequired: false; accessToken: string; refreshToken: string };
+  | { mfaRequired: false; accessToken: string; refreshToken: string; accessTokenExpiresAt: string; refreshTokenExpiresAt: string };
 
-const ACCESS_MAX_AGE = 60 * 15; // 15 min — mirrors setSessionCookies
-const REFRESH_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 
-// Relative Location — the browser resolves it against the public URL it is on
+// Relative Location, the browser resolves it against the public URL it is on
 // (panel.rekey.dev), NOT `req.url`, which behind a proxy is the internal bind
 // address. NextResponse.redirect requires an absolute URL, so emit the header
 // directly. Same reasoning as the OAuth callback next door.
@@ -41,7 +39,7 @@ function seeOther(path: string): NextResponse {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  let idToken = '';
+  let idToken: string;
   try {
     const form = await req.formData();
     idToken = String(form.get('id_token') ?? '');
@@ -73,11 +71,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const secure = await cookieSecure();
   const res = seeOther('/applications?e=login_cloud');
+  const maxAges = sessionCookieMaxAges(result);
   res.cookies.set(ACCESS_COOKIE, result.accessToken, {
-    httpOnly: true, sameSite: 'lax', secure, path: '/', maxAge: ACCESS_MAX_AGE,
+    httpOnly: true, sameSite: 'lax', secure, path: '/', maxAge: maxAges.access,
   });
   res.cookies.set(REFRESH_COOKIE, result.refreshToken, {
-    httpOnly: true, sameSite: 'lax', secure, path: '/', maxAge: REFRESH_MAX_AGE,
+    httpOnly: true, sameSite: 'lax', secure, path: '/', maxAge: maxAges.refresh,
   });
   return res;
 }

@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { FilterChips } from '@/components/FilterChips';
 import type { EmailLogWithApp } from '@/lib/api';
 import { formatDateTime } from '@/lib/date';
 import { Table, THead, TBody, TR, TH, TD } from './Table';
@@ -14,14 +15,25 @@ const VIA_LABEL: Record<string, string> = {
 };
 
 function StatusBadge({ status }: { status: string }): React.JSX.Element {
-  const tone: BadgeTone = status === 'sent' ? 'success' : status === 'error' ? 'danger' : 'warning';
+  // `suppressed` reads NEUTRAL, not amber. The Settings page calls it "an
+  // outcome, not a failure", an operator who turned an event off and then
+  // sees a warning-toned row would reasonably go looking for a fault that is
+  // not there.
+  const tone: BadgeTone =
+    status === 'sent'
+      ? 'success'
+      : status === 'error'
+        ? 'danger'
+        : status === 'suppressed'
+          ? 'neutral'
+          : 'warning';
   return <Badge tone={tone}>{status}</Badge>;
 }
 
 /**
  * Read-only email send-log table. Used by both the per-application and the
  * workspace-wide (per-tenant) views; set `showApp` to render the owning-app
- * column (the workspace view) — per-app pages omit it.
+ * column (the workspace view), per-app pages omit it.
  */
 export function EmailLogsTable({
   rows,
@@ -30,7 +42,7 @@ export function EmailLogsTable({
 }: {
   rows: EmailLogWithApp[];
   showApp?: boolean;
-  /** True when a status filter is active — distinguishes "no matches" from "no sends at all". */
+  /** True when a status filter is active, distinguishes "no matches" from "no sends at all". */
   filtered?: boolean;
 }): React.JSX.Element {
   if (rows.length === 0) {
@@ -79,9 +91,17 @@ export function EmailLogsTable({
             <TD>
               <div className="space-y-1">
                 <StatusBadge status={r.status} />
-                {r.status === 'error' && r.error && (
+                {/* A suppressed row carries its REASON in the same column an
+                    error uses, and the reason is the entire point of showing
+                    the row: "the welcome event is turned off" is what the
+                    operator came here to learn. */}
+                {r.error && (r.status === 'error' || r.status === 'suppressed') && (
                   <div
-                    className="max-w-[16rem] truncate text-[11px] text-red-600 dark:text-red-400"
+                    className={`max-w-[16rem] truncate text-[11px] ${
+                      r.status === 'suppressed'
+                        ? 'text-[var(--color-muted-fg)]'
+                        : 'text-red-600 dark:text-red-400'
+                    }`}
                     title={r.error}
                   >
                     {r.error}
@@ -99,7 +119,7 @@ export function EmailLogsTable({
 /**
  * Status filter pills shared by both log views. `basePath` is the page URL.
  *
- * Changing the filter resets `offset` to page 1 (correct — a new filter is a
+ * Changing the filter resets `offset` to page 1 (correct, a new filter is a
  * new result set) but PRESERVES the active page size (`ps`), so the user's
  * 10/25/100 choice survives a filter click, matching `Pager`'s own link
  * behaviour. Pass `pageSize` from the page's `readPageSize(sp)`.
@@ -118,6 +138,7 @@ export function EmailLogStatusFilter({
     { value: 'sent', label: 'Sent' },
     { value: 'error', label: 'Errors' },
     { value: 'no_transport', label: 'No transport' },
+    { value: 'suppressed', label: 'Suppressed' },
   ];
   const buildHref = (value: string | undefined): string => {
     const p = new URLSearchParams();
@@ -128,25 +149,11 @@ export function EmailLogStatusFilter({
     return `${basePath}${s ? `?${s}` : ''}`;
   };
   return (
-    <div className="flex items-center gap-1.5">
-      {opts.map((o) => {
-        const href = buildHref(o.value);
-        const isActive = active === o.value || (!active && !o.value);
-        return (
-          <a
-            key={o.label}
-            href={href}
-            className={
-              'text-xs px-2.5 py-1 rounded-md border ' +
-              (isActive
-                ? 'border-[var(--color-primary)] text-[var(--color-primary)] bg-[color-mix(in_srgb,var(--color-primary)_5%,transparent)]'
-                : 'border-[var(--color-border)] text-[var(--color-muted-fg)] hover:bg-[var(--color-surface-muted)]')
-            }
-          >
-            {o.label}
-          </a>
-        );
-      })}
-    </div>
+    <FilterChips
+      chips={opts.map((o) => ({ value: o.value, label: o.label }))}
+      active={active}
+      hrefFor={buildHref}
+      label="Filter delivery log by outcome"
+    />
   );
 }

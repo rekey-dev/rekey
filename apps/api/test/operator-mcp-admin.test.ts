@@ -3,7 +3,7 @@
  *
  * Admin scope gates the destructive / financial / secret-handling tools
  * (configure_billing_provider, cancel_subscription). It must be granted
- * explicitly via the OAuth flow — a write token alone can't see or call them.
+ * explicitly via the OAuth flow, a write token alone can't see or call them.
  *
  * Load-bearing cases:
  *   - a write-but-not-admin token can't see or call admin tools;
@@ -137,7 +137,7 @@ describe('Operator MCP admin tools + get_end_user', () => {
       where: { applicationId_provider: { applicationId: appId, provider: 'stripe' } },
     });
     expect(row).not.toBeNull();
-    // Secret is encrypted at rest — the raw key must not appear in ciphertext.
+    // Secret is encrypted at rest, the raw key must not appear in ciphertext.
     expect(row!.ciphertext).not.toContain(secret);
 
     // The security audit logged the configuration WITHOUT the secret. The write

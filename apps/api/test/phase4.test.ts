@@ -1,18 +1,16 @@
 /**
- * Phase 4 smoke tests — BYO billing creds, OAuth (with mock provider),
+ * Phase 4 smoke tests, BYO billing creds, OAuth (with mock provider),
  * MFA, licenses, usage. Each new surface gets at least one happy path
  * + one failure-mode assertion.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { registerOAuthProvider } from '../src/modules/oauth/providers/index.js';
-import { generateSecret } from '../src/lib/mfa.js';
 import * as OTPAuth from 'otpauth';
 
-const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
 interface Bootstrapped {
   applicationId: string;
@@ -346,7 +344,7 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
 
     // Inject a mock provider that pretends Google returned a stable id +
     // verified email. `emailVerified` is now required by the provider
-    // contract — see oauth/providers/types.ts. Verified-only auto-link is
+    // contract, see oauth/providers/types.ts. Verified-only auto-link is
     // the security gate against unverified-email account takeover.
     registerOAuthProvider({
       name: 'google',
@@ -448,7 +446,7 @@ describe('Phase 4: BYO creds + OAuth + MFA + licenses + usage', () => {
       payload: { code: backup },
     });
     expect((c1.json().data as { ok: boolean }).ok).toBe(true);
-    // Replay should fail — backup code is single-use.
+    // Replay should fail, backup code is single-use.
     const c2 = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/mfa/challenge',

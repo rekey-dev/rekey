@@ -1,7 +1,7 @@
 import * as React from 'react';
 
 /**
- * Tonal banner primitive — the standard inline feedback strip (form errors,
+ * Tonal banner primitive, the standard inline feedback strip (form errors,
  * saved confirmations, contextual notices). Consolidates the ad-hoc
  * `rounded border px-3 py-2` strings the page-level banners hand-roll.
  *
@@ -10,7 +10,7 @@ import * as React from 'react';
  * strip reads as a surface, not a chip.
  *
  * Accessibility: `error` renders with role="alert" (interrupts, announced
- * immediately); the other tones use aria-live="polite" — same convention as
+ * immediately); the other tones use aria-live="polite", same convention as
  * FlashBanner.
  */
 

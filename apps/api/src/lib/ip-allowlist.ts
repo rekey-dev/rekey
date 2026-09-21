@@ -4,7 +4,7 @@
  * Entries may be CIDRs ("10.0.0.0/8", "2001:db8::/32") or bare IPs ("1.2.3.4",
  * "::1"). v4 and v6 are handled independently; a malformed entry or a
  * version mismatch is skipped (never a false match). An empty list means
- * "allow all" — the caller gates on `.length > 0` before enforcing.
+ * "allow all", the caller gates on `.length > 0` before enforcing.
  */
 
 import { Address4, Address6 } from 'ip-address';
@@ -36,7 +36,7 @@ export function ipMatchesAllowlist(ip: string, allowlist: ReadonlyArray<string>)
         if (new Address4(addr).isInSubnet(subnet)) return true;
       }
     } catch {
-      // malformed entry or unparseable address — treat as non-match
+      // malformed entry or unparseable address, treat as non-match
     }
   }
   return false;

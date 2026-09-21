@@ -1,5 +1,5 @@
 /**
- * Four findings from the second external audit — the verification pass over
+ * Four findings from the second external audit, the verification pass over
  * the nine fixes that shipped earlier in 2.0.0-rc.3.
  *
  * Two are new. Two are the same defect class as fixes that had already landed,
@@ -7,7 +7,7 @@
  * original reproduction:
  *
  *   1. The money bound was set to 10^11 on the reasoning that it was "a sane
- *      ceiling for money". The column is `Int` — Postgres `integer`, max
+ *      ceiling for money". The column is `Int`, Postgres `integer`, max
  *      2147483647. So everything from 2147483648 up to the declared maximum
  *      still reached Postgres and came back `22003 value out of range`,
  *      including the exact `maximum` the OpenAPI document advertised. The fix
@@ -20,7 +20,7 @@
  *      correctly since it was written.
  *
  *   3. `GET /tenant/applications/{id}` returned the encrypted credential blobs
- *      to any reader, including a read-only APP_VIEWER — an audience that only
+ *      to any reader, including a read-only APP_VIEWER, an audience that only
  *      became reachable when grant-scoped access became the default.
  */
 
@@ -86,7 +86,7 @@ describe('second-audit findings', () => {
         },
       });
 
-      // 400 from the schema. The point is that it is not 500 — this exact
+      // 400 from the schema. The point is that it is not 500, this exact
       // value used to reach Postgres and come back 22003.
       expect(res.statusCode).toBe(400);
     });
@@ -140,7 +140,7 @@ describe('second-audit findings', () => {
 
     it('PATCH routing answers 404, not 500', async () => {
       const { token, applicationId } = await fixture('bc-patch');
-      // Routing lives on the provider path itself — `countries`/`priority` in
+      // Routing lives on the provider path itself, `countries`/`priority` in
       // the body route to `setRouting`, which was the unguarded call.
       const res = await app.inject({
         method: 'PATCH',
@@ -186,7 +186,7 @@ describe('second-audit findings', () => {
       });
 
       expect(res.statusCode).toBe(200);
-      // `{items, page}` since 2.0.0-rc.3 — every list endpoint returns the
+      // `{items, page}` since 2.0.0-rc.3, every list endpoint returns the
       // envelope, so the rows live under `items`.
       const { items: rows, page } = res.json().data as {
         items: Array<Record<string, unknown>>;

@@ -1,5 +1,5 @@
 /**
- * PayPal billing provider — real implementation, driven by plain `fetch`.
+ * PayPal billing provider, real implementation, driven by plain `fetch`.
  *
  * Uses Subscriptions v1 against `/v1/billing/plans` and
  * `/v1/billing/subscriptions` directly. `@paypal/paypal-server-sdk` is still a
@@ -9,11 +9,11 @@
  * Mode (`test` → sandbox, `live` → production) selects the API base URL.
  *
  * Webhook verification is delegated to the operator's hosted webhook ID (we
- * call `/v1/notifications/verify-webhook-signature`) — see
+ * call `/v1/notifications/verify-webhook-signature`), see
  * modules/paypal/index.ts (the ProviderModule).
  */
 
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type { Plan } from '@prisma/client';
 import type {
   BillingProvider,
@@ -36,7 +36,7 @@ const LIVE_BASE = 'https://api-m.paypal.com';
  * Hard ceiling on any outbound PayPal call.
  *
  * Node's undici has NO default request timeout, so a bare `fetch()` to a
- * wedged host hangs until the OS gives up on the socket — minutes, or never.
+ * wedged host hangs until the OS gives up on the socket, minutes, or never.
  * Every call in this file used to be a bare `fetch()`.
  *
  * 10s matches the outbound budget the OAuth providers and the webhook
@@ -54,15 +54,15 @@ const PAYPAL_TIMEOUT_MS = 10_000;
  * That path is the sharp one. It runs synchronously inside the Fastify handler
  * for every webhook PayPal sends; with no timeout at all, a wedged
  * api-m.paypal.com held a handler open indefinitely, PayPal retried and opened
- * another, and the process ran out of connections while `/health/live` — which
- * touches neither PayPal nor the handler pool — stayed green. Failing a
+ * another, and the process ran out of connections while `/health/live`, which
+ * touches neither PayPal nor the handler pool, stayed green. Failing a
  * webhook fast costs one provider retry; holding it costs the API.
  */
 const PAYPAL_WEBHOOK_TIMEOUT_MS = 4_000;
 
 /**
  * `fetch` with a deadline. The signal stays armed after the response
- * resolves, so it covers the body read too — a server that returns headers
+ * resolves, so it covers the body read too, a server that returns headers
  * promptly and then trickles the body still hits the deadline.
  */
 function paypalFetch(
@@ -79,7 +79,7 @@ function paypalFetch(
  * PayPal's signature check IS the authentication for the webhook route (there
  * is no bearer token; see pipeline.ts). Deferring it means either acting on an
  * unverified payload, or persisting one to a quarantine and building a second
- * pipeline to drain it — a new trust boundary and a new failure mode to buy
+ * pipeline to drain it, a new trust boundary and a new failure mode to buy
  * latency we do not otherwise have a problem with. The timeout above bounds
  * the damage, and an unreachable PayPal now answers 503 rather than 401 (see
  * `PaypalVerifyOutcome`) so the provider retries instead of being told its
@@ -187,7 +187,7 @@ export class RealPaypalProvider implements BillingProvider {
         category: 'SOFTWARE',
       }),
     });
-    // Ignore non-2xx — most commonly 422 "ALREADY_EXISTS" which we want.
+    // Ignore non-2xx, most commonly 422 "ALREADY_EXISTS" which we want.
 
     const requestId = `REKEY-PLAN-${plan.id}`;
     const interval = plan.interval === 'YEAR' ? 'YEAR' : 'MONTH';
@@ -231,7 +231,7 @@ export class RealPaypalProvider implements BillingProvider {
     if (input.discount) {
       // Subscriptions v1 has no per-subscription coupon. The only price
       // control at create time is the inline `plan` override, which can just
-      // restate the pricing_scheme of a cycle the plan already declares — and
+      // restate the pricing_scheme of a cycle the plan already declares, and
       // ours declare a single REGULAR cycle with `total_cycles: 0`, so
       // discounting "the first period" would discount every period forever
       // against one recorded redemption. Refuse instead of billing a
@@ -305,8 +305,8 @@ export class RealPaypalProvider implements BillingProvider {
    *
    * A coupon becomes a real discount line rather than a quietly smaller
    * number: Orders v2 takes `amount.breakdown.discount`, and PayPal renders it
-   * on the approval page and the buyer's receipt. The breakdown must add up —
-   * `item_total - discount === amount.value` — or PayPal rejects the order.
+   * on the approval page and the buyer's receipt. The breakdown must add up,
+   * `item_total - discount === amount.value`, or PayPal rejects the order.
    */
   async createOneTimeCheckout(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
     const token = await this.accessToken();
@@ -419,7 +419,7 @@ export class RealPaypalProvider implements BillingProvider {
       'PAYMENT.SALE.REVERSED',
       'PAYMENT.CAPTURE.COMPLETED',
       // Reversals on the Orders v2 side. Existing tenants keep their current
-      // subscription until their credential is next saved — `registerWebhook`
+      // subscription until their credential is next saved, `registerWebhook`
       // deletes and recreates, so this only takes effect on the next save.
       'PAYMENT.CAPTURE.REVERSED',
       'PAYMENT.CAPTURE.REFUNDED',
@@ -449,67 +449,6 @@ export class RealPaypalProvider implements BillingProvider {
   }
 
   /**
-   * Cancel the agreement at PayPal. **Always immediately — PayPal has no other
-   * kind.**
-   *
-   * ## Why `input.atPeriodEnd` is not forwarded
-   *
-   * Subscriptions v1 exposes exactly one cancellation,
-   * `POST /v1/billing/subscriptions/:id/cancel`, and it terminates the
-   * agreement on the spot. There is no `cancel_at_period_end` (Stripe), no
-   * `cancel_at_cycle_end` (Razorpay), and no scheduling parameter of any kind —
-   * the request body takes a `reason` string and nothing else. `suspend` is the
-   * only neighbouring verb and it means "dunning pause, reactivatable", not
-   * "cancel later"; our own webhook translate maps PayPal's SUSPENDED to
-   * PAST_DUE and opens a dunning case, so borrowing it here would put a
-   * cancelling buyer into collections.
-   *
-   * So the flag has nowhere to go, and inventing a body field to carry it would
-   * be a lie PayPal ignores. This method used to send the same immediate cancel
-   * whatever it was asked for, silently — which is defensible as a wire call
-   * and indefensible as a promise, because `cancelCurrentSubscription` had
-   * already told the buyer "you keep everything you paid for until <date>" and
-   * then PayPal's CANCELLED webhook took it away seconds later.
-   *
-   * ## Where the paid period is honoured instead
-   *
-   * Cancelling at PayPal NOW is the only thing that reliably stops the money,
-   * and stopping the money is the part that cannot be allowed to fail. What it
-   * does not have to mean is that entitlements end now: that is Rekey's own
-   * decision, not PayPal's. So the period-end promise is kept **locally** —
-   * `cancelAt` is recorded, the row stays ACTIVE, `applySubscriptionStatusChanged`
-   * declines to let the resulting CANCELLED webhook shorten a period the buyer
-   * has paid for, and `expireIfDue` ends it on the day.
-   *
-   * That ordering is deliberate, and it is the opposite of scheduling the
-   * PayPal call for later. Both designs have a failure mode; only one of them
-   * costs the buyer money:
-   *
-   *   - Call PayPal later (a local scheduler): if the sweep is late, missed, or
-   *     lands after PayPal's own anniversary — and our period anchor is a local
-   *     approximation, so it can — PayPal takes another payment. Money leaves a
-   *     buyer's account for a subscription they cancelled.
-   *   - Call PayPal now (this): if the local expiry is late, the buyer keeps
-   *     access a little longer than they paid for. Costs us, not them.
-   *
-   * The consequence to be honest about: unlike Stripe's
-   * `cancel_at_period_end`, this is not reversible at the provider. Changing
-   * their mind means a new agreement, which is what "Resubscribe" does.
-   *
-   * ## Failures are failures
-   *
-   * The response used to be discarded entirely. A cancel PayPal refused
-   * resolved successfully, `cancelCurrentSubscription` stamped the local row
-   * cancelled, and the agreement went on billing — the buyer having been told
-   * it was over, and seeing no subscription left to cancel. Throwing surfaces
-   * it as `BILLING_PROVIDER_ERROR` (502) so the buyer knows to try again and
-   * the local row is left untouched.
-   *
-   * 404 / RESOURCE_NOT_FOUND is treated as success on purpose: it is what
-   * PayPal answers for an agreement it has already terminated, so a retry after
-   * a partial failure settles instead of wedging.
-   */
-  /**
    * Refund a captured PayPal payment.
    *
    * The endpoint is not a constant, and this is the whole difficulty. PayPal
@@ -533,11 +472,11 @@ export class RealPaypalProvider implements BillingProvider {
    * not. No PayPal statement settles it.
    *
    * So this does not guess. In order:
-   *   1. `input.refundHref` — the `rel:"refund"` link PayPal itself put on
+   *   1. `input.refundHref`, the `rel:"refund"` link PayPal itself put on
    *      that transaction. It names the right endpoint AND version for that
    *      specific payment, so when we have it the question does not arise.
    *   2. v2 captures.
-   *   3. v1 sale, on a 404 from v2 — which is exactly the signal that the id
+   *   3. v1 sale, on a 404 from v2, which is exactly the signal that the id
    *      was not in the capture namespace.
    *
    * Note the bodies differ between versions (`amount.value` +
@@ -559,8 +498,8 @@ export class RealPaypalProvider implements BillingProvider {
           // so a retried refund returns the first refund instead of issuing a
           // second one.
           'PayPal-Request-Id': input.idempotencyKey,
-          // Without this PayPal may answer `return=minimal` — id and status
-          // only — and the amount we report back would be a guess.
+          // Without this PayPal may answer `return=minimal`, id and status
+          // only, and the amount we report back would be a guess.
           Prefer: 'return=representation',
         },
         body: JSON.stringify(body),
@@ -598,7 +537,7 @@ export class RealPaypalProvider implements BillingProvider {
     if (!res.ok) {
       const text = await res.text();
       // The two refusals an operator can act on without opening PayPal. Both
-      // arrive as 422 with the meaning in `details[].issue` — matched there
+      // arrive as 422 with the meaning in `details[].issue`, matched there
       // rather than on `name`, because PayPal ships both
       // `UNPROCESSABLE_ENTITY` and the misspelled `UNPROCCESSABLE_ENTITY`.
       if (text.includes('REFUND_NOT_ALLOWED_AFTER_180_DAYS')) {
@@ -614,7 +553,7 @@ export class RealPaypalProvider implements BillingProvider {
           statusCode: 409,
           code: 'BILLING_PAYMENT_ALREADY_REFUNDED',
           message: 'PayPal has already refunded this payment in full.',
-          fix: 'Nothing to do — the buyer has their money. Resolve the case as refunded.',
+          fix: 'Nothing to do, the buyer has their money. Resolve the case as refunded.',
         });
       }
       console.error('paypal refund failed', res.status, text);
@@ -628,7 +567,7 @@ export class RealPaypalProvider implements BillingProvider {
       amount?: { value?: string; currency_code?: string; total?: string; currency?: string };
     };
     // v2 says `status: COMPLETED`; v1 says `state: completed`. Read both, and
-    // treat only an explicit success as success — PayPal returns PENDING for
+    // treat only an explicit success as success, PayPal returns PENDING for
     // eCheck-funded refunds, where the money has not moved yet.
     const state = (json.status ?? json.state ?? '').toUpperCase();
     const currency = json.amount?.currency_code ?? json.amount?.currency ?? input.currency ?? 'USD';
@@ -644,6 +583,67 @@ export class RealPaypalProvider implements BillingProvider {
     };
   }
 
+  /**
+   * Cancel the agreement at PayPal. **Always immediately, PayPal has no other
+   * kind.**
+   *
+   * ## Why `input.atPeriodEnd` is not forwarded
+   *
+   * Subscriptions v1 exposes exactly one cancellation,
+   * `POST /v1/billing/subscriptions/:id/cancel`, and it terminates the
+   * agreement on the spot. There is no `cancel_at_period_end` (Stripe), no
+   * `cancel_at_cycle_end` (Razorpay), and no scheduling parameter of any kind,
+   * the request body takes a `reason` string and nothing else. `suspend` is the
+   * only neighbouring verb and it means "dunning pause, reactivatable", not
+   * "cancel later"; our own webhook translate maps PayPal's SUSPENDED to
+   * PAST_DUE and opens a dunning case, so borrowing it here would put a
+   * cancelling buyer into collections.
+   *
+   * So the flag has nowhere to go, and inventing a body field to carry it would
+   * be a lie PayPal ignores. This method used to send the same immediate cancel
+   * whatever it was asked for, silently, which is defensible as a wire call
+   * and indefensible as a promise, because `cancelCurrentSubscription` had
+   * already told the buyer "you keep everything you paid for until <date>" and
+   * then PayPal's CANCELLED webhook took it away seconds later.
+   *
+   * ## Where the paid period is honoured instead
+   *
+   * Cancelling at PayPal NOW is the only thing that reliably stops the money,
+   * and stopping the money is the part that cannot be allowed to fail. What it
+   * does not have to mean is that entitlements end now: that is Rekey's own
+   * decision, not PayPal's. So the period-end promise is kept **locally**,
+   * `cancelAt` is recorded, the row stays ACTIVE, `applySubscriptionStatusChanged`
+   * declines to let the resulting CANCELLED webhook shorten a period the buyer
+   * has paid for, and `expireIfDue` ends it on the day.
+   *
+   * That ordering is deliberate, and it is the opposite of scheduling the
+   * PayPal call for later. Both designs have a failure mode; only one of them
+   * costs the buyer money:
+   *
+   *   - Call PayPal later (a local scheduler): if the sweep is late, missed, or
+   *     lands after PayPal's own anniversary, and our period anchor is a local
+   *     approximation, so it can, PayPal takes another payment. Money leaves a
+   *     buyer's account for a subscription they cancelled.
+   *   - Call PayPal now (this): if the local expiry is late, the buyer keeps
+   *     access a little longer than they paid for. Costs us, not them.
+   *
+   * The consequence to be honest about: unlike Stripe's
+   * `cancel_at_period_end`, this is not reversible at the provider. Changing
+   * their mind means a new agreement, which is what "Resubscribe" does.
+   *
+   * ## Failures are failures
+   *
+   * The response used to be discarded entirely. A cancel PayPal refused
+   * resolved successfully, `cancelCurrentSubscription` stamped the local row
+   * cancelled, and the agreement went on billing, the buyer having been told
+   * it was over, and seeing no subscription left to cancel. Throwing surfaces
+   * it as `BILLING_PROVIDER_REFUSED` (502) so the buyer knows to try again and
+   * the local row is left untouched.
+   *
+   * 404 / RESOURCE_NOT_FOUND is treated as success on purpose: it is what
+   * PayPal answers for an agreement it has already terminated, so a retry after
+   * a partial failure settles instead of wedging.
+   */
   async cancelSubscription(input: CancelSubscriptionInput): Promise<void> {
     const providerSubId = input.subscription.providerSubId;
     if (!providerSubId) return;
@@ -655,7 +655,7 @@ export class RealPaypalProvider implements BillingProvider {
     });
     if (res.ok || res.status === 404) return;
     const text = await res.text();
-    // Already cancelled/expired at PayPal — the outcome we asked for.
+    // Already cancelled/expired at PayPal, the outcome we asked for.
     if (res.status === 422 && text.includes('SUBSCRIPTION_STATUS_INVALID')) return;
     console.error('paypal cancel failed', res.status, text);
     throw paypalError('cancellation', res.status, text);
@@ -667,7 +667,7 @@ export class RealPaypalProvider implements BillingProvider {
  *
  * `unreachable` is separated from `invalid` deliberately. Both used to be
  * `false`, so a PayPal outage or a timeout surfaced as HTTP 401
- * WEBHOOK_SIGNATURE_INVALID — telling PayPal its own signature was bad. PayPal
+ * WEBHOOK_SIGNATURE_INVALID, telling PayPal its own signature was bad. PayPal
  * disables an endpoint that keeps rejecting, so an outage on OUR side of the
  * call could cost the operator their webhook. `unreachable` maps to 503, which
  * is retried and reads correctly in the logs.
@@ -692,7 +692,7 @@ export type PaypalVerifyOutcome =
  * transmission header or an explicit non-SUCCESS is `invalid`; a timeout,
  * network error or 5xx from PayPal is `unreachable`.
  *
- * Both calls carry PAYPAL_WEBHOOK_TIMEOUT_MS — see the constant for why this
+ * Both calls carry PAYPAL_WEBHOOK_TIMEOUT_MS, see the constant for why this
  * is the sharpest of the eleven calls in this file.
  */
 export async function verifyPaypalWebhook(args: {
@@ -714,7 +714,7 @@ export async function verifyPaypalWebhook(args: {
   const authAlgo = header('paypal-auth-algo');
   const transmissionSig = header('paypal-transmission-sig');
   if (!transmissionId || !transmissionTime || !certUrl || !authAlgo || !transmissionSig) {
-    // Nothing was sent to verify with — that is the caller's problem, not
+    // Nothing was sent to verify with, that is the caller's problem, not
     // PayPal's availability.
     return { ok: false, reason: 'invalid' };
   }

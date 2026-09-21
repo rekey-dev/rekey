@@ -7,7 +7,7 @@
  *
  * Getting the flag wrong is silent: the modal stays shut, and because the error
  * is rendered INSIDE the dialog, a closed `<dialog>` renders nothing. The
- * operator gets a full page navigation, an unchanged row, and no message —
+ * operator gets a full page navigation, an unchanged row, and no message,
  * which is what `?editUser=<id>` paired with `modalKey={`editUser_${id}`}` did
  * to every failed end-user edit and role delete.
  *

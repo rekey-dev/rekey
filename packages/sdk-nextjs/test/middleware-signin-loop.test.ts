@@ -2,14 +2,14 @@
  * The gate must never protect the page it redirects to.
  *
  * The default `publicRoutes` does list `/sign-in`, so the out-of-the-box
- * configuration is fine — the original report overstated this. The loop is
+ * configuration is fine, the original report overstated this. The loop is
  * real as soon as a caller supplies their own list, which *replaces* the
  * default rather than extending it: name a custom `signInUrl`, or simply
  * forget to include the sign-in path, and every request to it is redirected
  * to itself until the browser gives up.
  *
  * That is a plausible mistake rather than an exotic one, and the failure has
- * no error message attached — so the gate now treats `signInUrl` as public
+ * no error message attached, so the gate now treats `signInUrl` as public
  * whatever the caller passed.
  */
 import { describe, it, expect } from 'vitest';
@@ -60,7 +60,7 @@ describe('rekeyMiddleware', () => {
 
 /**
  * A visitor holding a refresh token but no access token is stale, not signed
- * out — the access cookie lasts fifteen minutes against the refresh cookie's
+ * out, the access cookie lasts fifteen minutes against the refresh cookie's
  * thirty days, so this is every user, several times a day.
  *
  * They cannot be repaired by a page: refreshing writes cookies, which Next

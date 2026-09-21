@@ -1,8 +1,8 @@
 /**
  * Finding 7: operator MCP read tools ignored the role gate and per-app grants.
  *
- * Reproduced against a running server: an `APP_VIEWER` MEMBER — granted sight
- * of exactly one Application — minted themselves an OAuth token, then read
+ * Reproduced against a running server: an `APP_VIEWER` MEMBER, granted sight
+ * of exactly one Application, minted themselves an OAuth token, then read
  * another Application's end-users and the full workspace security log (IPs,
  * user agents) through MCP. The REST equivalents answer 404 and 403 for the
  * same account.
@@ -12,7 +12,7 @@
  * token" is not a detail of the report but the whole reason the hole was
  * reachable by the account it was reachable by.
  *
- * The `tools/list` assertions matter as much as the `tools/call` ones — a tool
+ * The `tools/list` assertions matter as much as the `tools/call` ones, a tool
  * a caller cannot use must not be advertised to their agent.
  */
 
@@ -150,7 +150,7 @@ describe('operator MCP read authorization', () => {
     const appA = await mkApp('a');
     const appB = await mkApp('b');
 
-    // An end-user in app B — the one the MEMBER has no grant on.
+    // An end-user in app B, the one the MEMBER has no grant on.
     const liveKey = await inject({
       method: 'POST',
       url: `/api/v1/tenant/applications/${appB}/api-keys`,
@@ -222,7 +222,7 @@ describe('operator MCP read authorization', () => {
   it('GET on the MCP endpoint 405s with Allow: POST and a complete error envelope', async () => {
     // This handler used to build its envelope by hand, which skipped
     // `rekeyErrorHandler` and dropped `requestId`. It now sets the header and
-    // THROWS — so this also pins that a header set before the throw survives it.
+    // THROWS, so this also pins that a header set before the throw survives it.
     const ws = await bootstrap();
     const token = await mintOauthToken(ws.ownerToken, ws.tenantId);
     const res = await inject({
@@ -251,13 +251,13 @@ describe('operator MCP read authorization', () => {
         })
       ).body,
     );
-    // Was `{ found: true, endUser: { … } }` — the profile of a user in an
+    // Was `{ found: true, endUser: { … } }`, the profile of a user in an
     // Application this member has no grant on. The REST route answers 404, and
     // the refusal here is deliberately the same shape as "no such Application"
     // so existence does not leak through it.
     expect(denied.data).toEqual({ found: false, reason: 'application_not_found_in_workspace' });
 
-    // The granted Application still works — this is a scope, not a lockout.
+    // The granted Application still works, this is a scope, not a lockout.
     const allowed = toolResult(
       (
         await rpc(token, 'tools/call', {
@@ -283,7 +283,7 @@ describe('operator MCP read authorization', () => {
     const overview = toolResult(
       (await rpc(token, 'tools/call', { name: 'get_workspace_overview' })).body,
     );
-    // Was 2 — the rollup counted every Application in the workspace, which is
+    // Was 2, the rollup counted every Application in the workspace, which is
     // also how it leaked end-user and revenue totals for apps behind no grant.
     expect((overview.data as { applicationCount: number }).applicationCount).toBe(1);
   });
@@ -297,7 +297,7 @@ describe('operator MCP read authorization', () => {
       result: { tools: Array<{ name: string }> };
     };
     const names = listed.result.tools.map((t) => t.name);
-    // A tool the caller cannot use must not be advertised — otherwise their
+    // A tool the caller cannot use must not be advertised, otherwise their
     // agent plans around it and reports a confusing failure.
     expect(names).not.toContain('recent_security_events');
     expect(names).not.toContain('list_invitations');
@@ -323,7 +323,7 @@ describe('operator MCP read authorization', () => {
 
   it('a GRANDFATHERED membership keeps workspace-wide read over MCP', async () => {
     // A member who predates grant-scoped-by-default must not lose access the
-    // day this shipped — the same backfilled flag the REST tests assert.
+    // day this shipped, the same backfilled flag the REST tests assert.
     const ws = await bootstrap();
     await prisma.tenantMembership.update({
       where: { id: ws.membershipId },

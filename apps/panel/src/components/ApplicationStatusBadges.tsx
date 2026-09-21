@@ -8,15 +8,15 @@ import type { ApplicationRow } from '@/lib/api';
  *
  * Three of them, in descending order of "nobody is getting in":
  *
- *   1. DISABLED — `Application.disabledAt`, set through the disable/enable
+ *   1. DISABLED, `Application.disabledAt`, set through the disable/enable
  *      routes. The application refuses every end-user request at both API-key
  *      middlewares, serves no hosted portal and sends no mail. It is the
  *      reversible stand-in for the delete Rekey does not have, so on a list it
  *      is the single most important fact about a row.
- *   2. NO SIGN-IN — no auth method and no OAuth provider, so nobody can get in
+ *   2. NO SIGN-IN, no auth method and no OAuth provider, so nobody can get in
  *      even though the application is live. Always a half-finished setup: no
  *      application is created in this state.
- *   3. PORTAL UNVERIFIED — the hosted portal is on and pinned to a custom
+ *   3. PORTAL UNVERIFIED, the hosted portal is on and pinned to a custom
  *      domain DNS has not verified, so that hostname does not serve.
  *
  * All three read fields the list payload already carries, so this adds no
@@ -24,8 +24,8 @@ import type { ApplicationRow } from '@/lib/api';
  *
  * ## What is deliberately NOT here
  *
- * Configuration is not a fault. `signupMode` is the temptation — it is right
- * there in the same object — but `invite_only` is a posture the quickstart
+ * Configuration is not a fault. `signupMode` is the temptation, it is right
+ * there in the same object, but `invite_only` is a posture the quickstart
  * actively recommends and `secret_only` is what every server-side integration
  * runs, so both would paint an identical chip on EVERY row of a workspace that
  * chose them, carrying no information that distinguishes one row from another.
@@ -40,7 +40,7 @@ import type { ApplicationRow } from '@/lib/api';
  *
  * `StatusPill` holds the canonical tone vocabulary: danger is "a failure or a
  * revocation… never for things that merely ended", and colouring a deliberate
- * state red "trains operators to ignore red". So only NO SIGN-IN is danger — it
+ * state red "trains operators to ignore red". So only NO SIGN-IN is danger, it
  * is the one an operator did not choose. A freeze is warning, matching the
  * banner the application's own layout already shows for the identical fact:
  * nothing has failed and nothing is lost, but on a list it is unusual enough
@@ -69,7 +69,7 @@ export function ApplicationStatusBadges({
   //
   // Deliberately OUTSIDE the redaction guard below. `redactApplicationForBilling`
   // blanks `authConfig`/`oauthConfig` and nothing else, so `disabledAt` is
-  // present for every audience — and a billing manager looking at a workspace
+  // present for every audience, and a billing manager looking at a workspace
   // that has stopped taking money is exactly who needs to see a freeze.
   if (app.disabledAt) {
     return (

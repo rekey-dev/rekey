@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * `<ProviderPicker>` — a "Pay with…" radio-card group, Clerk-shaped.
+ * `<ProviderPicker>`, a "Pay with…" radio-card group, Clerk-shaped.
  *
  * ── Why the provider list is a PROP (read this) ──
  *
@@ -9,7 +9,7 @@
  * `razorpay`). Checkout takes an optional `provider`; when omitted, a server-side
  * geo router auto-picks from the enabled set. `<ProviderPicker>` lets the end-user
  * override that pick. The list is a PROP (not fetched here) so the component stays
- * presentational and composes with both server- and client-rendered flows — fetch
+ * presentational and composes with both server- and client-rendered flows, fetch
  * it with the browser client's `listBillingProviders()` (publishable key, like
  * `getPlans()`) or the node SDK's `billing.getProviders()` and pass it in, the same
  * posture as `<PricingTable plans>`.
@@ -17,13 +17,13 @@
  * ── Form-field model ──
  *
  * The picker is a radio group whose selected value posts as `provider` in
- * FormData — so it composes with the existing checkout `<form action={…}>` with
+ * FormData, so it composes with the existing checkout `<form action={…}>` with
  * ZERO client JS in uncontrolled mode (the browser submits the checked radio).
  * For richer UIs it also supports a controlled `value` + `onChange` pair.
  *
  * This file carries the `'use client'` boundary because the controlled mode and
  * the interactive `<PricingTable providers>` variant use React state. The plain
- * (no-providers) `<PricingTable>` stays a server component — it never imports
+ * (no-providers) `<PricingTable>` stays a server component, it never imports
  * this module's stateful paths at render time.
  */
 
@@ -33,7 +33,7 @@ import { PricingGrid, type PricingGridProps } from './pricing-shared.js';
 import type { BillingProvider, BillingProviderInfoDto } from '@rekey.dev/shared-types';
 
 /**
- * One selectable provider — a genuine slice of `BillingProviderInfoDto` (the
+ * One selectable provider, a genuine slice of `BillingProviderInfoDto` (the
  * shape `billing.getProviders()` / `listBillingProviders()` return) rather than
  * a look-alike interface, so field drift in shared-types is a compile error
  * here. Only `provider` is required, so callers can pass a bare
@@ -46,7 +46,7 @@ export type ProviderOption = Pick<BillingProviderInfoDto, 'provider'> & {
   countries?: BillingProviderInfoDto['countries'] | undefined;
   /**
    * Server-provided display name (P4 discovery). Preferred over the built-in
-   * fallback map when present — so a provider added server-side renders its
+   * fallback map when present, so a provider added server-side renders its
    * proper label without an SDK update.
    */
   label?: BillingProviderInfoDto['label'] | undefined;
@@ -55,7 +55,7 @@ export type ProviderOption = Pick<BillingProviderInfoDto, 'provider'> & {
 /**
  * Built-in fallback labels for the three bundled providers. The server's
  * `label` (P4 discovery) wins when present; an unknown provider from a newer
- * server degrades to a capitalized name — never a broken flow.
+ * server degrades to a capitalized name, never a broken flow.
  */
 const PROVIDER_LABELS: Record<string, string> = {
   stripe: 'Stripe',
@@ -73,7 +73,7 @@ function providerLabel(opt: ProviderOption): string {
 
 export interface ProviderPickerProps {
   /**
-   * Providers to offer — fetch with `listBillingProviders()` (browser, publishable
+   * Providers to offer, fetch with `listBillingProviders()` (browser, publishable
    * key) or `billing.getProviders()` (node SDK) and pass here. The first entry is
    * the geo router's top pick and is selected by default.
    */
@@ -165,7 +165,7 @@ function ProviderPickerBody({
 }
 
 /**
- * A themed "Pay with…" radio-card group — one option per enabled billing
+ * A themed "Pay with…" radio-card group, one option per enabled billing
  * provider. The selected value posts as `provider` in the surrounding form's
  * FormData (uncontrolled, zero-JS) or drives a controlled `value`/`onChange`
  * pair. Friendly names (Stripe / PayPal / Razorpay), a labelled radiogroup, and
@@ -195,7 +195,7 @@ export function ProviderPicker(props: ProviderPickerProps): React.JSX.Element {
 }
 
 // ---------------------------------------------------------------------------
-// <PricingTableInteractive> — the provider-aware <PricingTable> variant
+// <PricingTableInteractive>, the provider-aware <PricingTable> variant
 // ---------------------------------------------------------------------------
 
 /** Props the interactive pricing table needs (the grid props + the provider list). */
@@ -210,7 +210,7 @@ export interface PricingTableInteractiveProps extends PricingGridProps {
  * The interactive `<PricingTable>` body used ONLY when a `providers` list is
  * passed. It holds the selected provider in client state, renders a controlled
  * `<ProviderPicker>` above the grid, and threads the chosen provider into EACH
- * plan's checkout form via `hiddenFields={{ ...hiddenFields, provider }}` — so
+ * plan's checkout form via `hiddenFields={{ ...hiddenFields, provider }}`, so
  * whichever plan the user buys carries their provider choice into
  * `billing.createCheckout`.
  *
@@ -225,7 +225,7 @@ export function PricingTableInteractive({
   const [provider, setProvider] = React.useState<BillingProvider | undefined>(first);
 
   // Merge the chosen provider into the per-form hidden fields (string map). When
-  // nothing is selected (empty list — shouldn't happen here) we leave it off.
+  // nothing is selected (empty list, shouldn't happen here) we leave it off.
   const mergedHidden: Record<string, string> = {
     ...(hiddenFields ?? {}),
     ...(provider ? { provider } : {}),
@@ -233,7 +233,7 @@ export function PricingTableInteractive({
 
   return (
     <Themed appearance={appearance} className={className}>
-      {/* Hide the picker behind the org gate — there's nothing to pay with yet. */}
+      {/* Hide the picker behind the org gate, there's nothing to pay with yet. */}
       {!orgGateBlocking && providers.length > 0 && (
         <ProviderPickerBody
           providers={providers}

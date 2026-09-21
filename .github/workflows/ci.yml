@@ -106,7 +106,9 @@ jobs:
       # of the compose files that run an API. A compose block is an ALLOWLIST,
       # so a key missing from it can never be set — five separate incidents of
       # that shape are recorded in this repo, each with a comment and no guard.
-      - name: Check compose files expose every env var the API reads
+      # The same script also holds .env.example to the same key list, so a
+      # setting the API reads is always documented where self-hosters look.
+      - name: Check compose files and .env.example cover every env var the API reads
         run: node .github/scripts/check-compose-env.mjs
 
   oss-strip:
@@ -183,6 +185,34 @@ jobs:
       # cascade of phantom "cannot find module" errors in unrelated files.
       - run: pnpm exec turbo run typecheck
 
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9.12.0 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # apps/api imports @prisma/client types that only exist after generate.
+      - run: pnpm exec prisma generate --schema prisma/schema.prisma
+      - uses: ./.github/actions/turbo-cache
+      # Errors fail the build; warnings do not. 61 are grandfathered in, and
+      # blocking on them would have meant either a huge unrelated diff or a
+      # rule set watered down until it caught nothing. What stops the number
+      # growing is `lint-staged`, which runs `--max-warnings=0` over the files
+      # a commit actually touches.
+      #
+      # `eslint .` at the root as well as through turbo: turbo runs per-package
+      # scripts and has no root task, so `scripts/`, `tools/` and the repo root
+      # would otherwise never be linted.
+      - run: pnpm exec turbo run lint
+      - run: pnpm exec eslint .
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -226,6 +256,17 @@ jobs:
         # actually answers queries.
         options: >-
           --health-cmd "pg_isready -U rekey"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      # The app itself runs Redis-free in test mode, but the prune sweep lease
+      # is only meaningful against a real Redis (SET NX PX plus two Lua scripts),
+      # so its suite connects to this one through REDIS_URL.
+      redis:
+        image: valkey/valkey:8.1-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "valkey-cli ping"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -292,6 +333,7 @@ jobs:
         if: needs.changes.outputs.api == 'true'
         env:
           TEST_DATABASE_URL: postgresql://rekey:rekey@localhost:5432/rekey_test?schema=public
+          REDIS_URL: redis://localhost:6379
           SUPER_ADMIN_KEY: test-admin-key-test-admin-key-test-admin-key
           JWT_SECRET: test-jwt-secret-test-jwt-secret-test-jwt-secret
         run: pnpm --filter @rekey.dev/api run test:coverage
@@ -494,7 +536,7 @@ jobs:
     name: CI
     runs-on: ubuntu-latest
     if: always()
-    needs: [changes, config, oss-strip, typecheck, test, build]
+    needs: [changes, config, oss-strip, typecheck, lint, test, build]
     steps:
       - name: Every job passed or was deliberately skipped
         env:

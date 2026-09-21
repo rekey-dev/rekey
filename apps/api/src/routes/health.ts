@@ -1,17 +1,17 @@
 /**
  * Health endpoints, split along the liveness/readiness line.
  *
- *   /health/live  — is the process up? Never touches a dependency. This is what
+ *   /health/live , is the process up? Never touches a dependency. This is what
  *                   a container healthcheck should use: restarting the API
  *                   cannot fix a database outage, so a dependency failure must
  *                   not look like a dead process.
- *   /health/ready — can we actually serve traffic? Checks Postgres and Redis.
+ *   /health/ready, can we actually serve traffic? Checks Postgres and Redis.
  *                   This is what a load balancer should gate on.
- *   /health       — dependency-aware alias of /health/ready.
+ *   /health      , dependency-aware alias of /health/ready.
  *
  * That last one is deliberate. `/health` is the obvious name and the one
  * operators wire into their LB or uptime monitor without reading docs, and it
- * used to return `{status:'ok'}` unconditionally — green during a total
+ * used to return `{status:'ok'}` unconditionally, green during a total
  * database outage, so nothing failed over and no alert fired. Making the
  * naive choice the safe choice matters more than purity here.
  */
@@ -35,10 +35,10 @@ async function checkDependencies(app: FastifyInstance): Promise<DependencyReport
     db = 'unreachable';
   }
 
-  // Redis is required at boot — enforced by `assertRedisReachable` in
+  // Redis is required at boot, enforced by `assertRedisReachable` in
   // modules/webhooks/webhook.queue.ts, not by lib/redis.ts (which returns null
   // and swallows errors). The global rate limiter fails open, though, so the API
-  // can still serve reads while Redis is down —
+  // can still serve reads while Redis is down,
   // degraded, not dead. Report it so an operator can see which half is sick
   // instead of guessing from a generic 500.
   let redis: DependencyReport['redis'] = 'not_configured';
@@ -47,7 +47,7 @@ async function checkDependencies(app: FastifyInstance): Promise<DependencyReport
     try {
       // Explicit deadline. ioredis's `connectTimeout` covers establishing the
       // socket, not an individual command, so a Redis that accepted the
-      // connection and then wedged could hang this endpoint indefinitely —
+      // connection and then wedged could hang this endpoint indefinitely,
       // a health check that never answers is worse than one that lies.
       await Promise.race([
         client.ping(),
@@ -82,7 +82,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
           'from rate limiting so an orchestrator can always reach it.',
         response: {
           200: {
-            description: 'The process is up. No `{success, data}` envelope — this route predates it.',
+            description: 'The process is up. No `{success, data}` envelope, this route predates it.',
             type: 'object',
             properties: {
               status: { type: 'string', enum: ['ok'] },
@@ -111,7 +111,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
           '`ready` otherwise. Unauthenticated and exempt from rate limiting.',
         response: {
           200: {
-            description: 'Ready to serve traffic. No `{success, data}` envelope — this route predates it.',
+            description: 'Ready to serve traffic. No `{success, data}` envelope, this route predates it.',
             type: 'object',
             properties: {
               status: { type: 'string', enum: ['ready'] },
@@ -123,7 +123,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
           503: {
             description:
               'Not ready: Postgres is unreachable, or a configured Redis is down. No ' +
-              '`{success, error}` envelope — this route answers directly, not through rekeyErrorHandler.',
+              '`{success, error}` envelope, this route answers directly, not through rekeyErrorHandler.',
             type: 'object',
             properties: {
               status: { type: 'string', enum: ['not_ready'] },
@@ -159,7 +159,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
           'which half is sick. Unauthenticated and exempt from rate limiting.',
         response: {
           200: {
-            description: 'Healthy. No `{success, data}` envelope — this route predates it.',
+            description: 'Healthy. No `{success, data}` envelope, this route predates it.',
             type: 'object',
             properties: {
               status: { type: 'string', enum: ['ok'] },
@@ -172,7 +172,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
           503: {
             description:
               'Degraded: Postgres is unreachable, or a configured Redis is down. No ' +
-              '`{success, error}` envelope — this route answers directly, not through rekeyErrorHandler.',
+              '`{success, error}` envelope, this route answers directly, not through rekeyErrorHandler.',
             type: 'object',
             properties: {
               status: { type: 'string', enum: ['degraded'] },
@@ -195,7 +195,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
           redis: report.redis,
         });
       }
-      // `status: 'ok'` retained verbatim — existing monitors and the compose
+      // `status: 'ok'` retained verbatim, existing monitors and the compose
       // healthcheck match on it.
       return { status: 'ok', service: 'rekey-api', db: report.db, redis: report.redis };
     },

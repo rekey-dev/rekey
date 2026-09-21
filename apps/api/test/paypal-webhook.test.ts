@@ -1,7 +1,7 @@
 /**
  * PayPal webhook ingress + dispatch.
  *
- * NODE_ENV=test bypasses the online signature verification (no network) —
+ * NODE_ENV=test bypasses the online signature verification (no network),
  * same posture as the billing provider stub. We exercise the full wiring:
  * checkout (stub) creates a PENDING subscription, then synthetic PayPal
  * events flip it through ACTIVE → payment recorded → CANCELED. Idempotency

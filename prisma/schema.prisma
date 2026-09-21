@@ -47,6 +47,12 @@ model Tenant {
   // automation (if any) is what writes plan-derived numbers in here; this
   // codebase only knows "a number, or no number".
   limits       Json?         @map("limits")
+  /// Whether operators may reach this workspace through the operator MCP
+  /// server (/api/v1/tenant/mcp) at all. Off = every MCP credential bound to
+  /// the workspace is refused at auth time and no new consent is granted; the
+  /// deployment-wide OPERATOR_MCP_ENABLED still governs whether the server
+  /// mounts. Default on, so applying this changes nothing.
+  operatorMcpEnabled Boolean @default(true) @map("operator_mcp_enabled")
   createdAt    DateTime      @default(now()) @map("created_at")
   updatedAt    DateTime      @updatedAt @map("updated_at")
 
@@ -92,6 +98,10 @@ model TenantUser {
   // migration; safe to drop in a later cleanup once confirmed unused in prod.
   failedSignInAttempts Int       @default(0) @map("failed_sign_in_attempts")
   lockedUntil          DateTime? @map("locked_until")
+  // See EndUser.sessionsInvalidBefore: stamped only when every session ends
+  // (password change or reset, sign-out everywhere, reuse detection); the
+  // session middleware refuses older access tokens.
+  sessionsInvalidBefore DateTime? @map("sessions_invalid_before")
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
@@ -158,6 +168,14 @@ model TenantMembership {
   // grant on a membership clears it — the documented "first grant switches
   // you to grant-scoped" transition, now one-way.
   legacyWorkspaceRead Boolean @default(false) @map("legacy_workspace_read")
+
+  /// The member's ceiling, workspace-wide — see lib/operator-scopes.ts. Two
+  /// columns because a Prisma list cannot be null: `scopesRestricted` is the
+  /// switch, `scopes` the set. false + [] (every existing row) resolves to
+  /// every scope in the registry, which is what a member has today. true + []
+  /// is a parked member: holds grants, reaches nothing through them.
+  scopesRestricted Boolean  @default(false) @map("scopes_restricted")
+  scopes           String[] @default([])
 
   // Per-application access grants. Only consulted when role = MEMBER —
   // OWNER/ADMIN keep implicit full access to every Application. See
@@ -282,10 +300,14 @@ model TenantRefreshToken {
   // operator-side sessions list in the panel.
   userAgent    String?   @map("user_agent")
   ip           String?   @map("ip")
+  // See RefreshToken.sessionId: the family id, carried in the `sid` claim.
+  sessionId    String    @default(cuid()) @map("session_id")
 
   tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
 
   @@index([tenantUserId])
+  // sessionId is indexed by `tenant_refresh_tokens_session_live_head_key`, a
+  // migration-only partial UNIQUE index. See RefreshToken for why.
   @@index([expiresAt])
   // Mirror of refresh_tokens.created_at — same retention query for operators.
   @@index([createdAt])
@@ -470,6 +492,17 @@ model Application {
   // with RESEND_DEFAULT_FROM); a BYO transport with no `fromAddress` is an
   // error, not a fallback.
   emailConfig                  Json    @default("{}") @map("email_config")
+  // Master switch for every Application-scoped email: verification, reset,
+  // magic link, welcome, dunning — everything `emailService.dispatch` sends for
+  // this Application. Workspace/system mail goes through `dispatchSystem` and is
+  // deliberately unaffected: an Application-level switch must not be able to
+  // lock operators out of their own workspace.
+  //
+  // A COLUMN, not a key inside `emailConfig`, because `setCredentials` rewrites
+  // that object wholesale — a flag living there would be silently cleared every
+  // time somebody saved transport credentials. `authConfig.appUrl` sits where it
+  // does for exactly the same reason, and says so.
+  emailsEnabled                Boolean @default(true) @map("emails_enabled")
   // Encrypted per-Application transport credentials. AES-256-GCM via
   // lib/secrets.ts. Shape is the `EmailCredentials` union in
   // lib/email-transport.ts: `{ provider: 'resend', apiKey }` or
@@ -571,12 +604,17 @@ model Application {
   coupons             Coupon[]
   oauthIdentities     OAuthIdentity[]
   licenses            License[]
+  licenseActivations  LicenseActivation[]
+  devices             Device[]
   usageMeters         UsageMeter[]
   billingCredentials  BillingCredentials[]
   applicationRoles    ApplicationRole[]
   organizationRoles   OrganizationRoleDef[]
   emailTemplates      EmailTemplate[]
   emailLogs           EmailLog[]
+  emailEventSettings  EmailEventSetting[]
+  emailSuppressions   EmailSuppression[]
+  subscriptionImports SubscriptionImportRun[]
   webhookEndpoints    WebhookEndpoint[]
   organizations       Organization[]
   creditBalances      CreditBalance[]
@@ -585,6 +623,8 @@ model Application {
   oauthAuthCodes      OAuthAuthCode[]
   dunningCases        DunningCase[]
   applicationGrants   ApplicationGrant[]
+  trialRedemptions    TrialRedemption[]
+  freeTierClaims      FreeTierClaim[]
 
   @@index([tenantId])
   @@map("applications")
@@ -626,6 +666,146 @@ model EmailTemplate {
 }
 
 // ============================================================================
+// Per-event send switch.
+//
+// SEPARATE from EmailTemplate on purpose. `EmailTemplate` existing is what
+// "customised" means in the panel, and turning an event OFF must not require
+// customising its body first — nor should deleting a customisation silently
+// re-enable an event somebody switched off.
+//
+// A missing row means enabled: the default is that Rekey sends what it always
+// sent, so an upgrade changes nothing until an operator says otherwise.
+// ============================================================================
+model EmailEventSetting {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  /** An `EmailEventKey` (modules/email/events.ts). */
+  eventKey      String   @map("event_key")
+  enabled       Boolean  @default(true)
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, eventKey])
+  @@index([applicationId])
+  @@map("email_event_settings")
+}
+
+// ============================================================================
+// Addresses this Application must not email, whatever it is trying to send.
+//
+// The narrowest of the three gates and the only one that is about a PERSON
+// rather than about configuration: a bounce, a spam complaint, an unsubscribe,
+// or an operator who was asked to stop. It outranks everything, including a
+// password reset — an address that hard-bounced cannot receive one anyway, and
+// mailing a complainant again is how a sending domain gets blocked.
+//
+// Rekey never writes these itself yet (no provider bounce webhooks are
+// consumed); `reason` is carried so that when it does, a bounce and a manual
+// entry stay distinguishable.
+// ============================================================================
+model EmailSuppression {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  /** Lowercased, matching how EmailLog stores `toAddress`. */
+  address       String
+  /** bounce | complaint | manual | unsubscribe */
+  reason        String   @default("manual")
+  note          String?
+  /** Operator id for a manual entry; null when Rekey added it itself. */
+  createdBy     String?  @map("created_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, address])
+  @@index([applicationId, createdAt])
+  @@map("email_suppressions")
+}
+
+// ============================================================================
+// Subscription import — reading what a billing system already sold.
+//
+// An import is a RUN, not a call. The operator presses a button and gets a
+// preview: every row the provider returned, what would happen to it, and why —
+// then applies it, or does not. A one-shot "import now" would be an
+// irreversible bulk write against somebody else's data, decided from a button
+// with no way to look first.
+//
+// A run is therefore its own row with its own items, and `mode` records which
+// half it stopped at. `dry_run` never writes a Subscription; `applied` does.
+// ============================================================================
+model SubscriptionImportRun {
+  id            String    @id @default(cuid())
+  applicationId String    @map("application_id")
+  /** Provider module name — the source that was read. */
+  provider      String
+  /** dry_run | applied */
+  mode          String    @default("dry_run")
+  /** queued | running | ready | applying | applied | failed */
+  status        String    @default("queued")
+  /** email | email_or_create */
+  matchStrategy String    @map("match_strategy")
+  /** Operator who started it. */
+  startedBy     String    @map("started_by")
+  /** Tallies by outcome, so a summary needs no scan of the items. */
+  counts        Json      @default("{}")
+  error         String?
+  createdAt     DateTime  @default(now()) @map("created_at")
+  completedAt   DateTime? @map("completed_at")
+  /**
+   * Written by the database clock when an apply claims the run and then every
+   * few seconds while it works. An `applying` run whose heartbeat is older than
+   * `APPLY_STALE_AFTER_MS` has no live process behind it and can be reclaimed.
+   */
+  heartbeatAt   DateTime? @map("heartbeat_at")
+  /**
+   * Which apply holds the run. A process that paused past the threshold and
+   * was reclaimed finds its lease gone at the next heartbeat and stops, rather
+   * than racing the process that took over.
+   */
+  applyLease    String?   @map("apply_lease")
+
+  application Application             @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  items       SubscriptionImportItem[]
+
+  @@index([applicationId, createdAt])
+  @@map("subscription_import_runs")
+}
+
+// ============================================================================
+// One provider subscription, and what the run decided about it.
+//
+// Kept after an apply, deliberately: "why does this customer have this
+// subscription" is answered by the run that created it, and an import that
+// deletes its own working is an import nobody can audit.
+// ============================================================================
+model SubscriptionImportItem {
+  id             String  @id @default(cuid())
+  runId          String  @map("run_id")
+  /** The provider's own id for the subscription. The idempotency key. */
+  externalId     String  @map("external_id")
+  email          String?
+  /** The provider's plan identifier, before mapping. */
+  planRef        String? @map("plan_ref")
+  /** match | create | skip_no_plan | skip_active | skip_invalid | error */
+  outcome        String
+  /** Set once matched or created. */
+  endUserId      String? @map("end_user_id")
+  /** Local plan the `planRef` mapped to. */
+  planSlug       String? @map("plan_slug")
+  /** Set by an apply. */
+  subscriptionId String? @map("subscription_id")
+  /** Anything worth showing in the preview: the refusal, the raw status, the term. */
+  detail         Json    @default("{}")
+
+  run SubscriptionImportRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, outcome])
+  @@map("subscription_import_items")
+}
+
+// ============================================================================
 // Email send log — one row per outbound email attempt (transactional auth
 // mail + operator/workspace system mail). Recorded at the transport boundary
 // (lib/email-transport.ts) so EVERY send is captured regardless of caller.
@@ -654,7 +834,7 @@ model EmailLog {
   eventKey      String?  @map("event_key")
   /** Transport used: byo_resend | default_resend | byo_smtp | none. */
   via           String
-  /** Outcome: sent | error | no_transport. */
+  /** Outcome: sent | error | no_transport | suppressed. */
   status        String
   /** Provider message id when status=sent (nullable — some providers omit). */
   messageId     String?  @map("message_id")
@@ -668,6 +848,11 @@ model EmailLog {
   @@index([applicationId, createdAt])
   @@index([tenantId, createdAt])
   @@index([status])
+  // Erasure scrubs every row sent to one person's address inside its
+  // transaction; without this that is a scan of the Application's whole log.
+  @@index([applicationId, toAddress])
+  // Range scan for the retention sweep (lib/log-retention.ts).
+  @@index([createdAt])
   @@map("email_logs")
 }
 
@@ -1125,6 +1310,14 @@ model EndUser {
   erasedAt      DateTime? @map("erased_at")
   // The operator (TenantUser id) who processed the erasure, for the audit trail.
   erasedBy      String?   @map("erased_by")
+  // Access tokens issued before this instant are refused on their next use.
+  // Stamped ONLY by revocations that end every session the user holds
+  // (password change or reset, sign-out everywhere, refresh-token reuse), so
+  // a long access lifetime never extends a session somebody already ended.
+  // A single-session revoke or a device release must NOT stamp: that ends the
+  // user's other sessions too. Those are refused per session instead, through
+  // the access token's `sid` (RefreshToken.sessionId) and `dev` claims.
+  sessionsInvalidBefore DateTime? @map("sessions_invalid_before")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
@@ -1139,8 +1332,11 @@ model EndUser {
   oauthIdentities         OAuthIdentity[]
   mfaCredential           MfaCredential?
   licenses                License[]
+  devices                 Device[]
   creditBalance           CreditBalance[]
   creditLedger            CreditLedger[]
+  trialRedemptions        TrialRedemption[]
+  freeTierClaims          FreeTierClaim[]
 
   @@unique([applicationId, email])
   @@index([applicationId])
@@ -1152,6 +1348,8 @@ model EndUser {
   // backward, 0.043 ms / 4 buffers. `(applicationId, email)` above already
   // covers the `sort=email` variant.
   @@index([applicationId, createdAt])
+  // Deployment-wide "new in the last N days" (super-admin overview).
+  @@index([createdAt])
   @@map("end_users")
 }
 
@@ -1284,6 +1482,17 @@ model License {
   keyHash       String        @unique @map("key_hash")
   expiresAt     DateTime?     @map("expires_at")
   seatsAllowed  Int?          @map("seats_allowed")
+  /// Which of the plan's LICENSE entitlements issued this licence.
+  ///
+  /// `@@unique([planId, kind, key])` on PlanEntitlement permits a plan to carry
+  /// `LICENSE:a` and `LICENSE:b`, and the PUT route accepts a `key` for LICENSE.
+  /// `provision` used to select the existing licence by (application, pool,
+  /// plan) alone, so both rows resolved to the SAME licence: the loop hit each
+  /// in turn and the second silently overwrote what the first had just written.
+  ///
+  /// Defaults to the empty string, which is the key a plan's single LICENSE row
+  /// carries and what existing rows backfill to, so the common case is unchanged.
+  entitlementKey String       @default("") @map("entitlement_key")
   // Notes the customer keeps about this license. Not user-facing.
   metadata      Json          @default("{}")
   createdAt     DateTime      @default(now()) @map("created_at")
@@ -1302,11 +1511,19 @@ model License {
   @@index([organizationId])
   // App-scoped newest-first license list (licenses.service.list).
   @@index([applicationId, createdAt])
+  // The pool identity `provision` and the seat reconciler select on. Not unique:
+  // a revoked licence and its replacement share it, and making it unique would
+  // turn a re-issue into a P2002 out of a webhook.
+  @@index([applicationId, planId, entitlementKey])
   @@map("licenses")
 }
 
 model LicenseActivation {
   id                 String   @id @default(cuid())
+  // Denormalised from the license. Every domain row carries its application so
+  // app-scoped listings and erasure can address activations directly instead
+  // of joining through licenses.
+  applicationId      String   @map("application_id")
   licenseId          String   @map("license_id")
   // Customer-provided device/machine fingerprint (their format, opaque to us).
   machineFingerprint String   @map("machine_fingerprint")
@@ -1314,12 +1531,93 @@ model LicenseActivation {
   lastSeenAt         DateTime @default(now()) @map("last_seen_at")
   // Human-readable hint from the activator (hostname, app version, etc.).
   label              String?
+  // The Device row the same fingerprint resolved to under the license holder,
+  // when one exists. Lets the device list and the seat list agree about which
+  // machine is which; null for activations recorded before devices existed.
+  deviceId           String?  @map("device_id")
+  // Set when the seat was given back (POST /licenses/deactivate, or an operator
+  // releasing the machine). A released activation no longer counts toward
+  // seatsAllowed; a later verify from the same machine reactivates it in place
+  // rather than inserting a second row.
+  releasedAt         DateTime? @map("released_at")
 
-  license License @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  license     License     @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  device      Device?     @relation(fields: [deviceId], references: [id], onDelete: SetNull)
 
   @@unique([licenseId, machineFingerprint])
   @@index([licenseId])
+  @@index([applicationId, machineFingerprint])
+  @@index([deviceId])
   @@map("license_activations")
+}
+
+// ============================================================================
+// Devices — the machines an end-user signs in from.
+//
+// A Device is an (application, end-user, fingerprint) triple. The fingerprint
+// is computed by the customer's client and is opaque here, exactly like
+// LicenseActivation.machineFingerprint — Rekey never derives, parses or
+// compares its parts. It is unique PER END-USER, not per application: the same
+// fingerprint under two accounts is two devices, and cross-account reuse is a
+// signal for the security-events trail rather than a constraint.
+//
+// What a device is for:
+//   - Sessions can be bound to one (RefreshToken.deviceId, the `dev` access
+//     token claim), so an app can say "sign out this laptop" and mean it.
+//   - The number of ACTIVE devices per end-user can be capped by the
+//     `max_devices` FEATURE entitlement on their plan.
+//   - License seats point at devices, so the seat list and the device list are
+//     the same machines.
+//
+// Lifecycle: ACTIVE <-> RELEASED (the user or an operator gave the slot back; a
+// later sign-in from the same fingerprint reactivates it, subject to the
+// limit), and either -> BLOCKED (operator decision; refuses sign-in from that
+// fingerprint until unblocked). Rows are never deleted by the API — a released
+// device is history the operator can still see.
+// ============================================================================
+
+enum DeviceStatus {
+  ACTIVE
+  RELEASED
+  BLOCKED
+}
+
+model Device {
+  id            String       @id @default(cuid())
+  applicationId String       @map("application_id")
+  endUserId     String       @map("end_user_id")
+  // Customer-provided, opaque. Max 256 chars at the API boundary.
+  fingerprint   String
+  // Human-readable hint from the client (hostname, "Work laptop"). Overwritten
+  // on every sign-in that supplies one.
+  label         String?
+  status        DeviceStatus @default(ACTIVE)
+  firstSeenAt   DateTime     @default(now()) @map("first_seen_at")
+  lastSeenAt    DateTime     @default(now()) @map("last_seen_at")
+  lastSeenIp    String?      @map("last_seen_ip")
+  releasedAt    DateTime?    @map("released_at")
+  blockedAt     DateTime?    @map("blocked_at")
+  // Operator-supplied, surfaced to the operator only — never to the end-user,
+  // who sees DEVICE_BLOCKED and nothing else.
+  blockedReason String?      @map("blocked_reason")
+  // Free-form per-device data the customer's app keeps (OS, app version...).
+  // Rekey never interprets it.
+  metadata      Json         @default("{}")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  application Application         @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser     EndUser             @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+  sessions    RefreshToken[]
+  activations LicenseActivation[]
+
+  @@unique([applicationId, endUserId, fingerprint])
+  // Cross-account reuse lookup ("which users have this fingerprint?").
+  @@index([applicationId, fingerprint])
+  // The ACTIVE count that the device limit is enforced against.
+  @@index([endUserId, status])
+  @@map("devices")
 }
 
 // ============================================================================
@@ -1476,15 +1774,37 @@ model RefreshToken {
   // callers may lack them.
   userAgent     String?   @map("user_agent")
   ip            String?   @map("ip")
+  // The Device this session was minted on, when the client identified itself
+  // (see Device). Nullable: browser SDKs and older clients send no fingerprint,
+  // and nothing about their sessions changes. SetNull rather than Cascade so
+  // deleting a device row never signs anyone out by accident — releasing or
+  // blocking a device revokes its sessions explicitly.
+  deviceId      String?   @map("device_id")
+  // The session (refresh-token family) this row belongs to. Minted with the
+  // first token of a sign-in and copied by every rotation, so it names one
+  // session for its whole life. Access tokens carry it as `sid`, and the
+  // session middleware refuses a `sid` whose newest row (replacedById null)
+  // is revoked: that is how revoking ONE session ends its access token early
+  // without touching the user's others. Rows from before the column existed
+  // were backfilled with their own id.
+  sessionId     String    @default(cuid()) @map("session_id")
 
   application        Application   @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   endUser            EndUser       @relation(fields: [endUserId], references: [id], onDelete: Cascade)
   activeOrganization Organization? @relation(fields: [activeOrganizationId], references: [id], onDelete: SetNull)
+  device             Device?       @relation(fields: [deviceId], references: [id], onDelete: SetNull)
 
   @@index([applicationId])
   @@index([endUserId])
   @@index([expiresAt])
   @@index([activeOrganizationId])
+  @@index([deviceId])
+  // No @@index on sessionId. The session head lookup is served by
+  // `refresh_tokens_session_live_head_key`, UNIQUE (session_id) WHERE
+  // replaced_by_id IS NULL AND revoked_at IS NULL: at most one live row per
+  // session. Prisma 6 cannot express a partial index, so it exists only in
+  // migration 20260915120000_refresh_token_session_head_index. Rotation must
+  // keep revoking the presented row BEFORE inserting its replacement.
   // The super-admin retention dashboard counts distinct end-users with a
   // refresh-token created inside a 24h/7d/30d window (groupBy endUserId).
   // Without this index the query is a sequential scan over the full token
@@ -1700,6 +2020,8 @@ model Plan {
   subscriptions Subscription[]
   licenses      License[]
   entitlements  PlanEntitlement[]
+  trialRedemptions TrialRedemption[]
+  freeTierClaims   FreeTierClaim[]
 
   @@unique([applicationId, slug])
   @@index([applicationId])
@@ -1800,7 +2122,9 @@ model Subscription {
   beneficiaryOrgId String?          @map("beneficiary_org_id")
   /** Sparse per-subscription entitlement overrides, merged over the plan's
    *  entitlements at provision/read time. Shape: {"KIND:key": value|quantity}
-   *  e.g. {"LICENSE:": 50} for a negotiated 50-seat deal. */
+   *  e.g. {"FEATURE:max_production_apps": 5} for a negotiated allowance. (A seat
+ *  count is NOT a good example: a SEATS override is accepted and announced but
+ *  does not re-issue an already-issued licence — see #488.) */
   entitlementOverrides Json?       @map("entitlement_overrides")
   metadata      Json               @default("{}")
   createdAt     DateTime           @default(now()) @map("created_at")
@@ -1832,6 +2156,8 @@ model Subscription {
   // Same shape as end_users: app-scoped, newest-first operator lists
   // (`recent_subscriptions`, the org beneficiary tab).
   @@index([applicationId, createdAt])
+  // Active-subscription counts per app (overview stats, super-admin lists).
+  @@index([applicationId, status])
   @@map("subscriptions")
 }
 
@@ -2035,10 +2361,17 @@ model DunningCase {
 //                   writes one row with the post-mutation `balanceAfter`, so
 //                   the balance is always reconstructable + auditable.
 //
-// Idempotency: `(applicationId, idempotencyKey)` is unique. Purchase grants
-// use "purchase:<paymentId>"; consume calls pass a client-supplied key (e.g.
-// the lead id) so a retried drawdown never double-charges. NULL keys are
+// Idempotency: `(applicationId, subjectKey, idempotencyKey)` is unique. Purchase
+// grants use "purchase:<paymentId>"; consume calls pass a client-supplied key
+// (e.g. the lead id) so a retried drawdown never double-charges. NULL keys are
 // allowed to repeat (manual operator adjustments without a key).
+//
+// The SUBJECT is part of that key, and was not. A client-supplied key names the
+// thing being paid for, not who is paying: two end users drawing down for the
+// same lead sent the same key, the second found the first's row and got back
+// `{ applied: false }` — so their balance never moved, they consumed for free,
+// and they were handed another subject's `balanceAfter`. `UsageRecord` next
+// door already keys on `(meterId, subjectKey, idempotencyKey)` for this reason.
 // ============================================================================
 
 enum CreditReason {
@@ -2095,8 +2428,7 @@ model CreditLedger {
   endUser      EndUser?      @relation(fields: [endUserId], references: [id], onDelete: Cascade)
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
-  @@unique([applicationId, idempotencyKey])
-  @@index([applicationId, subjectKey])
+  @@unique([applicationId, subjectKey, idempotencyKey])
   @@index([createdAt])
   @@map("credit_ledger")
 }
@@ -2221,6 +2553,113 @@ model CouponRedemption {
 }
 
 // ============================================================================
+// Trial redemptions — one row per trial ATTEMPT, mirroring CouponRedemption.
+//
+// A buyer used to be able to trial, cancel on the last day, and trial again
+// without limit: `resolveCheckoutTrial` is a pure function of the plan, and
+// nothing anywhere asked whether this buyer had trialled before (#477).
+//
+// Eligibility is decided by COUNTING slot holders, not by a unique key. One
+// row per (subject, plan) cannot hold the states the policy setting allows:
+// under `unlimited` a second redemption would have to overwrite the first,
+// destroying the `startedAt`/`endsAt` the operator surfaces read, and a
+// `once_per_plan` to `once_per_application` flip would collide on write and
+// throw P2002 out of the checkout path.
+// ============================================================================
+
+enum TrialRedemptionStatus {
+  /// A checkout minted a trial at the provider; nothing is confirmed yet.
+  RESERVED
+  /// The provider started the trial.
+  CONSUMED
+  /// The attempt died: the provider threw, or the subject started another.
+  RELEASED
+}
+
+model TrialRedemption {
+  id             String                @id @default(cuid())
+  applicationId  String                @map("application_id")
+  /// The billing subject, as `user:<endUserId>` or `org:<organizationId>`.
+  /// An org-billed application keys on the org: keying it on the individual
+  /// would hand a five-person team five trials, and would refuse a colleague
+  /// who takes the account over.
+  subjectKey     String                @map("subject_key")
+  endUserId      String                @map("end_user_id")
+  organizationId String?               @map("organization_id")
+  planId         String                @map("plan_id")
+  status         TrialRedemptionStatus @default(RESERVED)
+  /// The provider checkout session this trial was minted onto, written after
+  /// the provider returns one. The grain of "one attempt", and the reason this
+  /// is a row per attempt: a buyer can hold several payable sessions at once.
+  checkoutSessionId String?            @map("checkout_session_id")
+  subscriptionId String?               @map("subscription_id")
+  /// Days as sent to the provider. Denormalised because the plan's value
+  /// changes underneath, and an upgrade may send remaining days instead.
+  trialDays      Int?                  @map("trial_days")
+  /// When a RESERVED row stops holding the slot.
+  ///
+  /// Null means it holds the slot indefinitely. That is deliberate, and it is
+  /// the fail-CLOSED direction: a confirmation that could not be recorded
+  /// clears this, so the slot is held until an operator resolves it. Letting
+  /// such a row age out would fail OPEN for an anti-abuse control and hand the
+  /// buyer another trial.
+  expiresAt      DateTime?             @map("expires_at")
+  startedAt      DateTime?             @map("started_at")
+  endsAt         DateTime?             @map("ends_at")
+  createdAt      DateTime              @default(now()) @map("created_at")
+  updatedAt      DateTime              @updatedAt @map("updated_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser     EndUser     @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+  plan        Plan        @relation(fields: [planId], references: [id])
+
+  /// One redemption per (application, checkout session) — the same grain the
+  /// coupon reservation uses, and what the confirmation looks up by.
+  @@unique([applicationId, checkoutSessionId])
+  @@index([applicationId, subjectKey, status])
+  @@map("trial_redemptions")
+}
+
+// ============================================================================
+// Free-tier claims: who has taken a free plan that hands over value.
+//
+// A self-serve free plan carrying CREDIT or LICENSE entitlements materialises
+// that value on activation, onto whichever beneficiary the actor names: their
+// personal account or any organization they own or administer. The
+// subscription row is keyed (application, end-user, plan) and moves between
+// beneficiaries on reactivation, while the credit ledger and the licence pool
+// are keyed per beneficiary, so cancel, create an org, and activate again used
+// to mint a fresh grant every time.
+//
+// One row per actor per plan, written in the transaction that activates the
+// subscription and never deleted by cancellation. It records which
+// beneficiary the claim went to, so reactivating for that same beneficiary
+// stays allowed (the entitlement anchors already make it issue nothing) and
+// any other beneficiary is refused. A unique key rather than the counting
+// model `TrialRedemption` uses, because there is no policy setting here that
+// needs more than one row to express.
+// ============================================================================
+
+model FreeTierClaim {
+  id             String   @id @default(cuid())
+  applicationId  String   @map("application_id")
+  /// The end-user who activated the plan, whoever the beneficiary is.
+  endUserId      String   @map("end_user_id")
+  planId         String   @map("plan_id")
+  /// The organization the claim went to; null for the actor's personal account.
+  organizationId String?  @map("organization_id")
+  subscriptionId String?  @map("subscription_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser     EndUser     @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+  plan        Plan        @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, endUserId, planId])
+  @@map("free_tier_claims")
+}
+
+// ============================================================================
 // Webhook events — durable idempotency for inbound provider webhooks.
 //
 // (applicationId, provider, providerEventId) is the source of truth. Redis is
@@ -2333,6 +2772,10 @@ model WebhookDelivery {
   @@index([endpointId, createdAt])
   @@index([applicationId, eventType])
   @@index([status, nextAttemptAt])
+  // Retention sweep: finished deliveries nobody has touched in the window.
+  @@index([status, updatedAt])
+  // Deployment-wide 24h delivery rollup (super-admin overview).
+  @@index([createdAt])
   @@map("webhook_deliveries")
 }
 
@@ -2428,6 +2871,11 @@ model SecurityEvent {
   // 'operator' | 'end_user' | 'system'
   actorType     String   @map("actor_type")
   actorId       String?  @map("actor_id")
+  // The end-user this event is ABOUT, whoever performed it: the actor for an
+  // end-user's own events, `metadata.endUserId` for anything done to them.
+  // Derived once in `recordSecurityEvent` so "this person's history" is an
+  // indexed equality instead of three 200-row scans matched in memory.
+  subjectEndUserId String? @map("subject_end_user_id")
   type          String
   ip            String?
   userAgent     String?  @map("user_agent")
@@ -2436,6 +2884,11 @@ model SecurityEvent {
 
   @@index([tenantId, createdAt])
   @@index([applicationId, createdAt])
+  // Per-app overview stats count sign-ins and sign-ups by type over 30 days.
+  @@index([applicationId, type, createdAt])
+  @@index([applicationId, subjectEndUserId, createdAt])
+  // Range scan for the retention sweep (lib/log-retention.ts).
+  @@index([createdAt])
   @@index([type])
   @@map("security_events")
 }
@@ -2464,9 +2917,15 @@ model ApiRequestLog {
   tenantId       String?  @map("tenant_id")
   operatorUserId String?  @map("operator_user_id")
   ip             String?
+  /// The scope that admitted the request, when a scope gate ran. Recorded so
+  /// "which permission let this happen" survives the membership's scopes
+  /// changing later. Null for open, floor and project routes.
+  admittedScope  String?  @map("admitted_scope")
   createdAt      DateTime @default(now()) @map("created_at")
 
   @@index([applicationId, createdAt])
+  // Deployment-wide 24h request rollup (super-admin overview).
+  @@index([createdAt])
   @@index([tenantId, createdAt])
   @@index([operatorUserId, createdAt])
   @@map("api_request_logs")

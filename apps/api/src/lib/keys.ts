@@ -51,7 +51,7 @@ export function generatePublicKey(slug: string): string {
  * says which kind of Application the key belongs to (see `AppEnvironment`) so
  * a key pasted into a chat window is identifiable at a glance. Nothing in the
  * API branches on it beyond "is this shaped like a secret key". Isolation is
- * the Application boundary — see docs/api-keys.md.
+ * the Application boundary, see docs/api-keys.md.
  *
  * @param mode `"live"` for keys of a PRODUCTION app, `"test"` for the rest.
  *
@@ -76,14 +76,14 @@ export function generateSecretKey(mode: 'live' | 'test'): {
   return { raw, hash, prefix: displayPrefix };
 }
 
-/** SHA-256 hash, hex-encoded. Stable, not salted — keys are high-entropy. */
+/** SHA-256 hash, hex-encoded. Stable, not salted, keys are high-entropy. */
 export function hashKey(rawKey: string): string {
   return createHash('sha256').update(rawKey).digest('hex');
 }
 
 /**
  * Constant-time comparison of two pre-hashed keys. Use this when verifying a
- * presented key against a stored hash — never `===`, which leaks length and
+ * presented key against a stored hash, never `===`, which leaks length and
  * prefix-match timing.
  */
 export function timingSafeEqualHex(a: string, b: string): boolean {

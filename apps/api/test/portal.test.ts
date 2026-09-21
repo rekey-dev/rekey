@@ -1,5 +1,5 @@
 /**
- * Hosted customer portal (Portal V2) — API surface.
+ * Hosted customer portal (Portal V2), API surface.
  *
  * Load-bearing properties:
  *   - Public config endpoint returns the app's PUBLISHABLE key only when the
@@ -163,7 +163,7 @@ describe('Portal V2 API', () => {
     await applicationsService.updateAuthConfig({ applicationId, patch: { organizationsEnabled: true } });
     const owner = await signUpFull(`owner-${Math.random().toString(36).slice(2, 7)}@example.com`);
 
-    // Owner creates a team via the end-user org route — now publishable-key accessible.
+    // Owner creates a team via the end-user org route, now publishable-key accessible.
     const orgSlug = `team-${Math.random().toString(36).slice(2, 7)}`;
     const orgRes = await app.inject({
       method: 'POST',
@@ -259,7 +259,7 @@ describe('Portal V2 API', () => {
     await billingCredentialsService.upsertCredentials(
       applicationId,
       'stripe',
-      // DEVELOPMENT app (the default) — only test-mode credentials are allowed.
+      // DEVELOPMENT app (the default), only test-mode credentials are allowed.
       { apiKey: 'sk_test_for_ci_only', webhookSecret: 'whsec_x' },
       { enabled: true, mode: 'test' },
     );

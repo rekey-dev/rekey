@@ -1,12 +1,12 @@
 /**
- * Per-workspace ceiling on PRODUCTION Applications — the enforcement primitive
+ * Per-workspace ceiling on PRODUCTION Applications, the enforcement primitive
  * behind per-production-app pricing.
  *
  * The assertions that make this safe to ship:
  *   1. Unset = unlimited. Every workspace that existed before this key did must
  *      be unaffected by it existing.
  *   2. Only PRODUCTION counts. A workspace at its ceiling can still create
- *      development and staging Applications — that is the whole "test
+ *      development and staging Applications, that is the whole "test
  *      environments are free" promise, and if it regresses we start charging
  *      people for scratch apps.
  *   3. Being over the line never takes an existing production app offline. The
@@ -23,7 +23,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 
@@ -58,7 +58,7 @@ describe('Tenant limits — maxProductionApps', () => {
     tenantId: string,
     slug: string,
     environment?: 'PRODUCTION' | 'STAGING' | 'DEVELOPMENT',
-  ): ReturnType<FastifyInstance['inject']> {
+  ): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'POST',
       url: '/api/v1/admin/applications',
@@ -75,7 +75,7 @@ describe('Tenant limits — maxProductionApps', () => {
   function setLimits(
     tenantId: string,
     limits: Record<string, unknown>,
-  ): ReturnType<FastifyInstance['inject']> {
+  ): Promise<LightMyRequestResponse> {
     return app.inject({
       method: 'PUT',
       url: `/api/v1/admin/tenants/${tenantId}/limits`,
@@ -136,7 +136,7 @@ describe('Tenant limits — maxProductionApps', () => {
     await setLimits(tenantId, { maxProductionApps: 1 });
 
     expect((await createApp(tenantId, 'mpa-free-prod', 'PRODUCTION')).statusCode).toBe(201);
-    // At the ceiling now — but only PRODUCTION is supposed to count.
+    // At the ceiling now, but only PRODUCTION is supposed to count.
     expect((await createApp(tenantId, 'mpa-free-dev', 'DEVELOPMENT')).statusCode).toBe(201);
     expect((await createApp(tenantId, 'mpa-free-stg', 'STAGING')).statusCode).toBe(201);
     // And an omitted environment defaults to DEVELOPMENT, so it is not billable
@@ -217,7 +217,7 @@ describe('Tenant limits — maxProductionApps', () => {
   it('rejects a non-integer limit', async () => {
     const tenantId = await createTenant('mpa-bad');
     // Rejected by the route's JSON schema (BAD_REQUEST), before the zod parse
-    // that produces INVALID_TENANT_LIMITS — the type is declared there.
+    // that produces INVALID_TENANT_LIMITS, the type is declared there.
     expect((await setLimits(tenantId, { maxProductionApps: 'lots' })).statusCode).toBe(400);
   });
 

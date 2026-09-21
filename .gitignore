@@ -30,3 +30,6 @@ dump.rdb
 
 # Vitest writes these next to a config when it transpiles it; they are per-run.
 *.timestamp-*.mjs
+
+# Local .env backups (pre-flight snapshots). Never committed.
+.env.bak*

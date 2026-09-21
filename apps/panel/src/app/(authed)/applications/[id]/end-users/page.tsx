@@ -1,5 +1,5 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
 import { ApiErrorText } from '@/components/api-error';
 import type { Page } from '@/lib/paginate';
@@ -7,6 +7,7 @@ import { redirect } from 'next/navigation';
 import { errorQuery, readErrorFlash, api, PanelApiError, type EndUserRow, type ApplicationRoleRow, type OrganizationRow } from '@/lib/api';
 import { Modal } from '@/components/Modal';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
 import { SectionHeader } from '@/components/Card';
@@ -15,7 +16,6 @@ import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
 
-// ─── End-user actions ────────────────────────────────────────────────
 
 async function createUser(applicationId: string, formData: FormData): Promise<void> {
   'use server';
@@ -128,7 +128,6 @@ async function deleteUser(applicationId: string, euid: string): Promise<void> {
   redirect(`/applications/${applicationId}/end-users`);
 }
 
-// ─── Errors ─────────────────────────────────────────────────────────
 
 const ERR: Record<string, string> = {
   missing: 'Required fields are empty.',
@@ -142,14 +141,13 @@ const ERR: Record<string, string> = {
     'Role name must be lowercase letters, digits, hyphens, or underscores (2–40 chars).',
   END_USER_ROLE_NOT_FOUND: 'Role not found.',
   END_USER_ROLE_IS_DEFAULT: 'Cannot delete the default role. Mark another as default first.',
-  END_USER_ROLE_IN_USE: 'Cannot delete — end-users still hold this role. Reassign them first.',
+  END_USER_ROLE_IN_USE: 'Cannot delete: end-users still hold this role. Reassign them first.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage end-users + roles.',
   ORGANIZATIONS_NOT_ENABLED: 'organizations are not enabled for this Application',
   ORGANIZATION_NOT_FOUND: 'the organization no longer exists',
   ORGANIZATION_ALREADY_MEMBER: 'they are already a member of that organization',
 };
 
-// ─── Page ───────────────────────────────────────────────────────────
 
 export default async function EndUsersPage({
   params,
@@ -168,9 +166,7 @@ export default async function EndUsersPage({
   // panel's own error banner.
   const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const newUserError = sp.newUser === '1' ? error : undefined;
-  const newRoleError = sp.newRole === '1' ? error : undefined;
   const editUser = typeof sp.editUser === 'string' ? sp.editUser : undefined;
-  const deleteRoleName = typeof sp.deleteRole === 'string' ? sp.deleteRole : undefined;
   const orgError = typeof sp.orgError === 'string' ? sp.orgError : undefined;
   const createdEmail = typeof sp.created === 'string' ? sp.created : undefined;
 
@@ -228,7 +224,7 @@ export default async function EndUsersPage({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/application-roles`,
     }),
-    // Organization picker for the new-user modal — first page only, never paged.
+    // Organization picker for the new-user modal, first page only, never paged.
     api<Page<OrganizationRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/organizations`,
@@ -254,7 +250,7 @@ export default async function EndUsersPage({
           count={`(${users.length === 0 ? 0 : `${offset + 1}–${offset + users.length}`})`}
           description={
             <>
-              The people who sign up to your app — manage roles, metadata, billing, and org
+              The people who sign up to your app. Manage roles, metadata, billing, and org
               membership. Created via the SDK&apos;s sign-up endpoint or seeded manually here; role +
               metadata are writable only by operators, so end-users can&apos;t elevate via the SDK.
             </>
@@ -306,7 +302,7 @@ export default async function EndUsersPage({
               href={`/applications/${id}/end-users`}
               className="text-sm text-[var(--color-muted-fg)] hover:text-[var(--color-fg)]"
             >
-              filtered — clear
+              filtered (clear)
             </a>
           )}
         </form>
@@ -375,7 +371,7 @@ export default async function EndUsersPage({
                         errorDetail={errorDetail}
                         errorFix={errorFix}
                       />
-                      <form action={deleteUser.bind(null, id, u.id)} className="inline">
+                      <ActionForm action={deleteUser.bind(null, id, u.id)} className="inline">
                         <TypedConfirmButton
                           expected={u.email}
                           title={`Delete ${u.email}?`}
@@ -383,7 +379,7 @@ export default async function EndUsersPage({
                           triggerLabel="Delete"
                           confirmLabel="Delete end-user"
                         />
-                      </form>
+                      </ActionForm>
                     </div>
                   </TD>
                 </TR>
@@ -412,7 +408,6 @@ export default async function EndUsersPage({
   );
 }
 
-// ─── Modals ─────────────────────────────────────────────────────────
 
 function NewUserModal({
   applicationId,
@@ -435,7 +430,7 @@ function NewUserModal({
       description="Operator-driven creation. The SDK's auth.signUp() is the normal path; this is for support seeding / data migrations. Email is verified by default since you vouched."
       trigger="+ New end-user"
     >
-      <form action={createUser.bind(null, applicationId)} className="space-y-3">
+      <ActionForm action={createUser.bind(null, applicationId)} className="space-y-3">
         {error && (
           <Banner tone="error">
             <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
@@ -479,9 +474,9 @@ function NewUserModal({
         </label>
         {organizations.length > 0 && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 border-t border-[var(--color-border)] pt-3">
-            <Field label="Add to organization" hint="Optional — drops the new user into a team.">
+            <Field label="Add to organization" hint="Optional. Drops the new user into a team.">
               <select name="organizationId" defaultValue="" className={inputCls}>
-                <option value="">— None —</option>
+                <option value="">(None)</option>
                 {organizations.map((o) => (
                   <option key={o.id} value={o.id}>{o.name}</option>
                 ))}
@@ -497,7 +492,7 @@ function NewUserModal({
           </div>
         )}
         <SubmitButton pendingLabel="Creating end-user…">Create end-user</SubmitButton>
-      </form>
+      </ActionForm>
     </Modal>
   );
 }
@@ -521,11 +516,11 @@ function EditUserModal({
       modalKey="editUser"
       modalValue={user.id}
       title={`Edit ${user.email}`}
-      description="Email is immutable — it's the natural key per-Application. Use password-reset to change a password. Metadata replaces wholesale (no deep merge)."
+      description="Email is immutable: it's the natural key per-Application. Use password-reset to change a password. Metadata replaces wholesale (no deep merge)."
       trigger="Edit"
       triggerClassName="text-xs text-[var(--color-fg)] font-medium hover:underline cursor-pointer"
     >
-      <form action={updateUser.bind(null, applicationId, user.id)} className="space-y-3">
+      <ActionForm action={updateUser.bind(null, applicationId, user.id)} className="space-y-3">
         {error && (
           <Banner tone="error">
             <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
@@ -565,12 +560,11 @@ function EditUserModal({
           <span className="text-xs">Email verified</span>
         </label>
         <SubmitButton pendingLabel="Saving…">Save changes</SubmitButton>
-      </form>
+      </ActionForm>
     </Modal>
   );
 }
 
-// ─── Field primitive ────────────────────────────────────────────────
 
 const inputCls =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';

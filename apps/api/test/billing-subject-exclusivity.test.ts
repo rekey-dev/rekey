@@ -18,7 +18,7 @@
  * The toggle is the other half. Flipping `billingSubject` under live
  * subscriptions would strand every one of them on the wrong side of the
  * setting, so it is refused while any exist rather than silently reassigning
- * who is paying — nobody can decide that but the operator.
+ * who is paying, nobody can decide that but the operator.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';

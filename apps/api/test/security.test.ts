@@ -110,7 +110,7 @@ describe('Phase-1 security hardening', () => {
       payload: { code: totp.generate() },
     });
 
-    // Now sign in by password — must return mfaRequired, not a session.
+    // Now sign in by password, must return mfaRequired, not a session.
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/sign-in',
@@ -232,7 +232,7 @@ describe('Phase-1 security hardening', () => {
       })
       .then((r) => r.json().data as { mfaChallengeToken: string });
 
-    // 5 wrong codes — each 401 INVALID; the 5th arms the lock.
+    // 5 wrong codes, each 401 INVALID; the 5th arms the lock.
     for (let i = 0; i < 5; i++) {
       const bad = await app.inject({
         method: 'POST',
@@ -243,7 +243,7 @@ describe('Phase-1 security hardening', () => {
       expect(bad.statusCode).toBe(401);
       expect(bad.json().error.code).toBe('MFA_CODE_INVALID');
     }
-    // Now locked — even the CORRECT code is refused (lock checked before verify).
+    // Now locked, even the CORRECT code is refused (lock checked before verify).
     const locked = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/mfa-verify',
@@ -288,7 +288,7 @@ describe('Phase-1 security hardening', () => {
       payload: { code: totp.generate() },
     });
 
-    // Now sign in — must hold the session.
+    // Now sign in, must hold the session.
     const signIn = await app.inject({
       method: 'POST',
       url: '/api/v1/tenant/auth/sign-in',
@@ -327,8 +327,33 @@ describe('Phase-1 security hardening', () => {
 
   it('an MFA challenge token cannot pass as a session access token', async () => {
     const b = await bootstrap('typ');
-    // Mint a challenge token directly — it has typ="eu_mfa_challenge".
-    const { token } = issueMfaChallengeToken('does-not-matter', b.applicationId);
+
+    // A REAL end user, signed with their REAL token generation.
+    //
+    // This used to mint the token for `'does-not-matter'` and omit the
+    // generation entirely, which typechecking the tests surfaced as a stale
+    // call site (#494). It mattered: `appSigningKey(applicationId,
+    // tokenGeneration)` DERIVES the key from the generation, so `undefined`
+    // produced a token whose signature did not verify, and the 401 this
+    // asserts came from the signature check, never reaching the `typ` claim the
+    // test is named for. It passed while proving nothing.
+    const eu = await app
+      .inject({
+        method: 'POST',
+        url: '/api/v1/auth/sign-up',
+        headers: { authorization: `Bearer ${b.liveKey}` },
+        payload: { email: `typ-${Math.random().toString(36).slice(2, 7)}@example.com`, password: 'pw-one-two-three' },
+      })
+      .then((r) => (r.json().data as { endUser: { id: string } }).endUser.id);
+    // The generation is the APPLICATION's, not the end user's, the signing key
+    // is derived per application.
+    const { tokenGeneration } = await prisma.application.findUniqueOrThrow({
+      where: { id: b.applicationId },
+      select: { tokenGeneration: true },
+    });
+
+    // Well-formed and correctly signed in every respect EXCEPT `typ`.
+    const { token } = issueMfaChallengeToken(eu, b.applicationId, tokenGeneration);
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/users/me/',
@@ -450,7 +475,7 @@ describe('Phase-1 security hardening', () => {
       })
       .then((r) => r.json().data as { rawKey: string });
 
-    // /me requires auth:read — auth:write should imply.
+    // /me requires auth:read, auth:write should imply.
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/me/',
@@ -460,7 +485,7 @@ describe('Phase-1 security hardening', () => {
   });
 
   it('legacy default scope ["*"] satisfies every required scope', async () => {
-    // The bootstrap-provided liveKey defaults to ["*"] — verify it accepts
+    // The bootstrap-provided liveKey defaults to ["*"], verify it accepts
     // a write (sign-up) without issue. Belt-and-suspenders since we already
     // rely on this everywhere implicitly.
     const b = await bootstrap('scope-star');
@@ -553,13 +578,24 @@ describe('Phase-1 security hardening', () => {
     expect(del.statusCode).toBe(200);
     expect(del.json().data.revoked).toBe(true);
 
-    // Idempotent — second revoke returns revoked=false.
+    // Revoking a session stamps the user, so the second session's own
+    // pre-revoke access token is refused next; it renews from its refresh.
+    const secondRenewed = await app
+      .inject({
+        method: 'POST',
+        url: '/api/v1/auth/refresh',
+        headers: { authorization: `Bearer ${b.liveKey}` },
+        payload: { refreshToken: secondSession.refreshToken },
+      })
+      .then((r) => r.json().data as { accessToken: string });
+
+    // Idempotent, second revoke returns revoked=false.
     const del2 = await app.inject({
       method: 'DELETE',
       url: `/api/v1/auth/sessions/${deviceA.id}`,
       headers: {
         authorization: `Bearer ${b.liveKey}`,
-        'x-rekey-user-token': secondSession.accessToken,
+        'x-rekey-user-token': secondRenewed.accessToken,
       },
     });
     expect(del2.json().data.revoked).toBe(false);
@@ -712,7 +748,7 @@ describe('Phase-1 security hardening', () => {
   it('unlink refuses to leave the account with no sign-in method', async () => {
     const b = await bootstrap('unlink-lockout');
     // Create an OAuth-only user (no password). We do that by signing up
-    // via OAuth — register a mock provider, configure it, and call the
+    // via OAuth, register a mock provider, configure it, and call the
     // public OAuth callback to create the user.
     await app.inject({
       method: 'PUT',

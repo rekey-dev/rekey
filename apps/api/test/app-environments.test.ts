@@ -1,5 +1,5 @@
 /**
- * Application environments — the replacement for the old test/live DataMode.
+ * Application environments, the replacement for the old test/live DataMode.
  *
  * Three properties are worth defending in tests, because each one is a place
  * where the old design silently did the wrong thing:
@@ -9,11 +9,11 @@
  *   2. The environment moves through exactly ONE door. Since 2026-08-20 it is
  *      no longer immutable: POST /:id/promote raises DEVELOPMENT/STAGING to
  *      PRODUCTION, once, one-way. What these tests defend is that promote is
- *      the ONLY door — no config route accepts the field, and nothing moves an
+ *      the ONLY door, no config route accepts the field, and nothing moves an
  *      Application back down. See lifecycle behaviour in
  *      app-lifecycle.test.ts; what is tested here is that every OTHER route
  *      still refuses.
- *   3. Environment does NOT constrain billing credentials — any app may hold
+ *   3. Environment does NOT constrain billing credentials, any app may hold
  *      live keys. What is enforced is that the recorded `mode` cannot
  *      contradict the key material, so the label never lies about the key.
  *
@@ -129,7 +129,7 @@ describe('Application environments', () => {
   // Promote is the only door into PRODUCTION, and this is the standing check
   // that it stays the only one. Every route swept below must keep ignoring the
   // field: if a future config route starts accepting it, the last assertion
-  // here fails. (`promote` itself is covered in app-lifecycle.test.ts — the
+  // here fails. (`promote` itself is covered in app-lifecycle.test.ts, the
   // point of this test is everything that must NOT work.)
   it('environment cannot be changed by any route except promote', async () => {
     const a = await createApp('env-immutable');
@@ -147,7 +147,7 @@ describe('Application environments', () => {
     });
     expect(gone.statusCode).toBe(404);
 
-    // And no other application-update surface will take the field either —
+    // And no other application-update surface will take the field either,
     // each writes an explicit column whitelist, so an extra key is ignored
     // rather than applied. Sweep the ones that exist today.
     const smuggle = async (path: string, payload: Record<string, unknown>) =>
@@ -213,7 +213,7 @@ describe('Application environments', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('BILLING_CREDENTIALS_MODE_CONTRADICTED');
 
-    // And nothing was stored — the refusal is not a warning.
+    // And nothing was stored, the refusal is not a warning.
     const list = await app.inject({
       method: 'GET',
       url: `/api/v1/tenant/applications/${dev.id}/billing-credentials`,

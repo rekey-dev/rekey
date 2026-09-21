@@ -1,7 +1,7 @@
 /**
  * `Secure` for every cookie this app writes, decided from the live request.
  *
- * Was `process.env.NODE_ENV === 'production'` — a build-time answer to a
+ * Was `process.env.NODE_ENV === 'production'`, a build-time answer to a
  * request-time question. A hosted portal behind TLS whose NODE_ENV was unset
  * (or `staging`, or anything Next did not inline as exactly `"production"`)
  * handed out end-user session cookies without `Secure`.

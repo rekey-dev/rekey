@@ -18,7 +18,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 
@@ -184,7 +184,7 @@ describe('OIDC authorize: delegating sign-in to the Application', () => {
     // object: 'hostedAuthorizeUrl'" and the feature was unreachable in
     // production despite every other layer working.
     const b = await bootstrap('via-api');
-    const patch = (value: string | null): ReturnType<FastifyInstance['inject']> =>
+    const patch = (value: string | null): Promise<LightMyRequestResponse> =>
       app.inject({
         method: 'PATCH',
         url: `/api/v1/tenant/applications/${b.applicationId}/auth-config`,

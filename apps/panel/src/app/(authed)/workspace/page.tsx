@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { errorQuery, readErrorFlash, api, PanelApiError, getMe, getWorkspaceLimits } from '@/lib/api';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { ApiErrorText } from '@/components/api-error';
 import { SavedBanner } from '@/components/SavedBanner';
@@ -16,6 +17,7 @@ interface WorkspaceDto {
   id: string;
   name: string;
   createdAt: string;
+  operatorMcpEnabled: boolean;
 }
 
 async function renameWorkspace(formData: FormData): Promise<void> {
@@ -44,25 +46,40 @@ async function renameWorkspace(formData: FormData): Promise<void> {
  *
  * Read from `PANEL_SUPPORT_EMAIL` rather than hard-coded. The address used to
  * be a literal `support@rekey.dev` printed unconditionally, which meant a
- * SELF-HOSTED operator — the product's core pitch — was told to email a vendor
+ * SELF-HOSTED operator, the product's core pitch, was told to email a vendor
  * about rows in a database that vendor has no access to and cannot touch. That
  * instruction is not merely unhelpful, it is impossible to follow.
  *
  * Unset (the default, and therefore what every self-host sees) switches the
  * panel to the truthful answer: deletion is an operation the operator performs
  * against their own database. Rekey Cloud sets the variable and keeps the
- * deliberate manual-via-support path — friction on leaving is intended there,
+ * deliberate manual-via-support path, friction on leaving is intended there,
  * and the operator confirmed that is the product decision.
  */
 function supportEmail(): string | null {
   const raw = process.env.PANEL_SUPPORT_EMAIL?.trim();
   if (!raw) return null;
-  // Cheap sanity check — a malformed value should degrade to the self-hosted
+  // Cheap sanity check, a malformed value should degrade to the self-hosted
   // copy rather than render a broken mailto.
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw) ? raw : null;
 }
 
-// Workspace deletion isn't a self-serve API call — there is no DELETE on
+// The per-workspace switch for the operator MCP server. Same PATCH as the
+// rename, its own field; `card=mcp` tells the page which card owns the
+// error banner, since both forms redirect back here.
+async function setOperatorMcp(formData: FormData): Promise<void> {
+  'use server';
+  const enabled = formData.get('operatorMcpEnabled') === 'on';
+  try {
+    await api({ method: 'PATCH', path: '/api/v1/tenant/workspace', body: { operatorMcpEnabled: enabled } });
+  } catch (err) {
+    if (err instanceof PanelApiError) redirect(`/workspace?${await errorQuery(err)}&card=mcp`);
+    throw err;
+  }
+  redirect('/workspace?saved=mcp');
+}
+
+// Workspace deletion isn't a self-serve API call, there is no DELETE on
 // /api/v1/tenant/workspace, by design. This action is the type-to-confirm
 // gate: it records no state, it just routes a deliberate owner to the
 // instructions below (which differ for managed vs self-hosted).
@@ -75,6 +92,9 @@ const ERR: Record<string, string> = {
   missing: 'Name is required.',
   WORKSPACE_NAME_INVALID: 'Workspace name must be 2–80 characters.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can rename a workspace.',
+};
+const ERR_MCP: Record<string, string> = {
+  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can switch operator MCP.',
 };
 
 export default async function WorkspaceSettingsPage({
@@ -90,6 +110,9 @@ export default async function WorkspaceSettingsPage({
   // panel's own error banner.
   const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const renamed = typeof sp.renamed === 'string';
+  const savedMcp = sp.saved === 'mcp';
+  // Which card the error belongs to; both forms on this page redirect here.
+  const errorCard = sp.card === 'mcp' ? 'mcp' : 'general';
   const deletionRequested = typeof sp.deletionRequested === 'string';
 
   const [workspace, me] = await Promise.all([
@@ -127,8 +150,46 @@ export default async function WorkspaceSettingsPage({
       />
 
       {renamed && <SavedBanner params={['renamed']} message="Workspace renamed." />}
+      {savedMcp && <SavedBanner message="Operator MCP setting saved." />}
 
-      {/* General — rename */}
+      {/* Operator MCP, the per-workspace switch */}
+      <Card className="space-y-3">
+        <div>
+          <h2 className="text-sm font-semibold text-[var(--color-fg)]">Operator MCP</h2>
+          <p className="max-w-2xl text-xs text-[var(--color-muted-fg)]">
+            Whether AI agents may act in this workspace through the operator MCP server. Off refuses
+            every connected agent on its next request and grants no new consent. Nothing is revoked:
+            an agent keeps its connection and turning this back on restores it as it was. The
+            end-user MCP server is a separate switch on each application.
+          </p>
+        </div>
+        {error && errorCard === 'mcp' && (
+          <Banner tone="error">
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR_MCP} fallback="Something went wrong. Please try again." />
+          </Banner>
+        )}
+        <ActionForm action={setOperatorMcp} className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              name="operatorMcpEnabled"
+              defaultChecked={workspace.operatorMcpEnabled}
+              disabled={!canEdit}
+            />
+            Allow operator MCP in this workspace
+          </label>
+          {canEdit && (
+            <SubmitButton
+              pendingLabel="Saving…"
+              className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)]"
+            >
+              Save
+            </SubmitButton>
+          )}
+        </ActionForm>
+      </Card>
+
+      {/* General, rename */}
       <Card className="space-y-4">
         <div>
           <h2 className="text-sm font-semibold text-[var(--color-fg)]">General</h2>
@@ -136,8 +197,8 @@ export default async function WorkspaceSettingsPage({
             The workspace name is shown to your whole team across the panel.
           </p>
         </div>
-        <form action={renameWorkspace} className="space-y-4">
-          {error && (
+        <ActionForm action={renameWorkspace} className="space-y-4">
+          {error && errorCard === 'general' && (
             <Banner tone="error">
               <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
             </Banner>
@@ -158,7 +219,7 @@ export default async function WorkspaceSettingsPage({
               className={`${fieldInputCls} disabled:cursor-not-allowed disabled:opacity-60`}
             />
           </Field>
-          <Field label="Workspace ID" hint="Stable identifier — share it with support if you hit an issue.">
+          <Field label="Workspace ID" hint="Stable identifier. Share it with support if you hit an issue.">
             <div className="flex items-center gap-2">
               <input
                 type="text"
@@ -174,14 +235,14 @@ export default async function WorkspaceSettingsPage({
             <SubmitButton pendingLabel="Saving…">Save changes</SubmitButton>
           ) : (
             <p className="text-xs text-[var(--color-muted-fg)]">
-              You're a {me.activeRole.toLowerCase()} — only owners and admins can edit workspace
+              You're a {me.activeRole.toLowerCase()}, and only owners and admins can edit workspace
               settings.
             </p>
           )}
-        </form>
+        </ActionForm>
       </Card>
 
-      {/* Usage and limits — read-only for every role. Placed between identity
+      {/* Usage and limits, read-only for every role. Placed between identity
           and the destructive section because "what is this workspace using"
           is the question an operator arrives with, and because the production
           figure is what the application Lifecycle tab refuses against. */}
@@ -191,7 +252,7 @@ export default async function WorkspaceSettingsPage({
         </Card>
       )}
 
-      {/* Danger zone — owner-only deletion (handled manually by support) */}
+      {/* Danger zone, owner-only deletion (handled manually by support) */}
       {isOwner && (
         <div className="rounded-xl border border-red-300 bg-red-50/40 dark:border-red-800 dark:bg-red-950/30">
           <div className="flex items-start justify-between gap-4 px-5 py-4">
@@ -202,13 +263,13 @@ export default async function WorkspaceSettingsPage({
               <p className="mt-0.5 text-xs text-[var(--color-muted-fg)]">
                 Deletion removes every application, billing record, end-user, and license.
                 {support === null
-                  ? " There's no self-serve delete in the panel — on a self-hosted deployment it's an operation you run against your own database. Confirm and we'll show you exactly what to run."
-                  : " These are unwound in order, so it's handled manually — confirm and we'll walk you through the final email step."}{' '}
+                  ? " There's no self-serve delete in the panel. On a self-hosted deployment it's an operation you run against your own database. Confirm and we'll show you exactly what to run."
+                  : " These are unwound in order, so it's handled manually. Confirm and we'll walk you through the final email step."}{' '}
                 This can't be undone.
               </p>
             </div>
             {!deletionRequested && (
-              <form action={requestWorkspaceDeletion} className="shrink-0">
+              <ActionForm action={requestWorkspaceDeletion} className="shrink-0">
                 <TypedConfirmButton
                   expected={workspace.name}
                   title="Delete this workspace?"
@@ -216,7 +277,7 @@ export default async function WorkspaceSettingsPage({
                   triggerLabel="Delete workspace"
                   confirmLabel="Continue to delete"
                 />
-              </form>
+              </ActionForm>
             )}
           </div>
 
@@ -235,7 +296,7 @@ export default async function WorkspaceSettingsPage({
                   <p className="text-xs text-[var(--color-muted-fg)]">
                     This is your Rekey, so this is your database. Every application, end-user,
                     subscription, payment, licence, API key, and webhook under this workspace is
-                    removed by foreign-key cascade from the one row below — nothing has to be
+                    removed by foreign-key cascade from the one row below, and nothing has to be
                     unwound by hand.
                   </p>
                   <p className="text-xs font-medium text-red-700 dark:text-red-300">
@@ -260,7 +321,7 @@ export default async function WorkspaceSettingsPage({
                   <a href={supportMailto ?? undefined} className="underline hover:text-[var(--color-fg)]">
                     {support}
                   </a>{' '}
-                  from the OWNER address — we'll confirm and schedule it within one business day. We
+                  from the OWNER address. We'll confirm and schedule it within one business day. We
                   never delete a workspace without that email.
                 </p>
               )}

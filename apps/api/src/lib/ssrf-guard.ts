@@ -3,7 +3,7 @@
  * (customer webhook endpoints, OIDC issuer + discovered endpoints).
  *
  * `isWebhookUrlSafe` in `webhook-signing.ts` does a *synchronous, string-level*
- * check — it blocks bare private IPs and obvious loopback hostnames but, by its
+ * check, it blocks bare private IPs and obvious loopback hostnames but, by its
  * own admission, never resolves DNS. That leaves the real hole: a perfectly
  * public hostname whose A/AAAA record points at `169.254.169.254` (cloud
  * metadata), `10.x`, `::1`, etc. `assertSafeUrl` closes it by resolving the
@@ -18,25 +18,21 @@
  */
 
 import { lookup } from 'node:dns/promises';
+import type { LookupAddress, LookupOptions } from 'node:dns';
 import { isIP } from 'node:net';
+import { Agent } from 'undici';
 import { env } from '../config/env.js';
 import { RekeyError } from './error.js';
 
-// IPv4 ranges that must never be reachable from a user-supplied URL:
-// private (10/8, 172.16/12, 192.168/16), loopback (127/8), link-local +
-// cloud-metadata (169.254/16), CGNAT (100.64/10), "this network" (0/8), and
-// multicast/reserved (224-255). Tested with a trailing '.' so prefixes anchor.
-const PRIVATE_IPV4_RE =
-  /^(?:10\.|127\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[0-1])\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|0\.|22[4-9]\.|2[3-5]\d\.)/;
 
 /**
- * Parse any textual IP to its bytes — 4 for v4, 16 for v6 — or null.
+ * Parse any textual IP to its bytes, 4 for v4, 16 for v6, or null.
  *
  * Everything below range-checks these bytes. The previous implementation
  * compared STRINGS, and string comparison lost twice: first to the
  * translation prefixes that embed an IPv4 address (`64:ff9b::7f00:1` does not
  * look like loopback), and then, after that was patched, to the uncompressed
- * spelling of the very same address — `0:0:0:0:0:ffff:127.0.0.1` sailed past a
+ * spelling of the very same address, `0:0:0:0:0:ffff:127.0.0.1` sailed past a
  * check that only recognised `::ffff:127.0.0.1`.
  *
  * That second miss was reachable: `assertSafeHost` takes a raw host string and
@@ -56,7 +52,7 @@ function ipToBytes(ip: string): Uint8Array | null {
   if (version !== 6) return null;
 
   let text = ip.toLowerCase();
-  // A trailing dotted quad (::ffff:127.0.0.1) — rewrite it to two hex groups.
+  // A trailing dotted quad (::ffff:127.0.0.1), rewrite it to two hex groups.
   const dotted = text.match(/^(.*:)(\d+\.\d+\.\d+\.\d+)$/);
   if (dotted) {
     const quad = dotted[2]!.split('.').map(Number);
@@ -129,7 +125,7 @@ function isPrivateV6Bytes(b: Uint8Array): boolean {
   if (b0 === 0xfe && (b1 & 0xc0) === 0x80) return true;        // link-local fe80::/10
   if (b0 === 0xfe && (b1 & 0xc0) === 0xc0) return true;        // deprecated site-local fec0::/10
 
-  // Forms that EMBED an IPv4 address — decode and judge the embedded address,
+  // Forms that EMBED an IPv4 address, decode and judge the embedded address,
   // rather than blocking the prefix, so legitimate public v4 reached this way
   // keeps working.
   const embedded = (o: number): Uint8Array => b.slice(o, o + 4);
@@ -140,7 +136,7 @@ function isPrivateV6Bytes(b: Uint8Array): boolean {
   if (b0 === 0x00 && b1 === 0x64 && b[2] === 0xff && b[3] === 0x9b) {
     return isPrivateV4Bytes(embedded(12));
   }
-  // 6to4 2002::/16 — the v4 lives in bytes 2..5
+  // 6to4 2002::/16, the v4 lives in bytes 2..5
   if (b0 === 0x20 && b1 === 0x02) return isPrivateV4Bytes(embedded(2));
   return false;
 }
@@ -154,7 +150,7 @@ export function isPrivateIp(ip: string): boolean {
 export interface SafeUrlOptions {
   /**
    * Permit private/loopback targets. Defaults to the
-   * `WEBHOOK_ALLOW_PRIVATE_TARGETS` env flag — the escape hatch for
+   * `WEBHOOK_ALLOW_PRIVATE_TARGETS` env flag, the escape hatch for
    * self-hosters whose webhook receivers / IdPs live on a private network.
    */
   allowPrivate?: boolean;
@@ -170,14 +166,9 @@ function blocked(reason: string): RekeyError {
 }
 
 /**
- * Resolve a URL's host and assert it is a public destination. Throws
- * `SSRF_BLOCKED` for a non-http(s) scheme, a loopback hostname, a DNS failure,
- * or any resolved address in a private/loopback/link-local range.
- */
-/**
  * Reject a host:port pair that resolves anywhere non-public.
  *
- * Same DNS-level check as `assertSafeUrl`, minus the URL parsing — for
+ * Same DNS-level check as `assertSafeUrl`, minus the URL parsing, for
  * protocols that are not http(s) and therefore have no URL to parse. Today
  * that is operator-supplied SMTP, which was previously connected to with no
  * check at all: a workspace admin could point it at `127.0.0.1:6379` or
@@ -215,7 +206,7 @@ export async function assertSafeHost(host: string, options: SafeUrlOptions = {})
  *
  * The addresses are the point. Checking a hostname and then handing the raw
  * URL to `fetch` lets the runtime re-resolve independently, so a record with a
- * short TTL that alternates public and private wins the race — the classic
+ * short TTL that alternates public and private wins the race, the classic
  * DNS-rebinding TOCTOU. The caller is expected to pin the connection to one of
  * these, which `webhook.service.ts` does via an undici dispatcher.
  *
@@ -246,7 +237,7 @@ export async function assertSafeUrlResolved(
     throw blocked('loopback hostnames are not allowed.');
   }
 
-  // Resolve EVERY address the host maps to and reject if any is private — this
+  // Resolve EVERY address the host maps to and reject if any is private, this
   // is the DNS-level check the synchronous filter can't do.
   let results: Array<{ address: string }>;
   try {
@@ -268,6 +259,64 @@ export async function assertSafeUrlResolved(
     }
   }
   return results.map((r) => r.address);
+}
+
+/**
+ * Fetch options that pin the connection to a pre-validated address set.
+ *
+ * `assertSafeUrlResolved` resolves the host and approves its addresses; the
+ * socket must then go to one of THEM, not to whatever a second DNS query
+ * answers a moment later (rebinding: a short-TTL record that flips from a
+ * public address to an internal one between the check and the connect). The
+ * dispatcher's `lookup` answers only from the validated set. TLS still
+ * validates against the original hostname, because undici keeps the URL's
+ * servername; pinning the address is not the same as connecting by IP.
+ *
+ * Built per call rather than cached: the validated set is specific to this
+ * attempt, and a pool keyed on the host would outlive it. Spread the result
+ * into the `fetch` init. An empty set yields no override, which happens only
+ * when the guard was told to allow private targets and so approved the host
+ * without resolving it (`allowPrivate`, or WEBHOOK_ALLOW_PRIVATE_TARGETS).
+ *
+ * The agent is configured to drop its socket as soon as the response is read.
+ * Nothing can destroy it, the helper hands back only the init, and undici
+ * otherwise honours the REMOTE server's keep-alive hint for up to ten minutes,
+ * so a per-call agent that kept its socket would leave one idle connection per
+ * fetch: three per OIDC sign-in, one per webhook delivery. There is no reuse to
+ * lose, because the next call builds a new agent anyway.
+ */
+export function pinnedFetchInit(allowed: readonly string[]): RequestInit {
+  if (allowed.length === 0) return {};
+  const dispatcher = new Agent({
+    connections: 1,
+    keepAliveTimeout: 1,
+    keepAliveMaxTimeout: 1,
+    connect: {
+      lookup: (
+        _hostname: string,
+        options: LookupOptions,
+        callback: (
+          err: NodeJS.ErrnoException | null,
+          address: string | LookupAddress[],
+          family?: number,
+        ) => void,
+      ): void => {
+        const entries = allowed.map((address) => ({
+          address,
+          family: address.includes(':') ? 6 : 4,
+        }));
+        if (options.all) {
+          callback(null, entries);
+          return;
+        }
+        const first = entries[0]!;
+        callback(null, first.address, first.family);
+      },
+    },
+  });
+  // `dispatcher` is not in the DOM RequestInit that TS resolves here; Node's
+  // fetch accepts it and undici reads it.
+  return { dispatcher } as unknown as RequestInit;
 }
 
 /** Back-compat wrapper for callers that do not pin the connection. */

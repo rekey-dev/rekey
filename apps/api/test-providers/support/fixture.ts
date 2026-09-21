@@ -1,7 +1,7 @@
 /**
  * The Rekey side of a sandbox test: a real tenant, a real Application with
  * real BYO provider credentials, a real end-user, and the two things every
- * suite needs — a way to call the public billing API as that end-user, and a
+ * suite needs, a way to call the public billing API as that end-user, and a
  * way to hand the API an event the provider genuinely emitted.
  *
  * Everything here goes through the product's own services and routes. The one
@@ -14,10 +14,10 @@
  * laptop or a CI runner has no public URL, and standing up a tunnel would make
  * the harness depend on a third service to test the second one.
  *
- * So `deliverStripeEvent` takes an event **retrieved from the Stripe API** —
+ * So `deliverStripeEvent` takes an event **retrieved from the Stripe API**,
  * `stripe.events.list` / `events.retrieve`, i.e. the exact object Stripe would
  * have delivered, byte for byte, including every field Stripe chose to
- * populate — and signs it with the Application's own stored webhook secret
+ * populate, and signs it with the Application's own stored webhook secret
  * before POSTing it at the local server.
  *
  * What that does and does not prove:
@@ -53,10 +53,10 @@ export interface SandboxFixture {
   tenantToken: string;
   applicationId: string;
   applicationSlug: string;
-  /** Secret API key — the `Authorization: Bearer` for the public billing API. */
+  /** Secret API key, the `Authorization: Bearer` for the public billing API. */
   liveKey: string;
   endUserId: string;
-  /** End-user session token — the `x-rekey-user-token` header. */
+  /** End-user session token, the `x-rekey-user-token` header. */
   userToken: string;
   /**
    * The webhook signing secret stored against this Application.
@@ -75,7 +75,7 @@ let sharedApp: FastifyInstance | null = null;
  * One Fastify instance for the whole run.
  *
  * Building the app is the most expensive thing in a sandbox test that is not a
- * network call, and nothing in it holds per-test state — the truncation in
+ * network call, and nothing in it holds per-test state, the truncation in
  * `setup.ts` is what isolates tests.
  */
 export async function sandboxApp(): Promise<FastifyInstance> {
@@ -170,7 +170,7 @@ export async function createFixture(label: string): Promise<SandboxFixture> {
  * would through Panel → Application → Billing.
  *
  * The service encrypts with `ENCRYPTION_KEY`, which the harness's global setup
- * always sets — so a real `sk_test_` key is never at rest in the harness
+ * always sets, so a real `sk_test_` key is never at rest in the harness
  * database in plaintext, even though the database is thrown away afterwards.
  */
 export async function configureStripe(
@@ -200,7 +200,7 @@ export async function configureProvider(
  * The response `app.inject` resolves to.
  *
  * `ReturnType<FastifyInstance['inject']>` picks the chainable overload, which
- * is not what an awaited call gives back — hence the `Awaited`.
+ * is not what an awaited call gives back, hence the `Awaited`.
  */
 export type InjectResponse = Awaited<ReturnType<FastifyInstance['inject']>>;
 
@@ -281,8 +281,8 @@ export async function deliverStripeEvent(
  * Wait for Stripe to publish the events a just-performed action produces, and
  * return them oldest-first.
  *
- * Event publication is asynchronous and not instant — an `invoice.paid` can
- * trail the API call that caused it by a second or two — so this polls rather
+ * Event publication is asynchronous and not instant, an `invoice.paid` can
+ * trail the API call that caused it by a second or two, so this polls rather
  * than reading once. `match` picks the events belonging to THIS test out of
  * the account-wide feed, which matters because a sandbox is shared.
  */

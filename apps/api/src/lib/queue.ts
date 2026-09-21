@@ -10,7 +10,7 @@
  * Redis + BullMQ are REQUIRED in every real runtime: the server refuses to
  * start if Redis is unreachable (see startWebhookWorker), because webhook
  * delivery must go through the shared queue for multi-replica / microservice
- * deployments — there is no process-local scheduling fallback in production.
+ * deployments, there is no process-local scheduling fallback in production.
  * `isQueueEnabled()` is false ONLY under test, where the suite is single-process
  * and runs delivery via an in-process timer (see webhook.service.ts), matching
  * the rate-limiter's test-Redis-free convention.
@@ -25,14 +25,14 @@ export function isQueueEnabled(): boolean {
 
 /**
  * A fresh ioredis connection configured the way BullMQ needs. Each BullMQ
- * primitive (Queue, Worker) should get its own — the Worker holds a blocking
+ * primitive (Queue, Worker) should get its own, the Worker holds a blocking
  * connection and must not share it with the Queue.
  */
 export function createQueueRedis(): Redis {
   const client = new Redis(env.REDIS_URL, {
     // BullMQ contract: blocking commands break with a finite retry cap.
     maxRetriesPerRequest: null,
-    // Let commands queue while (re)connecting rather than throwing — queue
+    // Let commands queue while (re)connecting rather than throwing, queue
     // work is background, so a brief reconnect should buffer, not fail.
     enableOfflineQueue: true,
   });

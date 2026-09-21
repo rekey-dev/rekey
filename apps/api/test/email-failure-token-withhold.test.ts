@@ -2,8 +2,8 @@
  * A FAILED email send must never hand back the raw token.
  *
  * The bug this pins: `{kind:'error'}` (lapsed Resend key, blown quota, network
- * blip) used to fall into the same branch as `{kind:'no_transport'}` — the
- * documented "your server forwards it" contract — so the moment mail broke,
+ * blip) used to fall into the same branch as `{kind:'no_transport'}`, the
+ * documented "your server forwards it" contract, so the moment mail broke,
  * every reset / magic-link / verification request started returning a live
  * credential in the JSON body while still answering 200.
  *
@@ -16,7 +16,7 @@
  * an operator can tell "we mailed it" from "mail is down". Only an existing user
  * reaches either branch, so that field discloses nothing about which addresses
  * have accounts. The field that DOES vary with existence is `delivered`, on the
- * unknown-address path — a pre-existing property of the response contract,
+ * unknown-address path, a pre-existing property of the response contract,
  * documented on `requestPasswordReset` and deliberately not changed here.
  */
 
@@ -70,7 +70,7 @@ describe('failed email send withholds the token', () => {
     applicationId = application.id;
 
     // `magic-link/request` refuses with 400 unless the method is enabled, which
-    // would make the magic-link cases below pass vacuously — the route would
+    // would make the magic-link cases below pass vacuously, the route would
     // never reach the branch under test. Merge into the stored config rather
     // than replacing it: a partial authConfig written straight through Prisma
     // bypasses validation and then 400s whichever route parses it next.
@@ -163,7 +163,7 @@ describe('failed email send withholds the token', () => {
       expect(failedBody[c.field]).toBeNull();
       expect(sentBody[c.field]).toBeNull();
 
-      // Same status and same `delivered` — the two fields a prober could use to
+      // Same status and same `delivered`, the two fields a prober could use to
       // learn whether this address has an account. `emailSent` is deliberately
       // NOT compared: it reports transport health, and only an existing user
       // reaches either branch, so it discloses nothing about existence.

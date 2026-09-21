@@ -21,6 +21,7 @@ import {
 import { stripeModule } from '../src/modules/billing/providers/modules/stripe/index.js';
 import { razorpayModule } from '../src/modules/billing/providers/modules/razorpay/index.js';
 import { paypalModule } from '../src/modules/billing/providers/modules/paypal/index.js';
+import { externalModule } from '../src/modules/billing/providers/modules/external/index.js';
 
 const modulesDir = fileURLToPath(
   new URL('../src/modules/billing/providers/modules/', import.meta.url),
@@ -38,19 +39,41 @@ describe('billing provider-module registry', () => {
     }
   });
 
-  it('registers all three built-in providers (P2)', () => {
-    expect([...registryNames].sort()).toEqual(['paypal', 'razorpay', 'stripe']);
+  it('registers the three hosted providers (P2) and the inbound-only external one', () => {
+    expect([...registryNames].sort()).toEqual(['external', 'paypal', 'razorpay', 'stripe']);
   });
 
   it('exposes a zod enum derived from the registry', () => {
     expect(providerNameSchema.safeParse('stripe').success).toBe(true);
     expect(providerNameSchema.safeParse('razorpay').success).toBe(true);
     expect(providerNameSchema.safeParse('paypal').success).toBe(true);
+    expect(providerNameSchema.safeParse('external').success).toBe(true);
     expect(providerNameSchema.safeParse('visa').success).toBe(false);
   });
 
+  it('every module states whether it hosts a checkout; only external does not', () => {
+    for (const name of registryNames) {
+      expect(typeof getModule(name)!.capabilities.checkout, `${name}.capabilities.checkout`).toBe(
+        'boolean',
+      );
+    }
+    expect(registryNames.filter((n) => getModule(n)!.capabilities.checkout === false)).toEqual([
+      'external',
+    ]);
+  });
+
+  it('the external module blocks checkout for every plan and cannot auto-register a webhook', () => {
+    // Nothing plan-specific goes into the decision; the module cannot host a
+    // checkout for anything, so the readiness view reports it on every plan.
+    const blocker = externalModule.planCheckoutBlocker!({ slug: 'any' } as never);
+    expect(blocker?.code).toBe('PROVIDER_INBOUND_ONLY');
+    expect(externalModule.capabilities.autoWebhookRegister).toBe(false);
+    expect(externalModule.capabilities.onlineVerify).toBe(false);
+    expect(externalModule.detectMode).toBeUndefined();
+  });
+
   it('every module declares at most one webhookRole field', () => {
-    // The pipeline's 503 gate checks a single field by design — a module
+    // The pipeline's 503 gate checks a single field by design, a module
     // declaring two would silently leave the second unchecked.
     for (const name of registryNames) {
       const fields = getModule(name)!.credentialSchema.filter((f) => f.webhookRole);
@@ -90,6 +113,43 @@ describe('billing provider-module registry', () => {
     );
   });
 
+  it('external credentialSchema is one REQUIRED signing secret plus the optional pull pair', () => {
+    // The signing secret is the whole inbound half and stays mandatory. The
+    // two pull fields were added for the subscription import and are OPTIONAL
+    // on purpose: an Application that only ever RECEIVES events needs neither,
+    // and leaving them blank must make the import unavailable rather than make
+    // the credential invalid.
+    expect(externalModule.credentialSchema.map((f) => f.key)).toEqual([
+      'webhookSecret',
+      'subscriptionsUrl',
+      'pullToken',
+    ]);
+    const field = externalModule.credentialSchema[0]!;
+    expect(field.secret).toBe(true);
+    expect(field.webhookRole).toBe('secret');
+    expect(field.optional).toBeUndefined();
+
+    const [, url, token] = externalModule.credentialSchema;
+    expect(url!.optional).toBe(true);
+    expect(token!.optional).toBe(true);
+    // The pull token is a bearer credential for somebody else's endpoint, so
+    // it must never be echoed back to the panel; the URL is not a secret and
+    // has to stay readable or an operator cannot see what they configured.
+    expect(token!.secret).toBe(true);
+    expect(url!.secret).toBe(false);
+
+    // A short HMAC key is guessable; the floor is enforced by the shared
+    // credential rules, not by the panel.
+    const rules = credentialRulesSchema(externalModule);
+    expect(rules.safeParse({ webhookSecret: 'short' }).success).toBe(false);
+    expect(rules.safeParse({ webhookSecret: 'x'.repeat(32) }).success).toBe(true);
+    // And the optional pair really is optional, the secret alone still validates.
+    expect(
+      rules.safeParse({ webhookSecret: 'x'.repeat(32), subscriptionsUrl: 'http://insecure.example' })
+        .success,
+    ).toBe(false);
+  });
+
   it('paypal credentialSchema matches the stored credential JSON keys exactly', () => {
     // PaypalCredentials in credentials.service.ts is
     // { clientId, clientSecret, webhookId }.
@@ -123,7 +183,7 @@ describe('billing provider-module registry', () => {
 
   it('every in-tree module states its discount support explicitly', () => {
     // `capabilities.discounts` is optional in the type so a module written
-    // before it keeps compiling, and absent resolves to "cannot" — but an
+    // before it keeps compiling, and absent resolves to "cannot", but an
     // in-tree module has no excuse for staying silent. Forgetting it here
     // would silently stop every coupon on that provider.
     for (const name of registryNames) {
@@ -132,7 +192,7 @@ describe('billing provider-module registry', () => {
   });
 
   it('only stripe can discount a recurring subscription', () => {
-    // Not a preference — PayPal Subscriptions v1 and Razorpay Subscriptions
+    // Not a preference, PayPal Subscriptions v1 and Razorpay Subscriptions
     // have no per-checkout discount surface at all, so checkout refuses the
     // coupon there rather than billing full price. See the module descriptors.
     expect(stripeModule.capabilities.discounts).toEqual({ oneTime: true, recurring: true });
@@ -142,12 +202,13 @@ describe('billing provider-module registry', () => {
 });
 
 describe('credentialSchema-driven validation (P3)', () => {
-  // Known-good fixture creds per provider — the same shapes the webhook and
+  // Known-good fixture creds per provider, the same shapes the webhook and
   // phase4 test suites store via the credential routes.
   const goodCreds: Record<string, Record<string, string>> = {
     stripe: { apiKey: 'sk_test_abc123', webhookSecret: 'whsec_abc123' },
     razorpay: { keyId: 'rzp_test_abc123', keySecret: 'secret_abc', webhookSecret: 'wh_secret' },
     paypal: { clientId: 'client_abc123', clientSecret: 'secret_abc123', webhookId: 'wh_id_123' },
+    external: { webhookSecret: 'a-signing-secret-of-at-least-32-characters' },
   };
 
   it('credentialRulesSchema accepts each provider\'s known-good creds', () => {
@@ -243,7 +304,7 @@ describe('credentialSchema-driven validation (P3)', () => {
     // The load-bearing half: an unrecognised shape is null, NOT 'test'.
     // Returning 'test' here would record an unknown-but-live credential as
     // sandbox, which is what the panel badge, the revenue stats and dunning
-    // all read — a wrong answer about real money, dressed as a safe default.
+    // all read, a wrong answer about real money, dressed as a safe default.
     expect(stripeModule.detectMode?.({ apiKey: 'rk_live_restricted', webhookSecret: '' })).toBeNull();
     expect(stripeModule.detectMode?.({ apiKey: '', webhookSecret: '' })).toBeNull();
     expect(razorpayModule.detectMode?.({ keyId: 'something_else' })).toBeNull();
@@ -270,20 +331,25 @@ describe('discovery projection (P4)', () => {
       expect(d.name).toBe(name);
       expect(d.label.length).toBeGreaterThan(0);
       expect(d.docsUrl).toMatch(/^https:\/\//);
-      expect(Object.keys(d.capabilities).sort()).toEqual([
-        'autoWebhookRegister',
-        'captureStep',
-        'discounts',
-        'oneTime',
-        'onlineVerify',
-        'periodRotationEvents',
-        // Reaches clients deliberately: the panel decides whether to offer a
-        // refund button from this, and a button for a provider that cannot
-        // refund is one an operator presses after promising a customer their
-        // money back.
-        'refunds',
-        'trials',
-      ]);
+      expect(Object.keys(d.capabilities).sort()).toEqual(
+        [
+          'autoWebhookRegister',
+          'captureStep',
+          // The panel hides routing fields and the checkout copy for a module
+          // that cannot host one.
+          'checkout',
+          'discounts',
+          'oneTime',
+          'onlineVerify',
+          'periodRotationEvents',
+          // Reaches clients deliberately: the panel decides whether to offer a
+          // refund button from this, and a button for a provider that cannot
+          // refund is one an operator presses after promising a customer their
+          // money back.
+          ...(name === 'external' ? [] : ['refunds']),
+          'trials',
+        ].sort(),
+      );
     }
   });
 

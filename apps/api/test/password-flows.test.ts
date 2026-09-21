@@ -1,5 +1,5 @@
 /**
- * Password reset, change, sign-out-everywhere — the "auth completeness"
+ * Password reset, change, sign-out-everywhere, the "auth completeness"
  * surface. Each test exercises an HTTP path end-to-end, including the
  * cross-application guards and the "revoke all refresh tokens on
  * password change" semantics that the docs promise.
@@ -105,7 +105,7 @@ describe('password flows + sign-out-everywhere', () => {
 
   it('forgot-password NEVER returns the raw token to a publishable key', async () => {
     // Regression: the publishable key ships in browser code, so handing it the
-    // reset token let anyone holding it take over any end-user account —
+    // reset token let anyone holding it take over any end-user account,
     // forgot-password → reset-password → sign-in, no email access needed.
     // A secret-key caller keeps the legacy raw-token contract (asserted above).
     await signUp(appA, 'pubkey-reset@example.com');
@@ -136,10 +136,10 @@ describe('password flows + sign-out-everywhere', () => {
 
   it('magic-link/request NEVER returns the raw token to a publishable key', async () => {
     // Same leak class as the reset-token regression above, higher stakes: a
-    // magic-link token IS a session — verifying it signs the holder in with no
+    // magic-link token IS a session, verifying it signs the holder in with no
     // password step at all.
     await signUp(appA, 'pubkey-magic@example.com');
-    // Enable magic_link. Direct DB mutation matching the audit-3 pattern —
+    // Enable magic_link. Direct DB mutation matching the audit-3 pattern,
     // exercising the authConfig edit API is incidental here, and a partial
     // authConfig payload fails validation (the whole object is replaced).
     await prisma.application.update({

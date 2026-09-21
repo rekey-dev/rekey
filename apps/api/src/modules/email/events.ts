@@ -3,7 +3,7 @@
  *
  * Each event maps to a stable string key (used as `EmailTemplate.eventKey`
  * column) and a *fixed* list of variable names it expects. The renderer
- * trusts only these variables — anything else passed at send-time is
+ * trusts only these variables, anything else passed at send-time is
  * dropped. This keeps the substitution surface small and predictable: no
  * arbitrary expressions, no helper functions, just `{{var}}` lookups.
  *
@@ -11,8 +11,8 @@
  * HTML/subject pair in `defaults/`, (3) call `emailService.dispatch(...)` (or
  * `dispatchSystem(...)` for mail with no Application) from the relevant flow.
  *
- * Variable values are always HTML-escaped at render time (see `render.ts`)
- * — never interpolate raw HTML from user-supplied strings.
+ * Variable values are always HTML-escaped at render time (see `render.ts`),
+ * never interpolate raw HTML from user-supplied strings.
  */
 
 export type EmailEventKey =
@@ -118,7 +118,7 @@ export const EMAIL_EVENTS: Record<EmailEventKey, EmailEventDef> = {
       graceEndsAtIso: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
     },
   },
-  // Addressed to the OPERATOR, not to a buyer — the only event here that is.
+  // Addressed to the OPERATOR, not to a buyer, the only event here that is.
   // It reports money the operator has received and Rekey could not attribute,
   // and asks them to decide what happens to it.
   billing_unapplied_payment: {

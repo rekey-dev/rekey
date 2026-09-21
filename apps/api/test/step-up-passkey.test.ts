@@ -9,7 +9,7 @@
  * Enrollment used to be secret-key-only for exactly that reason. That was the safe
  * holding position, not a fix: it made the flow unreachable from a browser-only app
  * while doing nothing about a stolen token on a server-side one. The control is now
- * a step-up — the caller re-proves identity with something the token does not carry.
+ * a step-up, the caller re-proves identity with something the token does not carry.
  *
  * These tests pin the property that matters: **a valid access token alone is not
  * enough.**
@@ -97,7 +97,7 @@ describe('passkey enrollment step-up', () => {
 
   it('the correct password gets a browser through to the ceremony', async () => {
     const res = await start(publicKey, { password: PASSWORD });
-    // No WebAuthn config on this app, so the ceremony refuses on CONFIG — which
+    // No WebAuthn config on this app, so the ceremony refuses on CONFIG, which
     // proves the step-up passed and we reached the handler.
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('WEBAUTHN_NOT_CONFIGURED');
@@ -114,7 +114,7 @@ describe('passkey enrollment step-up', () => {
   it('an account with no password and no MFA is told why it cannot step up', async () => {
     // OAuth-only user: the access token is its ONLY credential, so no challenge we
     // could issue would tell the owner apart from someone holding a stolen token.
-    // Refusing beats waving it through — waving it through IS the takeover.
+    // Refusing beats waving it through, waving it through IS the takeover.
     const { assertStepUp } = await import('../src/lib/step-up.js');
     const application = await prisma.application.findFirstOrThrow({
       orderBy: { createdAt: 'desc' },

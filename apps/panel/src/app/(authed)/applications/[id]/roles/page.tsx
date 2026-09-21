@@ -14,7 +14,7 @@
  */
 
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import {
   errorQuery,
@@ -26,6 +26,7 @@ import {
   type OrganizationRoleRow,
 } from '@/lib/api';
 import { ApiErrorText } from '@/components/api-error';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
 import { Modal } from '@/components/Modal';
@@ -44,7 +45,6 @@ const rowDanger = 'text-xs text-red-600 dark:text-red-400 hover:underline cursor
 
 const pageUrl = (id: string): string => `/applications/${id}/roles`;
 
-// ─── Application-role actions ────────────────────────────────────────
 
 async function createAppRole(applicationId: string, formData: FormData): Promise<void> {
   'use server';
@@ -104,7 +104,6 @@ async function deleteAppRole(
   redirect(`${pageUrl(applicationId)}?appRoleDeleted=${encodeURIComponent(name)}`);
 }
 
-// ─── Organization-role actions ───────────────────────────────────────
 
 async function createOrgRole(applicationId: string, formData: FormData): Promise<void> {
   'use server';
@@ -185,7 +184,6 @@ async function deleteOrgRole(
   redirect(`${pageUrl(applicationId)}?orgRoleDeleted=${encodeURIComponent(name)}`);
 }
 
-// ─── Errors ──────────────────────────────────────────────────────────
 
 const ERR: Record<string, string> = {
   missing: 'Name is required.',
@@ -220,7 +218,6 @@ const ERR: Record<string, string> = {
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage roles.',
 };
 
-// ─── Page ────────────────────────────────────────────────────────────
 
 export default async function RolesPage({
   params,
@@ -380,11 +377,11 @@ export default async function RolesPage({
                 <TD align="right">
                   <div className="flex items-center justify-end gap-3">
                     {!r.isDefault && (
-                      <form action={setAppRoleDefault.bind(null, id, r.name)} className="inline">
+                      <ActionForm action={setAppRoleDefault.bind(null, id, r.name)} className="inline">
                         <SubmitButton pendingLabel="Saving…" className={rowAction}>
                           Make default
                         </SubmitButton>
-                      </form>
+                      </ActionForm>
                     )}
                     {!r.isDefault && (
                       <DeleteRoleModal
@@ -499,14 +496,14 @@ export default async function RolesPage({
                 <TD align="right">
                   <div className="flex items-center justify-end gap-3">
                     {orgsEnabled && !r.isDefault && !r.disabled && (
-                      <form action={setOrgRoleDefault.bind(null, id, r.name)} className="inline">
+                      <ActionForm action={setOrgRoleDefault.bind(null, id, r.name)} className="inline">
                         <SubmitButton pendingLabel="Saving…" className={rowAction}>
                           Make default
                         </SubmitButton>
-                      </form>
+                      </ActionForm>
                     )}
                     {orgsEnabled && !r.isDefault && (
-                      <form
+                      <ActionForm
                         action={setOrgRoleDisabled.bind(null, id, r.name, !r.disabled)}
                         className="inline"
                       >
@@ -516,7 +513,7 @@ export default async function RolesPage({
                         >
                           {r.disabled ? 'Enable' : 'Disable'}
                         </SubmitButton>
-                      </form>
+                      </ActionForm>
                     )}
                     {orgsEnabled && !r.isBuiltIn && !r.isDefault && (
                       <DeleteRoleModal
@@ -558,7 +555,6 @@ export default async function RolesPage({
   );
 }
 
-// ─── Modals ──────────────────────────────────────────────────────────
 
 /**
  * One delete flow for both catalogs. `reassignTo` is optional: leave it blank
@@ -587,7 +583,7 @@ function DeleteRoleModal({
       trigger="Delete"
       triggerClassName={rowDanger}
     >
-      <form action={action.bind(null, applicationId, name)} className="space-y-3">
+      <ActionForm action={action.bind(null, applicationId, name)} className="space-y-3">
         <label className="block space-y-1">
           <span className="text-xs font-medium">Move current holders to</span>
           <select name="reassignTo" defaultValue="" className={inputCls}>
@@ -610,7 +606,7 @@ function DeleteRoleModal({
         >
           Delete role
         </SubmitButton>
-      </form>
+      </ActionForm>
     </Modal>
   );
 }
@@ -632,7 +628,7 @@ function NewAppRoleModal({
       trigger="+ New application role"
       triggerClassName="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-surface-muted)] whitespace-nowrap"
     >
-      <form action={createAppRole.bind(null, applicationId)} className="space-y-3">
+      <ActionForm action={createAppRole.bind(null, applicationId)} className="space-y-3">
         {error && (
           <Banner tone="error">
             <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
@@ -674,7 +670,7 @@ function NewAppRoleModal({
           <span className="text-xs">Make this the default role for new sign-ups</span>
         </label>
         <SubmitButton pendingLabel="Adding role…">Add role</SubmitButton>
-      </form>
+      </ActionForm>
     </Modal>
   );
 }
@@ -696,7 +692,7 @@ function NewOrgRoleModal({
       trigger="+ New organization role"
       triggerClassName="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-surface-muted)] whitespace-nowrap"
     >
-      <form action={createOrgRole.bind(null, applicationId)} className="space-y-3">
+      <ActionForm action={createOrgRole.bind(null, applicationId)} className="space-y-3">
         {error && (
           <Banner tone="error">
             <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
@@ -744,7 +740,7 @@ function NewOrgRoleModal({
           />
         </label>
         <SubmitButton pendingLabel="Creating role…">Create role</SubmitButton>
-      </form>
+      </ActionForm>
     </Modal>
   );
 }

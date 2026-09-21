@@ -13,7 +13,7 @@
  * key) and the MCP resource server at `POST /:slug` (end-user MCP access token).
  *
  * Responses use the standard OAuth/RFC JSON shapes (top-level fields), NOT the
- * Rekey `{ success, data }` envelope — MCP/OAuth/OIDC clients expect the spec
+ * Rekey `{ success, data }` envelope, MCP/OAuth/OIDC clients expect the spec
  * shape.
  */
 
@@ -46,6 +46,7 @@ import { requireApiKey } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
+import { CLIENT_REGISTRATION_BODY_LIMIT, TOKEN_BODY_LIMIT } from '../../lib/body-limits.js';
 
 const SlugParam = z.object({ slug: z.string().min(1).max(40) });
 
@@ -66,11 +67,11 @@ const GrantBody = z.object({
 });
 
 // ---------------------------------------------------------------------------
-// Response fragments — RFC-shaped bodies, NOT the Rekey `{success, data}`
+// Response fragments, RFC-shaped bodies, NOT the Rekey `{success, data}`
 // envelope. See the module header: MCP/OAuth/OIDC clients expect the spec
 // shape, so `ok()`/`errs()` (the Rekey envelope) would misdescribe them. The
 // 404s these operations *can* still return (the app is missing or the
-// relevant `authConfig` toggle is off — see `resolveApp` in oauth.service.ts)
+// relevant `authConfig` toggle is off, see `resolveApp` in oauth.service.ts)
 // ARE the Rekey envelope, because that gate throws a `RekeyError` before any
 // OAuth/OIDC logic runs.
 // ---------------------------------------------------------------------------
@@ -101,7 +102,7 @@ const ProtectedResourceMetadata: JsonSchema = {
 
 /**
  * OIDC Discovery 1.0 document. A superset of the `OAuthAuthServerMetadata`
- * component (same issuer/endpoints) plus OIDC-only fields — declared inline
+ * component (same issuer/endpoints) plus OIDC-only fields, declared inline
  * rather than via `ref()` because the component does not model the OIDC
  * fields (`userinfo_endpoint`, `jwks_uri`, `claims_supported`, ...).
  */
@@ -132,7 +133,7 @@ const OpenIdConfiguration: JsonSchema = {
   required: ['issuer', 'authorization_endpoint', 'token_endpoint', 'userinfo_endpoint', 'jwks_uri'],
 };
 
-/** RFC 7591 dynamic client registration response. Public client — no secret is issued. */
+/** RFC 7591 dynamic client registration response. Public client, no secret is issued. */
 const ClientRegistrationResponse: JsonSchema = {
   type: 'object',
   properties: {
@@ -165,14 +166,14 @@ const TokenResponse: JsonSchema = {
     id_token: {
       type: 'string',
       description:
-        'Present only when `openid` was granted, and only on the authorization_code grant — ' +
+        'Present only when `openid` was granted, and only on the authorization_code grant, ' +
         'never on a refresh.',
     },
   },
   required: ['access_token', 'token_type', 'expires_in', 'refresh_token', 'scope'],
 };
 
-/** RFC 6749 §5.2 error body — the shape every OAuth/OIDC failure in this file uses. */
+/** RFC 6749 §5.2 error body, the shape every OAuth/OIDC failure in this file uses. */
 function oauthError(description: string): JsonSchema {
   return {
     description,
@@ -209,7 +210,7 @@ const JsonRpcSuccess: JsonSchema = {
   type: 'object',
   properties: {
     jsonrpc: { type: 'string', enum: ['2.0'] },
-    id: { description: 'Echoes the request id — string, number, or null.' },
+    id: { description: 'Echoes the request id, string, number, or null.' },
     result: {
       description:
         'Present on success. Shape depends on the method (initialize / tools/list / tools/call / ping).',
@@ -222,7 +223,7 @@ const JsonRpcFailure: JsonSchema = {
   type: 'object',
   properties: {
     jsonrpc: { type: 'string', enum: ['2.0'] },
-    id: { description: 'Echoes the request id — string, number, or null.' },
+    id: { description: 'Echoes the request id, string, number, or null.' },
     error: {
       type: 'object',
       properties: { code: { type: 'integer' }, message: { type: 'string' } },
@@ -236,8 +237,8 @@ const JsonRpcFailure: JsonSchema = {
  * `POST /:slug` responds with one JSON-RPC 2.0 message when the request body
  * was a single message, or an array of them (in order) when it was a batch.
  * A `tools/call` failure (unknown tool, or the tool's own handler throwing)
- * is carried as a JSON-RPC **result** with `isError: true` — see
- * `handleMcpMessage` — not as a JSON-RPC `error`; `error` is reserved for
+ * is carried as a JSON-RPC **result** with `isError: true`, see
+ * `handleMcpMessage`, not as a JSON-RPC `error`; `error` is reserved for
  * protocol-level failures (unknown method, bad params).
  */
 const McpJsonRpcResponse: JsonSchema = {
@@ -265,7 +266,7 @@ interface AuthorizeParams {
 
 /**
  * What each grantable scope actually gives the client, for the consent screen.
- * A consent page that doesn't say what is being consented to isn't consent —
+ * A consent page that doesn't say what is being consented to isn't consent,
  * and with OIDC the same form now covers "read my account through an AI tool"
  * and "let this site sign me in", which are not the same decision.
  */
@@ -283,7 +284,7 @@ const SCOPE_DESCRIPTIONS: Record<string, string> = {
  * The deployment-wide policy is `form-action 'self'`, and browsers enforce
  * `form-action` ACROSS THE REDIRECT that follows a submission. This page is
  * served by the API and its whole purpose is to redirect to the relying
- * party's `redirect_uri` on another origin — so the browser silently refused
+ * party's `redirect_uri` on another origin, so the browser silently refused
  * the navigation. The server issued a correct 302 and nothing happened: no
  * error page, no console message except a CSP violation, and every headless
  * test passed because curl does not enforce CSP.
@@ -328,7 +329,7 @@ function authorizePageCsp(redirectUri: string, nonce: string): string {
   try {
     formAction = `'self' ${new URL(redirectUri).origin}`;
   } catch {
-    // Unparseable never reaches here — the route rejects it earlier — but a
+    // Unparseable never reaches here, the route rejects it earlier, but a
     // policy that is too narrow is safer than one built from a bad value.
   }
   return [
@@ -350,13 +351,13 @@ function renderAuthorizePage(opts: {
   clientName: string;
   /**
    * The Application's own site, when the operator has set one. Used for the
-   * password-reset link — without it this screen is a dead end for anyone who
+   * password-reset link, without it this screen is a dead end for anyone who
    * has forgotten the password, which is the single most likely reason someone
    * is stuck here.
    */
   appUrl?: string | null;
   params: AuthorizeParams;
-  /** The scopes that WILL be granted — already filtered by `grantScopes`. */
+  /** The scopes that WILL be granted, already filtered by `grantScopes`. */
   grantedScopes: string[];
   error?: string;
   mfa?: boolean;
@@ -364,7 +365,7 @@ function renderAuthorizePage(opts: {
    * What was typed into the email field on a failed attempt, echoed back.
    *
    * The refusal is deliberately identical whether the password was wrong or no
-   * such account exists — that is what stops this screen enumerating addresses.
+   * such account exists, that is what stops this screen enumerating addresses.
    * The cost is that someone whose browser autofilled the wrong one of their
    * two addresses gets an error that cannot tell them so, retries, and sees the
    * same thing forever. Re-displaying their OWN input discloses nothing they
@@ -374,8 +375,8 @@ function renderAuthorizePage(opts: {
   /**
    * The Application's own branding, as configured on the Portal tab and already
    * served publicly by `GET /portal/config/:slug`. Reused here so an
-   * Application's customers see that Application — its name, its mark, its
-   * colour — rather than a generic form on whatever host the API happens to
+   * Application's customers see that Application, its name, its mark, its
+   * colour, rather than a generic form on whatever host the API happens to
    * run on.
    *
    * Read defensively: it is operator-authored JSON with no schema at rest, and
@@ -397,7 +398,7 @@ function renderAuthorizePage(opts: {
     .map((s) => `<li>${esc(SCOPE_DESCRIPTIONS[s] ?? s)}</li>`)
     .join('');
   // `logoUrl` is operator-authored and ends up in an <img src>. Only http(s)
-  // survives — a `javascript:` or `data:` URL here would be script execution on
+  // survives, a `javascript:` or `data:` URL here would be script execution on
   // the sign-in page, which is the worst place in the product for it.
   const logo = (() => {
     const raw = opts.branding?.logoUrl;
@@ -522,7 +523,7 @@ const AuthorizeQuery = z.object({
   code_challenge_method: z.string(),
   scope: z.string().max(256).optional(),
   state: z.string().max(512).optional(),
-  // OIDC Core §3.1.2.1. Opaque to us — stored with the code and replayed into
+  // OIDC Core §3.1.2.1. Opaque to us, stored with the code and replayed into
   // the ID Token, where the relying party matches it against its own session.
   nonce: z.string().max(256).optional(),
   // Accepted only to be REFUSED correctly (see `unsupportedRequestError`); this
@@ -536,12 +537,12 @@ const AuthorizeQuery = z.object({
  * Reject the parts of an authentication request this AS cannot honour, with the
  * error code the spec names for each. Returned as an OAuth error redirect (the
  * client + redirect_uri are already validated by the time this runs), never as
- * a silent downgrade — a client that asked for `prompt=none` and got a login
+ * a silent downgrade, a client that asked for `prompt=none` and got a login
  * form has been lied to.
  *
  * `prompt=none` can never succeed here: there is no AS-side SSO session to
  * reuse, so every authorization re-authenticates the end-user. That also means
- * `max_age` is always satisfied and needs no handling — `auth_time` is minted
+ * `max_age` is always satisfied and needs no handling, `auth_time` is minted
  * seconds before the code is redeemed.
  */
 function unsupportedRequestError(params: {
@@ -551,7 +552,7 @@ function unsupportedRequestError(params: {
   request?: string | undefined;
   request_uri?: string | undefined;
 }): string | null {
-  // OIDC Core §6.1 / §6.2 — both MUST be refused with their own error codes
+  // OIDC Core §6.1 / §6.2, both MUST be refused with their own error codes
   // when request objects aren't supported (discovery says they aren't).
   if (params.request !== undefined) return 'request_not_supported';
   if (params.request_uri !== undefined) return 'request_uri_not_supported';
@@ -567,7 +568,7 @@ const RegisterBody = z.object({
 });
 
 export async function mcpRoutes(app: FastifyInstance): Promise<void> {
-  // RFC 9728 — protected-resource metadata. The 401 from the MCP endpoint
+  // RFC 9728, protected-resource metadata. The 401 from the MCP endpoint
   // (`POST /:slug`, further down this file) points clients here.
   app.get(
     '/:slug/.well-known/oauth-protected-resource',
@@ -589,7 +590,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // RFC 8414 — authorization-server metadata.
+  // RFC 8414, authorization-server metadata.
   app.get(
     '/:slug/.well-known/oauth-authorization-server',
     {
@@ -610,7 +611,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // OIDC Discovery 1.0 §4 — OpenID Provider metadata. Served at the issuer +
+  // OIDC Discovery 1.0 §4, OpenID Provider metadata. Served at the issuer +
   // `/.well-known/openid-configuration`, which is the location OIDC mandates;
   // the path-insertion form RFC 8414 §3.1 defines for issuers with a path lives
   // in mcp.well-known.routes.ts, because it has to sit under the origin.
@@ -623,7 +624,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         summary: 'OpenID Provider metadata (OIDC Discovery 1.0)',
         description:
           'Present only for Applications with `authConfig.oidcEnabled`; 404 otherwise. ' +
-          'Every advertised capability is implemented — unsupported OIDC features are ' +
+          'Every advertised capability is implemented, unsupported OIDC features are ' +
           'advertised as unsupported rather than omitted.',
         response: {
           200: { description: 'OpenID Provider metadata.', ...OpenIdConfiguration },
@@ -638,23 +639,24 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // RFC 7591 — dynamic client registration. Public clients (PKCE, no secret).
+  // RFC 7591, dynamic client registration. Public clients (PKCE, no secret).
   app.post(
     '/:slug/oauth/register',
     {
-      // RFC 7591 clients post JSON, but some post form-encoded — both allowed.
+      bodyLimit: CLIENT_REGISTRATION_BODY_LIMIT,
+      // RFC 7591 clients post JSON, but some post form-encoded, both allowed.
       config: { rateLimit: authRateLimit(20), acceptsForm: true },
       schema: {
         tags: ['MCP · OAuth'],
         security: [],
         summary: 'Dynamic client registration (RFC 7591)',
         description:
-          'Unauthenticated (RFC 7591 open registration). Registers a PUBLIC client — PKCE, ' +
-          'no client secret is issued — so there is nothing to authenticate with yet at this ' +
+          'Unauthenticated (RFC 7591 open registration). Registers a PUBLIC client, PKCE, ' +
+          'no client secret is issued, so there is nothing to authenticate with yet at this ' +
           'point in the flow. Governed by `authConfig.dynamicClientRegistration` (default ' +
           'on): with it off this returns 403 `CLIENT_REGISTRATION_DISABLED` and the ' +
           'discovery documents stop advertising `registration_endpoint`. Turn it off once ' +
-          'your relying parties are registered — on a public OpenID Provider, open ' +
+          'your relying parties are registered, on a public OpenID Provider, open ' +
           "registration lets anyone put a password form on the operator's own issuer origin.",
         body: {
           type: 'object',
@@ -686,7 +688,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const { slug } = SlugParam.parse(req.params);
       const application = await resolveAuthServerApp(slug);
-      // 403 rather than 404: the endpoint exists and the Application is real —
+      // 403 rather than 404: the endpoint exists and the Application is real,
       // the operator has closed it. A client that gets 404 retries a different
       // path; one that gets this knows to ask the operator for a client_id.
       if (!registrationOpen(application)) {
@@ -715,7 +717,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         security: [],
         summary: 'Authorization endpoint — login + consent page',
         description:
-          'Renders an HTML sign-in + consent form for a browser. No Rekey credential — ' +
+          'Renders an HTML sign-in + consent form for a browser. No Rekey credential, ' +
           'the end user authenticates by submitting the form below.',
         response: {
           200: raw('The login + consent HTML page.', 'text/html'),
@@ -723,7 +725,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
             description:
               'The authorization request could not be satisfied (unsupported `response_type`, ' +
               '`code_challenge_method` other than S256, `invalid_scope`, or an unsupported ' +
-              '`prompt`/`request`/`request_uri`) — redirect to the client `redirect_uri` with ' +
+              '`prompt`/`request`/`request_uri`), redirect to the client `redirect_uri` with ' +
               '`error` (+ `state`).',
           },
           400: raw(
@@ -745,7 +747,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         return reply.type('text/html').code(400).send('<p>Invalid authorization request.</p>');
       }
       const client = await mcpOAuthService.getClient(application.id, q.data.client_id);
-      // Never redirect to an unvalidated URI — render an error instead.
+      // Never redirect to an unvalidated URI, render an error instead.
       if (!client || !client.redirectUris.includes(q.data.redirect_uri)) {
         return reply.type('text/html').code(400).send('<p>Unknown client_id or unregistered redirect_uri.</p>');
       }
@@ -802,14 +804,15 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/:slug/oauth/authorize',
     {
-      // Browser form POST — form-encoded by definition.
+      bodyLimit: TOKEN_BODY_LIMIT,
+      // Browser form POST, form-encoded by definition.
       config: { rateLimit: authRateLimit(10), acceptsForm: true },
       schema: {
         tags: ['MCP · OAuth'],
         security: [],
         summary: 'Submit login + consent',
         description:
-          "No Rekey credential — the end user's email + password (+ MFA code) travel in " +
+          "No Rekey credential, the end user's email + password (+ MFA code) travel in " +
           'the form body and ARE the authentication.',
         response: {
           200: raw(
@@ -819,7 +822,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           ),
           302: {
             description:
-              'Success — redirect to the client `redirect_uri` with `code` (+ `state`). Also ' +
+              'Success, redirect to the client `redirect_uri` with `code` (+ `state`). Also ' +
               'used for the unsupported-request / `invalid_scope` / `access_denied` (consent ' +
               'was NOT "allow") cases, which redirect with `error` (+ `state`) instead.',
           },
@@ -909,7 +912,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           // App policy mandates MFA but this user hasn't enrolled yet. The
           // web/SDK sign-in flags this so the customer app can force enrollment;
           // the MCP authorize flow must NOT mint an access token without a
-          // second factor — deny (re-render) until the user enrolls. Without
+          // second factor, deny (re-render) until the user enrolls. Without
           // this, a `required`-policy app hands AI tools tokens for users who
           // have bypassed MFA entirely.
           return renderErr(
@@ -928,7 +931,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         endUserId,
         redirectUri: params.redirect_uri,
         codeChallenge: params.code_challenge,
-        // The GRANTED scope, not the requested one — everything downstream
+        // The GRANTED scope, not the requested one, everything downstream
         // (the access token, the ID Token, `/userinfo`, the refresh chain)
         // reads this row, so an unsupported scope must not survive past here.
         scope: granted,
@@ -951,14 +954,14 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   // This endpoint is that case. The Application's server presents its secret
   // key AND the user's live access token, and receives an authorization code
   // for one of its own registered clients. It grants NO authority the caller
-  // did not already have — a secret key can already act across its
+  // did not already have, a secret key can already act across its
   // Application's end-users, and the access token proves this particular user
   // is authenticated right now, so the token cannot be used to target someone
   // who has not signed in. What it adds is packaging: a standards-shaped code
   // instead of a bespoke handoff.
   //
   // Deliberately NOT reachable with a publishable key. That WOULD be an
-  // escalation — the publishable key is identity, not authorization, and it
+  // escalation, the publishable key is identity, not authorization, and it
   // lives in browsers. `requireApiKey` refuses anything without a secret
   // prefix before the handler runs; the check inside is defence in depth.
   //
@@ -969,6 +972,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/:slug/oauth/authorize/grant',
     {
+      bodyLimit: TOKEN_BODY_LIMIT,
       preHandler: [requireApiKey, requireUserSession, refuseWhileImpersonating('hand off a session')],
       config: { rateLimit: authRateLimit(30) },
       schema: {
@@ -1017,7 +1021,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       const application = await resolveAuthServerApp(slug);
 
       // Defence in depth. `requireApiKey` already refuses a publishable key
-      // (wrong prefix → API_KEY_INVALID), so this is unreachable — which is
+      // (wrong prefix → API_KEY_INVALID), so this is unreachable, which is
       // why it can carry a specific code without becoming a probing oracle.
       if (req.authKind === 'publishable') {
         throw new RekeyError({
@@ -1029,7 +1033,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       }
 
       // The slug names one Application and the secret key resolves to another
-      // — refuse rather than letting a key for app A mint codes on app B.
+      //, refuse rather than letting a key for app A mint codes on app B.
       // `requireUserSession` has already bound the user token to the KEY's
       // Application, so without this the code would be minted on the wrong one.
       if (!req.application || req.application.id !== application.id) {
@@ -1043,7 +1047,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
 
       const endUser = req.endUser;
       if (!endUser) {
-        // Programming error — requireUserSession guarantees this.
+        // Programming error, requireUserSession guarantees this.
         throw new RekeyError({
           statusCode: 500,
           code: 'INTERNAL_ERROR',
@@ -1092,7 +1096,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         // The authentication this code attests to is the one that minted the
         // access token presented above, not this call. We do not know when
         // that happened, so `auth_time` is the moment we last SAW proof of it
-        // — honest, and never later than the real event by more than the
+        //, honest, and never later than the real event by more than the
         // token's lifetime.
         authTime: new Date(),
       });
@@ -1115,10 +1119,11 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // ---- Token endpoint (RFC 6749) — authorization_code + refresh_token grants ----
+  // ---- Token endpoint (RFC 6749), authorization_code + refresh_token grants ----
   app.post(
     '/:slug/oauth/token',
     {
+      bodyLimit: TOKEN_BODY_LIMIT,
       // RFC 6749 §4.1.3 mandates application/x-www-form-urlencoded.
       config: { rateLimit: authRateLimit(30), acceptsForm: true },
       schema: {
@@ -1129,7 +1134,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           'No Rekey credential and no client secret: clients here are public and prove ' +
           'themselves with PKCE. The `code` + `code_verifier` (or `refresh_token`) in the ' +
           'form body are the credential. An `id_token` (OIDC Core) is returned alongside ' +
-          'the access token when the `openid` scope was granted — on the authorization_code ' +
+          'the access token when the `openid` scope was granted, on the authorization_code ' +
           'grant only, never on a refresh.',
         response: {
           200: { description: 'Tokens issued.', ...TokenResponse },
@@ -1141,7 +1146,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           ),
           401: oauthError('invalid_client — unknown `client_id`.'),
           500: {
-            description: 'server_error — an unexpected failure. Logged; `error_description` is omitted.',
+            description: 'server_error, an unexpected failure. Logged; `error_description` is omitted.',
             type: 'object',
             properties: { error: { type: 'string', enum: ['server_error'] } },
             required: ['error'],
@@ -1201,10 +1206,11 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // ---- Token introspection (RFC 7662) — for customers' own MCP servers ----
+  // ---- Token introspection (RFC 7662), for customers' own MCP servers ----
   app.post(
     '/:slug/oauth/introspect',
     {
+      bodyLimit: TOKEN_BODY_LIMIT,
       // RFC 7662 §2.1 mandates application/x-www-form-urlencoded.
       config: { rateLimit: authRateLimit(30), acceptsForm: true },
       schema: {
@@ -1212,7 +1218,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         security: [{ apiKey: [] }],
         summary: 'Token introspection (RFC 7662)',
         description:
-          "Requires this Application's own **secret** key as `Authorization: Bearer` — the " +
+          "Requires this Application's own **secret** key as `Authorization: Bearer`, the " +
           'handler verifies it and rejects a key belonging to any other Application with ' +
           '401 `invalid_client`. The publishable key is not accepted: introspection reveals ' +
           'token state. Intended for a customer running their own MCP server against ' +
@@ -1233,7 +1239,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const { slug } = SlugParam.parse(req.params);
       const application = await resolveAuthServerApp(slug);
-      // Token state is sensitive — never let a proxy cache an introspection result.
+      // Token state is sensitive, never let a proxy cache an introspection result.
       reply.header('Cache-Control', 'no-store');
       const header = req.headers.authorization ?? '';
       const key = header.startsWith('Bearer ') ? header.slice(7) : '';
@@ -1246,14 +1252,14 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       }
       const token = (req.body as Record<string, string> | undefined)?.token;
       if (!token) return reply.send({ active: false });
-      return reply.send(mcpOAuthService.introspect(application, token));
+      return reply.send(await mcpOAuthService.introspect(application, token));
     },
   );
 
   // ---- UserInfo endpoint (OIDC Core §5.3) ----
   // GET and POST both, because §5.3.1 requires supporting both. The token is
   // taken ONLY from the Authorization header: RFC 6750 also allows a form field
-  // and a query parameter, and this endpoint accepts neither — a query
+  // and a query parameter, and this endpoint accepts neither, a query
   // parameter puts a live credential in access logs and Referer headers, and
   // discovery advertises `bearer_methods_supported: ["header"]` accordingly.
   for (const method of ['GET', 'POST'] as const) {
@@ -1261,7 +1267,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       method,
       url: '/:slug/oauth/userinfo',
       // `acceptsForm` only so a spec-compliant POST with a form content-type
-      // isn't refused by the media-type guard — the body is never read. No
+      // isn't refused by the media-type guard, the body is never read. No
       // route-level rate limit: this is a bearer-protected read, like the MCP
       // endpoint below, and an RP calling it once per sign-in is normal traffic.
       // The global limiter still applies.
@@ -1273,7 +1279,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Returns the claims authorised by the granted scopes for the end-user the ' +
           'access token was issued to: `sub` always, `email`/`email_verified` with the ' +
-          '`email` scope, profile claims with `profile`. Requires the `openid` scope — a ' +
+          '`email` scope, profile claims with `profile`. Requires the `openid` scope, a ' +
           'token without it gets 403 `insufficient_scope`. The token must have been issued ' +
           'by THIS Application; one from another Application is `invalid_token`.',
         response: {
@@ -1290,14 +1296,14 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       handler: async (req, reply) => {
         const { slug } = SlugParam.parse(req.params);
         const application = await resolveOidcApp(slug);
-        // Claims about a person, keyed by a bearer token — never cacheable.
+        // Claims about a person, keyed by a bearer token, never cacheable.
         reply.header('Cache-Control', 'no-store');
         const header = req.headers.authorization ?? '';
         const token = header.startsWith('Bearer ') ? header.slice(7) : '';
         const wwwAuthenticate = (error: string, description: string): string =>
           `Bearer error="${error}", error_description="${description}"`;
         if (!token) {
-          // RFC 6750 §3 — a request with NO credential gets the bare challenge.
+          // RFC 6750 §3, a request with NO credential gets the bare challenge.
           return reply.header('WWW-Authenticate', 'Bearer').code(401).send({
             error: 'invalid_token',
             error_description: 'Missing bearer access token.',
@@ -1340,14 +1346,14 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         summary: 'MCP server endpoint (JSON-RPC 2.0)',
         description:
           'Requires an **end-user** MCP access token (`Authorization: Bearer`), obtained ' +
-          'through the OAuth flow above — NOT an Application key and not an operator ' +
+          'through the OAuth flow above, NOT an Application key and not an operator ' +
           'credential. A missing or invalid token gets 401 plus a `WWW-Authenticate` header ' +
           'pointing at the protected-resource metadata.',
         response: {
           200: { description: 'JSON-RPC response(s).', ...McpJsonRpcResponse },
           202: {
             description:
-              'The request body contained only JSON-RPC notifications (no `id`) — accepted, no reply body.',
+              'The request body contained only JSON-RPC notifications (no `id`), accepted, no reply body.',
           },
           401: oauthError(
             'invalid_token — the bearer token is missing, malformed, expired, revoked (token ' +
@@ -1371,7 +1377,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         ? verifyMcpAccessToken(token, application.id, application.tokenGeneration, mcpIssuer(slug))
         : null;
       if (!claims) {
-        // RFC 9728 §5.1 — point the client at the protected-resource metadata.
+        // RFC 9728 §5.1, point the client at the protected-resource metadata.
         return reply
           .header(
             'WWW-Authenticate',
@@ -1382,7 +1388,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       }
       // A valid token is not automatically an MCP token. The same AS now also
       // grants `openid` for sign-in, and an OIDC client holding a perfectly good
-      // access token must not reach the account tools with it — that would make
+      // access token must not reach the account tools with it, that would make
       // "let this site sign me in" silently equal to "read my subscription".
       if (!hasScope(claims.scope, MCP_SCOPE)) {
         return reply
@@ -1396,12 +1402,14 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
             error_description: `This access token was not granted the ${MCP_SCOPE} scope.`,
           });
       }
-      // GDPR erasure gate. Every tool here reads the end-user's own data —
-      // `get_profile` returns their metadata verbatim — so a still-unexpired
+      // GDPR erasure gate. Every tool here reads the end-user's own data,
+      // `get_profile` returns their metadata verbatim, so a still-unexpired
       // token minted before the erasure must stop working the moment it lands,
       // not 15 minutes later. Same rule as the session API's
-      // `assertEndUserNotErased`, phrased as an RFC 6750 challenge.
-      if (!(await mcpOAuthService.grantSubjectIsLive(application.id, claims.sub))) {
+      // `assertEndUserNotErased`, phrased as an RFC 6750 challenge. The same
+      // call refuses a token issued before the user's last password change,
+      // sign-out everywhere or refresh-token reuse (`sessionsInvalidBefore`).
+      if (!(await mcpOAuthService.accessTokenIsLive(application.id, claims))) {
         return reply
           .header(
             'WWW-Authenticate',
@@ -1437,7 +1445,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         summary: 'MCP endpoint — use POST (JSON-RPC)',
         description:
           'Always 405 with `Allow: POST`. Checks no credential, because it never does any ' +
-          'work — it exists so a GET-typer sees the method violation instead of a 404.',
+          'work, it exists so a GET-typer sees the method violation instead of a 404.',
         response: {
           405: oauthError('method_not_allowed — use POST for MCP JSON-RPC.'),
           ...errs(MCP_GATE_404),

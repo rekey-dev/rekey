@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * Lightweight dropdown menu — shadcn-style API without the dependency.
+ * Lightweight dropdown menu, shadcn-style API without the dependency.
  *
  * Usage:
  *
@@ -20,7 +20,7 @@
  *
  * Click-outside, Escape, and trigger-toggle handled. Items render as
  * focusable buttons; arrow-key navigation is intentionally *not* wired to
- * keep this small — for menus longer than ~6 items we'd swap in Radix.
+ * keep this small, for menus longer than ~6 items we'd swap in Radix.
  */
 
 import * as React from 'react';

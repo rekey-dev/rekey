@@ -17,7 +17,7 @@ const TOKEN_BYTES = 32;
 export const OPERATOR_INVITE_PREFIX = 'rp_opinv';
 
 export interface GeneratedOperatorInvite {
-  /** The full raw key — shown exactly once, never stored. */
+  /** The full raw key, shown exactly once, never stored. */
   raw: string;
   /** SHA-256(raw), hex. Persisted as `tokenHash`. */
   hash: string;
@@ -34,7 +34,7 @@ export function generateOperatorInviteToken(): GeneratedOperatorInvite {
   return { raw, hash, prefix };
 }
 
-/** SHA-256, hex-encoded. Stable, not salted — keys are high-entropy. */
+/** SHA-256, hex-encoded. Stable, not salted, keys are high-entropy. */
 export function hashOperatorInviteToken(raw: string): string {
   return createHash('sha256').update(raw).digest('hex');
 }

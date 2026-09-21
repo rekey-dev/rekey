@@ -1,8 +1,8 @@
 /**
  * Concurrent checkouts must not reach two processors (#437).
  *
- * Every other test of the provider binding is SEQUENTIAL — one checkout, then
- * the next — and all of them pass against code that bills a buyer twice. The
+ * Every other test of the provider binding is SEQUENTIAL, one checkout, then
+ * the next, and all of them pass against code that bills a buyer twice. The
  * guards in #430/#440 are correct and are not the problem: each concurrent
  * request independently reads a state in which nothing binds this buyer, and
  * each is right about what it saw. Nothing serialises read-decide-write.
@@ -17,7 +17,7 @@
  * and the write. Narrower, not closed: `createCheckoutSession` awaits the
  * provider between reading the binding and upserting the row, and every await
  * is a yield. If a future change makes these flaky rather than failing, that
- * is the window moving, not the bug going away — widen it with a delay in the
+ * is the window moving, not the bug going away, widen it with a delay in the
  * fake rather than deleting the test.
  */
 
@@ -142,7 +142,7 @@ describe('concurrent checkouts and the provider binding (#437)', () => {
     const processors = new Set(rows.map((r) => r.provider));
 
     // The assertion that matters, and it is about ROWS. One of the two
-    // requests may legitimately be refused (409) or may legitimately succeed —
+    // requests may legitimately be refused (409) or may legitimately succeed,
     // what must never happen is the buyer ending up billable by two
     // processors at once.
     expect(

@@ -204,7 +204,42 @@ export const POST: APIRoute = async ({ cookies, redirect }) => {
 | `ACCESS_COOKIE` / `REFRESH_COOKIE` | Cookie names, shared with `@rekey.dev/nextjs`. |
 | `RekeyAstroConfigError` | Thrown for a misconfigured deploy; the middleware lets it through. |
 
-`config` accepts `secretKey`, `apiUrl` and `cookieSecure`, defaulting to `REKEY_SECRET`, `REKEY_URL` and `REKEY_COOKIE_SECURE`. You only need `cookieSecure` when serving plain HTTP on a hostname that is not localhost.
+`config` accepts `secretKey`, `apiUrl`, `cookieSecure` and `device`, defaulting the first three to `REKEY_SECRET`, `REKEY_URL` and `REKEY_COOKIE_SECURE`. You only need `cookieSecure` when serving plain HTTP on a hostname that is not localhost.
+
+## Device binding
+
+If your Application sets `authConfig.deviceBinding: 'required'`, every primary sign-in must name its machine or the API answers `400 DEVICE_FINGERPRINT_REQUIRED` and issues no token. The sign-in call is `@rekey.dev/node`'s, so pass it there:
+
+```ts
+await rekey().auth.signIn({ email, password, device: { fingerprint, label: 'Work laptop' } });
+```
+
+Then keep sending it on refresh, which is this package's job. A chain bound at sign-in is re-checked on every rotation, and a bound chain refreshed from a different fingerprint is `REFRESH_TOKEN_DEVICE_MISMATCH`: Rekey treats that as a stolen token and revokes every session the user has. Put the device in the config `getSession` and the middleware already take:
+
+```ts
+export const onRequest = rekeyMiddleware({ device: { fingerprint } });
+```
+
+Leave it unset and nothing changes: no key is sent, and an unbound chain stays unbound. A browser cannot produce a fingerprint worth having, so this is for a site fronting a desktop or mobile client that computes one. Full model: [docs/devices.md](https://github.com/rekey-dev/rekey/blob/main/docs/devices.md).
+
+## Reading a failed sign-in
+
+The sign-in example above catches `INVALID_CREDENTIALS` and rethrows everything else, which is the right shape. Two of the codes it rethrows deserve their own branch rather than a 500, and neither is a wrong password:
+
+| Code | What actually happened | What to render |
+| --- | --- | --- |
+| `DEVICE_LIMIT_REACHED` (403) | The credentials were right; the account is at its `max_devices` entitlement. `err.details` carries `{ limit, devices: [{ id, label, firstSeenAt, lastSeenAt }] }`. | The device list, so the user can pick one to release. No token was issued, so the release runs through your own backend (`rekey().devices.release(...)`) or an operator. |
+| `PASSWORD_VERIFY_BUSY` (503) | The bcrypt pool was saturated and the password was **not checked**. Nothing was counted toward lockout. | "Server busy, try again in `err.retryAfterSeconds` seconds." Telling the user their password is wrong is false, and it sends them to password reset. |
+
+```ts
+if (err instanceof RekeyError && err.code === 'DEVICE_LIMIT_REACHED') {
+  devices = (err.details?.devices ?? []) as { id: string; label: string | null }[];
+} else if (err instanceof RekeyError && err.code === 'PASSWORD_VERIFY_BUSY') {
+  error = `Server busy. Try again in ${err.retryAfterSeconds ?? 5} seconds.`;
+}
+```
+
+`err.details` and `err.retryAfterSeconds` are on `RekeyError` already; nothing extra is needed to read them. Every code and `details` shape: [docs/errors.md](https://github.com/rekey-dev/rekey/blob/main/docs/errors.md).
 
 ### `safePath`
 

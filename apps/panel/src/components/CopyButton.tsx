@@ -29,7 +29,7 @@ export function CopyButton({
       track(AnalyticsEvent.CopyClicked, { label });
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      // No-op — secure context required, or user denied.
+      // No-op, secure context required, or user denied.
     }
   }
 

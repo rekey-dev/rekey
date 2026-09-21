@@ -5,7 +5,7 @@
  * needs; a suite whose credential is absent is SKIPPED WITH ITS REASON IN THE
  * TITLE, so `vitest` prints
  *
- *     ↓ Stripe sandbox · checkout — SKIPPED: set STRIPE_TEST_SECRET_KEY … (4 tests)
+ *     ↓ Stripe sandbox · checkout, SKIPPED: set STRIPE_TEST_SECRET_KEY … (4 tests)
  *
  * rather than silently reporting a smaller passing count. A contributor
  * without keys learns why in the run output, not by reading this file.
@@ -14,12 +14,12 @@
  *
  * Skipping is right for a contributor and wrong for the CI job that exists
  * *because* the secrets are configured: a rotated secret would turn that job
- * green while testing nothing. `REKEY_SANDBOX_REQUIRE` is the answer — set it
+ * green while testing nothing. `REKEY_SANDBOX_REQUIRE` is the answer, set it
  * to `all`, or to a comma-separated list of provider names, and a missing
  * credential FAILS the run instead of skipping it. The opt-in CI job sets it.
  *
  * The env var NAMES live in `support/env-vars.ts`, which imports nothing from
- * vitest — `global-setup.ts` needs them for its banner and runs in a context
+ * vitest, `global-setup.ts` needs them for its banner and runs in a context
  * where importing `describe` fails the whole run.
  */
 
@@ -56,7 +56,7 @@ function env(name: string): string | undefined {
 }
 
 export interface StripeSandbox {
-  /** The `sk_test_…` secret key. Never logged — see `support/redact.ts`. */
+  /** The `sk_test_…` secret key. Never logged, see `support/redact.ts`. */
   apiKey: string;
 }
 
@@ -154,8 +154,8 @@ function isRequired(provider: ProviderId): boolean {
  *
  * A file, not a module variable: vitest runs suites in a forked child, and the
  * banner is printed by `global-setup.ts` in the parent. The path is handed
- * down through the environment (see `global-setup.ts`); when it is absent —
- * someone running a single file with `vitest --config` by hand — the skip is
+ * down through the environment (see `global-setup.ts`); when it is absent,
+ * someone running a single file with `vitest --config` by hand, the skip is
  * still in the suite title, so nothing is lost.
  */
 function recordSkip(provider: ProviderId, title: string, reason: string): void {
@@ -164,7 +164,7 @@ function recordSkip(provider: ProviderId, title: string, reason: string): void {
   try {
     appendFileSync(path, `${JSON.stringify({ provider, title, reason })}\n`);
   } catch {
-    /* best-effort — a banner is not worth failing a run over */
+    /* best-effort, a banner is not worth failing a run over */
   }
 }
 
@@ -172,8 +172,8 @@ function recordSkip(provider: ProviderId, title: string, reason: string): void {
  * Declare a suite that needs a live sandbox credential.
  *
  * `resolve` returns either the credential bundle or `{ error }` naming the env
- * var to set. On `{ error }` the suite is skipped with the reason in its title
- * — unless `REKEY_SANDBOX_REQUIRE` names this provider, in which case the
+ * var to set. On `{ error }` the suite is skipped with the reason in its title,
+ * unless `REKEY_SANDBOX_REQUIRE` names this provider, in which case the
  * suite runs and fails immediately, because a CI job that was configured with
  * secrets and quietly stopped exercising them is the failure mode this whole
  * harness exists to prevent.
@@ -199,7 +199,7 @@ export function describeSandbox<T extends object>(
     return;
   }
   recordSkip(provider, title, reason);
-  // The body of a `describe.skip` is still EXECUTED — that is how vitest
+  // The body of a `describe.skip` is still EXECUTED, that is how vitest
   // enumerates the tests it is about to report as skipped. So a suite that
   // touched `credentials.apiKey` at describe level would throw during
   // collection and turn a clean skip into a red run. Hand it a stand-in that
@@ -208,7 +208,7 @@ export function describeSandbox<T extends object>(
   describe.skip(`${title} — SKIPPED: ${reason}`, () => suite(unsetCredentials<T>()));
 }
 
-/** Placeholder credential bundle for a skipped suite — see `describeSandbox`. */
+/** Placeholder credential bundle for a skipped suite, see `describeSandbox`. */
 function unsetCredentials<T extends object>(): T {
   return new Proxy({} as T, {
     get: (_target, prop) => (typeof prop === 'string' ? `unset-${prop}` : undefined),

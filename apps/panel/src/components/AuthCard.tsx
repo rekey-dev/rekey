@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { ActionForm } from './ActionForm';
 
 /**
  * Shared centered shell for the signed-out auth pages (login, sign-up,
@@ -7,6 +8,15 @@ import * as React from 'react';
  *
  * Pass `action` to render the card element itself as a <form> (single-form
  * pages); omit it for pages that nest multiple forms inside the card.
+ *
+ * That form is an `ActionForm`, never a plain `<form action={…}>`. The submit
+ * control lives in the caller: `sign-up`, `forgot-password`, `magic-link` and
+ * `reset-password` each pass their own `SubmitButton` through `children`, so
+ * the button reads its pending state from whatever form element encloses it.
+ * Left as a plain form, those buttons read React's `useFormStatus()`, which
+ * can stay `true` after the write has already succeeded (issue #567), and the
+ * operator is told a sign-up or a password reset failed when it did not. This
+ * is the one such pair the panel shows to a signed-out user.
  */
 export function AuthCard({
   title,
@@ -18,7 +28,7 @@ export function AuthCard({
 }: {
   title: string;
   subtitle?: React.ReactNode;
-  /** Server action — when given, the card element is a <form>. */
+  /** Server action, when given, the card element is a <form>. */
   action?: (formData: FormData) => Promise<void>;
   /** Vertical rhythm between card children: 'sm' = space-y-4, 'md' = space-y-5. */
   spacing?: 'sm' | 'md';
@@ -43,10 +53,10 @@ export function AuthCard({
   return (
     <main className="min-h-screen grid place-items-center px-6 bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-950 dark:to-neutral-900">
       {action ? (
-        <form action={action} className={cardCls}>
+        <ActionForm action={action} className={cardCls}>
           {header}
           {children}
-        </form>
+        </ActionForm>
       ) : (
         <div className={cardCls}>
           {header}

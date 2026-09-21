@@ -3,9 +3,9 @@
  *
  * Assembled on a minimal Fastify instance that mirrors app.ts's wiring
  * (formbody + rate limiter + the media-type gate + `rekeyErrorHandler`)
- * instead of `buildApp()`. The pieces under test are the framework seams —
+ * instead of `buildApp()`. The pieces under test are the framework seams,
  * the rate-limit plugin's error path, Fastify's own content-type and
- * validation errors, and the hook stage the auth limiter runs at — and pinning
+ * validation errors, and the hook stage the auth limiter runs at, and pinning
  * them here keeps the assertions about *those* rather than about whichever
  * route happened to be convenient. The per-route caps are also raised to
  * effectively-infinite under NODE_ENV=test in lib/rate-limit.ts, so a real
@@ -192,7 +192,7 @@ describe('auth rate limiter', () => {
   it('does not lock out a second end user when the first exhausts the cap', async () => {
     // The bug: sign-in requires the Application secret key, so `keyGenerator:
     // req.apiKey?.id ?? req.ip` put every end user of one app in ONE 10/60s
-    // bucket — an attacker burning it locked out everyone for the window.
+    // bucket, an attacker burning it locked out everyone for the window.
     const instance = await harness({ authMax: 2 });
     expect((await signIn(instance, 'victim@example.com')).statusCode).toBe(200);
     expect((await signIn(instance, 'victim@example.com')).statusCode).toBe(200);
@@ -323,7 +323,7 @@ describe('request ids', () => {
 describe('unsupported media types', () => {
   it('return 415 UNSUPPORTED_MEDIA_TYPE for a form body on a JSON route', async () => {
     // Previously: formbody parsed it, then schema validation reported
-    // "body must have required property 'email'" — for a request that sent it.
+    // "body must have required property 'email'", for a request that sent it.
     const instance = await harness();
     const res = await instance.inject({
       method: 'POST',
@@ -415,7 +415,7 @@ describe('unsupported media types', () => {
       payload: '{"a":1}',
     });
     // Fastify has no parser registered for the vendor type, so it answers its
-    // own 415 — but our gate must not be the thing that rejected it.
+    // own 415, but our gate must not be the thing that rejected it.
     expect((res.json() as Envelope).error.message).not.toMatch(/does not accept/);
   });
 });
@@ -456,20 +456,20 @@ describe('Fastify-internal codes', () => {
  * `rekeyErrorHandler`: `POST …/applications/:id/licenses` (404), `POST
  * …/applications/:id/end-users` (409), and `GET /api/v1/tenant/mcp` (405).
  * Each therefore returned neither the `requestId` field nor the
- * `X-Request-Id` header — and an external audit found the first of them as the
+ * `X-Request-Id` header, and an external audit found the first of them as the
  * single envelope break across 244 operations checked. That is not "three
  * routes forgot a field", it is an invariant with no enforcement: the other
  * 241 are consistent only because their authors happened to throw.
  *
  * This is a STATIC check, deliberately. Walking every registered route at
  * runtime would mean authenticating 244 operations and provoking an error on
- * each — expensive, and it would still only cover the errors we managed to
+ * each, expensive, and it would still only cover the errors we managed to
  * provoke. Grepping the source covers every branch whether or not a test can
  * reach it, in milliseconds, and fails on the next one somebody writes.
  *
  * The rule: any object literal in `src/` carrying `success: false` must also
  * carry `requestId`. Responses that are deliberately NOT this envelope don't
- * match at all — the OAuth2/RFC-6749 `{error, error_description}` bodies in
+ * match at all, the OAuth2/RFC-6749 `{error, error_description}` bodies in
  * `mcp.routes.ts` and `tenant-mcp/oauth.routes.ts`, the `/health` probe body,
  * and the `{received, processed}` webhook receipt.
  */
@@ -496,7 +496,7 @@ describe('error envelope invariant (static)', () => {
      *
      * Its `ErrorResponseSchema` is a JSON Schema whose `success` property is
      * `enum: [false]`, and the `requestId` it requires lives in a separate
-     * const (`RekeyErrorObject`) further up the file — outside the 14-line
+     * const (`RekeyErrorObject`) further up the file, outside the 14-line
      * window this scan reads. So the scan sees a `success: false` with no
      * `requestId` near it and reports a schema definition as a hand-built
      * response.
@@ -508,10 +508,15 @@ describe('error envelope invariant (static)', () => {
      * here for it to miss.
      */
     const SCHEMA_ONLY = new Set(['lib/openapi.ts']);
+    // Posix separators, so the exclusion set and the reported offenders read
+    // the same on Windows, where `path.relative` answers `lib\openapi.ts` and
+    // the exclusion silently stopped applying.
+    const relative = (file: string): string =>
+      path.relative(srcDir, file).split(path.sep).join('/');
 
     const offenders: string[] = [];
     for (const file of await walk(srcDir)) {
-      if (SCHEMA_ONLY.has(path.relative(srcDir, file))) continue;
+      if (SCHEMA_ONLY.has(relative(file))) continue;
       const text = await readFile(file, 'utf8');
       const lines = text.split('\n');
       lines.forEach((line, i) => {
@@ -521,7 +526,7 @@ describe('error envelope invariant (static)', () => {
         // (the dependency-outage branch) without reaching the next statement.
         const window = lines.slice(i, i + 14).join('\n');
         if (!/requestId/.test(window)) {
-          offenders.push(`${path.relative(srcDir, file)}:${i + 1}`);
+          offenders.push(`${relative(file)}:${i + 1}`);
         }
       });
     }

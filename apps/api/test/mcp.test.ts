@@ -1,5 +1,5 @@
 /**
- * Per-app MCP OAuth 2.1 authorization server — increment 1:
+ * Per-app MCP OAuth 2.1 authorization server, increment 1:
  * mcpEnabled gating, discovery metadata (RFC 8414 / 9728), and dynamic client
  * registration (RFC 7591). Domain tables truncate before each test, so each
  * case bootstraps its own operator + app.
@@ -355,7 +355,7 @@ describe('MCP OAuth AS — discovery + DCR', () => {
         consent: 'allow',
       }),
     });
-    // Re-renders the consent/login page (200 HTML) — NOT a 302 redirect with a
+    // Re-renders the consent/login page (200 HTML), NOT a 302 redirect with a
     // code. A token must never be issued without the mandated second factor.
     expect(res.statusCode).toBe(200);
     expect(res.headers.location).toBeUndefined();

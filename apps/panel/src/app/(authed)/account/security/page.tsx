@@ -11,9 +11,10 @@
  */
 
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
+import { errorMessage } from '@/lib/error-message';
 import { errorQuery, readErrorFlash, api, PanelApiError, type OperatorSessionRow, getMe } from '@/lib/api';
 import { describeUserAgent } from '@/lib/format';
 import { QrCode } from '@/components/QrCode';
@@ -22,6 +23,7 @@ import { CopyButton } from '@/components/CopyButton';
 import { DownloadButton } from '@/components/DownloadButton';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDateTime } from '@/lib/date';
 import { PageHeader } from '@/components/PageHeader';
@@ -38,14 +40,14 @@ const inputCls =
  * The MFA setup secret + backup codes are sensitive one-time-reveal data:
  * the TOTP seed is essentially a long-lived shared key, and backup codes
  * are themselves single-use passwords. Previously this page redirected
- * with `?otpauth=…&backups=…` in the URL — that data ended up in browser
+ * with `?otpauth=…&backups=…` in the URL, that data ended up in browser
  * history, referer headers, and panel access logs. AUDIT-3 (2026-05-19):
  * we now stash them in a short-lived, HttpOnly, SameSite=strict cookie
  * (`rekey_mfa_setup`) scoped to /account/security, read once by the
  * page, then cleared after a successful confirm/disable.
  */
 const MFA_SETUP_COOKIE = 'rekey_mfa_setup';
-const MFA_SETUP_COOKIE_MAX_AGE = 60 * 5; // 5 minutes — long enough to scan, short enough to limit blast radius.
+const MFA_SETUP_COOKIE_MAX_AGE = 60 * 5; // 5 minutes, long enough to scan, short enough to limit blast radius.
 
 interface MfaStatus {
   enabled: boolean;
@@ -92,7 +94,7 @@ async function confirmMfa(formData: FormData): Promise<void> {
     }
     throw err;
   }
-  // Successful confirm — clear the one-time-reveal cookie. Operators who
+  // Successful confirm, clear the one-time-reveal cookie. Operators who
   // need the backup codes again must mint fresh ones via Disable + Setup.
   const jar = await cookies();
   jar.delete(MFA_SETUP_COOKIE);
@@ -123,7 +125,10 @@ async function changePassword(formData: FormData): Promise<void> {
     }
     throw err;
   }
-  redirect('/account/security?pwchanged=1');
+  // The change revoked every session, this one included: the API refuses the
+  // access token on its next use and the refresh is gone. Sign out cleanly
+  // rather than letting the next page load discover it as "expired".
+  redirect('/sign-out?reason=password_changed');
 }
 
 async function revokeSession(formData: FormData): Promise<void> {
@@ -175,12 +180,11 @@ export default async function SecurityPage({
       otpauth = parsed.otpauthUrl;
       backups = parsed.backupCodes;
     } catch {
-      // Stale / corrupted cookie — ignore, the operator can re-run setup.
+      // Stale / corrupted cookie, ignore, the operator can re-run setup.
     }
   }
   const confirmed = sp.confirmed === '1';
   const disabled = sp.disabled === '1';
-  const pwchanged = sp.pwchanged === '1';
 
   const status = await api<MfaStatus>({
     method: 'GET',
@@ -190,7 +194,7 @@ export default async function SecurityPage({
     method: 'GET',
     path: '/api/v1/tenant/auth/sessions',
   });
-  // Operator email for the change-password form's hidden username field —
+  // Operator email for the change-password form's hidden username field,
   // best-effort: the form works without it.
   const operatorEmail = await getMe()
     .then((me) => me.user.email)
@@ -230,7 +234,7 @@ export default async function SecurityPage({
                 Few backup codes remaining. Consider re-running setup to mint a fresh batch.
               </p>
             )}
-            <form action={disableMfa} className="border-t border-[var(--color-border)] pt-2">
+            <ActionForm action={disableMfa} className="border-t border-[var(--color-border)] pt-2">
               <TypedConfirmButton
                 expected="disable mfa"
                 title="Disable two-factor authentication?"
@@ -238,7 +242,7 @@ export default async function SecurityPage({
                 triggerLabel="Disable MFA"
                 confirmLabel="Disable MFA"
               />
-            </form>
+            </ActionForm>
             {disabled && (
               <p className="text-xs text-[var(--color-muted-fg)]">MFA disabled.</p>
             )}
@@ -248,7 +252,7 @@ export default async function SecurityPage({
         {/* CASE 2: Setup in progress (have otpauth but not yet confirmed) */}
         {setupInProgress && (
           <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
-            {/* Step 1 — Scan */}
+            {/* Step 1, Scan */}
             <div className="p-5 border-b border-[var(--color-border)]">
               <StepHeader n={1} title="Scan with your authenticator app" />
               <div className="mt-4 grid sm:grid-cols-[auto_1fr] gap-5 items-start">
@@ -272,7 +276,7 @@ export default async function SecurityPage({
               </div>
             </div>
 
-            {/* Step 2 — Backup codes */}
+            {/* Step 2, Backup codes */}
             <div className="p-5 border-b border-[var(--color-border)] bg-amber-50/40 dark:bg-amber-950/20">
               <StepHeader n={2} title="Save your backup codes" />
               <p className="text-xs text-amber-900 dark:text-amber-200 mt-1">
@@ -302,10 +306,10 @@ export default async function SecurityPage({
               )}
             </div>
 
-            {/* Step 3 — Confirm */}
+            {/* Step 3, Confirm */}
             <div className="p-5">
               <StepHeader n={3} title="Confirm with the current 6-digit code" />
-              <form action={confirmMfa} className="mt-3 space-y-2">
+              <ActionForm action={confirmMfa} className="mt-3 space-y-2">
                 {error && (
                   <Banner tone="error">
                     <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
@@ -329,7 +333,7 @@ export default async function SecurityPage({
                   </label>
                   <SubmitButton pendingLabel="Verifying…">Enable MFA</SubmitButton>
                 </div>
-              </form>
+              </ActionForm>
             </div>
           </div>
         )}
@@ -345,9 +349,9 @@ export default async function SecurityPage({
             <p className="text-sm text-[var(--color-muted-fg)]">
               MFA is currently <strong>not enabled</strong>. We strongly recommend enabling it for any operator with workspace owner or admin permissions.
             </p>
-            <form action={setupMfa}>
+            <ActionForm action={setupMfa}>
               <SubmitButton pendingLabel="Starting setup…">Set up MFA</SubmitButton>
-            </form>
+            </ActionForm>
           </Card>
         )}
       </section>
@@ -375,11 +379,11 @@ export default async function SecurityPage({
           description="Devices with a live refresh token for your operator account. Revoke any you don't recognize."
           action={
             sessions.length > 0 ? (
-              <form action={signOutEverywhere} className="shrink-0">
+              <ActionForm action={signOutEverywhere} className="shrink-0">
                 <ConfirmButton confirm="Sign out of every device, including this one?">
                   Sign out everywhere
                 </ConfirmButton>
-              </form>
+              </ActionForm>
             ) : undefined
           }
         />
@@ -411,10 +415,10 @@ export default async function SecurityPage({
                     <div className="mt-0.5 text-xs text-[var(--color-faint-fg)]">{device.note}</div>
                   )}
                 </div>
-                <form action={revokeSession} className="shrink-0">
+                <ActionForm action={revokeSession} className="shrink-0">
                   <input type="hidden" name="sessionId" value={s.id} />
                   <ConfirmButton confirm="Revoke this session? That device is signed out immediately and has to log in again.">Revoke</ConfirmButton>
-                </form>
+                </ActionForm>
               </div>
               );
             })
@@ -429,18 +433,13 @@ export default async function SecurityPage({
           description="Other sessions on other devices are signed out on success."
         />
 
-        <form
+        <ActionForm
           action={changePassword}
           className="space-y-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5"
         >
           {pwerror && (
             <Banner tone="error">
-              {ERR[pwerror] ?? pwerror}
-            </Banner>
-          )}
-          {pwchanged && (
-            <Banner tone="success">
-              Password changed.
+              {errorMessage(ERR, pwerror)}
             </Banner>
           )}
           <label className="block space-y-1">
@@ -481,7 +480,7 @@ export default async function SecurityPage({
               className="sr-only"
             />
           )}
-        </form>
+        </ActionForm>
       </section>
 
       <p className="border-t border-[var(--color-border)] pt-4 text-center text-xs text-[var(--color-muted-fg)]">

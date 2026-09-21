@@ -4,18 +4,18 @@
  * Bundles what used to be spread across razorpay.routes.ts (offline
  * HMAC-SHA256 verification, event id) and razorpay.handler.ts
  * (the 7-event dispatch switch) into one descriptor. Every mapping is a
- * straight port — CI's razorpay-webhook suite pins the behavior through the
+ * straight port, CI's razorpay-webhook suite pins the behavior through the
  * legacy alias URL.
  *
  * Application scoping is the URL slug (Razorpay events do NOT echo our app
  * id reliably); the signing secret that validates the request is that app's
  * own, so the slug is trustworthy. Local rows match by the Razorpay object
  * id stored at checkout in `metadata.checkoutSessionId` OR by
- * `providerSubId` once persisted — the events carry `checkoutSessionId` so
+ * `providerSubId` once persisted, the events carry `checkoutSessionId` so
  * the shared appliers keep that OR-match.
  *
  * Credential JSON keys (`keyId`, `keySecret`, `webhookSecret`) match the
- * stored encrypted blobs exactly — zero data migration (see
+ * stored encrypted blobs exactly, zero data migration (see
  * RazorpayCredentials in credentials.service.ts).
  */
 
@@ -30,8 +30,6 @@ import type {
   VerifyCtx,
   VerifyResult,
 } from '../../module-types.js';
-
-// ---------- Razorpay payload shapes (the subset we read) ----------
 
 interface RzpSubscriptionEntity {
   id: string;
@@ -70,7 +68,7 @@ function safeEqualHex(a: string, b: string): boolean {
 }
 
 function resolveApplication(req: RawWebhookReq): AppRef {
-  // Slug-scoped only — Razorpay payloads carry nothing to scope credentials
+  // Slug-scoped only, Razorpay payloads carry nothing to scope credentials
   // by, so a slug-less request is unverifiable → unauthenticated.
   if (req.params.slug) return { slug: req.params.slug };
   throw new RekeyError({
@@ -92,7 +90,7 @@ async function verify(req: RawWebhookReq, creds: Record<string, string>, _ctx: V
     };
   }
   // Offline HMAC-SHA256 hex over the exact raw bytes with the app's own
-  // webhook secret (BYO, per-application — no global fallback).
+  // webhook secret (BYO, per-application, no global fallback).
   const expected = createHmac('sha256', creds.webhookSecret ?? '').update(req.rawBody).digest('hex');
   if (!safeEqualHex(expected, sig)) {
     return {
@@ -107,7 +105,7 @@ async function verify(req: RawWebhookReq, creds: Record<string, string>, _ctx: V
 
 /**
  * Razorpay has no event id in the body, so the idempotency key is DERIVED from
- * the body — a digest of the exact bytes the signature covers, plus the two
+ * the body, a digest of the exact bytes the signature covers, plus the two
  * identifying fields, so the key is readable in a log.
  *
  * `x-razorpay-event-id` is deliberately ignored, and this is a security
@@ -115,7 +113,7 @@ async function verify(req: RawWebhookReq, creds: Record<string, string>, _ctx: V
  * raw body only; the header sits outside it, and Razorpay's scheme carries no
  * timestamp for `verify` to bound. So one captured signed body, replayed with a
  * fresh header id, passed verification and got a brand-new
- * `UNIQUE(applicationId, provider, providerEventId)` slot every time — an
+ * `UNIQUE(applicationId, provider, providerEventId)` slot every time, an
  * unlimited supply of "new" events out of one recording. That is a delivery
  * vehicle, not a corner case: it is how a stale `subscription.activated` is
  * re-presented after a cancellation.
@@ -134,12 +132,12 @@ function extractEventId(payload: unknown, req?: RawWebhookReq): string {
 }
 
 /**
- * Port of the razorpay.handler.ts dispatch switch — the same 7 handled
+ * Port of the razorpay.handler.ts dispatch switch, the same 7 handled
  * event types (incl. the payment_link.paid one-time path), translated to
  * normalized domain events. Everything else → null (logged + acked
  * upstream). All events carry `checkoutSessionId` so the appliers keep the
  * bespoke metadata-OR-providerSubId row matching, and payment events set
- * `requireLocalSubscription` — the bespoke handler never wrote an unlinked
+ * `requireLocalSubscription`, the bespoke handler never wrote an unlinked
  * Payment for an unmatched Razorpay event.
  */
 function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | null {
@@ -180,7 +178,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
     }
     // SUCCEEDED Payment + ensure ACTIVE + mirror current_end (all in one
     // transaction, applier-side) + recover dunning + (re)provision.
-    // firstPeriod when paid_count <= 1 — the first charge pays for the SAME
+    // firstPeriod when paid_count <= 1, the first charge pays for the SAME
     // period the activation already provisioned.
     case 'subscription.charged': {
       if (!sub || !payment) {
@@ -221,7 +219,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
       ];
     }
     // Razorpay subscriptions run a finite total_count; `completed` fires
-    // once all cycles are charged. A natural end, not a cancellation —
+    // once all cycles are charged. A natural end, not a cancellation,
     // status EXPIRED emits no outbound lifecycle event (the mirror applier
     // only closes any lingering dunning case).
     case 'subscription.completed': {
@@ -312,28 +310,29 @@ export const razorpayModule: ProviderModule = {
   display: {
     label: 'Razorpay',
     docsUrl: 'https://razorpay.com/docs/webhooks/',
-    // Suggested only — the panel pre-fills "IN" here. `pickProvider` reads the
+    // Suggested only, the panel pre-fills "IN" here. `pickProvider` reads the
     // stored row, so India routes to Razorpay only once an operator saves it.
     defaultCountries: ['IN'],
     priority: 100,
   },
   capabilities: {
+    checkout: true,
     // No per-checkout trial on Subscriptions; the plan would need its own
     // intro cycle. Declared false so the discovery contract stays uniform.
     trials: false,
     oneTime: true,
     captureStep: false,
-    // No webhook-registration API surface on the provider class — the panel
+    // No webhook-registration API surface on the provider class, the panel
     // sends operators to the Razorpay dashboard to paste the secret
     // manually (registerWebhook is undefined on RealRazorpayProvider, so
     // auto-config 400s with BILLING_WEBHOOK_AUTOCONFIG_UNSUPPORTED).
     autoWebhookRegister: false,
-    // subscription.charged carries the new current_end — the period rotates
+    // subscription.charged carries the new current_end, the period rotates
     // off the provider's own event, no local advance needed.
     periodRotationEvents: true,
     onlineVerify: false,
     // Razorpay states this cliff as "6 months" and never as a day count, so
-    // 180 is an APPROXIMATION here — close enough to warn an operator early,
+    // 180 is an APPROXIMATION here, close enough to warn an operator early,
     // never precise enough to refuse on. Razorpay itself is the authority and
     // answers "Normal refund is not possible for a payment which is more than
     // 6 months old."

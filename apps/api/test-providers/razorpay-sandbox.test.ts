@@ -1,5 +1,5 @@
 /**
- * Razorpay test mode — plan registration, checkout, and the cancellation shape
+ * Razorpay test mode, plan registration, checkout, and the cancellation shape
  * that was inverted on the wire.
  *
  * The cancellation test is the one that earns this file. `cancelSubscription`
@@ -66,7 +66,7 @@ describeSandbox('razorpay', 'Razorpay test mode', razorpaySandbox, (creds) => {
     await configureProvider(fixture, 'razorpay', {
       keyId: creds.keyId,
       keySecret: creds.keySecret,
-      // Offline HMAC — the harness signs nothing here, so any stable value
+      // Offline HMAC, the harness signs nothing here, so any stable value
       // works. It is required by the credential schema, so it is supplied.
       webhookSecret: `${HARNESS_PREFIX}-${runId}`,
     });
@@ -99,7 +99,7 @@ describeSandbox('razorpay', 'Razorpay test mode', razorpaySandbox, (creds) => {
     createdSubscriptions.push(providerSubId);
 
     const atRazorpay = await client.subscriptions.fetch(providerSubId);
-    // `created` — authorization has not happened yet, which is exactly the
+    // `created`, authorization has not happened yet, which is exactly the
     // state a local PENDING row should mirror.
     expect(atRazorpay.status).toBe('created');
     const local = await subscriptionBySession(fixture.applicationId, providerSubId);

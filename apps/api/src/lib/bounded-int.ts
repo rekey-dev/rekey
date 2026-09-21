@@ -2,7 +2,7 @@
  * Integer schemas with an upper bound, because Postgres has one.
  *
  * Every money and metering field in this codebase was written as
- * `z.number().int().min(0)` — a floor, no ceiling. Zod accepted anything up to
+ * `z.number().int().min(0)`, a floor, no ceiling. Zod accepted anything up to
  * `Number.MAX_SAFE_INTEGER`, Prisma passed it through, and Postgres answered
  * `22003 value out of range for type integer`. An external audit turned that
  * into a 500 on five routes by sending `9007199254740991` as a usage quantity,
@@ -15,13 +15,13 @@
  *
  * Two ceilings, because the columns differ:
  *
- *   - `int4Max` — 2147483647, the actual limit of a Postgres `integer` column.
+ *   - `int4Max`, 2147483647, the actual limit of a Postgres `integer` column.
  *     Use for counts and durations that map to `Int` in the Prisma schema.
- *   - `moneyMax` — 10^11 minor units, ~1 billion in a two-decimal currency.
+ *   - `moneyMax`, 10^11 minor units, ~1 billion in a two-decimal currency.
  *     Deliberately far below `int4Max`: money above this is a typo or a probe,
  *     not a real charge, and the difference between "rejected at the edge" and
  *     "accepted, then charged" is worth more than the flexibility. Raise it if
- *     a real deployment ever needs to — a bound that is too low fails loudly
+ *     a real deployment ever needs to, a bound that is too low fails loudly
  *     at the boundary, which is the direction to err in.
  */
 
@@ -36,7 +36,7 @@ export const INT4_MAX = 2_147_483_647;
  * This is `INT4_MAX`, because that is what the column holds: `Plan.amount` and
  * `Coupon.amountOff` are Prisma `Int`, i.e. Postgres `integer`.
  *
- * The first version of this bound was 10^11 — picked as "a sane ceiling for
+ * The first version of this bound was 10^11, picked as "a sane ceiling for
  * money" without checking the column, which is 46× smaller. The result was a
  * bound that looked like it fixed the 500s and did not: every value from
  * 2147483648 up to the declared maximum still reached Postgres and came back
@@ -46,7 +46,7 @@ export const INT4_MAX = 2_147_483_647;
  *
  * 2147483647 minor units is ~21.5 million in a two-decimal currency. If a
  * deployment ever needs more than that, the column has to widen to BigInt
- * first — this constant must never exceed what the column can store, which is
+ * first, this constant must never exceed what the column can store, which is
  * the whole point of it.
  */
 export const MONEY_MAX = INT4_MAX;

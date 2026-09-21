@@ -4,15 +4,15 @@
  * credentials and threading them into the provider class.
  *
  * Multi-provider model (phase 6+): an Application can configure any subset
- * of {stripe, paypal, razorpay}. The caller decides which provider to use
- * — either explicitly (user picked at checkout) or via the geo router
+ * of {stripe, paypal, razorpay}. The caller decides which provider to use,
+ * either explicitly (user picked at checkout) or via the geo router
  * (`pickProvider`), then passes that name here.
  *
  * **Every provider returned from here talks to a real payment processor.**
  * There is no fallback. Missing credentials throw
  * `BILLING_CREDENTIALS_NOT_CONFIGURED` in every environment, dev included:
- * the old behaviour — hand back a deterministic stub so the wiring "worked"
- * — meant an operator could run a whole integration, see checkout URLs and
+ * the old behaviour, hand back a deterministic stub so the wiring "worked",
+ * meant an operator could run a whole integration, see checkout URLs and
  * ACTIVE subscriptions, and never learn that no money could ever move. A
  * billing system that succeeds when it is not configured is worse than one
  * that refuses to start. Tests get their fakes from `test/fakes/`.
@@ -23,6 +23,8 @@ import { RekeyError } from '../../../lib/error.js';
 import { RealStripeProvider } from './stripe-real.js';
 import { RealPaypalProvider } from './paypal.js';
 import { RealRazorpayProvider } from './razorpay.js';
+import { ExternalBillingProvider } from './external.js';
+import { getModule } from './registry.js';
 import {
   billingCredentialsService,
   type BillingProviderName,
@@ -65,6 +67,29 @@ export async function getProviderForApplication(
       if (!creds) throw credentialsNotConfigured(application, 'razorpay');
       return new RealRazorpayProvider(creds as RazorpayCredentials);
     }
+    case 'external': {
+      // Every outbound call on this provider refuses with a named error (see
+      // external.ts), what a row stamped `provider: 'external'` should get
+      // when a checkout or cancellation path reaches for its processor.
+      //
+      // The one exception is READING. Credentials are loaded so the
+      // subscription import can pull the book of business the event feed never
+      // saw. Absent or partial credentials are NOT an error here: the provider
+      // is built without a pull config, `listSubscriptions` then refuses with
+      // EXTERNAL_PULL_NOT_CONFIGURED, and every other path behaves exactly as
+      // it did before.
+      const creds = (await billingCredentialsService
+        .loadDecrypted(application.id, 'external')
+        .catch(() => null)) as Record<string, string> | null;
+      const url = creds?.subscriptionsUrl;
+      const token = creds?.pullToken;
+      const secret = creds?.webhookSecret;
+      return new ExternalBillingProvider(
+        url && token && secret
+          ? { subscriptionsUrl: url, token, signingSecret: secret }
+          : undefined,
+      );
+    }
   }
 }
 
@@ -87,7 +112,7 @@ export async function getProviderForApplication(
  *      `preferred` provider that isn't configured.
  *
  * **There is NO ambient per-provider default.** This function names no provider
- * and consults no country table — it reads only the stored `countries` /
+ * and consults no country table, it reads only the stored `countries` /
  * `priority` on each credential row, which `upsertRaw` defaults to `[]` and
  * `100`. A module's `display.defaultCountries` / `display.priority` are
  * *advertised* through the discovery projection in `registry.ts` so the panel can
@@ -99,7 +124,9 @@ export async function pickProvider(args: {
   country?: string | undefined;
   preferred?: BillingProviderName | undefined;
 }): Promise<BillingProviderName> {
-  const enabled = await billingCredentialsService.listEnabled(args.application.id);
+  // Checkout-capable only. An inbound-only provider is enabled so that its
+  // webhooks verify, not so that buyers are sent to it.
+  const enabled = await billingCredentialsService.listCheckoutEnabled(args.application.id);
   if (enabled.length === 0) {
     // No enabled credentials at all. This used to fall through to the legacy
     // `billingConfig.provider` hint and land on the Stripe stub, which made an
@@ -112,6 +139,14 @@ export async function pickProvider(args: {
   if (args.preferred) {
     const match = enabled.find((p) => p.provider === args.preferred);
     if (match) return match.provider;
+    if (getModule(args.preferred)?.capabilities.checkout === false) {
+      throw new RekeyError({
+        statusCode: 400,
+        code: 'BILLING_PROVIDER_INBOUND_ONLY',
+        message: `Provider "${args.preferred}" only receives events from an external billing system; it cannot host a checkout.`,
+        fix: 'Omit `provider` to let the router pick a hosted provider, or sell through the external system.',
+      });
+    }
     throw new RekeyError({
       statusCode: 400,
       code: 'BILLING_PROVIDER_NOT_AVAILABLE',
@@ -137,7 +172,7 @@ export async function pickProvider(args: {
   if (globals.length > 0) return globals[0]!.provider;
 
   // Last resort: any enabled provider, lowest priority. (This kicks in when
-  // every configured provider has a country list and none match — better to
+  // every configured provider has a country list and none match, better to
   // route to *something* than to fail outright.)
   return enabled.sort((a, b) => a.priority - b.priority)[0]!.provider;
 }

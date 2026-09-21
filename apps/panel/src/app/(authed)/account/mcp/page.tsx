@@ -2,7 +2,7 @@
  * Account → MCP (operator-side).
  *
  * Connection guide for the hosted operator MCP server at
- * `/api/v1/tenant/mcp` — the JSON-RPC surface that exposes the
+ * `/api/v1/tenant/mcp`, the JSON-RPC surface that exposes the
  * operator's workspace data (apps, end-users, payments, webhooks,
  * security events) to Claude Desktop / Code / Cursor.
  *
@@ -11,14 +11,14 @@
  * the operator's view of THEIR workspace, not their customers' data.
  *
  * Two live auth paths: the OAuth 2.1 + PKCE authorization server
- * (preferred — the client drives the browser sign-in + workspace pick +
+ * (preferred, the client drives the browser sign-in + workspace pick +
  * consent, no pre-minted token) and PAT-Bearer auth
  * (`Authorization: Bearer rp_op_…`, minted on `/account/api-tokens`,
  * for headless / non-browser automation).
  */
 
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { CopyButton } from '@/components/CopyButton';
 import { PageHeader } from '@/components/PageHeader';
 import { Card } from '@/components/Card';
@@ -56,7 +56,7 @@ function DefRow({
   );
 }
 
-// Mirror of `app/applications/[id]/mcp/page.tsx`'s fallback — never display the
+// Mirror of `app/applications/[id]/mcp/page.tsx`'s fallback, never display the
 // in-cluster REKEY_URL; the public API origin is the operator-facing one.
 function publicApiBase(): string {
   // Sentinel rather than '': an empty base makes the snippet below a relative
@@ -70,7 +70,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
   const apiBase = publicApiBase();
   const mcpUrl = `${apiBase}/api/v1/tenant/mcp`;
 
-  // OAuth-flow mcp.json — auto-discovers via /.well-known. Preferred path now
+  // OAuth-flow mcp.json, auto-discovers via /.well-known. Preferred path now
   // that Phase 2 is live: the operator runs the browser flow + workspace pick,
   // no PAT pasting.
   const mcpJsonOAuth = `{
@@ -85,7 +85,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
   }
 }`;
 
-  // PAT-bearer mcp.json — alternate, useful for headless / non-browser
+  // PAT-bearer mcp.json, alternate, useful for headless / non-browser
   // automation. Same MCP endpoint, just a static Bearer instead of OAuth.
   const mcpJsonPat = `{
   "mcpServers": {
@@ -99,7 +99,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
   }
 }`;
 
-  // OAuth endpoint URLs — operators reading the page can copy them straight
+  // OAuth endpoint URLs, operators reading the page can copy them straight
   // into a hand-rolled client / curl debug session.
   const discoveryAs = `${mcpUrl}/.well-known/oauth-authorization-server`;
   const discoveryPr = `${mcpUrl}/.well-known/oauth-protected-resource`;
@@ -108,7 +108,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
   const tokenUrl = `${mcpUrl}/oauth/token`;
   const introspectUrl = `${mcpUrl}/oauth/introspect`;
 
-  // Claude Code CLI snippets — OAuth (preferred) + PAT (alternate).
+  // Claude Code CLI snippets, OAuth (preferred) + PAT (alternate).
   const claudeCodeOAuth = `claude mcp add --transport http rekey-operator ${mcpUrl}`;
   const claudeCodePat = `claude mcp add --transport http rekey-operator ${mcpUrl} \\
   --header "Authorization: Bearer rp_op_<paste-your-token-here>"`;
@@ -132,7 +132,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
     {
       name: 'get_workspace_overview',
       summary:
-        'Workspace rollup — app count, end-user count, org count, active subs, MRR (per-currency).',
+        'Workspace rollup: app count, end-user count, org count, active subs, MRR (per-currency).',
     },
     {
       name: 'list_applications',
@@ -177,7 +177,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
     <section className="mx-auto max-w-7xl space-y-6 px-6 py-8 lg:px-8">
       <PageHeader
         title="Operator MCP"
-        description="Connect Claude Desktop, Claude Code, or Cursor to a workspace via a hosted MCP server. The agent reads applications, end-users, payments, and webhook health — write and admin tools exist but need explicitly granted scopes — and never sees any customer's individual data."
+        description="Connect Claude Desktop, Claude Code, or Cursor to a workspace via a hosted MCP server. The agent reads applications, end-users, payments, and webhook health (write and admin tools exist but need explicitly granted scopes) and never sees any customer's individual data."
       />
 
       <Card>
@@ -213,7 +213,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
         </div>
         <div className="space-y-3 p-5">
           <div className="text-sm font-medium text-[var(--color-fg)]">OAuth endpoints</div>
-          <p className="text-xs text-[var(--color-muted-fg)]">Resolved by discovery — copy for curl-level debugging.</p>
+          <p className="text-xs text-[var(--color-muted-fg)]">Resolved by discovery. Copy for curl-level debugging.</p>
           <DefRow label="Dynamic client registration (RFC 7591)" value={registerUrl} method="POST" />
           <DefRow label="Authorization (login + workspace pick + consent)" value={authorizeUrl} method="GET / POST" />
           <DefRow label="Token (auth-code + refresh)" value={tokenUrl} method="POST" />
@@ -224,7 +224,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
           <ul className="space-y-1 text-xs text-[var(--color-muted-fg)]">
             <li><code>response_type</code> = <code>code</code></li>
             <li><code>code_challenge_method</code> = <code>S256</code> (PKCE mandatory)</li>
-            <li><code>scope</code> = <code>mcp:operator:read</code> (always granted), plus <code>mcp:operator:write</code> and/or <code>mcp:operator:admin</code> when requested — each shown for approval on the consent screen</li>
+            <li><code>scope</code> = <code>mcp:operator:read</code> (always granted), plus <code>mcp:operator:write</code> and/or <code>mcp:operator:admin</code> when requested, each shown for approval on the consent screen</li>
             <li><code>grant_types_supported</code>: <code>authorization_code</code>, <code>refresh_token</code></li>
             <li><code>token_endpoint_auth_method</code> = <code>none</code> (public client; PKCE replaces the secret)</li>
           </ul>
@@ -234,7 +234,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
       <Card padded={false} className="divide-y divide-[var(--color-border)]">
         <div className="space-y-2 p-5">
           <div className="flex items-center gap-2">
-            <div className="text-sm font-medium text-[var(--color-fg)]">Add to Claude Code (OAuth — recommended)</div>
+            <div className="text-sm font-medium text-[var(--color-fg)]">Add to Claude Code (OAuth, recommended)</div>
             <Badge tone="success" dot>
               Preferred
             </Badge>
@@ -265,14 +265,14 @@ export default function OperatorMcpPage(): React.JSX.Element {
           </pre>
           <CopyButton value={mcpJsonOAuth} label="Copy" />
           <p className="text-xs text-[var(--color-muted-fg)]">
-            Restart the client. OAuth flow opens in your browser — sign in, pick a workspace, allow.
+            Restart the client. OAuth flow opens in your browser. Sign in, pick a workspace, allow.
           </p>
         </div>
 
         <div className="space-y-2 p-5">
           <div className="text-sm font-medium text-[var(--color-fg)]">PAT-Bearer (headless / non-browser)</div>
           <p className="text-xs text-[var(--color-muted-fg)]">
-            Useful when you can&apos;t drive the browser flow — CI agents, sealed containers, etc.
+            Useful when you can&apos;t drive the browser flow: CI agents, sealed containers, etc.
             Mint a PAT on{' '}
             <Link href="/account/api-tokens" className="underline">
               Account → API tokens
@@ -288,7 +288,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
           </pre>
           <CopyButton value={mcpJsonPat} label="Copy mcp.json" />
           <p className="text-xs text-[var(--color-muted-fg)]">
-            <strong>Keep PATs out of shared dotfiles</strong> — paste them locally only.
+            <strong>Keep PATs out of shared dotfiles</strong>: paste them locally only.
           </p>
         </div>
 
@@ -322,10 +322,10 @@ export default function OperatorMcpPage(): React.JSX.Element {
         <p className="mt-3 text-xs text-[var(--color-faint-fg)]">
           The tools above are read-only and available to every credential. Write tools (create /
           update applications, plans, webhook endpoints, members) additionally require the{' '}
-          <code>mcp:operator:write</code> OAuth scope — or a PAT carrying{' '}
+          <code>mcp:operator:write</code> OAuth scope, or a PAT carrying{' '}
           <code>applications:write</code>. Admin tools (billing-provider credentials, subscription
-          cancel) require <code>mcp:operator:admin</code>, grantable only via OAuth consent — a PAT
-          never carries it. Workspace scoping is structural — the credential is bound to one
+          cancel) require <code>mcp:operator:admin</code>, grantable only via OAuth consent. A PAT
+          never carries it. Workspace scoping is structural: the credential is bound to one
           workspace, so every tool sees only that workspace&apos;s data.
         </p>
       </Card>
@@ -335,7 +335,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
         <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[var(--color-muted-fg)]">
           <li>
             Token verification is a SHA-256 hash lookup against the unique{' '}
-            <code className="font-mono">token_hash</code> index — no scan, no timing oracle.
+            <code className="font-mono">token_hash</code> index. No scan, no timing oracle.
           </li>
           <li>
             Membership is re-checked against the DB on every request. Removing the operator from
@@ -344,11 +344,11 @@ export default function OperatorMcpPage(): React.JSX.Element {
           <li>
             Scopes are default-deny. Read is the floor; write tools demand{' '}
             <code>mcp:operator:write</code> (OAuth) or a PAT with <code>applications:write</code>,
-            and admin tools demand <code>mcp:operator:admin</code> — approved explicitly on the
-            OAuth consent screen, never carried by a PAT.
+            and admin tools demand <code>mcp:operator:admin</code>, approved explicitly on the
+            OAuth consent screen and never carried by a PAT.
           </li>
           <li>
-            <code>lastUsedAt</code> on the PAT advances at most once a minute per API process — visible on{' '}
+            <code>lastUsedAt</code> on the PAT advances at most once a minute per API process, visible on{' '}
             <Link href="/account/api-tokens" className="underline">
               Account → API tokens
             </Link>{' '}
@@ -371,7 +371,7 @@ export default function OperatorMcpPage(): React.JSX.Element {
           <li>
             Client opens <code>/oauth/authorize</code> with PKCE{' '}
             <code>code_challenge</code>, <code>state</code>, and{' '}
-            <code>redirect_uri</code> — your browser sees the login form.
+            <code>redirect_uri</code>. Your browser sees the login form.
           </li>
           <li>
             You sign in with your panel email + password and pick a workspace at the consent page.

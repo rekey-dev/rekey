@@ -1,5 +1,5 @@
 /**
- * Outbound billing webhook events — emitted from the Stripe/PayPal/Razorpay
+ * Outbound billing webhook events, emitted from the Stripe/PayPal/Razorpay
  * inbound handlers via the same dispatch service the auth flows use
  * (`webhookService`, see `modules/webhooks/webhook.service.ts`).
  *
@@ -13,7 +13,7 @@
  *     outbox anyway. `applyPaymentSucceeded` committed money and then, in a
  *     detached `void (async () => …)()`, re-read the DB to insert the delivery
  *     rows. A pod rotation or a pool timeout in that gap lost
- *     `payment.succeeded` permanently — the delivery poller only re-attempts
+ *     `payment.succeeded` permanently, the delivery poller only re-attempts
  *     rows that already exist, and no row existed. An outbox that starts after
  *     an un-retried async hop is not an outbox.
  *
@@ -26,7 +26,7 @@
  *   - **Emit only on a real state change.** Callers invoke these only when
  *     they actually transitioned a Subscription's status or created a new
  *     Payment row, so a provider-event replay that changes nothing emits
- *     nothing. (A provider retry after a 5xx on our side may still re-emit —
+ *     nothing. (A provider retry after a 5xx on our side may still re-emit,
  *     the delivery payload carries `eventId`, which consumers dedupe on.)
  *
  *   - Payload shape follows the `user.created` convention: a single named
@@ -35,8 +35,8 @@
  *
  * Every read here goes through the SAME client as the write. Reaching for the
  * global `prisma` from inside a caller's transaction would take a second pool
- * connection while holding the first — the classic way to deadlock a pool
- * under the webhook worker's concurrency — and would read pre-transaction
+ * connection while holding the first, the classic way to deadlock a pool
+ * under the webhook worker's concurrency, and would read pre-transaction
  * state, so the payload would announce the status the row had BEFORE the
  * change it is announcing.
  */
@@ -67,8 +67,8 @@ export type DunningEventType =
  *
  * The payload carries `entitlements`: what this subscription actually grants,
  * with its per-subscription overrides applied. The plan slug alone does not
- * answer that — two subscribers on the same plan can hold different quantities
- * via `entitlementOverrides` — so a consumer acting on the grant (provisioning
+ * answer that, two subscribers on the same plan can hold different quantities
+ * via `entitlementOverrides`, so a consumer acting on the grant (provisioning
  * seats, sizing a quota) would otherwise have to follow up with an API call it
  * has no user token for. Shape matches `GET /billing/entitlements`'
  * `entitlements` array so the same parsing works on both.
@@ -92,7 +92,7 @@ export async function enqueueSubscriptionEvent(
       plan: { select: { slug: true, name: true, amount: true, currency: true, interval: true, kind: true } },
     },
   });
-  if (!sub) return []; // Deleted out from under us — nothing to announce.
+  if (!sub) return []; // Deleted out from under us, nothing to announce.
   // A plan whose entitlements cannot be resolved (deleted out from under us)
   // must not swallow the whole event: the status transition is the news, and
   // an empty list is honest about what we could establish.
@@ -126,7 +126,7 @@ export async function enqueueSubscriptionEvent(
 
 /**
  * Enqueue a payment event for a just-created Payment row. Looks the row up by
- * id (and its subscription's plan slug, when linked) through `client` — so in
+ * id (and its subscription's plan slug, when linked) through `client`, so in
  * the money transaction it reads the payment that has not committed yet, which
  * is the whole point.
  *
@@ -164,7 +164,7 @@ export async function enqueuePaymentEvent(
 
 /**
  * Enqueue a dunning lifecycle event for a DunningCase row. Same contract as
- * the subscription/payment enqueuers — callers invoke this only when a case
+ * the subscription/payment enqueuers, callers invoke this only when a case
  * actually opened or closed, inside the transaction that opened or closed it.
  *
  * Returns the delivery-row ids to kick after the caller's commit.

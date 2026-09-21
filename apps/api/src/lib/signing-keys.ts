@@ -1,14 +1,14 @@
 /**
  * RS256 signing-key management for end-user access tokens (JWKS).
  *
- * Applications opt in per-app via `authConfig.tokenAlg = "RS256"` — their
+ * Applications opt in per-app via `authConfig.tokenAlg = "RS256"`, their
  * access tokens are then signed with the deployment's ACTIVE RSA key (`kid`
  * in the JWT header) instead of the per-app derived HS256 secret, so
  * customers can verify sessions offline against `GET /.well-known/jwks.json`
  * (API gateways, edge middleware, `verifyAccessToken` in @rekey.dev/node).
  *
  * Key resolution, in priority order:
- *   1. env `JWT_RS256_PRIVATE_KEY` (PEM) — BYO key; nothing persisted. It is
+ *   1. env `JWT_RS256_PRIVATE_KEY` (PEM), BYO key; nothing persisted. It is
  *      always the active signer when set. DB keys (if any) remain published
  *      in the JWKS so older tokens keep verifying.
  *   2. The newest `signing_keys` row with `rotatedAt = null`.
@@ -18,10 +18,10 @@
  * Rotation story (N keys, one active): insert a new row, stamp `rotatedAt`
  * on the old one. Rotated keys stop SIGNING immediately but stay in the JWKS
  * + the verification kid-map until deleted, so outstanding (≤15 min) access
- * tokens keep verifying. There is deliberately no "remove from JWKS" timer —
+ * tokens keep verifying. There is deliberately no "remove from JWKS" timer,
  * delete the row once its tokens are safely past expiry.
  *
- * `kid` is the RFC 7638 JWK thumbprint of the public key — deterministic, so
+ * `kid` is the RFC 7638 JWK thumbprint of the public key, deterministic, so
  * the same key material always maps to the same kid (idempotent boot, safe
  * concurrent first-boot generation across replicas: the loser of the unique
  * race re-reads the winner's row).
@@ -47,11 +47,7 @@ export interface ActiveSigningKey {
   publicPem: string;
 }
 
-// ---------------------------------------------------------------------------
-// PEM / JWK helpers
-// ---------------------------------------------------------------------------
-
-/** Env vars often carry PEMs with literal `\n` — normalize before parsing. */
+/** Env vars often carry PEMs with literal `\n`, normalize before parsing. */
 function normalizePem(pem: string): string {
   return pem.includes('\\n') ? pem.replace(/\\n/g, '\n') : pem;
 }
@@ -64,7 +60,7 @@ function publicJwkFromKey(key: KeyObject): { kty: 'RSA'; n: string; e: string } 
   return { kty: 'RSA', n: jwk.n, e: jwk.e };
 }
 
-/** RFC 7638 JWK thumbprint (SHA-256, base64url) — the JWT header `kid`. */
+/** RFC 7638 JWK thumbprint (SHA-256, base64url), the JWT header `kid`. */
 function computeKid(publicKey: KeyObject): string {
   const { e, kty, n } = publicJwkFromKey(publicKey);
   // Canonical form: required members only, lexicographic order, no whitespace.
@@ -84,11 +80,9 @@ function keyFromPrivatePem(privatePem: string): ActiveSigningKey {
   return { kid: computeKid(publicKey), alg: 'RS256', privatePem, publicPem };
 }
 
-// ---------------------------------------------------------------------------
-// Cache — small TTL so a rotation done by another replica is picked up
+// Cache, small TTL so a rotation done by another replica is picked up
 // without a restart. Env-key material never changes within a process, so it
 // is resolved once and reused.
-// ---------------------------------------------------------------------------
 
 interface KeyCache {
   active: ActiveSigningKey;
@@ -107,7 +101,7 @@ const TTL_MS = 60_000;
  * Drop the in-memory snapshot so the next call re-reads the DB.
  *
  * Test-only. The 60s TTL outlives a whole test file, so a key cached against a
- * `signing_keys` row that a later TRUNCATE removed keeps being served — the
+ * `signing_keys` row that a later TRUNCATE removed keeps being served, the
  * JWKS a test then asserts on describes a key that no longer exists. Called
  * from test/setup.ts's beforeEach; individual tests may still call it directly
  * around a rotation.
@@ -117,7 +111,7 @@ export function __resetForTests(): void {
   envKey = undefined;
 }
 
-/** @deprecated Use `__resetForTests` — kept so existing call sites compile. */
+/** @deprecated Use `__resetForTests`, kept so existing call sites compile. */
 export const _clearSigningKeyCacheForTests = __resetForTests;
 
 function resolveEnvKey(): ActiveSigningKey | null {
@@ -150,7 +144,7 @@ async function generateAndPersistKey(): Promise<void> {
       },
     });
   } catch (e) {
-    // Unique violation on kid — another process persisted first. Fall through;
+    // Unique violation on kid, another process persisted first. Fall through;
     // the caller re-reads and adopts whatever row won.
     if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
   }
@@ -173,7 +167,7 @@ async function load(): Promise<KeyCache> {
     const { privatePem } = decryptJson<{ privatePem: string }>(dbActive.privatePemCiphertext);
     active = { kid: dbActive.kid, alg: 'RS256', privatePem, publicPem: dbActive.publicPem };
   } else {
-    // Rows exist but every one is rotated out and no env key — refuse rather
+    // Rows exist but every one is rotated out and no env key, refuse rather
     // than silently signing with a retired key.
     throw new Error(
       'No active RS256 signing key: all signing_keys rows are rotated and JWT_RS256_PRIVATE_KEY is unset.',
@@ -197,10 +191,6 @@ async function snapshot(): Promise<KeyCache> {
   return load();
 }
 
-// ---------------------------------------------------------------------------
-// Public surface
-// ---------------------------------------------------------------------------
-
 /**
  * The key new RS256 tokens are signed with. Generates + persists a keypair on
  * first call when neither env key nor DB row exists.
@@ -215,7 +205,7 @@ export async function getJwks(): Promise<{ keys: JwkRsaPublic[] }> {
 }
 
 /**
- * Public PEM for a presented `kid`, or null for unknown kids. STRICT — the
+ * Public PEM for a presented `kid`, or null for unknown kids. STRICT, the
  * RS256 verification path only ever trusts keys returned here. A cache miss
  * triggers one forced reload (a freshly minted key on another replica) before
  * answering null.
@@ -233,7 +223,7 @@ export async function getPublicKeyByKid(kid: string): Promise<string | null> {
 
 /**
  * Boot warm-up: resolve (or first-generate) the active key so the first
- * RS256 sign/verify doesn't pay keygen latency. Failure is non-fatal — apps
+ * RS256 sign/verify doesn't pay keygen latency. Failure is non-fatal, apps
  * that never opt into RS256 must not be blocked by it (e.g. DB briefly
  * unavailable at boot; the lazy path retries on first use).
  */

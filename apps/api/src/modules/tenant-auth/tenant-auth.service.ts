@@ -8,7 +8,7 @@
  *   - sign-up creates a Tenant + an OWNER membership atomically. The first
  *     person to sign up owns their workspace; team-mates join via invite.
  *   - sign-in returns the user's full memberships list. The caller picks an
- *     active workspace (defaults to the OLDEST — `loadMemberships` orders
+ *     active workspace (defaults to the OLDEST, `loadMemberships` orders
  *     `createdAt: 'asc'` and callers take `[0]`, so it is the workspace you
  *     joined first, which for most operators is the one they created) and we mint
  *     tokens scoped to that tenant.
@@ -17,6 +17,8 @@
  */
 
 import type { Tenant, TenantRole, TenantUser } from '@prisma/client';
+import { expandScopes, type Scope } from '../../lib/operator-scopes.js';
+import { invalidateOperatorAuth } from '../../lib/operator-auth-cache.js';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { hashPassword, verifyPassword, verifyPasswordOrDecoy } from '../../lib/passwords.js';
@@ -66,7 +68,7 @@ import { env } from '../../config/env.js';
  * Local-development convenience only: it lets the panel render a working
  * reset link with no mail transport configured. Deny-by-default and gated on
  * an explicit flag rather than `NODE_ENV`, because NODE_ENV defaults to
- * 'development' — keying off it would fail OPEN for anyone running the API
+ * 'development', keying off it would fail OPEN for anyone running the API
  * outside our Docker image. `config/env.ts` refuses to boot when the flag is
  * set with NODE_ENV=production.
  */
@@ -84,10 +86,10 @@ const PASSWORD_MIN_LENGTH = 8;
 
 /**
  * The only rule an operator password had to satisfy, everywhere, was
- * `length >= 8` — so `password` was accepted. Meanwhile the product ships HIBP
+ * `length >= 8`, so `password` was accepted. Meanwhile the product ships HIBP
  * k-anonymity breach checking for its CUSTOMERS' end-users
  * (`lib/breached-password.ts`, wired into `auth.service.ensurePasswordNotBreached`)
- * and never wired it to its own operators — the accounts that reach every
+ * and never wired it to its own operators, the accounts that reach every
  * workspace, every end-user and every decrypted billing credential in the
  * deployment. Holding the more privileged account to the weaker standard is
  * backwards.
@@ -96,7 +98,7 @@ const PASSWORD_MIN_LENGTH = 8;
  * operator password without passing through this.
  *
  * No availability cost: `checkPasswordBreached` has a 1.5s timeout and fails
- * OPEN — an unreachable HIBP lets the password through rather than blocking
+ * OPEN, an unreachable HIBP lets the password through rather than blocking
  * sign-up. `HIBP_BREACH_CHECK_DISABLED` turns it off deployment-wide, the same
  * switch the end-user path honours. There is deliberately no per-operator
  * opt-out: end-users get one because the Application owner is accountable for
@@ -127,15 +129,15 @@ async function assertOperatorPasswordAcceptable(password: string): Promise<void>
  * The ONE body `/tenant/auth/forgot-password` returns.
  *
  * Both operator credential-send endpoints used to report what actually
- * happened — `delivered: false` for an address with no operator account,
- * `delivered: true` for one that has — which is a complete account-existence
+ * happened, `delivered: false` for an address with no operator account,
+ * `delivered: true` for one that has, which is a complete account-existence
  * oracle on an unauthenticated endpoint, for the accounts that reach every
  * workspace and every decrypted billing credential in the deployment.
  *
  * The end-user surface solved this first and this is the same shape as its
  * `PUBLISHABLE_SEND_RESPONSE`: unknown address, real send, and broken transport
  * are byte-identical to the caller, and the real outcome is recorded in the
- * security log instead. There is no secret-key tier here to exempt — the panel
+ * security log instead. There is no secret-key tier here to exempt, the panel
  * is first-party, so every caller of these two routes is a browser.
  *
  * The only path that still varies is the dev token echo
@@ -148,11 +150,10 @@ const CONSTANT_RESET_RESPONSE = { delivered: true, resetToken: null } as const;
 /** The magic-link twin of `CONSTANT_RESET_RESPONSE`. Same reasoning. */
 const CONSTANT_MAGIC_LINK_RESPONSE = { delivered: true, token: null } as const;
 
-export type PublicTenantUser = Omit<TenantUser, 'passwordHash'>;
+export type PublicTenantUser = Omit<TenantUser, 'passwordHash' | 'sessionsInvalidBefore'>;
 
 function redact(user: TenantUser): PublicTenantUser {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { passwordHash, ...rest } = user;
+  const { passwordHash, sessionsInvalidBefore, ...rest } = user;
   return rest;
 }
 
@@ -160,7 +161,7 @@ function redact(user: TenantUser): PublicTenantUser {
  * The workspace a failed sign-in is attributed to.
  *
  * An operator sign-in happens BEFORE a workspace is chosen, so there is no
- * `tenantId` on the request — and every reader of `security_events` is
+ * `tenantId` on the request, and every reader of `security_events` is
  * tenant-scoped (`listSecurityEvents` takes a required `tenantId`, the operator
  * MCP tool filters on one, the panel page is inside a workspace). A row written
  * with `tenantId: null` is therefore a row nobody can ever see, which is the
@@ -171,7 +172,7 @@ function redact(user: TenantUser): PublicTenantUser {
  * The failure lands in the log of the workspace the operator was trying to
  * reach.
  *
- * Returns null only for an operator with no memberships at all — nothing can
+ * Returns null only for an operator with no memberships at all, nothing can
  * be attributed, and sign-in would have refused them anyway.
  */
 async function primaryTenantId(tenantUserId: string): Promise<string | null> {
@@ -193,6 +194,12 @@ export interface MembershipSummary {
   tenantId: string;
   tenantName: string;
   role: TenantRole;
+  /**
+   * The member's RESOLVED scopes in this workspace, lineage applied, reads
+   * implied, or `null` when unrestricted (OWNER, ADMIN, and every member
+   * nobody has restricted). What the panel renders navigation from.
+   */
+  scopes: Scope[] | null;
 }
 
 export interface AuthSessionResult {
@@ -209,7 +216,7 @@ export interface AuthSessionResult {
 }
 
 /**
- * Operator sign-in MFA challenge — primary factor passed but MFA enrolled.
+ * Operator sign-in MFA challenge, primary factor passed but MFA enrolled.
  * Mirror of the end-user `MfaChallengeResult`. The challenge token holds
  * an unauthenticated identity and can only be exchanged via
  * `/tenant/auth/mfa-verify` for a real session.
@@ -231,7 +238,13 @@ async function loadMemberships(tenantUserId: string): Promise<MembershipSummary[
     include: { tenant: { select: { id: true, name: true } } },
     orderBy: { createdAt: 'asc' },
   });
-  return rows.map((r) => ({ tenantId: r.tenantId, tenantName: r.tenant.name, role: r.role }));
+  return rows.map((r) => ({
+    tenantId: r.tenantId,
+    tenantName: r.tenant.name,
+    role: r.role,
+    scopes:
+      r.role === 'MEMBER' && r.scopesRestricted ? [...expandScopes(r.scopes)].sort() : null,
+  }));
 }
 
 export interface TenantDeviceContext {
@@ -246,10 +259,13 @@ async function issueSession(
   memberships: MembershipSummary[],
   device?: TenantDeviceContext,
 ): Promise<AuthSessionResult> {
-  const access = issueTenantAccessToken(user.id, activeTenantId, activeRole);
+  // Refresh row first: its session id rides on the access token as `sid`.
   const refresh = await issueTenantRefreshToken(user.id, {
     userAgent: device?.userAgent ?? null,
     ip: device?.ip ?? null,
+  });
+  const access = issueTenantAccessToken(user.id, activeTenantId, activeRole, {
+    sessionId: refresh.record.sessionId,
   });
   return {
     user: redact(user),
@@ -264,13 +280,6 @@ async function issueSession(
 }
 
 export const tenantAuthService = {
-  /**
-   * Self-serve sign-up. Atomically creates a TenantUser + a Tenant + an
-   * OWNER Membership, then issues a session scoped to the new workspace.
-   *
-   * If the email already exists, returns EMAIL_ALREADY_EXISTS — sign-in
-   * is the right action there.
-   */
   async listSessions(
     tenantUserId: string,
     opts: { take?: number; skip?: number } = {},
@@ -286,17 +295,24 @@ export const tenantAuthService = {
     return { revoked };
   },
 
+  /**
+   * Self-serve sign-up. Atomically creates a TenantUser + a Tenant + an
+   * OWNER Membership, then issues a session scoped to the new workspace.
+   *
+   * If the email already exists, returns EMAIL_ALREADY_EXISTS, sign-in
+   * is the right action there.
+   */
   async signUpAndCreateWorkspace(input: {
     email: string;
     password: string;
     name?: string | undefined;
     workspaceName: string;
-    /** Single-use invite key — required when OPERATOR_SIGNUP_MODE='invite'. */
+    /** Single-use invite key, required when OPERATOR_SIGNUP_MODE='invite'. */
     inviteKey?: string | undefined;
     device?: TenantDeviceContext;
   }): Promise<AuthSessionResult> {
     await assertOperatorPasswordAcceptable(input.password);
-    // Enforce OPERATOR_SIGNUP_MODE before doing any work. Validation only —
+    // Enforce OPERATOR_SIGNUP_MODE before doing any work. Validation only,
     // the key is consumed atomically inside the creation transaction below, so
     // a later failure (e.g. duplicate email) does not burn it.
     const invite = await resolveSignupInvite(input.inviteKey);
@@ -360,7 +376,7 @@ export const tenantAuthService = {
    * Match an operator by verified email, or create one (+ a starter workspace
    * they OWN, mirroring sign-up). For operator OAuth login. The caller
    * (tenant-oauth.service) MUST have confirmed the provider verified the email
-   * before calling — we trust `emailVerified` here for the auto-link/create
+   * before calling, we trust `emailVerified` here for the auto-link/create
    * decision, exactly like the end-user OAuth path. OAuth operators have no
    * password (`passwordHash` stays null) until they set one.
    */
@@ -368,7 +384,7 @@ export const tenantAuthService = {
     email: string;
     name?: string | undefined;
     emailVerified: boolean;
-    /** Single-use invite key — required when OPERATOR_SIGNUP_MODE='invite' AND
+    /** Single-use invite key, required when OPERATOR_SIGNUP_MODE='invite' AND
      *  this login would create a NEW operator. Ignored for existing operators. */
     inviteKey?: string | undefined;
     device?: TenantDeviceContext;
@@ -376,10 +392,16 @@ export const tenantAuthService = {
     const email = input.email.toLowerCase();
     const existing = await prisma.tenantUser.findUnique({ where: { email } });
     if (existing) {
-      // Existing operator — sign-in, never gated. The provider vouched for the
+      // Existing operator, sign-in, never gated. The provider vouched for the
       // email, so upgrade a stale unverified flag.
       if (input.emailVerified && !existing.emailVerified) {
-        return prisma.tenantUser.update({ where: { id: existing.id }, data: { emailVerified: true } });
+        const upgraded = await prisma.tenantUser.update({
+          where: { id: existing.id },
+          data: { emailVerified: true },
+        });
+        // The cached row carries the flag, and GET /me must not show it stale.
+        invalidateOperatorAuth(existing.id);
+        return upgraded;
       }
       return existing;
     }
@@ -387,7 +409,7 @@ export const tenantAuthService = {
     const invite = await resolveSignupInvite(input.inviteKey);
     const created = await prisma.$transaction(async (tx) => {
       const tenant = await tx.tenant.create({
-        // Same deployment default as the password path — an operator must not
+        // Same deployment default as the password path, an operator must not
         // land in a wider workspace by choosing the OAuth button.
         data: {
           name: deriveWorkspaceName(input.name, email),
@@ -423,11 +445,11 @@ export const tenantAuthService = {
   },
 
   /**
-   * Finish a passwordless sign-in for a resolved operator — same tail as
+   * Finish a passwordless sign-in for a resolved operator, same tail as
    * `signIn` (membership check + MFA gate + session mint). Shared by OAuth
    * (`tenant-oauth`) and magic-link `verifyMagicLink`, so those flows stay out
    * of the session/MFA internals. An MFA-enrolled operator still gets the
-   * challenge — the passwordless primary factor doesn't bypass the second one.
+   * challenge, the passwordless primary factor doesn't bypass the second one.
    */
   async completeSignIn(user: TenantUser, device?: TenantDeviceContext): Promise<TenantSignInOutcome> {
     const memberships = await loadMemberships(user.id);
@@ -463,7 +485,7 @@ export const tenantAuthService = {
    * We email the link ourselves via the deployment-wide transport and return
    * `token: null`. The raw token is echoed back only under the dev flag
    * (`REKEY_DEV_ECHO_AUTH_TOKENS`, refused at boot in production) or when no
-   * transport is configured — same shape as `requestPasswordReset`.
+   * transport is configured, same shape as `requestPasswordReset`.
    */
   async requestMagicLink(input: { email: string }): Promise<{ delivered: boolean; token: string | null }> {
     const user = await prisma.tenantUser.findUnique({ where: { email: input.email.toLowerCase() } });
@@ -477,7 +499,7 @@ export const tenantAuthService = {
     const issued = await issueTenantMagicLinkToken(user.id);
     // Deliver via the default transport (RESEND_DEFAULT) + log it. The send is
     // recorded in EmailLog at the transport boundary. Only fall back to
-    // returning the raw token when there's no transport (or no panel base) —
+    // returning the raw token when there's no transport (or no panel base),
     // self-hosted dev. On a real send we never leak the token in the response.
     const base = panelBaseUrl();
     if (base) {
@@ -507,14 +529,14 @@ export const tenantAuthService = {
       }
     }
     // Same reasoning as requestPasswordReset above, and worse: this token IS a
-    // session — verifying it signs the holder in as the operator outright.
+    // session, verifying it signs the holder in as the operator outright.
     if (!echoAuthTokensInDev()) return { ...CONSTANT_MAGIC_LINK_RESPONSE };
     return { delivered: true, token: issued.raw };
   },
 
   /**
    * Consume a magic-link token (single-use) and mint a session. The token is a
-   * passwordless PRIMARY factor — `completeSignIn` still applies the MFA gate.
+   * passwordless PRIMARY factor, `completeSignIn` still applies the MFA gate.
    */
   async verifyMagicLink(input: { token: string; device?: TenantDeviceContext }): Promise<TenantSignInOutcome> {
     const outcome = await lookupTenantMagicLinkToken(input.token);
@@ -565,14 +587,14 @@ export const tenantAuthService = {
       where: { email: input.email.toLowerCase() },
     });
 
-    // Account lockout via the Redis brute-force limiter — surface 429 during
+    // Account lockout via the Redis brute-force limiter, surface 429 during
     // the lock window rather than running argon2 / leaking timing.
     const lockScope = operatorLoginLockScope(input.email);
     await assertNotLocked(lockScope);
 
     // `verifyPasswordOrDecoy`, not `verifyPassword`: the latter returns
     // instantly for a null hash, so an unknown email answered in ~3 ms against
-    // ~9 ms for a real one — a clean, separable account-existence oracle on an
+    // ~9 ms for a real one, a clean, separable account-existence oracle on an
     // unauthenticated endpoint. The decoy costs the same argon2 work.
     const ok = await verifyPasswordOrDecoy(user?.passwordHash ?? null, input.password);
     if (!ok || user === null) {
@@ -584,7 +606,7 @@ export const tenantAuthService = {
       // That reasoning does not transfer here: operator sign-up is not a public
       // funnel (it is invite-gated on any deployment that has been configured),
       // and skipping the count made the 429-vs-401 divergence after 10 attempts
-      // a *louder* existence oracle than the timing one above — no measurement
+      // a *louder* existence oracle than the timing one above, no measurement
       // required, just a loop and a status code.
       const failure = await registerFailure(lockScope, LOGIN_POLICY);
 
@@ -592,7 +614,7 @@ export const tenantAuthService = {
       // any operator- or admin-facing surface at all: the lockout was a Redis
       // key with a TTL and nothing wrote a row, so "why can't the workspace
       // owner sign in?" had no answer anywhere. Attributed to the operator's
-      // primary workspace — see `primaryTenantId` for why null would be
+      // primary workspace, see `primaryTenantId` for why null would be
       // invisible. Fire-and-forget, like every other audit write.
       //
       // Emitted only when the account EXISTS. Recording attempts against
@@ -613,7 +635,7 @@ export const tenantAuthService = {
             metadata: { via: 'password', failuresInWindow: failure.failures },
           });
           if (failure.locked) {
-            // Once per lockout — on the attempt that tripped it, not on every
+            // Once per lockout, on the attempt that tripped it, not on every
             // attempt refused during the window.
             await recordSecurityEvent({
               type: 'operator.locked_out',
@@ -640,12 +662,12 @@ export const tenantAuthService = {
       });
     }
 
-    // Success — clear the failure counter + any lock.
+    // Success, clear the failure counter + any lock.
     await clearFailures(lockScope);
 
     const memberships = await loadMemberships(user.id);
     if (memberships.length === 0) {
-      // Edge case — user exists but every membership got revoked. Likely a
+      // Edge case, user exists but every membership got revoked. Likely a
       // freshly-revoked account. Block them with a friendly error rather
       // than issuing a token that points nowhere.
       throw new RekeyError({
@@ -656,7 +678,7 @@ export const tenantAuthService = {
       });
     }
 
-    // MFA gate — if the operator enrolled, hold the session and emit a
+    // MFA gate, if the operator enrolled, hold the session and emit a
     // 5-min challenge token. The panel exchanges it via /tenant/auth/mfa-verify.
     if (await tenantMfaService.isEnrolled(user.id)) {
       const challenge = issueTenantMfaChallengeToken(user.id);
@@ -740,7 +762,7 @@ export const tenantAuthService = {
       //          chain that has already been spent, which is the signature of
       //          a stolen refresh token. Treat compromise of one link as
       //          compromise of the chain and revoke everything.
-      //   null → the token was DELIBERATELY revoked — the operator signed this
+      //   null → the token was DELIBERATELY revoked, the operator signed this
       //          device out, or revoked it from the sessions list. Replaying
       //          it means only that the device has not noticed yet.
       //
@@ -803,7 +825,9 @@ export const tenantAuthService = {
       });
     }
     const active = memberships[0]!;
-    const access = issueTenantAccessToken(user.id, active.tenantId, active.role);
+    const access = issueTenantAccessToken(user.id, active.tenantId, active.role, {
+      sessionId: replacement.record.sessionId,
+    });
     return {
       user: redact(user),
       memberships,
@@ -879,7 +903,7 @@ export const tenantAuthService = {
       where: { email: input.email.toLowerCase() },
     });
     if (!user) {
-      // Constant-ish sleep — same shape as end-user requestPasswordReset —
+      // Constant-ish sleep, same shape as end-user requestPasswordReset,
       // then the same body a real send produces. `delivered: false` here used
       // to answer "does this operator exist?" for anyone who asked.
       await new Promise((r) => setTimeout(r, 50));
@@ -909,7 +933,7 @@ export const tenantAuthService = {
       if (outcome.kind === 'error') {
         // Token behaviour is already correct here (the dev flag withholds it in
         // production), but an operator whose mail transport just broke gets no
-        // signal at all — they simply cannot recover their own password. Record
+        // signal at all, they simply cannot recover their own password. Record
         // it so the failure is visible instead of silent. Response shape stays
         // put: this endpoint is unauthenticated, so it must not become an
         // operator-email enumeration oracle.
@@ -925,7 +949,7 @@ export const tenantAuthService = {
     // session to recover a forgotten password), so returning the raw token
     // here handed anyone who knew an operator's email a workspace takeover:
     // reset the password, sign in, own the Tenant. Unlike the end-user
-    // surface there is no "customer's server forwards it" contract to honour —
+    // surface there is no "customer's server forwards it" contract to honour,
     // the panel is first-party.
     //
     // DENY BY DEFAULT: an explicit opt-in flag, not `NODE_ENV !== 'production'`.
@@ -990,8 +1014,14 @@ export const tenantAuthService = {
   }): Promise<{ ok: true }> {
     await assertOperatorPasswordAcceptable(input.newPassword);
     const user = await prisma.tenantUser.findUniqueOrThrow({ where: { id: input.tenantUserId } });
+    // The current password is the same secret sign-in checks, so wrong guesses
+    // here count toward the same account lockout. Otherwise a stolen session
+    // could guess it without limit and never trip the lock sign-in would.
+    const lockScope = operatorLoginLockScope(user.email);
+    await assertNotLocked(lockScope);
     const ok = await verifyPassword(user.passwordHash, input.currentPassword);
     if (!ok) {
+      await registerFailure(lockScope, LOGIN_POLICY);
       throw new RekeyError({
         statusCode: 401,
         code: 'INVALID_CREDENTIALS',
@@ -999,6 +1029,7 @@ export const tenantAuthService = {
         fix: 'Verify the current password and try again.',
       });
     }
+    await clearFailures(lockScope);
     const newHash = await hashPassword(input.newPassword);
     await prisma.tenantUser.update({ where: { id: user.id }, data: { passwordHash: newHash } });
     await revokeAllTenantRefreshTokensForUser(user.id);

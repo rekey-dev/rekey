@@ -1,5 +1,5 @@
 /**
- * Operator MCP OAuth 2.1 authorization server — discovery metadata
+ * Operator MCP OAuth 2.1 authorization server, discovery metadata
  * (RFC 8414 / 9728) in BOTH the suffix form and the root-level "path-insertion"
  * form a strict connector (Claude custom connectors) constructs. The
  * path-insertion routes are what unblock Claude connector setup; without them
@@ -72,7 +72,7 @@ describe('Operator MCP OAuth AS — discovery', () => {
   });
   // RFC 9728, which the MCP spec makes a MUST: the 401 is what points an
   // undiscovered client at the authorization server. This shipped without the
-  // header — it was set only on the success reply, i.e. on the one response a
+  // header, it was set only on the success reply, i.e. on the one response a
   // client that already has a token does not need it on. A spec-compliant
   // client could not discover this surface, and Claude specifically will not
   // honour the header on a 200.
@@ -87,7 +87,7 @@ describe('Operator MCP OAuth AS — discovery', () => {
     const header = res.headers['www-authenticate'];
     expect(header).toBeDefined();
     expect(String(header)).toContain('Bearer');
-    // Must name the protected-resource document, not just the scheme —
+    // Must name the protected-resource document, not just the scheme,
     // that URL is the whole point of the cascade.
     expect(String(header)).toContain('resource_metadata=');
     expect(String(header)).toContain('/.well-known/oauth-protected-resource');

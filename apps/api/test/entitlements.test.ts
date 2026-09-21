@@ -1,5 +1,5 @@
 /**
- * Plan entitlements — bundle CRUD + the in-house provisioner.
+ * Plan entitlements, bundle CRUD + the in-house provisioner.
  *
  * Verifies: a plan can carry a bundle (CREDIT + LICENSE + FEATURE) via the
  * tenant CRUD route; provisioning a subscription materializes them onto the
@@ -7,7 +7,7 @@
  * provisioning is idempotent; and a legacy single-`kind` plan (no explicit
  * entitlements) still provisions from its kind fields.
  *
- * Each test bootstraps its own operator + app in beforeEach — the shared
+ * Each test bootstraps its own operator + app in beforeEach, the shared
  * setup.ts truncates all domain tables before every test.
  */
 
@@ -171,7 +171,7 @@ describe('Plan entitlements + provisioner', () => {
     it('ADDS a FEATURE the plan does not carry', async () => {
       // The documented remedy for a customer who has outgrown their plan is an
       // override on their subscription. It could only ever rewrite a row the
-      // plan already had — so for the common case, a plan carrying no such row
+      // plan already had, so for the common case, a plan carrying no such row
       // at all, setting the override changed precisely nothing and the
       // customer stayed capped. Both directions were reproduced.
       const { euId } = await subscribeWithOverrides({ 'FEATURE:max_workspaces': 3 });

@@ -4,7 +4,7 @@
  *
  * ## Why this file exists at all
  *
- * #336, #338 and #341 made "cancel at period end" correct — for a subscription
+ * #336, #338 and #341 made "cancel at period end" correct, for a subscription
  * with no provider, and for Stripe. Rekey Cloud runs on PayPal. Every fixture
  * those PRs added is Stripe-shaped (`provider: 'stripe'`, a `currentPeriodEnd`
  * already populated), and PayPal matches neither half of that shape:
@@ -16,7 +16,7 @@
  *     paid period has to be honoured on our side or not at all.
  *   - PayPal's `BILLING.SUBSCRIPTION.ACTIVATED` carries no period anchor that
  *     we used to read, so `currentPeriodEnd` stayed NULL for the whole first
- *     period — and `cancelEffect` requires it to be non-null. The first
+ *     period, and `cancelEffect` requires it to be non-null. The first
  *     cancellation, the most common one there is, was therefore always
  *     immediate.
  *
@@ -24,7 +24,7 @@
  * like Stripe passes against all of the bugs this file is about.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { cancelEffect } from '@rekey.dev/shared-types';
@@ -40,8 +40,8 @@ const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
  * What the account page shows, reduced to the one input that drives it.
  *
  * the marketing app's `subscriptionFacts` calls an entitled row with a
- * `cancelAt` "cancelling", renders "Ends <cancelAt>", and — this is the part
- * that traps a buyer — replaces the Cancel button with Resubscribe
+ * `cancelAt` "cancelling", renders "Ends <cancelAt>", and, this is the part
+ * that traps a buyer, replaces the Cancel button with Resubscribe
  * (`account-panel.tsx`). So a stale `cancelAt` on a live subscription is not a
  * cosmetic bug: it removes the only control that stops the charges.
  */
@@ -64,7 +64,7 @@ describe('PayPal cancellation', () => {
 
   /**
    * An application with PayPal credentials, an end-user, and a plan. Nothing
-   * here creates the subscription — each case builds the row it needs.
+   * here creates the subscription, each case builds the row it needs.
    */
   async function fixture(slug: string) {
     const tenant = await app
@@ -162,7 +162,7 @@ describe('PayPal cancellation', () => {
   const inTwentyDays = () => new Date(Date.now() + 20 * 24 * 60 * 60 * 1000);
 
   // ───────────────────────────────────────────────────────────────────────────
-  // Defect 1 — the provider call itself
+  // Defect 1, the provider call itself
   // ───────────────────────────────────────────────────────────────────────────
 
   describe('the outbound cancel call', () => {
@@ -202,7 +202,7 @@ describe('PayPal cancellation', () => {
       // successfully, so `cancelCurrentSubscription` went on to stamp the local
       // row cancelled while the agreement carried on billing every month. The
       // buyer is then told they have cancelled, sees no subscription to cancel,
-      // and keeps paying — with nothing anywhere recording that the call
+      // and keeps paying, with nothing anywhere recording that the call
       // failed.
       stubFetch({ status: 422, body: '{"name":"UNPROCESSABLE_ENTITY"}' });
       const provider = new RealPaypalProvider(creds, 'test');
@@ -233,7 +233,7 @@ describe('PayPal cancellation', () => {
     it('never claims to PayPal that the cancellation is scheduled', async () => {
       // PayPal Subscriptions v1 has no period-end cancel. The old code POSTed
       // the same immediate-termination endpoint whatever `atPeriodEnd` said,
-      // which at least did not lie to PayPal — but it also never recorded that
+      // which at least did not lie to PayPal, but it also never recorded that
       // the flag had nowhere to go. This pins the contract: one endpoint, and
       // no scheduling parameter invented in the body.
       const calls = stubFetch({ status: 204, body: '' });
@@ -246,7 +246,7 @@ describe('PayPal cancellation', () => {
   });
 
   // ───────────────────────────────────────────────────────────────────────────
-  // Defect 1 — the buyer keeps the period they paid for
+  // Defect 1, the buyer keeps the period they paid for
   // ───────────────────────────────────────────────────────────────────────────
 
   it("PayPal's own CANCELLED webhook does not repossess the paid period", async () => {
@@ -256,7 +256,7 @@ describe('PayPal cancellation', () => {
     //   2. PayPal terminates the agreement immediately, because that is the
     //      only cancel it has;
     //   3. seconds later its BILLING.SUBSCRIPTION.CANCELLED webhook arrives and
-    //      the status mirror writes CANCELED — entitlements drop to the free
+    //      the status mirror writes CANCELED, entitlements drop to the free
     //      ceiling mid-period, with no refund, contradicting the sentence the
     //      buyer just read.
     const f = await fixture('pp-keep');
@@ -295,7 +295,7 @@ describe('PayPal cancellation', () => {
     // translated without one and nothing else wrote it until the SECOND charge
     // (`subscription.period_advanced` refuses to advance while no prior
     // succeeded payment exists), so for the whole of month one the answer was
-    // "cancel immediately" — the exact harm #336 set out to remove, on the most
+    // "cancel immediately", the exact harm #336 set out to remove, on the most
     // common case there is. The live Cloud subscription is in this state now.
     const f = await fixture('pp-first');
     const nextBilling = inTwentyDays();
@@ -320,23 +320,23 @@ describe('PayPal cancellation', () => {
   });
 
   // ───────────────────────────────────────────────────────────────────────────
-  // Defect 2 — a resubscribe must not inherit the old cancellation
+  // Defect 2, a resubscribe must not inherit the old cancellation
   // ───────────────────────────────────────────────────────────────────────────
 
   it('a resubscribe clears the old cancellation and can be cancelled again', async () => {
     // The worst outcome in this codebase. The row is unique on
     // (applicationId, endUserId, planId), so resubscribing REUSES the cancelled
-    // row — and nothing on the reactivation path ever cleared `cancelAt`. The
+    // row, and nothing on the reactivation path ever cleared `cancelAt`. The
     // subscription the buyer paid for this morning then renders as
-    // "Cancelling — ends <a date last month>", the account panel swaps the
+    // "Cancelling, ends <a date last month>", the account panel swaps the
     // Cancel button for Resubscribe in that branch, and the cancel endpoint
     // short-circuits on `if (atPeriodEnd && sub.cancelAt !== null) return sub`
-    // — 200 OK, nothing done. PayPal keeps charging and the buyer has no
+    //, 200 OK, nothing done. PayPal keeps charging and the buyer has no
     // working way to stop it.
     const f = await fixture('pp-resub');
 
     // First period, PayPal shape: no period anchor yet, so this cancel is the
-    // immediate one — which is exactly how the live subscription would cancel.
+    // immediate one, which is exactly how the live subscription would cancel.
     const first = await prisma.subscription.create({
       data: {
         applicationId: f.applicationId,
@@ -379,14 +379,14 @@ describe('PayPal cancellation', () => {
     const stopped = await prisma.subscription.findUniqueOrThrow({ where: { id: first.id } });
     expect(stopped.cancelAt).not.toBeNull();
     expect(stopped.cancelAt!.getTime()).toBeGreaterThan(Date.now());
-    // Scheduled, not terminated — this time there IS a period to run out.
+    // Scheduled, not terminated, this time there IS a period to run out.
     expect(stopped.status).toBe('ACTIVE');
   });
 
   it('does not expire a row that was paid for after its cancellation date', async () => {
     // Protects the subscriptions that are ALREADY poisoned. Reactivation now
     // clears `cancelAt` at every seam, so no new row can end up ACTIVE with a
-    // date in the past — but rows poisoned before this shipped still exist, and
+    // date in the past, but rows poisoned before this shipped still exist, and
     // to the lazy expiry they look overdue. Without this guard, deploying the
     // fix would cancel a live, paid-for subscription on its next portal load:
     // the exact harm the fix is for.
@@ -443,7 +443,7 @@ describe('PayPal cancellation', () => {
   it('a scheduled cancellation survives a replayed activation webhook', async () => {
     // The other direction of the same fix. Clearing `cancelAt` on every
     // activation write would let a re-delivered ACTIVATED event silently
-    // un-cancel a subscription the buyer had scheduled to end — PayPal retries
+    // un-cancel a subscription the buyer had scheduled to end, PayPal retries
     // webhooks, so this is a routine occurrence, not a hypothetical. Only a
     // genuine transition INTO active may clear it.
     const f = await fixture('pp-replay');

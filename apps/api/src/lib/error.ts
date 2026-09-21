@@ -2,11 +2,11 @@
  * Error infrastructure.
  *
  * Every error returned to clients carries:
- *   - `code`    — stable string, safe to switch/case on
- *   - `message` — human-readable
- *   - `fix`     — concrete remediation. The single most useful field for
- *                 both humans and AI agents — read this first when debugging.
- *   - `docs`    — optional URL to the long-form explanation.
+ *   - `code`   , stable string, safe to switch/case on
+ *   - `message`, human-readable
+ *   - `fix`    , concrete remediation. The single most useful field for
+ *                 both humans and AI agents, read this first when debugging.
+ *   - `docs`   , optional URL to the long-form explanation.
  *
  * The shape matches `@rekey.dev/shared-types` `RekeyErrorSchema` so the
  * SDK can decode without re-deriving.
@@ -29,11 +29,19 @@ export interface RekeyErrorPayload {
   fix?: string;
   docs?: string;
   /**
-   * For 429 responses: rendered as a `Retry-After` header (in seconds).
-   * Clients should honour this before retrying — most HTTP libraries
-   * surface it automatically.
+   * Rendered as a `Retry-After` header (in seconds) on any RekeyError that
+   * carries it, not only a 429: the 503 for a dependency outage carries one
+   * too. Clients should honour it before retrying, most HTTP libraries surface
+   * it automatically.
    */
   retryAfterSeconds?: number;
+  /**
+   * Structured, code-specific context a client can act on without parsing
+   * `message`. Documented per code (e.g. DEVICE_LIMIT_REACHED carries
+   * `{ limit, devices[] }`); absent everywhere else. Rendered into the envelope
+   * as-is, so never put anything here the caller must not see.
+   */
+  details?: Record<string, unknown>;
 }
 
 /**
@@ -59,6 +67,7 @@ export class RekeyError extends Error {
   public readonly fix: string | undefined;
   public readonly docs: string | undefined;
   public readonly retryAfterSeconds: number | undefined;
+  public readonly details: Record<string, unknown> | undefined;
 
   constructor(args: RekeyErrorPayload & { statusCode?: number; cause?: unknown }) {
     // `cause` keeps the original exception attached without putting any of it
@@ -71,6 +80,7 @@ export class RekeyError extends Error {
     this.fix = args.fix;
     this.docs = args.docs;
     this.retryAfterSeconds = args.retryAfterSeconds;
+    this.details = args.details;
   }
 }
 
@@ -107,9 +117,12 @@ const FASTIFY_CODE_MAP: Record<string, { code: string; fix: string }> = {
     code: 'BAD_REQUEST',
     fix: 'Send a Content-Length that matches the body you wrote.',
   },
+  // The `fix` names no number on purpose: the limit varies per route
+  // (lib/body-limits.ts caps the credential tier well under the global 1 MiB),
+  // and a caller told the exact cap can size a payload to sit just inside it.
   FST_ERR_CTP_BODY_TOO_LARGE: {
     code: 'PAYLOAD_TOO_LARGE',
-    fix: 'Split the request — the body limit is 1 MiB.',
+    fix: 'This endpoint accepts a smaller body than you sent. Send only the fields its schema documents (/docs), and keep large values (files, long text, metadata blobs) in your own storage with a reference here.',
   },
 };
 
@@ -123,7 +136,7 @@ export function normalizeFastifyError(rawCode: string | undefined): {
   if (rawCode === undefined) return { code: 'BAD_REQUEST', fix: FALLBACK_4XX_FIX };
   const mapped = FASTIFY_CODE_MAP[rawCode];
   if (mapped) return mapped;
-  // Unmapped framework code — never surface the `FST_ERR_*` identifier.
+  // Unmapped framework code, never surface the `FST_ERR_*` identifier.
   if (rawCode.startsWith('FST_ERR')) return { code: 'BAD_REQUEST', fix: FALLBACK_4XX_FIX };
   return { code: rawCode, fix: FALLBACK_4XX_FIX };
 }
@@ -141,7 +154,7 @@ const MAX_VALIDATION_ISSUES = 10;
  * Turn a `ZodError` into the 400 envelope.
  *
  * This exists because the handler had no ZodError branch at all, so a raw
- * ZodError fell through to the generic 500 — and most of the routes that parse
+ * ZodError fell through to the generic 500, and most of the routes that parse
  * with zod in the handler (every `/admin/metrics/*` endpoint among them)
  * declare no Fastify `querystring` schema, which makes that parse the ONLY
  * validator. `?limit=500`, `?sort=bogus` or `?order=sideways` therefore
@@ -152,7 +165,7 @@ const MAX_VALIDATION_ISSUES = 10;
  * `path` is the dotted field path (`""` for a whole-body failure) and
  * `message` is zod's own text, which already reads well ("Expected number,
  * received nan", "Unrecognized key(s) in object: 'dunningEnabld'"). Neither
- * can carry server internals — both are derived from the schema and the
+ * can carry server internals, both are derived from the schema and the
  * caller's own input.
  */
 function zodErrorPayload(err: ZodError): {
@@ -190,7 +203,7 @@ const DEPENDENCY_RETRY_AFTER_SECONDS = 5;
  * 503 envelope for a dead backing service. Names the subsystem so the operator
  * knows which process to look at, and points at `/health/ready` (which reports
  * `db` and `redis` individually). Carries no connection string, credential,
- * host, or port — the underlying error message is logged, never returned.
+ * host, or port, the underlying error message is logged, never returned.
  */
 export function dependencyUnavailablePayload(subsystem: OutageSubsystem): {
   statusCode: number;
@@ -203,7 +216,7 @@ export function dependencyUnavailablePayload(subsystem: OutageSubsystem): {
     statusCode: 503,
     code: 'DEPENDENCY_UNAVAILABLE',
     message: `The ${OUTAGE_SUBSYSTEM_LABEL[subsystem]} is unreachable, so this request could not be served.`,
-    fix: 'Check GET /health/ready — it reports `db` and `redis` separately — then restore the failed dependency on this deployment and retry.',
+    fix: 'Check GET /health/ready, it reports `db` and `redis` separately, then restore the failed dependency on this deployment and retry.',
     retryAfterSeconds: DEPENDENCY_RETRY_AFTER_SECONDS,
   };
 }
@@ -219,7 +232,7 @@ export function rekeyErrorHandler(
   reply: FastifyReply,
 ): FastifyReply {
   // Surface the Fastify-assigned request id on every error response. Clients
-  // can grep server logs for this id to find the matching backtrace — much
+  // can grep server logs for this id to find the matching backtrace, much
   // more useful than the opaque message alone.
   const requestId = req.id;
   reply.header('X-Request-Id', requestId);
@@ -231,7 +244,7 @@ export function rekeyErrorHandler(
     // A 5xx is a failure even when we chose its shape deliberately. Without
     // this, mapping an upstream provider exception onto a clean 502 traded the
     // caller's bad error message for a server log that no longer mentioned the
-    // failure at all. 4xx stays unlogged — a rejected request is normal traffic.
+    // failure at all. 4xx stays unlogged, a rejected request is normal traffic.
     if (err.statusCode >= 500) {
       req.log.error({ err, requestId, code: err.code }, 'upstream or server failure');
     }
@@ -243,6 +256,7 @@ export function rekeyErrorHandler(
         ...(err.fix !== undefined && { fix: err.fix }),
         ...(err.docs !== undefined && { docs: err.docs }),
         ...(err.retryAfterSeconds !== undefined && { retryAfterSeconds: err.retryAfterSeconds }),
+        ...(err.details !== undefined && { details: err.details }),
         requestId,
       },
     });
@@ -271,15 +285,15 @@ export function rekeyErrorHandler(
     });
   }
 
-  // Backstop for finding #3. A `StripeError` carries `.statusCode` and
-  // `.message`, which is all the branch below needs to mistake it for a
-  // framework 4xx: the provider's status passed through, its absent `.code`
-  // collapsed to `BAD_REQUEST`, and the caller was told to check their request
-  // shape — for a wrong key on the OPERATOR's provider account, with a
-  // fragment of that key echoed back in `message`. Every known provider call
-  // site now maps its own failures (see `lib/provider-errors.ts`); this
-  // catches the one somebody adds later and forgets to wrap. Checked before
-  // the duck-type, because the duck-type is exactly what goes wrong.
+  // A `StripeError` carries `.statusCode` and `.message`, which is all the
+  // branch below needs to mistake it for a framework 4xx: the provider's
+  // status passed through, its absent `.code` collapsed to `BAD_REQUEST`, and
+  // the caller was told to check their request shape, for a wrong key on the
+  // OPERATOR's provider account, with a fragment of that key echoed back in
+  // `message`. Every known provider call site now maps its own failures (see
+  // `lib/provider-errors.ts`); this catches one added later that forgets to
+  // wrap. Checked before the duck-type, because the duck-type is exactly what
+  // goes wrong.
   if (isProviderSdkError(err)) {
     req.log.error({ err, requestId }, 'unmapped payment-provider error');
     return reply.status(502).send({
@@ -315,7 +329,7 @@ export function rekeyErrorHandler(
     req.log.error({ err, requestId, subsystem: outage }, 'dependency unavailable');
     // Durable, operator-visible trail. Throttled per (subsystem, tenant): an
     // outage hits every request, and a row each would bury the log it is meant to
-    // explain. Fire-and-forget — an audit write must never replace the response.
+    // explain. Fire-and-forget, an audit write must never replace the response.
     const outageTenantId = req.tenantId ?? req.application?.tenantId ?? null;
     if (shouldRecordOutageEvent(outage, outageTenantId)) {
       void recordSecurityEvent({

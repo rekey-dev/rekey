@@ -1,12 +1,12 @@
 /**
- * Tenant-operator JWT — separate from the end-user JWT (lib/jwt.ts) because
+ * Tenant-operator JWT, separate from the end-user JWT (lib/jwt.ts) because
  * its claims are different.
  *
  * Token shapes (discriminated by `typ`):
  *
- *   "to_access"        — operator session access token.
+ *   "to_access"       , operator session access token.
  *                        { typ, sub, tid, rol, iat, exp }
- *   "to_mfa_challenge" — short-lived intermediate token issued at sign-in
+ *   "to_mfa_challenge", short-lived intermediate token issued at sign-in
  *                        when the operator has MFA enrolled. Holds an
  *                        unauthenticated identity; can only be exchanged
  *                        via /tenant/auth/mfa-verify for a real session.
@@ -16,7 +16,7 @@
  * tenant-session middleware even if claim names happened to align, AND it
  * stops a challenge token from being mistaken for a session token.
  *
- * `tid` + `rol` are also load-bearing — the session middleware uses them to
+ * `tid` + `rol` are also load-bearing, the session middleware uses them to
  * scope every request to the active workspace and to gate role-restricted
  * routes. To switch workspaces, the operator calls /tenant/switch-workspace,
  * which mints a new pair of tokens with a different tid.
@@ -33,6 +33,12 @@ export interface TenantSessionClaims {
   sub: string;
   tid: string;
   rol: TenantRole;
+  /**
+   * The session (`tenant_refresh_tokens.session_id`) this token was minted
+   * for. `requireTenantSession` refuses it once that session is revoked.
+   * Absent on tokens minted before the claim existed.
+   */
+  sid?: string;
   iat: number;
   exp: number;
 }
@@ -44,7 +50,8 @@ export interface TenantMfaChallengeClaims {
   exp: number;
 }
 
-const DEFAULT_LIFETIME_SECONDS = 15 * 60;
+// Configurable per deployment (OPERATOR_ACCESS_TOKEN_TTL_SECONDS, default 15 minutes).
+const DEFAULT_LIFETIME_SECONDS = env.OPERATOR_ACCESS_TOKEN_TTL_SECONDS;
 // Short-enough that a leaked challenge token is useless before email phishes
 // can be acted on; long enough for a real user to fish their authenticator
 // app out of their pocket.
@@ -54,11 +61,17 @@ export function issueTenantAccessToken(
   tenantUserId: string,
   tenantId: string,
   role: TenantRole,
-  options: { lifetimeSeconds?: number } = {},
+  options: { lifetimeSeconds?: number; sessionId?: string } = {},
 ): { token: string; expiresAt: Date } {
   const lifetime = options.lifetimeSeconds ?? DEFAULT_LIFETIME_SECONDS;
   const token = jwt.sign(
-    { typ: 'to_access' as const, sub: tenantUserId, tid: tenantId, rol: role },
+    {
+      typ: 'to_access' as const,
+      sub: tenantUserId,
+      tid: tenantId,
+      rol: role,
+      ...(options.sessionId && { sid: options.sessionId }),
+    },
     env.JWT_SECRET,
     { expiresIn: lifetime, algorithm: 'HS256' },
   );

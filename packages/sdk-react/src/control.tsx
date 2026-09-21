@@ -1,14 +1,14 @@
 'use client';
 
 /**
- * Control components — the "render this region iff …" primitives, Clerk-shaped.
+ * Control components, the "render this region iff …" primitives, Clerk-shaped.
  *
  * `<SignedIn>` / `<SignedOut>` already live in `components.tsx`; this module adds
  * the loading-gate pair and the entitlement/role gate `<Protect>`.
  *
  * IMPORTANT (security model): `<Protect>` does NOT fetch entitlements. Not
- * because it couldn't — `/billing/entitlements` accepts the publishable key plus
- * the user's own token, and `RekeyBrowserClient.getEntitlements` is that call —
+ * because it couldn't, `/billing/entitlements` accepts the publishable key plus
+ * the user's own token, and `RekeyBrowserClient.getEntitlements` is that call,
  * but because a UI gate must render a decision, not make one. The customer
  * resolves entitlements (server-side via `@rekey.dev/node`, or in the browser for
  * a purely cosmetic gate) and passes the resolved facts down as props/context.
@@ -22,7 +22,7 @@ import { useUser } from './hooks.js';
 /**
  * The entitlement facts `<Protect>` checks against. Resolve these server-side
  * (via `@rekey.dev/node billing.getEntitlements`) and hand them to the component.
- * All optional — pass whichever your gate needs.
+ * All optional, pass whichever your gate needs.
  */
 export interface ProtectAuthorization {
   /** Feature flags + numeric limits, keyed by code (the `features` map). */
@@ -35,7 +35,7 @@ export interface ProtectProps {
   /**
    * The resolved authorization facts (server-side truth). When omitted,
    * `<Protect>` treats the user as unauthorized for any feature/role check
-   * (fail-closed) — pass it from your server-resolved entitlements.
+   * (fail-closed), pass it from your server-resolved entitlements.
    */
   authorization?: ProtectAuthorization;
   /** Require this feature flag to be truthy (`features[feature]`). */
@@ -112,7 +112,7 @@ export function Protect({
 }
 
 /**
- * Renders children only while the provider is resolving the session — the
+ * Renders children only while the provider is resolving the session, the
  * `<ClerkLoading>` equivalent. Pair with `<RekeyLoaded>`.
  *
  * @example

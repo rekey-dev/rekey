@@ -1,8 +1,9 @@
 import * as React from 'react';
 import type { Metadata } from 'next';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { publicPost, setSessionCookies, PanelApiError, type AuthResponse } from '@/lib/api';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
 import { safeNext } from '@/lib/safe-next';
@@ -43,10 +44,7 @@ async function verify(formData: FormData): Promise<void> {
     throw err;
   }
 
-  await setSessionCookies({
-    accessToken: result.accessToken,
-    refreshToken: result.refreshToken,
-  });
+  await setSessionCookies(result);
   if (next) redirect(`${next}${next.includes('?') ? '&' : '?'}e=login_mfa`);
   redirect('/applications?e=login_mfa');
 }
@@ -68,7 +66,7 @@ export default async function MfaVerifyPage({
   const params = await searchParams;
   const challenge =
     typeof params.challenge === 'string' ? params.challenge : '';
-  // Only codes we have copy for render a banner — an unrecognized `?error=`
+  // Only codes we have copy for render a banner, an unrecognized `?error=`
   // value shows nothing rather than an unexplained "something went wrong".
   const error = typeof params.error === 'string' ? ERROR_MESSAGES[params.error] : undefined;
   const next = typeof params.next === 'string' ? params.next : undefined;
@@ -77,7 +75,7 @@ export default async function MfaVerifyPage({
 
   return (
     <main className="min-h-screen grid place-items-center px-6 bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-950 dark:to-neutral-900">
-      <form
+      <ActionForm
         action={verify}
         className="w-full max-w-md space-y-5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-8 shadow-sm"
       >
@@ -119,7 +117,7 @@ export default async function MfaVerifyPage({
             Back to sign-in
           </Link>
         </div>
-      </form>
+      </ActionForm>
     </main>
   );
 }

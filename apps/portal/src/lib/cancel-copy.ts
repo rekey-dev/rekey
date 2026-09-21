@@ -6,7 +6,7 @@ import { cancelEffect } from '@rekey.dev/shared-types';
  *
  * ## Why this is a function and not inline JSX
  *
- * `atPeriodEnd: true` — the only thing the portal's cancel action ever sends —
+ * `atPeriodEnd: true`, the only thing the portal's cancel action ever sends,
  * is a REQUEST. The API grants it for an ACTIVE subscription with a known
  * period end and otherwise cancels on the spot, with no refund for the unused
  * remainder. A confirmation dialog has to say which of those two is about to
@@ -16,7 +16,7 @@ import { cancelEffect } from '@rekey.dev/shared-types';
  * The portal predicted wrong, unconditionally: the button read "Cancel at
  * period end" and the dialog promised the plan "stays active until the end of
  * the current period" for every subscription, including the ones the API was
- * about to terminate immediately — and including ones where the page could not
+ * about to terminate immediately, and including ones where the page could not
  * even name the date, since it only renders one when `currentPeriodEnd` exists.
  * #338 fixed this copy on the marketing site and did not touch the portal.
  *
@@ -56,7 +56,7 @@ export function cancelCopy(
       confirmLabel: 'Yes, cancel now',
       message:
         'This subscription has no renewal date left to run out, so cancelling takes effect ' +
-        "straight away — access ends now and there's no refund for any unused time. " +
+        "straight away, access ends now and there's no refund for any unused time. " +
         'You can resubscribe any time.',
     };
   }

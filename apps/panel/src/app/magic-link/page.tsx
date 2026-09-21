@@ -1,6 +1,6 @@
 import * as React from 'react';
 import type { Metadata } from 'next';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { errorQuery, publicPost, PanelApiError } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
@@ -48,7 +48,7 @@ export default async function MagicLinkPage({
   const params = await searchParams;
   const sent = params.sent === '1';
   const demoToken = typeof params.demoToken === 'string' ? params.demoToken : null;
-  // Only codes we have copy for render a banner — an unrecognized `?error=`
+  // Only codes we have copy for render a banner, an unrecognized `?error=`
   // value shows nothing rather than an unexplained "something went wrong".
   const error = typeof params.error === 'string' ? ERR[params.error] : undefined;
 

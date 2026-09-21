@@ -5,7 +5,7 @@ import { RequestLogTable } from '@/components/RequestLogTable';
 import { Pager, readPageSize } from '@/components/Pager';
 
 /**
- * Operator "My requests" — the calling operator's own requests to the tenant
+ * Operator "My requests", the calling operator's own requests to the tenant
  * API. The panel makes these on the operator's behalf (every page load fans
  * out to a few reads), so this is an honest record of API activity for the
  * account. Captured best-effort, capped per operator by a periodic pruner.
@@ -24,7 +24,7 @@ export default async function AccountActivityPage({
   if (offset) qs.set('offset', String(offset));
 
   // `page.total` counts what the pruner has left for this operator, not every
-  // request they have ever made — the route is a capped convenience tail. It is
+  // request they have ever made, the route is a capped convenience tail. It is
   // still the real answer to "is there another page", which the old
   // `{requests: […]}` wrapper could not give at all.
   const { items: requests, page } = await api<Page<ApiRequestLogRow>>({
@@ -37,7 +37,7 @@ export default async function AccountActivityPage({
       <div>
         <h1 className="text-2xl font-semibold">My requests</h1>
         <p className="text-sm text-neutral-600 dark:text-neutral-500 mt-1">
-          Recent requests made to the Rekey API under your operator session — the panel issues
+          Recent requests made to the Rekey API under your operator session, which the panel issues
           these on your behalf as you navigate. Newest first. Captured best-effort and capped to
           your most recent requests.
         </p>

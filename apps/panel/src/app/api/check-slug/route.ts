@@ -3,7 +3,7 @@
  *
  * Thin proxy to the API's `/api/v1/tenant/applications/check-slug` endpoint.
  * Lives here (in the panel's own /api/* namespace) so the client component
- * can fetch it without exposing the operator JWT — `api()` reads cookies
+ * can fetch it without exposing the operator JWT, `api()` reads cookies
  * server-side and adds Authorization, so we keep that pattern intact.
  */
 

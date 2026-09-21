@@ -1,11 +1,11 @@
 /**
- * Granting a subscription with no payment provider behind it —
+ * Granting a subscription with no payment provider behind it,
  * `POST /api/v1/admin/applications/:id/subscriptions`.
  *
  * The thing under test is not the row. It is whether a grant produces the same
- * CONSEQUENCES a provider activation produces, because everything downstream —
+ * CONSEQUENCES a provider activation produces, because everything downstream,
  * entitlement resolution, the outbound `subscription.activated` event, and the
- * Cloud provisioning that listens for it — is built on those and not on the
+ * Cloud provisioning that listens for it, is built on those and not on the
  * status column. So each case here asserts an effect, not a write:
  *
  *   - the entitlements are materialised onto the subscriber;
@@ -19,15 +19,16 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import type { WebhookDelivery } from '@prisma/client';
+import type { Prisma, WebhookDelivery } from '@prisma/client';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { creditsService } from '../src/modules/credits/credits.service.js';
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
-/** Poll for delivery rows of one event type — emission is fire-and-forget. */
+/** Poll for delivery rows of one event type, emission is fire-and-forget. */
 async function waitForDeliveries(
   endpointId: string,
   eventType: string,
@@ -126,6 +127,16 @@ describe('Granting a subscription without a payment provider', () => {
     return (r.json().data as { id: string }).id;
   }
 
+  async function setDefaultPlan(slug: string): Promise<void> {
+    const current = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
+    await prisma.application.update({
+      where: { id: appId },
+      data: {
+        billingConfig: { ...(current.billingConfig as Record<string, unknown>), defaultPlanSlug: slug },
+      },
+    });
+  }
+
   function grant(payload: Record<string, unknown>, headers = admin()) {
     return app.inject({
       method: 'POST',
@@ -148,7 +159,6 @@ describe('Granting a subscription without a payment provider', () => {
     });
     const euId = await makeEndUser('buyer@example.com');
 
-    const before = Date.now();
     const res = await grant({ planSlug: 'pro', endUserId: euId, note: 'wire transfer #4471' });
     expect(res.statusCode).toBe(201);
     const body = res.json().data as {
@@ -162,7 +172,7 @@ describe('Granting a subscription without a payment provider', () => {
     };
     expect(body.activated).toBe(true);
     expect(body.subscription.status).toBe('ACTIVE');
-    // Provider-less is the defining property — it is what makes the local
+    // Provider-less is the defining property, it is what makes the local
     // cancel + expiry paths, rather than a webhook nobody will send, the thing
     // that ends this subscription.
     expect(body.subscription.provider).toBeNull();
@@ -281,7 +291,7 @@ describe('Granting a subscription without a payment provider', () => {
 
     // Both requests read the same pre-transaction state. What separates them is
     // the unique key on (application, end-user, plan) for the create path and a
-    // count-checked conditional update for the re-grant path — without either,
+    // count-checked conditional update for the re-grant path, without either,
     // a double-clicked "mark as paid" button is a double announcement of one
     // sale, and every consumer acts on it twice.
     const [a, b] = await Promise.all([
@@ -333,7 +343,7 @@ describe('Granting a subscription without a payment provider', () => {
 
     // The operator who OWNS this workspace still cannot grant. Their session
     // token is the credential the panel holds, and it opens every other write
-    // on this Application — plans, coupons, credentials, cancelling a
+    // on this Application, plans, coupons, credentials, cancelling a
     // subscription. Not this one.
     const owner = await grant(payload, auth());
     expect(owner.statusCode).toBe(401);
@@ -350,19 +360,16 @@ describe('Granting a subscription without a payment provider', () => {
     await grant({ planSlug: 'pro', endUserId: euId, note: 'invoice INV-2026-0031' });
 
     const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
-    // Best-effort writer (`void recordSecurityEvent`) — poll rather than assume.
-    let events: Array<{ metadata: unknown; tenantId: string | null }> = [];
-    for (let i = 0; i < 40 && events.length === 0; i += 1) {
-      events = await prisma.securityEvent.findMany({
-        where: { applicationId: appId, type: 'app.subscription_granted' },
-      });
-      if (events.length === 0) await new Promise((r) => setTimeout(r, 25));
-    }
+    // Best-effort writer (`void recordSecurityEvent`), poll rather than assume.
+    const events = await waitForSecurityEvents({
+      applicationId: appId,
+      type: 'app.subscription_granted',
+    });
     expect(events).toHaveLength(1);
     expect(events[0]!.tenantId).toBe(application.tenantId);
     expect(events[0]!.metadata).toMatchObject({ planSlug: 'pro', endUserId: euId, note: 'invoice INV-2026-0031' });
 
-    // A no-op grant adds nothing — a trail that logs non-events gets skimmed.
+    // A no-op grant adds nothing, a trail that logs non-events gets skimmed.
     await grant({ planSlug: 'pro', endUserId: euId });
     await settle();
     expect(
@@ -418,7 +425,7 @@ describe('Granting a subscription without a payment provider', () => {
     const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
     const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: euId } });
 
-    // No provider means no provider call — and, since #336, still a scheduled
+    // No provider means no provider call, and, since #336, still a scheduled
     // cancellation rather than an immediate one that keeps the money.
     const canceled = await billingService.cancelCurrentSubscription(application, endUser);
     expect(canceled.status).toBe('ACTIVE');
@@ -571,7 +578,7 @@ describe('Granting a subscription without a payment provider', () => {
     // has since stopped being true: the gate required `providerBacked` because
     // a scheduled provider-less row could sit ACTIVE and entitling if nobody
     // loaded the portal. `stillEntitling` filters `cancelAt` in the entitlement
-    // query now, so that cannot happen — and on a deployment where every
+    // query now, so that cannot happen, and on a deployment where every
     // subscription is granted, the old rule ended every operator cancel
     // immediately, mid-period, with no refund.
     await makePlan('pro');
@@ -595,7 +602,7 @@ describe('Granting a subscription without a payment provider', () => {
     expect(canceled.status).toBe('ACTIVE');
     expect(canceled.cancelAt).not.toBeNull();
 
-    // The explicit opt-out still ends it on the spot — that is what an operator
+    // The explicit opt-out still ends it on the spot, that is what an operator
     // cancelling for abuse needs, and it now takes saying so.
     const other = await makeEndUser('abuser@example.com');
     await grant({
@@ -632,16 +639,176 @@ describe('Granting a subscription without a payment provider', () => {
 
     // The session pointers are what a provider webhook matches the local row
     // on. Left in place, going back to the old tab and paying would stamp a
-    // `providerSubId` onto a subscription no provider owns — and a row that
+    // `providerSubId` onto a subscription no provider owns, and a row that
     // claims a provider is never reaped by the local expiry.
     const { checkoutSessionWhere } = await import('../src/modules/billing/checkout-sessions.js');
     expect(await prisma.subscription.count({ where: checkoutSessionWhere(appId, 'cs_abandoned') })).toBe(0);
     const row = await prisma.subscription.findFirstOrThrow({ where: { applicationId: appId, endUserId: euId } });
     expect(row.provider).toBeNull();
-    // Retired, not erased — "why did that session match nothing" stays answerable.
+    // Retired, not erased, "why did that session match nothing" stays answerable.
     expect((row.metadata as { grant: { retiredCheckoutSessions: string[] } }).grant.retiredCheckoutSessions).toEqual([
       'cs_abandoned',
     ]);
+  });
+
+  it('an abandoned upgrade checkout does not shadow the plan the subscriber is on', async () => {
+    // A free subscriber opens a paid checkout and closes the tab. The PENDING
+    // row is newer than their live plan, and newest-first used to win, so they
+    // read as "pending" from then on: every gate on the current subscription
+    // refused them, and cancelling hit the checkout instead of the plan.
+    await makePlan('free', { amount: 0 });
+    const paidId = await makePlan('paid');
+    const euId = await makeEndUser('upgrader@example.com');
+    expect((await grant({ planSlug: 'free', endUserId: euId })).statusCode).toBe(201);
+    await prisma.subscription.create({
+      data: { applicationId: appId, endUserId: euId, planId: paidId, status: 'PENDING', provider: 'paypal' },
+    });
+
+    const { billingService } = await import('../src/modules/billing/billing.service.js');
+    const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
+    const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: euId } });
+
+    const current = await billingService.getCurrentSubscription(application, endUser);
+    expect(current?.status).toBe('ACTIVE');
+    expect(current?.planId).not.toBe(paidId);
+
+    // With no live plan at all, the checkout is still what there is to report.
+    await prisma.subscription.updateMany({
+      where: { applicationId: appId, endUserId: euId, status: 'ACTIVE' },
+      data: { status: 'CANCELED' },
+    });
+    expect((await billingService.getCurrentSubscription(application, endUser))?.status).toBe('PENDING');
+  });
+
+  it('a paid plan outranks the free tier even when its row is older', async () => {
+    // Checkout reuses the (app, end-user, plan) row, so a buyer who opened a
+    // paid checkout, backed out, joined the free tier and later paid ends up
+    // with a paid row CREATED before the free one. Newest-first read them as
+    // Free: the page offered Upgrade again (a second charge) and cancel ended
+    // the free row while the paid one kept billing.
+    await makePlan('free', { amount: 0 });
+    const paidId = await makePlan('paid');
+    await setDefaultPlan('free');
+    const euId = await makeEndUser('returning@example.com');
+    const paid = await prisma.subscription.create({
+      data: { applicationId: appId, endUserId: euId, planId: paidId, status: 'PENDING', provider: 'paypal' },
+    });
+    expect((await grant({ planSlug: 'free', endUserId: euId })).statusCode).toBe(201);
+    await prisma.subscription.update({
+      where: { id: paid.id },
+      data: {
+        status: 'ACTIVE',
+        providerSubId: 'I-PAID',
+        currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000),
+      },
+    });
+
+    const { billingService } = await import('../src/modules/billing/billing.service.js');
+    const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
+    const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: euId } });
+
+    expect((await billingService.getCurrentSubscription(application, endUser))?.id).toBe(paid.id);
+
+    const canceled = await billingService.cancelCurrentSubscription(application, endUser, { atPeriodEnd: true });
+    expect(canceled.id).toBe(paid.id);
+    const free = await prisma.subscription.findFirstOrThrow({
+      where: { applicationId: appId, endUserId: euId, planId: { not: paidId } },
+    });
+    expect(free.status).toBe('ACTIVE');
+  });
+
+  it('a paid plan outranks a $0 plan even after the default plan is renamed or cleared', async () => {
+    // The ranking cannot lean on today's `defaultPlanSlug` alone: an operator
+    // who renames the free tier, or clears it, still has buyers holding the
+    // old $0 rows, and those must not shadow what the buyer pays for.
+    await makePlan('free', { amount: 0 });
+    const paidId = await makePlan('paid');
+    await setDefaultPlan('free');
+    const euId = await makeEndUser('renamed@example.com');
+    const paid = await prisma.subscription.create({
+      data: { applicationId: appId, endUserId: euId, planId: paidId, status: 'PENDING', provider: 'paypal' },
+    });
+    expect((await grant({ planSlug: 'free', endUserId: euId })).statusCode).toBe(201);
+    await prisma.subscription.update({
+      where: { id: paid.id },
+      data: { status: 'ACTIVE', providerSubId: 'I-PAID-2', currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000) },
+    });
+
+    const { billingService } = await import('../src/modules/billing/billing.service.js');
+    const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: euId } });
+    for (const slug of ['free-v2', '']) {
+      if (slug) {
+        await makePlan(slug, { amount: 0 });
+        await setDefaultPlan(slug);
+      } else {
+        const current = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
+        const { defaultPlanSlug: _cleared, ...rest } = current.billingConfig as Record<string, unknown>;
+        await prisma.application.update({
+          where: { id: appId },
+          data: { billingConfig: rest as Prisma.InputJsonObject },
+        });
+      }
+      const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
+      expect((await billingService.getCurrentSubscription(application, endUser))?.id).toBe(paid.id);
+    }
+  });
+
+  it('a paid plan that lapses on read falls back to the live free tier on that same read', async () => {
+    await makePlan('free', { amount: 0 });
+    const paidId = await makePlan('paid');
+    await setDefaultPlan('free');
+    const euId = await makeEndUser('lapsed@example.com');
+    expect((await grant({ planSlug: 'free', endUserId: euId })).statusCode).toBe(201);
+    // A granted paid term that has already run out: provider-less, so the
+    // read itself expires it.
+    await prisma.subscription.create({
+      data: {
+        applicationId: appId,
+        endUserId: euId,
+        planId: paidId,
+        status: 'ACTIVE',
+        currentPeriodEnd: new Date(Date.now() - 1000),
+      },
+    });
+
+    const { billingService } = await import('../src/modules/billing/billing.service.js');
+    const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
+    const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: euId } });
+
+    const current = await billingService.getCurrentSubscription(application, endUser);
+    expect(current?.status).toBe('ACTIVE');
+    expect(current?.planId).not.toBe(paidId);
+  });
+
+  it('the admin default-plan route sets and clears the free tier, and nothing else', async () => {
+    await makePlan('free', { amount: 0 });
+    const setPlan = (slug: string | null, headers = admin(), extra: Record<string, unknown> = {}) =>
+      app.inject({
+        method: 'PATCH',
+        url: `/api/v1/admin/applications/${appId}/default-plan`,
+        headers,
+        payload: { slug, ...extra },
+      });
+    const config = async () =>
+      (await prisma.application.findUniqueOrThrow({ where: { id: appId } })).billingConfig as Record<
+        string,
+        unknown
+      >;
+    const before = await config();
+
+    expect((await setPlan('free', auth())).statusCode).toBe(401);
+    expect((await setPlan('nope')).json().error.code).toBe('DEFAULT_PLAN_NOT_FOUND');
+    expect((await setPlan('free', admin(), { enabled: false })).statusCode).toBe(400);
+
+    const set = await setPlan('free');
+    expect(set.statusCode).toBe(200);
+    expect(set.json().data.billingConfig.defaultPlanSlug).toBe('free');
+    const after = await config();
+    expect(after.defaultPlanSlug).toBe('free');
+    expect(after.enabled).toBe(before.enabled);
+
+    expect((await setPlan(null)).statusCode).toBe(200);
+    expect((await config()).defaultPlanSlug).toBeUndefined();
   });
 
   it('re-grants after a cancellation, with a fresh period and a fresh announcement', async () => {
@@ -659,7 +826,7 @@ describe('Granting a subscription without a payment provider', () => {
 
     // A customer who cancelled and has now paid again must be servable. This is
     // the one place a grant diverges from `webhooks/apply.ts`, which refuses to
-    // reopen a terminal row — that refusal is against STALE PROVIDER NEWS, and
+    // reopen a terminal row, that refusal is against STALE PROVIDER NEWS, and
     // an operator calling this endpoint is not stale news.
     const next = new Date(Date.now() + 40 * 86_400_000).toISOString();
     const again = await grant({ planSlug: 'pro', endUserId: euId, currentPeriodEnd: next });

@@ -1,7 +1,7 @@
 /**
  * Driving a real subscription lifecycle in a Stripe test account.
  *
- * Stripe test mode has no API that completes a hosted Checkout Session — the
+ * Stripe test mode has no API that completes a hosted Checkout Session, the
  * supported route is a test card on the hosted page, which
  * `stripe-checkout-browser.test.ts` drives and which not every environment can
  * run. Everything AFTER the completion, though, is reachable from the API:
@@ -14,14 +14,14 @@
  * and are explicit about the ONE link it does not establish: the local
  * Subscription row's `providerSubId`. In production that is written by
  * `checkout.session.completed`. Here `linkProviderSubscription` writes it
- * directly, and it is the only fabricated step in any of these tests —
+ * directly, and it is the only fabricated step in any of these tests,
  * everything downstream of it (the events, their contents, their timing, what
  * Stripe does when a period ends) is the provider's.
  *
  * Test clocks are used wherever a subscription is created, for two reasons:
  * deleting the clock deletes its customers and subscriptions in one call, and
  * a clock is the only way to observe what Stripe does when a period actually
- * ends — which is precisely the half of PR #336 that had never been exercised.
+ * ends, which is precisely the half of PR #336 that had never been exercised.
  */
 
 import type Stripe from 'stripe';
@@ -96,7 +96,7 @@ export async function createLiveSubscription(
  *
  * THE ONE FABRICATED STEP. In production `applyCheckoutCompleted` does this
  * from a genuine `checkout.session.completed`, which cannot be produced
- * without completing a hosted page. Nothing else about the row is touched —
+ * without completing a hosted page. Nothing else about the row is touched,
  * it stays PENDING, exactly as the checkout left it, so the status transition
  * under test is still driven entirely by the provider's events.
  */

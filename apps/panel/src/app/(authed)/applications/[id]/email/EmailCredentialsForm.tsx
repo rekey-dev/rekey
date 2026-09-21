@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 
 type Provider = 'resend' | 'smtp';
@@ -27,7 +28,7 @@ export function EmailCredentialsForm({
   const [provider, setProvider] = React.useState<Provider>(currentProvider ?? 'resend');
 
   return (
-    <form action={action} className="space-y-4">
+    <ActionForm action={action} className="space-y-4">
       <label className="block space-y-1.5 max-w-xs">
         <span className="text-sm font-medium">Provider</span>
         <select
@@ -106,6 +107,6 @@ export function EmailCredentialsForm({
       <SubmitButton pendingLabel="Saving credentials…">
         {hasCustomCredentials ? 'Update credentials' : 'Save credentials'}
       </SubmitButton>
-    </form>
+    </ActionForm>
   );
 }

@@ -36,11 +36,12 @@ import { organizationRolesService } from '../organization-roles/organization-rol
 import { authService } from '../auth/auth.service.js';
 import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
+import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
 import { ok, okPage, errs, ref, type JsonSchema } from '../../lib/openapi.js';
 
 /**
- * The auth errors shared by every route in both plugins below —
+ * The auth errors shared by every route in both plugins below,
  * `requirePublishableOrSecretKey` + `requireScope('auth:write')` +
  * `requireUserSession` all run as `onRequest` hooks before any handler.
  */
@@ -58,7 +59,7 @@ const ORG_AUTH_ERRORS = {
 
 /**
  * `setMemberRole` / `acceptInvitation` return a trimmed membership row without
- * `email` (unlike `OrganizationMemberDtoSchema`, which requires it) — write it
+ * `email` (unlike `OrganizationMemberDtoSchema`, which requires it), write it
  * inline rather than `ref('OrganizationMember')` so the doc does not claim a
  * field these two responses never carry.
  */
@@ -143,10 +144,10 @@ const OrgInvParam = z.object({ id: z.string().min(1), invId: z.string().min(1) }
 /**
  * Routes mounted under `/api/v1/users/me/organizations`. Credential:
  * **publishable OR secret** key in `Authorization: Bearer`, AND the end-user
- * JWT in `X-Rekey-User-Token` — both, always.
+ * JWT in `X-Rekey-User-Token`, both, always.
  */
 export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Promise<void> {
-  // End-user self-service team management — list/create orgs, members, invites,
+  // End-user self-service team management, list/create orgs, members, invites,
   // role changes. All require the caller's own user token (requireUserSession)
   // and are role-gated per route, so they accept the publishable key too (a
   // browser portal manages teams + billing with no secret key), exactly like
@@ -464,7 +465,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
                 invitation: ref('OrganizationInvitation'),
                 token: {
                   type: 'string',
-                  description: 'Raw invitation token. Shown exactly once — store it now.',
+                  description: 'Raw invitation token. Shown exactly once, store it now.',
                 },
                 warning: { type: 'string' },
               },
@@ -669,9 +670,17 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
 
   // Active-org switch (the `oid` claim). Re-mints the {access, refresh} pair so
   // the new active org is carried on the token + persisted on the refresh row.
+  //
+  // Both switch routes refuse an impersonated session. The pair they mint is an
+  // ordinary 30-day session with no `imp` claim, so handing it to an operator
+  // turned a 5-minute, revocable, attributed token into one that survives the
+  // end of the impersonation, skips MFA, and reads as the end-user's own.
+  // `issuePair` refuses too, so a future route cannot reopen this by forgetting
+  // the guard.
   app.post(
     '/:id/switch',
     {
+      preHandler: refuseWhileImpersonating('switch the active organization'),
       schema: {
         tags: ['Public · Organizations'],
         summary: 'Make an org the session\'s active org; re-mints the token pair with the `oid` claim',
@@ -685,7 +694,8 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
           200: ok(ref('AuthResult'), 'A fresh session pair carrying the active org.'),
           ...errs({
             ...ORG_AUTH_ERRORS,
-            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member of this organization.`,
+            401: `${ORG_AUTH_ERRORS[401]} Or SESSION_DEVICE_RELEASED — the device this session is bound to was released; sign in again.`,
+            403: `${ORG_AUTH_ERRORS[403]} Or ORGANIZATION_NOT_MEMBER — the caller is not a member of this organization; or DEVICE_BLOCKED — an operator blocked the device this session is bound to.`,
           }),
         },
       },
@@ -701,7 +711,15 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         application: req.application!,
         endUserId: req.endUser!.id,
         activeOrganizationId: id,
-        device: { userAgent: req.headers['user-agent'] ?? null, ip: req.ip },
+        impersonation: req.impersonation,
+        // Re-mint on the device the current session is bound to (the `dev`
+        // claim), never a new one, switching teams is not a sign-in.
+        device: {
+          userAgent: req.headers['user-agent'] ?? null,
+          ip: req.ip,
+          deviceId: req.deviceId ?? null,
+          primary: false,
+        },
       });
       return { success: true, data: result };
     },
@@ -710,6 +728,7 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
   app.post(
     '/clear-active-organization',
     {
+      preHandler: refuseWhileImpersonating('switch the active organization'),
       schema: {
         tags: ['Public · Organizations'],
         summary: 'Clear the active org (back to the personal pool); re-mints the token pair',
@@ -725,7 +744,13 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         application: req.application!,
         endUserId: req.endUser!.id,
         activeOrganizationId: null,
-        device: { userAgent: req.headers['user-agent'] ?? null, ip: req.ip },
+        impersonation: req.impersonation,
+        device: {
+          userAgent: req.headers['user-agent'] ?? null,
+          ip: req.ip,
+          deviceId: req.deviceId ?? null,
+          primary: false,
+        },
       });
       return { success: true, data: result };
     },
@@ -735,10 +760,10 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
 /**
  * Accept-invitation requires authentication (we need the caller's EndUser
  * id for the membership row) but is logically separate from the
- * "authenticated org admin" surface above — mounted under /auth/organizations.
+ * "authenticated org admin" surface above, mounted under /auth/organizations.
  *
  * Same credential as the plugin above: publishable or secret key, plus the
- * invitee's own end-user JWT. Two bearer secrets have to line up — the session
+ * invitee's own end-user JWT. Two bearer secrets have to line up, the session
  * proves who is accepting, and the invitation token proves they were asked.
  */
 export async function organizationsAcceptInvitationRoutes(app: FastifyInstance): Promise<void> {
@@ -761,7 +786,7 @@ export async function organizationsAcceptInvitationRoutes(app: FastifyInstance):
           'end-user token. Creating an invitation already accepted the publishable ' +
           'key, so requiring a secret key here left the flow dead-ended: a portal ' +
           'could invite someone but never let them accept.\n\n' +
-          'The signed-in user\'s email must MATCH the address the invitation names — ' +
+          'The signed-in user\'s email must MATCH the address the invitation names, ' +
           '403 `ORGANIZATION_INVITATION_EMAIL_MISMATCH` otherwise. An invite link travels ' +
           'by email or chat and can be forwarded, so without that binding anyone holding ' +
           'the link joins at the invited role (up to OWNER).',
@@ -820,8 +845,6 @@ export async function organizationsAcceptInvitationRoutes(app: FastifyInstance):
     },
   );
 }
-
-// ---------- Shaping helpers ----------
 
 function shapeOrg(o: {
   id: string;

@@ -14,11 +14,13 @@ import {
   paged,
   paginationJsonSchema,
 } from '../../lib/pagination.js';
-import { authRateLimit } from '../../lib/rate-limit.js';
+import { authRateLimit, tenantRefreshRateLimit } from '../../lib/rate-limit.js';
+import { env } from '../../config/env.js';
 import { operatorTokensService } from './operator-tokens.service.js';
 import { OPERATOR_TOKEN_SCOPES } from '../../lib/operator-token.js';
 import { operatorSignupMode } from './operator-signup-policy.js';
 import { ok, okPage, okFlag, errs, ref } from '../../lib/openapi.js';
+import { CREDENTIAL_BODY_LIMIT } from '../../lib/body-limits.js';
 
 function deviceContext(req: FastifyRequest): { userAgent: string | null; ip: string | null } {
   const ua = req.headers['user-agent'];
@@ -33,7 +35,7 @@ const SignUpBody = z.object({
   password: z.string().min(1).max(256),
   name: z.string().min(1).max(120).optional(),
   workspaceName: z.string().min(1).max(120),
-  // Single-use invite key — required only when OPERATOR_SIGNUP_MODE='invite'.
+  // Single-use invite key, required only when OPERATOR_SIGNUP_MODE='invite'.
   inviteKey: z.string().min(1).max(512).optional(),
 });
 
@@ -112,19 +114,17 @@ function shapeOperatorToken(
   };
 }
 
-// ---------------------------------------------------------------------------
 // OpenAPI response fragments
-// ---------------------------------------------------------------------------
 
 /**
- * `AuthSessionResult` (see `shape()` above) — a full operator session. `OperatorSession` (the
+ * `AuthSessionResult` (see `shape()` above), a full operator session. `OperatorSession` (the
  * corrected component) already requires `user` / `memberships` (as `MembershipSummary[]`) /
  * `activeTenantId` / `activeRole` alongside the token pair, so this only needs to `allOf` in the
  * one field it adds on top: `shape()` stamps `mfaRequired: false` that isn't part of
  * `AuthSessionResult` itself.
  */
 const TenantSession = {
-  description: 'An operator session — token pair, memberships, and the active workspace.',
+  description: 'An operator session, token pair, memberships, and the active workspace.',
   allOf: [
     ref('OperatorSession'),
     {
@@ -137,7 +137,7 @@ const TenantSession = {
   ],
 };
 
-/** `TenantMfaChallengeResult` — the primary factor passed; a second is required. */
+/** `TenantMfaChallengeResult`, the primary factor passed; a second is required. */
 const TenantMfaChallenge = {
   type: 'object',
   description: 'The primary factor passed but MFA is enrolled. Resolve via POST /mfa-verify.',
@@ -153,7 +153,7 @@ const TenantMfaChallenge = {
   required: ['mfaRequired', 'user', 'mfaChallengeToken', 'mfaChallengeExpiresAt'],
 };
 
-/** `TenantSignInOutcome` — discriminated union on `mfaRequired`. */
+/** `TenantSignInOutcome`, discriminated union on `mfaRequired`. */
 const TenantSignInOutcome = {
   description:
     'Either a full session (`mfaRequired: false`) or an MFA challenge ' +
@@ -186,7 +186,7 @@ const TENANT_SESSION_ERRORS = {
 } as const;
 
 /**
- * Unauthenticated tenant-auth endpoints. Mounted under /api/v1/tenant/auth —
+ * Unauthenticated tenant-auth endpoints. Mounted under /api/v1/tenant/auth,
  * the SAME prefix as `tenantAuthAuthenticatedRoutes` below, but no hook is
  * registered here, and Fastify encapsulation keeps `requireTenantSession` off
  * these routes. Every one is annotated `security: []`.
@@ -194,8 +194,8 @@ const TENANT_SESSION_ERRORS = {
  * "No security scheme" is not the same as "no credential": `/mfa-verify`,
  * `/refresh`, `/sign-out`, `/reset-password` and `/magic-link/verify` all carry
  * a single-use token **in the request body**. That is not an
- * `Authorization`-header credential, so it cannot be an OpenAPI security scheme
- * — it is documented as a body field instead.
+ * `Authorization`-header credential, so it cannot be an OpenAPI security scheme,
+ * it is documented as a body field instead.
  */
 export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
   app.get(
@@ -208,7 +208,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Public UX hint so the sign-up page can render the right state: an invite-key ' +
           'field (invite), a "registration closed" notice (closed), or the plain form (open). ' +
-          'Not a secret — enforcement happens server-side at every creation path regardless.',
+          'Not a secret, enforcement happens server-side at every creation path regardless.',
         response: {
           200: ok(
             {
@@ -228,6 +228,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/sign-up',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       // Unauthenticated, and it creates an operator account AND a Tenant AND
       // an OWNER membership per call, which is the most expensive thing an
       // anonymous caller can ask this API to do. Every sibling on this router
@@ -289,6 +290,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/sign-in',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
@@ -344,6 +346,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/mfa-verify',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
@@ -384,6 +387,10 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/refresh',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
+      // Its own per-client-IP bucket (RATE_LIMIT_REFRESH_MAX), replacing the
+      // global limiter here. See `tenantRefreshRateLimit` for why.
+      config: { rateLimit: tenantRefreshRateLimit(env.RATE_LIMIT_REFRESH_MAX, env.RATE_LIMIT_WINDOW_MS) },
       schema: {
         tags: ['Tenant · Auth'],
         security: [],
@@ -401,6 +408,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
               'rotated token was replayed (every session for the operator is revoked); or ' +
               'REFRESH_TOKEN_REVOKED — it was already revoked; or REFRESH_TOKEN_EXPIRED.',
             403: 'NO_TENANT_MEMBERSHIPS — the operator has no workspace memberships.',
+            429: 'RATE_LIMITED: too many refreshes from this address. Honour the `Retry-After` header.',
           }),
         },
       },
@@ -415,6 +423,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/sign-out',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       schema: {
         tags: ['Tenant · Auth'],
         security: [],
@@ -431,7 +440,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
               properties: { signedOut: { type: 'boolean', enum: [true] } },
               required: ['signedOut'],
             },
-            'Always succeeds — revocation is idempotent, so an unknown/expired token still ' +
+            'Always succeeds, revocation is idempotent, so an unknown/expired token still ' +
               'reports `signedOut: true`.',
           ),
           ...errs({
@@ -451,6 +460,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/forgot-password',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
@@ -474,7 +484,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
                   nullable: true,
                   description:
                     'The raw reset token. Present only when no email transport is configured ' +
-                    '(dev convenience) — otherwise `null` and the token is emailed instead.',
+                    '(dev convenience), otherwise `null` and the token is emailed instead.',
                 },
               },
               required: ['delivered', 'resetToken'],
@@ -495,6 +505,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/reset-password',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
@@ -532,6 +543,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/magic-link/request',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
@@ -555,7 +567,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
                   nullable: true,
                   description:
                     'The raw magic-link token. Present only when no email transport is ' +
-                    'configured (dev convenience) — otherwise `null` and the token is emailed.',
+                    'configured (dev convenience), otherwise `null` and the token is emailed.',
                 },
               },
               required: ['delivered', 'token'],
@@ -577,6 +589,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/magic-link/verify',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
@@ -745,10 +758,10 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
         summary: 'Revoke one operator session by id. Idempotent.',
         description:
           'Revokes exactly the named session and nothing else. The revoked device keeps its ' +
-          'short-lived access token until it expires (15 minutes); its next refresh answers ' +
+          'access token until its next request, which is refused; its next refresh answers ' +
           '401 `REFRESH_TOKEN_REVOKED` and it does not affect any other session. Replaying a ' +
           'token that was ROTATED rather than revoked is still treated as chain compromise and ' +
-          'revokes every session — see POST /refresh.',
+          'revokes every session, see POST /refresh.',
         params: {
           type: 'object',
           required: ['id'],
@@ -762,7 +775,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
               required: ['revoked'],
             },
             'Whether a live session matching that id was found and revoked (`false` if it was ' +
-              'already gone — this endpoint is idempotent).',
+              'already gone, this endpoint is idempotent).',
           ),
           ...errs(TENANT_SESSION_ERRORS),
         },
@@ -796,12 +809,12 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
         description:
           "The operator's own requests to the tenant API (the panel calls these on " +
           'their behalf), newest first. Best-effort log capped per operator by a ' +
-          'periodic pruner — a convenience tail, not a billing-grade audit trail. ' +
+          'periodic pruner, a convenience tail, not a billing-grade audit trail. ' +
           'Paginated via ?limit&offset.',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
         response: {
           // `page.total` is what the pruner has left for this operator, not
-          // every request they have ever made — the description says so. It is
+          // every request they have ever made, the description says so. It is
           // still the honest answer to "is there another page", which the old
           // `{requests: [...]}` wrapper could not give at all.
           200: okPage(
@@ -859,6 +872,11 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
   app.post(
     '/change-password',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
+      // Checks a secret inside a session, so it gets the credential tier's
+      // 10/min per (account, IP), not the 600/min identity budget. See
+      // test/rate-limit-hardening.test.ts.
+      config: { rateLimit: authRateLimit(10) },
       schema: {
         tags: ['Tenant · Auth'],
         security: [{ tenantSession: [] }],
@@ -1012,7 +1030,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
     {
       // Deliberately NOT role-gated (unlike the mint above). `revoke` is scoped
       // to `req.tenantUser.id`, so this can only ever kill the caller's own
-      // token — the same scoping `GET /api-tokens` relies on, which is also
+      // token, the same scoping `GET /api-tokens` relies on, which is also
       // ungated. Requiring OWNER/ADMIN here stranded an operator downgraded to
       // MEMBER with a live PAT they could see but not revoke; revocation must
       // never need more privilege than minting did.
@@ -1021,7 +1039,7 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
         security: [{ tenantSession: [] }],
         summary: 'Revoke one of the operator\'s personal-access-tokens. Idempotent.',
         description:
-          'No workspace role required — revocation is scoped to the calling operator, so this ' +
+          'No workspace role required, revocation is scoped to the calling operator, so this ' +
           'can only ever kill your own token. Deliberately looser than minting: an operator ' +
           'downgraded to MEMBER must still be able to revoke a PAT they already hold.',
         params: {

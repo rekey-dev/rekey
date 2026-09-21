@@ -1,6 +1,6 @@
 import { KNOWN_WEBHOOK_EVENTS } from '@rekey.dev/shared-types';
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { errorQuery, readErrorFlash, api, PanelApiError } from '@/lib/api';
@@ -8,6 +8,7 @@ import type { Page } from '@/lib/paginate';
 import { Modal } from '@/components/Modal';
 import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
 import { CopyButton } from '@/components/CopyButton';
@@ -44,7 +45,7 @@ const ALL_EVENTS: readonly string[] = KNOWN_WEBHOOK_EVENTS;
  * Per-endpoint delivery health over the last 24 hours.
  *
  * An endpoint with 12 of 12 deliveries failing rendered "● Enabled" in green,
- * pixel-identical to a working one — "enabled" is a config flag, and the list
+ * pixel-identical to a working one, "enabled" is a config flag, and the list
  * was showing configuration where the operator needed behaviour. Finding the
  * dead one meant opening Details on every endpoint in turn.
  *
@@ -53,8 +54,8 @@ const ALL_EVENTS: readonly string[] = KNOWN_WEBHOOK_EVENTS;
  * deployment-wide, so an operator cannot call it. The only tenant source is
  * `GET .../webhooks/:endpointId/deliveries`, which takes no query parameters at
  * all: no status filter, no time window, no limit (the route pins the service's
- * page size to 50). So the panel fans out one request per endpoint — bounded by
- * the endpoint count, not by volume — and counts the rows inside the window.
+ * page size to 50). So the panel fans out one request per endpoint, bounded by
+ * the endpoint count, not by volume, and counts the rows inside the window.
  *
  * The 50-row cap is a real limit and the UI does not hide it: when the page is
  * saturated AND its oldest row is still inside 24h, the counts are a floor and
@@ -98,7 +99,7 @@ async function endpointHealth(
   const recent = rows.filter((r) => new Date(r.createdAt).getTime() >= cutoff);
   const oldest = rows[rows.length - 1];
   // Rows we did not fetch, and the oldest one we did is still inside the
-  // window — so the 24h counts below are a floor, not a total. `page.hasMore`
+  // window, so the 24h counts below are a floor, not a total. `page.hasMore`
   // is the API's answer; this used to mirror the route's page size by hand.
   const truncated =
     delivered.page.hasMore &&
@@ -135,7 +136,7 @@ function HealthCell({ health }: { health: EndpointHealth | null }): React.JSX.El
       title={
         `Last 24h: ${health.succeeded} succeeded, ${health.failed} failed, ${health.pending} pending.` +
         (health.truncated
-          ? ' Counted from the most recent 50 attempts, which do not reach back a full 24 hours — the real totals are higher.'
+          ? ' Counted from the most recent 50 attempts, which do not reach back a full 24 hours, so the real totals are higher.'
           : '')
       }
     >
@@ -162,12 +163,12 @@ function HealthCell({ health }: { health: EndpointHealth | null }): React.JSX.El
 const ERR: Record<string, string> = {
   missing: 'A URL and at least one event are required.',
   WEBHOOK_URL_UNSAFE:
-    'That URL is not allowed — use a public HTTPS URL (private/internal hosts are blocked).',
+    'That URL is not allowed. Use a public HTTPS URL (private/internal hosts are blocked).',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage webhook endpoints.',
   APPLICATION_NOT_FOUND: 'Application not found.',
 };
 
-// These actions deliberately redirect without revalidatePath — pairing the two
+// These actions deliberately redirect without revalidatePath, pairing the two
 // is what blanked this page after an endpoint was added. Reasoning in
 // `(authed)/layout.tsx`.
 
@@ -177,13 +178,13 @@ async function createEndpoint(applicationId: string, formData: FormData): Promis
   const events = formData.getAll('events').map(String).filter(Boolean);
   const wildcard = String(formData.get('wildcard') ?? '');
   const selected = wildcard ? ['*'] : events.length > 0 ? events : [];
-  // Round-trip the URL so a rejected submit doesn't blank what was typed —
+  // Round-trip the URL so a rejected submit doesn't blank what was typed,
   // the operator can fix a typo instead of re-pasting the whole endpoint.
   const keep = url ? `&url=${encodeURIComponent(url)}` : '';
   if (!url || selected.length === 0) {
     redirect(`/applications/${applicationId}/webhooks?error=missing&newWebhook=1${keep}`);
   }
-  let secret = '';
+  let secret: string;
   try {
     const result = await api<{ id: string; secret: string }>({
       method: 'POST',
@@ -254,7 +255,7 @@ export default async function WebhooksPage({
   // `createEndpoint` fails back with `?error=…&newWebhook=1`, and that flag
   // reopens the Add-endpoint modal on top of the page. A page-level banner is
   // then behind the backdrop and the operator sees a blank form with no reason
-  // — so route the error to whichever surface is actually visible.
+  //, so route the error to whichever surface is actually visible.
   const addModalOpen = sp.newWebhook === '1';
   const lastUrl = typeof sp.url === 'string' ? sp.url : undefined;
   const { items: endpoints } = await api<Page<EndpointRow>>({
@@ -276,7 +277,7 @@ export default async function WebhooksPage({
         description={
           <>
             Events Rekey sends to your backend when things happen (sign-ups, payments, dunning).
-            Each endpoint gets a signing secret — deliveries carry an HMAC-SHA256 signature in{' '}
+            Each endpoint gets a signing secret, and deliveries carry an HMAC-SHA256 signature in{' '}
             <code className="font-mono">X-Rekey-Signature</code>.
           </>
         }
@@ -287,7 +288,7 @@ export default async function WebhooksPage({
           description="Rekey POSTs user lifecycle events to the URL with an HMAC-signed body."
           modalKey="newWebhook"
         >
-          <form action={createBound} className="space-y-3">
+          <ActionForm action={createBound} className="space-y-3">
             {error && addModalOpen && (
               <Banner tone="error"><ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." /></Banner>
             )}
@@ -326,7 +327,7 @@ export default async function WebhooksPage({
               </details>
             </fieldset>
             <SubmitButton pendingLabel="Creating endpoint…">Create endpoint</SubmitButton>
-          </form>
+          </ActionForm>
         </Modal>
         }
       />
@@ -348,12 +349,12 @@ export default async function WebhooksPage({
       {created && secret && (
         <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-700 dark:bg-amber-950/60 space-y-2">
           <div className="text-sm font-medium text-amber-900 dark:text-amber-200">
-            Signing secret — shown once
+            Signing secret, shown once
           </div>
           <p className="text-xs text-amber-800 dark:text-amber-300">
             Store this now. You'll use it to verify the{' '}
             <code className="font-mono">X-Rekey-Signature</code> header on every inbound
-            delivery. Rekey never displays it again — rotate from the endpoint detail page if lost.
+            delivery. Rekey never displays it again. Rotate from the endpoint detail page if lost.
           </p>
           <div className="flex items-center gap-2">
             <code className="flex-1 break-all rounded-md border border-amber-200 bg-[var(--color-surface)] px-3 py-2 font-mono text-xs dark:border-amber-800">
@@ -429,19 +430,19 @@ export default async function WebhooksPage({
                     >
                       Details
                     </Link>
-                    <form action={toggleEndpoint.bind(null, id, e.id, !e.enabled)} className="inline">
+                    <ActionForm action={toggleEndpoint.bind(null, id, e.id, !e.enabled)} className="inline">
                       <SubmitButton
                         pendingLabel={e.enabled ? 'Disabling…' : 'Enabling…'}
                         className="text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline disabled:opacity-60"
                       >
                         {e.enabled ? 'Disable' : 'Enable'}
                       </SubmitButton>
-                    </form>
-                    <form action={deleteEndpoint.bind(null, id, e.id)} className="inline">
+                    </ActionForm>
+                    <ActionForm action={deleteEndpoint.bind(null, id, e.id)} className="inline">
                       <ConfirmButton confirm="Delete this webhook endpoint? Pending deliveries are cancelled and history is removed.">
                         Delete
                       </ConfirmButton>
-                    </form>
+                    </ActionForm>
                   </div>
                 </TD>
               </TR>

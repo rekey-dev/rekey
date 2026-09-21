@@ -4,7 +4,7 @@
  * The first endpoint a fresh `@rekey.dev/node` client should call to verify
  * its credentials. Returns the Application the presented secret key resolves
  * to: `id`, `tenantId`, `name`, `slug`, `environment`, `publicKey`,
- * `createdAt`, and the `authConfig` / `billingConfig` objects **whole** — not a
+ * `createdAt`, and the `authConfig` / `billingConfig` objects **whole**, not a
  * filtered subset.
  *
  * That is deliberate and safe here, because this route requires an Application
@@ -13,7 +13,7 @@
  * a "public-safe slice": do not proxy this response to a browser assuming it has
  * been redacted. Provider credentials and webhook secrets live in separate
  * encrypted columns and are never part of these two config objects, so no
- * secret material is returned — everything else in them is.
+ * secret material is returned, everything else in them is.
  *
  * ## The response is `ApplicationDto`, and now actually is
  *
@@ -27,8 +27,8 @@
  *     branch in silence.
  *   - `authConfig` / `billingConfig` were declared `unknown` here and passed
  *     through as raw Prisma JSON. The DTO types them as the parsed schemas, so
- *     `AuthConfigSchema`'s defaults and transforms — the ones that fill in
- *     every field an Application stored before that field existed — never ran.
+ *     `AuthConfigSchema`'s defaults and transforms, the ones that fill in
+ *     every field an Application stored before that field existed, never ran.
  *     A caller reading `authConfig.passwordMinLength` off an older row got
  *     `undefined` where the type promised a number.
  *
@@ -54,8 +54,8 @@ function toApplicationDto(app: Application): ApplicationDto {
     name: app.name,
     slug: app.slug,
     // `AppEnvironmentSchema` enumerates the same three values as the Prisma
-    // enum, so this is a parse rather than a cast: if the two ever diverge —
-    // a fourth environment added on one side only — this throws here instead
+    // enum, so this is a parse rather than a cast: if the two ever diverge,
+    // a fourth environment added on one side only, this throws here instead
     // of publishing a value the DTO says cannot exist.
     environment: AppEnvironmentSchema.parse(app.environment),
     publicKey: app.publicKey,
@@ -69,7 +69,7 @@ function toApplicationDto(app: Application): ApplicationDto {
 
 export async function meRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('onRequest', requireApiKey);
-  // /me is the credential self-inspection endpoint — read-only.
+  // /me is the credential self-inspection endpoint, read-only.
   app.addHook('onRequest', requireScope('auth:read'));
 
   app.get(
@@ -79,11 +79,11 @@ export async function meRoutes(app: FastifyInstance): Promise<void> {
         tags: ['Public · Me'],
         summary: 'Inspect the Application this credential resolves to',
         description:
-          'Use this as the SDK smoke test — if it returns 200, your secret key is good.\n\n' +
+          'Use this as the SDK smoke test, if it returns 200, your secret key is good.\n\n' +
           'Requires an Application **secret** key with the `auth:read` scope; the publishable ' +
           'key is rejected. Returns an `ApplicationDto`: id, tenantId, name, slug, ' +
           '`environment`, publicKey, createdAt, and the whole `authConfig` / `billingConfig` ' +
-          'objects (schema-parsed, so defaults are filled in) rather than a filtered view — ' +
+          'objects (schema-parsed, so defaults are filled in) rather than a filtered view, ' +
           'safe for the secret-key holder, but do not forward this response to a browser ' +
           'assuming it has been redacted. Provider, OAuth and email credentials live in ' +
           'separate encrypted columns and are never included.',

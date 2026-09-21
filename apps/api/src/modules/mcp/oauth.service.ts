@@ -4,13 +4,13 @@
  * Rekey acts as the AS that clients authenticate an Application's end-users
  * against. It fronts two resources, each gated by its own `authConfig` toggle:
  *
- *   - `mcpEnabled`  — the hosted MCP server at `/api/v1/mcp/<slug>`, reached
+ *   - `mcpEnabled` , the hosted MCP server at `/api/v1/mcp/<slug>`, reached
  *                     with the `mcp:account` scope.
- *   - `oidcEnabled` — the Application as an OpenID Provider: `openid` grants an
+ *   - `oidcEnabled`, the Application as an OpenID Provider: `openid` grants an
  *                     ID Token and access to `/oauth/userinfo` (oidc.service.ts).
  *
- * The grant is the same either way — one client registry, one authorization
- * code, one token endpoint — so a client can hold both, and neither surface can
+ * The grant is the same either way, one client registry, one authorization
+ * code, one token endpoint, so a client can hold both, and neither surface can
  * be reached with the other's scope. Standards:
  *   - RFC 8414  authorization-server metadata
  *   - RFC 9728  protected-resource metadata
@@ -28,6 +28,7 @@ import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
 import { issueMcpAccessToken, verifyMcpAccessToken, type McpAccessClaims } from '../../lib/jwt.js';
+import { sessionIssuedBefore } from '../../lib/session-stamp.js';
 import {
   issueRefreshToken,
   lookupRefreshToken,
@@ -53,7 +54,7 @@ const AUTH_CODE_TTL_MS = 60 * 1000; // 60s, single-use.
 /**
  * OAuth error (RFC 6749 §5.2). Carried distinctly from RekeyError because the
  * token endpoint must emit the `{ error, error_description }` shape OAuth
- * clients parse — not the Rekey envelope.
+ * clients parse, not the Rekey envelope.
  */
 export class OAuthError extends Error {
   constructor(
@@ -88,7 +89,7 @@ function publicBase(): string {
 
 /**
  * The Application's authorization-server URL. It is simultaneously the MCP
- * resource URL, the OAuth issuer and — when `oidcEnabled` — the OIDC `iss`.
+ * resource URL, the OAuth issuer and, when `oidcEnabled`, the OIDC `iss`.
  * The `/api/v1/mcp` path is historic (MCP got here first) and is now load-
  * bearing: it is baked into registered clients, live tokens' `aud`, and the
  * discovery documents third parties have already fetched. One AS, one issuer.
@@ -105,7 +106,7 @@ function jwksUri(): string {
 /**
  * Resolve an Application by slug, asserting the caller's surface is switched on.
  * Throws 404 when the Application is missing, when the surface toggle is off,
- * or when the Application itself is disabled — we don't disclose which, so all
+ * or when the Application itself is disabled, we don't disclose which, so all
  * three are indistinguishable to an anonymous caller.
  *
  * ("disabled app" in the original wording of this comment meant a switched-off
@@ -136,7 +137,7 @@ async function resolveApp(
   if (!app || !enabled) {
     // OIDC-only surfaces get their own code: an operator who hit /userinfo on
     // an Application that never enabled OIDC is not helped by being told about
-    // MCP. The shared endpoints keep MCP_NOT_FOUND — clients and docs have been
+    // MCP. The shared endpoints keep MCP_NOT_FOUND, clients and docs have been
     // reading that code since before OIDC existed.
     if (wanted === 'oidc') {
       throw new RekeyError({
@@ -167,7 +168,7 @@ export async function resolveOidcApp(slug: string): Promise<Application> {
 }
 
 /**
- * The shared grant endpoints — authorize, token, register, introspect, and the
+ * The shared grant endpoints, authorize, token, register, introspect, and the
  * RFC 8414 metadata that describes them. Either toggle mounts them; which
  * scopes they will actually grant still depends on the individual toggles
  * (`supportedScopes`).
@@ -178,7 +179,7 @@ export async function resolveAuthServerApp(slug: string): Promise<Application> {
 
 /**
  * Every scope this Application's AS will grant, in metadata-advertised order.
- * Driven by the toggles, so the advertised list is exactly the grantable one —
+ * Driven by the toggles, so the advertised list is exactly the grantable one,
  * a client can never read `openid` out of the metadata of an Application that
  * would refuse to grant it.
  *
@@ -187,7 +188,7 @@ export async function resolveAuthServerApp(slug: string): Promise<Application> {
  * ever proved is an account-takeover primitive at any relying party that keys
  * on the claim, and RPs routinely ignore `email_verified`. Rather than emit a
  * claim we cannot stand behind, an Application that does not require verified
- * addresses simply does not offer the scope — and says so in discovery, since
+ * addresses simply does not offer the scope, and says so in discovery, since
  * this same function feeds `scopes_supported`.
  */
 export function supportedScopes(application: Application): string[] {
@@ -211,7 +212,7 @@ export function registrationOpen(application: Application): boolean {
  * Resolve the scopes actually granted from a client's `scope` request.
  *
  * Requested ∩ supported, in supported order, deduped. Unrecognised values are
- * dropped silently (RFC 6749 §3.3 lets the AS ignore part of the request) —
+ * dropped silently (RFC 6749 §3.3 lets the AS ignore part of the request),
  * a client cannot talk itself into a scope this AS does not define, or into one
  * the operator has switched off.
  *
@@ -228,7 +229,7 @@ export function registrationOpen(application: Application): boolean {
  * The fallback is deliberately keyed on "the client asked for nothing", not on
  * "nothing survived the intersection". Those were the same condition until OIDC
  * arrived, and conflating them meant an Application with MCP on and OIDC off
- * answered `scope=openid` — a request to sign someone in — with a working
+ * answered `scope=openid`, a request to sign someone in, with a working
  * `mcp:account` token that reached `tools/list`. An operator who deliberately
  * left OIDC off does not thereby consent to handing account-read access to
  * anything that asks for sign-in, and `scope=admin root` is not a request for
@@ -272,7 +273,7 @@ export function authServerMetadata(application: Application): Record<string, unk
 
 /**
  * OpenID Provider Metadata for an Application. A superset of the RFC 8414
- * document above (same issuer, same endpoints) plus the OIDC-specific fields —
+ * document above (same issuer, same endpoints) plus the OIDC-specific fields,
  * `userinfo_endpoint`, `jwks_uri`, `id_token_signing_alg_values_supported`.
  */
 export function openidConfiguration(application: Application): Record<string, unknown> {
@@ -302,12 +303,14 @@ export interface RegisterClientInput {
   clientName?: string | undefined;
 }
 
-// Schemes that are never valid OAuth redirect targets — reject even though
+// Schemes that are never valid OAuth redirect targets, reject even though
 // they parse as a "custom scheme".
 const DENIED_REDIRECT_SCHEMES = new Set([
   'ftp:',
   'file:',
   'data:',
+  // The scheme is named here because this list is what REFUSES it.
+  // eslint-disable-next-line no-script-url
   'javascript:',
   'vbscript:',
   'gopher:',
@@ -319,7 +322,7 @@ const DENIED_REDIRECT_SCHEMES = new Set([
 ]);
 
 /** A redirect URI is acceptable if it's an https URL, an http loopback URL, or
- * a custom app scheme (claude://, cursor://, …) — the shapes MCP clients use.
+ * a custom app scheme (claude://, cursor://, …), the shapes MCP clients use.
  * Non-loopback http and known-dangerous schemes are rejected. */
 function isAcceptableRedirectUri(uri: string): boolean {
   let u: URL;
@@ -331,19 +334,19 @@ function isAcceptableRedirectUri(uri: string): boolean {
   if (u.protocol === 'https:') return true;
   if (u.protocol === 'http:') return u.hostname === 'localhost' || u.hostname === '127.0.0.1';
   if (DENIED_REDIRECT_SCHEMES.has(u.protocol.toLowerCase())) return false;
-  // Custom app scheme — must be a well-formed scheme token.
+  // Custom app scheme, must be a well-formed scheme token.
   return /^[a-z][a-z0-9+.-]*:$/i.test(u.protocol);
 }
 
 /**
- * The GDPR erasure gate for this surface — the OAuth/OIDC counterpart of
+ * The GDPR erasure gate for this surface, the OAuth/OIDC counterpart of
  * `assertEndUserNotErased` in modules/auth/auth.service.ts.
  *
  * It is a second implementation rather than a call to that one because the two
  * speak different error dialects: the session API answers `410 END_USER_ERASED`
  * in the Rekey envelope, and the token endpoint MUST answer
  * `{ error, error_description }` (RFC 6749 §5.2) or clients cannot parse it.
- * The RULE is identical and must stay identical — a tombstoned end-user has had
+ * The RULE is identical and must stay identical, a tombstoned end-user has had
  * their credentials hard-deleted and can never authenticate again, whichever
  * door is tried.
  *
@@ -359,14 +362,14 @@ async function liveGrantSubject(
   // An erased end-user is a tombstone: `email` is a synthetic
   // `…@deleted.invalid` address and the profile is nulled. Serving that as
   // claims would be worse than serving nothing, and the account can no longer
-  // authenticate anywhere else either — so every token naming it reads as
+  // authenticate anywhere else either, so every token naming it reads as
   // invalid.
   if (!user || user.erasedAt !== null) return null;
 
   // `requireEmailVerification` has to hold here too. It was enforced at every
   // door on the first-party auth surface and at none on this one, so an
   // unconfirmed account refused a session by `/auth/refresh` could still renew
-  // an MCP/OIDC grant indefinitely — a longer-lived credential than the one
+  // an MCP/OIDC grant indefinitely, a longer-lived credential than the one
   // being denied. Both grants funnel through this function, which is why the
   // check belongs here rather than in each of them.
   const application = await prisma.application.findUnique({ where: { id: applicationId } });
@@ -385,21 +388,39 @@ async function requireLiveGrantSubject(
   if (!user) {
     // `invalid_grant`, not `invalid_request`: the code / refresh token itself
     // was well-formed, and what stopped it is a property of the grant. The
-    // description says nothing about erasure — a client cannot act on it and it
+    // description says nothing about erasure, a client cannot act on it and it
     // would answer "was this person deleted" for anyone holding a stale token.
     throw new OAuthError('invalid_grant', 'This grant is no longer valid for its subject.');
   }
   return user;
 }
 
+/**
+ * `liveGrantSubject` for a presented ACCESS token: also refuses one issued
+ * before `EndUser.sessionsInvalidBefore`. A password change or reset, sign-out
+ * everywhere, or refresh-token reuse revokes the MCP refresh tokens with every
+ * other refresh token, but the one-hour access JWT is stateless and used to
+ * keep working until it expired. Same stamp and second granularity the session
+ * middleware uses (lib/session-stamp.ts). Grants are not checked this way: a
+ * refresh token's own `revokedAt` already answers for it.
+ */
+async function liveAccessTokenSubject(
+  applicationId: string,
+  claims: McpAccessClaims,
+): Promise<EndUser | null> {
+  const user = await liveGrantSubject(applicationId, claims.sub);
+  if (!user || sessionIssuedBefore(claims, user.sessionsInvalidBefore)) return null;
+  return user;
+}
+
 export const mcpOAuthService = {
   /**
-   * Is the end-user a token names still live (not erased)? For the resource
-   * servers, which answer with an RFC 6750 challenge rather than an OAuth
-   * error body.
+   * Is the access token's end-user still live (not erased), and was the token
+   * issued after the user's last revoke-everything? For the resource servers,
+   * which answer with an RFC 6750 challenge rather than an OAuth error body.
    */
-  async grantSubjectIsLive(applicationId: string, endUserId: string): Promise<boolean> {
-    return (await liveGrantSubject(applicationId, endUserId)) !== null;
+  async accessTokenIsLive(applicationId: string, claims: McpAccessClaims): Promise<boolean> {
+    return (await liveAccessTokenSubject(applicationId, claims)) !== null;
   },
 
   /** RFC 7591 dynamic client registration. Public client (PKCE, no secret). */
@@ -513,7 +534,7 @@ export const mcpOAuthService = {
     ) {
       invalid();
     }
-    // Atomic single-use claim — a replayed code loses the race.
+    // Atomic single-use claim, a replayed code loses the race.
     const claimed = await prisma.oAuthAuthCode.updateMany({
       where: { id: row!.id, consumedAt: null },
       data: { consumedAt: new Date() },
@@ -525,7 +546,7 @@ export const mcpOAuthService = {
     }
     // Erasure gate. Codes live 60 seconds, but erasure does not delete them
     // atomically with the request that redeems them, and a code minted before
-    // an erasure was redeemable after it — yielding an `id_token` about a
+    // an erasure was redeemable after it, yielding an `id_token` about a
     // person whose data we had just promised to destroy.
     const user = await requireLiveGrantSubject(args.application.id, row!.endUserId);
     return this.issueTokens(args.application, user, row!.scope, args.clientId, {
@@ -548,14 +569,14 @@ export const mcpOAuthService = {
     if (outcome.kind !== 'ok' || outcome.token.applicationId !== args.application.id) {
       throw new OAuthError('invalid_grant', 'Refresh token is invalid, expired, or revoked.');
     }
-    // Only MCP-surface tokens bound to THIS client may refresh here — a session
+    // Only MCP-surface tokens bound to THIS client may refresh here, a session
     // refresh token (or another client's) is rejected.
     if (outcome.token.kind !== 'mcp' || outcome.token.clientId !== args.clientId) {
       throw new OAuthError('invalid_grant', 'Refresh token is not valid for this client.');
     }
     // Erasure gate, checked BEFORE the rotation so a refused refresh leaves the
     // chain exactly as it was. Erasure hard-deletes every refresh row for the
-    // user, MCP-surface ones included, so this normally cannot fire — but the
+    // user, MCP-surface ones included, so this normally cannot fire, but the
     // window worth closing is not the 60 seconds of a code, it is the 30 days
     // of a refresh chain, and a token rotated by a concurrent request could
     // still land here.
@@ -563,7 +584,7 @@ export const mcpOAuthService = {
     // The scope granted at consent, carried down the whole rotation chain. NOT
     // a constant: re-issuing `mcp:account` here would silently widen a grant
     // the end-user approved as `openid email` into MCP tool access. Null on
-    // rows minted before the column existed — those could only ever have been
+    // rows minted before the column existed, those could only ever have been
     // MCP grants, which is exactly what this used to hard-code.
     const scope = outcome.token.scope ?? MCP_SCOPE;
     let replacement;
@@ -651,8 +672,8 @@ export const mcpOAuthService = {
    *
    * Returns null when the token is not a live `mcp_access` token for THIS
    * Application (wrong signature, wrong `aud`, expired, revoked generation) or
-   * when its holder has since been erased. `insufficient_scope` — a valid token
-   * that was never granted `openid` — is the caller's to raise, because RFC 6750
+   * when its holder has since been erased. `insufficient_scope`, a valid token
+   * that was never granted `openid`, is the caller's to raise, because RFC 6750
    * gives it a different status code than a bad token.
    */
   async userInfo(
@@ -670,13 +691,18 @@ export const mcpOAuthService = {
     );
     if (!claims) return { ok: false, reason: 'invalid_token' };
     if (!hasScope(claims.scope, OPENID_SCOPE)) return { ok: false, reason: 'insufficient_scope' };
-    const user = await liveGrantSubject(application.id, claims.sub);
+    const user = await liveAccessTokenSubject(application.id, claims);
     if (!user) return { ok: false, reason: 'invalid_token' };
     return { ok: true, claims: identityClaims(user, claims.scope) };
   },
 
-  /** RFC 7662 token introspection. Returns the active claims or `{ active:false }`. */
-  introspect(application: Application, token: string): Record<string, unknown> {
+  /**
+   * RFC 7662 token introspection. Returns the active claims or `{ active:false }`.
+   * A token the resource server would refuse (erased user, or issued before a
+   * revoke-everything) is reported inactive, so a customer's own MCP server
+   * agrees with ours.
+   */
+  async introspect(application: Application, token: string): Promise<Record<string, unknown>> {
     const claims: McpAccessClaims | null = verifyMcpAccessToken(
       token,
       application.id,
@@ -684,6 +710,7 @@ export const mcpOAuthService = {
       mcpIssuer(application.slug),
     );
     if (!claims) return { active: false };
+    if (!(await liveAccessTokenSubject(application.id, claims))) return { active: false };
     return {
       active: true,
       sub: claims.sub,

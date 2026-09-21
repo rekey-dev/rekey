@@ -2,16 +2,16 @@
  * Per-request access log writer + reader + pruner.
  *
  * Records one row per HTTP response. This is a **bounded convenience tail** the
- * panel renders — the authoritative request log is structured stdout
+ * panel renders, the authoritative request log is structured stdout
  * (`req.log`). Three hard rules, all load-bearing for not re-introducing the
  * crash this feature guards against:
  *
  *   1. **No DB write on the request path.** `recordApiRequest` only pushes the
- *      row into an in-memory buffer — it touches no connection and never
+ *      row into an in-memory buffer, it touches no connection and never
  *      throws. A periodic flush (`flushApiRequestLogs`) writes the whole buffer
  *      in ONE `createMany`. Per-request inserts would put one un-awaited query
  *      on the connection pool per request; under load that starves the pool
- *      (and contends with everything else) — the exact failure we're avoiding.
+ *      (and contends with everything else), the exact failure we're avoiding.
  *      Batching decouples DB write volume from request volume.
  *
  *   2. **Best-effort, never fatal.** Both the enqueue and the flush swallow
@@ -43,6 +43,8 @@ export interface ApiRequestLogInput {
   tenantId?: string | null;
   operatorUserId?: string | null;
   ip?: string | null;
+  /** The scope that admitted this request, when a scope gate ran. Null otherwise. */
+  admittedScope?: string | null;
 }
 
 interface BufferedRow {
@@ -54,6 +56,7 @@ interface BufferedRow {
   tenantId: string | null;
   operatorUserId: string | null;
   ip: string | null;
+  admittedScope: string | null;
   createdAt: Date;
 }
 
@@ -61,7 +64,7 @@ let buffer: BufferedRow[] = [];
 let flushing = false;
 
 /**
- * Enqueue one request-log row. Synchronous, allocation-only — no DB, no
+ * Enqueue one request-log row. Synchronous, allocation-only, no DB, no
  * connection, never throws. The `createdAt` is stamped now (at response time)
  * so ordering is accurate even though the row is written later in a batch.
  */
@@ -75,6 +78,7 @@ export function recordApiRequest(input: ApiRequestLogInput): void {
     tenantId: input.tenantId ?? null,
     operatorUserId: input.operatorUserId ?? null,
     ip: input.ip ?? null,
+    admittedScope: input.admittedScope ?? null,
     createdAt: new Date(),
   });
   // Hard cap: if a burst outruns the flush timer, drop the oldest rows rather
@@ -85,17 +89,11 @@ export function recordApiRequest(input: ApiRequestLogInput): void {
 }
 
 /**
- * Write the buffered rows in a single `createMany` and clear the buffer.
- * Best-effort: returns the number of rows written, swallows errors (a failed
- * flush drops that batch — stdout remains the source of truth). Re-entrancy
- * guarded so two timers / a timer + a shutdown flush can't double-write.
- */
-/**
  * Discard whatever is buffered without writing it.
  *
  * Test-only. This buffer is module-level and flushed by a TIMER, which makes
  * it the documented cause of the TRUNCATE deadlock retry in test/setup.ts:
- * rows enqueued by one test are still in flight — or land mid-TRUNCATE — while
+ * rows enqueued by one test are still in flight, or land mid-TRUNCATE, while
  * the next takes an AccessExclusiveLock on `api_request_logs`. Dropping the
  * buffer between tests removes the write that the retry loop exists to
  * survive. Called from test/setup.ts's beforeEach.
@@ -107,6 +105,12 @@ export function __resetForTests(): void {
   buffer = [];
 }
 
+/**
+ * Write the buffered rows in a single `createMany` and clear the buffer.
+ * Best-effort: returns the number of rows written, swallows errors (a failed
+ * flush drops that batch, stdout remains the source of truth). Re-entrancy
+ * guarded so two timers / a timer + a shutdown flush can't double-write.
+ */
 export async function flushApiRequestLogs(): Promise<number> {
   if (flushing || buffer.length === 0) return 0;
   flushing = true;
@@ -133,6 +137,7 @@ export interface ApiRequestLogRow {
   tenantId: string | null;
   operatorUserId: string | null;
   ip: string | null;
+  admittedScope: string | null;
   createdAt: Date;
 }
 
@@ -149,7 +154,7 @@ export interface ApiRequestLogQuery {
  * List request-log rows newest-first for a single app or operator, with the
  * total behind the window.
  *
- * `total` counts what the pruner has left, not every request ever made — this
+ * `total` counts what the pruner has left, not every request ever made, this
  * is a capped convenience tail, and the endpoints say so. It is still the
  * honest answer to "is there another page", which is what a caller needs and
  * what a bare `{requests: [...]}` could not give them.
@@ -157,7 +162,7 @@ export interface ApiRequestLogQuery {
 export async function listApiRequests(
   query: ApiRequestLogQuery,
 ): Promise<{ items: ApiRequestLogRow[]; total: number }> {
-  // One filter object for both queries — a count over a different `where` than
+  // One filter object for both queries, a count over a different `where` than
   // the rows is a pager that walks off the end.
   const where = {
     ...(query.applicationId !== undefined && { applicationId: query.applicationId }),
@@ -182,6 +187,7 @@ export async function listApiRequests(
     tenantId: r.tenantId,
     operatorUserId: r.operatorUserId,
     ip: r.ip,
+    admittedScope: r.admittedScope,
     createdAt: r.createdAt,
   }));
   return { items, total };
@@ -189,10 +195,10 @@ export async function listApiRequests(
 
 /**
  * Cap the table to the last `keepPerGroup` rows per application, per operator,
- * and (as a backstop) per the anonymous bucket — using a window function so
+ * and (as a backstop) per the anonymous bucket, using a window function so
  * the whole sweep is three set-based DELETEs, not a per-row loop. Idempotent
  * and best-effort: returns the number of rows deleted, swallows errors (the
- * rows are harmless if a sweep is skipped — the next tick catches up).
+ * rows are harmless if a sweep is skipped, the next tick catches up).
  *
  * Why three statements: API-key traffic carries `application_id` (operator
  * null) and operator/panel traffic carries `operator_user_id` (application

@@ -3,28 +3,29 @@
 /**
  * Form submit button with in-flight pending state.
  *
- * `useFormStatus` is a React hook available *inside* a form's children
- * tree — it reflects whether the surrounding form's `action` is currently
- * pending (server action in flight). On submit, we flip `disabled=true`
- * and swap the label to `pendingLabel` so:
+ * Pending state comes from `useActionPending`: the owning `ActionForm`'s
+ * own transition when there is one, and React's `useFormStatus()` otherwise.
+ * See `ActionForm.tsx` for why reading React's pending state alone is not
+ * safe here. On submit, we flip `disabled=true` and swap the label to
+ * `pendingLabel` so:
  *   - the user gets immediate feedback that something is happening
  *   - double-clicks are blocked at the DOM level (no duplicate POSTs)
  *
- * UX-AUDIT-3 / item #6 + #14: the server-action redirect pattern means
- * the page eventually re-renders, but for 100ms–2s the user has no signal.
- * This component is the canonical fix.
+ * The server-action redirect pattern means the page eventually re-renders,
+ * but for anything from 100ms to 2s the user has no signal. This component
+ * is the canonical fix.
  *
  * @example
  * ```tsx
- * <form action={createPlan}>
+ * <ActionForm action={createPlan}>
  *   <input name="slug" />
  *   <SubmitButton>Create plan</SubmitButton>
- * </form>
+ * </ActionForm>
  * ```
  */
 
 import * as React from 'react';
-import { useFormStatus } from 'react-dom';
+import { useActionPending } from './ActionForm';
 
 export interface SubmitButtonProps
   extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'type' | 'disabled'> {
@@ -38,7 +39,7 @@ export function SubmitButton({
   className,
   ...rest
 }: SubmitButtonProps): React.JSX.Element {
-  const { pending } = useFormStatus();
+  const pending = useActionPending();
   return (
     <button
       type="submit"

@@ -11,9 +11,9 @@
  *
  * Note that supplying `publicRoutes` REPLACES the default list. Everything
  * not named is protected, which is the right default for a dashboard and the
- * wrong one for a marketing page — list them, or scope the matcher.
+ * wrong one for a marketing page, list them, or scope the matcher.
  *
- * This middleware is intentionally simple — it does not call Rekey over
+ * This middleware is intentionally simple, it does not call Rekey over
  * the network on every request. Token validity is verified the next time
  * the customer's server uses it via `auth()` or directly. The cookie's
  * presence is the gate; the cookie's *value* is checked deeper in the stack.
@@ -32,7 +32,7 @@ export interface MiddlewareConfig {
    * below. Defaults to `/api/rekey/refresh`; set `false` to opt out.
    *
    * A visitor holding a refresh token but no access token is not signed out,
-   * they are stale — the access cookie lives fifteen minutes and the refresh
+   * they are stale, the access cookie lives fifteen minutes and the refresh
    * cookie thirty days, so this is every user, several times a day. They
    * cannot be repaired by a page: refreshing writes cookies, which Next
    * forbids during a render, and spending a refresh token that cannot be
@@ -65,8 +65,8 @@ export function rekeyMiddleware(config: MiddlewareConfig = {}) {
    * The destination is always public, whatever the caller passed.
    *
    * `publicRoutes` REPLACES the default list rather than extending it, so a
-   * caller who supplies their own — the common case, since the default
-   * protects the whole site — can easily omit the page they are redirecting
+   * caller who supplies their own, the common case, since the default
+   * protects the whole site, can easily omit the page they are redirecting
    * to. Naming a custom `signInUrl` does it too. The result is a request to
    * the sign-in page being redirected to the sign-in page until the browser
    * gives up, with nothing in any log to say why.

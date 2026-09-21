@@ -3,18 +3,18 @@
  *
  * The address belongs to the deployment, so the display name has to say who the
  * mail is about AND that it left someone else's domain. Sending as a bare
- * "Rekey" told the recipient nothing about which product had emailed them —
+ * "Rekey" told the recipient nothing about which product had emailed them,
  * every Application's verification and password-reset mail arrived under one
- * name — and sending as a bare "Acme" would claim a sending identity Acme does
+ * name, and sending as a bare "Acme" would claim a sending identity Acme does
  * not have. `Acme (via Rekey)` is what Google Groups and GitHub do here.
  *
  * The rule only applies to the shared pool. An Application with its own
  * credentials sends from its own domain, so there is nothing to disclose and
- * nothing is appended — that path never calls this function.
+ * nothing is appended, that path never calls this function.
  *
  * The deployment name is passed in rather than read from the environment. The
  * first version of this test read `env.RESEND_DEFAULT_FROM_NAME` and skipped
- * when it was unset — which it is under test, so three of five cases silently
+ * when it was unset, which it is under test, so three of five cases silently
  * asserted nothing while the file reported green.
  */
 

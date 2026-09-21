@@ -6,14 +6,14 @@
  *   - Loads the Application's RP config (rpId, rpOrigins, rpName) from
  *     `authConfig.webauthn`, with deliberate failure if absent. The two
  *     ceremonies refuse to mint options when the Application hasn't been
- *     configured — registering a passkey to a guess-able rpId is
+ *     configured, registering a passkey to a guess-able rpId is
  *     security-relevant, so we don't fall back to anything.
  *
  *   - Generates the ceremony challenge. Anti-replay is enforced by the
  *     server-side challenge store (`lib/webauthn-challenge.ts`): the
  *     `start` path persists the challenge, the `complete` path atomically
  *     consumes it (single-use, 5-minute TTL). The posted `expectedChallenge`
- *     is validated against that store, never trusted on its own — a replayed
+ *     is validated against that store, never trusted on its own, a replayed
  *     assertion fails because its challenge was already burned.
  *
  * SimpleWebAuthn handles the cryptographic verification (signature,
@@ -28,15 +28,15 @@
  * not one. Preferred is a *request*: an authenticator that declines it still
  * returns a valid assertion, just with the UV bit clear, and a verifier that
  * does not require UV accepts it. Since
- * `passkeyAuthenticateComplete` calls `issuePair` directly — a passkey is
- * treated as a complete sign-in and skips the MFA challenge — that assertion
+ * `passkeyAuthenticateComplete` calls `issuePair` directly, a passkey is
+ * treated as a complete sign-in and skips the MFA challenge, that assertion
  * is a full session. So an account protected by password + TOTP could be
  * entered by touching a key, with no PIN, no biometric, and nothing the user
  * knows. The strong-factor claim the bypass rests on was never checked.
  *
  * `required` makes the claim true: the authenticator must verify the human
  * (PIN, biometric) and set the UV bit, and we refuse the assertion if it
- * didn't. That is a real behaviour change — a security key with no PIN
+ * didn't. That is a real behaviour change, a security key with no PIN
  * configured, or a browser too old to prompt, is now refused rather than
  * silently downgraded. It is the correct trade for a credential that replaces
  * two factors, and the fix belongs at both ends: `required` in the options
@@ -66,7 +66,7 @@ export interface RpConfig {
 
 /**
  * Resolve the RP config from `authConfig.webauthn`. Throws if not
- * configured — callers should not paper over this with defaults; the
+ * configured, callers should not paper over this with defaults; the
  * Application owner must opt into WebAuthn explicitly.
  */
 export function rpConfigForApplication(application: Application): RpConfig {
@@ -76,7 +76,7 @@ export function rpConfigForApplication(application: Application): RpConfig {
       statusCode: 400,
       code: 'WEBAUTHN_NOT_CONFIGURED',
       message:
-        'This Application has no WebAuthn config — passkey ceremonies cannot run.',
+        'This Application has no WebAuthn config, passkey ceremonies cannot run.',
       fix: 'Set `authConfig.webauthn = { rpId, rpOrigins }` on the Application (Panel → Application → Auth).',
     });
   }
@@ -89,7 +89,7 @@ export function rpConfigForApplication(application: Application): RpConfig {
 
 /**
  * Wrap SimpleWebAuthn's registration-options generator. Caller passes the
- * EndUser identifier (we use `endUserId` as the WebAuthn user handle —
+ * EndUser identifier (we use `endUserId` as the WebAuthn user handle,
  * stable across email changes, never exposed to the user) and the
  * `excludeCredentials` list (credentials already registered for this
  * user, so the authenticator refuses to register a duplicate).
@@ -139,7 +139,7 @@ export async function buildAuthenticationOptions(args: {
   application: Application;
   /**
    * Allow-list to send to the browser. When `null`, we run a usernameless
-   * ceremony — works for resident-key passkeys and is the better UX when
+   * ceremony, works for resident-key passkeys and is the better UX when
    * the user hasn't typed an email. When non-null (email-first flow), we
    * scope to that user's credentials so the wrong-credential-for-email
    * UX fails fast.

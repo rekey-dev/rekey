@@ -8,8 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "echo \"(eslint not yet wired)\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "lint": "eslint .",
     "test": "pnpm run test:prepare && vitest run",
     "test:coverage": "pnpm run test:prepare && vitest run --coverage",
     "test:providers": "pnpm run test:prepare && vitest run --config vitest.providers.config.ts",
@@ -17,7 +17,8 @@
     "db:generate": "prisma generate --schema ../../prisma/schema.prisma",
     "db:migrate": "prisma migrate dev --schema ../../prisma/schema.prisma",
     "db:migrate:deploy": "prisma migrate deploy --schema ../../prisma/schema.prisma",
-    "db:studio": "prisma studio --schema ../../prisma/schema.prisma"
+    "db:studio": "prisma studio --schema ../../prisma/schema.prisma",
+    "lint:fix": "eslint . --fix --fix-type problem,suggestion,layout"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
@@ -33,6 +34,8 @@
     "@simplewebauthn/server": "^13.3.0",
     "@t3-oss/env-core": "^0.11.1",
     "argon2": "^0.41.1",
+    "aws4fetch": "^1.0.20",
+    "bcryptjs": "^3.0.3",
     "bullmq": "^5.34.0",
     "fastify": "^5.1.0",
     "fastify-raw-body": "^5.0.0",

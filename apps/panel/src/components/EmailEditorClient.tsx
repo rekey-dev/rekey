@@ -6,22 +6,22 @@ import dynamic from 'next/dynamic';
 /**
  * Unlayer wrapper. The editor lives in an iframe and exposes
  * `loadDesign` / `exportHtml` via its imperative ref. We don't try to
- * bind it to React state — instead, on submit we ask it for the latest
- * design + html, stuff them into hidden inputs, and let the parent
- * `<form action={...}>` server-action handle persistence.
+ * bind it to React state, instead, on submit we ask it for the latest
+ * design + html and hand them to the server action ourselves, so the Save
+ * button's pending state is ours to clear when the write answers.
  *
  * `designJson` hydrates the editor from a previously-saved template
- * (null for built-in defaults — the editor opens blank). `eventKey` and
+ * (null for built-in defaults, the editor opens blank). `eventKey` and
  * `applicationId` are pass-through hidden inputs the server action
  * reads back.
  *
  * Variables that the renderer will substitute are surfaced as merge tags
- * in Unlayer's tools — operators see e.g. `{{userEmail}}` chips they can
+ * in Unlayer's tools, operators see e.g. `{{userEmail}}` chips they can
  * drag into the body.
  */
 
 // react-email-editor's TS types are noisy (heavy generics + forwardRef).
-// We re-type as a plain component prop bag — the library is mature enough
+// We re-type as a plain component prop bag, the library is mature enough
 // that the shape is stable.
 type EditorInstance = {
   loadDesign?: (design: unknown) => void;
@@ -46,7 +46,7 @@ export interface EmailEditorClientProps {
   initialSubject: string;
   /** Saved Unlayer design (null when only the built-in default exists). */
   initialDesignJson: unknown | null;
-  /** Server-action handle — receives FormData with subject, designJson, bodyHtml. */
+  /** Server-action handle, receives FormData with subject, designJson, bodyHtml. */
   action: (formData: FormData) => Promise<void>;
   /** Variable names registered for this event, e.g. ['userEmail','resetUrl']. */
   variables: ReadonlyArray<string>;
@@ -58,6 +58,7 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
   const [designJsonHidden, setDesignJsonHidden] = React.useState<string>('');
   const [bodyHtmlHidden, setBodyHtmlHidden] = React.useState<string>('');
   const [submitting, setSubmitting] = React.useState(false);
+  const [, startTransition] = React.useTransition();
   const [ready, setReady] = React.useState(false);
   const [saveError, setSaveError] = React.useState<string | null>(null);
   const formRef = React.useRef<HTMLFormElement | null>(null);
@@ -83,7 +84,7 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
       if (props.initialDesignJson && editor?.loadDesign) {
         editor.loadDesign(props.initialDesignJson);
       }
-      // Unlock Save — before this fires, exportHtml would silently no-op.
+      // Unlock Save, before this fires, exportHtml would silently no-op.
       setReady(true);
     },
     [props.initialDesignJson],
@@ -105,31 +106,54 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
     setSaveError(null);
     const editor = editorRef.current?.editor;
     if (!editor?.exportHtml) {
-      setSaveError('The editor is still loading — wait a moment and try again.');
+      setSaveError('The editor is still loading. Wait a moment and try again.');
       return;
     }
     setSubmitting(true);
     // exportHtml's callback can simply never fire (iframe wedged, editor torn
     // down). Without a deadline that leaves the button stuck on "Saving…"
-    // forever — so time out, re-enable Save, and surface an error instead.
+    // forever, so time out, re-enable Save, and surface an error instead.
     let settled = false;
     exportTimeoutRef.current = setTimeout(() => {
       if (settled) return;
       settled = true;
       setSubmitting(false);
-      setSaveError('The editor did not respond in time. Try saving again — if it keeps failing, reload the page.');
+      setSaveError('The editor did not respond in time. Try saving again. If it keeps failing, reload the page.');
     }, EXPORT_TIMEOUT_MS);
     editor.exportHtml((data) => {
-      if (settled) return; // timed out — don't submit a stale export
+      if (settled) return; // timed out, don't submit a stale export
       settled = true;
       if (exportTimeoutRef.current) clearTimeout(exportTimeoutRef.current);
-      setDesignJsonHidden(JSON.stringify(data.design));
+      const designJson = JSON.stringify(data.design);
+      // Still mirrored into the hidden inputs: they are what a browser with
+      // no JavaScript would post, and what the next export overwrites.
+      setDesignJsonHidden(designJson);
       setBodyHtmlHidden(data.html);
-      // Defer to the next tick so React commits the hidden-input values
-      // before we trigger the native form submission.
-      setTimeout(() => {
-        formRef.current?.requestSubmit();
-      }, 0);
+      // Build the FormData here rather than waiting a tick for React to
+      // commit those two inputs and then `requestSubmit()`ing. That older
+      // path went through the form's `action` directly, which meant nothing
+      // was left holding the save: `submitting` was set before the export and
+      // never cleared again, so the button stayed on "Saving…" and disabled
+      // until a navigation happened to remount the editor. Owning the call
+      // lets us clear it when the write answers, exactly as `ActionForm`
+      // does for the panel's other forms. The action runs inside a transition
+      // so the router has one to navigate with, and the chain that clears the
+      // flag is left outside it because an action ending in `redirect()` puts
+      // the navigation into that transition, and the navigation is the part
+      // that can hang.
+      const form = formRef.current;
+      if (!form) {
+        setSubmitting(false);
+        return;
+      }
+      const formData = new FormData(form);
+      formData.set('designJson', designJson);
+      formData.set('bodyHtml', data.html);
+      startTransition(() => {
+        void Promise.resolve(props.action(formData)).finally(() => {
+          setSubmitting(false);
+        });
+      });
     });
   }
 
@@ -137,7 +161,9 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
     <form
       ref={formRef}
       action={props.action}
-      onSubmit={designJsonHidden ? undefined : handleSubmit}
+      // Always ours. The old conditional handed the second submit straight to
+      // the form's `action`, which is the path that never settled.
+      onSubmit={handleSubmit}
     >
       <input type="hidden" name="applicationId" value={props.applicationId} />
       <input type="hidden" name="eventKey" value={props.eventKey} />
@@ -188,6 +214,7 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
         <button
           type="submit"
           disabled={!ready || submitting}
+          aria-busy={submitting || undefined}
           className="rounded-md bg-[var(--color-primary)] px-3.5 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60 shrink-0"
         >
           {!ready ? 'Loading editor…' : submitting ? 'Saving…' : 'Save'}

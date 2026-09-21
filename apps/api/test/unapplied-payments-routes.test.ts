@@ -243,7 +243,7 @@ describe('extend', () => {
 
     const after = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     // Extending from the stale end would hand the buyer seven days that
-    // expired three weeks ago — a grant they never actually receive.
+    // expired three weeks ago, a grant they never actually receive.
     expect(after.currentPeriodEnd!.getTime()).toBeGreaterThan(Date.now());
   });
 

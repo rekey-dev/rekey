@@ -1,10 +1,11 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { api, errorQuery, readErrorFlash, PanelApiError, type ApplicationRow, type MemberRow, type InvitationRow, type PlanRow, type ApiKeyRow, type BillingCredentialRow, getMe } from '@/lib/api';
 import { Modal } from '@/components/Modal';
 import { ApiErrorText } from '@/components/api-error';
 import { SlugAvailabilityField } from '@/components/SlugAvailabilityField';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Pager, readPageSize } from '@/components/Pager';
 import { emptyPage, type Page } from '@/lib/paginate';
@@ -19,7 +20,7 @@ import { authConfigVisible, signInReachable } from '@/lib/auth-config';
 
 /**
  * `environment` is chosen at create and afterwards moves in ONE direction only,
- * once, via `POST /:id/promote` (#475) — no config route accepts the field.
+ * once, via `POST /:id/promote` (#475), no config route accepts the field.
  * Anything we don't recognise falls back to the API's own default rather than
  * being forwarded, so a tampered form can't 400 the create.
  */
@@ -27,7 +28,7 @@ function parseEnvironment(raw: FormDataEntryValue | null): ApplicationRow['envir
   return raw === 'PRODUCTION' || raw === 'STAGING' ? raw : 'DEVELOPMENT';
 }
 
-// No revalidatePath before the redirect — see `(authed)/layout.tsx` for why.
+// No revalidatePath before the redirect, see `(authed)/layout.tsx` for why.
 // Worth noting this one revalidated the *destination* (`/applications/<newId>`)
 // rather than the list it was submitted from, so it was invalidating a route
 // that was about to be rendered fresh anyway.
@@ -60,14 +61,14 @@ const ERR: Record<string, string> = {
 };
 
 /**
- * Derive the "Get started" checklist from real workspace state — no new API
+ * Derive the "Get started" checklist from real workspace state, no new API
  * endpoints, everything comes from data this page already has (the app list,
  * which carries authConfig.methods + billingConfig.enabled) or from cheap
  * existing reads (team members/invitations, plans of the first billing-enabled
  * app). Steps whose state can't be determined (a fetch failed, e.g. member-role
  * restrictions) are omitted rather than shown with a guess.
  *
- * `allDone` flips when every derivable step is complete — the caller then
+ * `allDone` flips when every derivable step is complete, the caller then
  * swaps the checklist for the dismissible "ready to go live" card (WP10).
  */
 async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
@@ -85,7 +86,7 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
       method: 'GET',
       path: '/api/v1/tenant/workspace/invitations',
     }).catch(() => null),
-    // API keys of the first app — drives the "mint your first key" step.
+    // API keys of the first app, drives the "mint your first key" step.
     // (One cheap read; omitted-on-failure like the other derived steps. Not a
     // paginated endpoint: this one still answers with a bare array.)
     firstApp
@@ -101,13 +102,13 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
   const invitations = invitationPage === null ? null : invitationPage.items;
 
   const billingApp = apps.find((a) => a.billingConfig.enabled);
-  // Two extra reads, only when an app actually has billing enabled — the list
+  // Two extra reads, only when an app actually has billing enabled, the list
   // payload carries neither plans nor provider credentials.
   //
   // The credentials read is what makes the billing step honest. `billingConfig
   // .enabled` alone ticked "Enable billing and add a provider" for an
   // application with ZERO providers configured, which is a checkout that fails
-  // with BILLING_CREDENTIALS_NOT_CONFIGURED — the checklist was reporting
+  // with BILLING_CREDENTIALS_NOT_CONFIGURED, the checklist was reporting
   // production-ready on a state that cannot take a payment. The step says "and
   // add a provider", so it needs both halves.
   const [planPage, billingCredentials] = billingApp
@@ -116,7 +117,7 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
           method: 'GET',
           path: `/api/v1/tenant/applications/${encodeURIComponent(billingApp.id)}/plans`,
         }).catch(() => null),
-        // Not paginated — one row per configured provider, still a bare array.
+        // Not paginated, one row per configured provider, still a bare array.
         api<BillingCredentialRow[]>({
           method: 'GET',
           path: `/api/v1/tenant/applications/${encodeURIComponent(billingApp.id)}/billing-credentials`,
@@ -125,7 +126,7 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
     : [emptyPage<PlanRow>(), [] as BillingCredentialRow[]];
   const plans = planPage === null ? null : planPage.items;
   // The endpoint returns one row per CONFIGURED provider, so a non-empty list
-  // is the signal. Null means the read failed — fall back to the old
+  // is the signal. Null means the read failed, fall back to the old
   // enabled-only answer rather than claiming the step is incomplete.
   const providerConfigured =
     billingCredentials === null ? true : billingCredentials.length > 0;
@@ -134,7 +135,7 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
   // Four of the steps below (key, auth, billing, plan) operate on an
   // application, so they can't be acted on until one exists. We *don't* disable
   // them (greying out most of the card reads as broken and gives no affordance)
-  // — instead the entry step gets a "Start here" pill and the dependent steps
+  //, instead the entry step gets a "Start here" pill and the dependent steps
   // get a muted "Requires an application" hint. Their hrefs already fall back to
   // the create-app modal, so an early click guides the user forward rather than
   // dead-ending. The hint/pill clear themselves once an app exists.
@@ -164,7 +165,7 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
     {
       key: 'auth-method',
       label: 'Configure an auth method',
-      description: 'Pick how end-users sign in — password, OAuth, passkeys.',
+      description: 'Pick how end-users sign in, password, OAuth, passkeys.',
       href: firstApp ? `/applications/${firstApp.id}/auth` : createHref,
       // `signInReachable`, not a methods count: an OAuth-only application has
       // no primary method and is fully configured. Counting methods called it
@@ -185,7 +186,7 @@ async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
       hint:
         requiresAppHint ??
         (billingApp !== undefined && !providerConfigured
-          ? 'Billing is on, but no provider is configured — checkout would fail'
+          ? 'Billing is on, but no provider is configured, so checkout would fail'
           : undefined),
     },
     ...(plans !== null
@@ -238,7 +239,7 @@ export default async function ApplicationsPage({
   // written by whoever composes the link, and this text renders inside the
   // panel's own error banner.
   const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
-  // Only owners and admins may create an Application — the API answers
+  // Only owners and admins may create an Application, the API answers
   // TENANT_ROLE_INSUFFICIENT for a MEMBER. Since #326 a MEMBER also starts with
   // access to NO Application, which is exactly the state accepting an
   // invitation produces. So the default view for an invited teammate was the
@@ -254,7 +255,7 @@ export default async function ApplicationsPage({
     path: `/api/v1/tenant/applications/?limit=${PAGE_SIZE}&offset=${offset}`,
   });
 
-  // Onboarding state only matters on the first page — paginating past page
+  // Onboarding state only matters on the first page, paginating past page
   // one means this is not a new workspace, so skip the extra reads entirely.
   // Members can act on none of the steps, so they skip it too.
   const onboarding = offset === 0 && canManageApps ? await buildOnboardingSteps(apps) : null;
@@ -264,7 +265,7 @@ export default async function ApplicationsPage({
       <PageHeader
         title="Applications"
         description="Each application has its own end-users, API keys, OAuth providers, and (optionally) billing."
-        /* Hide the header trigger on the empty state — the prominent CTA in
+        /* Hide the header trigger on the empty state, the prominent CTA in
            the empty state is the right entry point, and rendering both
            here used to collide on modalKey="newApp" (HIGH #7 fix). */
         action={
@@ -279,7 +280,7 @@ export default async function ApplicationsPage({
         />
       )}
 
-      {/* Every onboarding step done — swap the checklist for a dismissible
+      {/* Every onboarding step done, swap the checklist for a dismissible
           "go live" pointer card (WP10). */}
       {onboarding && onboarding.allDone && apps[0] && (
         <ReadyToGoLive
@@ -292,7 +293,7 @@ export default async function ApplicationsPage({
             },
             {
               label: 'API keys',
-              description: 'Keys inherit the application’s environment — check you are on the right one.',
+              description: 'Keys inherit the application’s environment, check you are on the right one.',
               href: `/applications/${apps[0].id}/api-keys`,
             },
             {
@@ -306,7 +307,7 @@ export default async function ApplicationsPage({
 
       {apps.length === 0 && !canManageApps ? (
         // A member sees an empty list because nothing has been shared with
-        // them, NOT because the workspace is empty — telling them "no
+        // them, NOT because the workspace is empty, telling them "no
         // applications yet" and offering a create button they cannot use sent
         // every invited teammate to a 403. Name the real cause and the fix.
         <EmptyState
@@ -346,7 +347,7 @@ export default async function ApplicationsPage({
             // Three states, and they are different answers. Redacted for an
             // APP_BILLING operator (absent `methods` is the only signal) means
             // say nothing. Zero methods with OAuth configured is an OAuth-only
-            // application, which is configured, not broken — reporting "0 auth
+            // application, which is configured, not broken, reporting "0 auth
             // methods" beside a badge component calling it healthy was the same
             // contradiction in the other direction.
             const methodSummary = !authConfigVisible(a)
@@ -421,14 +422,14 @@ function NewAppModal({
     <Modal
       modalKey={modalKey}
       title="Create application"
-      description="An application is a self-contained set of end-users, auth, and (optional) billing. The slug is baked into API keys and webhook URLs, and the environment sets their prefix — neither can be changed later."
+      description="An application is a self-contained set of end-users, auth, and (optional) billing. The slug is baked into API keys and webhook URLs, and the environment sets their prefix. Neither can be changed later."
       trigger={triggerLabel}
       triggerClassName={triggerCls}
     >
-      <form action={createApp} className="space-y-3">
+      <ActionForm action={createApp} className="space-y-3">
         {error && (
           <Banner tone="error">
-            {/* The local map first — a page often has better words than the
+            {/* The local map first, a page often has better words than the
                 API. Then the API's own message, which for a quota refusal
                 names the limit and the current count. "Something went wrong"
                 only when there is genuinely nothing to say. */}
@@ -466,7 +467,7 @@ function NewAppModal({
             <option value="PRODUCTION">Production</option>
           </select>
           <span className="block text-xs text-[var(--color-muted-fg)]">
-            What this application is. <strong>Cannot be changed later</strong> — to go live you
+            What this application is. <strong>Cannot be changed later</strong>: to go live you
             create a new production application, so pick it now.
           </span>
         </label>
@@ -475,8 +476,8 @@ function NewAppModal({
           <ul className="list-disc pl-5 space-y-0.5">
             <li>Email + password sign-up / sign-in</li>
             <li>Empty OAuth slot (add Google / Microsoft / OIDC / … later)</li>
-            <li>Mintable API keys — <code className="font-mono">rp_live_…</code> for production, <code className="font-mono">rp_test_…</code> otherwise</li>
-            <li><strong>No billing</strong> — opt in on the Billing tab when you're ready</li>
+            <li>Mintable API keys: <code className="font-mono">rp_live_…</code> for production, <code className="font-mono">rp_test_…</code> otherwise</li>
+            <li><strong>No billing</strong>: opt in on the Billing tab when you're ready</li>
           </ul>
           <p>
             The environment sets that key prefix and nothing else. It does not restrict which
@@ -485,7 +486,7 @@ function NewAppModal({
           </p>
         </div>
         <SubmitButton pendingLabel="Creating application…">Create application</SubmitButton>
-      </form>
+      </ActionForm>
     </Modal>
   );
 }

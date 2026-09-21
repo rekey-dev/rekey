@@ -1,7 +1,7 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 
-/** Root 404 (WP15) — friendly, token-styled, links back to safety. */
+/** Root 404, friendly, token-styled, links back to safety. */
 export default function NotFound(): React.JSX.Element {
   return (
     <main className="min-h-screen grid place-items-center px-6 bg-[var(--color-bg)]">

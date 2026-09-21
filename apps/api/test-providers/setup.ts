@@ -13,7 +13,7 @@
  * provider's sandbox over the network.
  *
  * The truncation and the module-singleton resets are shared with the default
- * suite via `../test/domain-tables.js` — those are properties of the API, not
+ * suite via `../test/domain-tables.js`, those are properties of the API, not
  * of the fakes, and a second copy of the table list is a second thing to
  * forget when a table is added. What it must NOT do is import `test/setup.ts`
  * itself: that file's module scope registers the fake-provider mock, and

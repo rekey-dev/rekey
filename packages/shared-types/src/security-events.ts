@@ -1,5 +1,5 @@
 /**
- * Security-event types and their human labels — the single definition, next to
+ * Security-event types and their human labels, the single definition, next to
  * the package every consumer already depends on.
  *
  * ## Why this is here rather than in the panel
@@ -9,13 +9,13 @@
  * The operator panel therefore carried a hand-written mirror of the map so it
  * could render "End-user signed in" instead of `user.signed_in`. A mirror of a
  * list nobody owns drifts by construction: the panel's first version covered 10
- * of them, so 44 rendered the raw key twice — once as the value and once as its
- * own label — and the Event-type filter could not select any of the 44 either.
+ * of them, so 44 rendered the raw key twice, once as the value and once as its
+ * own label, and the Event-type filter could not select any of the 44 either.
  * Three types a later revision guessed at turned out not to exist API-side.
  *
  * So the map lives with the shared types both sides already import. `EVENT_TYPE`
  * gives the emit sites a constant to reference instead of a literal, and
- * `SecurityEventType` makes the map exhaustive — a new event added to the union
+ * `SecurityEventType` makes the map exhaustive, a new event added to the union
  * without a label is a compile error, which is the whole point.
  *
  * Two pairs differ only by REST-vs-MCP provenance and read like typos. They are
@@ -27,7 +27,7 @@
 /**
  * Every event type the API can emit, grouped as the emitters group them.
  *
- * The values ARE the contract — they are persisted in `security_events.type`
+ * The values ARE the contract, they are persisted in `security_events.type`
  * and appear in `?type=` filters, so renaming one is a breaking change to
  * stored data, not a refactor.
  */
@@ -40,7 +40,7 @@ export const SECURITY_EVENT_LABEL = {
   // Every MCP tool invocation, recorded at the dispatch layer rather than by
   // each tool. Tools that change something ALSO emit their own specific event;
   // this one exists so the record does not depend on an author remembering,
-  // and so read tools — which change nothing but can read a lot — leave a
+  // and so read tools, which change nothing but can read a lot, leave a
   // trail too. An agent acting on an operator's behalf should be as auditable
   // as the operator.
   'operator.mcp_tool_called': 'MCP tool called',
@@ -90,11 +90,14 @@ export const SECURITY_EVENT_LABEL = {
   // because it changes commercial terms for a single customer without touching
   // any plan, so nothing in the plan history records that it happened.
   'app.subscription_entitlements_overridden': 'Subscription entitlements overridden',
-  // A subscription activated with no payment provider behind it — an invoice,
+  // A subscription activated with no payment provider behind it, an invoice,
   // a bank transfer, a comped account. It is the one billing write that
   // CREATES entitlement on somebody's say-so rather than following money the
   // deployment can see, which is exactly why it is in the trail.
   'app.subscription_granted': 'Subscription granted without a payment provider',
+  // A bulk write against somebody else's data. Worth its own entry so the
+  // trail says which run produced a batch of subscriptions.
+  'app.subscriptions_imported': 'Subscriptions imported from a billing provider',
   'app.webhook_endpoint_created': 'Webhook endpoint created',
   'app.webhook_endpoint_updated': 'Webhook endpoint updated',
 
@@ -112,27 +115,58 @@ export const SECURITY_EVENT_LABEL = {
   'user.passkey_added': 'End-user added a passkey',
   'user.passkey_removed': 'End-user removed a passkey',
   'user.sessions_revoked': 'End-user revoked their sessions',
-  // App-authorised session handoff — the Application's own server exchanged a
+  // App-authorised session handoff, the Application's own server exchanged a
   // live end-user session for an OIDC authorization code (see
   // POST /api/v1/mcp/:slug/oauth/authorize/grant). The end-user is the actor
   // because it is their session being handed on; the Application that did it
   // is named in `applicationId`, and the client it was handed to is in
   // `metadata.clientId`. This is the audit trail that makes a stolen secret
-  // key investigable rather than invisible — without it, the handoff would be
+  // key investigable rather than invisible, without it, the handoff would be
   // indistinguishable from an ordinary interactive sign-in.
   'user.session_handoff_granted': 'End-user session handed off by the application server',
+  // Devices. `registered` covers both a brand-new fingerprint and a released
+  // device coming back (metadata.reactivated); `limit_reached` is the refusal,
+  // recorded so "why can't this user sign in from their new PC?" has an answer.
+  'user.device_registered': 'End-user registered a device',
+  'user.device_released': 'End-user released a device',
+  'user.device_limit_reached': 'End-user hit their device limit',
 
   // ── Operator actions ON an end-user ──
+  // An account that exists because a billing system reported a sale for an
+  // address Rekey did not know. Nobody signed up: the row was created so the
+  // subscription had somewhere to land, and the person claims it at their
+  // first sign-in. In the trail so "where did this user come from" has an
+  // answer. The actor is the system; `metadata.provider` names the module.
+  'end_user.created_by_billing_webhook': 'End-user created by a billing webhook',
   'end_user.erased': 'End-user erased (GDPR)',
   'end_user.delete_blocked': 'End-user deletion blocked',
   'end_user.deleted': 'End-user deleted',
   'end_user.data_exported': 'End-user data exported',
+  'end_user.device_released': 'Device released by an operator or the application server',
+  'end_user.device_blocked': 'Device blocked',
+  'end_user.device_unblocked': 'Device unblocked',
+  'end_user.devices_released_by_operator': 'All devices released by an operator',
+  'end_user.created_by_import': 'End-user created by a subscription import',
+
+  // ── Operator support actions on one end-user ──
+  // An operator acting ON somebody, rather than the person acting for
+  // themselves, hence `end_user.*` with an operator actor and the subject in
+  // `metadata.endUserId`. Two of these put mail in a real person's inbox that
+  // they did not ask for, so both carry an audited reason: at the recipient's
+  // end, support-initiated mail and an attacker who reached the panel look
+  // identical, and the trail is the only thing that tells them apart.
+  'end_user.unlocked_by_operator': 'Sign-in lockout cleared by an operator',
+  'end_user.verification_resent': 'Verification email re-sent by an operator',
+  'end_user.password_reset_sent': 'Password reset email sent by an operator',
+  'end_user.sessions_revoked_by_operator': 'Sessions revoked by an operator',
 
   // ── Workspace / team ──
   'workspace.member_invited': 'Teammate invited',
   'workspace.invitation_revoked': 'Invitation revoked',
   'workspace.member_role_changed': 'Teammate role changed',
   'workspace.member_removed': 'Teammate removed',
+  // An owner or admin turning agent access for the whole workspace off or on.
+  'workspace.operator_mcp_switched': 'Operator MCP switched',
   'member.app_grant_set': 'Application access granted to member',
   'member.app_grant_removed': 'Application access removed from member',
   // A membership written by deployment automation through the super-admin
@@ -165,7 +199,7 @@ export const SECURITY_EVENT_TYPES = Object.keys(SECURITY_EVENT_LABEL) as Securit
  * Takes `string`, not `SecurityEventType`, on purpose: the value comes back
  * from the database as a bare string, and a row written by a NEWER API than the
  * client reading it is exactly the case that has to degrade well. An unknown
- * key is humanised — `app.plan_archived` → "Plan archived" — rather than
+ * key is humanised, `app.plan_archived` → "Plan archived", rather than
  * printed raw and shown twice.
  */
 export function humanizeSecurityEventType(type: string): string {

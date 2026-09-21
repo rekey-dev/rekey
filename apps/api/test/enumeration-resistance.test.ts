@@ -67,7 +67,7 @@ describe('publishable callers cannot enumerate accounts', () => {
       .then((r) => (r.json().data as { rawKey: string }).rawKey);
 
     // magic_link needs enabling, merged into the stored config so the write
-    // stays valid — a partial authConfig 400s whichever route parses it next.
+    // stays valid, a partial authConfig 400s whichever route parses it next.
     const stored = await prisma.application.findUniqueOrThrow({
       where: { id: application.id },
       select: { authConfig: true },

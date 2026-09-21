@@ -1,5 +1,5 @@
 /**
- * Wire-contract tests — the places where these schemas disagreed with what the
+ * Wire-contract tests, the places where these schemas disagreed with what the
  * API actually sends, or froze a set the API is going to grow.
  *
  * Type-level guarantees (the `Open<…>` unions, the schema/interface equality
@@ -54,7 +54,7 @@ describe('RekeyError', () => {
   it('is the SAME class via the barrel and via the /error subpath', () => {
     // The subpath exists so browser bundles can skip zod. If it produced a
     // second class object, `instanceof` would be false across packages that
-    // happened to import from different paths — a silent, un-debuggable bug.
+    // happened to import from different paths, a silent, un-debuggable bug.
     expect(RekeyError).toBe(RekeyErrorFromSubpath);
     expect(new RekeyErrorFromSubpath({ code: 'X', message: 'y' })).toBeInstanceOf(RekeyError);
   });

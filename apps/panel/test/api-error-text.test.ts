@@ -3,7 +3,7 @@
  *
  * The first version of this file re-implemented the precedence in a local
  * helper, so `api-error.tsx` could have been edited freely without a single
- * failure. It imports the component now and reads the element tree it returns —
+ * failure. It imports the component now and reads the element tree it returns,
  * no DOM needed, which suits this app's node-environment test setup.
  */
 import { describe, it, expect } from 'vitest';

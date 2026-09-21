@@ -119,7 +119,7 @@ describe('entitlement resolution — revenue leaks', () => {
   it('a credit purchase does not delete the free tier', async () => {
     // The free tier lives on the default plan and applies to users with no
     // recurring subscription. A CREDIT pack creates a Subscription row because
-    // that is where provisioning hangs — it is not "being on a plan".
+    // that is where provisioning hangs, it is not "being on a plan".
     const freePlan = await makePlan('SUBSCRIPTION', 1000);
     await setDefaultPlan(freePlan);
     const eu = await makeEndUser();
@@ -134,11 +134,127 @@ describe('entitlement resolution — revenue leaks', () => {
       data: { applicationId: appId, endUserId: eu, planId: creditPlan, status: 'ACTIVE' },
     });
 
-    // Still 1000. Before the fix this returned null — uncapped and unbilled.
+    // Still 1000. Before the fix this returned null, uncapped and unbilled.
     expect(await entitlementsService.includedQuotaFor(appId, { endUserId: eu }, 'calls')).toEqual({
       included: 1000,
       creditsPerUnit: null,
     });
+  });
+
+  it('an override that LOWERS a feature is what the subject actually gets', async () => {
+    // The merge unions across sources: booleans OR-true, numbers take the max.
+    // That is right for two subscriptions held together and wrong for a default
+    // the subject has not bought, because pushed flat the free tier can only
+    // raise the answer.
+    //
+    // So an operator restricting one customer got a 200, a `changed: true`, and
+    // a `subscription.entitlements_updated` webhook carrying the lower value,
+    // while resolution kept serving the higher one. Both the revocation and the
+    // downgrade were no-ops that reported success.
+    //
+    // A CREDIT-kind subscription is the reachable case: `suppressesFreeTier`
+    // already drops the fallback for SUBSCRIPTION and USAGE plans.
+    const freePlan = await makePlan('SUBSCRIPTION');
+    await app.inject({
+      method: 'PUT',
+      url: `/api/v1/tenant/applications/${appId}/plans/${(await prisma.plan.findUniqueOrThrow({ where: { id: freePlan } })).slug}/entitlements`,
+      headers: auth(),
+      payload: { kind: 'FEATURE', key: 'api_access', valueType: 'BOOL', value: 'true' },
+    });
+    await setDefaultPlan(freePlan);
+
+    const eu = await makeEndUser();
+    const creditPlan = await makePlan('CREDIT');
+    const sub = await prisma.subscription.create({
+      data: { applicationId: appId, endUserId: eu, planId: creditPlan, status: 'ACTIVE' },
+    });
+
+    // The free tier applies while nothing says otherwise.
+    const before = await entitlementsService.resolveForEndUser(appId, eu);
+    expect(before.features.api_access).toBe(true);
+
+    const patched = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/tenant/applications/${appId}/subscriptions/${sub.id}/entitlement-overrides`,
+      headers: auth(),
+      payload: { 'FEATURE:api_access': false },
+    });
+    expect(patched.statusCode).toBe(200);
+
+    // What the operator was told twice, now also what the customer receives.
+    const after = await entitlementsService.resolveForEndUser(appId, eu);
+    expect(after.features.api_access).toBe(false);
+  });
+
+  it('an override that LOWERS a metered allowance does not raise it', async () => {
+    // Worse than the feature case: `includedQuotaFor` ADDS across sources, so
+    // lowering 1000 to 50 produced 1050.
+    const freePlan = await makePlan('SUBSCRIPTION', 1000);
+    await setDefaultPlan(freePlan);
+
+    const eu = await makeEndUser();
+    const creditPlan = await makePlan('CREDIT');
+    await app.inject({
+      method: 'PUT',
+      url: `/api/v1/tenant/applications/${appId}/plans/${(await prisma.plan.findUniqueOrThrow({ where: { id: creditPlan } })).slug}/entitlements`,
+      headers: auth(),
+      payload: { kind: 'USAGE', key: 'calls', quantity: 500 },
+    });
+    const sub = await prisma.subscription.create({
+      data: { applicationId: appId, endUserId: eu, planId: creditPlan, status: 'ACTIVE' },
+    });
+
+    const patched = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/tenant/applications/${appId}/subscriptions/${sub.id}/entitlement-overrides`,
+      headers: auth(),
+      payload: { 'USAGE:calls': 50 },
+    });
+    expect(patched.statusCode).toBe(200);
+
+    // 50, not 1050, and not 1000.
+    expect(await entitlementsService.includedQuotaFor(appId, { endUserId: eu }, 'calls')).toEqual({
+      included: 50,
+      creditsPerUnit: null,
+    });
+  });
+
+  it('a free-tier key the subscription says nothing about still applies', async () => {
+    // The fix is per-KEY, not all-or-nothing: a default that the subscription
+    // never mentions is not something the subject has been given instead.
+    const freePlan = await makePlan('SUBSCRIPTION');
+    const freeSlug = (await prisma.plan.findUniqueOrThrow({ where: { id: freePlan } })).slug;
+    for (const ent of [
+      { kind: 'FEATURE', key: 'api_access', valueType: 'BOOL', value: 'true' },
+      { kind: 'FEATURE', key: 'support_tier', valueType: 'STRING', value: 'community' },
+    ]) {
+      // Asserted: without the free-tier row, the ADD path alone produces
+      // `api_access: false` and the override half of this test proves nothing.
+      const put = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/tenant/applications/${appId}/plans/${freeSlug}/entitlements`,
+        headers: auth(),
+        payload: ent,
+      });
+      expect(put.statusCode).toBe(200);
+    }
+    await setDefaultPlan(freePlan);
+
+    const eu = await makeEndUser();
+    const creditPlan = await makePlan('CREDIT');
+    const sub = await prisma.subscription.create({
+      data: { applicationId: appId, endUserId: eu, planId: creditPlan, status: 'ACTIVE' },
+    });
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/tenant/applications/${appId}/subscriptions/${sub.id}/entitlement-overrides`,
+      headers: auth(),
+      payload: { 'FEATURE:api_access': false },
+    });
+
+    const resolved = await entitlementsService.resolveForEndUser(appId, eu);
+    expect(resolved.features.api_access).toBe(false); // overridden
+    expect(resolved.features.support_tier).toBe('community'); // untouched
   });
 
   it('a real subscription does still replace the free tier', async () => {

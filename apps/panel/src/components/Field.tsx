@@ -1,7 +1,7 @@
 import * as React from 'react';
 
 /**
- * Form field primitive — labeled `<input>` (or `<select>`, `<textarea>`)
+ * Form field primitive, labeled `<input>` (or `<select>`, `<textarea>`)
  * with an optional helper hint underneath. See design.md §11.
  *
  * Usage:
@@ -9,7 +9,7 @@ import * as React from 'react';
  *     <input name="slug" className={fieldInputCls + ' font-mono'} />
  *   </Field>
  *
- * The Field component itself doesn't render the input — callers pass the
+ * The Field component itself doesn't render the input, callers pass the
  * input element so they keep control of `name`, `defaultValue`, `pattern`,
  * autoFocus, etc. `fieldInputCls` is the canonical input className from
  * design.md so callers compose with one extra class instead of repeating
@@ -33,7 +33,7 @@ export function Field({
    * Per-field validation error. When set, the message renders below the
    * input with `role="alert"` and the child input (when it's a single
    * element) gets `aria-invalid` + a red border, so the broken field is
-   * findable at a glance — not just from a page-top banner.
+   * findable at a glance, not just from a page-top banner.
    */
   error?: string;
   children: React.ReactNode;

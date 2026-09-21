@@ -2,7 +2,7 @@
  * Browser-reachability of end-user self-service flows.
  *
  * A route-guard audit found several flows gated on `requireApiKey` (SECRET key
- * only) where the real authorizer was already `requireUserSession` — the
+ * only) where the real authorizer was already `requireUserSession`, the
  * end-user JWT, which is bound to the Application and enforces test/live
  * isolation. The secret tier added no authorization the session didn't carry;
  * it only forbade the one credential a browser is allowed to hold (`rp_pub_*`),
@@ -135,7 +135,7 @@ describe('browser-reachable end-user self-service flows', () => {
     ctx = await bootstrap();
   });
 
-  /** Call with the publishable key AND the end-user token — the browser shape. */
+  /** Call with the publishable key AND the end-user token, the browser shape. */
   const asBrowser = (
     method: 'GET' | 'POST' | 'DELETE',
     url: string,
@@ -149,7 +149,7 @@ describe('browser-reachable end-user self-service flows', () => {
       ...(payload !== undefined && { payload }),
     });
 
-  /** Call with the publishable key and NO user token — must always be refused. */
+  /** Call with the publishable key and NO user token, must always be refused. */
   const asAnonBrowser = (method: 'GET' | 'POST' | 'DELETE', url: string, payload?: Record<string, unknown>) =>
     app.inject({
       method,
@@ -191,7 +191,7 @@ describe('browser-reachable end-user self-service flows', () => {
         { email: inviteeEmail, role: 'ADMIN' },
       ).then((r) => r.json().data as { token: string });
 
-      // Accepting it did not — the flow dead-ended here.
+      // Accepting it did not, the flow dead-ended here.
       const accept = await asBrowser(
         'POST',
         '/api/v1/auth/organizations/accept-invitation',
@@ -228,7 +228,7 @@ describe('browser-reachable end-user self-service flows', () => {
       expect((setup.json().data as { otpauthUrl: string }).otpauthUrl).toContain('otpauth://');
 
       // Enrollment was only STARTED, so nothing is enrolled yet and cancelling
-      // it needs no factor — disable stays the successful no-op it always was.
+      // it needs no factor, disable stays the successful no-op it always was.
       const disable = await asBrowser('POST', '/api/v1/auth/mfa/disable');
       expect(disable.statusCode).toBe(200);
     });
@@ -333,7 +333,7 @@ describe('browser-reachable end-user self-service flows', () => {
       // This used to be secret-key-only, which was a holding position rather than
       // a fix: it made enrollment unreachable from a browser-only app while doing
       // nothing about a stolen token on a server-side one. A passkey bypasses the
-      // MFA challenge, so the real control is re-proving identity — see
+      // MFA challenge, so the real control is re-proving identity, see
       // lib/step-up.ts and test/step-up-passkey.test.ts.
       const noProof = await asBrowser('POST', '/api/v1/auth/passkey/register/start', {});
       expect(noProof.statusCode).toBe(401);
@@ -342,7 +342,7 @@ describe('browser-reachable end-user self-service flows', () => {
       const withProof = await asBrowser('POST', '/api/v1/auth/passkey/register/start', {
         password: PASSWORD,
       });
-      // No WebAuthn config on this app, so it refuses on CONFIG — which proves the
+      // No WebAuthn config on this app, so it refuses on CONFIG, which proves the
       // step-up passed and the ceremony was reached.
       expect(withProof.statusCode).toBe(400);
       expect(withProof.json().error.code).toBe('WEBAUTHN_NOT_CONFIGURED');
@@ -389,7 +389,7 @@ describe('browser-reachable end-user self-service flows', () => {
     });
 
     it('link/start is reachable from a browser (fails on provider config, not credential)', async () => {
-      // No Google OAuth config on this app, so this refuses on the provider —
+      // No Google OAuth config on this app, so this refuses on the provider,
       // previously it never got that far, refused on the key tier instead.
       const res = await asBrowser('POST', '/api/v1/auth/oauth/google/link/start', {
         state: 'csrf-state-value',
@@ -484,7 +484,7 @@ describe('browser-reachable end-user self-service flows', () => {
 
     it('never returns the password hash', async () => {
       // `authService.getById` redacts it, and this route spreads the whole
-      // record — so the redaction is the only thing standing between a browser
+      // record, so the redaction is the only thing standing between a browser
       // and an Argon2id hash. Pin it here rather than trusting the type alias.
       const res = await asBrowser('GET', '/api/v1/users/me');
       expect(Object.keys(res.json().data as object)).not.toContain('passwordHash');
@@ -645,7 +645,7 @@ describe('operator PAT revocation privilege', () => {
       (list.json().data as { items: Array<{ id: string }> }).items.map((t) => t.id),
     ).toContain(pat);
 
-    // Previously 403 TENANT_ROLE_INSUFFICIENT — the operator could see a live
+    // Previously 403 TENANT_ROLE_INSUFFICIENT, the operator could see a live
     // credential they had no way to kill. `revoke` is scoped to their own id,
     // so no extra privilege is needed (or reachable).
     const revoke = await app.inject({

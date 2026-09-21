@@ -1,5 +1,5 @@
 /**
- * Cancellation, both shapes, against the real provider — the half of PR #336
+ * Cancellation, both shapes, against the real provider, the half of PR #336
  * that has never been exercised.
  *
  * #336 separated two mechanisms that used to be one predicate:
@@ -17,7 +17,7 @@
  * period ends.
  *
  * The third is what the test clock is for. Advancing past `current_period_end`
- * makes Stripe run the cycle for real, and whatever it emits — that is the
+ * makes Stripe run the cycle for real, and whatever it emits, that is the
  * event the production system will one day receive.
  */
 
@@ -61,7 +61,7 @@ describeSandbox('stripe', 'Stripe sandbox · cancellation', stripeSandbox, (cred
     await janitor.cleanup();
   });
 
-  /** A provider-backed ACTIVE subscription — the shape #336 could not test. */
+  /** A provider-backed ACTIVE subscription, the shape #336 could not test. */
   async function activeProviderBackedSubscription(label: string): Promise<{
     fixture: SandboxFixture;
     localSubscriptionId: string;
@@ -87,7 +87,7 @@ describeSandbox('stripe', 'Stripe sandbox · cancellation', stripeSandbox, (cred
       valueType: 'BOOL',
       value: 'true',
     });
-    const priceId = (plan.metadata as { stripe?: { priceId?: string } }).stripe?.priceId!;
+    const priceId = (plan.metadata as { stripe?: { priceId?: string } }).stripe!.priceId!;
     const price = await stripe.prices.retrieve(priceId);
     janitor.track('product', typeof price.product === 'string' ? price.product : price.product.id);
 
@@ -239,7 +239,7 @@ describeSandbox('stripe', 'Stripe sandbox · cancellation', stripeSandbox, (cred
     const atStripe = await stripe.subscriptions.retrieve(scenario.stripeSubscription.id);
     expect(atStripe.status).toBe('canceled');
     expect(atStripe.canceled_at).toBeTruthy();
-    // Not a schedule — the difference between the two shapes, at the provider.
+    // Not a schedule, the difference between the two shapes, at the provider.
     expect(atStripe.cancel_at_period_end).toBe(false);
 
     const local = await prisma.subscription.findUniqueOrThrow({
@@ -248,7 +248,7 @@ describeSandbox('stripe', 'Stripe sandbox · cancellation', stripeSandbox, (cred
     expect(local.status).toBe('CANCELED');
     expect((await readEntitlements(scenario.fixture)).features.pro).toBeUndefined();
 
-    // And the provider's own event agrees, replayed for good measure — a
+    // And the provider's own event agrees, replayed for good measure, a
     // terminal row must stay terminal.
     const deleted = await waitForStripeEvents(stripe, {
       types: ['customer.subscription.deleted'],

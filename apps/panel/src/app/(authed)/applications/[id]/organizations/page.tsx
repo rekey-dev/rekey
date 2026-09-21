@@ -1,9 +1,10 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { errorQuery, readErrorFlash, api, PanelApiError, type OrganizationRow, type EndUserRow, getApplication } from '@/lib/api';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { ApiErrorText } from '@/components/api-error';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
 import { Field } from '@/components/Field';
@@ -17,7 +18,6 @@ import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
 
-// ─── Actions ─────────────────────────────────────────────────────────
 
 async function createOrg(applicationId: string, formData: FormData): Promise<void> {
   'use server';
@@ -58,14 +58,13 @@ async function deleteOrg(applicationId: string, orgId: string): Promise<void> {
   redirect(`/applications/${applicationId}/organizations?deleted=1`);
 }
 
-// ─── Errors ──────────────────────────────────────────────────────────
 
 const ERR: Record<string, string> = {
   missing: 'Name and slug are required.',
   ORGANIZATION_SLUG_INVALID: 'Slug must be 1–40 chars of [a-z0-9-], starting and ending alphanumeric.',
   ORGANIZATION_SLUG_TAKEN: 'An organization with that slug already exists in this application.',
   END_USER_NOT_FOUND: 'The chosen owner is not an end-user of this application.',
-  ORGANIZATION_NOT_FOUND: 'Organization not found — it may have already been deleted.',
+  ORGANIZATION_NOT_FOUND: 'Organization not found. It may have already been deleted.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage organizations.',
   ORGANIZATIONS_NOT_ENABLED:
     'Enable organizations for this application (Auth settings) before defining organization roles.',
@@ -84,7 +83,6 @@ const ERR: Record<string, string> = {
     'This role carries OWNER authority and the target does not, so organizations would be left without an owner.',
 };
 
-// ─── Page ────────────────────────────────────────────────────────────
 
 export default async function OrganizationsPage({
   params,
@@ -112,7 +110,7 @@ export default async function OrganizationsPage({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/organizations?limit=${PAGE_SIZE}&offset=${offset}`,
     }),
-    // Owner picker for the create-org modal — one window, never paged.
+    // Owner picker for the create-org modal, one window, never paged.
     api<Page<EndUserRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users?limit=100`,
@@ -131,7 +129,7 @@ export default async function OrganizationsPage({
           count={`(${orgs.length})`}
           description={
             <>
-              Group end-users into companies/teams — use this if you bill organizations rather than
+              Group end-users into companies/teams. Use this if you bill organizations rather than
               individuals. Optional, and distinct from your workspace members. End-users create +
               manage these from your app via the SDK
               (<code className="font-mono text-xs">rekey.organizations.*</code>); you can also
@@ -148,7 +146,7 @@ export default async function OrganizationsPage({
 
         {!enabled && (
           <Banner tone="warning">
-            Organizations are <strong>disabled</strong> for this application — the SDK org endpoints
+            Organizations are <strong>disabled</strong> for this application, so the SDK org endpoints
             return <code className="font-mono text-xs">ORGANIZATIONS_NOT_ENABLED</code> for end-users
             (operator management here still works). Enable it under{' '}
             <Link href={`/applications/${id}/auth`} className="underline hover:no-underline">
@@ -170,7 +168,7 @@ export default async function OrganizationsPage({
             title="No organizations yet"
             description={
               <>
-                Create one if you bill companies/teams rather than individuals — use “+ New
+                Create one if you bill companies/teams rather than individuals. Use “+ New
                 organization”, or let end-users create teams from your app with
                 <code className="font-mono text-xs"> rekey.organizations.create()</code>.
               </>
@@ -210,13 +208,13 @@ export default async function OrganizationsPage({
                       >
                         Manage
                       </Link>
-                      <form action={deleteOrg.bind(null, id, o.id)} className="inline">
+                      <ActionForm action={deleteOrg.bind(null, id, o.id)} className="inline">
                         <ConfirmButton
                           confirm={`Delete organization "${o.name}"? This removes all ${o.memberCount} membership${o.memberCount === 1 ? '' : 's'} and any pending invitations. End-user accounts themselves are not deleted.`}
                         >
                           Delete
                         </ConfirmButton>
-                      </form>
+                      </ActionForm>
                     </div>
                   </TD>
                 </TR>
@@ -238,7 +236,6 @@ export default async function OrganizationsPage({
   );
 }
 
-// ─── Modal ───────────────────────────────────────────────────────────
 
 const inputCls =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
@@ -265,7 +262,7 @@ function NewOrgModal({
       description="Provision a team inside this application. Optionally seed an initial OWNER from an existing end-user; you can add more members afterwards."
       trigger="+ New organization"
     >
-      <form action={createOrg.bind(null, applicationId)} className="space-y-3">
+      <ActionForm action={createOrg.bind(null, applicationId)} className="space-y-3">
         {error && !slugError && (
           <Banner tone="error">
             <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
@@ -293,7 +290,7 @@ function NewOrgModal({
         <label className="block space-y-1">
           <span className="text-xs font-medium">Initial owner (optional)</span>
           <select name="ownerEndUserId" defaultValue="" className={inputCls}>
-            <option value="">— No owner yet —</option>
+            <option value="">(No owner yet)</option>
             {endUsers.map((u) => (
               <option key={u.id} value={u.id}>{u.email}</option>
             ))}
@@ -303,7 +300,7 @@ function NewOrgModal({
           </span>
         </label>
         <SubmitButton pendingLabel="Creating organization…">Create organization</SubmitButton>
-      </form>
+      </ActionForm>
     </Modal>
   );
 }

@@ -86,12 +86,102 @@ Before opening a PR, make sure `pnpm build`, `pnpm typecheck`, and `pnpm test`
 pass. The `apps/api` suite shares one Postgres + Redis in a single fork, so a
 cross-file failure is sometimes transient — re-run before assuming a regression.
 
-**There is no linter yet.** `pnpm lint` exists and every workspace's `lint`
-script is `echo "(eslint not yet wired)"`, so running it proves nothing — this
-guide used to list it as "lint all workspaces", which was a promise the repo
-does not keep. It is deliberately not wired into CI either: a green check that
-runs no rules is worse than an absent one. Formatting and style are reviewed by
-humans until someone wires a real config, which is its own change.
+### Root files and the turbo cache
+
+`turbo.json` declares `globalDependencies`. Anything at the repo root that
+packages read *through* — `tsconfig.base.json`, `prisma/schema.prisma`, the
+migrations — belongs in that list, because turbo hashes each package's own files
+and would otherwise never see those change.
+
+The failure it prevents is quiet: tighten a compiler option in
+`tsconfig.base.json`, which every app extends, and `turbo typecheck` replays a
+cached PASS produced under the old setting. The check reports success without
+having run against the change that was the point of making it.
+
+If you add a root file that packages depend on, add it there. Verify with
+`turbo run typecheck --filter=<pkg> --dry` — edit the file and the task `Hash`
+must change.
+
+### Tests are typechecked
+
+`pnpm typecheck` in `apps/api` runs twice: `tsconfig.json` for `src`, and
+`tsconfig.test.json` for `src` + `test` + `test-providers` + `scripts`. CI runs
+the same script through turbo, so a type error in a test fails the build.
+
+This is not tidiness. Vitest transpiles without checking types, so before this
+a test could call a function with the wrong arguments and still pass — the
+runtime just saw `undefined`. One had: a security test minted an MFA challenge
+token without the `tokenGeneration` argument, so the token's signature did not
+verify and the 401 it asserted came from the signature check, never reaching the
+`typ` claim the test was named for. It passed while proving nothing.
+
+If you add a file outside those globs, add it to `tsconfig.test.json` too.
+
+### The test database
+
+**The suite is destructive.** It applies migrations to whatever database it is
+pointed at and runs `TRUNCATE ... RESTART IDENTITY CASCADE` between test files.
+Never aim it at a database you want to keep.
+
+It resolves the target in this order:
+
+1. `TEST_DATABASE_URL`
+2. `postgresql://rekey:rekey@localhost:5432/rekey_test?schema=public`
+
+`DATABASE_URL` is **not** consulted, on purpose. It names your development
+database, and honouring it meant `pnpm test` could migrate and repeatedly empty
+it with no warning.
+
+Two guards, because both of these have actually happened:
+
+- The database name must end in `_test`, or setup refuses before touching it.
+- If migrations fail on the built-in default, the error says so and suggests the
+  likely cause rather than passing Prisma's `P1000` through.
+
+That second one matters if you run more than one project. Port 5432 is the
+default for *every* Postgres, so the built-in URL can reach an unrelated
+project's server, and Prisma reports it as a credentials problem — which sends
+you off to fix a password on a database that was never the right target. Check
+what is actually holding the port:
+
+```bash
+docker ps --format '{{.Names}}\t{{.Ports}}'
+```
+
+and set `TEST_DATABASE_URL` to the right host and port if Rekey's Postgres is
+published somewhere other than 5432.
+
+**Do not run two suites against one database at the same time.** They share it,
+and each truncates between files, so concurrent runs delete each other's rows
+and fail in ways that look like real bugs in whichever code you happened to be
+editing.
+
+**Linting.** `pnpm lint` runs ESLint across every workspace from one flat
+config at the repo root (`eslint.config.mjs`). CI runs it and **errors fail the
+build**; warnings do not.
+
+Warnings are grandfathered rather than blocking. There are 58 of them, and
+forcing that to zero on day one would have meant either a huge unrelated diff or
+a rule set watered down until it caught nothing. What stops the number growing
+is the pre-commit hook: `lint-staged` runs ESLint with `--max-warnings=0` over
+the files your commit touches, so anything you edit comes back clean.
+
+`pnpm lint:fix` applies the safe fixes. It passes
+`--fix-type problem,suggestion,layout`, which deliberately excludes `directive`:
+a plain `eslint --fix` DELETES `eslint-disable` comments whose rule is not
+enabled, silently discarding the reason somebody wrote down.
+
+Two rules earn special mention. `local/no-em-dash` is a repo-local rule that
+bans em and en dashes in comments and user-facing error strings, because they
+read as machine-written and this codebase ships publicly. And
+`@typescript-eslint/no-floating-promises` runs type-aware over `apps/api`: this
+codebase calls `void recordSecurityEvent(...)` by contract, and a dropped
+`void` or a missing `await` on a money path is invisible without it.
+
+`@typescript-eslint/no-unnecessary-type-assertion` is deliberately **off**. Its
+autofix removed `as object` from a Prisma write where the assertion was
+load-bearing for `InputJsonValue` assignability, producing ten typecheck errors
+from a single `--fix` run.
 
 ## Pull requests
 

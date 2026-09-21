@@ -2,7 +2,7 @@
  * Workspace invitation token helpers.
  *
  * Per the user's call: invitations are unique-per-recipient single-use
- * links with an expiry — not domain-restricted "anyone can join" links.
+ * links with an expiry, not domain-restricted "anyone can join" links.
  * 7-day lifetime by default. Hash-only DB.
  *
  * The owner generates an invite, gets back a one-time-show raw token, and

@@ -4,7 +4,7 @@
  * Mirrors the per-Application MCP OAuth shape (modules/mcp/oauth.service.ts)
  * but binds tokens to a (tenantUserId, tenantId) pair the operator picks at
  * the panel consent page. The operator authenticates through the REAL panel
- * login (modules/tenant-auth) — this service never checks a password. The
+ * login (modules/tenant-auth), this service never checks a password. The
  * panel calls `POST /oauth/grant` once the operator is authenticated; the
  * only identity check here is `memberRole` (is this operator a member of the
  * chosen workspace?).
@@ -17,6 +17,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
+import { sessionIssuedBefore } from '../../lib/session-stamp.js';
 import {
   issueOperatorMcpAccessToken,
   verifyOperatorMcpAccessToken,
@@ -26,17 +27,17 @@ import type { TenantRole } from '@prisma/client';
 
 /** Read access across the operator's workspace. Always granted. */
 export const OPERATOR_MCP_READ_SCOPE = 'mcp:operator:read';
-/** Write access — create/edit applications, plans, webhook endpoints, auth-config. */
+/** Write access, create/edit applications, plans, webhook endpoints, auth-config. */
 export const OPERATOR_MCP_WRITE_SCOPE = 'mcp:operator:write';
 /**
- * Admin access — destructive / financial / secret-handling operations:
+ * Admin access, destructive / financial / secret-handling operations:
  * configuring provider credentials, cancelling subscriptions, (later) refunds
  * and deletes. Strictly above write so a client must request it explicitly and
  * the operator must approve it on the consent screen, separately from write.
  */
 export const OPERATOR_MCP_ADMIN_SCOPE = 'mcp:operator:admin';
 /**
- * Unused alias for the read scope — zero importers in this repo. Kept only so an
+ * Unused alias for the read scope, zero importers in this repo. Kept only so an
  * external consumer of the pre-tiering name doesn't break on upgrade; safe to
  * delete once 2.0.0 is out.
  */
@@ -53,7 +54,7 @@ export const OPERATOR_MCP_SCOPES_SUPPORTED = [
  *
  * Read is always granted (the floor). Write and admin are granted only when
  * explicitly requested AND recognised. Admin IMPLIES write (an admin grant can
- * also do everything write can). Anything unrecognised is dropped silently — a
+ * also do everything write can). Anything unrecognised is dropped silently, a
  * client can't talk itself into a scope this AS doesn't define. Returns a
  * normalised, deduped, space-separated string with read first.
  */
@@ -82,7 +83,7 @@ const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30d
 /**
  * OAuth error (RFC 6749 §5.2). Carried distinctly from RekeyError because
  * the token endpoint must emit the `{ error, error_description }` shape OAuth
- * clients parse — not the Rekey envelope.
+ * clients parse, not the Rekey envelope.
  */
 export class OAuthError extends Error {
   constructor(
@@ -125,7 +126,7 @@ export function operatorMcpIssuer(): string {
  * Canonically defined and boot-validated in config/env.ts; read LIVE from
  * process.env here so an operator can close registration without a restart
  * (and so tests can exercise both modes). An out-of-range live value falls
- * back to the boot-validated one — a fat-fingered `disabeld` must never read
+ * back to the boot-validated one, a fat-fingered `disabeld` must never read
  * as "not disabled" and quietly reopen the door.
  *
  * Mirrors `operatorSignupMode()` in modules/tenant-auth.
@@ -175,6 +176,8 @@ const DENIED_REDIRECT_SCHEMES = new Set([
   'ftp:',
   'file:',
   'data:',
+  // The scheme is named here because this list is what REFUSES it.
+  // eslint-disable-next-line no-script-url
   'javascript:',
   'vbscript:',
   'gopher:',
@@ -209,7 +212,7 @@ export const operatorMcpOAuthService = {
     // Enforced in the service, not only at the route, so no future caller can
     // reach registration around the gate.
     if (!operatorMcpRegistrationOpen()) {
-      // 403, not 404: the endpoint exists and the deployment is real — the
+      // 403, not 404: the endpoint exists and the deployment is real, the
       // operator closed it. Same code and status as the per-Application twin,
       // already documented in docs/errors.md.
       throw new RekeyError({
@@ -267,7 +270,7 @@ export const operatorMcpOAuthService = {
    * The operator's role in a workspace, or null if they aren't a member.
    *
    * This is the ONLY identity check the grant path makes: the panel has
-   * already authenticated the operator (full login — MFA + lockout) and
+   * already authenticated the operator (full login, MFA + lockout) and
    * `requireTenantSession` proved who they are; here we confirm they actually
    * belong to the workspace they're consenting for. Re-read live so a revoked
    * membership can't be consented to.
@@ -331,7 +334,7 @@ export const operatorMcpOAuthService = {
     ) {
       invalid();
     }
-    // Atomic single-use claim — a replayed code loses the race.
+    // Atomic single-use claim, a replayed code loses the race.
     const claimed = await prisma.tenantOAuthAuthCode.updateMany({
       where: { id: row!.id, consumedAt: null },
       data: { consumedAt: new Date() },
@@ -364,7 +367,7 @@ export const operatorMcpOAuthService = {
   },
 
   /**
-   * Revoke every live refresh token in a chain's family — the operator MCP
+   * Revoke every live refresh token in a chain's family, the operator MCP
    * analogue of `revokeAllForEndUser` on the end-user surface.
    *
    * There is no `familyId` column, and there does not need to be: a chain is
@@ -374,7 +377,7 @@ export const operatorMcpOAuthService = {
    * the attacker had already forked off; the triple catches both halves of a
    * fork in a single statement, which is what "burn the family" has to mean.
    *
-   * Access tokens are stateless JWTs and are NOT revoked here — same as the
+   * Access tokens are stateless JWTs and are NOT revoked here, same as the
    * end-user surface. The 15-minute lifetime bounds that; the refresh chain is
    * the durable credential and it is what a leak actually costs you.
    */
@@ -408,7 +411,7 @@ export const operatorMcpOAuthService = {
     const invalid = (): never => {
       throw new OAuthError('invalid_grant', 'Refresh token is invalid, expired, or revoked.');
     };
-    // An unknown hash names no family, so there is nothing to burn — and
+    // An unknown hash names no family, so there is nothing to burn, and
     // burning on an unknown token would hand anyone a denial-of-service.
     if (!row) invalid();
     if (row!.clientId !== args.clientId) {
@@ -416,16 +419,16 @@ export const operatorMcpOAuthService = {
     }
     // Reuse of an ALREADY-ROTATED token is the compromise signal: the chain
     // moved on, and something is replaying the spent link. Either a thief holds
-    // a copy or the client raced itself, and nothing here can tell those apart —
+    // a copy or the client raced itself, and nothing here can tell those apart,
     // so the whole family loses value. This is the same discrimination the
     // end-user path makes (auth.service.ts): `replacedById !== null` means
     // rotated-then-replayed (burn), `null` means somebody deliberately revoked
     // this token, and signing the operator out of every other client session
     // because one was revoked on purpose is the opposite of what they asked for.
     //
-    // Until this landed the MCP path only ever refused the presented token,
-    // which is exactly backwards: the replay is the legitimate client arriving
-    // second, and the token the ATTACKER rotated into stayed live.
+    // Bug: the MCP path used to only refuse the presented token, which is
+    // backwards. The replay is the legitimate client arriving second, and
+    // the token the ATTACKER rotated into stayed live.
     if (row!.revokedAt !== null) {
       if (row!.replacedById !== null) {
         await this.revokeRefreshFamily(row!);
@@ -437,7 +440,7 @@ export const operatorMcpOAuthService = {
       invalid();
     }
     if (row!.expiresAt <= new Date()) invalid();
-    // Atomic revoke — losing the race means a concurrent request redeemed the
+    // Atomic revoke, losing the race means a concurrent request redeemed the
     // same token between the read above and here. Indistinguishable from a
     // replay from this side, so it gets the same treatment.
     const revoked = await prisma.tenantMcpRefreshToken.updateMany({
@@ -467,7 +470,7 @@ export const operatorMcpOAuthService = {
       tenantUserId: row!.tenantUserId,
       tenantId: row!.tenantId,
       clientId: args.clientId,
-      // Carry the grant forward verbatim — a refresh never widens or drops scope.
+      // Carry the grant forward verbatim, a refresh never widens or drops scope.
       scope: row!.scope,
       userAgent: args.userAgent,
       ip: args.ip,
@@ -523,13 +526,22 @@ export const operatorMcpOAuthService = {
     };
   },
 
-  /** RFC 7662 token introspection. Returns the active claims or `{ active:false }`. */
-  introspect(token: string): Record<string, unknown> {
+  /**
+   * RFC 7662 token introspection. Returns the active claims or `{ active:false }`.
+   * A token issued before the operator's `sessionsInvalidBefore` is inactive,
+   * matching what the MCP endpoint itself does with it (bearer-auth.ts).
+   */
+  async introspect(token: string): Promise<Record<string, unknown>> {
     const claims: OperatorMcpAccessClaims | null = verifyOperatorMcpAccessToken(
       token,
       operatorMcpIssuer(),
     );
     if (!claims) return { active: false };
+    const user = await prisma.tenantUser.findUnique({
+      where: { id: claims.sub },
+      select: { sessionsInvalidBefore: true },
+    });
+    if (!user || sessionIssuedBefore(claims, user.sessionsInvalidBefore)) return { active: false };
     return {
       active: true,
       sub: claims.sub,

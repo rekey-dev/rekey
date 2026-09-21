@@ -2,7 +2,7 @@
  * Generic `Idempotency-Key` header middleware (middleware/idempotency.ts).
  *
  * Vehicles: the operator credits-grant route (tenant-session scope) and the
- * public credits-consume route (API-key scope) — both opted in via
+ * public credits-consume route (API-key scope), both opted in via
  * `config: { idempotency: true }` and both with an observable side effect
  * (the credit ledger), so "replayed, not re-executed" is directly assertable.
  */
@@ -87,7 +87,7 @@ describe('idempotency-key middleware', () => {
    * SAME workspace rather than its OWNER.
    *
    * Signing that operator up would give them their own workspace and a
-   * different scope either way — which is exactly how a first version of this
+   * different scope either way, which is exactly how a first version of this
    * test passed against the vulnerable code. They have to be re-pointed at the
    * owner's workspace with the MEMBER role for the collision to be possible at
    * all.
@@ -145,7 +145,7 @@ describe('idempotency-key middleware', () => {
     expect(res.headers['idempotency-replayed']).toBeUndefined();
     expect(await ledgerCount()).toBe(1);
 
-    // The scope is the effective ACTOR, not just the workspace — an
+    // The scope is the effective ACTOR, not just the workspace, an
     // Application- or tenant-wide scope let a lower-privileged member replay a
     // higher-privileged member's response, because a replay short-circuits
     // before the route's role guard ever runs.
@@ -162,7 +162,7 @@ describe('idempotency-key middleware', () => {
     expect(row!.responseStatus).toBe(201);
     expect(row!.applicationId).toBeNull(); // operator-session scope, not API-key
     expect(row!.method).toBe('POST');
-    // Bodies are encrypted at rest — the stored value is a ciphertext string
+    // Bodies are encrypted at rest, the stored value is a ciphertext string
     // that decrypts back to the original response.
     expect(typeof row!.responseBody).toBe('string');
     expect(decryptJson(row!.responseBody as string)).toEqual(res.json());
@@ -222,7 +222,7 @@ describe('idempotency-key middleware', () => {
 
   it('keys are scoped per principal — the same key in two Applications both execute', async () => {
     const other = await createApp(`idem-b-${Math.random().toString(36).slice(2, 8)}`);
-    // Fund both subjects (no header — setup).
+    // Fund both subjects (no header, setup).
     await grant(100);
     await app.inject({
       method: 'POST',
@@ -243,7 +243,7 @@ describe('idempotency-key middleware', () => {
     const b = await consume('shared-key', other.liveKey, other.endUserId);
     expect(a.statusCode).toBe(200);
     expect(b.statusCode).toBe(200);
-    // Neither was a replay of the other — both debited their own balance.
+    // Neither was a replay of the other, both debited their own balance.
     expect(b.headers['idempotency-replayed']).toBeUndefined();
     expect(await creditsService.getBalance(applicationId, { endUserId })).toBe(70);
     expect(await creditsService.getBalance(other.applicationId, { endUserId: other.endUserId })).toBe(70);
@@ -322,7 +322,7 @@ describe('idempotency-key middleware', () => {
   });
 
   it('routes that did not opt in ignore the header (selective application)', async () => {
-    // auth sign-up is deliberately excluded — duplicate sign-ups 409 naturally.
+    // auth sign-up is deliberately excluded, duplicate sign-ups 409 naturally.
     const signUp = () =>
       app.inject({
         method: 'POST',
@@ -333,7 +333,7 @@ describe('idempotency-key middleware', () => {
     const first = await signUp();
     const second = await signUp();
     expect(first.statusCode).toBe(201);
-    // Not replayed — the second call really executed and hit the natural 409.
+    // Not replayed, the second call really executed and hit the natural 409.
     expect(second.statusCode).toBe(409);
     expect(second.headers['idempotency-replayed']).toBeUndefined();
     expect(await prisma.idempotencyKey.count({ where: { key: 'su-1' } })).toBe(0);
@@ -358,14 +358,14 @@ describe('idempotency-key middleware', () => {
    * The property the escalation fix establishes: two different actors in ONE
    * workspace never share a cache slot.
    *
-   * Honest scoping note — this asserts the invariant, not the end-to-end
+   * Honest scoping note, this asserts the invariant, not the end-to-end
    * exploit. The exploit was proven separately against
    * `POST /:id/api-keys`: a workspace MEMBER whose own mint returned
    * 403 replayed an OWNER's key and received the plaintext key with
    * `scopes: ['*']`, because the replay lives in an instance-level
    * `preHandler` that runs BEFORE route-level guards and before the handler
    * body. Reproducing that end to end needs a member who holds app access but
-   * not the role, which this file's fixture does not build — so rather than
+   * not the role, which this file's fixture does not build, so rather than
    * ship a test that passes against the vulnerable code (an earlier draft of
    * this one did, twice), it pins the scope directly.
    */
@@ -376,7 +376,7 @@ describe('idempotency-key middleware', () => {
     expect(rows).toHaveLength(1);
 
     const membership = await prisma.tenantMembership.findFirstOrThrow({ where: { role: 'OWNER' } });
-    // The workspace id alone must NOT be the scope — that is the bug.
+    // The workspace id alone must NOT be the scope, that is the bug.
     expect(rows[0]!.scopeKey).not.toBe(`tenant:${membership.tenantId}`);
     expect(rows[0]!.scopeKey).toBe(`tenant:${membership.tenantId}:member:${membership.id}`);
   });

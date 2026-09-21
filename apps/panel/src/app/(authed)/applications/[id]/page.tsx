@@ -1,12 +1,12 @@
 import * as React from 'react';
-import Link from 'next/link';
-import { api, type ApiKeyRow, type ApplicationStatsRow, type BillingCredentialRow, type PlanRow, getApplication } from '@/lib/api';
+import Link from '@/components/Link';
+import { api, type ApiKeyRow, type ApplicationStatsRow, type BillingCredentialRow, type PlanRow, getApplication, unlessBusy } from '@/lib/api';
 import { emptyPage, type Page } from '@/lib/paginate';
 import { SavedBanner } from '@/components/SavedBanner';
 import { keyPrefixFor } from '@/components/EnvironmentBadge';
 
 /**
- * Application overview — the landing page when an operator picks an
+ * Application overview, the landing page when an operator picks an
  * application. Self-explanatory by design: each card explains what it is,
  * shows current state, and links to the deeper tab to act on it.
  */
@@ -26,9 +26,9 @@ export default async function ApplicationOverviewPage({
   // useful even when one provider's call fails.
   const [app, keys, providers, planPage, stats] = await Promise.all([
     getApplication(id),
-    api<ApiKeyRow[]>({ method: 'GET', path: `${basePath}/api-keys` }).catch(() => []),
-    api<BillingCredentialRow[]>({ method: 'GET', path: `${basePath}/billing-credentials` }).catch(() => []),
-    api<Page<PlanRow>>({ method: 'GET', path: `${basePath}/plans` }).catch(() => emptyPage<PlanRow>()),
+    api<ApiKeyRow[]>({ method: 'GET', path: `${basePath}/api-keys` }).catch(unlessBusy(() => [])),
+    api<BillingCredentialRow[]>({ method: 'GET', path: `${basePath}/billing-credentials` }).catch(unlessBusy(() => [])),
+    api<Page<PlanRow>>({ method: 'GET', path: `${basePath}/plans` }).catch(unlessBusy(() => emptyPage<PlanRow>())),
     api<ApplicationStatsRow>({ method: 'GET', path: `${basePath}/stats` }).catch(() => null),
   ]);
   const plans = planPage.items;
@@ -89,7 +89,7 @@ export default async function ApplicationOverviewPage({
         </div>
       )}
 
-      {/* Sign-ups over time — the headline graph. */}
+      {/* Sign-ups over time, the headline graph. */}
       {stats && (
         <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
           <div className="flex items-baseline justify-between gap-2">
@@ -102,8 +102,8 @@ export default async function ApplicationOverviewPage({
         </section>
       )}
 
-      {/* Configuration status + quick start — two compact columns replacing the
-          old wall of action tiles (the two-level nav already covers navigation). */}
+      {/* Configuration status + quick start, two compact columns. No action
+          tiles here: the two-level nav already covers navigation. */}
       <div className="grid lg:grid-cols-2 gap-4">
         <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
           <h3 className="text-sm font-medium mb-3">Configuration</h3>
@@ -161,14 +161,14 @@ export default async function ApplicationOverviewPage({
               Wire <code className="font-mono text-xs">@rekey.dev/node</code> on your backend (or one of the React/Next SDKs on the frontend).
             </li>
             <li>
-              Optional —{' '}
+              Optional:{' '}
               <Link href={`/applications/${id}/oauth`} className="text-[var(--color-fg)] hover:underline">
                 add OAuth providers
               </Link>
               {' '}so users can sign in with Google, Microsoft, etc.
             </li>
             <li>
-              Optional —{' '}
+              Optional:{' '}
               <Link href={`/applications/${id}/billing`} className="text-[var(--color-fg)] hover:underline">
                 enable billing
               </Link>
@@ -214,7 +214,7 @@ function StatTile({
   );
 }
 
-/** Minimal inline bar sparkline — no chart lib. Scales to the series max. */
+/** Minimal inline bar sparkline, no chart lib. Scales to the series max. */
 function Sparkline({ data }: { data: number[] }): React.JSX.Element {
   const max = Math.max(1, ...data);
   return (
@@ -231,7 +231,7 @@ function Sparkline({ data }: { data: number[] }): React.JSX.Element {
 }
 
 /**
- * Inline SVG area chart for the 30-day sign-up series. No chart library — a
+ * Inline SVG area chart for the 30-day sign-up series. No chart library, a
  * single filled path + baseline, scaled to the series max. Renders an empty
  * baseline when there's no activity yet.
  */

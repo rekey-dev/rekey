@@ -1,5 +1,5 @@
 /**
- * Error-contract unit tests — the pure helpers behind docs/errors.md.
+ * Error-contract unit tests, the pure helpers behind docs/errors.md.
  *
  * These pin the four places the contract was previously wrong:
  *   - a 429 that claimed `BAD_REQUEST` and told a throttled caller to debug
@@ -214,7 +214,7 @@ describe('authIdentityOf', () => {
   });
 
   it('never throws on an absent or malformed body', () => {
-    // This runs on unvalidated input at preValidation — a throw here would
+    // This runs on unvalidated input at preValidation, a throw here would
     // 500 every auth request with a weird body.
     expect(authIdentityOf(undefined)).toBe('-');
     expect(authIdentityOf(null)).toBe('-');
@@ -254,7 +254,8 @@ describe('authRateLimitKey', () => {
   });
 
   it('still separates Applications and source IPs', () => {
-    const base = { ip: '1.2.3.4', body: { email: 'a@example.com' } };
+    // A direct client: the resolver vouched for its address.
+    const base = { ip: '1.2.3.4', clientIpVouched: true, body: { email: 'a@example.com' } };
     const other = { id: 'key_2' } as FastifyRequest['apiKey'];
     expect(authRateLimitKey(req({ ...base, apiKey }))).not.toBe(
       authRateLimitKey(req({ ...base, apiKey: other })),
@@ -266,9 +267,25 @@ describe('authRateLimitKey', () => {
 
   it('falls back to a per-IP bucket for unauthenticated auth routes', () => {
     // Operator sign-in carries no API key.
-    const key = authRateLimitKey(req({ ip: '1.2.3.4', body: { email: 'op@example.com' } }));
+    const key = authRateLimitKey(
+      req({ ip: '1.2.3.4', clientIpVouched: true, body: { email: 'op@example.com' } }),
+    );
     expect(key).toContain('anon');
     expect(key).toContain('1.2.3.4');
+  });
+
+  it('leaves out an address shared by everyone behind a proxy it cannot identify', () => {
+    // Keying on that address would put every client behind the proxy in one
+    // bucket, so ten failures from anyone would refuse everyone.
+    const a = authRateLimitKey(
+      req({ ip: '10.0.0.2', clientIpVouched: false, body: { email: 'a@example.com' } }),
+    );
+    const b = authRateLimitKey(
+      req({ ip: '10.0.0.3', clientIpVouched: false, body: { email: 'a@example.com' } }),
+    );
+    expect(a).not.toContain('10.0.0.2');
+    expect(a).toBe(b);
+    expect(a).toContain('a@example.com');
   });
 });
 
@@ -308,7 +325,7 @@ describe('request ids', () => {
   it('are collision-resistant, not a per-boot counter', () => {
     const ids = new Set(Array.from({ length: 500 }, () => generateRequestId()));
     expect(ids.size).toBe(500);
-    // The old ids were `req-1`, `req-f`, `req-ea` — restarting at 1 each boot.
+    // The old ids were `req-1`, `req-f`, `req-ea`, restarting at 1 each boot.
     for (const id of ids) expect(id).not.toMatch(/^req-/);
   });
 

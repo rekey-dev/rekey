@@ -2,7 +2,7 @@
  * The panel must not replace an answer with a shrug, and must not let a link
  * put words in its own mouth.
  *
- * A workspace at its application limit gets a precise sentence from the API —
+ * A workspace at its application limit gets a precise sentence from the API,
  * which limit, the current count, which environments are exempt. The panel kept
  * a per-page map of code → sentence and rendered "Something went wrong. Please
  * try again." for anything it did not recognise, so that sentence never reached

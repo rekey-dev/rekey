@@ -4,9 +4,28 @@ import { cookies } from 'next/headers';
 import { errorQuery, readErrorFlash, api, PanelApiError, type ApiKeyRow, getApplication } from '@/lib/api';
 
 // One-time reveal of a freshly minted secret key. Carried in a short-lived,
-// httpOnly, path-scoped cookie instead of the URL query — a raw key in the URL
+// httpOnly, path-scoped cookie instead of the URL query, a raw key in the URL
 // leaks into browser history, the referer header, and server access logs.
 const REVEAL_COOKIE = 'rekey_reveal_key';
+
+/**
+ * Whether the last mint on this page refused, and why.
+ *
+ * The reveal is a one-time credential, so the render that carries it has to
+ * happen. It used to depend on the action's `redirect()` being committed by
+ * the client, and on a production build that is not something this app can
+ * rely on: rekey issue #569 has redirects that are answered, rendered and then
+ * dropped, and a dropped one here costs the operator a live key they were
+ * never shown and cannot use. The form below reloads the page instead, which
+ * is the one delivery measured to always land, and the reveal is waiting in
+ * `REVEAL_COOKIE` when it does.
+ *
+ * That reload arrives with no query, so the refusal has to travel the same
+ * way. Same path scope and a short TTL, and written on the success path too,
+ * so a retry that works cannot leave the previous failure on screen.
+ */
+const MINT_FLASH_COOKIE = 'rekey_mint_flash';
+const MINT_FLASH_MAX_AGE = 20;
 import { CopyButton } from '@/components/CopyButton';
 import { ApiErrorText } from '@/components/api-error';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
@@ -15,6 +34,7 @@ import { Banner } from '@/components/Banner';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { EmptyState } from '@/components/EmptyState';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate, formatDateTime } from '@/lib/date';
 import { keyPrefixFor } from '@/components/EnvironmentBadge';
@@ -23,8 +43,8 @@ import { cookieSecure } from '@/lib/cookie-secure';
 /**
  * Scopes an API key can carry, mirroring `SCOPE_IMPLICATIONS` in the API's
  * `middleware/api-key-auth.ts`. The API validates `scopes` as a bare
- * `z.array(z.string())` — any string is accepted and persisted, and simply
- * never matches at enforcement time — so this list is the only thing stopping
+ * `z.array(z.string())`, any string is accepted and persisted, and simply
+ * never matches at enforcement time, so this list is the only thing stopping
  * a typo from becoming a permanently inert permission.
  *
  * `webhooks:read` is declared in the API's implication table but has no
@@ -59,7 +79,7 @@ const KEY_SCOPES = [
   {
     value: 'webhooks:read',
     label: 'webhooks:read',
-    help: 'Reserved — no endpoint enforces this scope yet.',
+    help: 'Reserved. No endpoint enforces this scope yet.',
   },
 ] as const;
 
@@ -81,7 +101,7 @@ interface CreateKeyResp {
   warning: string;
 }
 
-// These actions deliberately redirect without revalidatePath — pairing the two
+// These actions deliberately redirect without revalidatePath, pairing the two
 // is what blanked this page after a key was minted. Reasoning in `(authed)/layout.tsx`.
 
 async function rotatePublicKey(applicationId: string, force: boolean): Promise<void> {
@@ -106,10 +126,13 @@ async function rotatePublicKey(applicationId: string, force: boolean): Promise<v
 async function createKey(applicationId: string, formData: FormData): Promise<void> {
   'use server';
   const name = String(formData.get('name') ?? '').trim();
-  if (!name) redirect(`/applications/${applicationId}/api-keys?error=missing&newKey=1`);
+  if (!name) {
+    await setMintFlash(applicationId, 'missing');
+    redirect(`/applications/${applicationId}/api-keys?error=missing&newKey=1`);
+  }
 
   // Scopes. The API takes `scopes: z.array(z.string()).default([])` and its
-  // service turns an EMPTY array into `['*']` — so posting "nothing selected"
+  // service turns an EMPTY array into `['*']`, so posting "nothing selected"
   // silently mints a full-access key. Only send the list when the operator
   // narrowed it; otherwise omit the field entirely so the default is explicit
   // rather than an accident of an empty checkbox group.
@@ -127,6 +150,7 @@ async function createKey(applicationId: string, formData: FormData): Promise<voi
   if (expiresOn !== '') {
     const parsed = new Date(`${expiresOn}T23:59:59.999Z`);
     if (Number.isNaN(parsed.getTime())) {
+      await setMintFlash(applicationId, 'EXPIRY_INVALID');
       redirect(`/applications/${applicationId}/api-keys?error=EXPIRY_INVALID&newKey=1`);
     }
     expiresAt = parsed.toISOString();
@@ -146,7 +170,7 @@ async function createKey(applicationId: string, formData: FormData): Promise<voi
     // Hand the raw key to the next render via a short-lived httpOnly cookie,
     // never the URL. Path-scoped so it's only sent to this route; ~2 min TTL.
     // The key's id rides along so the banner can tell whether the credential it
-    // is holding is still live — see the render below.
+    // is holding is still live, see the render below.
     const jar = await cookies();
     jar.set(REVEAL_COOKIE, `${result.apiKey.id}:${result.rawKey}`, {
       httpOnly: true,
@@ -155,13 +179,40 @@ async function createKey(applicationId: string, formData: FormData): Promise<voi
       path: `/applications/${applicationId}/api-keys`,
       maxAge: 120,
     });
+    await setMintFlash(applicationId, undefined);
     redirect(`/applications/${applicationId}/api-keys?e=apikey_created`);
   } catch (err) {
     if (err instanceof PanelApiError) {
+      await setMintFlash(applicationId, err.code);
       redirect(`/applications/${applicationId}/api-keys?${await errorQuery(err, { newKey: '1' })}`);
     }
     throw err;
   }
+}
+
+/** The refusal code the last mint left behind, or nothing. */
+function readMintFlash(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return undefined;
+    const { error } = parsed as Record<string, unknown>;
+    return typeof error === 'string' && error !== '' ? error : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Park the mint's outcome where the reload that follows it can read it. */
+async function setMintFlash(applicationId: string, error: string | undefined): Promise<void> {
+  const jar = await cookies();
+  jar.set(MINT_FLASH_COOKIE, error === undefined ? '' : JSON.stringify({ error }), {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: await cookieSecure(),
+    path: `/applications/${applicationId}/api-keys`,
+    maxAge: error === undefined ? 0 : MINT_FLASH_MAX_AGE,
+  });
 }
 
 async function revokeKey(applicationId: string, keyId: string): Promise<void> {
@@ -193,22 +244,31 @@ export default async function ApiKeysPage({
   // A cookie with no colon was written by the previous deploy, which stored the
   // raw key alone. During a rolling deploy the POST can be served by an old pod
   // and the redirected GET by a new one, and treating that as unreadable would
-  // hide the secret entirely — the operator is billed a key against the cap and
+  // hide the secret entirely, the operator is billed a key against the cap and
   // has to revoke and re-mint. Showing it, at the cost of the stale-banner bug
   // for the remaining two minutes, is the better end of that trade.
   const legacyReveal = revealCookie !== undefined && sep === -1;
   const revealedId = sep > 0 ? revealCookie!.slice(0, sep) : undefined;
   const revealedKey = legacyReveal ? revealCookie : sep > 0 ? revealCookie!.slice(sep + 1) : undefined;
-  const error = typeof sp.error === 'string' ? sp.error : undefined;
+  // The URL first, then the cookie the action left behind: after the mint
+  // form's reload there is no query to read.
+  const mintFlash = readMintFlash((await cookies()).get(MINT_FLASH_COOKIE)?.value);
+  const error = typeof sp.error === 'string' ? sp.error : mintFlash;
   // The API's own message and fix for this failure, left by `errorQuery`
   // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
   // written by whoever composes the link, and this text renders inside the
   // panel's own error banner.
   const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   // The mint modal reopens itself only when the redirect carries `newKey=1`
-  // (createKey failures). Errors without it — e.g. rotatePublicKey — would
+  // (createKey failures). Errors without it, e.g. rotatePublicKey, would
   // otherwise render invisibly inside the closed modal, so show those at page
   // level instead (never both).
+  //
+  // A refusal that arrived on the cookie deliberately does NOT reopen the
+  // modal: only the URL flag can, because `Modal` decides from the query, and
+  // an error rendered inside a dialog nothing opens is an error nobody reads.
+  // The reload has already cost the operator the form's contents, so the
+  // honest thing is to say what was refused where they can see it.
   const mintModalOpen = sp.newKey === '1';
   // Earliest expiry the API will accept is "later than now"; make the picker
   // refuse a past date up front rather than round-tripping API_KEY_EXPIRY_IN_PAST.
@@ -238,7 +298,7 @@ export default async function ApiKeysPage({
         description={
           <>
             Browser-safe credential (<code className="font-mono text-xs">rp_pub_…</code>) for
-            your frontend, mobile, or desktop app — pass it to <code>@rekey.dev/react</code> for
+            your frontend, mobile, or desktop app. Pass it to <code>@rekey.dev/react</code> for
             sign-in, sign-up, magic links, passkeys, license checks, and plan listing with{' '}
             <strong>no backend required</strong>. It only identifies this application and carries no
             privileges of its own, so it's safe to ship in client code. Charging customers and
@@ -252,30 +312,30 @@ export default async function ApiKeysPage({
             {app.publicKey}
           </code>
           <CopyButton value={app.publicKey} label="Copy" />
-          <form action={rotatePublicKey.bind(null, id, Boolean(graceUntil))}>
+          <ActionForm action={rotatePublicKey.bind(null, id, Boolean(graceUntil))}>
             <TypedConfirmButton
               expected={app.slug}
               title="Rotate the publishable key?"
               description={
                 graceUntil
-                  ? `A previous key is still active until ${formatDateTime(graceUntil)}. Rotating again will drop that key immediately — any client still on it stops working at once. Only do this if the previous key leaked. Type the app slug to confirm.`
+                  ? `A previous key is still active until ${formatDateTime(graceUntil)}. Rotating again will drop that key immediately, and any client still on it stops working at once. Only do this if the previous key leaked. Type the app slug to confirm.`
                   : 'Mints a new publishable key and keeps the current one valid for a 30-day grace window, so already-shipped clients keep working while you roll out the new key. After the window the old key stops working. Type the app slug to confirm.'
               }
               triggerLabel="Rotate"
               confirmLabel={graceUntil ? 'Drop previous + rotate' : 'Rotate key'}
             />
-          </form>
+          </ActionForm>
         </div>
         {graceUntil && (
           <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-500/60 dark:bg-amber-950/60 dark:text-amber-300">
-            Rotation in progress — the <strong>previous</strong> key keeps working until{' '}
+            Rotation in progress. The <strong>previous</strong> key keeps working until{' '}
             <strong>{formatDateTime(graceUntil)}</strong>. Deploy the new key to all clients before
             then, after which the old key stops verifying.
           </p>
         )}
         {!hasCors && (
           <p className="text-xs text-[var(--color-muted-fg)]">
-            No origin allowlist set — any website can use this key. Add allowed browser origins
+            No origin allowlist set, so any website can use this key. Add allowed browser origins
             under <strong>Access</strong> to restrict where it works.
           </p>
         )}
@@ -285,7 +345,7 @@ export default async function ApiKeysPage({
         Show the freshly minted key only while it is still a working credential.
         The cookie outlives a revocation by up to two minutes, and without this
         check the banner kept offering "Copy key" for a key that had just been
-        deleted — above a table reading "No API keys yet". Checking against the
+        deleted, above a table reading "No API keys yet". Checking against the
         list the server just returned also covers revocation from another tab
         or another operator, which no amount of cookie-clearing here would.
       */}
@@ -293,7 +353,7 @@ export default async function ApiKeysPage({
         <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-500/60 dark:bg-amber-950/60 space-y-2">
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-              New API key (shown once — copy now)
+              New API key (shown once, copy now)
             </p>
             <CopyButton value={revealedKey} label="Copy key" />
           </div>
@@ -308,8 +368,8 @@ export default async function ApiKeysPage({
 
       {/* Promotion deliberately does not touch existing keys: revoking them
           would break the integration at the exact moment the operator goes
-          live. The cost is a cosmetic mismatch — production application, keys
-          labelled rp_test_ — which is confusing precisely because the prefix
+          live. The cost is a cosmetic mismatch, production application, keys
+          labelled rp_test_, which is confusing precisely because the prefix
           is supposed to tell you what you are holding. Say so, rather than
           leaving the operator to notice and mistrust it. Shown only on a
           PROMOTED application (`promotedAt` set); one born production never
@@ -319,7 +379,7 @@ export default async function ApiKeysPage({
           This application was promoted to production on{' '}
           {new Date(app.promotedAt).toLocaleDateString(undefined, { dateStyle: 'medium' })}. Keys
           minted before then still start with <code>rp_test_</code> and keep working exactly as
-          they did — the prefix is a label, not a capability. Mint a{' '}
+          they did: the prefix is a label, not a capability. Mint a{' '}
           <code>rp_live_</code> key and retire the old one when it suits you.
         </Banner>
       )}
@@ -340,7 +400,7 @@ export default async function ApiKeysPage({
             description={`Server-side key for your backend + SDKs (${keyPrefixFor(app.environment)}…, from this application's environment). Shown once at creation.`}
             trigger="+ New API key"
           >
-            <form action={createKey.bind(null, id)} className="space-y-3">
+            <ActionForm action={createKey.bind(null, id)} className="space-y-3" reloadOnSettle>
               {error && mintModalOpen && (
                 <p role="alert" className="rounded-lg border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
                   <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
@@ -350,7 +410,7 @@ export default async function ApiKeysPage({
                 <span className="text-xs font-medium">Name</span>
                 <input type="text" name="name" required autoFocus placeholder="Production server"
                   className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]" />
-                <span className="block text-xs text-[var(--color-muted-fg)]">Internal label — helps you identify the key in this list later.</span>
+                <span className="block text-xs text-[var(--color-muted-fg)]">Internal label, to help you identify the key in this list later.</span>
               </label>
 
               {/* Scopes and expiry: the API has always accepted both on this
@@ -384,7 +444,7 @@ export default async function ApiKeysPage({
                     ))}
                   </div>
                   <p className="mt-2 text-xs text-[var(--color-muted-fg)]">
-                    Untick “Full access” above to use this list — otherwise it is ignored. Leaving
+                    Untick “Full access” above to use this list. Otherwise it is ignored. Leaving
                     every box clear also mints a full-access key.
                   </p>
                 </details>
@@ -406,9 +466,9 @@ export default async function ApiKeysPage({
 
               <SubmitButton pendingLabel="Minting key…">Mint key</SubmitButton>
               <p className="text-xs text-[var(--color-muted-fg)]">
-                You'll see the raw key once after creation — copy it then. Only the SHA-256 hash is stored.
+                You'll see the raw key once after creation, so copy it then. Only the SHA-256 hash is stored.
               </p>
-            </form>
+            </ActionForm>
           </Modal>
         }
       />
@@ -440,7 +500,7 @@ export default async function ApiKeysPage({
                   {k.expiresAt ? formatDate(k.expiresAt) : 'never'}
                 </TD>
                 <TD align="right">
-                  <form action={revokeKey.bind(null, id, k.id)}>
+                  <ActionForm action={revokeKey.bind(null, id, k.id)}>
                     <TypedConfirmButton
                       expected={k.name}
                       title={`Revoke API key "${k.name}"?`}
@@ -448,7 +508,7 @@ export default async function ApiKeysPage({
                       triggerLabel="Revoke"
                       confirmLabel="Revoke key"
                     />
-                  </form>
+                  </ActionForm>
                 </TD>
               </TR>
             ))}

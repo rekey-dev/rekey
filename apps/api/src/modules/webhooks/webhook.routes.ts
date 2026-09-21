@@ -5,14 +5,14 @@
  *     List endpoints for this Application.
  *
  *   POST   /api/v1/tenant/applications/:id/webhooks
- *     Create. Returns the signing `secret` exactly once — same contract
+ *     Create. Returns the signing `secret` exactly once, same contract
  *     as API keys. Callers must store it.
  *
  *   PATCH  /api/v1/tenant/applications/:id/webhooks/:endpointId
  *     Edit url/events/enabled.
  *
  *   DELETE /api/v1/tenant/applications/:id/webhooks/:endpointId
- *     HARD delete — the row is removed and cascades away its WebhookDelivery
+ *     HARD delete, the row is removed and cascades away its WebhookDelivery
  *     history. To pause an endpoint without losing the delivery log, PATCH it
  *     with `{ enabled: false }` instead.
  *
@@ -20,7 +20,7 @@
  *     Replace the signing secret. Returns the new raw value once.
  *
  *   GET    /api/v1/tenant/applications/:id/webhooks/:endpointId/deliveries
- *     Recent deliveries for debugging — includes the request body and the
+ *     Recent deliveries for debugging, includes the request body and the
  *     response status/body we got back.
  *
  *   POST   /api/v1/tenant/applications/:id/webhooks/:endpointId/deliveries/:deliveryId/retry
@@ -111,7 +111,7 @@ const APP_WRITE_ERRORS = {
     'without disclosing existence, when a MEMBER holds no grant on it).',
 };
 
-/** `WEBHOOK_ENDPOINT_NOT_FOUND`, from `ensureEndpointInApp` — folded into the write/read 404. */
+/** `WEBHOOK_ENDPOINT_NOT_FOUND`, from `ensureEndpointInApp`, folded into the write/read 404. */
 const ENDPOINT_NOT_FOUND_DESC =
   'WEBHOOK_ENDPOINT_NOT_FOUND — no webhook endpoint with that id on this Application.';
 
@@ -148,12 +148,13 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/:id/webhooks',
     {
+      config: { access: { scope: 'developer:read' } },
       schema: {
         tags: ['Tenant · Webhooks'],
         security: [{ tenantSession: [] }],
         summary: 'List webhook endpoints for an Application',
         description:
-          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'Requires **read** access to this Application, OWNER/ADMIN, or a MEMBER holding ' +
           'any grant on it. A MEMBER with no grant on this Application gets 404.',
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
         response: {
@@ -169,7 +170,7 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'read');
       // Default page size 100, matching the hard `take: 100` this route used
-      // before it could page — so an existing caller sees the same rows.
+      // before it could page, so an existing caller sees the same rows.
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query), 100);
       const [endpoints, total] = await Promise.all([
         webhookService.listEndpoints(id, { take, skip }),
@@ -196,12 +197,13 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/:id/webhooks',
     {
+      config: { access: { scope: 'developer:write' } },
       schema: {
         tags: ['Tenant · Webhooks'],
         security: [{ tenantSession: [] }],
         summary: 'Create a webhook endpoint. Returns the signing secret once.',
         description:
-          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          'Requires **write** access to this Application, OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.',
         body: {
           type: 'object',
@@ -224,7 +226,7 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
                 secret: {
                   type: 'string',
                   description:
-                    'The signing secret, in plaintext. Shown exactly ONCE — store it now. ' +
+                    'The signing secret, in plaintext. Shown exactly ONCE, store it now. ' +
                     'Use it to verify the `X-Rekey-Signature` header on inbound deliveries.',
                 },
                 warning: { type: 'string' },
@@ -282,19 +284,19 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
   app.patch(
     '/:id/webhooks/:endpointId',
     {
+      config: { access: { scope: 'developer:write' } },
       schema: {
         tags: ['Tenant · Webhooks'],
         security: [{ tenantSession: [] }],
         summary: 'Update an endpoint',
         description:
-          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          'Requires **write** access to this Application, OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.',
         response: {
           200: ok(
             {
               type: 'object',
-              // NOTE: unlike GET (list) and POST (create), this handler does not
-              // return `createdAt` — see the module report.
+              // NOTE: unlike GET (list) and POST (create), this response omits `createdAt`.
               properties: {
                 id: { type: 'string' },
                 url: { type: 'string', format: 'uri' },
@@ -355,12 +357,13 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
   app.delete(
     '/:id/webhooks/:endpointId',
     {
+      config: { access: { scope: 'developer:write' } },
       schema: {
         tags: ['Tenant · Webhooks'],
         security: [{ tenantSession: [] }],
         summary: 'Remove an endpoint',
         description:
-          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          'Requires **write** access to this Application, OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.',
         response: {
           200: ok(
@@ -369,10 +372,10 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
               properties: { deleted: { type: 'boolean', enum: [true] } },
               required: ['deleted'],
             },
-            // deleteEndpoint is a scoped deleteMany with no existence check —
+            // deleteEndpoint is a scoped deleteMany with no existence check,
             // this always answers 200, even when endpointId does not exist
             // (or belongs to a different Application). Idempotent by design.
-            'Deleted (idempotent — also 200 when the id did not exist).',
+            'Deleted (idempotent, also 200 when the id did not exist).',
           ),
           ...errs(APP_WRITE_ERRORS),
         },
@@ -389,12 +392,13 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/:id/webhooks/:endpointId/rotate-secret',
     {
+      config: { access: { scope: 'developer:write' } },
       schema: {
         tags: ['Tenant · Webhooks'],
         security: [{ tenantSession: [] }],
         summary: 'Rotate the endpoint\'s signing secret. Returns the new value once.',
         description:
-          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          'Requires **write** access to this Application, OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.',
         response: {
           200: ok(
@@ -434,15 +438,16 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/:id/webhooks/:endpointId/deliveries',
     {
+      config: { access: { scope: 'developer:read' } },
       schema: {
         tags: ['Tenant · Webhooks'],
         security: [{ tenantSession: [] }],
         summary: 'List recent delivery attempts for an endpoint',
         description:
-          'Requires **read** access to this Application — OWNER/ADMIN, or a MEMBER holding ' +
+          'Requires **read** access to this Application, OWNER/ADMIN, or a MEMBER holding ' +
           'any grant on it. A MEMBER with no grant on this Application gets 404.\n\n' +
           'Each row carries the `payload` that was POSTed and the consumer\'s `responseBody` ' +
-          '(truncated) — the two things you actually need when an endpoint is failing. ' +
+          '(truncated), the two things you actually need when an endpoint is failing. ' +
           'Filter with `?status=FAILED` and page with `limit` / `offset`.',
         querystring: {
           type: 'object',
@@ -518,7 +523,7 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
         ...(q.status !== undefined && { status: q.status }),
         ...(q.eventType !== undefined && { eventType: q.eventType }),
       };
-      // The service clamps limit to 1..100 and defaults it to 50 — mirror both
+      // The service clamps limit to 1..100 and defaults it to 50, mirror both
       // so `page` describes the window that was served.
       const limit = Math.min(q.limit ?? 50, 100);
       const offset = q.offset ?? 0;
@@ -564,12 +569,13 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/:id/webhooks/:endpointId/deliveries/:deliveryId/retry',
     {
+      config: { access: { scope: 'developer:write' } },
       schema: {
         tags: ['Tenant · Webhooks'],
         security: [{ tenantSession: [] }],
         summary: 'Force a re-attempt of a failed delivery',
         description:
-          'Requires **write** access to this Application — OWNER/ADMIN, or a MEMBER with an ' +
+          'Requires **write** access to this Application, OWNER/ADMIN, or a MEMBER with an ' +
           '`APP_ADMIN` grant on it.',
         response: {
           200: ok(ref('RetryWebhookDeliveryResult'), 'The retry was queued.'),

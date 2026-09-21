@@ -1,7 +1,7 @@
 /**
  * Refresh-token rotation, replay protection, sign-out, cross-app guard.
  *
- * The replay-protection assertion is the load-bearing one — a refresh
+ * The replay-protection assertion is the load-bearing one, a refresh
  * token is single-use. Reusing it should always be detected and rejected
  * (REFRESH_TOKEN_REUSED), because reuse strongly implies the token was
  * leaked.
@@ -125,7 +125,7 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
   it('FAMILY REVOCATION: reuse-detection revokes every active refresh for the user', async () => {
     // Issue an initial token, rotate once to get a live replacement, then
     // replay the original. Reuse-detection should revoke the replacement
-    // too — leaving every refresh for this user dead.
+    // too, leaving every refresh for this user dead.
     const { refreshToken: original, endUserId } = await signUp(appA, 'family@example.com');
     const r1 = await app.inject({
       method: 'POST',
@@ -135,7 +135,7 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
     });
     const replacement = (r1.json().data as { refreshToken: string }).refreshToken;
 
-    // Replay the original — strong compromise signal.
+    // Replay the original, strong compromise signal.
     const replay = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/refresh',
@@ -145,7 +145,7 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
     expect(replay.statusCode).toBe(401);
     expect(replay.json().error.code).toBe('REFRESH_TOKEN_REUSED');
 
-    // The live replacement must now also be rejected — family revocation. It
+    // The live replacement must now also be rejected, family revocation. It
     // reports REVOKED rather than REUSED because *it* was never replayed: the
     // family kill revoked it outright, so `replacedById` is null. What matters
     // is that it is dead, which the DB invariant below pins.
@@ -195,6 +195,73 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
     expect(tokens[1]!.revokedAt).not.toBeNull();
     expect(tokens[1]!.replacedById).toBe(tokens[2]!.id);
     expect(tokens[2]!.revokedAt).toBeNull();
+  });
+
+  // One live row per session is enforced by a unique partial index
+  // (migration 20260915120000). Rotation revokes before it inserts, so racing
+  // refreshes of one token must still end as before: one winner, every loser
+  // REFRESH_TOKEN_REUSED, and no unique violation surfacing as a 500.
+  it('concurrent refreshes of one token: one winner, the rest REUSED, never a 500', async () => {
+    const { refreshToken, endUserId } = await signUp(appA, 'race@example.com');
+
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        app.inject({
+          method: 'POST',
+          url: '/api/v1/auth/refresh',
+          headers: { authorization: `Bearer ${appA.liveKey}` },
+          payload: { refreshToken },
+        }),
+      ),
+    );
+    const statuses = results.map((r) => r.statusCode);
+    expect(statuses.filter((s) => s === 200)).toHaveLength(1);
+    for (const r of results.filter((x) => x.statusCode !== 200)) {
+      expect(r.statusCode).toBe(401);
+      expect(r.json().error.code).toBe('REFRESH_TOKEN_REUSED');
+    }
+    const heads = await prisma.refreshToken.count({
+      where: { endUserId, replacedById: null, revokedAt: null },
+    });
+    expect(heads).toBeLessThanOrEqual(1);
+  });
+
+  it('the database refuses a second live row in one session', async () => {
+    const { refreshToken, endUserId } = await signUp(appA, 'one-head@example.com');
+    const r = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+      headers: { authorization: `Bearer ${appA.liveKey}` },
+      payload: { refreshToken },
+    });
+    expect(r.statusCode).toBe(200);
+    const head = await prisma.refreshToken.findFirstOrThrow({
+      where: { endUserId, replacedById: null, revokedAt: null },
+    });
+
+    await expect(
+      prisma.refreshToken.create({
+        data: {
+          applicationId: head.applicationId,
+          endUserId,
+          tokenHash: `dup-${head.id}`,
+          expiresAt: head.expiresAt,
+          sessionId: head.sessionId,
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'P2002' });
+
+    // A revoked row is outside the index, so it never blocks the session.
+    await prisma.refreshToken.create({
+      data: {
+        applicationId: head.applicationId,
+        endUserId,
+        tokenHash: `revoked-${head.id}`,
+        expiresAt: head.expiresAt,
+        sessionId: head.sessionId,
+        revokedAt: new Date(),
+      },
+    });
   });
 
   it('rejects refresh tokens that have expired', async () => {
@@ -257,7 +324,7 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
     });
     expect(res.statusCode).toBe(401);
     // Sign-out is a DELIBERATE revocation (`replacedById === null`), so it is
-    // REVOKED, not REUSED — and critically it does not revoke the user's other
+    // REVOKED, not REUSED, and critically it does not revoke the user's other
     // sessions. Reuse of a *rotated* token is the compromise signal and still
     // burns the whole chain; see the REPLAY GUARD cases above.
     expect(['REFRESH_TOKEN_REVOKED', 'REFRESH_TOKEN_INVALID']).toContain(

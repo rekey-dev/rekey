@@ -1,14 +1,14 @@
 'use client';
 
 /**
- * Organization widgets — `<OrganizationSwitcher>` / `<CreateOrganization>` /
+ * Organization widgets, `<OrganizationSwitcher>` / `<CreateOrganization>` /
  * `<OrganizationProfile>`, Clerk-shaped.
  *
  * ── Data + mutation model ──
  *
  * The org endpoints (`/api/v1/users/me/organizations/*`) take a publishable OR
  * secret key plus the end-user's own JWT, so a browser *can* drive them
- * directly — `RekeyBrowserClient.listOrganizations` does. As with the auth
+ * directly, `RekeyBrowserClient.listOrganizations` does. As with the auth
  * widgets these components still are **render + delegate**, because the
  * customer's server is where the session cookie lives and where org state is
  * already resolved for SSR:
@@ -39,7 +39,7 @@ import type {
 // They used to be standalone interfaces "matching" the DTOs. They did not.
 // `OrgMember` was declared `{ id; email; role }`, but `OrganizationMemberDto`
 // carries BOTH `id` (the membership row) and `endUserId` (the user), populated
-// from different columns — and TypeScript could not catch the drift, because
+// from different columns, and TypeScript could not catch the drift, because
 // the real DTO is structurally assignable to the smaller shape. So passing
 // `organizations.listMembers()` straight in type-checked cleanly while
 // `<OrganizationProfile>` posted the membership id into the `endUserId` field
@@ -57,7 +57,7 @@ export type OrgSummary = Pick<OrganizationWithRoleDto, 'id' | 'name'> & {
 };
 
 /**
- * The member fields the profile renders. A slice of `OrganizationMemberDto` —
+ * The member fields the profile renders. A slice of `OrganizationMemberDto`,
  * note it needs BOTH ids: `id` keys the row, `endUserId` is what the mutation
  * endpoints address.
  */
@@ -114,7 +114,7 @@ function OrganizationSwitcherBody({
 
   // Is there anything to switch *to*? The selectable set is the real orgs plus
   // the Personal option (when shown). When an app bills per-team and the user
-  // has no teams yet, there's nothing to switch among — rendering a live
+  // has no teams yet, there's nothing to switch among, rendering a live
   // "Switch" there is a dead control (it would post an empty orgId, clearing the
   // active org, which org-billing forbids). In that case we drop the switch form
   // and steer the user to "Create team" instead.
@@ -132,7 +132,7 @@ function OrganizationSwitcherBody({
       </div>
 
       {/* Current selection + a native select to switch. Suppressed when there's
-          nothing to switch to (per-org billing, no teams yet) — see above. */}
+          nothing to switch to (per-org billing, no teams yet), see above. */}
       {hasSwitchTargets ? (
         <form action={switchAction} className="rekey-stack">
           <label className={cx('rekey-label', 'label')} htmlFor="rekey-org-select">
@@ -311,7 +311,7 @@ export interface OrganizationProfileProps {
   members: OrgMember[];
   /** Pending invitations, if you surface them (resolve server-side). */
   invitations?: OrgInvitation[];
-  /** The viewer's role — controls whether invite/manage affordances render. */
+  /** The viewer's role, controls whether invite/manage affordances render. */
   viewerRole?: string;
   /** Server Action to invite a member (reads `email`, `role`). Enables the invite form. */
   inviteAction?: FormAction;
@@ -370,7 +370,7 @@ function OrganizationProfileBody({
             {manage && setRoleAction ? (
               <form action={setRoleAction} className="rekey-row rekey-spacer">
                 <HiddenFields fields={hiddenFields} />
-                {/* `endUserId`, NOT `id` — see the note on OrgMember. */}
+                {/* `endUserId`, NOT `id`, see the note on OrgMember. */}
                 <input type="hidden" name="endUserId" value={m.endUserId} />
                 <select name="role" defaultValue={m.role} aria-label={`Role for ${m.email}`} className={cx('rekey-select', 'input')} style={{ padding: '4px 8px', width: 'auto' }}>
                   {ROLES.map((r) => (
@@ -385,7 +385,7 @@ function OrganizationProfileBody({
             {manage && removeAction && (
               <form action={removeAction}>
                 <HiddenFields fields={hiddenFields} />
-                {/* `endUserId`, NOT `id` — see the note on OrgMember. */}
+                {/* `endUserId`, NOT `id`, see the note on OrgMember. */}
                 <input type="hidden" name="endUserId" value={m.endUserId} />
                 <button type="submit" className="rekey-link" style={{ color: 'var(--rekey-color-danger)' }}>
                   Remove

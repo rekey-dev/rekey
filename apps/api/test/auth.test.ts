@@ -1,5 +1,5 @@
 /**
- * EndUser auth — sign-up, sign-in, users/me, cross-application guard.
+ * EndUser auth, sign-up, sign-in, users/me, cross-application guard.
  *
  * The cross-app guard is the load-bearing assertion: a JWT issued by
  * Application A must NOT be acceptable when presented through a secret
@@ -132,7 +132,7 @@ describe('EndUser auth — POST /sign-up, POST /sign-in, GET /users/me', () => {
     });
     expect(a.statusCode).toBe(201);
     expect(b.statusCode).toBe(201);
-    // Different ids — they're separate users.
+    // Different ids, they're separate users.
     expect(a.json().data.endUser.id).not.toBe(b.json().data.endUser.id);
   });
 
@@ -150,7 +150,7 @@ describe('EndUser auth — POST /sign-up, POST /sign-in, GET /users/me', () => {
 
   it('rejects sign-up when password is not in the Application authConfig.methods', async () => {
     // Switch app A's config to oauth-only by writing it directly. (No admin route
-    // for this yet — when one ships, swap to that.)
+    // for this yet, when one ships, swap to that.)
     await prisma.application.update({
       where: { id: appA.applicationId },
       data: {
@@ -294,7 +294,7 @@ describe('EndUser auth — POST /sign-up, POST /sign-in, GET /users/me', () => {
     expect(res.statusCode).toBe(401);
     // End-user JWTs are now signed with a per-app derived key
     // (HMAC(JWT_SECRET, appId:generation)), so a token minted for app A fails
-    // signature verification under app B's key — rejected as USER_TOKEN_INVALID
+    // signature verification under app B's key, rejected as USER_TOKEN_INVALID
     // before the claim-based WRONG_APPLICATION check is even reached. The
     // isolation is now cryptographic, not just a claim comparison.
     expect(res.json().error.code).toBe('USER_TOKEN_INVALID');

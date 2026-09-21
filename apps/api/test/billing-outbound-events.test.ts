@@ -1,17 +1,18 @@
 /**
- * Outbound BILLING webhook events — the Stripe/PayPal inbound handlers emit
+ * Outbound BILLING webhook events, the Stripe/PayPal inbound handlers emit
  * `subscription.activated` / `subscription.past_due` / `payment.succeeded` /
  * `payment.failed` (etc.) through the same dispatcher the auth flows use.
  *
  * We register a WebhookEndpoint (wildcard) and assert WebhookDelivery rows
  * appear for the right event types. The endpoint URL is unreachable on
- * purpose — delivery *rows* are what we assert on, not HTTP success.
+ * purpose, delivery *rows* are what we assert on, not HTTP success.
  *
  * Replay-safety is load-bearing: a provider event that causes no local state
  * change (already-ACTIVE row, duplicate providerPaymentId) must NOT re-emit.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { Prisma } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
 import Stripe from 'stripe';
 import { randomUUID } from 'node:crypto';
@@ -34,7 +35,7 @@ function stripeSigned(body: object): { payload: string; headers: Record<string, 
   return { payload, headers: { 'stripe-signature': sig, 'content-type': 'application/json' } };
 }
 
-/** Poll for delivery rows of one event type — emission is fire-and-forget. */
+/** Poll for delivery rows of one event type, emission is fire-and-forget. */
 async function waitForDeliveries(
   endpointId: string,
   eventType: string,
@@ -200,7 +201,7 @@ describe('Outbound billing webhook events', () => {
         },
       });
       // A DIFFERENT provider event for the SAME (already-ACTIVE) session must
-      // not re-emit either — no state change, no event.
+      // not re-emit either, no state change, no event.
       await fireStripe(slug, {
         id: 'evt_obe_act_2',
         object: 'event',
@@ -255,14 +256,14 @@ describe('Outbound billing webhook events', () => {
       expect(envelope.data.payment.subscriptionId).toBe(sub.id);
       expect(envelope.data.payment.planSlug).toBe('pro_monthly');
       expect(envelope.data.payment.providerPaymentId).toBe('in_obe_pay');
-      // Sub was already ACTIVE — no spurious activation event.
+      // Sub was already ACTIVE, no spurious activation event.
       expect(
         await prisma.webhookDelivery.count({
           where: { endpointId: b.endpointId, eventType: 'subscription.activated' },
         }),
       ).toBe(0);
 
-      // Replay with a NEW provider event id but the SAME invoice — the unique
+      // Replay with a NEW provider event id but the SAME invoice, the unique
       // providerPaymentId stops the second Payment row, so no re-emit.
       await fireStripe(slug, {
         id: 'evt_obe_pay_2',
@@ -496,7 +497,7 @@ describe('Outbound billing webhook events', () => {
   // ------------------------------------------------- entitlements on payload
 
   /**
-   * `data.subscription.entitlements` — what the subscription actually grants.
+   * `data.subscription.entitlements`, what the subscription actually grants.
    *
    * The plan slug cannot answer that: `entitlementOverrides` is how a bespoke
    * quantity is sold without minting a private plan, so two subscribers on one
@@ -529,7 +530,7 @@ describe('Outbound billing webhook events', () => {
           status: 'PENDING',
           metadata: { checkoutSessionId: `cs_${slug}` },
           ...(opts.entitlementOverrides !== undefined && {
-            entitlementOverrides: opts.entitlementOverrides,
+            entitlementOverrides: opts.entitlementOverrides as Prisma.InputJsonValue,
           }),
         },
       });

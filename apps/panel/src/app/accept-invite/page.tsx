@@ -1,18 +1,19 @@
 /**
  * Invitation acceptance flow.
  *
- *   1. GET /preview unauth — show workspace name + role + expiry.
+ *   1. GET /preview unauth, show workspace name + role + expiry.
  *   2. If signed in: POST /accept directly + persist new session, hop to /applications.
  *   3. If not signed in: route to /login?inviteToken=… so the user can
- *      sign in then come back. (We could also offer sign-up here; deferred.)
+ *      sign in then come back. (Sign-up here is possible too; deferred.)
  */
 
 import * as React from 'react';
 import type { Metadata } from 'next';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { publicGet, setSessionCookies, ACCESS_COOKIE, PanelApiError, api } from '@/lib/api';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { AuthCard } from '@/components/AuthCard';
 import { formatDateTime } from '@/lib/date';
@@ -36,11 +37,10 @@ interface AcceptResponse {
   refreshTokenExpiresAt: string;
 }
 
-// AUDIT-3 (2026-05-19): the previous `accept` action used `publicPost`
-// (unauthenticated) and was reachable as an orphaned server-action ID even
-// though the form only wired `acceptAuthed`. Removed entirely — there is
-// exactly one path now, and it uses the authed `api()` client that reads
-// the session cookie.
+// A previous unauthenticated `accept` action was reachable as an orphaned
+// server-action ID even though the form only wired `acceptAuthed`. It was
+// removed; only this authed path exists, using the `api()` client that
+// reads the session cookie.
 async function acceptAuthed(formData: FormData): Promise<void> {
   'use server';
   const token = String(formData.get('token') ?? '');
@@ -51,10 +51,7 @@ async function acceptAuthed(formData: FormData): Promise<void> {
       path: '/api/v1/tenant/invitations/accept',
       body: { token },
     });
-    await setSessionCookies({
-      accessToken: result.accessToken,
-      refreshToken: result.refreshToken,
-    });
+    await setSessionCookies(result);
   } catch (err) {
     if (err instanceof PanelApiError) {
       redirect(`/accept-invite?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.code)}`);
@@ -67,14 +64,14 @@ async function acceptAuthed(formData: FormData): Promise<void> {
 const ERR: Record<string, string> = {
   missing: 'Invite token missing.',
   INVITATION_NOT_FOUND:
-    'This invite link is incomplete or has expired — ask whoever invited you to send a new one.',
+    'This invite link is incomplete or has expired. Ask whoever invited you to send a new one.',
   INVITATION_REVOKED: 'This invite was withdrawn. Ask whoever invited you to send a new one.',
   INVITATION_EXPIRED: 'This invite has expired. Ask whoever invited you to send a new one.',
   INVITATION_ALREADY_ACCEPTED: 'This invite has already been used.',
   INVITATION_NOT_USABLE: 'This invite is no longer usable. Ask for a new one.',
   PREVIEW_FAILED: 'We couldn’t check this invite just now. Please try again in a moment.',
-  // Unknown codes now render nothing, so the generic ones the accept action
-  // can actually redirect with have to be mapped or the failure is silent.
+  // Unmapped codes render nothing, so every code the accept action can
+  // redirect with must have an entry here or the failure is silent.
   INTERNAL_ERROR: 'Something went wrong on our side. Please try again.',
   RATE_LIMITED: 'Too many attempts. Please wait a minute and try again.',
 };
@@ -86,15 +83,15 @@ export default async function AcceptInvitePage({
 }): Promise<React.JSX.Element> {
   const params = await searchParams;
   const token = typeof params.token === 'string' ? params.token : '';
-  // Only codes we have copy for render a banner — an unrecognized `?error=`
-  // value shows nothing rather than an unexplained "something went wrong".
+  // Only codes with copy render a banner; an unrecognized `?error=` value
+  // shows nothing rather than an unexplained "something went wrong".
   const error = typeof params.error === 'string' ? ERR[params.error] : undefined;
 
   if (!token) {
     return (
       <AuthCard title="Invite link incomplete" spacing="sm">
         <p className="text-sm text-[var(--color-muted-fg)]">
-          This invite link is incomplete or has expired — ask whoever invited you to send a new
+          This invite link is incomplete or has expired. Ask whoever invited you to send a new
           one. If you already have an account, you can sign in instead.
         </p>
         <Link
@@ -128,8 +125,7 @@ export default async function AcceptInvitePage({
             <Banner tone="error">
               {ERR[previewError] ?? 'This invite link isn’t usable. Ask whoever invited you to send a new one.'}
             </Banner>
-            {/* The dead-end state used to render no way out at all — always
-                offer sign-in, since the person may already have an account. */}
+            {/* Always offer sign-in here, since the person may already have an account. */}
             <Link
               href="/login"
               className="block w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-center text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] transition-colors"
@@ -155,7 +151,7 @@ export default async function AcceptInvitePage({
             {error && <Banner tone="error">{error}</Banner>}
 
             {signedIn ? (
-              <form action={acceptAuthed}>
+              <ActionForm action={acceptAuthed}>
                 <input type="hidden" name="token" value={token} />
                 <SubmitButton
                   pendingLabel="Accepting…"
@@ -163,7 +159,7 @@ export default async function AcceptInvitePage({
                 >
                   Accept invitation
                 </SubmitButton>
-              </form>
+              </ActionForm>
             ) : (
               <div className="space-y-2">
                 <p className="text-sm text-[var(--color-muted-fg)]">

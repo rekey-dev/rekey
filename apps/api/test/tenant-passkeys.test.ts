@@ -9,12 +9,12 @@
  *   - register/start returns options when env configured
  *
  * `register/start` requires a step-up proof (`password` or a current
- * authenticator code) as of 2.0.0-rc.3 — these cases send the password so they
+ * authenticator code) as of 2.0.0-rc.3, these cases send the password so they
  * keep testing the RP-config resolution they are about. The step-up itself is
  * pinned in test/auth-hardening-operator.test.ts.
  *
  * Full ceremonies (register/complete + authenticate/complete) need a real
- * authenticator simulator — out of scope for in-process tests. Those
+ * authenticator simulator, out of scope for in-process tests. Those
  * paths are smoke-covered via the service unit shape on the panel side.
  */
 
@@ -54,7 +54,7 @@ describe('Operator passkeys', () => {
     delete process.env.PANEL_WEBAUTHN_RP_ID;
     delete process.env.PANEL_WEBAUTHN_RP_ORIGINS;
     delete process.env.PANEL_WEBAUTHN_RP_NAME;
-    // The RP config can also be derived from CORS_ALLOWED_ORIGINS — clear it so
+    // The RP config can also be derived from CORS_ALLOWED_ORIGINS, clear it so
     // the "unset" cases are deterministic regardless of cross-suite leakage.
     delete process.env.CORS_ALLOWED_ORIGINS;
   });
@@ -123,7 +123,7 @@ describe('Operator passkeys', () => {
   });
 
   it('register/start derives the RP from CORS_ALLOWED_ORIGINS when PANEL_WEBAUTHN_* is unset', async () => {
-    // No PANEL_WEBAUTHN_* set — fall back to the panel origin in the CORS list.
+    // No PANEL_WEBAUTHN_* set, fall back to the panel origin in the CORS list.
     // The `panel.` host is preferred over the bare marketing origin.
     process.env.CORS_ALLOWED_ORIGINS = 'https://rekey.dev,https://panel.rekey.dev';
 
@@ -197,7 +197,7 @@ describe('Operator passkeys', () => {
       method: 'POST',
       url: '/api/v1/tenant/auth/passkeys/authenticate/complete',
       payload: {
-        // Attacker-fabricated challenge value — must not be trusted.
+        // Attacker-fabricated challenge value, must not be trusted.
         expectedChallenge: 'this-challenge-was-never-minted-by-the-server',
         response: { id: 'whatever' },
       },
@@ -220,7 +220,7 @@ describe('Operator passkeys', () => {
     expect(typeof challenge).toBe('string');
 
     // 2. First completion burns the challenge. The dummy credential id won't
-    //    resolve, so we stop at PASSKEY_UNKNOWN — but the challenge is consumed.
+    //    resolve, so we stop at PASSKEY_UNKNOWN, but the challenge is consumed.
     const first = await app.inject({
       method: 'POST',
       url: '/api/v1/tenant/auth/passkeys/authenticate/complete',
@@ -229,7 +229,7 @@ describe('Operator passkeys', () => {
     expect(first.statusCode).toBe(401);
     expect(first.json().error.code).toBe('PASSKEY_UNKNOWN');
 
-    // 3. Replaying the SAME challenge now fails at the store — proving a
+    // 3. Replaying the SAME challenge now fails at the store, proving a
     //    captured assertion can't be replayed even with a valid signature.
     const replay = await app.inject({
       method: 'POST',

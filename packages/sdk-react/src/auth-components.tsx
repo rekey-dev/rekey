@@ -1,20 +1,20 @@
 'use client';
 
 /**
- * Auth widgets — the drop-in `<SignIn>` / `<SignUp>` / `<UserButton>` family.
+ * Auth widgets, the drop-in `<SignIn>` / `<SignUp>` / `<UserButton>` family.
  *
  * ── Why these take server actions instead of calling the API ──
  *
- * Not because the browser *can't* reach the API — the signed-out bootstrap
+ * Not because the browser *can't* reach the API, the signed-out bootstrap
  * routes (sign-up, sign-in, mfa-verify, magic-link, passkey-authenticate,
  * refresh, password reset) accept the Application's publishable key via
  * `requirePublishableOrSecretKey`, and `RekeyBrowserClient` in client.ts is
  * exactly that path. These widgets delegate anyway, for two reasons that still
  * hold: your server is where the httpOnly session cookie lives (a token in JS
- * is a token an XSS can read), and the *authenticated* half of `/auth/*` —
- * password change, MFA enrollment, passkey registration — is secret-key-only.
+ * is a token an XSS can read), and the *authenticated* half of `/auth/*`,
+ * password change, MFA enrollment, passkey registration, is secret-key-only.
  *
- * So — exactly like Clerk's components talk to Clerk's FAPI — they delegate
+ * So, exactly like Clerk's components talk to Clerk's FAPI, they delegate
  * writes to *your* server: you pass a Server Action (or a route URL) and the
  * widget renders the form/buttons around it. Your action runs `@rekey.dev/node`
  * server-side (with the secret) and rotates the session cookie; the provider
@@ -37,7 +37,7 @@ import * as React from 'react';
 import { useUser } from './hooks.js';
 import { Themed, useCx, type AppearanceProp } from './theme.js';
 
-/** A Next.js Server Action bound to a `<form>` — `(formData) => void | Promise<void>`. */
+/** A Next.js Server Action bound to a `<form>`, `(formData) => void | Promise<void>`. */
 export type FormAction = (formData: FormData) => void | Promise<void>;
 
 /** A provider button descriptor for OAuth sign-in. The `startUrl`/`startAction`
@@ -102,7 +102,7 @@ function Alert({ kind, children }: { kind: 'error' | 'info'; children: React.Rea
   );
 }
 
-/** Form props spread helper — prefer the Server Action, else POST to the URL. */
+/** Form props spread helper, prefer the Server Action, else POST to the URL. */
 function formProps(action?: FormAction, url?: string): { action: FormAction } | { action: string; method: 'post' } | Record<string, never> {
   if (action) return { action };
   if (url) return { action: url, method: 'post' };
@@ -486,7 +486,7 @@ function UserButtonBody({
  */
 export function UserButton(props: UserButtonProps): React.JSX.Element | null {
   const { signedIn, loading } = useUser();
-  // Skip the themed wrapper entirely when signed out — avoids injecting an empty
+  // Skip the themed wrapper entirely when signed out, avoids injecting an empty
   // root node into the header.
   if (loading || !signedIn) return null;
   return (

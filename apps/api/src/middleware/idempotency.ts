@@ -1,12 +1,12 @@
 /**
  * Generic `Idempotency-Key` header support (ENTERPRISE-ROADMAP §6).
  *
- * Opt-in per route via `config: { idempotency: true }` — never blanket-applied,
+ * Opt-in per route via `config: { idempotency: true }`, never blanket-applied,
  * so existing route semantics can't regress. When an authenticated mutating
  * request (POST/PATCH/PUT/DELETE) carries the header, the first execution's
  * response is persisted and replays of the same request return it verbatim.
  *
- * Scoping — the key belongs to the authenticated principal:
+ * Scoping, the key belongs to the authenticated principal:
  *   - API-key routes:        `req.application.id`  → scopeKey "app:<id>"
  *   - operator-session routes: `req.tenantId`      → scopeKey "tenant:<id>"
  * Two different Applications (or workspaces) can use the same key string
@@ -16,7 +16,7 @@
  *
  * Semantics (one key = ONE logical operation per scope):
  *   - first request          → executes; {status, body} persisted on completion,
- *                              but only for 2xx/4xx — a 5xx deletes the
+ *                              but only for 2xx/4xx, a 5xx deletes the
  *                              reservation so the client can retry for real.
  *   - replay, same fingerprint (method + path + body hash)
  *                            → stored response + `Idempotency-Replayed: true`.
@@ -24,19 +24,19 @@
  *   - concurrent duplicate while the first is in flight
  *                            → 409 IDEMPOTENCY_KEY_IN_FLIGHT with
  *                              `Retry-After: 1`. Deliberately the simple
- *                              deterministic option — we do not block the
+ *                              deterministic option, we do not block the
  *                              second request waiting on the first.
  *   - key expired (24 h TTL) → row replaced, request re-executes.
  *
  * Mechanism: a "reservation" row (responseStatus NULL) is inserted in the
- * preHandler — the `(scopeKey, key)` unique constraint is the lock, so exactly
+ * preHandler, the `(scopeKey, key)` unique constraint is the lock, so exactly
  * one of N concurrent duplicates executes. The onSend hook completes or
  * discards the reservation. If the process dies mid-request the orphaned
  * reservation is cleared by the TTL sweep (lib/token-prune.ts).
  *
  * Interaction with the credits-native key: `POST /credits/consume` and the
  * operator credits-grant accept a body-level `idempotencyKey` that dedupes at
- * the *ledger* level — that keeps working unchanged. The header is the
+ * the *ledger* level, that keeps working unchanged. The header is the
  * generic, route-agnostic mechanism layered above it.
  */
 
@@ -105,19 +105,19 @@ export async function idempotencyPreHandler(
     });
   }
 
-  // Principal scope — auth middlewares (onRequest) have already run.
+  // Principal scope, auth middlewares (onRequest) have already run.
   //
   // The scope MUST be the effective actor, not merely the Application or
   // workspace. A replay short-circuits the handler entirely, and this hook is
   // an instance-level `preHandler`, so it runs BEFORE route-level
-  // `preHandler`s and before the handler body — which means `requireTenantRole`
+  // `preHandler`s and before the handler body, which means `requireTenantRole`
   // and the in-handler `ensureAppAccess` calls are both skipped on a replay.
   //
   // Scoped only to the Application, that made the cache a privilege-escalation
   // primitive: a workspace MEMBER whose own mint returns 403 could replay an
   // OWNER's key on `POST /:id/api-keys` and receive the plaintext key with
   // `scopes:['*']`. On the end-user side, the subject is a JWT *header* and the
-  // fingerprint is method+path+body — so one end-user could replay another's
+  // fingerprint is method+path+body, so one end-user could replay another's
   // key and receive their checkout URL and subscription. `/subscription/cancel`
   // was worst: its body is `{}`, identical for every user, so the fingerprint
   // offered no protection at all.
@@ -140,12 +140,12 @@ export async function idempotencyPreHandler(
       : `tenant:${req.tenantId}`;
     tenantId = req.tenantId;
   } else {
-    // No authenticated principal to scope to — behave as if no header was sent.
+    // No authenticated principal to scope to, behave as if no header was sent.
     return;
   }
 
   const method = req.method;
-  const path = req.url; // includes query string — part of the fingerprint
+  const path = req.url; // includes query string, part of the fingerprint
   const requestHash = fingerprint(req.body);
 
   // Try to take the reservation. Loop once so an expired row can be replaced.
@@ -164,7 +164,7 @@ export async function idempotencyPreHandler(
         },
       });
       req.idempotencyRecordId = created.id;
-      return; // we hold the reservation — execute the handler
+      return; // we hold the reservation, execute the handler
     } catch (e) {
       if (!isUniqueViolation(e)) throw e;
     }
@@ -180,7 +180,7 @@ export async function idempotencyPreHandler(
     }
 
     if (existing.expiresAt.getTime() <= Date.now()) {
-      // Expired — remove it (guarded, so we never delete a fresh row that
+      // Expired, remove it (guarded, so we never delete a fresh row that
       // replaced it concurrently) and retry the insert.
       await prisma.idempotencyKey.deleteMany({
         where: { id: existing.id, expiresAt: { lte: new Date() } },
@@ -204,7 +204,7 @@ export async function idempotencyPreHandler(
       });
     }
 
-    // Faithful replay — stored status + body, plus the replay marker. Bodies
+    // Faithful replay, stored status + body, plus the replay marker. Bodies
     // are encrypted at rest (see onSend); a string responseBody is ciphertext.
     reply.header('Idempotency-Replayed', 'true');
     const storedBody =
@@ -219,7 +219,7 @@ export async function idempotencyPreHandler(
 }
 
 /**
- * Instance-level onSend — completes (2xx/4xx) or discards (5xx / non-JSON)
+ * Instance-level onSend, completes (2xx/4xx) or discards (5xx / non-JSON)
  * the reservation taken in the preHandler. Awaited deliberately: the row must
  * be durable before the client sees the response, otherwise an immediate
  * retry could race past a half-written reservation.
@@ -238,7 +238,7 @@ export async function idempotencyOnSend(
   let parsedBody: unknown;
   // Never cache 5xx, and never cache an authorization refusal. A cached 401/
   // 403/404 let a low-privileged caller pre-seed a key so the legitimate
-  // higher-privileged request replayed the refusal instead of executing — a
+  // higher-privileged request replayed the refusal instead of executing, a
   // denial primitive, and a confused deputy. Those statuses are also a
   // function of WHO asked, which is exactly what a cache must not freeze.
   const AUTHZ_REFUSALS = new Set([401, 403, 404]);
@@ -253,7 +253,7 @@ export async function idempotencyOnSend(
             : undefined;
       parsedBody = text === undefined || text === '' ? null : JSON.parse(text);
     } catch {
-      storable = false; // non-JSON payload — don't attempt a replayable cache
+      storable = false; // non-JSON payload, don't attempt a replayable cache
     }
   }
 
@@ -265,7 +265,7 @@ export async function idempotencyOnSend(
           responseStatus: status,
           // Encrypted at rest: covered routes can return secret material
           // (api-key mint returns the plaintext rawKey) and this cache must
-          // not become a second, weaker home for it — the key itself is only
+          // not become a second, weaker home for it, the key itself is only
           // ever stored hashed. Ciphertext is a string, which is valid Json,
           // so no schema change. Replay decrypts (see preHandler).
           responseBody: parsedBody === null ? Prisma.JsonNull : encryptJson(parsedBody),

@@ -17,7 +17,7 @@
  * Two things have to hold for the claim to be true, and both are asserted here:
  *
  *   - the FIRST completion decides the row, including which processor it names
- *     — the `provider` column is a guess until a completion settles it, because
+ *    , the `provider` column is a guess until a completion settles it, because
  *     the second checkout overwrote it while nothing had been paid;
  *   - the SECOND completion is refused rather than silently overwriting the id,
  *     because overwriting is what strands the first subscription.
@@ -179,7 +179,7 @@ describe('a subscription row that has two completable checkout sessions', () => 
     // `provider` is written by checkout, before anyone has paid, so the second
     // checkout leaves it naming PayPal while the buyer goes back and pays at
     // Stripe. The row then carried `provider: paypal` and
-    // `providerSubId: sub_…` — one processor named, the other's id — and
+    // `providerSubId: sub_…`, one processor named, the other's id, and
     // `cancelCurrentSubscription` reads `provider` to decide who to dial.
     const stripeSession = await checkout('stripe');
     await checkout('paypal');
@@ -212,7 +212,7 @@ describe('a subscription row that has two completable checkout sessions', () => 
     // And exactly one row: the refusal must not create a parallel subscription
     // either.
     expect(await prisma.subscription.count({ where: { applicationId } })).toBe(1);
-    // Refusing does not make the PayPal subscription stop existing — the buyer
+    // Refusing does not make the PayPal subscription stop existing, the buyer
     // was charged there and nothing local names it. An operator has to be able
     // to find it three weeks later, which a log line is not.
     const orphans = (row.metadata as { unappliedCompletions?: unknown[] }).unappliedCompletions;
@@ -227,7 +227,7 @@ describe('a subscription row that has two completable checkout sessions', () => 
   it('two completions arriving AT ONCE still leave one winner and record the loser (#437)', async () => {
     // The sequential guard above reads the row, decides, then writes, and the
     // read is outside the transaction. Two completions that both observe a
-    // PENDING row therefore both pass it and both fall through to the write —
+    // PENDING row therefore both pass it and both fall through to the write,
     // last one wins, and the losing processor's subscription is live, billing,
     // and named nowhere. That is money arriving through a path that does not
     // even record it.
@@ -310,7 +310,7 @@ describe('a subscription row that has two completable checkout sessions', () => 
     expect(row.status).toBe('ACTIVE');
     expect(row.providerSubId).toBe('sub_ONLY');
     // The assertions above cannot tell "applied again, harmlessly" from
-    // "refused by the guard" — both leave the row exactly as it was, which is
+    // "refused by the guard", both leave the row exactly as it was, which is
     // how a guard that swallowed every re-delivery would keep this green. The
     // refusal path is the one that writes here, so its absence is the evidence.
     expect(
@@ -320,8 +320,8 @@ describe('a subscription row that has two completable checkout sessions', () => 
 
   it('lets a genuine resubscribe write a new provider subscription id', async () => {
     // A cancelled row is reused by the next checkout, which walks it back to
-    // PENDING. That completion is not a second completion — the previous
-    // relationship is over — so it must be free to write its own id.
+    // PENDING. That completion is not a second completion, the previous
+    // relationship is over, so it must be free to write its own id.
     const first = await checkout('stripe');
     await completeStripe(first, 'sub_FIRST');
     await prisma.subscription.updateMany({

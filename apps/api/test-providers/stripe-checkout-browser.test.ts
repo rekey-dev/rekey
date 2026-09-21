@@ -4,7 +4,7 @@
  * Stripe test mode has **no API that completes a Checkout Session**. Test
  * clocks advance billing for subscriptions that already exist; the Sessions
  * API can create and expire a session but not pay for one. The supported route
- * is the documented one — open the hosted page and pay with a test card — so
+ * is the documented one, open the hosted page and pay with a test card, so
  * that is what this does, with Playwright.
  *
  * It is opt-in (`REKEY_SANDBOX_BROWSER=1`) for a boring reason: it needs a
@@ -12,7 +12,7 @@
  * fails on a missing binary teaches contributors to ignore red. Everything the
  * completion unlocks that can be reached another way is covered
  * unconditionally in `stripe-webhook-entitlement.test.ts`; what ONLY lives here
- * is `checkout.session.completed` itself — the event that writes
+ * is `checkout.session.completed` itself, the event that writes
  * `providerSubId` onto the local row and provisions the first period.
  *
  * The hosted page is somebody else's UI and will change. The selectors below
@@ -73,7 +73,7 @@ describeSandbox('stripe', 'Stripe sandbox · hosted checkout completion (browser
    *
    * Playwright is imported dynamically: it is a root devDependency and the
    * browser binary is a separate download, so a static import would make this
-   * file fail to LOAD on a machine that has neither — which vitest reports as
+   * file fail to LOAD on a machine that has neither, which vitest reports as
    * a smaller passing count, not as an error.
    */
   async function payWithTestCard(url: string): Promise<void> {
@@ -85,7 +85,7 @@ describeSandbox('stripe', 'Stripe sandbox · hosted checkout completion (browser
 
       // Stripe renders card fields in the top-level document on the hosted
       // page (unlike Elements, which uses iframes). Fall back to searching
-      // frames anyway — this page is not ours and has changed before.
+      // frames anyway, this page is not ours and has changed before.
       const fill = async (selector: string, value: string): Promise<void> => {
         for (const frame of [page.mainFrame(), ...page.frames()]) {
           const field = frame.locator(selector).first();
@@ -106,7 +106,7 @@ describeSandbox('stripe', 'Stripe sandbox · hosted checkout completion (browser
       if (await postal.count().catch(() => 0)) await postal.fill('12345');
 
       await page.locator('button[type="submit"], .SubmitButton').first().click({ timeout: 20_000 });
-      // The redirect back to `successUrl` is example.com, which will not load —
+      // The redirect back to `successUrl` is example.com, which will not load,
       // that is fine and expected. What matters is that the navigation was
       // attempted; the authority on whether the session completed is the API.
       await page.waitForURL(/example\.com\/thanks/, { timeout: 90_000 }).catch(() => undefined);
@@ -134,7 +134,7 @@ describeSandbox('stripe', 'Stripe sandbox · hosted checkout completion (browser
       valueType: 'BOOL',
       value: 'true',
     });
-    const priceId = (plan.metadata as { stripe?: { priceId?: string } }).stripe?.priceId!;
+    const priceId = (plan.metadata as { stripe?: { priceId?: string } }).stripe!.priceId!;
     const price = await stripe.prices.retrieve(priceId);
     janitor.track('product', typeof price.product === 'string' ? price.product : price.product.id);
 
@@ -162,7 +162,7 @@ describeSandbox('stripe', 'Stripe sandbox · hosted checkout completion (browser
     janitor.track('subscription', providerSubId);
     janitor.track('customer', typeof completed.customer === 'string' ? completed.customer : completed.customer?.id);
 
-    // The genuine completion event — the one that cannot be obtained any other
+    // The genuine completion event, the one that cannot be obtained any other
     // way, and the one `applyCheckoutCompleted` is written against.
     const events = await waitForStripeEvents(stripe, {
       types: ['checkout.session.completed'],
@@ -184,7 +184,7 @@ describeSandbox('stripe', 'Stripe sandbox · hosted checkout completion (browser
     expect(local?.providerSubId).toBe(providerSubId);
     expect((await readEntitlements(fixture)).features.hosted_checkout).toBe(true);
 
-    // A `mode: 'subscription'` completion records NO payment of its own — the
+    // A `mode: 'subscription'` completion records NO payment of its own, the
     // money is `invoice.paid`'s to record, and recording it twice under two
     // provider ids is the double-count `oneTimeCharge` avoids. Pinned here
     // because it is a claim about Stripe's payload, not about our code.

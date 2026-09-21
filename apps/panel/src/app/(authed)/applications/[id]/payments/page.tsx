@@ -1,5 +1,5 @@
 import * as React from 'react';
-import Link from 'next/link';
+import Link from '@/components/Link';
 import { api, type PaymentRow, getApplication } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { formatMoney } from '@/lib/format';
@@ -97,7 +97,7 @@ export default async function PaymentsPage({
       <SectionHeader
         title="Payments"
         count={`(${payments.length === 0 ? 0 : `${offset + 1}–${offset + payments.length}`})`}
-        description="Every payment recorded for this application — subscription invoices and one-time charges, newest first. Amounts are what the provider settled, after any coupon discount."
+        description="Every payment recorded for this application: subscription invoices and one-time charges, newest first. Amounts are what the provider settled, after any coupon discount."
       />
 
       <form className="flex flex-wrap items-end gap-2">
@@ -131,7 +131,7 @@ export default async function PaymentsPage({
             href={`/applications/${id}/payments`}
             className="px-1 py-2 text-sm text-[var(--color-muted-fg)] hover:text-[var(--color-fg)]"
           >
-            filtered — clear
+            filtered (clear)
           </a>
         )}
       </form>

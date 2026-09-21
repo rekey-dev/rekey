@@ -1,6 +1,6 @@
 /**
  * Org-pooled license key delivery (#27). An org-beneficiary subscription
- * provisions ONE pooled license but stores it hash-only — the auto-issued raw
+ * provisions ONE pooled license but stores it hash-only, the auto-issued raw
  * key is discarded and can never be read back. That left org seats
  * provisionable but unusable: nobody could obtain a key to call
  * `licenses/verify`.
@@ -115,7 +115,7 @@ describe('License — org-pooled key delivery (#27)', () => {
       .then((r) => r.json().data as { ok: boolean; reason?: string });
 
   it('operator obtains a usable key for a provisioned org license; verify then succeeds', async () => {
-    // Provision an org-pooled SEATS license — exactly as a webhook activation
+    // Provision an org-pooled SEATS license, exactly as a webhook activation
     // would. The raw key is discarded here (hash-only), so nobody holds it yet.
     const ownerId = await makeEndUser(`own-${Math.random().toString(36).slice(2, 7)}@example.com`);
     const orgId = await makeOrg(ownerId, 'acme');
@@ -127,7 +127,7 @@ describe('License — org-pooled key delivery (#27)', () => {
 
     const pooled = await prisma.license.findFirstOrThrow({ where: { applicationId: appId, organizationId: orgId } });
 
-    // Before the fix this seat is unusable — there is no key to verify with.
+    // Before the fix this seat is unusable, there is no key to verify with.
     const res = await app.inject({ method: 'POST', url: rotateUrl(orgId, pooled.id), headers: auth() });
     expect(res.statusCode).toBe(200);
     const body = res.json().data as { rawKey: string; activationsReset: number; license: { id: string; seatsAllowed: number } };
@@ -180,7 +180,7 @@ describe('License — org-pooled key delivery (#27)', () => {
     const orgId = await makeOrg(euId, 'solo-org');
     const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
     const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: euId } });
-    // Personal license — no organizationId.
+    // Personal license, no organizationId.
     const personal = await licensesService.issue({ application, endUser, kind: 'PERPETUAL' });
 
     const res = await app.inject({ method: 'POST', url: rotateUrl(orgId, personal.license.id), headers: auth() });

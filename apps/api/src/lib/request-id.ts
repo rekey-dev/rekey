@@ -25,7 +25,7 @@ export const MAX_INBOUND_REQUEST_ID_LENGTH = 64;
 
 /**
  * Characters kept from an inbound id. Deliberately narrow: no whitespace, no
- * control characters, no quotes/brackets — nothing that can forge a field
+ * control characters, no quotes/brackets, nothing that can forge a field
  * boundary in a log line or split a header. Covers UUID, ULID, traceparent,
  * and base64url shapes.
  */

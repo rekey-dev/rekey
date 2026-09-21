@@ -1,5 +1,12 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": [
+    "tsconfig.base.json",
+    "prisma/schema.prisma",
+    "prisma/migrations/**",
+    "eslint.config.mjs",
+    "tools/eslint/**"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -12,13 +19,15 @@
       "persistent": true,
       "passThroughEnv": ["*"]
     },
-    "lint": {},
+    "lint": {
+      "dependsOn": ["^build"]
+    },
     "typecheck": {
       "dependsOn": ["^build"]
     },
     "test": {
       "dependsOn": ["^build"],
-      "env": ["TEST_DATABASE_URL", "DATABASE_URL", "REDIS_URL", "SUPER_ADMIN_KEY", "JWT_SECRET"]
+      "env": ["TEST_DATABASE_URL", "REDIS_URL", "SUPER_ADMIN_KEY", "JWT_SECRET"]
     }
   }
 }

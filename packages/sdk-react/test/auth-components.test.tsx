@@ -1,5 +1,5 @@
 /**
- * Auth widgets — <SignIn>, <SignUp>, <UserButton>, and the nav buttons.
+ * Auth widgets, <SignIn>, <SignUp>, <UserButton>, and the nav buttons.
  *
  * These are "render + delegate": they render forms wired to the integrator's
  * Server Actions, never calling the API themselves. So the contract we pin is

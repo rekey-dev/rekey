@@ -5,7 +5,7 @@
  * operator-supplied string and, respectively, an inline `style` attribute and
  * an `<img src>` on a page shown to that operator's paying customers
  * (`[slug]/layout.tsx`). React escapes the attribute value, so there is no
- * attribute breakout — but nothing stops extra CSS declarations riding along in
+ * attribute breakout, but nothing stops extra CSS declarations riding along in
  * a colour, or a `javascript:` / `data:` URL in a logo.
  *
  * Everything here is a pure function, so this file needs no fixtures, no

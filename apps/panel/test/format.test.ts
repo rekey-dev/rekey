@@ -1,8 +1,8 @@
 /**
  * `describeUserAgent`, the status maps, and the money/percent formatters.
  *
- * `describeUserAgent` is an ORDER-DEPENDENT regex cascade — Edge and Chrome
- * both claim "Chrome", and everything Chromium claims "Safari" — so it is
+ * `describeUserAgent` is an ORDER-DEPENDENT regex cascade, Edge and Chrome
+ * both claim "Chrome", and everything Chromium claims "Safari", so it is
  * exactly the kind of function a well-meaning reorder silently breaks. Its
  * first branch is not cosmetic: the sessions page tells operators to "revoke
  * any you don't recognize", and the panel's own server-side fetch shows up

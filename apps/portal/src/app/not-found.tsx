@@ -1,12 +1,12 @@
 /**
- * Portal 404 — the page a paying customer sees when a portal address doesn't
+ * Portal 404, the page a paying customer sees when a portal address doesn't
  * resolve: unknown slug, or an app whose operator hasn't enabled the hosted
  * portal. The API answers both cases identically (existence-hiding), so this
  * page can't tell them apart and deliberately doesn't try.
  *
  * Audience is the merchant's customer, not the operator: no Rekey branding
  * beyond a footer credit, no error codes, and none of the API's operator "fix"
- * hint ("enable the portal in Panel → …") — that text is for the operator.
+ * hint ("enable the portal in Panel → …"), that text is for the operator.
  *
  * Lives at the app root, not under [slug]: notFound() is thrown by
  * [slug]/layout.tsx itself, so the boundary that catches it has to be the

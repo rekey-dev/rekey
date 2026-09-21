@@ -2,22 +2,22 @@
  * Operator-side MCP routes mounted at `/api/v1/tenant/mcp`.
  *
  * Auth: `resolveOperatorMcpBearer` (see `bearer-auth.ts`) accepts EITHER
- * credential on `Authorization: Bearer` —
+ * credential on `Authorization: Bearer`,
  *
  *   1. an operator personal-access-token (`rp_op_…`) carrying the `read` scope
  *      (Phase 1), or
  *   2. an OAuth-issued access JWT (`typ: 'op_mcp_access'`) minted by this
- *      deployment's operator-MCP authorization server (Phase 2, already live —
+ *      deployment's operator-MCP authorization server (Phase 2, already live,
  *      see `oauth.routes.ts` in this directory).
  *
  * One bearer at a time; credentials are never chained. Both paths decorate
  * `req.tenantUser` / `req.tenantId` / `req.tenantRole` identically, re-check the
- * operator's membership against the DB on every request — so a credential
+ * operator's membership against the DB on every request, so a credential
  * minted while an operator was a workspace member stops working the moment
- * they're removed — and 401 uniformly on any failure.
+ * they're removed, and 401 uniformly on any failure.
  *
  * The MCP endpoint accepts a single JSON-RPC 2.0 message (object body) per
- * POST and responds with `application/json` — the Streamable HTTP transport
+ * POST and responds with `application/json`, the Streamable HTTP transport
  * shape MCP clients negotiate. GET on the same URL returns 405 + an `Allow:
  * POST` hint so curl-typers see the explicit method violation rather than a
  * silent 404.
@@ -39,7 +39,7 @@
  *     token `mcp:operator:write`, to reach the write tools.
  *   - Workspace scoping: a PAT is pinned to one workspace
  *     (`TenantApiToken.tenantId`); an OAuth token carries the consented `tid`.
- *     Either way the isolation is each handler filtering on `ctx.tenantId` —
+ *     Either way the isolation is each handler filtering on `ctx.tenantId`,
  *     a convention to uphold, not a structural guarantee.
  */
 
@@ -48,27 +48,32 @@ import { RekeyError } from '../../lib/error.js';
 import { requestContext } from '../../lib/security-events.js';
 import { resolveOperatorMcpBearer } from './bearer-auth.js';
 import { scopeHasWrite, scopeHasAdmin } from './oauth.service.js';
+import { NO_SCOPES, intersectScopes, mcpTokenScopes } from '../../lib/operator-scopes.js';
 import { handleOperatorMcpMessage, type JsonRpcMessage } from './tenant-mcp-server.js';
 import { errs, type JsonSchema } from '../../lib/openapi.js';
 
-// This whole plugin only mounts when OPERATOR_MCP_ENABLED is on (see app.ts) —
-// there is no per-request feature-toggle 404 to document here, unlike the
-// per-Application MCP module. The `onRequest` hook (`resolveOperatorMcpBearer`)
+// This plugin only mounts when OPERATOR_MCP_ENABLED is on (see app.ts), so
+// unlike the per-Application MCP module there is no per-request feature-
+// toggle 404 to document here. The `onRequest` hook (`resolveOperatorMcpBearer`)
 // runs before every handler in this file and throws the Rekey-enveloped 401
 // below on any auth failure.
 
-const AUTH_401 = {
+const AUTH_ERRS = {
   401:
     'OPERATOR_MCP_UNAUTHORIZED — no `Authorization: Bearer` header, or the presented PAT / ' +
     'OAuth access token is unknown, revoked, expired, wrong-audience, or belongs to an ' +
     'operator no longer a member of the token\'s workspace.',
+  403:
+    'OPERATOR_MCP_DISABLED — the credential is valid but its workspace has switched the ' +
+    'operator MCP server off. The one case that is not a generic 401: the caller is a ' +
+    'confirmed member, and the fix names who can turn it back on.',
 };
 
 const JsonRpcSuccess: JsonSchema = {
   type: 'object',
   properties: {
     jsonrpc: { type: 'string', enum: ['2.0'] },
-    id: { description: 'Echoes the request id — string, number, or null.' },
+    id: { description: 'Echoes the request id, string, number, or null.' },
     result: {
       description:
         'Present on success. Shape depends on the method (initialize / tools/list / tools/call / ping).',
@@ -81,7 +86,7 @@ const JsonRpcFailure: JsonSchema = {
   type: 'object',
   properties: {
     jsonrpc: { type: 'string', enum: ['2.0'] },
-    id: { description: 'Echoes the request id — string, number, or null.' },
+    id: { description: 'Echoes the request id, string, number, or null.' },
     error: {
       type: 'object',
       properties: { code: { type: 'integer' }, message: { type: 'string' } },
@@ -93,11 +98,11 @@ const JsonRpcFailure: JsonSchema = {
 
 /**
  * Unlike the per-Application MCP endpoint, this route accepts one JSON-RPC
- * message per POST (never a batch array) — see `handleOperatorMcpMessage`,
+ * message per POST (never a batch array), see `handleOperatorMcpMessage`,
  * which takes a single `JsonRpcMessage`.
  */
 const JsonRpcResponse: JsonSchema = {
-  description: 'A single JSON-RPC 2.0 response — a `result` or an `error`, never both.',
+  description: 'A single JSON-RPC 2.0 response, a `result` or an `error`, never both.',
   oneOf: [JsonRpcSuccess, JsonRpcFailure],
 };
 
@@ -130,24 +135,24 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
           'workspace membership is re-checked against the database on every request, and the ' +
           'tools can only ever see that one workspace.\n\n' +
           '**Read tools** need nothing beyond authenticating. **Write tools** additionally ' +
-          'require write capability on the presented credential — `mcp:operator:write` in the ' +
-          'OAuth scope, or the `applications:write` scope on a PAT — AND an operator role that ' +
+          'require write capability on the presented credential, `mcp:operator:write` in the ' +
+          'OAuth scope, or the `applications:write` scope on a PAT, AND an operator role that ' +
           'clears the tool’s floor (ADMIN by default). The gate filters `tools/list` as well as ' +
           '`tools/call`, so an under-privileged credential does not even see them. ' +
           'Destructive / financial tools are gated further on `mcp:operator:admin`, which only ' +
-          'the OAuth path can carry — a PAT can never reach them.',
+          'the OAuth path can carry, a PAT can never reach them.',
         response: {
           200: { description: 'JSON-RPC response.', ...JsonRpcResponse },
           204: {
-            description: 'The request was a JSON-RPC notification (no `id`) — accepted, no reply body.',
+            description: 'The request was a JSON-RPC notification (no `id`), accepted, no reply body.',
           },
-          ...errs(AUTH_401),
+          ...errs(AUTH_ERRS),
         },
       },
     },
     async (req, reply) => {
       // Decorations from `resolveOperatorToken`. Guard against any future
-      // misconfiguration that would bypass auth (defence in depth — the
+      // misconfiguration that would bypass auth (defence in depth, the
       // hook above already 401s on failure).
       if (!req.tenantUser || !req.tenantId) {
         throw new RekeyError({
@@ -158,8 +163,7 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
         });
       }
       // `WWW-Authenticate` is set in the auth hook before it can throw, so it
-      // rides every 401 as well as this success reply. It used to be set only
-      // here, which meant the one response that needed it never carried it.
+      // rides every 401 as well as this success reply (see bearer-auth.ts).
       //
       // Write capability is whichever the resolved credential carries:
       //   - OAuth JWT: the granted `scope` string includes `mcp:operator:write`.
@@ -168,7 +172,7 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
       const canWrite = req.operatorMcpClaims
         ? scopeHasWrite(req.operatorMcpClaims.scope)
         : (req.operatorTokenScopes ?? []).includes('applications:write');
-      // Admin (destructive/financial) is OAuth-scope-only — a PAT never carries
+      // Admin (destructive/financial) is OAuth-scope-only, a PAT never carries
       // it. An operator must run the OAuth consent flow and grant
       // `mcp:operator:admin` explicitly for these tools to be reachable.
       const canAdmin = req.operatorMcpClaims
@@ -187,6 +191,12 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
           tenantMembershipId: req.tenantMembershipId,
           canWrite,
           canAdmin,
+          // Membership ceiling ∩ token authority. The PAT path already
+          // intersected in bearer-auth; the OAuth path's authority is its
+          // write flag, applied here where that flag is computed.
+          scopes: req.operatorMcpClaims
+            ? intersectScopes(req.tenantScopes ?? NO_SCOPES, mcpTokenScopes(canWrite))
+            : (req.tenantScopes ?? NO_SCOPES),
           ip,
           userAgent,
         },
@@ -214,13 +224,13 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
           'runs first, so an unauthenticated GET gets 401 rather than this 405.',
         response: {
           // NOTE: hand-rolled in the handler as `{success: false, error: {code, message,
-          // fix}}` — the shape of the Rekey envelope, but WITHOUT the `requestId` field
+          // fix}}`, the shape of the Rekey envelope, but WITHOUT the `requestId` field
           // every other error response carries (it isn't built via RekeyError/the error
           // handler, just written inline). Declared literally rather than via
           // `ref('ErrorResponse')`/`errs()`, which would incorrectly promise a
-          // `requestId`. See the report for this file.
+          // `requestId`.
           405: {
-            description: 'METHOD_NOT_ALLOWED — use POST for MCP JSON-RPC.',
+            description: 'METHOD_NOT_ALLOWED, use POST for MCP JSON-RPC.',
             type: 'object',
             properties: {
               success: { type: 'boolean', enum: [false] },
@@ -236,12 +246,12 @@ export async function tenantMcpRoutes(app: FastifyInstance): Promise<void> {
             },
             required: ['success', 'error'],
           },
-          ...errs(AUTH_401),
+          ...errs(AUTH_ERRS),
         },
       },
     },
     async (_req, reply) => {
-      // Set the header, then THROW — a hand-built `reply.send({ success:
+      // Set the header, then THROW, a hand-built `reply.send({ success:
       // false, error: {...} })` never reaches `rekeyErrorHandler` and so
       // omits `requestId`. Headers already on the reply survive the throw.
       reply.header('Allow', 'POST');

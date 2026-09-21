@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
 
@@ -29,9 +30,9 @@ export function EntitlementForm({
   const [kind, setKind] = React.useState<Kind>('FEATURE');
 
   return (
-    <form action={action} className="space-y-3">
+    <ActionForm action={action} className="space-y-3">
       <p className="text-xs text-[var(--color-muted-fg)]">
-        Bundle items onto this plan — feature flags, extra licenses, usage allowances, or bonus
+        Bundle items onto this plan: feature flags, extra licenses, usage allowances, or bonus
         credits. Optional.
       </p>
       {error && (
@@ -131,8 +132,8 @@ export function EntitlementForm({
         usage past the included units per calendar month is refused (402
         USAGE_QUOTA_EXCEEDED). Priced, the excess is charged to the
         subscriber&apos;s credit balance, and a balance too low is refused the
-        same way — never billed into the negative.
+        same way, and never billed into the negative.
       </p>
-    </form>
+    </ActionForm>
   );
 }

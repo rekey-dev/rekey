@@ -4,7 +4,7 @@
  * Why this exists: the brute-force store now fails closed, so credential paths
  * answer 503 rather than running unprotected. That means a Redis outage shows up
  * to end users as sign-in failures, and before this nothing told the operator
- * why — the only signal was a super-admin services page they had to think to
+ * why, the only signal was a super-admin services page they had to think to
  * open, on a deployment they might not even run.
  *
  * Reads `/health/ready`, which reports `db` and `redis` separately. Cached
@@ -28,7 +28,7 @@ export async function DependencyBanner(): Promise<React.JSX.Element | null> {
   const ready = await readReady();
   if (!ready) return null;
 
-  // `not_configured` is not an outage — it is what a dev stack without Redis
+  // `not_configured` is not an outage, it is what a dev stack without Redis
   // reports, and flagging it would train operators to ignore this banner.
   const down = (['db', 'redis'] as const).filter((k) => ready[k] === 'unreachable');
   if (down.length === 0) return null;

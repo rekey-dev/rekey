@@ -64,7 +64,6 @@ describe('Audit — credential + auth-config mutations write SecurityEvents', ()
   ): Promise<Array<{ type: string; applicationId: string | null; metadata: unknown }>> {
     const deadline = Date.now() + 5000;
     let rows: Array<{ type: string; applicationId: string | null; metadata: unknown }> = [];
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       const log = await app.inject({
         method: 'GET',

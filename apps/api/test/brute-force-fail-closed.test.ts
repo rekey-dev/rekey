@@ -211,7 +211,7 @@ describe('the display-only lock read fails open, and says so', () => {
 
 describe('the auth rate-limit tier fails closed too', () => {
   it('marks the auth ceiling and per-route auth caps skipOnError: false', async () => {
-    // The global limiter keeps `skipOnError: true` on purpose — it protects
+    // The global limiter keeps `skipOnError: true` on purpose, it protects
     // throughput, and failing it closed turns a Redis restart into a full
     // outage. The auth tier is different: `forgot-password` and
     // `magic-link/request` have no brute-force scope behind them (they are not

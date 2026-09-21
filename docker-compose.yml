@@ -48,17 +48,24 @@ services:
       retries: 10
 
   redis:
-    image: redis:7-alpine
+    image: valkey/valkey:8.1-alpine
     restart: unless-stopped
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
     # AOF persistence so BullMQ webhook-delivery jobs (delayed retries) survive a
-    # Redis restart. The DB retry poller backstops any gap; durable queue state
+    # restart. The DB retry poller backstops any gap; durable queue state
     # avoids needless re-deliveries on a bounce.
+    #
+    # This mounts a NEW volume (rekey_valkey), not the old rekey_redis one: a
+    # Redis 7.4 AOF/RDB file (anything written since the redis:7-alpine tag
+    # started resolving to 7.4) makes Valkey refuse to start, which would turn
+    # this image swap into a boot-time outage. Starting empty is safe — see
+    # "Why Valkey, not Redis" in DEPLOY.md for exactly what resets and why.
+    # `docker volume rm rekey_redis` once you've confirmed you don't need it.
     command:
       [
-        "redis-server",
+        "valkey-server",
         "--appendonly",
         "yes",
         "--requirepass",
@@ -69,13 +76,13 @@ services:
       # Redis on a public interface is a trivially readable session/lockout store.
       - "127.0.0.1:6379:6379"
     volumes:
-      - rekey_redis:/data
+      - rekey_valkey:/data
     environment:
-      # redis-cli reads this, so the healthcheck below doesn't put the password
+      # valkey-cli reads this, so the healthcheck below doesn't put the password
       # in a command line that shows up in `docker inspect`/`ps` output.
       REDISCLI_AUTH: ${REDIS_PASSWORD}
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -150,6 +157,18 @@ services:
       # an anonymous registration's only prize is an ALLOWLISTED redirect_uri,
       # which is the one ingredient a consent-phishing link needs.
       OPERATOR_MCP_DYNAMIC_REGISTRATION: ${OPERATOR_MCP_DYNAMIC_REGISTRATION:-open}
+      # Believe X-Forwarded-For from the panel and portal containers ONLY (their
+      # fixed addresses on the rekey-edge network below), so operator sign-in limits key on the
+      # operator's real IP instead of the panel's one address, which let anyone
+      # spraying the login page lock every operator out. Not a hop count: the
+      # API port is published, and a hop count would believe the header from
+      # any caller that reaches it. If you expose the panel itself with
+      # BIND_ADDRESS=0.0.0.0 and NO proxy in front of it, set
+      # TRUSTED_PROXIES=false: the panel forwards whatever X-Forwarded-For it
+      # was sent, and with no proxy of yours in between, the client wrote it.
+      # docs/rate-limits.md.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-${REKEY_PANEL_EDGE_IP:-10.203.53.10},${REKEY_PORTAL_EDGE_IP:-10.203.53.11}}
+    networks: [default, rekey-edge]
     ports:
       # Loopback by default, like postgres and redis above — but for a
       # different reason. The datastores are loopback because nothing outside
@@ -195,6 +214,18 @@ services:
       # into Stripe). MUST be the public origin, not the in-cluster REKEY_URL.
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3030}
       PANEL_URL:   ${PANEL_URL:-http://localhost:3031}
+      # Published directly (no proxy in front), so no forwarded header is
+      # believed and the panel reports the socket address to the API.
+      PANEL_TRUSTED_PROXIES: ${PANEL_TRUSTED_PROXIES:-0}
+      # Optional. Sent to the API as X-Rekey-Caller-Secret so it can believe the
+      # client IP the panel forwards; must match the API's value.
+      INTERNAL_CALLER_SECRET: ${INTERNAL_CALLER_SECRET:-}
+    # A fixed address on the rekey-edge network, so the API can trust exactly
+    # this container's X-Forwarded-For (TRUSTED_PROXIES above) and nothing
+    # else. The panel only talks to the API, so it needs no other network.
+    networks:
+      rekey-edge:
+        ipv4_address: ${REKEY_PANEL_EDGE_IP:-10.203.53.10}
     ports:
       # Loopback by default — see the api service above.
       - "${BIND_ADDRESS:-127.0.0.1}:3031:3031"
@@ -218,10 +249,28 @@ services:
       NODE_ENV: production
       REKEY_URL: http://api:3030
       PORTAL_BASE_URL: http://localhost:3050
+      # Unset here: nothing sits in front of this portal, so any
+      # X-Forwarded-For it receives was written by the client. Set it to the
+      # number of proxies in front if you add one. docs/rate-limits.md.
+      PORTAL_TRUSTED_PROXY_HOPS: ${PORTAL_TRUSTED_PROXY_HOPS:-}
+    networks:
+      rekey-edge:
+        ipv4_address: ${REKEY_PORTAL_EDGE_IP:-10.203.53.11}
     ports:
       # Loopback by default — see the api service above.
       - "${BIND_ADDRESS:-127.0.0.1}:3050:3050"
 
 volumes:
   rekey_postgres:
-  rekey_redis:
+  rekey_valkey:
+
+networks:
+  # The panel and portal network (see TRUSTED_PROXIES on the api service). A
+  # fixed subnet because the API trusts two fixed addresses on it, chosen
+  # outside Docker's default address pools (172.17-31.x, 192.168.x). If it
+  # collides with a network you already have (a second copy of this stack,
+  # say), set REKEY_EDGE_SUBNET and the two REKEY_*_EDGE_IP addresses inside it.
+  rekey-edge:
+    ipam:
+      config:
+        - subnet: ${REKEY_EDGE_SUBNET:-10.203.53.0/28}

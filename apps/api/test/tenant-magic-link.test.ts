@@ -1,7 +1,7 @@
 /**
  * Operator magic-link (passwordless email sign-in). A 15-min, single-use,
  * hash-only token minted by /tenant/auth/magic-link/request and consumed by
- * /verify (which mints a session). Enumeration-safe — the request never reveals
+ * /verify (which mints a session). Enumeration-safe, the request never reveals
  * whether the email maps to an operator. Mirrors the password-reset + end-user
  * magic-link test shapes.
  */
@@ -75,7 +75,7 @@ describe('Operator magic-link sign-in', () => {
   });
 
   it('is enumeration-safe: unknown email returns the same body, not just the same shape', async () => {
-    // This assertion used to read `delivered: false`, under this same name —
+    // This assertion used to read `delivered: false`, under this same name,
     // pinning the oracle it claimed to rule out. A known address answered
     // `true` and an unknown one `false`, so one request per address enumerated
     // the deployment's operators. `delivered` is now constant; see
@@ -100,7 +100,7 @@ describe('Operator magic-link sign-in', () => {
   it('rejects an expired token', async () => {
     const email = await makeOperator('expired');
     const token = await request(email).then((r) => (r.json().data as { token: string }).token);
-    // Force expiry (only this token exists — the suite truncates per test).
+    // Force expiry (only this token exists, the suite truncates per test).
     await prisma.tenantMagicLinkToken.updateMany({ data: { expiresAt: new Date(Date.now() - 1000) } });
 
     const res = await verify(token);

@@ -5,7 +5,7 @@
  *       same end as /mfa/disable without passing its guard.
  *   3.  Both passkey ceremonies asked for user verification as "preferred" and
  *       verified with the requirement off, while passkey auth mints a session
- *       directly — so a UV=0 assertion downgraded password + TOTP to a touch.
+ *       directly, so a UV=0 assertion downgraded password + TOTP to a touch.
  *   4.  Organization invitations were not bound to the invited email: any
  *       authenticated account could accept an OWNER invite.
  *   5.  `impersonation_audits.endedAt` was never written, so an impersonation
@@ -149,7 +149,7 @@ describe('end-user auth hardening', () => {
           'x-rekey-user-token': f.endUserToken,
         },
       });
-      // Was 201 with a fresh secret and `enrolledAt: null` — the account's real
+      // Was 201 with a fresh secret and `enrolledAt: null`, the account's real
       // authenticator silently stopped counting, which is what /mfa/disable
       // demands a code to prevent.
       expect(rebind.statusCode).toBe(401);
@@ -188,7 +188,7 @@ describe('end-user auth hardening', () => {
           'x-rekey-user-token': f.endUserToken,
         },
       });
-      // The customer's backend is the trusted gate — same split /mfa/disable
+      // The customer's backend is the trusted gate, same split /mfa/disable
       // already makes. Changing this would break published SDK signatures.
       expect(res.statusCode).toBe(201);
     });
@@ -207,7 +207,7 @@ describe('end-user auth hardening', () => {
       expect(res.statusCode).toBe(200);
       const { options } = res.json().data as { options: { userVerification: string } };
       // Was 'preferred', and the verifier passed `requireUserVerification: false`
-      // — so an authenticator that skipped the PIN/biometric still produced a
+      //, so an authenticator that skipped the PIN/biometric still produced a
       // full session via `issuePair`, replacing password + TOTP with a touch.
       expect(options.userVerification).toBe('required');
     });
@@ -290,7 +290,7 @@ describe('end-user auth hardening', () => {
         await prisma.organizationMembership.count({ where: { organizationId: org.id } }),
       ).toBe(1);
 
-      // The invited address still works — the token was not burned by the
+      // The invited address still works, the token was not burned by the
       // refused attempt.
       const invited = await app
         .inject({
@@ -348,7 +348,7 @@ describe('end-user auth hardening', () => {
       expect((ended.json().data as { ended: number }).ended).toBe(1);
 
       // `endedAt` was documented in prisma/schema.prisma and written by no code
-      // path at all — this is the first thing that writes it.
+      // path at all, this is the first thing that writes it.
       const row = await prisma.impersonationAudit.findUniqueOrThrow({
         where: { id: impersonationId },
       });
@@ -404,7 +404,7 @@ describe('end-user auth hardening', () => {
       });
       expect(stillWorks.statusCode).toBe(200);
 
-      // Reads are untouched — support work is what impersonation is for.
+      // Reads are untouched, support work is what impersonation is for.
       const read = await asImpersonator('POST', '/api/v1/auth/mfa/setup');
       expect(read.statusCode).toBe(403);
       const me = await app.inject({

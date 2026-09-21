@@ -11,7 +11,7 @@
  *
  * Deliberately does NOT disable the submit button. An earlier version reached
  * into `form.elements` from an effect to toggle `disabled` + classes, which
- * fights React for ownership of a button it doesn't render — fragile the moment
+ * fights React for ownership of a button it doesn't render, fragile the moment
  * submission stops always ending in a redirect. Inline feedback plus the
  * server's own re-check (which preserves the reset token on the bounce-back) is
  * both simpler and safe with JS disabled.

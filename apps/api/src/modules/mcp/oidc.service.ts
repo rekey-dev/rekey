@@ -5,7 +5,7 @@
  * built to front the hosted MCP server) doubles as an OpenID Provider when the
  * Application sets `authConfig.oidcEnabled`. This file holds only the OIDC half:
  * the discovery document, the identity claims, and ID Token minting. The grant
- * itself — clients, authorization codes, PKCE, the token endpoint — is the same
+ * itself, clients, authorization codes, PKCE, the token endpoint, is the same
  * one MCP uses and is NOT duplicated here.
  *
  * Standards:
@@ -33,7 +33,7 @@ export const EMAIL_SCOPE = 'email';
 /** Every OIDC scope this provider recognises, in metadata-advertised order. */
 export const OIDC_SCOPES_SUPPORTED = [OPENID_SCOPE, PROFILE_SCOPE, EMAIL_SCOPE] as const;
 
-/** The ID Token's own structural claims — emitted for every grant. */
+/** The ID Token's own structural claims, emitted for every grant. */
 const STRUCTURAL_CLAIMS = [
   'iss',
   'sub',
@@ -59,7 +59,7 @@ const CLAIMS_BY_SCOPE: Record<string, readonly string[]> = {
 };
 
 export interface OidcDiscoveryInput {
-  /** The authorization server's issuer URL — identical to `iss` on ID Tokens. */
+  /** The authorization server's issuer URL, identical to `iss` on ID Tokens. */
   issuer: string;
   /** Deployment-wide JWKS (RS256 public keys); there is exactly one. */
   jwksUri: string;
@@ -78,7 +78,7 @@ export interface OidcDiscoveryInput {
  * not from a fixed list.
  *
  * A hint rather than a promise for any given user (an Application that never
- * stores a display name simply never emits `name`) — but it must not name
+ * stores a display name simply never emits `name`), but it must not name
  * claims that are unreachable in principle. `email` is grantable only when the
  * Application requires verified addresses, so an Application that does not must
  * not list `email` here either; a client that reads it and keys accounts on the
@@ -119,12 +119,12 @@ export function oidcDiscoveryDocument(input: OidcDiscoveryInput): Record<string,
     response_types_supported: ['code'],
     response_modes_supported: ['query'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
-    // `public` — `sub` is the EndUser id, the same value for every client of
+    // `public`, `sub` is the EndUser id, the same value for every client of
     // this Application. Pairwise would buy nothing: EndUser rows are already
     // per-Application, so two Applications never share a subject identifier.
     subject_types_supported: ['public'],
     id_token_signing_alg_values_supported: ['RS256'],
-    // Public clients proving themselves with PKCE — no client secrets exist.
+    // Public clients proving themselves with PKCE, no client secrets exist.
     token_endpoint_auth_methods_supported: ['none'],
     code_challenge_methods_supported: ['S256'],
     claims_supported: claimsSupported(input.scopesSupported),
@@ -153,8 +153,8 @@ export function hasScope(scope: string | undefined | null, want: string): boolea
  * response); every other claim is gated on the scope that authorises it, so a
  * client granted bare `openid` learns an opaque identifier and nothing else.
  *
- * Returns nothing for an erased end-user's PII by construction — erasure nulls
- * `metadata` and tombstones the email — but callers reject those tokens outright
+ * Returns nothing for an erased end-user's PII by construction, erasure nulls
+ * `metadata` and tombstones the email, but callers reject those tokens outright
  * (see the `/userinfo` handler) rather than relying on that.
  */
 export function identityClaims(
@@ -166,7 +166,7 @@ export function identityClaims(
 
   // The address is asserted only when somebody proved it. `email` is grantable
   // only on an Application with `requireEmailVerification` (see
-  // `supportedScopes`), so in practice this cannot be false — but the granted
+  // `supportedScopes`), so in practice this cannot be false, but the granted
   // scope string rides a 30-day refresh chain, and an operator who switches the
   // requirement back off must not thereby start shipping unproven addresses
   // down tokens that were already issued. `email_verified` is consequently
@@ -178,7 +178,7 @@ export function identityClaims(
   }
 
   if (granted.has(PROFILE_SCOPE)) {
-    // Operator-written namespace only — the end-user's own free-form metadata
+    // Operator-written namespace only, the end-user's own free-form metadata
     // is not an identity assertion. See lib/oidc-profile.ts.
     Object.assign(claims, profileClaims(user.metadata));
     // Not from metadata: `updated_at` is a real column, and OIDC defines it as
@@ -193,7 +193,7 @@ export interface IssueIdTokenForGrantInput {
   issuer: string;
   clientId: string;
   user: Pick<EndUser, 'id' | 'email' | 'emailVerified' | 'metadata' | 'updatedAt'>;
-  /** The GRANTED scope string — never the requested one. */
+  /** The GRANTED scope string, never the requested one. */
   scope: string;
   authTime: Date;
   nonce?: string | undefined;

@@ -1,11 +1,11 @@
 /**
- * Operator MCP WRITE tools — phase 1 (reversible workspace configuration).
+ * Operator MCP WRITE tools, phase 1 (reversible workspace configuration).
  *
  * Most tools here mutate, and those are listed / dispatchable only when the
  * caller's token carries write capability (`mcp:operator:write` for the OAuth
  * path, `applications:write` for a PAT) AND their role clears the tool's
  * `minRole` (default ADMIN). The dispatcher in `tenant-mcp-server.ts` enforces
- * both before a handler runs — but every handler ALSO re-scopes by tenant, so a
+ * both before a handler runs, but every handler ALSO re-scopes by tenant, so a
  * dispatch bug can't become a cross-workspace write.
  *
  * ## FOUR TOOLS IN THIS FILE ARE READS, AND THE PARAGRAPH ABOVE IS NOT ABOUT THEM
@@ -22,7 +22,7 @@
  * reads were scoped by. The answer was "the workspace, and nothing else", while
  * their REST twins and the read-tool set both enforce per-application grants.
  *
- * App-targeted authorization for EVERY tool in this file — read and write —
+ * App-targeted authorization for EVERY tool in this file, read and write,
  * lives in `loadAppInTenant` below. Read its docstring before adding a tool
  * that takes an `applicationId`.
  *
@@ -31,13 +31,13 @@
  * validation, slug rules, provider registration, and secret generation behave
  * identically to the panel. Every successful write emits a `securityEvent`.
  *
- * Most tools here are reversible. The two that are not — `configure_billing_provider`
+ * Most tools here are reversible. The two that are not, `configure_billing_provider`
  * (the secret travels through the MCP client) and `cancel_subscription`
- * (irreversible) — carry `admin: true`, which demands the `mcp:operator:admin`
+ * (irreversible), carry `admin: true`, which demands the `mcp:operator:admin`
  * scope on top of the role check rather than plain write capability.
  * `remove_member` is exposed as an ordinary write tool because re-inviting undoes
  * it. Still deliberately absent: delete application, refund, and webhook-secret
- * rotation — no undo, and no confirmation step an agent can be trusted to have
+ * rotation, no undo, and no confirmation step an agent can be trusted to have
  * surfaced to a human.
  */
 
@@ -58,10 +58,14 @@ import { billingService } from '../billing/billing.service.js';
 import {
   billingCredentialsService,
   type BillingMode,
+  type BillingProviderName,
 } from '../billing/credentials.service.js';
+import { getModule, registryNames } from '../billing/providers/registry.js';
 import { tenantWorkspacesService } from '../tenant-workspaces/tenant-workspaces.service.js';
 import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
+import { devicesService } from '../devices/devices.service.js';
+import { assertEndUserInApplication } from '../../lib/end-users.js';
 import {
   accessibleApplicationIds,
   type OperatorTool,
@@ -89,17 +93,17 @@ async function membershipIdInTenant(tenantId: string, tenantUserId: string): Pro
 }
 
 /**
- * Load an application and assert the caller may reach it — same workspace AND
+ * Load an application and assert the caller may reach it, same workspace AND
  * within their per-application grants.
  *
  * `applicationsService.get` is NOT tenant-scoped (it fetches by id alone), so
- * every app-targeted tool MUST funnel through here — otherwise an operator
+ * every app-targeted tool MUST funnel through here, otherwise an operator
  * could pass another tenant's applicationId and mutate it. The not-found,
  * wrong-tenant and not-granted cases return the SAME error so the caller can't
  * probe which application ids exist outside what they may see.
  *
  * The GRANT half was missing, and it mattered for the four READ tools that live
- * in this file — `list_plans`, `list_plan_entitlements`, `list_usage_meters`,
+ * in this file, `list_plans`, `list_plan_entitlements`, `list_usage_meters`,
  * `list_api_keys`. They carry neither `write` nor `admin` nor a `minRole`, so
  * the dispatcher in `tenant-mcp-server.ts` leaves them open to any role, and a
  * workspace MEMBER with zero grants could read the plan and pricing catalogue
@@ -111,7 +115,7 @@ async function membershipIdInTenant(tenantId: string, tenantUserId: string): Pro
  *
  * `accessibleApplicationIds` models `need: 'read'` and only that. It ignores
  * `ApplicationGrant.role` (an `APP_VIEWER` is in the set) and it hands the whole
- * workspace to a `legacyWorkspaceRead` MEMBER — both of which `ensureAppAccess`
+ * workspace to a `legacyWorkspaceRead` MEMBER, both of which `ensureAppAccess`
  * refuses for a WRITE (see `legacyWriteDenied` / `grantDenied` in
  * `lib/app-access.ts`).
  *
@@ -124,7 +128,7 @@ async function membershipIdInTenant(tenantId: string, tenantUserId: string): Pro
  * `ensureAppAccess` rather than assuming it already covers you.
  *
  * The grandfathered `legacyWorkspaceRead` exception survives here deliberately,
- * because it survives over REST too — this is parity, not a gap.
+ * because it survives over REST too, this is parity, not a gap.
  */
 async function loadAppInTenant(
   ctx: OperatorToolContext,
@@ -189,7 +193,142 @@ function assertOrganizationsEnabled(app: Application): void {
   }
 }
 
+/** Shared by the device tools: the end-user must be in an app the operator can read. */
+async function loadEndUserInApp(
+  ctx: OperatorToolContext,
+  applicationId: string,
+  endUserId: string,
+): Promise<Application> {
+  const app = await loadAppInTenant(ctx, applicationId);
+  await assertEndUserInApplication(app.id, endUserId, 'Use get_end_user to find the id.');
+  return app;
+}
+
+function deviceView(d: {
+  id: string;
+  fingerprint: string;
+  label: string | null;
+  status: string;
+  firstSeenAt: Date;
+  lastSeenAt: Date;
+  lastSeenIp: string | null;
+  releasedAt: Date | null;
+  blockedAt: Date | null;
+  blockedReason: string | null;
+}) {
+  return {
+    id: d.id,
+    fingerprint: d.fingerprint,
+    label: d.label,
+    status: d.status,
+    firstSeenAt: d.firstSeenAt.toISOString(),
+    lastSeenAt: d.lastSeenAt.toISOString(),
+    lastSeenIp: d.lastSeenIp,
+    releasedAt: d.releasedAt?.toISOString() ?? null,
+    blockedAt: d.blockedAt?.toISOString() ?? null,
+    blockedReason: d.blockedReason,
+  };
+}
+
+const DEVICE_TOOL_ARGS = {
+  applicationId: { type: 'string', minLength: 1 },
+  endUserId: { type: 'string', minLength: 1 },
+  deviceId: { type: 'string', minLength: 1 },
+} as const;
+
 export const operatorWriteTools: OperatorTool[] = [
+  {
+    name: 'list_devices',
+    description:
+      "List an end-user's devices, the machines they have signed in from, newest activity " +
+      'first, including released and blocked ones. Read-only. See docs/devices.md.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        applicationId: DEVICE_TOOL_ARGS.applicationId,
+        endUserId: DEVICE_TOOL_ARGS.endUserId,
+        status: { type: 'string', enum: ['ACTIVE', 'RELEASED', 'BLOCKED'] },
+      },
+      required: ['applicationId', 'endUserId'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadEndUserInApp(ctx, String(args.applicationId), String(args.endUserId));
+      const status = args.status === undefined ? undefined : (String(args.status) as 'ACTIVE' | 'RELEASED' | 'BLOCKED');
+      const { items, total } = await devicesService.listForEndUser(app.id, String(args.endUserId), { status, take: 100 });
+      return { total, devices: items.map(deviceView) };
+    },
+  },
+  {
+    name: 'release_device',
+    description:
+      "Release one of an end-user's devices: gives the slot back against max_devices and revokes " +
+      'every session minted on it. Idempotent. A BLOCKED device must be unblocked first.',
+    write: true,
+    inputSchema: {
+      type: 'object',
+      properties: DEVICE_TOOL_ARGS,
+      required: ['applicationId', 'endUserId', 'deviceId'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadEndUserInApp(ctx, String(args.applicationId), String(args.endUserId));
+      const r = await devicesService.release({
+        applicationId: app.id,
+        endUserId: String(args.endUserId),
+        deviceId: String(args.deviceId),
+        actor: { type: 'operator', id: ctx.tenantUserId },
+      });
+      return { device: deviceView(r.device), sessionsRevoked: r.sessionsRevoked };
+    },
+  },
+  {
+    name: 'block_device',
+    description:
+      'Block a device: sign-in from that fingerprint is refused (DEVICE_BLOCKED) until unblocked, ' +
+      'and its sessions are revoked now. The reason is operator-facing only. Idempotent.',
+    write: true,
+    inputSchema: {
+      type: 'object',
+      properties: { ...DEVICE_TOOL_ARGS, reason: { type: 'string', maxLength: 500 } },
+      required: ['applicationId', 'endUserId', 'deviceId'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadEndUserInApp(ctx, String(args.applicationId), String(args.endUserId));
+      const r = await devicesService.block({
+        applicationId: app.id,
+        endUserId: String(args.endUserId),
+        deviceId: String(args.deviceId),
+        reason: args.reason === undefined ? undefined : String(args.reason),
+        operatorUserId: ctx.tenantUserId,
+      });
+      return { device: deviceView(r.device), sessionsRevoked: r.sessionsRevoked };
+    },
+  },
+  {
+    name: 'unblock_device',
+    description:
+      'Lift a block. The device comes back as RELEASED and takes a slot again only on its next ' +
+      'sign-in, subject to max_devices. Idempotent.',
+    write: true,
+    inputSchema: {
+      type: 'object',
+      properties: DEVICE_TOOL_ARGS,
+      required: ['applicationId', 'endUserId', 'deviceId'],
+      additionalProperties: false,
+    },
+    handler: async (ctx, args) => {
+      const app = await loadEndUserInApp(ctx, String(args.applicationId), String(args.endUserId));
+      const device = await devicesService.unblock({
+        applicationId: app.id,
+        endUserId: String(args.endUserId),
+        deviceId: String(args.deviceId),
+        operatorUserId: ctx.tenantUserId,
+      });
+      return { device: deviceView(device) };
+    },
+  },
   {
     name: 'list_organization_roles',
     description:
@@ -346,7 +485,7 @@ export const operatorWriteTools: OperatorTool[] = [
   {
     name: 'create_usage_meter',
     description:
-      'Create a usage meter — what an agent product actually bills on. `slug` is what your ' +
+      'Create a usage meter, what an agent product actually bills on. `slug` is what your ' +
       'server records against (`usage.record`), `unit` is the thing counted (tokens, calls, ' +
       'seconds). A meter only COUNTS until a plan gives it a USAGE entitlement: set that ' +
       'with put_plan_entitlement, using the meter slug as `key`, `quantity` for the included ' +
@@ -405,7 +544,7 @@ export const operatorWriteTools: OperatorTool[] = [
   {
     name: 'put_plan_entitlement',
     description:
-      'Create or replace ONE entitlement on a plan. This is what actually gates access — ' +
+      'Create or replace ONE entitlement on a plan. This is what actually gates access, ' +
       'a plan with no entitlements grants nothing, whatever it costs. `kind` is FEATURE ' +
       '(a flag or limit, needs `key` and usually `valueType`+`value`), CREDIT (a credit ' +
       'grant per period, needs `quantity`), USAGE (an included quota for a meter, `key` is ' +
@@ -454,7 +593,7 @@ export const operatorWriteTools: OperatorTool[] = [
   {
     name: 'list_plan_entitlements',
     description:
-      'What a plan actually grants. Read this back after put_plan_entitlement — a priced ' +
+      'What a plan actually grants. Read this back after put_plan_entitlement, a priced ' +
       'plan with an empty list gates nothing.',
     write: false,
     inputSchema: {
@@ -476,7 +615,7 @@ export const operatorWriteTools: OperatorTool[] = [
     name: 'list_plans',
     description:
       'Plans on an application, including inactive ones. Slugs for the other tools. Each plan ' +
-      'carries `checkout.ready` — false means a buyer sent to checkout for it is refused, and ' +
+      'carries `checkout.ready`, false means a buyer sent to checkout for it is refused, and ' +
       '`checkout.blockers` says by which provider and how to repair it. Check it after ' +
       'configuring a billing provider: plans register with the provider when they are CREATED, ' +
       'so any plan created before the credentials existed has no price behind it and connecting ' +
@@ -542,7 +681,7 @@ export const operatorWriteTools: OperatorTool[] = [
   {
     name: 'list_api_keys',
     description:
-      'API keys on an application — id, name, prefix, scopes, last use. Never the key ' +
+      'API keys on an application, id, name, prefix, scopes, last use. Never the key ' +
       'itself; it is hashed at rest.',
     write: false,
     inputSchema: {
@@ -583,12 +722,12 @@ export const operatorWriteTools: OperatorTool[] = [
     name: 'mint_api_key',
     description:
       'Mint a server-side API key (rp_live_… / rp_test_…) for an Application. Returns the ' +
-      'raw key EXACTLY ONCE — it is hashed at rest and cannot be retrieved again. Scopes ' +
+      'raw key EXACTLY ONCE, it is hashed at rest and cannot be retrieved again. Scopes ' +
       'default to full access; pass a narrower list to restrict the key. Optional ' +
       '`expiresAt` is an ISO-8601 datetime in the future.',
     write: true,
     // Admin tier, for the same reason `configure_billing_provider` is: a secret
-    // crosses the MCP client. Here it crosses outward — the raw key is
+    // crosses the MCP client. Here it crosses outward, the raw key is
     // serialised into the tool result and lands in the agent transcript and the
     // model provider's logs.
     //
@@ -638,7 +777,7 @@ export const operatorWriteTools: OperatorTool[] = [
         ...(expiresAt !== undefined && { expiresAt }),
       });
 
-      // The key itself is never audited — only that one was minted, by whom,
+      // The key itself is never audited, only that one was minted, by whom,
       // and for which application. Same rule the panel's route follows.
       audit(ctx, 'app.api_key.created', app.id, {
         apiKeyId: result.apiKey.id,
@@ -741,6 +880,14 @@ export const operatorWriteTools: OperatorTool[] = [
             'against GET /.well-known/jwks.json; HS256 (default) requires the API. ' +
             'Switching never breaks outstanding tokens, since the API verifies both.',
         },
+        deviceBinding: {
+          type: 'string',
+          enum: ['optional', 'required'],
+          description:
+            'Whether primary sign-in flows must carry a device binding. "optional" (default) ' +
+            'records a device when the client sends one; "required" refuses sign-in without ' +
+            'one. Refresh is never gated.',
+        },
         passwordBreachCheckEnabled: { type: 'boolean' },
         sendVerificationEmailOnSignUp: {
           type: 'boolean',
@@ -779,6 +926,9 @@ export const operatorWriteTools: OperatorTool[] = [
         ...(args.mfa !== undefined && { mfa: args.mfa as 'off' | 'optional' | 'required' }),
         ...(args.mcpEnabled !== undefined && { mcpEnabled: args.mcpEnabled === true }),
         ...(args.tokenAlg !== undefined && { tokenAlg: args.tokenAlg as 'HS256' | 'RS256' }),
+        ...(args.deviceBinding !== undefined && {
+          deviceBinding: args.deviceBinding as 'optional' | 'required',
+        }),
         ...(args.passwordBreachCheckEnabled !== undefined && {
           passwordBreachCheckEnabled: args.passwordBreachCheckEnabled === true,
         }),
@@ -827,7 +977,7 @@ export const operatorWriteTools: OperatorTool[] = [
           // 1, not 0. The service refuses `creditsAmount <= 0` with
           // PLAN_CREDITS_AMOUNT_REQUIRED and the REST body says `minimum: 1`,
           // so advertising 0 would tell an agent a value is valid and then
-          // refuse it — the exact defect this pass narrowed passwordMinLength
+          // refuse it, the exact defect this pass narrowed passwordMinLength
           // to remove.
           type: 'integer',
           minimum: 1,
@@ -938,7 +1088,7 @@ export const operatorWriteTools: OperatorTool[] = [
     name: 'set_plan_active',
     description:
       'Activate or ARCHIVE a plan by slug. Deactivating (active=false) archives it: existing ' +
-      "subscriptions keep billing, but no new sign-ups. This is how you retire a plan — you " +
+      "subscriptions keep billing, but no new sign-ups. This is how you retire a plan, you " +
       "CANNOT change a plan's price in place (the price is registered with the payment provider " +
       'and is immutable), so to change pricing you archive the old plan here and create a ' +
       'replacement with create_plan UNDER A DIFFERENT SLUG. Archiving does not release the slug: ' +
@@ -965,7 +1115,7 @@ export const operatorWriteTools: OperatorTool[] = [
   {
     name: 'update_plan',
     description:
-      "Edit a plan's ENTITLEMENTS ONLY — its display name, LICENSE seats/duration, or CREDIT " +
+      "Edit a plan's ENTITLEMENTS ONLY, its display name, LICENSE seats/duration, or CREDIT " +
       'amount. You CANNOT change price, currency, or interval here: those are registered with ' +
       'the payment provider (Stripe/PayPal/Razorpay) and are immutable. To change pricing, ' +
       'ARCHIVE this plan (set_plan_active active=false) and CREATE a replacement (create_plan) ' +
@@ -1019,7 +1169,7 @@ export const operatorWriteTools: OperatorTool[] = [
     name: 'create_webhook_endpoint',
     description:
       'Register an outbound webhook endpoint for an application. Returns the endpoint id ' +
-      'and the signing secret — the secret is shown ONCE here and cannot be retrieved later.',
+      'and the signing secret, the secret is shown ONCE here and cannot be retrieved later.',
     write: true,
     inputSchema: {
       type: 'object',
@@ -1054,7 +1204,7 @@ export const operatorWriteTools: OperatorTool[] = [
   {
     name: 'update_webhook_endpoint',
     description:
-      'Update an outbound webhook endpoint — its URL, subscribed events, or enabled flag. ' +
+      'Update an outbound webhook endpoint, its URL, subscribed events, or enabled flag. ' +
       'Only the fields you pass change. Does not rotate the signing secret.',
     write: true,
     inputSchema: {
@@ -1088,7 +1238,7 @@ export const operatorWriteTools: OperatorTool[] = [
     },
   },
 
-  // ── Member management (write) — reuses tenantWorkspacesService, whose
+  // ── Member management (write), reuses tenantWorkspacesService, whose
   //    ensureCanManage enforces OWNER-manages-anyone / ADMIN-manages-MEMBER. ──
   {
     name: 'invite_member',
@@ -1116,7 +1266,7 @@ export const operatorWriteTools: OperatorTool[] = [
         // PANEL_URL has no default (a Rekey default would email a self-hoster's
         // operators a link to OUR panel). Without it we cannot build a usable
         // invite link, so omit the key entirely rather than send a broken one
-        // — `exactOptionalPropertyTypes` means an explicit undefined is not the
+        //, `exactOptionalPropertyTypes` means an explicit undefined is not the
         // same as absent.
         ...(env.PANEL_URL
           ? { inviteUrl: `${env.PANEL_URL.replace(/\/$/, '')}/accept-invite?token={token}` }
@@ -1127,7 +1277,7 @@ export const operatorWriteTools: OperatorTool[] = [
         role: result.invitation.role,
         emailSent: result.emailSent,
       });
-      // The raw invite token is intentionally NOT returned — it travels only in
+      // The raw invite token is intentionally NOT returned, it travels only in
       // the email. If delivery failed, the operator resends from the panel.
       return {
         invitationId: result.invitation.id,
@@ -1142,7 +1292,7 @@ export const operatorWriteTools: OperatorTool[] = [
     name: 'revoke_invitation',
     description:
       'Revoke a pending workspace invitation by its id (from list_invitations). ' +
-      'Already-accepted invitations cannot be revoked — remove the member instead.',
+      'Already-accepted invitations cannot be revoked, remove the member instead.',
     write: true,
     inputSchema: {
       type: 'object',
@@ -1217,23 +1367,27 @@ export const operatorWriteTools: OperatorTool[] = [
     },
   },
 
-  // ── Admin tools (mcp:operator:admin) — financial / secret-handling ──────────
+  // ── Admin tools (mcp:operator:admin), financial / secret-handling ──────────
   // These require the admin scope AND an OWNER/ADMIN role. The connector denies
   // them by default; the operator opts in per-tool. Still re-scoped by tenant.
   {
     name: 'configure_billing_provider',
     description:
-      "Set an application's billing-provider credentials (Stripe / PayPal / Razorpay). " +
-      'Credentials are AES-256-GCM encrypted at rest and never returned by any tool. ' +
-      'SECURITY: the secret you pass travels through the MCP client — only use this from a ' +
-      'trusted client. Leave webhook secrets blank to auto-configure them later in the panel.',
+      "Set an application's billing-provider credentials. Providers: " +
+      registryNames.map((n) => `${n} (${getModule(n)!.credentialSchema.map((f) => f.key).join(', ')})`).join('; ') +
+      '. Credentials are AES-256-GCM encrypted at rest and never returned by any tool. ' +
+      'SECURITY: the secret you pass travels through the MCP client, only use this from a ' +
+      'trusted client. Omit a field to keep its stored value on an edit; leave webhook secrets ' +
+      'blank to auto-configure them later in the panel where the provider supports it. ' +
+      '"external" is an inbound-only provider for your own billing system: it takes only ' +
+      'webhookSecret, the HMAC key that system signs events with (see docs/external-billing.md).',
     write: true,
     admin: true,
     inputSchema: {
       type: 'object',
       properties: {
         applicationId: { type: 'string', minLength: 1 },
-        provider: { type: 'string', enum: ['stripe', 'paypal', 'razorpay'] },
+        provider: { type: 'string', enum: registryNames },
         // Stripe
         apiKey: { type: 'string', description: 'Stripe secret key (sk_…).' },
         // PayPal
@@ -1242,7 +1396,8 @@ export const operatorWriteTools: OperatorTool[] = [
         // Razorpay
         keyId: { type: 'string' },
         keySecret: { type: 'string' },
-        // Shared optional webhook secret/id (provider-specific meaning)
+        // Shared webhook secret/id (provider-specific meaning; the only field
+        // the external provider takes)
         webhookSecret: { type: 'string' },
         webhookId: { type: 'string' },
         mode: { type: 'string', enum: ['test', 'live'] },
@@ -1254,44 +1409,35 @@ export const operatorWriteTools: OperatorTool[] = [
     },
     handler: async (ctx, args) => {
       const app = await loadAppInTenant(ctx, String(args.applicationId));
-      const provider = String(args.provider) as 'stripe' | 'paypal' | 'razorpay';
+      const provider = String(args.provider) as BillingProviderName;
+      const module = getModule(provider);
+      if (!module) {
+        throw new RekeyError({
+          statusCode: 400,
+          code: 'BILLING_PROVIDER_UNKNOWN',
+          message: `"${provider}" is not a registered billing provider.`,
+          fix: `Use one of: ${registryNames.join(', ')}.`,
+        });
+      }
       const mode = args.mode === 'test' || args.mode === 'live' ? (args.mode as BillingMode) : undefined;
       const options = {
         ...(args.countries !== undefined && { countries: args.countries as string[] }),
         ...(args.enabled !== undefined && { enabled: args.enabled === true }),
         ...(mode !== undefined && { mode }),
       };
-      if (provider === 'stripe') {
-        await billingCredentialsService.upsertCredentials(
-          app.id,
-          'stripe',
-          { apiKey: String(args.apiKey ?? ''), webhookSecret: String(args.webhookSecret ?? '') },
-          options,
-        );
-      } else if (provider === 'paypal') {
-        await billingCredentialsService.upsertCredentials(
-          app.id,
-          'paypal',
-          {
-            clientId: String(args.clientId ?? ''),
-            clientSecret: String(args.clientSecret ?? ''),
-            webhookId: String(args.webhookId ?? ''),
-          },
-          options,
-        );
-      } else {
-        await billingCredentialsService.upsertCredentials(
-          app.id,
-          'razorpay',
-          {
-            keyId: String(args.keyId ?? ''),
-            keySecret: String(args.keySecret ?? ''),
-            webhookSecret: String(args.webhookSecret ?? ''),
-          },
-          options,
-        );
+      // The field set is whatever the module declares, so a fourth provider is
+      // not a fourth branch. A field the caller omits is omitted from the
+      // request, and the credentials service keeps its stored value; a field
+      // passed as "" is cleared, which is what a blank optional webhook field
+      // has always meant. The old per-provider branches sent "" for every
+      // omitted key, so an edit through MCP wiped the fields it did not name.
+      const data: Record<string, string> = {};
+      for (const field of module.credentialSchema) {
+        const value = args[field.key];
+        if (value !== undefined) data[field.key] = String(value);
       }
-      // Audit records only that creds were set — NEVER the secret values.
+      await billingCredentialsService.upsertCredentials(app.id, provider, data, options);
+      // Audit records only that creds were set, NEVER the secret values.
       audit(ctx, 'app.billing_credentials_configured', app.id, { provider, mode: mode ?? 'inferred' });
       return { applicationId: app.id, provider, configured: true };
     },
@@ -1301,7 +1447,7 @@ export const operatorWriteTools: OperatorTool[] = [
     description:
       'Cancel a specific subscription by id. By default cancels at period end for an active ' +
       'provider-backed subscription (so the customer keeps access until then); pass ' +
-      '`atPeriodEnd: false` to cancel immediately. Irreversible — the subscription cannot be ' +
+      '`atPeriodEnd: false` to cancel immediately. Irreversible, the subscription cannot be ' +
       'un-cancelled.',
     write: true,
     admin: true,
@@ -1317,7 +1463,7 @@ export const operatorWriteTools: OperatorTool[] = [
     handler: async (ctx, args) => {
       const subscriptionId = String(args.subscriptionId);
       // Resolve the subscription's application and confirm it's in this tenant
-      // BEFORE acting — a subscription id from another workspace is treated as
+      // BEFORE acting, a subscription id from another workspace is treated as
       // not-found (no cross-tenant cancel, no existence probing).
       //
       // The tenant filter is IN the query, not applied afterwards. Looking the

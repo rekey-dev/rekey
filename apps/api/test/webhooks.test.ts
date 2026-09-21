@@ -1,5 +1,5 @@
 /**
- * Outbound webhooks — emission, signing, delivery rows, retry/backoff.
+ * Outbound webhooks, emission, signing, delivery rows, retry/backoff.
  *
  * No real HTTP is required: we point endpoints at a local listener
  * inside the test process. The transport `fetch` is the built-in global
@@ -191,7 +191,7 @@ describe('Outbound webhooks', () => {
         })
         .then((r) => r.json().data as { secret: string });
 
-      // Sign up an end-user — fires user.created.
+      // Sign up an end-user, fires user.created.
       await app.inject({
         method: 'POST',
         url: '/api/v1/auth/sign-up',
@@ -252,7 +252,7 @@ describe('Outbound webhooks', () => {
         })
         .then((r) => r.json().data as { accessToken: string });
 
-      // email.verified — issue a verification token, then consume it.
+      // email.verified, issue a verification token, then consume it.
       const send = await app
         .inject({
           method: 'POST',
@@ -380,7 +380,7 @@ describe('Outbound webhooks', () => {
       expect(row.status).toBe('SUCCEEDED');
       expect(row.attempts).toBe(2);
 
-      // A second poll finds nothing due — the claim + terminal status stop
+      // A second poll finds nothing due, the claim + terminal status stop
       // any double-send.
       const again = await processDueWebhookDeliveries();
       expect(again).toBe(0);
@@ -418,7 +418,7 @@ describe('Outbound webhooks', () => {
         },
       });
 
-      // Retrying through a DIFFERENT endpoint's path must 404 — the delivery
+      // Retrying through a DIFFERENT endpoint's path must 404, the delivery
       // is validated against (application, endpoint), not just the app.
       const wrong = await app.inject({
         method: 'POST',
@@ -468,7 +468,7 @@ describe('Outbound webhooks', () => {
       headers: { authorization: `Bearer ${b.tenantAccess}` },
       payload: { url: 'https://example.invalid/hook', events: ['mfa.enabled'] },
     });
-    // Emit user.created — should not create a delivery row.
+    // Emit user.created, should not create a delivery row.
     const ids = await webhookService.emit({
       applicationId: b.applicationId,
       type: 'user.created',
@@ -500,7 +500,7 @@ describe('Outbound webhooks', () => {
         data: {},
       });
       expect(ids).toHaveLength(1);
-      // The first attempt is enqueued at zero delay, attempt count 0 — no real
+      // The first attempt is enqueued at zero delay, attempt count 0, no real
       // HTTP fired because our scheduler intercepted it.
       expect(calls).toEqual([{ deliveryId: ids[0], delayMs: 0, attempts: 0 }]);
     } finally {

@@ -3,21 +3,21 @@
  *
  * PERMANENT ALIAS into the shared provider-module pipeline (pipeline.ts;
  * docs/specs/billing-provider-modules.md, P1). Old-route strategy: forward,
- * don't duplicate — this URL is what operators registered with Stripe, so
+ * don't duplicate, this URL is what operators registered with Stripe, so
  * it must keep working byte-for-byte (same status codes, same response
- * bodies, same idempotency semantics — Stripe retries depend on them), but
+ * bodies, same idempotency semantics, Stripe retries depend on them), but
  * the verification/idempotency/dispatch logic now lives in exactly one
  * place. CI's stripe-webhook suite runs against THIS path and therefore
  * exercises the whole pipeline + Stripe module + shared appliers.
  *
  * Per-Application ONLY. There is no deployment-wide endpoint: a single
- * shared `STRIPE_WEBHOOK_SECRET` would be a cross-tenant trust boundary —
+ * shared `STRIPE_WEBHOOK_SECRET` would be a cross-tenant trust boundary,
  * one leaked secret lets a forged-but-validly-signed event target any app
  * (via `metadata.applicationId`) and move money state. The slug names the
- * Application whose OWN webhook secret must verify the signature — a
+ * Application whose OWN webhook secret must verify the signature, a
  * Stripe account can't sign payloads for someone else's endpoint.
  *
- * No bearer auth — the signature IS the auth.
+ * No bearer auth, the signature IS the auth.
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -29,11 +29,11 @@ import { errs, type JsonSchema } from '../../../lib/openapi.js';
 const SlugParam = z.object({ slug: z.string().min(1).max(40) });
 
 /**
- * The webhook pipeline's own ack body — NOT the `{success, data}` envelope.
+ * The webhook pipeline's own ack body, NOT the `{success, data}` envelope.
  * Matches what `handleBillingProviderWebhook` (pipeline.ts) actually sends:
- *   - 200 `{received: true, processed: true, eventId}` — applied.
- *   - 200 `{received: true, processed: false, reason: 'duplicate'}` — replay.
- *   - 500 `{received: true, processed: false, eventId}` — applier threw;
+ *   - 200 `{received: true, processed: true, eventId}`, applied.
+ *   - 200 `{received: true, processed: false, reason: 'duplicate'}`, replay.
+ *   - 500 `{received: true, processed: false, eventId}`, applier threw;
  *     Stripe retries with backoff.
  * A thrown `RekeyError` (bad slug, no rawBody, no credentials, bad
  * signature, cross-application event) instead falls through to the standard
@@ -63,9 +63,9 @@ export async function stripeWebhookRoutes(app: FastifyInstance): Promise<void> {
         description:
           'The slug must match an Application with Stripe credentials (including a webhook ' +
           "signing secret) configured. The signature is verified against THAT Application's " +
-          'webhook secret — no events from other Stripe accounts will be accepted.' +
+          'webhook secret, no events from other Stripe accounts will be accepted.' +
           '\n\n' +
-          '**No bearer auth — the provider signature IS the authentication.** Do not send an ' +
+          '**No bearer auth, the provider signature IS the authentication.** Do not send an ' +
           '`Authorization` header; the request is authenticated by verifying the raw body ' +
           "against the Application's own webhook signing secret. `security: []` here means " +
           '"no Rekey credential", not "unprotected".',

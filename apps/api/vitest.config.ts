@@ -12,7 +12,7 @@ export default defineConfig({
     setupFiles: ['./test/setup.ts'],
     // Operator OAuth credentials for the tenant-oauth tests. Set here so they
     // land in process.env before config/env.ts is first imported (t3-env parses
-    // once). Fake values — the tests inject a mock provider via the registry.
+    // once). Fake values, the tests inject a mock provider via the registry.
     env: {
       PANEL_OAUTH_GOOGLE_CLIENT_ID: 'test-google-client-id',
       PANEL_OAUTH_GOOGLE_CLIENT_SECRET: 'test-google-client-secret',
@@ -32,7 +32,7 @@ export default defineConfig({
     //
     // The thresholds are a RATCHET, not a target. They sit a couple of points
     // under whatever the suite currently reaches, so they catch a PR that
-    // deletes coverage without failing on the day they land — a threshold that
+    // deletes coverage without failing on the day they land, a threshold that
     // is red on arrival is a threshold that gets deleted. Raise them when the
     // real number moves up; never lower them to make a build pass.
     coverage: {

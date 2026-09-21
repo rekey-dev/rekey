@@ -2,10 +2,10 @@
  * Operator passkey routes.
  *
  * Split into two plugins:
- *   - `tenantPasskeysAuthenticatedRoutes` — under /tenant/auth/passkeys
+ *   - `tenantPasskeysAuthenticatedRoutes`, under /tenant/auth/passkeys
  *     (register, list, delete). Requires an authenticated tenant session.
- *   - `tenantPasskeysPublicRoutes` — under /tenant/auth/passkeys (auth
- *     ceremony) — unauthenticated; the passkey IS the auth factor.
+ *   - `tenantPasskeysPublicRoutes`, under /tenant/auth/passkeys (auth
+ *     ceremony), unauthenticated; the passkey IS the auth factor.
  *
  * The route prefixes overlap deliberately so the public surface looks
  * like a single /tenant/auth/passkeys/* namespace.
@@ -19,6 +19,7 @@ import { assertTenantStepUp } from '../../lib/step-up.js';
 import { tenantMfaService } from '../tenant-mfa/tenant-mfa.service.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
 import { ok, errs, ref } from '../../lib/openapi.js';
+import { CREDENTIAL_BODY_LIMIT, WEBAUTHN_BODY_LIMIT } from '../../lib/body-limits.js';
 
 /**
  * The 401/403 pair `requireTenantSession` (middleware/tenant-session.ts) produces, shared by
@@ -31,17 +32,14 @@ const TENANT_SESSION_ERRORS = {
   403: "TENANT_MEMBERSHIP_REVOKED — the session's workspace no longer has a live membership for this operator.",
 } as const;
 
-// `tenantPasskeysService`'s `PasskeyRow` (`{id, credentialId, deviceName, lastUsedAt,
-// createdAt}`) now matches the corrected `Passkey` component field-for-field — referenced
-// directly via `ref('Passkey')` below instead of duplicating the shape here.
+// `tenantPasskeysService`'s `PasskeyRow` matches the `Passkey` component field-for-field
+// (`id`, `credentialId`, `deviceName`, `lastUsedAt`, `createdAt`), so routes reference it
+// via `ref('Passkey')` instead of duplicating the shape here.
 
-// `authenticateComplete` returns an `AuthSessionResult` verbatim (see tenant-passkeys.service.ts)
-// — no `mfaRequired` field is added on top, unlike `tenant-auth.routes.ts`'s `shape()`. That is
-// exactly the `OperatorSession` component's shape (`user`, `memberships`, `activeTenantId`,
-// `activeRole`, plus the token pair), so this references `ref('OperatorSession')` directly at the
-// call site rather than wrapping it in a local `allOf` — a previous pass here also declared an
-// `mfaRequired: false` field on the response schema that the handler never actually sends, which
-// `ref('OperatorSession')` alone does not claim.
+// `authenticateComplete` returns an `AuthSessionResult` verbatim, matching the
+// `OperatorSession` component (`user`, `memberships`, `activeTenantId`, `activeRole`, plus
+// the token pair) with no extra `mfaRequired` field, so this references `ref('OperatorSession')`
+// directly rather than wrapping it in a local schema.
 
 /** Step-up proof accepted by `/passkeys/register/start`. Any one that verifies passes. */
 const StepUpProofBody = z.object({
@@ -84,9 +82,8 @@ export async function tenantPasskeysAuthenticatedRoutes(app: FastifyInstance): P
         security: [{ tenantSession: [] }],
         summary: 'List operator passkeys',
         response: {
-          // NOTE: the handler wraps the array as `{passkeys: [...]}` with no page metadata —
-          // an unbounded, growable collection with no pagination implemented. Documented with
-          // the real field name rather than forcing okPage's items/page shape; see the report.
+          // NOTE: response is `{passkeys: [...]}` with no page metadata or pagination.
+          // Documented with the real field name rather than forcing okPage's items/page shape.
           200: ok(
             {
               type: 'object',
@@ -108,8 +105,9 @@ export async function tenantPasskeysAuthenticatedRoutes(app: FastifyInstance): P
   app.post(
     '/passkeys/register/start',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       // Enrolling an operator passkey is a persistent-takeover primitive, and
-      // this route had no second demand of any kind — a panel access token was
+      // this route had no second demand of any kind, a panel access token was
       // enough. An operator passkey signs its holder straight in
       // (`authenticateComplete` mints the session; there is no MFA challenge
       // after it), and nothing the victim can do removes it: changing the
@@ -119,7 +117,7 @@ export async function tenantPasskeysAuthenticatedRoutes(app: FastifyInstance): P
       // The end-user surface reached this conclusion first and
       // `/auth/passkey/register/start` has demanded a step-up since; this is
       // the same control on the operator side. Proof is the account password OR
-      // a current authenticator code — deliberately either, unlike the MFA
+      // a current authenticator code, deliberately either, unlike the MFA
       // routes, because enrolment ADDS a credential rather than removing the
       // one being proved.
       config: { rateLimit: authRateLimit(10) },
@@ -194,6 +192,7 @@ export async function tenantPasskeysAuthenticatedRoutes(app: FastifyInstance): P
   app.post(
     '/passkeys/register/complete',
     {
+      bodyLimit: WEBAUTHN_BODY_LIMIT,
       // No step-up here, and that is not an oversight: it happened at
       // /register/start and `consumeChallenge` binds this call to that
       // ceremony. The challenge is single-use and scoped to this operator, so
@@ -277,7 +276,7 @@ export async function tenantPasskeysAuthenticatedRoutes(app: FastifyInstance): P
 }
 
 /**
- * Operator passkey **sign-in** ceremony — genuinely unauthenticated (`security: []`).
+ * Operator passkey **sign-in** ceremony, genuinely unauthenticated (`security: []`).
  * No hook is registered here on purpose: the caller has no session yet, and the
  * WebAuthn assertion itself is the credential. Registered under the same
  * `/api/v1/tenant/auth` prefix as the session-gated plugin above; Fastify
@@ -287,6 +286,7 @@ export async function tenantPasskeysPublicRoutes(app: FastifyInstance): Promise<
   app.post(
     '/passkeys/authenticate/start',
     {
+      bodyLimit: CREDENTIAL_BODY_LIMIT,
       schema: {
         tags: ['Tenant · Passkeys'],
         security: [],
@@ -301,7 +301,7 @@ export async function tenantPasskeysPublicRoutes(app: FastifyInstance): Promise<
                   description:
                     'WebAuthn `PublicKeyCredentialRequestOptionsJSON` (from ' +
                     '@simplewebauthn/server): `challenge`, `timeout`, `rpId`, ' +
-                    '`allowCredentials`, `userVerification`, `extensions`. Usernameless — ' +
+                    '`allowCredentials`, `userVerification`, `extensions`. Usernameless, ' +
                     '`allowCredentials` is empty. Pass verbatim to ' +
                     '`navigator.credentials.get()`.',
                 },
@@ -327,6 +327,7 @@ export async function tenantPasskeysPublicRoutes(app: FastifyInstance): Promise<
   app.post(
     '/passkeys/authenticate/complete',
     {
+      bodyLimit: WEBAUTHN_BODY_LIMIT,
       schema: {
         tags: ['Tenant · Passkeys'],
         security: [],
