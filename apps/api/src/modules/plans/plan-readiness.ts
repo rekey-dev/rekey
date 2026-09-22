@@ -76,9 +76,18 @@ export async function planCheckoutReadiness(
     return out;
   }
 
+  // Only providers a buyer can be routed to decide readiness, the set
+  // `listCheckoutEnabled` gives the geo router. An inbound-only module (the
+  // external billing system) refuses every plan by design, so counting it next
+  // to a real provider reported every plan as unbuyable while checkout through
+  // that provider worked. When nothing enabled can host a checkout, every
+  // enabled module is evaluated, so the inbound-only one says why.
+  const routable = enabled.filter(({ provider }) => getModule(provider)?.capabilities.checkout !== false);
+  const judged = routable.length > 0 ? routable : enabled;
+
   for (const plan of plans) {
     const blockers: PlanBlocker[] = [];
-    for (const { provider } of enabled) {
+    for (const { provider } of judged) {
       const module = getModule(provider);
       const blocker = module?.planCheckoutBlocker?.(plan);
       if (blocker) blockers.push({ provider, ...blocker });

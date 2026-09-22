@@ -1,14 +1,14 @@
 import * as React from 'react';
 import { DOMAIN_LABEL, SCOPE_DOMAINS, levelFor } from '@/lib/operator-scopes';
-import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { cookieSecure } from '@/lib/cookie-secure';
+import { revalidatePath } from 'next/cache';
 import { errorQuery, readErrorFlash, api, PanelApiError, type ApplicationRow, type MemberRow, type InvitationRow, getMe, unlessBusy } from '@/lib/api';
 import { emptyPage, type Page } from '@/lib/paginate';
-import { CopyButton } from '@/components/CopyButton';
 import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { ActionForm } from '@/components/ActionForm';
+import { RevealActionForm, type RevealResult } from '@/components/RevealActionForm';
+import { WhileUrlHas } from '@/components/WhileUrlHas';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
 import { publicHttpUrl } from '@/lib/public-url';
@@ -20,27 +20,6 @@ import { Badge } from '@/components/Badge';
 import { Field, fieldInputCls } from '@/components/Field';
 import { MemberRoleSelect } from '@/components/MemberRoleSelect';
 
-/**
- * Carries the one-time invitation link from `invite()` to the next render of
- * this page. Path-scoped to `/team` and ~2 min TTL, like the other reveals; no
- * clear on read because a Server Component may read cookies but not write
- * them, so the TTL is what stops a later refresh showing it again.
- */
-const INVITE_REVEAL_COOKIE = 'rekey_reveal_invite';
-
-function readInviteReveal(raw: string | undefined): { token?: string; emailSent: boolean } {
-  if (!raw) return { emailSent: false };
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null) return { emailSent: false };
-    const { token, emailSent } = parsed as Record<string, unknown>;
-    if (typeof token !== 'string' || token === '') return { emailSent: false };
-    return { token, emailSent: emailSent === true };
-  } catch {
-    return { emailSent: false };
-  }
-}
-
 interface InviteCreateResponse {
   invitation: InvitationRow;
   token: string;
@@ -49,42 +28,56 @@ interface InviteCreateResponse {
   warning: string;
 }
 
-async function invite(formData: FormData): Promise<void> {
+async function invite(formData: FormData): Promise<RevealResult> {
   'use server';
   const email = String(formData.get('email') ?? '').trim();
   const role = String(formData.get('role') ?? 'MEMBER');
   if (!email) redirect('/team?error=missing');
+  let result: InviteCreateResponse;
   try {
-    const result = await api<InviteCreateResponse>({
+    result = await api<InviteCreateResponse>({
       method: 'POST',
       path: '/api/v1/tenant/workspace/invitations',
       body: { email, role },
     });
-    // One-time invitation link via a short-lived httpOnly cookie, not the URL.
-    // The token joins a workspace, so it is a credential: in the query it lands
-    // in browser history, in the `Referer` of the next outbound link, and in
-    // every access log between here and the operator. Same channel the API key,
-    // webhook secret and licence key reveals already use.
-    const jar = await cookies();
-    jar.set(INVITE_REVEAL_COOKIE, JSON.stringify({ token: result.token, emailSent: result.emailSent }), {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: await cookieSecure(),
-      path: '/team',
-      maxAge: 120,
-    });
-    // Kept for the no-JavaScript path, where the browser posts the form
-    // natively and follows this 303 itself. With JavaScript the client does
-    // not commit it on this page (issue #569), which is why the token above
-    // travels in a cookie and `reloadOnSettle` on the form below is what
-    // actually brings the operator back to a rendered `/team`.
-    redirect('/team?e=member_invited');
   } catch (err) {
     if (err instanceof PanelApiError) {
       redirect(`/team?${await errorQuery(err)}`);
     }
     throw err;
   }
+  // The token joins a workspace, so it is a credential: in a URL it lands in
+  // browser history, in the `Referer` of the next outbound link, and in every
+  // access log between here and the operator. It goes back in this action's
+  // response instead, to the dialog `RevealActionForm` opens, and the page is
+  // revalidated so the pending invitation is already in the list behind it.
+  revalidatePath('/team');
+  return {
+    secret: {
+      title: 'Invitation link',
+      value: inviteLink(result.token),
+      flag: 'member_invited',
+      notes: [
+        `For ${result.invitation.email}. Single-use, expires in 7 days.`,
+        result.emailSent
+          ? 'We emailed the invite as well. The link is here in case you need to share it another way.'
+          : 'Email delivery is not configured on this deployment, so send the link through your own channel.',
+      ],
+    },
+  };
+}
+
+/**
+ * PANEL_URL is server-only and on some deploys is an in-cluster host (e.g.
+ * http://panel:3031); `publicHttpUrl()` keeps that out of what the operator
+ * copies. When it doesn't look public the link carries a visible sentinel
+ * rather than a relative path: this link is pasted into an email, where a
+ * relative path is silently useless to the recipient, whereas the sentinel
+ * names the variable the operator has to set.
+ */
+function inviteLink(token: string): string {
+  const panelBase = publicHttpUrl(process.env.PANEL_URL ?? '') ?? '<set PANEL_URL>';
+  return `${panelBase}/accept-invite?token=${token}`;
 }
 
 async function revokeInvite(invitationId: string): Promise<void> {
@@ -200,12 +193,6 @@ export default async function TeamPage({
   // written by whoever composes the link, and this text renders inside the
   // panel's own error banner.
   const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
-  // The one-time invitation link, left by `invite()` in a short-lived httpOnly
-  // cookie rather than the query. Unreadable JSON is treated as absent.
-  const { token: inviteToken, emailSent: inviteEmailSent } = readInviteReveal(
-    (await cookies()).get(INVITE_REVEAL_COOKIE)?.value,
-  );
-
   const [me, memberPage, invitationPage] = await Promise.all([
     getMe(),
     api<Page<MemberRow>>({ method: 'GET', path: '/api/v1/tenant/workspace/members' }),
@@ -235,15 +222,6 @@ export default async function TeamPage({
       ).items
     : [];
   const memberRows = members.filter((m) => m.role === 'MEMBER');
-  // PANEL_URL is server-only and on some deploys is an in-cluster host (e.g.
-  // http://panel:3031), publicHttpUrl() keeps that out of the client HTML.
-  // When it doesn't look public we emit a visible sentinel rather than a
-  // relative path: this link is copied into an email, where a relative path is
-  // silently useless to the recipient, whereas the sentinel names the variable
-  // the operator has to set.
-  const panelBase = publicHttpUrl(process.env.PANEL_URL ?? '') ?? '<set PANEL_URL>';
-  const inviteUrl = inviteToken ? `${panelBase}/accept-invite?token=${inviteToken}` : null;
-
   return (
     <section className="mx-auto max-w-7xl space-y-6 px-6 py-8 lg:px-8">
       <PageHeader
@@ -258,25 +236,6 @@ export default async function TeamPage({
           </>
         }
       />
-
-      {inviteUrl && (
-        <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-500/60 dark:bg-amber-950/60 space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-              Invitation link (single-use, expires in 7 days)
-            </p>
-            <CopyButton value={inviteUrl} label="Copy link" />
-          </div>
-          <code className="block break-all rounded-md bg-[var(--color-surface)] px-3 py-2 text-xs font-mono">
-            {inviteUrl}
-          </code>
-          <p className="text-xs text-amber-800 dark:text-amber-300">
-            {inviteEmailSent
-              ? 'We emailed the invite. The link is here too, in case you need to re-share. It is shown only once.'
-              : 'Email delivery is not configured on this deployment, so copy the link and send it through your own channel.'}
-          </p>
-        </div>
-      )}
 
       {/* Members */}
       <div className="space-y-3">
@@ -303,9 +262,9 @@ export default async function TeamPage({
                 <TD muted>{m.name ?? '—'}</TD>
                 <TD>
                   {canManage && m.tenantUserId !== me.user.id ? (
-                    <form action={changeRole.bind(null, m.membershipId)}>
+                    <ActionForm action={changeRole.bind(null, m.membershipId)}>
                       <MemberRoleSelect email={m.email} currentRole={m.role} />
-                    </form>
+                    </ActionForm>
                   ) : (
                     <Badge tone="neutral">{m.role}</Badge>
                   )}
@@ -521,20 +480,25 @@ export default async function TeamPage({
       {canManage && (
         <div className="space-y-3">
           <SectionHeader title="Invite a teammate" />
-          <ActionForm
+          <RevealActionForm
             action={invite}
-            reloadOnSettle
             className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 space-y-4"
           >
             {error && error !== 'INVITE_TARGET_ALREADY_MEMBER' && (
-              <p role="alert" className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
-                <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
-              </p>
+              <WhileUrlHas param="error">
+                <p role="alert" className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+                  <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
+                </p>
+              </WhileUrlHas>
             )}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field
                 label="Email"
-                error={error === 'INVITE_TARGET_ALREADY_MEMBER' ? ERR[error] : undefined}
+                error={
+                  error === 'INVITE_TARGET_ALREADY_MEMBER' ? (
+                    <WhileUrlHas param="error">{ERR[error]}</WhileUrlHas>
+                  ) : undefined
+                }
               >
                 <input
                   type="email"
@@ -568,7 +532,7 @@ export default async function TeamPage({
               Single-use, expires in 7 days. If email is configured on this
               deployment we send it; either way you get a link to share.
             </p>
-          </ActionForm>
+          </RevealActionForm>
         </div>
       )}
     </section>

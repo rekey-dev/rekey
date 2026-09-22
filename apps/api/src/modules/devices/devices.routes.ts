@@ -33,7 +33,7 @@ import {
 } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { requireTenantSession } from '../../middleware/tenant-session.js';
-import { devicesService, type Device } from './devices.service.js';
+import { devicesService, forEndUser } from './devices.service.js';
 import { assertEndUserInApplication } from '../../lib/end-users.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 
@@ -44,12 +44,6 @@ const StatusQuery = z.object({
 const STATUS_QUERY_SCHEMA = {
   status: { type: 'string', enum: ['ACTIVE', 'RELEASED', 'BLOCKED'] },
 } as const;
-
-/** What an end-user sees of their own device: no operator notes, no IP. */
-function forEndUser(d: Device): Omit<Device, 'blockedReason' | 'lastSeenIp'> {
-  const { blockedReason, lastSeenIp, ...rest } = d;
-  return rest;
-}
 
 // ---------------------------------------------------------------------------
 // End-user surface

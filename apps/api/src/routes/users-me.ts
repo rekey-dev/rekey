@@ -29,7 +29,7 @@
  * before this handler runs, so `erasedBy` is always null on this path.
  */
 
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { organizationsService } from '../modules/organizations/organizations.service.js';
 import { requirePublishableOrSecretKey, requireScope } from '../middleware/api-key-auth.js';
@@ -37,6 +37,14 @@ import { requireUserSession } from '../middleware/user-session.js';
 import { RekeyError } from '../lib/error.js';
 import { authService } from '../modules/auth/auth.service.js';
 import { ok, errs, ref } from '../lib/openapi.js';
+import {
+  ME_INCLUDED_PROPERTIES_SCHEMA,
+  ME_INCLUDE_ERRORS,
+  ME_INCLUDE_QUERYSTRING,
+  ME_INCLUDE_SCOPES,
+  parseMeInclude,
+  resolveMeIncludes,
+} from '../modules/auth/me-include.js';
 
 // ---------------------------------------------------------------------------
 // Shared error fragments, every route here sits behind
@@ -131,6 +139,11 @@ const END_USER_SELF_SCHEMA = {
   ],
 };
 
+/** What GET returns: the self record plus whatever `?include=` asked for. */
+const END_USER_SELF_WITH_INCLUDES_SCHEMA = {
+  allOf: [...END_USER_SELF_SCHEMA.allOf, ME_INCLUDED_PROPERTIES_SCHEMA],
+};
+
 /**
  * Self-service write surface, a **closed** allowlist.
  *
@@ -150,6 +163,31 @@ const UpdateSelfBody = z
     metadata: z.record(z.unknown()).nullable().optional(),
   })
   .strict();
+
+/**
+ * The self record both GET and PATCH return: the end-user row plus the
+ * session's active organization and the caller's role in it. One builder, so
+ * the PATCH cannot drift from the GET again (it returned
+ * `activeOrganizationId` without the two role fields `END_USER_SELF_SCHEMA`
+ * requires, and a typed client read `undefined`). Returns the role lookup too,
+ * since the GET's includes reuse it.
+ */
+async function selfRecord<U extends { id: string }>(req: FastifyRequest, endUser: U) {
+  const active = await organizationsService.activeRoleFor({
+    applicationId: req.application!.id,
+    endUserId: endUser.id,
+    organizationId: req.activeOrganizationId,
+  });
+  return {
+    active,
+    record: {
+      ...endUser,
+      activeOrganizationId: req.activeOrganizationId ?? null,
+      activeOrganizationRole: active?.role ?? null,
+      activeOrganizationBaseRole: active?.baseRole ?? null,
+    },
+  };
+}
 
 export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
   // Order matters: requireUserSession depends on request.application, which the
@@ -172,32 +210,47 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
           'key, since the JWT is the authorizer and the response is that user\'s own record. ' +
           'Refuses to return data if the JWT was issued by a different Application than the ' +
           'key represents. Note `GET /api/v1/me` is different: it returns the Application, ' +
-          'including its whole authConfig and billingConfig, so it stays secret-key-only.',
+          'including its whole authConfig and billingConfig, so it stays secret-key-only. ' +
+          'Pass `?include=` to add entitlements, the bound device, the current subscription, ' +
+          'the active organization or the caller\'s licences to the same response. With a ' +
+          'secret key, `entitlements`, `subscription` and `licenses` also need `billing:read`.',
+        querystring: ME_INCLUDE_QUERYSTRING,
         security: [
           { publishableKey: [], userToken: [] },
           { apiKey: [], userToken: [] },
         ],
         response: {
-          200: ok(END_USER_SELF_SCHEMA, "The current end-user's own record."),
-          ...errs({ ...USERS_ME_ERRORS }),
+          200: ok(END_USER_SELF_WITH_INCLUDES_SCHEMA, "The current end-user's own record."),
+          ...errs({
+            ...USERS_ME_ERRORS,
+            400: ME_INCLUDE_ERRORS[400],
+            403:
+              USERS_ME_ERRORS[403] +
+              ' With a secret key, API_KEY_SCOPE_INSUFFICIENT also when `include` asks for ' +
+              'entitlements, subscription or licenses without `billing:read` (the scope of the ' +
+              'routes that serve them). ' +
+              ME_INCLUDE_ERRORS[403],
+          }),
         },
       },
     },
-    async (req) => {
-      const active = await organizationsService.activeRoleFor({
-        applicationId: req.application!.id,
-        endUserId: req.endUser!.id,
-        organizationId: req.activeOrganizationId,
+    async (req, reply) => {
+      const include = parseMeInclude(req.query);
+      // Each value needs the scope of the route that already serves it, so a
+      // narrow key cannot read here what it is refused there. A publishable
+      // request carries no scopes and passes, as it does on those routes.
+      for (const scope of new Set([...include].map((value) => ME_INCLUDE_SCOPES[value]))) {
+        if (scope) await requireScope(scope)(req, reply);
+      }
+      const { active, record } = await selfRecord(req, req.endUser!);
+      const included = await resolveMeIncludes(include, {
+        endUser: req.endUser!,
+        deviceId: req.deviceId,
+        activeOrganizationId: req.activeOrganizationId,
+        activeOrganizationRole: active,
+        loadApplication: async () => req.application!,
       });
-      return {
-        success: true,
-        data: {
-          ...req.endUser!,
-          activeOrganizationId: req.activeOrganizationId ?? null,
-          activeOrganizationRole: active?.role ?? null,
-          activeOrganizationBaseRole: active?.baseRole ?? null,
-        },
-      };
+      return { success: true, data: { ...record, ...included } };
     },
   );
 
@@ -277,10 +330,7 @@ export async function usersMeRoutes(app: FastifyInstance): Promise<void> {
         ...(parsed.data.metadata !== undefined && { metadata: parsed.data.metadata }),
       });
 
-      return {
-        success: true,
-        data: { ...endUser, activeOrganizationId: req.activeOrganizationId ?? null },
-      };
+      return { success: true, data: (await selfRecord(req, endUser)).record };
     },
   );
 }

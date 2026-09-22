@@ -4,8 +4,9 @@
  * Operator personal-access-tokens (PATs, `rp_op_…`): long-lived, revocable,
  * SCOPED credentials an operator (or an AI agent acting as them) uses to call
  * tenant routes without a session, replacing the global SUPER_ADMIN_KEY. Mint
- * is OWNER/ADMIN only; the raw token is shown EXACTLY ONCE (stashed in a
- * short-lived HttpOnly cookie for the post-redirect reveal, never in the URL).
+ * is OWNER/ADMIN only; the raw token is shown EXACTLY ONCE, in the dialog
+ * `RevealActionForm` opens from the mint action's own response (never a URL,
+ * never a cookie).
  *
  * Also documents wiring the @rekey.dev/mcp server with a PAT so AI tools can mint
  * Application API keys via the scoped `keys:mint` tool instead of the master key.
@@ -13,19 +14,19 @@
 
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { cookies } from 'next/headers';
+import { revalidatePath } from 'next/cache';
 import { errorQuery, readErrorFlash, api, PanelApiError } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { ApiErrorText } from '@/components/api-error';
 import { Badge } from '@/components/Badge';
-import { CopyButton } from '@/components/CopyButton';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { ActionForm } from '@/components/ActionForm';
+import { RevealActionForm, type RevealResult } from '@/components/RevealActionForm';
+import { WhileUrlHas } from '@/components/WhileUrlHas';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { formatDate, formatDateTime } from '@/lib/date';
 import { Banner } from '@/components/Banner';
-import { cookieSecure } from '@/lib/cookie-secure';
 import type { Page } from '@/lib/paginate';
 
 interface OperatorTokenRow {
@@ -48,12 +49,6 @@ function scopeTone(scope: string): 'neutral' | 'brand' | 'warning' {
   return SCOPES.find((s) => s.value === scope)?.tone ?? 'neutral';
 }
 
-const REVEAL_COOKIE = 'rekey_pat_reveal';
-// Short floor: the reveal is dismissed (cookie deleted) the moment the operator
-// clicks "Done" or navigates away, so this max-age is only the fallback window
-// if they abandon the tab. Kept tight to limit how long the raw token lingers.
-const REVEAL_COOKIE_MAX_AGE = 60 * 2;
-
 const ERR: Record<string, string> = {
   TENANT_ROLE_INSUFFICIENT: 'Only workspace owners and admins can mint or revoke personal-access-tokens.',
   OPERATOR_SCOPE_UNKNOWN: 'Unknown scope. Allowed: read, applications:write, keys:mint.',
@@ -62,7 +57,7 @@ const ERR: Record<string, string> = {
   EXPIRES_IN_PAST: 'Expiry must be in the future (or leave it blank for no expiry).',
 };
 
-async function mintToken(formData: FormData): Promise<void> {
+async function mintToken(formData: FormData): Promise<RevealResult> {
   'use server';
   const name = String(formData.get('name') ?? '').trim();
   const scopes = formData.getAll('scopes').map((s) => String(s));
@@ -92,15 +87,18 @@ async function mintToken(formData: FormData): Promise<void> {
     throw err;
   }
 
-  const jar = await cookies();
-  jar.set(REVEAL_COOKIE, JSON.stringify({ rawToken: result.rawToken, prefix: result.apiToken.tokenPrefix }), {
-    httpOnly: true,
-    sameSite: 'strict',
-    secure: await cookieSecure(),
-    path: '/account/api-tokens',
-    maxAge: REVEAL_COOKIE_MAX_AGE,
-  });
-  redirect('/account/api-tokens?minted=1');
+  // Returned to the dialog `RevealActionForm` opens; revalidating puts the new
+  // token in the list behind it.
+  revalidatePath('/account/api-tokens');
+  return {
+    secret: {
+      title: 'Your new API token',
+      value: result.rawToken,
+      notes: [
+        `Prefix ${result.apiToken.tokenPrefix}. Store it like a database password: only its SHA-256 hash is kept on the server, so it cannot be recovered.`,
+      ],
+    },
+  };
 }
 
 async function revokeToken(formData: FormData): Promise<void> {
@@ -115,20 +113,6 @@ async function revokeToken(formData: FormData): Promise<void> {
     throw err;
   }
   redirect('/account/api-tokens?revoked=1');
-}
-
-/**
- * Dismiss the one-time reveal: delete the cookie and drop the `?minted=1`
- * query so a refresh can't re-display the raw token. A Server Component render
- * cannot mutate cookies in Next 15, only a Server Action / Route Handler can,
- * so the delete-on-read has to live here, invoked by the "Done" button (and as
- * a belt-and-braces auto-dismiss) once the operator has had a chance to copy it.
- */
-async function dismissReveal(): Promise<void> {
-  'use server';
-  const jar = await cookies();
-  jar.delete(REVEAL_COOKIE);
-  redirect('/account/api-tokens');
 }
 
 const inputCls =
@@ -146,25 +130,12 @@ export default async function ApiTokensPage({
   // written by whoever composes the link, and this text renders inside the
   // panel's own error banner.
   const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
-  const minted = sp.minted === '1';
   const revoked = sp.revoked === '1';
 
   const { items: tokens } = await api<Page<OperatorTokenRow>>({
     method: 'GET',
     path: '/api/v1/tenant/auth/api-tokens',
   });
-
-  // One-time raw-token reveal (cookie set by mintToken on the prior request).
-  const jar = await cookies();
-  let reveal: { rawToken: string; prefix: string } | null = null;
-  const revealCookie = jar.get(REVEAL_COOKIE)?.value;
-  if (minted && revealCookie) {
-    try {
-      reveal = JSON.parse(revealCookie) as { rawToken: string; prefix: string };
-    } catch {
-      /* stale */
-    }
-  }
 
   return (
     <section className="mx-auto max-w-7xl space-y-10 px-6 py-8 lg:px-8">
@@ -174,41 +145,16 @@ export default async function ApiTokensPage({
       />
 
       {error && (
-        <Banner tone="error">
-          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
-        </Banner>
+        <WhileUrlHas param="error">
+          <Banner tone="error">
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
+          </Banner>
+        </WhileUrlHas>
       )}
       {revoked && (
         <Banner tone="success">
           Token revoked.
         </Banner>
-      )}
-
-      {/* One-time reveal */}
-      {minted && reveal && (
-        <div className="rounded-lg border-2 border-amber-300 dark:border-amber-600 bg-amber-50 dark:bg-amber-950 p-4 space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-              New token: copy it now, it&apos;s shown once
-            </p>
-            <CopyButton value={reveal.rawToken} label="Copy token" />
-          </div>
-          <code className="block break-all rounded bg-[var(--color-surface)] px-3 py-2 text-xs font-mono">
-            {reveal.rawToken}
-          </code>
-          <p className="text-xs text-amber-800 dark:text-amber-300">
-            Store it like a database password. Only its SHA-256 hash is kept on the server, so it
-            cannot be recovered.
-          </p>
-          <ActionForm action={dismissReveal}>
-            <SubmitButton
-              pendingLabel="Dismissing…"
-              className="rounded-md border border-amber-400 dark:border-amber-600 px-3 py-1.5 text-xs font-medium text-amber-900 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900 disabled:opacity-60"
-            >
-              Done, I&apos;ve copied it
-            </SubmitButton>
-          </ActionForm>
-        </div>
       )}
 
       {/* ─── Mint ─────────────────────────────────────────── */}
@@ -219,7 +165,7 @@ export default async function ApiTokensPage({
             Default-deny: pick only the scopes the token needs. Owners and admins only.
           </p>
         </div>
-        <ActionForm
+        <RevealActionForm
           action={mintToken}
           className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5 space-y-4"
         >
@@ -246,7 +192,7 @@ export default async function ApiTokensPage({
             ))}
           </fieldset>
           <SubmitButton pendingLabel="Creating token…">Create token</SubmitButton>
-        </ActionForm>
+        </RevealActionForm>
       </section>
 
       {/* ─── Active tokens ────────────────────────────────── */}

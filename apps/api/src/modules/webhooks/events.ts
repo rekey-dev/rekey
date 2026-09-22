@@ -86,6 +86,15 @@ export const KNOWN_WEBHOOK_EVENTS = [
   // operator release). `license.activated` is deliberately absent: verify is
   // called at every launch, and announcing each one would be noise.
   'license.deactivated',
+  // One per credit ledger entry, enqueued inside the transaction that wrote
+  // the entry (credits.service.ts `applyDelta`). Named by what happened, not
+  // only by sign: CONSUME is `credit.consumed`; ADJUST of either sign, or any
+  // other entry that removes credits, is `credit.adjusted`; every remaining
+  // entry adds and is `credit.granted`. Payload: `data.credit`, see
+  // `CreditWebhookData` in shared-types.
+  'credit.granted',
+  'credit.consumed',
+  'credit.adjusted',
 ] as const;
 
 /**

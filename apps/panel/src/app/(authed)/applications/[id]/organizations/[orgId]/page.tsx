@@ -2,23 +2,23 @@ import * as React from 'react';
 import Link from '@/components/Link';
 import { RecordHeader } from '@/components/RecordHeader';
 import { notFound, redirect } from 'next/navigation';
-import { cookies } from 'next/headers';
+import { revalidatePath } from 'next/cache';
 import { errorQuery, readErrorFlash, api, PanelApiError, type OrganizationDetail, type OrganizationRoleRow, type EndUserRow, type OrgBillingDto } from '@/lib/api';
 import type { Page } from '@/lib/paginate';
 import { Modal } from '@/components/Modal';
 import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
-import { CopyButton } from '@/components/CopyButton';
 import { Card, SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
 import { StatusPill } from '@/components/StatusPill';
 import { EmptyState } from '@/components/EmptyState';
 import { ActionForm } from '@/components/ActionForm';
+import { RevealActionForm, type RevealResult } from '@/components/RevealActionForm';
+import { WhileUrlHas } from '@/components/WhileUrlHas';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
 import { Banner } from '@/components/Banner';
-import { cookieSecure } from '@/lib/cookie-secure';
 
 // Organization roles are a per-Application catalog, not this fixed list. These
 // three are only the built-ins every Application is seeded with, kept as a
@@ -156,30 +156,36 @@ async function revealOrgLicenseKey(
   applicationId: string,
   orgId: string,
   licenseId: string,
-): Promise<void> {
+): Promise<RevealResult> {
   'use server';
+  let result: { rawKey: string; activationsReset: number };
   try {
-    const result = await api<{ rawKey: string; activationsReset: number }>({
+    result = await api<{ rawKey: string; activationsReset: number }>({
       method: 'POST',
       path: `${orgBase(applicationId, orgId)}/licenses/${encodeURIComponent(licenseId)}/rotate-key`,
     });
-    // One-time key via a short-lived httpOnly cookie, not the URL (keys in the
-    // URL leak into history, the referer header, and access logs).
-    const jar = await cookies();
-    jar.set('rekey_reveal_org_license', result.rawKey, {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: await cookieSecure(),
-      path: pageUrl(applicationId, orgId),
-      maxAge: 120,
-    });
-    redirect(`${pageUrl(applicationId, orgId)}?revealed=1&reset=${result.activationsReset}`);
   } catch (err) {
     if (err instanceof PanelApiError) {
       redirect(`${pageUrl(applicationId, orgId)}?${await errorQuery(err)}`);
     }
     throw err;
   }
+  // Returned to the dialog `RevealActionForm` opens: never a URL (history,
+  // Referer, access logs), never a cookie.
+  revalidatePath(pageUrl(applicationId, orgId));
+  const reset = result.activationsReset;
+  return {
+    secret: {
+      title: 'Pooled licence key',
+      value: result.rawKey,
+      notes: [
+        "Hand this to the organization. The team's machines validate with POST /api/v1/licenses/verify.",
+        ...(reset > 0
+          ? [`${reset} existing activation${reset === 1 ? ' was' : 's were'} reset, so any machine on the old key must re-verify.`]
+          : []),
+      ],
+    },
+  };
 }
 
 export default async function OrganizationDetailPage({
@@ -199,8 +205,6 @@ export default async function OrganizationDetailPage({
   const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const addMemberError = sp.addMember === '1' ? error : undefined;
   const editOrgError = sp.editOrg === '1' ? error : undefined;
-  const reveal = (await cookies()).get('rekey_reveal_org_license')?.value;
-  const revealReset = typeof sp.reset === 'string' ? Number(sp.reset) : 0;
 
   let detail: OrganizationDetail;
   try {
@@ -290,30 +294,11 @@ export default async function OrganizationDetailPage({
       />
 
       {error && !addMemberError && !editOrgError && (
-        <Banner tone="error">
-          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
-        </Banner>
-      )}
-
-      {reveal && (
-        <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-500/60 dark:bg-amber-950/60 space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-              Pooled license key (shown once, copy now)
-            </p>
-            <CopyButton value={reveal} label="Copy key" />
-          </div>
-          <code className="block break-all rounded-md bg-[var(--color-surface)] px-3 py-2 text-xs font-mono">
-            {reveal}
-          </code>
-          <p className="text-xs text-amber-800 dark:text-amber-300">
-            Hand this to the organization. The team's machines validate with{' '}
-            <code className="font-mono">POST /api/v1/licenses/verify</code>.
-            {revealReset > 0 && (
-              <> {revealReset} existing activation{revealReset === 1 ? '' : 's'} were reset, so any machine on the old key must re-verify.</>
-            )}
-          </p>
-        </div>
+        <WhileUrlHas param="error">
+          <Banner tone="error">
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+          </Banner>
+        </WhileUrlHas>
       )}
 
       {/* ─── Members ─────────────────────────────── */}
@@ -510,14 +495,14 @@ export default async function OrganizationDetailPage({
                       </TD>
                       <TD align="right">
                         {l.status === 'ACTIVE' && (
-                          <ActionForm action={revealOrgLicenseKey.bind(null, id, orgId, l.id)} className="inline">
+                          <RevealActionForm action={revealOrgLicenseKey.bind(null, id, orgId, l.id)} className="inline">
                             <ConfirmButton
                               variant="subtle"
                               confirm={`Reveal the key for ${l.keyPrefix}…? This mints a NEW key (shown once) and resets any existing activations, so machines on the old key must re-verify. Org keys are stored hash-only, so this is the only way to obtain one.`}
                             >
                               Reveal key
                             </ConfirmButton>
-                          </ActionForm>
+                          </RevealActionForm>
                         )}
                       </TD>
                     </TR>

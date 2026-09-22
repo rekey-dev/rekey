@@ -34,6 +34,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { recordSecurityEvent } from '../src/lib/security-events.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 
 interface Bootstrapped {
   tenantId: string;
@@ -216,6 +217,12 @@ describe('Security events are reachable from the workspace that owns the Applica
       payload: { reason: 'chargeback' },
     });
     expect(blocked.statusCode).toBe(200);
+
+    // Both routes write their event detached (`void recordSecurityEvent`), so
+    // the rows land after the responses above. Wait for them before reading
+    // the log, or a slow runner reads it first and sees neither.
+    await waitForSecurityEvents({ applicationId: b.applicationId, type: 'user.device_registered' });
+    await waitForSecurityEvents({ applicationId: b.applicationId, type: 'end_user.device_blocked' });
 
     // Registration is the end-user's own event; the block is the operator's.
     // Both were unreachable before, and they arrive under different actor

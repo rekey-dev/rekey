@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import dynamic from 'next/dynamic';
+import { useCommitNudge } from './use-commit-nudge';
 
 /**
  * Unlayer wrapper. The editor lives in an iframe and exposes
@@ -59,6 +60,7 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
   const [bodyHtmlHidden, setBodyHtmlHidden] = React.useState<string>('');
   const [submitting, setSubmitting] = React.useState(false);
   const [, startTransition] = React.useTransition();
+  const nudge = useCommitNudge();
   const [ready, setReady] = React.useState(false);
   const [saveError, setSaveError] = React.useState<string | null>(null);
   const formRef = React.useRef<HTMLFormElement | null>(null);
@@ -149,9 +151,13 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
       const formData = new FormData(form);
       formData.set('designJson', designJson);
       formData.set('bodyHtml', data.html);
+      nudge.mark();
       startTransition(() => {
         void Promise.resolve(props.action(formData)).finally(() => {
           setSubmitting(false);
+          // The save's redirect re-renders this page, the transition that can
+          // be left suspended for good (`lib/commit-nudge.ts`).
+          nudge.start();
         });
       });
     });

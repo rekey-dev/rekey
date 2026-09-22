@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { prisma } from '../src/lib/prisma.js';
 
 function pkce(): { verifier: string; challenge: string } {
   const verifier = randomBytes(32).toString('base64url');
@@ -521,6 +522,18 @@ describe('MCP OAuth AS — discovery + DCR', () => {
     return (tok.json() as { access_token: string }).access_token;
   }
 
+  /** The end-user's own session token, for the REST route a tool mirrors. */
+  async function userToken(ctx: { liveKey: string; euEmail: string; euPassword: string }): Promise<string> {
+    const r = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/sign-in',
+      headers: { authorization: `Bearer ${ctx.liveKey}` },
+      payload: { email: ctx.euEmail, password: ctx.euPassword },
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    return (r.json().data as { accessToken: string }).accessToken;
+  }
+
   function rpc(slug: string, token: string | null, msg: object): Promise<unknown> {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (token) headers.authorization = `Bearer ${token}`;
@@ -580,7 +593,12 @@ describe('MCP OAuth AS — discovery + DCR', () => {
     const profile = JSON.parse(call.json().result.content[0]!.text) as { email: string };
     expect(profile.email).toBe(ctx.euEmail);
 
-    // get_credits returns a balance for the same user.
+    // get_credits returns a balance for the same user once billing is on.
+    // (This Application has billing off, so first it refuses, as REST does.)
+    await prisma.application.update({
+      where: { slug: ctx.slug },
+      data: { billingConfig: { provider: 'stripe', enabled: true } },
+    });
     const credits = (await rpc(ctx.slug, token, {
       jsonrpc: '2.0',
       id: 4,
@@ -589,6 +607,51 @@ describe('MCP OAuth AS — discovery + DCR', () => {
     })) as { json: () => { result: { content: Array<{ text: string }> } } };
     const bal = JSON.parse(credits.json().result.content[0]!.text) as { balance: number };
     expect(typeof bal.balance).toBe('number');
+  });
+
+  it('the billing tools refuse with BILLING_DISABLED where the REST reads they mirror do', async () => {
+    const ctx = await bootstrapFlow();
+    const token = await accessTokenFor(ctx);
+    const call = async (name: string) => {
+      const res = (await rpc(ctx.slug, token, {
+        jsonrpc: '2.0',
+        id: name,
+        method: 'tools/call',
+        params: { name, arguments: {} },
+      })) as { statusCode: number; json: () => { result: { content: Array<{ text: string }>; isError?: boolean } } };
+      expect(res.statusCode).toBe(200);
+      const { result } = res.json();
+      return { isError: result.isError === true, body: JSON.parse(result.content[0]!.text) as Record<string, unknown> };
+    };
+    const BILLING_TOOLS = ['get_subscription', 'get_credits', 'list_licenses'];
+
+    // Billing off (the default for this Application): all three refuse.
+    for (const name of BILLING_TOOLS) {
+      const { isError, body } = await call(name);
+      expect(isError, `${name}: ${JSON.stringify(body)}`).toBe(true);
+      expect(body).toEqual({ error: 'Billing is not enabled for this application.', code: 'BILLING_DISABLED' });
+    }
+    // The REST route agrees, so the two surfaces refuse the same thing.
+    const rest = await app.inject({
+      method: 'GET',
+      url: '/api/v1/users/me/licenses',
+      headers: { authorization: `Bearer ${ctx.liveKey}`, 'x-rekey-user-token': await userToken(ctx) },
+    });
+    expect(rest.statusCode).toBe(403);
+    expect(rest.json().error.code).toBe('BILLING_DISABLED');
+    // Tools with nothing to do with billing still answer.
+    expect((await call('get_profile')).isError).toBe(false);
+    expect((await call('list_my_devices')).isError).toBe(false);
+
+    // Billing on: all three answer.
+    await prisma.application.update({
+      where: { slug: ctx.slug },
+      data: { billingConfig: { provider: 'stripe', enabled: true } },
+    });
+    for (const name of BILLING_TOOLS) {
+      const { isError, body } = await call(name);
+      expect(isError, `${name}: ${JSON.stringify(body)}`).toBe(false);
+    }
   });
 
   it('MCP unknown tool returns a JSON-RPC error', async () => {

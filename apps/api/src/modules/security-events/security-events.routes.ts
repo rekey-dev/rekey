@@ -116,7 +116,7 @@ export async function securityEventsRoutes(app: FastifyInstance): Promise<void> 
                 schema: {
                   type: 'string',
                   description:
-                    'Header row `id,type,actorType,actorId,applicationId,ip,userAgent,metadata,createdAt` ' +
+                    'Header row `id,type,actorType,actorId,applicationId,ip,userAgent,metadata,createdAt,actorEmail` ' +
                     'followed by one row per event.',
                 },
               },
@@ -143,7 +143,9 @@ export async function securityEventsRoutes(app: FastifyInstance): Promise<void> 
           limit: CSV_MAX_ROWS,
           cap: CSV_MAX_ROWS,
         });
-        const header = 'id,type,actorType,actorId,applicationId,ip,userAgent,metadata,createdAt';
+        // `actorEmail` is appended, not inserted beside `actorId`, so a reader
+        // that picks columns by position keeps working.
+        const header = 'id,type,actorType,actorId,applicationId,ip,userAgent,metadata,createdAt,actorEmail';
         const lines = rows.map((r) =>
           [
             csvCell(r.id),
@@ -155,6 +157,7 @@ export async function securityEventsRoutes(app: FastifyInstance): Promise<void> 
             csvCell(r.userAgent),
             csvCell(JSON.stringify(r.metadata ?? {})),
             csvCell(r.createdAt.toISOString()),
+            csvCell(r.actorEmail),
           ].join(','),
         );
         return reply

@@ -79,7 +79,7 @@ You don't have to wait for a leak:
 - **Rotate on personnel change** — anyone who could read production env vars and leaves the team.
 - **Set `expiresAt` on keys minted for short-lived purposes** (load tests, migrations, contractors). Expired keys fail closed with `API_KEY_INVALID`; nothing to remember to clean up.
 - **One key per consumer** — give each service/environment its own named key so a leak is revocable without redeploying everything else, and `lastUsedAt` stays meaningful.
-- **Scope down where possible** — keys take a `scopes` array (`auth:read`, `auth:write`, `billing:read`, `billing:write`, `webhooks:read`); a leaked scoped key buys an attacker less than `*`.
+- **Scope down where possible**: keys take a `scopes` array (`auth:read`, `auth:write`, `billing:read`, `billing:write`, `webhooks:read`); a leaked scoped key buys an attacker less than `*`. A key holding the elevated `credits:grant` scope can mint credits, so rotate it first and keep it on the one service that needs it.
 
 Keys never auto-rotate. Rotation is always an explicit operator action.
 

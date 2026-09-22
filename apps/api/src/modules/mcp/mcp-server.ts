@@ -9,6 +9,7 @@
  */
 
 import { accountTools, type ToolContext } from './account-tools.js';
+import { RekeyError } from '../../lib/error.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const SERVER_INFO = { name: 'rekey-account', version: '1.0.0' };
@@ -73,8 +74,12 @@ export async function handleMcpMessage(
         const data = await tool.handler(ctx);
         return result(id, { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
       } catch (e) {
+        // A RekeyError also carries its code, so a refusal reads the same as
+        // the REST route it mirrors (`BILLING_DISABLED`, not only its prose).
+        const body =
+          e instanceof RekeyError ? { error: e.message, code: e.code } : { error: (e as Error).message };
         return result(id, {
-          content: [{ type: 'text', text: JSON.stringify({ error: (e as Error).message }) }],
+          content: [{ type: 'text', text: JSON.stringify(body) }],
           isError: true,
         });
       }

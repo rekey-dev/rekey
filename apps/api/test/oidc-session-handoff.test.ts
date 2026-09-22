@@ -290,6 +290,30 @@ describe('app-authorised session handoff', () => {
     expect((res.json().error as { code: string }).code).toBe('API_KEY_INVALID');
   });
 
+  it('needs auth:write: a key minted only for credits:grant cannot mint a session code', async () => {
+    const fx = await bootstrap();
+    const mint = async (scopes: string[]): Promise<string> => {
+      const r = await app.inject({
+        method: 'POST',
+        url: `/api/v1/tenant/applications/${fx.appId}/api-keys`,
+        headers: { authorization: `Bearer ${fx.operatorToken}` },
+        payload: { name: scopes.join('+'), mode: 'live', scopes },
+      });
+      expect(r.statusCode, r.body).toBe(201);
+      return (r.json().data as { rawKey: string }).rawKey;
+    };
+
+    for (const scopes of [['credits:grant'], ['auth:read', 'billing:read']]) {
+      const res = await handoff(fx, { challenge: pkce().challenge, key: await mint(scopes) });
+      expect(res.statusCode, `${scopes.join('+')}: ${res.body}`).toBe(403);
+      expect((res.json().error as { code: string }).code).toBe('API_KEY_SCOPE_INSUFFICIENT');
+    }
+    const authWrite = await handoff(fx, { challenge: pkce().challenge, key: await mint(['auth:write']) });
+    expect(authWrite.statusCode, authWrite.body).toBe(200);
+    // The fixture's `*` key keeps working.
+    expect((await handoff(fx, { challenge: pkce().challenge })).statusCode).toBe(200);
+  });
+
   it('refuses a missing user token', async () => {
     const fx = await bootstrap();
     const { challenge } = pkce();

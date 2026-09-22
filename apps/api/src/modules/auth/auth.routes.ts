@@ -5,6 +5,7 @@ import { authService } from './auth.service.js';
 import {
   requirePublishableOrSecretKey,
   requireScope,
+  requireScopeByMethod,
 } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { assertStepUp } from '../../lib/step-up.js';
@@ -22,7 +23,8 @@ import { CREDENTIAL_BODY_LIMIT, SIGN_UP_BODY_LIMIT, WEBAUTHN_BODY_LIMIT } from '
 //
 // Every route in `authRoutes` (the public-bootstrap plugin) sits behind
 // `requirePublishableOrSecretKey` + `requireScope('auth:write')`. Every route
-// in `authenticatedAuthRoutes` sits behind those two PLUS `requireUserSession`
+// in `authenticatedAuthRoutes` sits behind the key hook, `auth:read` for GET or
+// `auth:write` for the rest (`requireScopeByMethod`), PLUS `requireUserSession`
 //, see middleware/api-key-auth.ts and middleware/user-session.ts for the
 // exact throws these hooks produce.
 // ---------------------------------------------------------------------------
@@ -50,7 +52,7 @@ const USER_SESSION_401 =
 /** Shared by every route in the authenticated plugin (`authenticatedAuthRoutes`). */
 const AUTHENTICATED_ERRORS = {
   401: USER_SESSION_401,
-  403: BOOTSTRAP_403,
+  403: BOOTSTRAP_403.replace('the secret key lacks the `auth:write` scope.', 'the secret key lacks the scope the method needs (`auth:read` for GET, `auth:write` for every other method).'),
   404: 'END_USER_NOT_FOUND — the end-user behind this session no longer exists in this Application.',
   410: 'END_USER_ERASED — this end-user was erased (GDPR) and can no longer authenticate.',
   429: RATE_LIMITED,
@@ -1057,7 +1059,9 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
   // password. Secret-only meant a browser could sign in with a passkey but
   // never enroll one, and consume a verification token but never request one.
   app.addHook('onRequest', requirePublishableOrSecretKey);
-  app.addHook('onRequest', requireScope('auth:write'));
+  // Reading your own sessions and passkeys needs `auth:read`, as reading your
+  // own record and devices does; every change needs `auth:write`.
+  app.addHook('onRequest', requireScopeByMethod({ read: 'auth:read', write: 'auth:write' }));
   app.addHook('onRequest', requireUserSession);
 
   app.post(

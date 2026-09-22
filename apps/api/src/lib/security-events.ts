@@ -11,6 +11,7 @@
 
 import type { FastifyRequest } from 'fastify';
 import type { SecurityEventType } from '@rekey.dev/shared-types';
+import type { Prisma } from '@prisma/client';
 import { prisma } from './prisma.js';
 
 export type SecurityActorType = 'operator' | 'end_user' | 'system';
@@ -98,22 +99,37 @@ export function subjectEndUserIdOf(
 
 export async function recordSecurityEvent(input: SecurityEventInput): Promise<void> {
   try {
-    await prisma.securityEvent.create({
-      data: {
-        type: input.type,
-        actorType: input.actorType,
-        actorId: input.actorId ?? null,
-        subjectEndUserId: subjectEndUserIdOf(input),
-        tenantId: input.tenantId ?? null,
-        applicationId: input.applicationId ?? null,
-        ip: input.ip ?? null,
-        userAgent: input.userAgent ?? null,
-        metadata: (input.metadata ?? {}) as object,
-      },
-    });
+    await prisma.securityEvent.create({ data: securityEventRow(input) });
   } catch {
     // Best-effort: an audit-log write must never break the action it records.
   }
+}
+
+/**
+ * The durable variant: write the event through the caller's transaction, so
+ * it commits with the action it records or neither does, and a failure fails
+ * the action. For an action whose trail is part of its safety, such as a key
+ * minting credits, where "applied but unaudited" must not be a possible state.
+ */
+export async function recordSecurityEventIn(
+  tx: Pick<Prisma.TransactionClient, 'securityEvent'>,
+  input: SecurityEventInput,
+): Promise<void> {
+  await tx.securityEvent.create({ data: securityEventRow(input) });
+}
+
+function securityEventRow(input: SecurityEventInput): Prisma.SecurityEventUncheckedCreateInput {
+  return {
+    type: input.type,
+    actorType: input.actorType,
+    actorId: input.actorId ?? null,
+    subjectEndUserId: subjectEndUserIdOf(input),
+    tenantId: input.tenantId ?? null,
+    applicationId: input.applicationId ?? null,
+    ip: input.ip ?? null,
+    userAgent: input.userAgent ?? null,
+    metadata: (input.metadata ?? {}) as object,
+  };
 }
 
 export interface SecurityEventQuery {
@@ -214,6 +230,62 @@ export async function countSecurityEvents(query: SecurityEventQuery): Promise<nu
   return prisma.securityEvent.count({ where: await securityEventWhere(query) });
 }
 
+/**
+ * Who each event's actor is, by email, looked up when the log is READ.
+ *
+ * `actorId` alone is an opaque cuid: an operator reading "who did this to my
+ * customer?" got `cmsa91v4c000nv5h5txnjvvry`, and the panel papered over it by
+ * matching ids against the CURRENT member list, which lost every operator who
+ * has since left the workspace (the people an audit trail most needs to name),
+ * plus one request per end-user on the page.
+ *
+ * Resolved here, not stored on the row: the audit write stays a single insert
+ * with no reads (the reason `SecurityEvent` has scalar ids and no relations,
+ * see `securityEventWhere`), and an email is mutable, so the log shows who the
+ * account is now rather than a copy that may be stale. Two batched reads per
+ * page, whatever its size. An actor that no longer exists (a deleted operator,
+ * an erased end-user row) resolves to `null` and the id still identifies it.
+ *
+ *   - `operator`: the operator account (`TenantUser`), whether or not they are
+ *     still a member of this workspace.
+ *   - `end_user`: the end-user, only within the Application the event names, so
+ *     an id can never resolve across Applications.
+ *   - `system` (and any type added later): `null`; there is no account to name.
+ */
+export async function withActorEmails<
+  T extends { actorType: string; actorId: string | null; applicationId: string | null },
+>(rows: T[]): Promise<Array<T & { actorEmail: string | null }>> {
+  const operatorIds = new Set<string>();
+  const endUserIds = new Set<string>();
+  for (const r of rows) {
+    if (!r.actorId) continue;
+    if (r.actorType === 'operator') operatorIds.add(r.actorId);
+    else if (r.actorType === 'end_user' && r.applicationId) endUserIds.add(r.actorId);
+  }
+  const [operators, endUsers] = await Promise.all([
+    operatorIds.size > 0
+      ? prisma.tenantUser.findMany({ where: { id: { in: [...operatorIds] } }, select: { id: true, email: true } })
+      : Promise.resolve([]),
+    endUserIds.size > 0
+      ? prisma.endUser.findMany({
+          where: { id: { in: [...endUserIds] } },
+          select: { id: true, email: true, applicationId: true },
+        })
+      : Promise.resolve([]),
+  ]);
+  const operatorEmail = new Map(operators.map((o) => [o.id, o.email]));
+  const endUser = new Map(endUsers.map((u) => [u.id, u]));
+  return rows.map((r) => {
+    let actorEmail: string | null = null;
+    if (r.actorId && r.actorType === 'operator') actorEmail = operatorEmail.get(r.actorId) ?? null;
+    if (r.actorId && r.actorType === 'end_user') {
+      const u = endUser.get(r.actorId);
+      actorEmail = u && u.applicationId === r.applicationId ? u.email : null;
+    }
+    return { ...r, actorEmail };
+  });
+}
+
 /** List recent security events for a tenant (newest first, capped at `cap`, default 200). */
 export async function listSecurityEvents(query: SecurityEventQuery): Promise<
   Array<{
@@ -221,6 +293,7 @@ export async function listSecurityEvents(query: SecurityEventQuery): Promise<
     type: string;
     actorType: string;
     actorId: string | null;
+    actorEmail: string | null;
     applicationId: string | null;
     ip: string | null;
     userAgent: string | null;
@@ -240,15 +313,17 @@ export async function listSecurityEvents(query: SecurityEventQuery): Promise<
     take: Math.min(query.limit ?? 50, query.cap ?? 200),
     skip: query.offset ?? 0,
   });
-  return rows.map((r) => ({
-    id: r.id,
-    type: r.type,
-    actorType: r.actorType,
-    actorId: r.actorId,
-    applicationId: r.applicationId,
-    ip: r.ip,
-    userAgent: r.userAgent,
-    metadata: r.metadata,
-    createdAt: r.createdAt,
-  }));
+  return withActorEmails(
+    rows.map((r) => ({
+      id: r.id,
+      type: r.type,
+      actorType: r.actorType,
+      actorId: r.actorId,
+      applicationId: r.applicationId,
+      ip: r.ip,
+      userAgent: r.userAgent,
+      metadata: r.metadata,
+      createdAt: r.createdAt,
+    })),
+  );
 }

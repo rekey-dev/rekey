@@ -57,6 +57,12 @@ export interface IssueRefreshTokenOptions {
   /** Active organization for this session, re-emitted as the `oid` claim on refresh. */
   activeOrganizationId?: string | null;
   /**
+   * For `kind: 'mcp'`, the organization the grant was bound to at consent.
+   * Unlike `activeOrganizationId` this is not a hint: the MCP refresh grant
+   * refuses a chain whose end-user no longer belongs to it.
+   */
+  grantOrganizationId?: string | null;
+  /**
    * Device the session was minted on (`devices.id`), when the client sent a
    * fingerprint. Carried across rotations; the refresh grant refuses a
    * different fingerprint for a bound chain (see auth.service `refresh`).
@@ -94,6 +100,7 @@ export async function issueRefreshToken(
       clientId: options.clientId ?? null,
       scope: options.scope ?? null,
       activeOrganizationId: options.activeOrganizationId ?? null,
+      grantOrganizationId: options.grantOrganizationId ?? null,
       deviceId: options.deviceId ?? null,
     },
   });
@@ -169,6 +176,9 @@ export async function rotateRefreshToken(
         // Carry the active org forward so it survives refresh (the refresh
         // handler re-confirms membership and clears it if the user left).
         activeOrganizationId: presented.activeOrganizationId,
+        // The MCP organization binding is part of the grant, like `scope`:
+        // a rotation re-issues the same grant and cannot drop or change it.
+        grantOrganizationId: presented.grantOrganizationId,
         // And the device: a rotation is the same session on the same machine.
         // The refresh handler is what refuses a rotation presented from a
         // different fingerprint; here the binding is simply preserved.

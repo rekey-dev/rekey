@@ -1,12 +1,14 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { cookies } from 'next/headers';
+import { revalidatePath } from 'next/cache';
 import { errorQuery, readErrorFlash, api, PanelApiError, getApplication } from '@/lib/api';
 import { BillingDisabledState } from '@/components/BillingDisabledState';
 import { ApiErrorText } from '@/components/api-error';
 import { Modal } from '@/components/Modal';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { ActionForm } from '@/components/ActionForm';
+import { RevealActionForm, type RevealResult } from '@/components/RevealActionForm';
+import { WhileUrlHas } from '@/components/WhileUrlHas';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
 import { CopyButton } from '@/components/CopyButton';
@@ -17,7 +19,6 @@ import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
-import { cookieSecure } from '@/lib/cookie-secure';
 
 const LICENSE_STATUS: Record<LicenseRow['status'], { tone: BadgeTone; label: string }> = {
   ACTIVE: { tone: 'success', label: 'active' },
@@ -54,7 +55,7 @@ interface IssueResp {
   rawKey: string;
 }
 
-async function issueLicense(applicationId: string, formData: FormData): Promise<void> {
+async function issueLicense(applicationId: string, formData: FormData): Promise<RevealResult> {
   'use server';
   const endUserId = String(formData.get('endUserId') ?? '').trim();
   const kind = String(formData.get('kind') ?? 'PERPETUAL') as 'PERPETUAL' | 'TIMED' | 'SEATS';
@@ -72,8 +73,9 @@ async function issueLicense(applicationId: string, formData: FormData): Promise<
     redirect(`/applications/${applicationId}/licenses?error=LICENSE_SEATS_REQUIRED&newLicense=1`);
   }
 
+  let result: IssueResp;
   try {
-    const result = await api<IssueResp>({
+    result = await api<IssueResp>({
       method: 'POST',
       path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/licenses`,
       body: {
@@ -83,23 +85,23 @@ async function issueLicense(applicationId: string, formData: FormData): Promise<
         ...(seatsAllowed && { seatsAllowed }),
       },
     });
-    // One-time key via a short-lived httpOnly cookie, not the URL (keys in the
-    // URL leak into history, the referer header, and access logs).
-    const jar = await cookies();
-    jar.set('rekey_reveal_license', result.rawKey, {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: await cookieSecure(),
-      path: `/applications/${applicationId}/licenses`,
-      maxAge: 120,
-    });
-    redirect(`/applications/${applicationId}/licenses?e=license_issued`);
   } catch (err) {
     if (err instanceof PanelApiError) {
       redirect(`/applications/${applicationId}/licenses?${await errorQuery(err, { newLicense: '1' })}`);
     }
     throw err;
   }
+  // The key goes back in this action's response, to the dialog
+  // `RevealActionForm` opens: never a URL (history, Referer, access logs),
+  // never a cookie. Revalidating puts the new licence in the table behind it.
+  revalidatePath(`/applications/${applicationId}/licenses`);
+  return {
+    secret: {
+      title: 'New licence key',
+      value: result.rawKey,
+      notes: ["The customer's software validates it with POST /api/v1/licenses/verify."],
+    },
+  };
 }
 
 async function revokeLicense(applicationId: string, licenseId: string): Promise<void> {
@@ -179,7 +181,6 @@ export default async function LicensesPage({
   // written by whoever composes the link, and this text renders inside the
   // panel's own error banner.
   const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
-  const reveal = (await cookies()).get('rekey_reveal_license')?.value;
   const PAGE_SIZE = readPageSize(sp);
   const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
   // Which licence's activations to expand, if any. A query parameter rather
@@ -224,24 +225,6 @@ export default async function LicensesPage({
 
   return (
     <div className="space-y-5">
-      {reveal && (
-        <div className="rounded-lg border-2 border-amber-300 dark:border-amber-500 bg-amber-50 dark:bg-amber-950 p-4 space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-              New license key (shown once, copy now)
-            </p>
-            <CopyButton value={reveal} label="Copy key" />
-          </div>
-          <code className="block break-all rounded bg-[var(--color-surface)] px-3 py-2 text-xs font-mono">
-            {reveal}
-          </code>
-          <p className="text-xs text-amber-800 dark:text-amber-300">
-            The customer's software validates with{' '}
-            <code className="font-mono">POST /api/v1/licenses/verify</code>.
-          </p>
-        </div>
-      )}
-
       <SectionHeader
         title="Licenses"
         count={`(${licenses.length})`}
@@ -266,11 +249,13 @@ export default async function LicensesPage({
                 No end-users yet. Sign one up via your application's sign-up flow first.
               </p>
             ) : (
-              <ActionForm action={issueLicense.bind(null, id)} className="space-y-3">
+              <RevealActionForm action={issueLicense.bind(null, id)} className="space-y-3">
                 {error && (
-                  <Banner tone="error">
-                    <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
-                  </Banner>
+                  <WhileUrlHas param="error">
+                    <Banner tone="error">
+                      <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
+                    </Banner>
+                  </WhileUrlHas>
                 )}
               <Field
                 label="End-user"
@@ -318,7 +303,7 @@ export default async function LicensesPage({
                 </Field>
               </div>
                 <SubmitButton pendingLabel="Issuing license…">Issue license</SubmitButton>
-              </ActionForm>
+              </RevealActionForm>
             )}
           </Modal>
         }

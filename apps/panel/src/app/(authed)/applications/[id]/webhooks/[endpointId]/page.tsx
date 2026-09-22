@@ -1,21 +1,20 @@
 import * as React from 'react';
 import { RecordHeader } from '@/components/RecordHeader';
 import { redirect } from 'next/navigation';
-import { cookies } from 'next/headers';
+import { revalidatePath } from 'next/cache';
 import { api } from '@/lib/api';
 import type { Page } from '@/lib/paginate';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { ActionForm } from '@/components/ActionForm';
+import { RevealActionForm, type RevealResult } from '@/components/RevealActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
 import { formatDateTime } from '@/lib/date';
-import { CopyButton } from '@/components/CopyButton';
 import { CopyLinkButton } from '@/components/CopyLinkButton';
 import { Card, SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
-import { cookieSecure } from '@/lib/cookie-secure';
 
 interface EndpointRow {
   id: string;
@@ -60,22 +59,21 @@ function truncate(s: string, max: number): { text: string; truncated: boolean } 
     : { text: s.slice(0, max), truncated: true };
 }
 
-async function rotateSecret(applicationId: string, endpointId: string): Promise<void> {
+async function rotateSecret(applicationId: string, endpointId: string): Promise<RevealResult> {
   'use server';
   const result = await api<{ secret: string }>({
     method: 'POST',
     path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/webhooks/${encodeURIComponent(endpointId)}/rotate-secret`,
   });
-  // One-time secret via a short-lived httpOnly cookie, not the URL.
-  const jar = await cookies();
-  jar.set('rekey_reveal_whsec', result.secret, {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: await cookieSecure(),
-    path: `/applications/${applicationId}/webhooks/${endpointId}`,
-    maxAge: 120,
-  });
-  redirect(`/applications/${applicationId}/webhooks/${endpointId}?rotated=1`);
+  // Returned to the dialog `RevealActionForm` opens, never a URL or a cookie.
+  revalidatePath(`/applications/${applicationId}/webhooks/${endpointId}`);
+  return {
+    secret: {
+      title: 'New signing secret',
+      value: result.secret,
+      notes: ['Update your consumer now. Signatures made with the old secret stop verifying immediately.'],
+    },
+  };
 }
 
 async function retryDelivery(
@@ -246,8 +244,6 @@ export default async function WebhookDetailPage({
 }): Promise<React.JSX.Element> {
   const { id, endpointId } = await params;
   const sp = await searchParams;
-  const rotated = typeof sp.rotated === 'string';
-  const rotatedSecret = (await cookies()).get('rekey_reveal_whsec')?.value ?? null;
   const retried = typeof sp.retried === 'string';
   const retriedAll = typeof sp.retriedAll === 'string' ? sp.retriedAll : null;
   const retriedAllOf = typeof sp.of === 'string' ? sp.of : null;
@@ -302,22 +298,6 @@ export default async function WebhookDetailPage({
         }
       />
 
-      {rotated && rotatedSecret && (
-        <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-700 dark:bg-amber-950/60 space-y-2">
-          <div className="text-sm font-medium text-amber-900 dark:text-amber-200">
-            New signing secret, shown once
-          </div>
-          <p className="text-xs text-amber-800 dark:text-amber-300">
-            Update your consumer immediately. Old signatures stop verifying right away.
-          </p>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 break-all rounded-md border border-amber-200 bg-[var(--color-surface)] px-3 py-2 font-mono text-xs dark:border-amber-800">
-              {rotatedSecret}
-            </code>
-            <CopyButton value={rotatedSecret} label="Copy" />
-          </div>
-        </div>
-      )}
       {retried && <SavedBanner params={['retried']} message="Retry queued." />}
       {retriedAll !== null && (
         <SavedBanner
@@ -333,11 +313,11 @@ export default async function WebhookDetailPage({
             We don't store the raw secret. Rotate to generate a new one.
           </p>
         </div>
-        <ActionForm action={rotateSecret.bind(null, id, endpointId)}>
+        <RevealActionForm action={rotateSecret.bind(null, id, endpointId)}>
           <ConfirmButton confirm="Rotate the signing secret? Old signatures stop verifying immediately, so update your consumer with the new value before the next delivery.">
             Rotate secret
           </ConfirmButton>
-        </ActionForm>
+        </RevealActionForm>
       </Card>
 
       <section className="space-y-3">

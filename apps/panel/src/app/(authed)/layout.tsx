@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation';
 import { cookies, headers } from 'next/headers';
 import { landedFromServerAction } from '@/lib/action-landing';
 import { RefreshAfterAction } from '@/components/RefreshAfterAction';
+import { RenderStamp } from '@/components/RenderStamp';
 import { ACCESS_COOKIE, REFRESH_COOKIE, api, clearSessionCookies, setSessionCookies, publicPost, PanelApiError, type AuthResponse, getMe, getWorkspaceCreationOpen } from '@/lib/api';
 import { Sidebar } from '@/components/Sidebar';
 import { MobileSidebar } from '@/components/MobileSidebar';
@@ -13,9 +14,13 @@ import { DependencyBanner } from '@/components/DependencyBanner';
 import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
 
-// ─── Why no server action in the panel calls revalidatePath ──────────────
+// ─── Why a server action that redirects never calls revalidatePath ───────
 //
-// Every mutating action here ends in `redirect()`, and pairing the two is
+// (The one exception to "every action redirects" is the one-time-secret mints,
+// which return the secret to `RevealActionForm` and revalidate instead of
+// redirecting on success. They still never do both on one path.)
+//
+// Mutating actions here end in `redirect()`, and pairing the two is
 // what made the panel go blank after "create API key" and "create webhook":
 // the operator's row was written, but the page rendered nothing until they
 // hit refresh by hand.
@@ -217,6 +222,10 @@ export default async function AuthedLayout({
           page's own. The id is per action: the component refreshes at most
           once per id, and the key remounts it even when two actions land on
           the same URL back to back. */}
+      {/* A fresh id per server render, recorded when it commits. It is how an
+          action knows its result actually reached the screen; see
+          `lib/commit-nudge.ts`. */}
+      <RenderStamp stamp={randomUUID()} />
       {actionId !== null && (
         <Suspense key={actionId} fallback={null}>
           <RefreshAfterAction actionId={actionId} />

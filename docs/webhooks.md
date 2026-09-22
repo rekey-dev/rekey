@@ -155,7 +155,7 @@ implement, not something you receive.
 
 ## Event catalog
 
-Twenty-four events. The registry lives in
+Twenty-seven events. The registry lives in
 `apps/api/src/modules/webhooks/events.ts`, and `@rekey.dev/node` re-exports it
 as `WEBHOOK_EVENTS` (`{ name, description }` pairs), `KNOWN_WEBHOOK_EVENTS`
 (names only) and `isKnownWebhookEvent` — use those to build an event picker
@@ -220,6 +220,57 @@ open/close timestamps.
 | `dunning.case_opened` | A Subscription went PAST_DUE and a case opened. |
 | `dunning.case_recovered` | A later successful payment or reactivation closed the case as RECOVERED. |
 | `dunning.case_exhausted` | No recovery within 14 days — the case closed as EXHAUSTED and the subscription was canceled. A `subscription.canceled` accompanies this one. |
+
+### Credits
+
+One event per credit ledger entry, so a copy of balances on your side can
+follow along instead of polling `GET /credits/balance`. Each is enqueued in the
+same database transaction that writes the ledger entry: the event exists if and
+only if the entry does. A refused consume (402) and an idempotent replay write
+no entry and emit nothing.
+
+| Event | When |
+|---|---|
+| `credit.granted` | Credits were added: an operator or Application-key grant, a refund, a credit-pack purchase, or plan provisioning. |
+| `credit.consumed` | Credits were drawn down: `POST /credits/consume`, or usage recorded past an included quota on a meter priced in credits. |
+| `credit.adjusted` | An operator corrected a balance, with reason ADJUST in either direction, or any other operator entry that removes credits. Kept apart from `credit.consumed` so a correction is never read as usage. |
+
+Every credit event carries the same `data.credit` (`CreditWebhookData` in
+`@rekey.dev/node`):
+
+```json
+{
+  "credit": {
+    "entryId": "clx...",
+    "endUserId": "eu_...",
+    "organizationId": null,
+    "delta": -4,
+    "amount": 4,
+    "reason": "CONSUME",
+    "balance": 96,
+    "idempotencyKey": "lead-123",
+    "description": null,
+    "createdAt": "2026-09-22T10:00:00.000Z"
+  }
+}
+```
+
+Exactly one of `endUserId` / `organizationId` is set. `delta` is signed and
+`balance` is the subject's balance right after this entry, so one handler can
+apply all three events the same way. Deliveries can arrive out of order, so
+keep the entry with the latest `createdAt` per subject rather than summing
+deltas, and dedupe on `eventId` (or `entryId`). `metadata` is not included; read
+the entry with `GET /credits/ledger` if you need it.
+
+`credit.consumed` fires for every drawdown, including one per `POST
+/usage/record` that is charged in credits. On a busy priced meter that is a lot
+of deliveries; subscribe to it only if you want each one. An endpoint subscribed
+to `*` receives it too, so a wildcard endpoint on an Application with a busy
+priced meter gets one delivery per charged record: list the events by name if
+you do not want them.
+
+A grant made with `POST /credits/grant` carries the `idempotencyKey` it was
+sent with as `api-grant:<key>`, the form the ledger stores it in.
 
 ## Writing a receiver that holds up
 

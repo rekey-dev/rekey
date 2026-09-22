@@ -41,7 +41,19 @@
  * reproduce on demand.
  *
  * So the action React runs is `run` below, a wrapper that awaits the real one.
- * React dispatches it, the transition is React's, and the redirect commits.
+ * React dispatches it and the transition is React's.
+ *
+ * ## Why it keeps nudging after the action settles
+ *
+ * Dispatching through React was necessary and not sufficient. On a production
+ * build the transition that re-renders the current page can still be left
+ * suspended for good: React suspends on a Flight chunk still streaming in and
+ * never gets the ping when it arrives. The redirect, the new table rows and
+ * the flash are all in the payload and none of it reaches the screen until
+ * something else updates. That is the common cause of #567 and #569, measured
+ * in `lib/commit-nudge.ts`. So once the action settles, `run` nudges this
+ * component until the layout's `RenderStamp` changes, which is the retry React
+ * did not schedule. `test/post-action-commit.test.ts` pins it.
  *
  * ## What that costs
  *
@@ -56,6 +68,8 @@
 
 import * as React from 'react';
 import { useFormStatus } from 'react-dom';
+import { useCommitNudge } from './use-commit-nudge';
+import { isRedirectSignal } from '@/lib/redirect-error';
 
 const ActionPendingContext = React.createContext<boolean | null>(null);
 
@@ -73,38 +87,17 @@ export function useActionPending(): boolean {
 export interface ActionFormProps
   extends Omit<React.FormHTMLAttributes<HTMLFormElement>, 'action'> {
   action: (formData: FormData) => void | Promise<void>;
-  /**
-   * Reload the page once the action has settled, instead of leaving the
-   * operator on the render they submitted from.
-   *
-   * Opt-in, and only for a form whose result the page can show on a fresh
-   * render and nowhere else: the value is waiting in a one-time cookie scoped
-   * to the path the submit came from, and a client navigation to the redirect
-   * target would not read it.
-   *
-   * This used to be the workaround for issue #569, dropped redirects, on the
-   * theory that a document navigation was the only thing that landed. It is
-   * not needed for that any more: the redirect commits now that React
-   * dispatches the submit (see the note at the top of this file). The three
-   * forms that still set it do so for the cookie, which is its own reason.
-   *
-   * Deliberately NOT set on the `StickyFormFooter` config forms. Their
-   * `?saved=1` redirect is load-bearing (panel issue #23) and they already
-   * clear their own dirty state; a reload there would throw away scroll
-   * position and collide with the unsaved-changes guard.
-   */
-  reloadOnSettle?: boolean;
+  ref?: React.Ref<HTMLFormElement>;
 }
 
 export function ActionForm({
   action,
   onSubmit,
-  reloadOnSettle = false,
   children,
   ...rest
 }: ActionFormProps): React.JSX.Element {
   const [pending, setPending] = React.useState(false);
-  const hrefAtSubmit = React.useRef('');
+  const nudge = useCommitNudge();
 
   // The action React runs. Wrapping it, rather than calling it ourselves from
   // `onSubmit`, is what keeps the redirect's navigation attached to the form
@@ -117,12 +110,15 @@ export function ActionForm({
   async function run(formData: FormData): Promise<void> {
     try {
       await action(formData);
+    } catch (err) {
+      // Already applied to the router state; rethrowing only re-navigates
+      // through a boundary that renders nothing meanwhile (see the note above).
+      if (!isRedirectSignal(err)) throw err;
     } finally {
       setPending(false);
-      // `href` as it was at submit, not the redirect's target: the target
-      // carries throwaway flags, and on the forms that opt in the result is
-      // waiting in a cookie scoped to the path we came from.
-      if (reloadOnSettle) window.location.assign(hrefAtSubmit.current);
+      // Whatever the action changed (a redirect, a revalidated page) is in the
+      // payload by now or soon will be; make sure it gets committed.
+      nudge.start();
     }
   }
 
@@ -133,7 +129,7 @@ export function ActionForm({
     // dispatch for a submit whose default was prevented, so there is nothing
     // left to stop.
     if (event.defaultPrevented) return;
-    hrefAtSubmit.current = window.location.href;
+    nudge.mark();
     // A discrete event, so this paints before the action's round trip starts.
     setPending(true);
   }

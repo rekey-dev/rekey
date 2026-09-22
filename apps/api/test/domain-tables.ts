@@ -118,6 +118,14 @@ export async function resetProcessGlobalState(): Promise<void> {
     }),
   );
   for (const reset of resetFns) reset();
+  // Delivery attempts the in-process test scheduler still holds. App close
+  // stops them too, but a retry timer from an EARLIER TEST in the same file
+  // would otherwise fire inside this one: the suite has files well past the
+  // 30s first-retry delay, and the claim it runs is one more statement in
+  // whatever query-count window is open. The rows those attempts would touch
+  // are about to be truncated, so nothing a test can observe is lost.
+  const webhooks = await import('../src/modules/webhooks/webhook.service.js');
+  await webhooks.stopScheduledDeliveries();
 }
 
 /**

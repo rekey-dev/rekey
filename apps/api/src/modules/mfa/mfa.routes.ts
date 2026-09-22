@@ -19,7 +19,7 @@ import { z } from 'zod';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { mfaService } from './mfa.service.js';
 import { RekeyError } from '../../lib/error.js';
-import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
+import { requirePublishableOrSecretKey, requireScopeByMethod } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
@@ -29,9 +29,9 @@ import { CREDENTIAL_BODY_LIMIT } from '../../lib/body-limits.js';
 const CodeBody = z.object({ code: z.string().min(1).max(64) });
 
 /**
- * Errors from `requirePublishableOrSecretKey` + `requireScope('auth:write')` +
- * `requireUserSession`, every route in this module runs all three as
- * `onRequest` hooks.
+ * Errors from `requirePublishableOrSecretKey` + the scope (`auth:read` for
+ * GET, `auth:write` otherwise) + `requireUserSession`, every route in this
+ * module runs all three as `onRequest` hooks.
  */
 const USER_SESSION_ERRORS = {
   401:
@@ -44,7 +44,7 @@ const USER_SESSION_ERRORS = {
   403:
     'IP_NOT_ALLOWED — caller IP is outside the secret key\'s IP allowlist; or ' +
     'ORIGIN_NOT_ALLOWED — the browser `Origin` is outside the publishable key\'s CORS ' +
-    'allowlist; or API_KEY_SCOPE_INSUFFICIENT — the secret key lacks the `auth:write` scope.',
+    'allowlist; or API_KEY_SCOPE_INSUFFICIENT: the secret key lacks the scope the method needs (`auth:read` for GET, `auth:write` for every other method).',
   429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
 } as const;
 
@@ -78,7 +78,9 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
   // meant a browser-only app could be *challenged* for MFA it could never
   // *enroll*, and `authConfig.mfa='required'` hard-stopped those users.
   app.addHook('onRequest', requirePublishableOrSecretKey);
-  app.addHook('onRequest', requireScope('auth:write'));
+  // Reading your own MFA status needs `auth:read`; enrolling or removing a
+  // factor needs `auth:write`.
+  app.addHook('onRequest', requireScopeByMethod({ read: 'auth:read', write: 'auth:write' }));
   app.addHook('onRequest', requireUserSession);
   // Every mutating route here rebinds or removes the user's second factor, and
   // the effect outlives the 5-minute impersonation token permanently, an

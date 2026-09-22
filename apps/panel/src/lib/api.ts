@@ -856,6 +856,12 @@ export interface SecurityEventRow {
   type: string;
   actorType: string;
   actorId: string | null;
+  /**
+   * The actor's email, resolved by the API when the log is read (operator
+   * account or end-user). Absent from an API older than this panel during a
+   * rolling deploy, which `resolveActorEmails` covers.
+   */
+  actorEmail?: string | null;
   applicationId: string | null;
   ip: string | null;
   userAgent: string | null;

@@ -601,8 +601,12 @@ Available on the browser client: `signUp`, `signIn`, `mfaVerify`,
 `requestMagicLink`, `verifyMagicLink`, `refresh`, `signOut`,
 `startPasskeyAuthentication`, `verifyPasskeyAuthentication`, `getCurrentUser`,
 `getPlans`, `listBillingProviders`, `verifyLicense`, `getSubscription`,
-`getEntitlements`, `listPayments`, `listOrganizations`, `createCheckout`,
-`cancelSubscription`.
+`getEntitlements`, `getFeature`, `hasFeature`, `listMyLicenses`, `getMe`,
+`getUsageRemaining`, `listMyCreditLedger`, `listPayments`, `listOrganizations`,
+`createCheckout`, `cancelSubscription`, `subscribe`, `getTrialEligibility`,
+`listMyDevices`, `releaseMyDevice`.
+Each plan from `getPlans` carries `checkout.ready`, false when checkout for it
+would be refused, so a pricing page can leave it out.
 
 Restrict where the key works with the Application's CORS origin allowlist
 (Panel → Application → Access); an off-allowlist origin gets

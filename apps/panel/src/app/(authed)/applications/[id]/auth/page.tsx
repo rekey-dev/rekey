@@ -349,8 +349,8 @@ export default async function AuthMethodsPage({
                   <code className="font-mono text-xs">
                     POST /api/v1/mcp/{app.slug}/oauth/authorize/grant
                   </code>{' '}
-                  with your secret key and the user&apos;s access token, then redirects to the
-                  returned code.
+                  with your secret key (it needs <code className="font-mono text-xs">auth:write</code>)
+                  and the user&apos;s access token, then redirects to the returned code.
                 </>
               }
             >

@@ -16,6 +16,7 @@
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { ApiKey, Application } from '@prisma/client';
+import { STANDARD_API_KEY_SCOPES, isElevatedApiKeyScope } from '@rekey.dev/shared-types';
 import { apiKeysService } from '../modules/api-keys/api-keys.service.js';
 import { prisma } from '../lib/prisma.js';
 import { shouldWriteLastUsed } from '../lib/last-used-throttle.js';
@@ -310,21 +311,21 @@ export async function requirePublishableOrSecretKey(
 
 /**
  * Scope hierarchy:
- *   - `*` grants every recognised scope.
+ *   - `*` grants every STANDARD scope (`STANDARD_API_KEY_SCOPES`).
  *   - `auth:write` implies `auth:read`.
  *   - `billing:write` implies `billing:read`.
+ *   - An ELEVATED scope (`ELEVATED_API_KEY_SCOPES`, today `credits:grant`) is
+ *     implied by nothing, `*` included. A key holds one only if it was minted
+ *     with that scope named.
  *
- * Read scopes never imply write. Other scopes (e.g. `webhooks:read`) are
- * leaf scopes, they must be granted explicitly.
+ * `*` is the default for every key minted without a `scopes` array, so it is
+ * on nearly every key in every deployment. Letting it imply an authority added
+ * later would arm all of those keys with it at once, without an operator
+ * having decided anything. Read scopes never imply write. Other scopes (e.g.
+ * `webhooks:read`) are leaf scopes, granted explicitly or through `*`.
  */
-const SCOPE_IMPLICATIONS: Record<string, string[]> = {
-  '*': [
-    'auth:read',
-    'auth:write',
-    'billing:read',
-    'billing:write',
-    'webhooks:read',
-  ],
+const SCOPE_IMPLICATIONS: Record<string, readonly string[]> = {
+  '*': STANDARD_API_KEY_SCOPES,
   'auth:write': ['auth:read'],
   'billing:write': ['billing:read'],
 };
@@ -351,11 +352,15 @@ export function hasScope(
  * hook that runs **after** `requireApiKey` and refuses with 403 if the
  * presented key lacks the required scope (or an implying scope).
  *
- * `["*"]` accepts everything. This is not a legacy artefact, it is still
- * `DEFAULT_SCOPES` in api-keys.service.ts, so every key minted without an
- * explicit `scopes` array gets it. Narrower keys (`["auth:read"]`) get
- * rejected from write endpoints with a clear `API_KEY_SCOPE_INSUFFICIENT`
- * code.
+ * `["*"]` accepts every standard scope. This is not a legacy artefact, it is
+ * still `DEFAULT_SCOPES` in api-keys.service.ts, so every key minted without an
+ * explicit `scopes` array gets it. It does NOT accept an elevated scope (see
+ * `SCOPE_IMPLICATIONS`): a route guarded by `requireScope('credits:grant')`
+ * refuses a `["*"]` key. Narrower keys (`["auth:read"]`) get rejected from
+ * write endpoints with a clear `API_KEY_SCOPE_INSUFFICIENT` code.
+ *
+ * An elevated scope must only guard a route that uses `requireApiKey`: a
+ * publishable request skips scope evaluation entirely (below).
  *
  * @example
  * ```ts
@@ -366,13 +371,56 @@ export function hasScope(
 export function requireScope(
   required: string,
 ): (req: FastifyRequest, _reply: FastifyReply) => Promise<void> {
+  return scopeGuard(required);
+}
+
+/**
+ * `requireScope` chosen by HTTP method: `read` for GET (and the HEAD Fastify
+ * derives from it), `write` for every other method. For a plugin whose routes
+ * all act on the caller's own session, so that reading your own sessions,
+ * passkeys or organizations needs the read scope, the way `/users/me` and
+ * `/users/me/devices` already did, and only a change needs the write scope.
+ * A write scope implies its read scope (`SCOPE_IMPLICATIONS`), so a key that
+ * could do everything before still can.
+ *
+ * @example
+ * ```ts
+ * app.addHook('onRequest', requireScopeByMethod({ read: 'auth:read', write: 'auth:write' }));
+ * ```
+ */
+export function requireScopeByMethod(scopes: {
+  read: string;
+  write: string;
+}): (req: FastifyRequest, reply: FastifyReply) => Promise<void> {
+  const read = scopeGuard(scopes.read);
+  const write = scopeGuard(scopes.write);
+  return (req, reply) => (req.method === 'GET' || req.method === 'HEAD' ? read : write)(req, reply);
+}
+
+function scopeGuard(
+  required: string,
+): (req: FastifyRequest, _reply: FastifyReply) => Promise<void> {
   return async (request) => {
     // Publishable requests are the route-membership gate: this route opted into
     // `requirePublishableOrSecretKey`, so it is a public-bootstrap route and a
     // pub key is pre-authorized for it. (A pub key can never reach a secret-only
     // route, those use `requireApiKey`, which rejects `rp_pub_*`.) No scope row
     // exists for a pub key, so don't evaluate scopes; allow.
-    if (request.authKind === 'publishable') return;
+    if (request.authKind === 'publishable') {
+      // Except an elevated scope: that pre-authorization is for browser-safe
+      // bootstrap routes, and no elevated authority is one. Unreachable while
+      // those routes use `requireApiKey`; this keeps a wiring mistake from
+      // turning the publishable key into a credit mint.
+      if (isElevatedApiKeyScope(required)) {
+        throw new RekeyError({
+          statusCode: 403,
+          code: 'API_KEY_SCOPE_INSUFFICIENT',
+          message: `This endpoint requires the "${required}" scope, which a publishable key never holds.`,
+          fix: 'Call it from your server with a secret key minted with that scope.',
+        });
+      }
+      return;
+    }
     if (!request.apiKey) {
       // Programming error: this hook must run after `requireApiKey`.
       throw new RekeyError({
@@ -389,7 +437,10 @@ export function requireScope(
         message:
           `This endpoint requires the "${required}" scope. ` +
           `The presented key carries: ${request.apiKey.scopes.join(', ') || '(none)'}.`,
-        fix: `Mint a new key that includes "${required}" (or "*") via Panel → Application → API Keys.`,
+        fix: isElevatedApiKeyScope(required)
+          ? `"${required}" is an elevated scope, which "*" does not include. Mint a key with ` +
+            `"${required}" named in its scopes via Panel → Application → API Keys.`
+          : `Mint a new key that includes "${required}" (or "*") via Panel → Application → API Keys.`,
       });
     }
   };

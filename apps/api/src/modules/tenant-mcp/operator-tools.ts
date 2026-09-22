@@ -48,6 +48,7 @@ import type { TenantRole } from '@prisma/client';
 import { NO_SCOPES, UNRESTRICTED, type Scope } from '../../lib/operator-scopes.js';
 import { isWorkspaceAdmin } from '../../lib/access-context.js';
 import { prisma } from '../../lib/prisma.js';
+import { withActorEmails } from '../../lib/security-events.js';
 import {
   accessContextFromTool,
   accessibleApplicationIds as sharedAccessibleApplicationIds,
@@ -475,12 +476,16 @@ export const operatorTools: OperatorTool[] = [
         orderBy: { createdAt: 'desc' },
         take: limit,
       });
+      // Same actor emails as GET /tenant/security-events, so an agent asking
+      // "who did this?" gets a person rather than a cuid.
+      const events = await withActorEmails(rows);
       return {
-        events: rows.map((r) => ({
+        events: events.map((r) => ({
           id: r.id,
           type: r.type,
           actorType: r.actorType,
           actorId: r.actorId,
+          actorEmail: r.actorEmail,
           applicationId: r.applicationId,
           ip: r.ip,
           userAgent: r.userAgent,

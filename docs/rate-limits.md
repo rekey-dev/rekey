@@ -17,6 +17,12 @@ specific identity the request has proved:
 | End user with a session (`x-rekey-user-token`) | per end user | 600 | `RATE_LIMIT_AUTHENTICATED_MAX` |
 | Anyone else, including publishable-key calls before sign-in | per client IP | 100 | `RATE_LIMIT_MAX` |
 
+`GET /api/v1/auth/me` takes the user token alone and counts against that end
+user, like any other session call. A backend that resolves many users' tokens
+from one address shares the per-IP ceiling below between all of them; one that
+calls `GET /api/v1/users/me` with its secret key instead counts against the key
+and is exempt from that ceiling.
+
 The window is `RATE_LIMIT_WINDOW_MS` (60 seconds). The two authenticated
 budgets default to the larger of their own default and `RATE_LIMIT_MAX`, so a
 deployment that had raised `RATE_LIMIT_MAX` does not lose headroom on upgrade.

@@ -697,6 +697,45 @@ export const entitlementsService = {
     entitlements: ResolvedEntitlement[];
     creditBalance: number;
   }> {
+    const { features, entitlements, subject } = await this.resolveGrants(applicationId, endUserId, opts);
+    const creditBalance = await creditsService.getBalance(applicationId, subject);
+    return { features, entitlements, creditBalance };
+  },
+
+  /**
+   * One feature's value for the same subject `resolveForEndUser` resolves,
+   * from the same resolution, without reading the credit balance.
+   *
+   * `granted` is `Boolean(value)`, the test every `if (features.x)` gate
+   * makes, so a false flag, a zero limit and an absent key all read as not
+   * granted. `value` is null for an absent key.
+   */
+  async resolveFeature(
+    applicationId: string,
+    endUserId: string,
+    key: string,
+    opts?: { organizationId?: string },
+  ): Promise<{ key: string; granted: boolean; value: boolean | number | string | null }> {
+    const { features } = await this.resolveGrants(applicationId, endUserId, opts);
+    const value = Object.hasOwn(features, key) ? features[key]! : null;
+    return { key, granted: Boolean(value), value };
+  },
+
+  /**
+   * The subscriptions-and-free-tier half of `resolveForEndUser`: the resolved
+   * rows and the merged feature map, plus the subject the credit balance
+   * belongs to. Split out so a single-feature check does not pay for the
+   * balance read.
+   */
+  async resolveGrants(
+    applicationId: string,
+    endUserId: string,
+    opts?: { organizationId?: string },
+  ): Promise<{
+    features: Record<string, boolean | number | string>;
+    entitlements: ResolvedEntitlement[];
+    subject: { endUserId?: string; organizationId?: string };
+  }> {
     let subs;
     let subject: { endUserId?: string; organizationId?: string };
     if (opts?.organizationId) {
@@ -839,8 +878,7 @@ export const entitlementsService = {
       else if (typeof v === 'number') features[e.key] = Math.max(typeof prev === 'number' ? prev : -Infinity, v);
       else features[e.key] = v;
     }
-    const creditBalance = await creditsService.getBalance(applicationId, subject);
-    return { features, entitlements: all, creditBalance };
+    return { features, entitlements: all, subject };
   },
 
   /** Operator/org view of an org's entitlements + shared credit pool. */
@@ -872,6 +910,23 @@ export const entitlementsService = {
     subject: { endUserId?: string | undefined; organizationId?: string | undefined },
     meterSlug: string,
   ): Promise<{ included: number; creditsPerUnit: number | null } | null> {
+    const quotas = await this.includedQuotasFor(applicationId, subject, [meterSlug]);
+    return quotas.get(meterSlug) ?? null;
+  },
+
+  /**
+   * `includedQuotaFor` for several meters at once. The subject's
+   * subscriptions, their plans and the free-tier default plan are loaded ONCE;
+   * each meter is then computed from them by the same per-meter rule.
+   * `includedQuotaFor` is this with one slug, so the record path and a
+   * multi-meter read cannot disagree. Every requested slug is in the map
+   * (null: uncapped).
+   */
+  async includedQuotasFor(
+    applicationId: string,
+    subject: { endUserId?: string | undefined; organizationId?: string | undefined },
+    meterSlugs: readonly string[],
+  ): Promise<Map<string, { included: number; creditsPerUnit: number | null } | null>> {
     // Same ENTITLING_STATUSES as resolveForEndUser, and for the same reason
     // read the other way round: dropping a dunning customer's subscription
     // here does not cap them harder, it makes them UNMETERED (no USAGE
@@ -899,102 +954,106 @@ export const entitlementsService = {
     // One query for every plan, same reason as resolveForEndUser: this runs on
     // the usage.record hot path, once per recorded event.
     const byPlan = await this.resolveForPlans(subs.map((s) => s.plan));
-    let total = 0;
-    let capped = false;
-    // The cheapest rate across the plans that price this meter. Lowest, not
-    // first or highest: quota is additive, so a subscriber holding two plans
-    // already gets the benefit of both, and charging them the dearer rate
-    // while summing the allowances would be inconsistent. Written down here
-    // because the code cannot decide it and two engineers would not agree.
-    let rate: number | null = null;
-    const consider = (e: { kind: string; key: string; quantity: number | null; creditsPerUnit?: number | null }): void => {
-      if (e.kind !== 'USAGE' || e.key !== meterSlug) return;
-      if (e.quantity != null && e.quantity > 0) {
-        total += e.quantity;
-        capped = true;
-      }
-      // A priced entitlement caps too, even at quantity 0, that is how an
-      // operator says "no free units, charge from the first one".
-      if (e.creditsPerUnit != null) {
-        capped = true;
-        rate = rate === null ? e.creditsPerUnit : Math.min(rate, e.creditsPerUnit);
-      }
-    };
-    // Decided PER SUBSCRIPTION, not unioned across them. Both conjuncts have to
-    // hold for the SAME subscription, or one subscription's override could
-    // withhold the default for a meter a different subscription's plan row
-    // supplies, reachable by overriding on plan A, then removing that row from
-    // plan A while plan B still carries the meter.
-    let meterOverridden = false;
-    for (const s of subs) {
-      const ents = applyOverrides(byPlan.get(s.planId) ?? [], s.entitlementOverrides);
-      let rowPresent = false;
-      for (const e of ents) {
-        if (e.kind === 'USAGE' && e.key === meterSlug) rowPresent = true;
-        consider(e);
-      }
-      if (rowPresent && overriddenKeys([s]).has(`USAGE:${meterSlug}`)) meterOverridden = true;
-    }
-    // An override is authoritative for this meter only if it actually LANDED.
-    //
-    // Both halves are load-bearing. The key has to be named, or a plan row would
-    // withhold the default and a credit pack would strip a free tier. And a row
-    // has to exist, because `applyOverrides` never ADDs a non-FEATURE row: an
-    // override naming a meter the plan does not carry is dropped by the resolver
-    // and means nothing, so it must not cap. Reading override keys alone made
-    // `{"USAGE:api_calls": 1000}` on a plan with no such entitlement report a
-    // cap of zero instead of "unmetered", which an existing test caught.
-    //
-// A legal `0` override always sits on a PRICED row, because `validate`
-    // refuses a zero quantity without a price, so `consider` has already capped
-    // it. Nothing extra is needed to make zero mean zero.
-    // Free-tier fallback (#36): a personal subject honours the default plan's
-    // included USAGE quota for this meter, so a free tier can cap consumption
-    // without a $0 subscription. Org subjects don't fall back.
-    //
-    // Two things are decided separately here, because they fail in opposite
-    // directions.
-    //
-    // QUANTITY is withheld only when an OVERRIDE spoke about this meter. The
-    // accumulation above is additive, so a default of 1,000 did not lose to an
-    // override of 50, it was added to it, and an operator lowering an allowance
-    // raised it. But the same additivity is CORRECT against a plan row: buying a
-    // credit pack that happens to mention the meter is a top-up, not a plan, and
-    // silently halving a subscriber's quota for topping up is the bug this
-    // fallback exists to avoid (`suppressesFreeTier`, and the credit-purchase
-    // test). So the override wins and the plan row does not.
-    //
-    // An override that landed CAPS, including at zero. A legal zero sits on a
-    // priced row `consider` has already capped; this covers the drift pair
-    // (quantity 0, no price), where nothing else does. Without it, a subject the
-    // operator explicitly restricted resolves `null`, unmetered and unbilled,
-    // whenever the Application has no default plan, which is the common case.
-    if (meterOverridden) capped = true;
+    // The free-tier default applies only to a personal subject whose
+    // subscriptions do not suppress it; loaded once for every meter.
+    const defaultPlan =
+      !suppressesFreeTier(subs) && !subject.organizationId ? await loadDefaultPlan(applicationId) : null;
+    const defaultEntitlements = defaultPlan ? await this.resolveForPlan(defaultPlan) : null;
 
-    // PRICE is never withheld. `rate` is a minimum across everything that prices
-    // the meter, and it is what `usage.record` charges. Dropping the default
-    // from that minimum does not change an allowance, it silently RAISES what a
-    // subscriber pays per unit -- a customer on a plan priced at 4 would start
-    // paying 4 where the free tier's 1 used to floor them. A change about who
-    // gets how many units must not move a price, so the default's rate is
-    // always considered even when its quantity is not.
-    if (!suppressesFreeTier(subs) && !subject.organizationId) {
-      const def = await loadDefaultPlan(applicationId);
-      if (def) {
-        for (const e of await this.resolveForPlan(def)) {
-          if (e.kind !== 'USAGE' || e.key !== meterSlug) continue;
-          if (e.creditsPerUnit != null) {
-            capped = true;
-            rate = rate === null ? e.creditsPerUnit : Math.min(rate, e.creditsPerUnit);
-          }
-          if (!meterOverridden && e.quantity != null && e.quantity > 0) {
-            total += e.quantity;
-            capped = true;
-          }
+    const quotaFor = (meterSlug: string): { included: number; creditsPerUnit: number | null } | null => {
+      let total = 0;
+      let capped = false;
+      // The cheapest rate across the plans that price this meter. Lowest, not
+      // first or highest: quota is additive, so a subscriber holding two plans
+      // already gets the benefit of both, and charging them the dearer rate
+      // while summing the allowances would be inconsistent. Written down here
+      // because the code cannot decide it and two engineers would not agree.
+      let rate: number | null = null;
+      const consider = (e: { kind: string; key: string; quantity: number | null; creditsPerUnit?: number | null }): void => {
+        if (e.kind !== 'USAGE' || e.key !== meterSlug) return;
+        if (e.quantity != null && e.quantity > 0) {
+          total += e.quantity;
+          capped = true;
+        }
+        // A priced entitlement caps too, even at quantity 0, that is how an
+        // operator says "no free units, charge from the first one".
+        if (e.creditsPerUnit != null) {
+          capped = true;
+          rate = rate === null ? e.creditsPerUnit : Math.min(rate, e.creditsPerUnit);
+        }
+      };
+      // Decided PER SUBSCRIPTION, not unioned across them. Both conjuncts have to
+      // hold for the SAME subscription, or one subscription's override could
+      // withhold the default for a meter a different subscription's plan row
+      // supplies, reachable by overriding on plan A, then removing that row from
+      // plan A while plan B still carries the meter.
+      let meterOverridden = false;
+      for (const s of subs) {
+        const ents = applyOverrides(byPlan.get(s.planId) ?? [], s.entitlementOverrides);
+        let rowPresent = false;
+        for (const e of ents) {
+          if (e.kind === 'USAGE' && e.key === meterSlug) rowPresent = true;
+          consider(e);
+        }
+        if (rowPresent && overriddenKeys([s]).has(`USAGE:${meterSlug}`)) meterOverridden = true;
+      }
+      // An override is authoritative for this meter only if it actually LANDED.
+      //
+      // Both halves are load-bearing. The key has to be named, or a plan row would
+      // withhold the default and a credit pack would strip a free tier. And a row
+      // has to exist, because `applyOverrides` never ADDs a non-FEATURE row: an
+      // override naming a meter the plan does not carry is dropped by the resolver
+      // and means nothing, so it must not cap. Reading override keys alone made
+      // `{"USAGE:api_calls": 1000}` on a plan with no such entitlement report a
+      // cap of zero instead of "unmetered", which an existing test caught.
+      //
+  // A legal `0` override always sits on a PRICED row, because `validate`
+      // refuses a zero quantity without a price, so `consider` has already capped
+      // it. Nothing extra is needed to make zero mean zero.
+      // Free-tier fallback (#36): a personal subject honours the default plan's
+      // included USAGE quota for this meter, so a free tier can cap consumption
+      // without a $0 subscription. Org subjects don't fall back.
+      //
+      // Two things are decided separately here, because they fail in opposite
+      // directions.
+      //
+      // QUANTITY is withheld only when an OVERRIDE spoke about this meter. The
+      // accumulation above is additive, so a default of 1,000 did not lose to an
+      // override of 50, it was added to it, and an operator lowering an allowance
+      // raised it. But the same additivity is CORRECT against a plan row: buying a
+      // credit pack that happens to mention the meter is a top-up, not a plan, and
+      // silently halving a subscriber's quota for topping up is the bug this
+      // fallback exists to avoid (`suppressesFreeTier`, and the credit-purchase
+      // test). So the override wins and the plan row does not.
+      //
+      // An override that landed CAPS, including at zero. A legal zero sits on a
+      // priced row `consider` has already capped; this covers the drift pair
+      // (quantity 0, no price), where nothing else does. Without it, a subject the
+      // operator explicitly restricted resolves `null`, unmetered and unbilled,
+      // whenever the Application has no default plan, which is the common case.
+      if (meterOverridden) capped = true;
+
+      // PRICE is never withheld. `rate` is a minimum across everything that prices
+      // the meter, and it is what `usage.record` charges. Dropping the default
+      // from that minimum does not change an allowance, it silently RAISES what a
+      // subscriber pays per unit -- a customer on a plan priced at 4 would start
+      // paying 4 where the free tier's 1 used to floor them. A change about who
+      // gets how many units must not move a price, so the default's rate is
+      // always considered even when its quantity is not.
+      for (const e of defaultEntitlements ?? []) {
+        if (e.kind !== 'USAGE' || e.key !== meterSlug) continue;
+        if (e.creditsPerUnit != null) {
+          capped = true;
+          rate = rate === null ? e.creditsPerUnit : Math.min(rate, e.creditsPerUnit);
+        }
+        if (!meterOverridden && e.quantity != null && e.quantity > 0) {
+          total += e.quantity;
+          capped = true;
         }
       }
-    }
-    return capped ? { included: total, creditsPerUnit: rate } : null;
+      return capped ? { included: total, creditsPerUnit: rate } : null;
+    };
+    return new Map(meterSlugs.map((slug) => [slug, quotaFor(slug)]));
   },
 };
 

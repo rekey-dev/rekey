@@ -15,7 +15,8 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { applicationsService } from '../applications/applications.service.js';
 import { apiKeysService } from '../api-keys/api-keys.service.js';
-import { planCheckoutReadiness } from '../plans/plan-readiness.js';
+import { assertMayMintScopes } from '../api-keys/elevated-scopes.js';
+import { serializePlans } from '../plans/plan-dto.js';
 import { plansService } from '../plans/plans.service.js';
 import { couponsService } from '../coupons/coupons.service.js';
 import {
@@ -68,7 +69,7 @@ import {
   effectiveApplicationScopes,
   scopeDenied,
 } from '../../lib/access-context.js';
-import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
+import { recordSecurityEvent, requestContext, withActorEmails } from '../../lib/security-events.js';
 import { refreshCorsOrigins } from '../../lib/cors-origins.js';
 import { mcpIssuer } from '../mcp/oauth.service.js';
 import { eraseEndUser } from './end-user-erasure.service.js';
@@ -1734,6 +1735,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       const { id } = AppParam.parse(req.params);
       await ensureAppAccess(req, id, 'write');
       const body = CreateKeyBody.parse(req.body);
+      await assertMayMintScopes(await accessContextFromRequest(req), id, body.scopes);
       const result = await apiKeysService.create({
         applicationId: id,
         name: body.name,
@@ -1838,11 +1840,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       // One credential lookup for the page, not one per plan. Evaluating the
       // blockers themselves is pure and calls neither the database nor the
       // provider.
-      const readiness = await planCheckoutReadiness(id, items);
-      const withReadiness = items.map((plan) => ({
-        ...plan,
-        checkout: readiness.get(plan.id) ?? { ready: true, blockers: [] },
-      }));
+      const withReadiness = await serializePlans(id, items, 'operator');
       return { success: true, data: paged(withReadiness, total, take, skip) };
     },
   );
@@ -4060,12 +4058,19 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                     properties: {
                       id: { type: 'string' },
                       operatorUserId: { type: 'string' },
+                      operatorEmail: {
+                        type: 'string',
+                        nullable: true,
+                        description:
+                          'Email of the operator who minted the token, resolved at read time. Null when that ' +
+                          'operator account no longer exists.',
+                      },
                       reason: { type: 'string', nullable: true },
                       startedAt: { type: 'string', format: 'date-time' },
                       endedAt: { type: 'string', format: 'date-time', nullable: true },
                       ip: { type: 'string', nullable: true },
                     },
-                    required: ['id', 'operatorUserId', 'startedAt'],
+                    required: ['id', 'operatorUserId', 'operatorEmail', 'startedAt'],
                   },
                 },
               },
@@ -4119,6 +4124,15 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         }),
         endUserLockState(eu.applicationId, eu.email),
       ]);
+      // Who impersonated them, by email, the same read-time lookup the
+      // security-events feed does (`withActorEmails`), and for the same reason.
+      const impersonators = await withActorEmails(
+        recentImpersonations.map((r) => ({
+          actorType: 'operator',
+          actorId: r.operatorUserId,
+          applicationId: eu.applicationId,
+        })),
+      );
       return {
         success: true,
         data: {
@@ -4132,9 +4146,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             lastUsedAt: p.lastUsedAt?.toISOString() ?? null,
             createdAt: p.createdAt.toISOString(),
           })),
-          recentImpersonations: recentImpersonations.map((r) => ({
+          recentImpersonations: recentImpersonations.map((r, i) => ({
             id: r.id,
             operatorUserId: r.operatorUserId,
+            operatorEmail: impersonators[i]?.actorEmail ?? null,
             reason: r.reason,
             startedAt: r.startedAt.toISOString(),
             endedAt: r.endedAt?.toISOString() ?? null,

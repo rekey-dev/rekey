@@ -21,11 +21,16 @@
  * 3. **Full-page guard.** `beforeunload` still covers reload / close / typed
  *    URL, which the click listener cannot see.
  *
- * Everything unregisters on submit so saving never trips its own guard.
+ * The guards stand down on submit so saving never trips its own guard, and
+ * re-arm when the server render the save caused is committed: the page is
+ * re-rendered in place (not remounted), so this component outlives the save,
+ * and without re-arming it kept the pre-save baseline and ignored every later
+ * edit (`test/sticky-form-footer.test.ts`).
  */
 
 import * as React from 'react';
 import { useActionPending } from './ActionForm';
+import { subscribeCommittedRender } from '@/lib/render-stamp';
 
 /**
  * Encode name and value pairs into one comparable string.
@@ -90,8 +95,24 @@ export function StickyFormFooter({
     const form = anchorRef.current?.closest('form');
     if (!(form instanceof HTMLFormElement)) return;
 
-    const initial = snapshot(form);
+    let initial = snapshot(form);
     const recheck = (): void => setDirty(snapshot(form) !== initial);
+
+    // A new server render after OUR submit is the save landing (or its
+    // refusal): take what the form now shows as the baseline and arm the
+    // guards again. A render that arrives while the operator is editing, with
+    // no submit of ours in flight, leaves their baseline alone. Deferred a
+    // task so React has finished resetting the form to its new defaults.
+    let rearm: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = subscribeCommittedRender(() => {
+      if (!submittingRef.current) return;
+      clearTimeout(rearm);
+      rearm = setTimeout(() => {
+        initial = snapshot(form);
+        submittingRef.current = false;
+        setDirty(false);
+      }, 0);
+    });
 
     form.addEventListener('input', recheck);
     form.addEventListener('change', recheck);
@@ -138,6 +159,8 @@ export function StickyFormFooter({
     document.addEventListener('click', onClick, true);
 
     return () => {
+      unsubscribe();
+      clearTimeout(rearm);
       form.removeEventListener('input', recheck);
       form.removeEventListener('change', recheck);
       form.removeEventListener('submit', onSubmit);

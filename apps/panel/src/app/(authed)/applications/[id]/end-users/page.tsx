@@ -90,18 +90,18 @@ async function updateUser(applicationId: string, euid: string, formData: FormDat
   const metadataRaw = String(formData.get('metadata') ?? '').trim();
   const emailVerified = formData.get('emailVerified') === 'on';
 
-  let metadata: unknown = undefined;
+  let metadata: unknown = null;
   if (metadataRaw) {
     try {
       metadata = JSON.parse(metadataRaw);
-      if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) {
-        redirect(`/applications/${applicationId}/end-users?error=metadata_not_object&editUser=${euid}`);
-      }
     } catch {
       redirect(`/applications/${applicationId}/end-users?error=metadata_invalid_json&editUser=${euid}`);
     }
-  } else {
-    metadata = null;
+    // Outside the try: `redirect()` throws, and inside it the catch above
+    // turned "not an object" into "invalid JSON".
+    if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) {
+      redirect(`/applications/${applicationId}/end-users?error=metadata_not_object&editUser=${euid}`);
+    }
   }
 
   try {

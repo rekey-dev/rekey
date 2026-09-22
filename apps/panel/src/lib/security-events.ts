@@ -44,13 +44,21 @@ export interface EventDetail {
  * nowhere. Whitelisted rather than dumped: metadata routinely carries ids and
  * argument shapes that mean nothing in a table cell.
  */
-const DETAIL_KEYS: ReadonlyArray<{ key: string; label: string }> = [
+const DETAIL_KEYS: ReadonlyArray<{ key: string; label: string; verbatim?: true }> = [
   { key: 'tool', label: 'tool' },
   { key: 'scope', label: 'scope' },
   { key: 'enabled', label: 'state' },
   { key: 'via', label: 'via' },
   { key: 'role', label: 'role' },
   { key: 'planSlug', label: 'plan' },
+  // A grant made with an API key records the key only in metadata (its actor
+  // is `system`), so without these the trail read "system, reason GRANT":
+  // no key and no amount.
+  // Verbatim: a key prefix is `rk_live_…`, and humanizing its underscores
+  // would print a prefix that matches no key.
+  { key: 'apiKeyName', label: 'key', verbatim: true },
+  { key: 'keyPrefix', label: 'key prefix', verbatim: true },
+  { key: 'amount', label: 'amount' },
   { key: 'reason', label: 'reason' },
   { key: 'note', label: 'note' },
   { key: 'admin', label: 'admin' },
@@ -64,11 +72,11 @@ export function eventDetails(metadata: unknown): EventDetail[] {
   if (!metadata || typeof metadata !== 'object') return [];
   const m = metadata as Record<string, unknown>;
   const out: EventDetail[] = [];
-  for (const { key, label } of DETAIL_KEYS) {
+  for (const { key, label, verbatim } of DETAIL_KEYS) {
     if (!(key in m)) continue;
     const v = m[key];
     let value: string | null = null;
-    if (typeof v === 'string') value = v.replace(/_/g, ' ');
+    if (typeof v === 'string') value = verbatim ? v : v.replace(/_/g, ' ');
     else if (typeof v === 'number') value = String(v);
     else if (typeof v === 'boolean') {
       // `enabled` reads as a state; the other flags only matter when set.
@@ -91,28 +99,99 @@ export function eventDetails(metadata: unknown): EventDetail[] {
 /**
  * Map of `actorId` → email, for the actors on one page of events.
  *
- * The API does not join this. `SecurityEvent` has no relations at all,
- * `actorId` is a bare scalar pointing at `TenantUser.id` or `EndUser.id`
- * depending on `actorType`, and the list endpoint has no `actorId` filter and
- * no email in its serializer. Payments and Dunning show an email because their
- * endpoints return `endUserEmail`; the audit log and Activity showed a raw CUID
- * because theirs doesn't.
+ * The API resolves it now (`actorEmail` on every event, looked up when the log
+ * is read), including operators who have since left the workspace, which the
+ * panel's own lookup against the current member list could never name. This
+ * takes that field as the answer.
  *
- * So the panel resolves it. Operators come from one workspace-members read
- * (small, already cached per request). End-users are fetched by id, deduped
- * and in parallel, capped at `MAX_END_USER_LOOKUPS`, a page is 50 rows and
- * distinct actors are far fewer, but the cap keeps a pathological page from
- * fanning out unboundedly. Anything unresolved falls back to the CUID, which
- * is strictly no worse than before.
+ * The lookups below are only for an event WITHOUT the field, which is an API
+ * older than this panel during a rolling deploy: operators from one
+ * workspace-members read, end-users fetched by id, deduped, in parallel and
+ * capped at `MAX_END_USER_LOOKUPS`. Anything unresolved falls back to the CUID.
  */
 export type ActorEmails = Map<string, string>;
+
+/**
+ * Who did it, in words, for a view about ONE end-user (their Overview and
+ * Security tabs). Operators by email, which is what the operator asked for:
+ * "which of us did this to my customer?" used to be answered "operator".
+ *
+ *   - the end-user themselves: "this user"
+ *   - an operator: their email, or the id when it cannot be resolved
+ *   - `system` acting with an API key (a backend granting credits): the key,
+ *     by name and prefix, from the event's metadata
+ *   - any other `system`: "system"
+ *   - anything else (a type added later): the type, and the id if any
+ */
+export function actorLabel(
+  e: { actorType: string; actorId: string | null; actorEmail?: string | null; metadata?: unknown },
+  subjectEndUserId: string,
+): string {
+  if (e.actorType === 'end_user') {
+    return e.actorId === subjectEndUserId ? 'this user' : (e.actorEmail ?? e.actorId ?? 'an end-user');
+  }
+  if (e.actorType === 'operator') return e.actorEmail ?? (e.actorId ? `operator ${e.actorId}` : 'an operator');
+  if (e.actorType === 'system') return apiKeyLabel(e.metadata) ?? 'system';
+  return e.actorId ? `${e.actorType.replace('_', ' ')} ${e.actorId}` : e.actorType.replace('_', ' ');
+}
+
+/** "API key Backend (rk_live_ab12)" from an event's metadata, or null when it names no key. */
+function apiKeyLabel(metadata: unknown): string | null {
+  if (!metadata || typeof metadata !== 'object') return null;
+  const m = metadata as Record<string, unknown>;
+  const name = typeof m.apiKeyName === 'string' && m.apiKeyName !== '' ? m.apiKeyName : null;
+  const prefix = typeof m.keyPrefix === 'string' && m.keyPrefix !== '' ? m.keyPrefix : null;
+  if (name && prefix) return `API key ${name} (${prefix})`;
+  if (name ?? prefix) return `API key ${name ?? prefix}`;
+  return null;
+}
+
+/**
+ * Readable one-liner from an event's `metadata`, for the end-user Security
+ * tab's Detail column. The shape varies by type (`{via}` on sign-in,
+ * `{reason}` where the API records one, `{deviceId}` and `{sessionsRevoked}`
+ * on the device events, `{amount}` on a credit grant), so pick the keys worth
+ * surfacing and fall back to a compact render of whatever is there.
+ */
+export function eventSummary(metadata: Record<string, unknown> | null | undefined): string | null {
+  if (!metadata || typeof metadata !== 'object') return null;
+  const parts: string[] = [];
+  for (const key of [
+    'via',
+    'amount',
+    'reason',
+    'deviceName',
+    'provider',
+    'releasedBy',
+    'sessionsRevoked',
+    'count',
+  ] as const) {
+    const v = metadata[key];
+    if (typeof v === 'string' && v !== '') parts.push(`${key}: ${v.replace(/_/g, ' ')}`);
+    else if (typeof v === 'number') parts.push(`${key}: ${v}`);
+  }
+  if (parts.length > 0) return parts.join(' · ');
+  const keys = Object.keys(metadata);
+  return keys.length === 0 ? null : keys.slice(0, 3).join(', ');
+}
 
 const MAX_END_USER_LOOKUPS = 40;
 
 export async function resolveActorEmails(
-  events: Array<{ actorType: string; actorId: string | null; applicationId: string | null }>,
+  allEvents: Array<{
+    actorType: string;
+    actorId: string | null;
+    actorEmail?: string | null;
+    applicationId: string | null;
+  }>,
 ): Promise<ActorEmails> {
   const out: ActorEmails = new Map();
+  for (const e of allEvents) {
+    if (e.actorId && typeof e.actorEmail === 'string') out.set(e.actorId, e.actorEmail);
+  }
+  // Only what the API did not answer: `actorEmail` missing entirely, not null
+  // (null is the API saying there is no one to name).
+  const events = allEvents.filter((e) => e.actorEmail === undefined);
 
   const operatorIds = new Set(
     events.filter((e) => e.actorType === 'operator' && e.actorId).map((e) => e.actorId!),

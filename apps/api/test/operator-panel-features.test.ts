@@ -557,7 +557,7 @@ describe('operator panel features', () => {
     expect(csv.headers['content-type']).toContain('text/csv');
     expect(csv.headers['content-disposition']).toContain('attachment');
     const lines = csv.body.trim().split('\n');
-    expect(lines[0]).toBe('id,type,actorType,actorId,applicationId,ip,userAgent,metadata,createdAt');
+    expect(lines[0]).toBe('id,type,actorType,actorId,applicationId,ip,userAgent,metadata,createdAt,actorEmail');
     expect(csv.body).toContain('"operator.sign_in"');
     expect(csv.body).toContain('"203.0.113.7"');
     expect(csv.body).toContain('"app.api_key.created"');

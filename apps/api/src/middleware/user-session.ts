@@ -16,7 +16,7 @@
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { RekeyError } from '../lib/error.js';
-import { verifyUserAccessTokenAnyAlg } from '../lib/jwt.js';
+import { verifyUserAccessTokenAnyAlg, type UserSessionClaims } from '../lib/jwt.js';
 import { prisma } from '../lib/prisma.js';
 import { authService, type PublicEndUser } from '../modules/auth/auth.service.js';
 import { sessionIssuedBefore } from '../lib/session-stamp.js';
@@ -127,27 +127,8 @@ export async function requireUserSession(
   // became revocable (they live 5 minutes, so the window is one deploy), and
   // treating either as a normal end-user session would silently strip the
   // operator attribution that the guards below depend on.
-  if (claims.imp) {
-    if (!claims.impid) throw impersonationEnded();
-    const audit = await prisma.impersonationAudit.findUnique({
-      where: { id: claims.impid },
-      select: { endedAt: true, endUserId: true, applicationId: true, operatorUserId: true },
-    });
-    if (
-      !audit ||
-      audit.endedAt !== null ||
-      audit.endUserId !== claims.sub ||
-      audit.applicationId !== request.application.id ||
-      // The DB row is the authority on WHO is impersonating, not the claim.
-      // Forging `imp` needs the app signing key, so this is defence in depth,
-      // but the whole point of resolving the row is that the audit trail and
-      // the live session cannot disagree about who is acting.
-      audit.operatorUserId !== claims.imp
-    ) {
-      throw impersonationEnded();
-    }
-    request.impersonation = { auditId: claims.impid, operatorUserId: audit.operatorUserId };
-  }
+  const impersonation = await resolveImpersonation(claims, request.application.id);
+  if (impersonation) request.impersonation = impersonation;
 
   const { endUser, sessionsInvalidBefore, sessionEnded } = await authService.getByIdForSession(
     request.application.id,
@@ -216,6 +197,37 @@ export async function requireUserSession(
       request.activeOrganizationId = claims.oid;
     }
   }
+}
+
+/**
+ * The impersonation behind a token, or null for an ordinary session. Throws
+ * IMPERSONATION_SESSION_ENDED when the token carries `imp` and its audit row is
+ * missing, ended, or names a different subject, Application or operator.
+ */
+export async function resolveImpersonation(
+  claims: UserSessionClaims,
+  applicationId: string,
+): Promise<ImpersonationContext | null> {
+  if (!claims.imp) return null;
+  if (!claims.impid) throw impersonationEnded();
+  const audit = await prisma.impersonationAudit.findUnique({
+    where: { id: claims.impid },
+    select: { endedAt: true, endUserId: true, applicationId: true, operatorUserId: true },
+  });
+  if (
+    !audit ||
+    audit.endedAt !== null ||
+    audit.endUserId !== claims.sub ||
+    audit.applicationId !== applicationId ||
+    // The DB row is the authority on WHO is impersonating, not the claim.
+    // Forging `imp` needs the app signing key, so this is defence in depth,
+    // but the whole point of resolving the row is that the audit trail and
+    // the live session cannot disagree about who is acting.
+    audit.operatorUserId !== claims.imp
+  ) {
+    throw impersonationEnded();
+  }
+  return { auditId: claims.impid, operatorUserId: audit.operatorUserId };
 }
 
 /**

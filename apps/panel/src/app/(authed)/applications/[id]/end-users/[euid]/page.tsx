@@ -15,7 +15,7 @@
 import * as React from 'react';
 import Link from '@/components/Link';
 import { getApplication } from '@/lib/api';
-import { humanizeEventType } from '@/lib/security-events';
+import { actorLabel, humanizeEventType } from '@/lib/security-events';
 import { formatDate, formatDateTime } from '@/lib/date';
 import { formatMoney } from '@/lib/format';
 import { Card, SectionHeader } from '@/components/Card';
@@ -62,8 +62,8 @@ export default async function EndUserOverviewPage({
   const { id, euid } = await params;
   const sp = await searchParams;
   // The URL first, then the cookie the action left behind. The support forms
-  // below reload this page rather than relying on the action's redirect to
-  // commit, and on that reload there is no query to read (rekey issue #569).
+  // below do not rely on the action's redirect committing (rekey issue #569):
+  // the page re-renders in place, and that render may carry no query to read.
   const flash = await readSupportFlash();
   const done = typeof sp.support === 'string' ? sp.support : flash.done;
   const supportError = typeof sp.supportError === 'string' ? sp.supportError : flash.error;
@@ -265,6 +265,12 @@ export default async function EndUserOverviewPage({
                 <li key={e.id} className="flex items-baseline justify-between gap-3 px-4 py-2.5">
                   <span className="min-w-0 truncate text-sm text-[var(--color-fg)]">
                     {humanizeEventType(e.type)}
+                    {/* Who, when it was not this user: operators by email. */}
+                    {e.actorType !== 'end_user' || e.actorId !== euid ? (
+                      <span className="ml-2 text-xs text-[var(--color-muted-fg)]" title={e.actorId ?? undefined}>
+                        {actorLabel(e, euid)}
+                      </span>
+                    ) : null}
                   </span>
                   <span className="shrink-0 whitespace-nowrap text-xs text-[var(--color-muted-fg)]">
                     {formatDateTime(e.createdAt)}
@@ -375,7 +381,6 @@ function SupportBar({
             <ActionForm
               action={sendVerification.bind(null, applicationId, euid)}
               className="space-y-3"
-              reloadOnSettle
             >
               <Field label="Reason" hint="Optional, recorded in the activity trail.">
                 <input
@@ -397,14 +402,9 @@ function SupportBar({
           trigger="Send password reset"
           triggerClassName={supportBtnCls}
         >
-          {/* The result is read back off the flash cookie after the reload,
-              because the action's own redirect is not committed here (rekey
-              issue #569). Without this the dialog sat open reporting nothing
-              while the reset had already been sent. */}
           <ActionForm
             action={sendPasswordReset.bind(null, applicationId, euid)}
             className="space-y-3"
-            reloadOnSettle
           >
             <Banner tone="warning">
               They did not ask for this. At their inbox it is indistinguishable from someone who got

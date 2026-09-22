@@ -21,7 +21,7 @@
  * With BOTH toggles off the whole surface 404s.
  */
 
-import type { Application, EndUser } from '@prisma/client';
+import type { Application, EndUser, OrganizationBaseRole } from '@prisma/client';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { prisma } from '../../lib/prisma.js';
@@ -29,6 +29,8 @@ import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
 import { issueMcpAccessToken, verifyMcpAccessToken, type McpAccessClaims } from '../../lib/jwt.js';
 import { sessionIssuedBefore } from '../../lib/session-stamp.js';
+import { organizationsService } from '../organizations/organizations.service.js';
+import { getOrganizationRoles } from '../../lib/organization-role-cache.js';
 import {
   issueRefreshToken,
   lookupRefreshToken,
@@ -395,6 +397,72 @@ async function requireLiveGrantSubject(
   return user;
 }
 
+/** The organization an MCP grant acts for, with the end-user's role in it. */
+export interface GrantOrganization {
+  id: string;
+  role: string;
+  baseRole: OrganizationBaseRole;
+}
+
+/**
+ * Is `organizationId` an organization this end-user may bind an MCP grant to
+ * right now? A member of it, in THIS Application, holding a role that is not
+ * disabled. The same rule the session API applies to an `oid` claim
+ * (`organizationsService.activeRoleFor`), so a connection can never act for an
+ * organization the user could not act for in the product itself.
+ */
+export async function grantOrganization(
+  applicationId: string,
+  endUserId: string,
+  organizationId: string,
+): Promise<GrantOrganization | null> {
+  const role = await organizationsService.activeRoleFor({ applicationId, endUserId, organizationId });
+  return role && { id: organizationId, ...role };
+}
+
+/**
+ * The organizations offered at consent: only when the Application has
+ * organizations switched on, the grant includes `mcp:account` (the binding
+ * means nothing to an OIDC-only sign-in), and only those the user can act for.
+ * Empty means no choice is offered and the grant is personal, as it always was.
+ */
+export async function consentOrganizationChoices(
+  application: Application,
+  endUserId: string,
+  scope: string,
+): Promise<Array<{ id: string; name: string; role: string }>> {
+  if (!hasScope(scope, MCP_SCOPE)) return [];
+  if (!AuthConfigSchema.parse(application.authConfig).organizationsEnabled) return [];
+  // One membership query and one (cached) role-catalog read, not a lookup per
+  // organization: this runs on every authorize POST. The usable-role test is
+  // the one `organizationRolesService.isUsable` applies (the role exists in
+  // the catalog and is not disabled), and the choice is re-checked with
+  // `grantOrganization` when submitted, so a role disabled in between still
+  // cannot be bound.
+  const [mine, roles] = await Promise.all([
+    organizationsService.listMine({ application: { id: application.id }, endUserId, take: 100 }),
+    getOrganizationRoles(application.id),
+  ]);
+  const usable = new Set(roles.filter((r) => !r.disabled).map((r) => r.name));
+  return mine
+    .filter((o) => usable.has(o.role))
+    .map((o) => ({ id: o.id, name: o.name, role: o.role }));
+}
+
+/**
+ * The refusal for a grant whose organization binding no longer holds: the
+ * end-user left the organization, was removed, or their role was disabled.
+ * Fails closed rather than degrading to the personal account, because a client
+ * that was told "this connection acts for Acme" would otherwise go on reporting
+ * the user's own plan and balance as Acme's.
+ */
+function organizationBindingLapsed(): OAuthError {
+  return new OAuthError(
+    'invalid_grant',
+    'This connection acts for an organization you can no longer act for. Connect again and choose an account.',
+  );
+}
+
 /**
  * `liveGrantSubject` for a presented ACCESS token: also refuses one issued
  * before `EndUser.sessionsInvalidBefore`. A password change or reset, sign-out
@@ -407,20 +475,30 @@ async function requireLiveGrantSubject(
 async function liveAccessTokenSubject(
   applicationId: string,
   claims: McpAccessClaims,
-): Promise<EndUser | null> {
+): Promise<{ user: EndUser; organization: GrantOrganization | null } | null> {
   const user = await liveGrantSubject(applicationId, claims.sub);
   if (!user || sessionIssuedBefore(claims, user.sessionsInvalidBefore)) return null;
-  return user;
+  // An organization-bound token is live only while the binding is. Checked on
+  // every use, not only at refresh: the access token lives an hour, and
+  // removal from an organization has to take effect before that.
+  if (!claims.oid) return { user, organization: null };
+  const organization = await grantOrganization(applicationId, user.id, claims.oid);
+  return organization && { user, organization };
 }
 
 export const mcpOAuthService = {
   /**
-   * Is the access token's end-user still live (not erased), and was the token
-   * issued after the user's last revoke-everything? For the resource servers,
-   * which answer with an RFC 6750 challenge rather than an OAuth error body.
+   * The live subject of an access token, for the MCP resource server, which
+   * answers with an RFC 6750 challenge rather than an OAuth error body: the
+   * end-user (not erased, token issued after their last revoke-everything) and
+   * the organization the grant is bound to (null for a personal grant). Null
+   * when the token must be refused, including when its binding has lapsed.
    */
-  async accessTokenIsLive(applicationId: string, claims: McpAccessClaims): Promise<boolean> {
-    return (await liveAccessTokenSubject(applicationId, claims)) !== null;
+  async liveAccessToken(
+    applicationId: string,
+    claims: McpAccessClaims,
+  ): Promise<{ user: EndUser; organization: GrantOrganization | null } | null> {
+    return liveAccessTokenSubject(applicationId, claims);
   },
 
   /** RFC 7591 dynamic client registration. Public client (PKCE, no secret). */
@@ -494,7 +572,14 @@ export const mcpOAuthService = {
     scope: string;
     nonce?: string | undefined;
     authTime: Date;
+    /** The organization chosen at consent. Only meaningful with `mcp:account`. */
+    organizationId?: string | null | undefined;
   }): Promise<string> {
+    if (args.organizationId && !hasScope(args.scope, MCP_SCOPE)) {
+      // Callers only offer the choice for MCP grants; a binding on anything
+      // else would be carried into tokens that no tool ever reads.
+      throw new Error('An organization binding requires the mcp:account scope.');
+    }
     const raw = randomBytes(32).toString('base64url');
     await prisma.oAuthAuthCode.create({
       data: {
@@ -507,6 +592,7 @@ export const mcpOAuthService = {
         scope: args.scope,
         nonce: args.nonce ?? null,
         authTime: args.authTime,
+        organizationId: args.organizationId ?? null,
         expiresAt: new Date(Date.now() + AUTH_CODE_TTL_MS),
       },
     });
@@ -549,7 +635,13 @@ export const mcpOAuthService = {
     // an erasure was redeemable after it, yielding an `id_token` about a
     // person whose data we had just promised to destroy.
     const user = await requireLiveGrantSubject(args.application.id, row!.endUserId);
-    return this.issueTokens(args.application, user, row!.scope, args.clientId, {
+    // The binding was checked at consent, up to 60 seconds ago. Checked again
+    // here so a removal in that window is not carried into a 30-day chain.
+    const organizationId = row!.organizationId;
+    if (organizationId && !(await grantOrganization(args.application.id, user.id, organizationId))) {
+      throw organizationBindingLapsed();
+    }
+    return this.issueTokens(args.application, user, row!.scope, args.clientId, organizationId, {
       nonce: row!.nonce ?? undefined,
       // Codes minted before `auth_time` existed have none. The authorize form
       // authenticates the user seconds before the code is redeemed, so the
@@ -581,6 +673,17 @@ export const mcpOAuthService = {
     // of a refresh chain, and a token rotated by a concurrent request could
     // still land here.
     await requireLiveGrantSubject(args.application.id, outcome.token.endUserId);
+    // The organization binding, re-checked before the rotation for the same
+    // reason: a refused refresh leaves the chain as it was, so a user who is
+    // added back to the organization (or whose role is re-enabled) finds the
+    // connection working again, the way a re-enabled role resumes everywhere.
+    const organizationId = outcome.token.grantOrganizationId;
+    if (
+      organizationId &&
+      !(await grantOrganization(args.application.id, outcome.token.endUserId, organizationId))
+    ) {
+      throw organizationBindingLapsed();
+    }
     // The scope granted at consent, carried down the whole rotation chain. NOT
     // a constant: re-issuing `mcp:account` here would silently widen a grant
     // the end-user approved as `openid email` into MCP tool access. Null on
@@ -599,6 +702,7 @@ export const mcpOAuthService = {
       tokenGeneration: args.application.tokenGeneration,
       audience: mcpIssuer(args.application.slug),
       scope,
+      organizationId,
     });
     // Deliberately NO `id_token` here, though OIDC Core §12.2 permits one. A
     // refresh performs no authentication: the only honest `auth_time` would be
@@ -626,6 +730,7 @@ export const mcpOAuthService = {
     user: EndUser,
     scope: string,
     clientId: string,
+    organizationId: string | null,
     oidc?: { nonce?: string | undefined; authTime: Date },
   ): Promise<Record<string, unknown>> {
     const endUserId = user.id;
@@ -635,6 +740,7 @@ export const mcpOAuthService = {
       tokenGeneration: application.tokenGeneration,
       audience: mcpIssuer(application.slug),
       scope,
+      organizationId,
     });
     // MCP-surface refresh token, bound to the OAuth client. Rejected at the
     // session /auth/refresh endpoint and only redeemable by the same client.
@@ -644,6 +750,7 @@ export const mcpOAuthService = {
       kind: 'mcp',
       clientId,
       scope,
+      grantOrganizationId: organizationId,
     });
     const response: Record<string, unknown> = {
       access_token: access.token,
@@ -691,9 +798,9 @@ export const mcpOAuthService = {
     );
     if (!claims) return { ok: false, reason: 'invalid_token' };
     if (!hasScope(claims.scope, OPENID_SCOPE)) return { ok: false, reason: 'insufficient_scope' };
-    const user = await liveAccessTokenSubject(application.id, claims);
-    if (!user) return { ok: false, reason: 'invalid_token' };
-    return { ok: true, claims: identityClaims(user, claims.scope) };
+    const live = await liveAccessTokenSubject(application.id, claims);
+    if (!live) return { ok: false, reason: 'invalid_token' };
+    return { ok: true, claims: identityClaims(live.user, claims.scope) };
   },
 
   /**
@@ -715,6 +822,9 @@ export const mcpOAuthService = {
       active: true,
       sub: claims.sub,
       scope: claims.scope,
+      // The organization the grant acts for, already confirmed above, so a
+      // customer's own MCP server can scope its answers the way ours does.
+      ...(claims.oid && { oid: claims.oid }),
       aud: claims.aud,
       exp: claims.exp,
       iat: claims.iat,

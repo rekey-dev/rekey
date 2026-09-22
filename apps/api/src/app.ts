@@ -54,7 +54,10 @@ import {
   idempotencyPreHandler,
   idempotencyOnSend,
 } from "./middleware/idempotency.js";
-import { processDueWebhookDeliveries } from "./modules/webhooks/webhook.service.js";
+import {
+  processDueWebhookDeliveries,
+  stopScheduledDeliveries,
+} from "./modules/webhooks/webhook.service.js";
 import { processDueDunningCases } from "./modules/billing/dunning.service.js";
 import { runPruneSweep } from "./lib/prune-sweep.js";
 import {
@@ -107,6 +110,7 @@ import {
 import { tenantOAuthPublicRoutes } from "./modules/tenant-oauth/index.js";
 import {
   licensesPublicRoutes,
+  licensesSelfRoutes,
   tenantLicenseActivationRoutes,
 } from "./modules/licenses/index.js";
 import {
@@ -115,8 +119,8 @@ import {
   tenantDevicesRoutes,
 } from "./modules/devices/index.js";
 import { portalConfigRoutes } from "./modules/portal/index.js";
-import { usagePublicRoutes } from "./modules/usage/index.js";
-import { creditsPublicRoutes } from "./modules/credits/index.js";
+import { usagePublicRoutes, usageSelfRoutes } from "./modules/usage/index.js";
+import { creditsPublicRoutes, creditsSelfRoutes } from "./modules/credits/index.js";
 import { tenantEmailRoutes } from "./modules/email/index.js";
 import {
   tenantWebhookRoutes,
@@ -571,7 +575,7 @@ export async function buildApp(
       await verifiedKeys.remember(rawKey, req.apiKey.expiresAt);
   });
   app.addHook("onResponse", async (req, reply) => {
-    if (reply.statusCode !== 401) return;
+    if (reply.statusCode !== 401 && !req.credentialRefused) return;
     if (req.clientIpVouched) {
       await authFailures.record(req.ip);
       return;
@@ -696,6 +700,15 @@ export async function buildApp(
   // lost on a graceful stop.
   app.addHook("onClose", async () => {
     await flushApiRequestLogs();
+  });
+
+  // Stop the delivery attempts the in-process test scheduler still holds. Its
+  // timers are process-global, so without this an app's retries fire after it
+  // closes, into whatever runs next in the same process. Outside test the
+  // default scheduler never queues anything (BullMQ owns scheduling) and this
+  // returns at once.
+  app.addHook("onClose", async () => {
+    await stopScheduledDeliveries();
   });
 
   // Terminate the bcrypt verification workers, if an imported hash ever
@@ -837,6 +850,8 @@ export async function buildApp(
   // The end-user's own devices (docs/devices.md), same credential tier as
   // /users/me: publishable key + user JWT.
   await app.register(devicesUserRoutes, { prefix: "/api/v1/users/me/devices" });
+  // The end-user's own licences, same tier as the self-service billing reads.
+  await app.register(licensesSelfRoutes, { prefix: "/api/v1/users/me/licenses" });
   // Secret-key surface over any end-user's devices, for the customer's backend.
   await app.register(devicesServerRoutes, { prefix: "/api/v1/devices" });
   // Secret-key end-user lookup by id / exact email (routes/users.ts). Mounted
@@ -861,6 +876,10 @@ export async function buildApp(
   await app.register(licensesPublicRoutes, { prefix: "/api/v1/licenses" });
   await app.register(usagePublicRoutes, { prefix: "/api/v1/usage" });
   await app.register(creditsPublicRoutes, { prefix: "/api/v1/credits" });
+  // The signed-in end-user's own usage and credit reads: same prefixes, a
+  // separate plugin each, because the two above are secret-key only as a whole.
+  await app.register(usageSelfRoutes, { prefix: "/api/v1/usage" });
+  await app.register(creditsSelfRoutes, { prefix: "/api/v1/credits" });
   // Hosted customer portal, public config lookup by slug (Portal V2).
   await app.register(portalConfigRoutes, { prefix: "/api/v1/portal" });
   // Per-Application MCP server + OAuth 2.1 AS (gated per-app by authConfig.mcpEnabled).

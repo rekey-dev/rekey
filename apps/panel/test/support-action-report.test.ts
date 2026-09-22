@@ -10,9 +10,12 @@
  * still open). A support action that reads as a no-op is worse than a slow
  * one: the operator sends a second reset, or tells the customer it is broken.
  *
- * The two Overview forms reload the page once the action settles, the way the
- * invitation link does since #572, and the outcome waits for that reload in a
- * short-lived httpOnly cookie because the reload has no query to read.
+ * The cause turned out to be a React transition left suspended after the
+ * payload arrived (`lib/commit-nudge.ts`), which `ActionForm` now nudges
+ * through, so the redirect commits and its `?support=` flag is what renders the
+ * banner. The two Overview forms used to reload the whole document instead;
+ * that reload is gone. The outcome still also waits in a short-lived httpOnly
+ * cookie, so a manual reload straight after shows it too.
  *
  * A source scan, for the same reason `action-form.test.ts` is one: it only
  * reproduces on a production build.
@@ -68,13 +71,9 @@ describe('end-user support actions say what they did', () => {
   const heads = actionFormHeads(readFileSync(overview, 'utf8'));
 
   for (const name of OVERVIEW_ACTIONS) {
-    it(`${name} does not rely on its redirect to show the result`, () => {
+    it(`${name} is submitted through ActionForm, which gets its redirect committed`, () => {
       const head = heads.find((h) => h.includes(name));
       expect(head, `no <ActionForm> bound to ${name} on the end-user Overview tab`).toBeDefined();
-      expect(
-        head!.includes('reloadOnSettle'),
-        `${name} must set reloadOnSettle. Its redirect goes to this same path with a flag in the query, and on a production build that navigation is not committed (rekey issue #569), so the banner never renders and the operator is told nothing.`,
-      ).toBe(true);
     });
   }
 

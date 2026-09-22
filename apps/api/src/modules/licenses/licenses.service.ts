@@ -51,6 +51,49 @@ function redactLicense(l: License): PublicLicense {
   return rest;
 }
 
+/**
+ * A licence as its holder sees it. Picked field by field rather than spread,
+ * so a column added to `License` later does not reach end-users by default:
+ * `keyHash` is a credential verifier and `metadata` is the operator's notes.
+ */
+export type EndUserLicense = Pick<
+  License,
+  | 'id'
+  | 'applicationId'
+  | 'endUserId'
+  | 'organizationId'
+  | 'planId'
+  | 'kind'
+  | 'status'
+  | 'keyPrefix'
+  | 'entitlementKey'
+  | 'expiresAt'
+  | 'seatsAllowed'
+  | 'createdAt'
+  | 'updatedAt'
+  | 'revokedAt'
+>;
+
+const END_USER_LICENSE_SELECT = {
+  id: true,
+  applicationId: true,
+  endUserId: true,
+  organizationId: true,
+  planId: true,
+  kind: true,
+  status: true,
+  keyPrefix: true,
+  entitlementKey: true,
+  expiresAt: true,
+  seatsAllowed: true,
+  createdAt: true,
+  updatedAt: true,
+  revokedAt: true,
+} as const satisfies Record<keyof EndUserLicense, true>;
+
+/** How many licences `include=licenses` carries: the first page at the maximum size. */
+export const SELF_LICENSE_INCLUDE_LIMIT = 100;
+
 export interface IssueInput {
   application: Application;
   endUser: EndUser;
@@ -136,6 +179,35 @@ export const licensesService = {
       take: 100,
     });
     return rows.map(redactLicense);
+  },
+
+  /**
+   * The licences a signed-in end-user holds, newest first: every licence
+   * issued to them (personal, and any they bought for a team), plus, with
+   * `organizationId`, every licence pooled to that organization whoever
+   * bought it. The caller decides whether the organization applies and has
+   * confirmed membership (see `billingSubjectOrganization`).
+   */
+  async listForEndUser(
+    applicationId: string,
+    endUserId: string,
+    opts: { organizationId?: string; take: number; skip: number },
+  ): Promise<{ items: EndUserLicense[]; total: number }> {
+    const where = {
+      applicationId,
+      OR: [{ endUserId }, ...(opts.organizationId ? [{ organizationId: opts.organizationId }] : [])],
+    };
+    const [items, total] = await Promise.all([
+      prisma.license.findMany({
+        where,
+        select: END_USER_LICENSE_SELECT,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: opts.take,
+        skip: opts.skip,
+      }),
+      prisma.license.count({ where }),
+    ]);
+    return { items, total };
   },
 
   async issue(input: IssueInput): Promise<IssueResult> {

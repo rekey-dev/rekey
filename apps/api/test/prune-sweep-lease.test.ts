@@ -110,9 +110,32 @@ describe('prune sweep lease', () => {
   });
 
   it('renews the lease while a long sweep runs', async () => {
-    await withLease(redis, { key, ttlMs: 150, renewEveryMs: 40 }, async () => {
-      await new Promise((r) => setTimeout(r, 400));
-      expect(await redis.get(key)).not.toBeNull();
+    // A fixed wall-clock sleep here only proves the key survived one
+    // particular window: on a loaded CI runner a single scheduling gap
+    // between renewals can outrun a thin ttlMs/renewEveryMs margin and the
+    // key expires before the next PEXPIRE lands, failing the test without
+    // the lease renewal itself being broken. Instead we poll PTTL and wait
+    // for actual evidence of renewal (the TTL jumping back up instead of
+    // counting down to zero), which proves the mechanism rather than
+    // gambling on timing. ttlMs is generous so a single missed tick while
+    // we poll cannot expire the key on its own.
+    const ttlMs = 2000;
+    const renewEveryMs = 50;
+
+    await withLease(redis, { key, ttlMs, renewEveryMs }, async () => {
+      let renewalsObserved = 0;
+      let lastPttl = -1;
+      const deadline = Date.now() + 5000;
+
+      while (renewalsObserved < 3 && Date.now() < deadline) {
+        const pttl = await redis.pttl(key);
+        expect(pttl).not.toBe(-2); // -2: the key is gone, expired underneath us
+        if (pttl > lastPttl) renewalsObserved += 1;
+        lastPttl = pttl;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+
+      expect(renewalsObserved).toBeGreaterThanOrEqual(3);
     });
     expect(await redis.get(key)).toBeNull();
   });

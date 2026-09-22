@@ -34,7 +34,11 @@ import { z } from 'zod';
 import { organizationsService } from './organizations.service.js';
 import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 import { authService } from '../auth/auth.service.js';
-import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
+import {
+  requirePublishableOrSecretKey,
+  requireScope,
+  requireScopeByMethod,
+} from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
@@ -42,8 +46,9 @@ import { ok, okPage, errs, ref, type JsonSchema } from '../../lib/openapi.js';
 
 /**
  * The auth errors shared by every route in both plugins below,
- * `requirePublishableOrSecretKey` + `requireScope('auth:write')` +
- * `requireUserSession` all run as `onRequest` hooks before any handler.
+ * `requirePublishableOrSecretKey` + the scope (`auth:read` for GET,
+ * `auth:write` otherwise) + `requireUserSession` all run as `onRequest` hooks
+ * before any handler.
  */
 const ORG_AUTH_ERRORS = {
   401:
@@ -53,8 +58,8 @@ const ORG_AUTH_ERRORS = {
     "mismatched end-user token (X-Rekey-User-Token).",
   403:
     'IP_NOT_ALLOWED / ORIGIN_NOT_ALLOWED — the caller is outside the presented key\'s ' +
-    "allowlist; or API_KEY_SCOPE_INSUFFICIENT — a secret key was presented without the " +
-    '`auth:write` scope.',
+    "allowlist; or API_KEY_SCOPE_INSUFFICIENT: a secret key was presented without the " +
+    'scope the method needs (`auth:read` for GET, `auth:write` for every other method).',
 } as const;
 
 /**
@@ -153,7 +158,9 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
   // browser portal manages teams + billing with no secret key), exactly like
   // the self-service billing tier.
   app.addHook('onRequest', requirePublishableOrSecretKey);
-  app.addHook('onRequest', requireScope('auth:write'));
+  // Reading your own organizations, roles and members needs `auth:read`;
+  // creating, inviting, changing roles, leaving and switching need `auth:write`.
+  app.addHook('onRequest', requireScopeByMethod({ read: 'auth:read', write: 'auth:write' }));
   app.addHook('onRequest', requireUserSession);
 
   app.post(

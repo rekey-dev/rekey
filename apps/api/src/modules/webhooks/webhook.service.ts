@@ -356,6 +356,16 @@ export type DeliveryScheduler = (deliveryId: string, delayMs: number, attempts: 
 // failed to start, throw loudly rather than silently pin retries to one
 // process and break multi-replica delivery. Errors in the test timer are
 // swallowed: a fire-and-forget attempt must not surface as an unhandled rejection.
+//
+// The test timers and the attempts they start are tracked so they can be
+// stopped (`stopScheduledDeliveries`). They are process-global and the suite
+// runs every file in ONE fork, so an untracked timer outlived the app and the
+// test that created it: a 30s retry scheduled against an unreachable endpoint
+// in one file fired inside a later file's query-count window, and that file's
+// exact count came up one statement high (the claim UPDATE below).
+const pendingTimers = new Set<NodeJS.Timeout>();
+const runningAttempts = new Set<Promise<void>>();
+
 const defaultScheduler: DeliveryScheduler = (deliveryId, delayMs) => {
   if (env.NODE_ENV !== 'test') {
     throw new Error(
@@ -364,10 +374,30 @@ const defaultScheduler: DeliveryScheduler = (deliveryId, delayMs) => {
         'in-process timer, which would not survive a crash or distribute across replicas.',
     );
   }
-  setTimeout(() => {
-    void attemptDelivery(deliveryId).catch(() => undefined);
-  }, delayMs).unref();
+  const timer = setTimeout(() => {
+    pendingTimers.delete(timer);
+    const attempt = attemptDelivery(deliveryId).catch(() => undefined);
+    runningAttempts.add(attempt);
+    void attempt.finally(() => runningAttempts.delete(attempt));
+  }, delayMs);
+  timer.unref();
+  pendingTimers.add(timer);
 };
+
+/**
+ * Cancel every attempt the in-process test scheduler still has queued, and
+ * wait for the ones already running to finish. An attempt that fails while
+ * being waited on schedules its retry, so this loops until both sets are
+ * empty. A no-op when nothing is queued, and always a no-op outside test,
+ * where the default scheduler never queues anything.
+ */
+export async function stopScheduledDeliveries(): Promise<void> {
+  while (pendingTimers.size > 0 || runningAttempts.size > 0) {
+    for (const timer of pendingTimers) clearTimeout(timer);
+    pendingTimers.clear();
+    await Promise.all(runningAttempts);
+  }
+}
 
 let scheduleAttempt: DeliveryScheduler = defaultScheduler;
 

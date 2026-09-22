@@ -100,8 +100,8 @@ Everything hangs off namespaces on the client. `amount` fields are always intege
 | `signUp({ email, password, metadata? })` | Create an end-user; returns user + token pair. |
 | `signIn({ email, password })` | Authenticate. Returns a `SignInOutcome` — **branch on `mfaRequired`** before reading `accessToken`. |
 | `mfaVerify({ mfaChallengeToken, code })` | Exchange an MFA challenge for a real session. |
-| `getCurrentUser(accessToken)` | Resolve the end-user behind a token (+ `activeOrganizationId`). |
-| `updateCurrentUser(accessToken, { metadata })` | Let a signed-in user edit their own `metadata`. **Shallow-merged**, not replaced: omitted keys survive, a sent key replaces that top-level key wholesale, a key sent as `null` is deleted, and `metadata: null` clears it. Only `metadata` is writable — email/role/password are refused. |
+| `getCurrentUser(accessToken, { include? })` | Resolve the end-user behind a token (+ `activeOrganizationId`, `activeOrganizationRole`, `activeOrganizationBaseRole`). `include: ['entitlements', 'device', 'subscription', 'organization', 'licenses']` adds any of those in the same call, typed to what you asked for. |
+| `updateCurrentUser(accessToken, { metadata })` | Let a signed-in user edit their own `metadata`. Returns the same shape as `getCurrentUser`. **Shallow-merged**, not replaced: omitted keys survive, a sent key replaces that top-level key wholesale, a key sent as `null` is deleted, and `metadata: null` clears it. Only `metadata` is writable; email, role and password are refused. |
 | `refresh(refreshToken)` | Rotate the token pair. Single-use — store the new refresh immediately. |
 | `signOut(refreshToken)` / `signOutEverywhere(accessToken)` | Revoke one / all refresh tokens. |
 | `requestPasswordReset({ email, resetUrl? })` / `resetPassword({ token, newPassword })` | Reset flow. **Branch on `emailSent`** — see [Email-sending methods](#email-sending-methods-branch-on-emailsent). |
@@ -142,13 +142,15 @@ if (!r.emailSent && r.resetToken) {
 ### `rekey.billing`
 | Method | Description |
 | --- | --- |
-| `getPlans(page?)` | List the Application's active plans (public — render pricing pages). Returns `{items, page}`. |
+| `getPlans(page?)` | List the Application's active plans (public, for rendering pricing pages). Returns `{items, page}`. Each plan's `checkout.ready` is false when checkout for it would be refused, so you can hide it: `items.filter((p) => p.slug === freeSlug \|\| p.checkout.ready)`. Keep the free tier in: with no provider connected it reads `ready: false` but still applies to every signed-in user. |
 | `getSubscription(accessToken, { organizationId?, includeEnded? })` | The user's active subscription, or `null`. `includeEnded: true` falls back to their most recent CANCELED/EXPIRED subscription **only when the answer would otherwise be null** — so a billing page can say what a former subscriber was on and when it ended, instead of showing them the same blank state as somebody who never subscribed. It never replaces a live subscription; leave it off for entitlement checks. |
 | `createCheckout(accessToken, { planSlug, successUrl, cancelUrl, couponCode?, organizationId? })` | Start hosted checkout; returns the redirect URL + a PENDING subscription. Activation happens via the provider webhook. |
 | `cancelSubscription(accessToken, { atPeriodEnd?, organizationId? })` | Cancel the user's subscription. Defaults to **at period end** — the row stays ACTIVE with `cancelAt` set until the day arrives, so read `cancelAt`, not `status`. Pass `atPeriodEnd: false` to end it immediately. The default is a *request*: a PAST_DUE subscription, a PENDING checkout, or an ACTIVE row with no known period end is canceled on the spot regardless. Ask `cancelsAtPeriodEnd(sub)` (exported from this package) before showing a confirmation, so you promise the outcome the caller will actually get. |
 | `validateCoupon(accessToken, { code, planSlug })` | Price-check a coupon without applying it. |
 | `getProviders(country?)` | The geo-routed list of enabled billing providers. |
 | `getEntitlements(accessToken, { organizationId? })` | Resolve feature flags + limits + live credit balance. **Gate your app on this.** Cache it with a ~5-min TTL / stale-while-revalidate and bust on checkout success — see ["Caching entitlements" in docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md#caching-entitlements). |
+| `hasFeature(accessToken, key, { organizationId? })` / `getFeature(...)` | One feature: `hasFeature` is `Boolean(value)`, `getFeature` returns `{ key, granted, value }`. Same subject as `include: ['entitlements']`; skips the credit balance read. |
+| `hasFeatureFor(endUserId, key)` / `getFeatureFor(...)` | The same for an end-user you name. Secret key only. |
 
 ### `rekey.organizations` (teams)
 | Method | Description |
@@ -165,6 +167,9 @@ if (!r.emailSent && r.resetToken) {
 | --- | --- |
 | `record({ meterSlug, quantity, endUserId? \| organizationId? })` | Record a metering event (quantity may be negative). |
 | `aggregate({ meterSlug, from?, to?, endUserId?, organizationId? })` | Sum a meter over a window / subject. |
+| `getRemaining(accessToken, { meter?, organizationId? })` | The signed-in user's included quota, `used` and `remaining` this period, per meter. Same numbers `record` enforces with. |
+| `getRemainingFor({ endUserId? , organizationId? }, { meter? })` | The same for a subject you name (secret key). |
+| `listMeters({ limit?, offset? })` | The meter catalogue: slugs, units, active flag, fallback credit price. |
 
 ### `rekey.credits` (prepaid / pay-as-you-go)
 | Method | Description |
@@ -172,10 +177,14 @@ if (!r.emailSent && r.resetToken) {
 | `getBalance(subject)` | Spendable balance for `{ endUserId }` or `{ organizationId }`. |
 | `consume(subject & { amount, idempotencyKey? })` | Idempotent drawdown. Throws `CREDITS_INSUFFICIENT` (402) when too low. |
 | `listLedger(subject, limit?, offset?)` | Ledger entries, newest first (default 50, max 200). Returns `{items, page}`. |
+| `grant({ endUserId? \| organizationId?, amount, idempotencyKey, reason?, description? })` | Add credits. Needs a key minted with the **elevated** `credits:grant` scope, which `*` does not include. 1 to 1,000,000 per call. |
+| `listMyLedger(accessToken, { organizationId?, limit?, offset? })` | The signed-in user's own ledger, without `metadata`. |
+
+Credit changes are also sent as `credit.granted`, `credit.consumed` and `credit.adjusted` webhooks; the payload type is `CreditWebhookData`.
 
 #### `idempotencyKey` scoping & retry semantics
 
-The key is unique per **Application** — `(applicationId, idempotencyKey)` on the append-only ledger — **not** per subject. Two consumes with the same key but different `endUserId`s collide: the second silently replays the first entry and **does not charge the second user**. So always embed the subject and the operation in the key:
+The key is unique per **subject** within the Application: `(applicationId, subject, idempotencyKey)` on the append-only ledger. The same key used for two different end-users is two separate operations, which is right when the key names what is being paid for (a lead id) and two buyers pay for it. Within one subject, embed the operation in the key:
 
 ```ts
 // Recommended format: `${subjectId}:${operationId}` — stable per logical operation.
@@ -197,6 +206,7 @@ Retry semantics: a repeat with the same key (timeout retry, queue redelivery, do
 | --- | --- |
 | `verify({ key, machineFingerprint, label? })` | Verify a license key + record an activation. Always 200 — branch on `result.ok`. |
 | `deactivate({ key, machineFingerprint })` | Give a machine's seat back. Same deterministic body as `verify`; idempotent. |
+| `listMine(accessToken, page?)` | The signed-in user's own licences (and the active organization's, in an org-billed Application). No raw keys, just `keyPrefix`. Needs `billing:read`. |
 
 ### `rekey.devices` (secret key)
 | Method | Description |
@@ -223,7 +233,7 @@ Retry semantics: a repeat with the same key (timeout retry, queue redelivery, do
 | --- | --- |
 | `verifyWebhookSignature({ header, payload, secret, toleranceSeconds? })` | Verify the HMAC on a webhook **Rekey sends to your app** (user-lifecycle + billing events) against the **raw body bytes** + the `X-Rekey-Signature` header. Not for Stripe/PayPal webhooks — those go to Rekey, never to you (see [docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md)). |
 | `verifyAccessToken(token, { applicationId, jwksUrl \| jwks })` | Verify an end-user access token **offline** (no API round-trip) against your deployment's `GET /.well-known/jwks.json`. RS256 only — the Application must opt in via `authConfig.tokenAlg: "RS256"`; default HS256 tokens still need `auth.getCurrentUser`. Fetches + caches the JWKS for 5 minutes, checks `kid`/signature/`exp`/`typ`, and returns the claims (`sub`, `applicationId`, `oid?`, …). **`applicationId` is required** — the RS256 keypair is deployment-wide, so without it a token minted for any other Application on the same deployment would verify here. (The HS256 default is unaffected: its key is derived per Application.) It cannot see a server-side revocation: a locally verified token stays valid until it expires, even after sign-out everywhere, a session revoke or a device release, so call the API when immediate revocation matters. See [docs/jwks.md](https://github.com/rekey-dev/rekey/blob/main/docs/jwks.md). |
-| `WEBHOOK_EVENTS` / `KNOWN_WEBHOOK_EVENTS` / `isKnownWebhookEvent` | The full outbound-event registry — `{ name, description }` pairs (and just the names) for the 18 events Rekey can send: `user.created/updated/deleted/erased`, `session.revoked`, `mfa.enabled/disabled`, `password.changed`, `email.verified`, `subscription.activated/canceled/past_due/entitlements_updated`, `payment.succeeded/failed`, `dunning.case_opened/case_recovered/case_exhausted`. Mirrors the API exactly; use it for event pickers / autocompleting an endpoint's `events` array rather than hardcoding this list. See [docs/webhooks.md](https://github.com/rekey-dev/rekey/blob/main/docs/webhooks.md). |
+| `WEBHOOK_EVENTS` / `KNOWN_WEBHOOK_EVENTS` / `isKnownWebhookEvent` | The full outbound-event registry: `{ name, description }` pairs (and just the names) for the 27 events Rekey can send: `user.created/updated/deleted/erased`, `session.revoked`, `mfa.enabled/disabled`, `password.changed`, `email.verified`, `subscription.activated/canceled/past_due/entitlements_updated`, `payment.succeeded/failed`, `dunning.case_opened/case_recovered/case_exhausted`, `device.registered/released/blocked/unblocked/limit_reached`, `license.deactivated`, `credit.granted/consumed/adjusted`. Mirrors the API exactly; use it for event pickers / autocompleting an endpoint's `events` array rather than hardcoding this list. See [docs/webhooks.md](https://github.com/rekey-dev/rekey/blob/main/docs/webhooks.md). |
 | `WebhookEventType` / `WebhookEventEnvelope<TData>` | Types for the event-name union and the delivery envelope (`{ eventId, occurredAt, type, applicationId, data }`). Dedupe on `eventId` — retries reuse it. |
 | `RekeyError` | The canonical error class — `instanceof`-consistent across SDK packages. |
 

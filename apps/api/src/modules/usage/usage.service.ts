@@ -12,7 +12,9 @@
  * so metered pricing means "cap and refuse", not "charge for what you used".
  */
 
-import type { UsageMeter, UsageRecord } from '@prisma/client';
+import type { Prisma, UsageMeter, UsageRecord } from '@prisma/client';
+import type { UsageRemainingDto } from '@rekey.dev/shared-types';
+import { kickDeliveries } from '../webhooks/webhook.service.js';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { entitlementsService } from '../billing/entitlements.service.js';
@@ -26,11 +28,63 @@ const SLUG_RE = /^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$/;
  * the MVP, predictable for customers ("10k calls/month"), provider-agnostic,
  * and needs no per-sub period bookkeeping. Returns [start, end).
  */
-function monthWindowUtc(at: Date): { start: Date; end: Date } {
+export function monthWindowUtc(at: Date): { start: Date; end: Date } {
   const start = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), 1));
   const end = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 1));
   return { start, end };
 }
+
+/** A quota subject: exactly one of the two, as `record` builds it. */
+export type UsageQuotaSubject = { endUserId: string } | { organizationId: string };
+
+/**
+ * Units a subject has recorded against a meter inside a quota window.
+ *
+ * The ONE definition of "used this period". `record` enforces the included
+ * quota against it and `remaining` reports against it, so the number a caller
+ * reads is the number the next record is measured with. Note it filters on the
+ * subject's id column, not `subjectKey`, which is what `record` has always
+ * summed.
+ */
+function usedInWindow(
+  client: Prisma.TransactionClient,
+  meterId: string,
+  subject: UsageQuotaSubject,
+  window: { start: Date; end: Date },
+): Promise<number> {
+  return client.usageRecord
+    .aggregate({ _sum: { quantity: true }, where: usedWhere(meterId, subject, window) })
+    .then((agg) => agg._sum.quantity ?? 0);
+}
+
+/** `usedInWindow` for several meters in one grouped query. Same filter. */
+async function usedInWindowByMeter(
+  meterIds: readonly string[],
+  subject: UsageQuotaSubject,
+  window: { start: Date; end: Date },
+): Promise<Map<string, number>> {
+  if (meterIds.length === 0) return new Map();
+  const rows = await prisma.usageRecord.groupBy({
+    by: ['meterId'],
+    _sum: { quantity: true },
+    where: usedWhere({ in: [...meterIds] }, subject, window),
+  });
+  return new Map(rows.map((r) => [r.meterId, r._sum.quantity ?? 0]));
+}
+
+function usedWhere(
+  meterId: string | { in: string[] },
+  subject: UsageQuotaSubject,
+  window: { start: Date; end: Date },
+): Prisma.UsageRecordWhereInput {
+  return { meterId, ...subject, occurredAt: { gte: window.start, lt: window.end } };
+}
+
+/**
+ * Every meter a remaining read reports at once. Far above any real catalogue;
+ * past it the response says `truncated: true` and a caller reads per meter.
+ */
+const MAX_METERS_PER_REMAINING_READ = 200;
 
 export const usageService = {
   async listMeters(
@@ -322,7 +376,10 @@ export const usageService = {
             fix: 'Refund the credits explicitly with a credits adjustment, which leaves a ledger entry saying who did it and why.',
           });
         }
-        const { start, end } = monthWindowUtc(args.occurredAt ?? new Date());
+        const window = monthWindowUtc(args.occurredAt ?? new Date());
+        // `credit.consumed` rows written inside the transaction below, kicked
+        // once it has committed.
+        let creditDeliveries: string[] = [];
         // Check + insert must be atomic: two concurrent records could both
         // read a pre-insert SUM and together blow past the hard cap. Take a
         // row-level lock on the meter (same pattern as licenses.service.ts
@@ -331,11 +388,7 @@ export const usageService = {
         return prisma
           .$transaction(async (tx) => {
             await tx.$queryRaw`SELECT id FROM usage_meters WHERE id = ${meter.id} FOR UPDATE`;
-            const agg = await tx.usageRecord.aggregate({
-              _sum: { quantity: true },
-              where: { meterId: meter.id, ...subject, occurredAt: { gte: start, lt: end } },
-            });
-            const used = agg._sum.quantity ?? 0;
+            const used = await usedInWindow(tx, meter.id, subject, window);
             const remainingIncluded = Math.max(0, includedUnits - used);
             const billable = Math.max(0, args.quantity - remainingIncluded);
 
@@ -389,6 +442,9 @@ export const usageService = {
                 // for is the bug this whole path exists to prevent, so the
                 // debit and the record commit together or not at all.
                 tx,
+                onDeliveries: (ids) => {
+                  creditDeliveries = ids;
+                },
                 // Namespaced so a caller's key cannot collide with a direct
                 // credits.consume using the same string.
                 ...(args.idempotencyKey !== undefined && {
@@ -410,6 +466,10 @@ export const usageService = {
             }
 
             return tx.usageRecord.create({ data });
+          })
+          .then((created) => {
+            kickDeliveries(creditDeliveries);
+            return created;
           })
           .catch(onConflictReturnExisting);
       }
@@ -456,6 +516,93 @@ export const usageService = {
     return {
       total: result._sum.quantity ?? 0,
       count: result._count,
+    };
+  },
+
+  /**
+   * What a subject has left of its included quota this period, per meter.
+   *
+   * Built from the same three pieces `record` enforces with, so it cannot
+   * disagree with the next record: the window is `monthWindowUtc(now)`, the
+   * allowance is `includedQuotaFor`, and "used" is `usedInWindow`. It takes no
+   * lock, so under concurrent records it is a snapshot, the same as any read.
+   *
+   * `meterSlug` narrows to one meter (404 when unknown); without it every
+   * meter on the Application is reported, inactive ones included, flagged.
+   */
+  async remaining(args: {
+    applicationId: string;
+    subject: UsageQuotaSubject;
+    meterSlug?: string | undefined;
+    now?: Date | undefined;
+  }): Promise<UsageRemainingDto> {
+    let meters: UsageMeter[];
+    let totalMeters = 1;
+    if (args.meterSlug !== undefined) {
+      const meter = await prisma.usageMeter.findUnique({
+        where: { applicationId_slug: { applicationId: args.applicationId, slug: args.meterSlug } },
+      });
+      if (!meter) {
+        throw new RekeyError({
+          statusCode: 404,
+          code: 'USAGE_METER_NOT_FOUND',
+          message: `Meter "${args.meterSlug}" not found in this application.`,
+          fix: 'Pass a slug from GET /api/v1/usage/meters, or omit `meter` to read every meter.',
+        });
+      }
+      meters = [meter];
+    } else {
+      [meters, totalMeters] = await Promise.all([
+        this.listMeters(args.applicationId, { take: MAX_METERS_PER_REMAINING_READ }),
+        this.countMeters(args.applicationId),
+      ]);
+    }
+
+    const window = monthWindowUtc(args.now ?? new Date());
+    const periodStart = window.start.toISOString();
+    const periodEnd = window.end.toISOString();
+    // A fixed number of queries whatever the catalogue size: the quota side
+    // resolves the subject's subscriptions and plans once for every meter, and
+    // usage is one grouped sum. Both use the definitions `record` enforces with.
+    const [quotas, usedByMeter] = await Promise.all([
+      entitlementsService.includedQuotasFor(
+        args.applicationId,
+        args.subject,
+        meters.map((m) => m.slug),
+      ),
+      usedInWindowByMeter(
+        meters.map((m) => m.id),
+        args.subject,
+        window,
+      ),
+    ]);
+    const rows: UsageRemainingDto['meters'] = [];
+    for (const meter of meters) {
+      const quota = quotas.get(meter.slug) ?? null;
+      const used = usedByMeter.get(meter.id) ?? 0;
+      rows.push({
+        meterSlug: meter.slug,
+        name: meter.name,
+        unit: meter.unit,
+        active: meter.active,
+        included: quota === null ? null : quota.included,
+        used,
+        remaining: quota === null ? null : Math.max(0, quota.included - used),
+        // `record` charges `plan rate ?? meter rate`, but only once a quota
+        // exists; with none it records freely and charges nothing.
+        creditsPerUnit: quota === null ? null : (quota.creditsPerUnit ?? meter.creditsPerUnit),
+        periodStart,
+        periodEnd,
+      });
+    }
+    return {
+      endUserId: 'endUserId' in args.subject ? args.subject.endUserId : null,
+      organizationId: 'organizationId' in args.subject ? args.subject.organizationId : null,
+      periodStart,
+      periodEnd,
+      meters: rows,
+      totalMeters,
+      truncated: totalMeters > rows.length,
     };
   },
 };

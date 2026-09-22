@@ -15,11 +15,16 @@
  *   - Idempotent PER SUBJECT, `(applicationId, subjectKey, idempotencyKey)`
  *     unique on the ledger. The subject is in the key because a client-supplied
  *     idempotency key names what is being paid for, not who is paying (#492).
+ *   - Every new ledger entry enqueues one `credit.*` webhook in the same
+ *     transaction (`creditEventType`), so the event exists exactly when the
+ *     entry does. A replay or a refused debit writes no entry and no event.
  */
 
-import type { Prisma, PrismaClient, CreditReason } from '@prisma/client';
+import type { Prisma, PrismaClient, CreditReason, CreditLedger } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
+import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
+import type { WebhookEventType } from '../webhooks/events.js';
 
 function isUniqueViolation(e: unknown): boolean {
   return (e as { code?: string }).code === 'P2002';
@@ -75,6 +80,36 @@ interface ApplyDeltaInput extends CreditSubjectInput {
    * the time we would look.
    */
   tx?: Prisma.TransactionClient | undefined;
+  /**
+   * With `tx`: receives the ids of the webhook delivery rows written in the
+   * caller's transaction, to hand to `kickDeliveries` once it commits. Without
+   * it the rows still go out, from the delivery poller, only later.
+   */
+  onDeliveries?: ((deliveryIds: string[]) => void) | undefined;
+  /**
+   * Runs inside the ledger write's transaction, after a NEW entry is written
+   * (never for a replay). A throw rolls the entry back. For a record that must
+   * exist exactly when the entry does, like the audit row of a key grant.
+   */
+  afterEntry?: ((tx: Prisma.TransactionClient, entry: CreditLedger) => Promise<void>) | undefined;
+  /** Refuse (409) a replay whose stored entry has a different delta or reason. */
+  strictReplay?: boolean | undefined;
+}
+
+/**
+ * An idempotency key matched an entry that is not this request: a different
+ * amount or reason under the same key. Returned as `applied: false` it would
+ * read as "already done" when nothing the caller asked for happened.
+ */
+export function creditsReplayMismatch(prior: { delta: number; reason: CreditReason }): RekeyError {
+  return new RekeyError({
+    statusCode: 409,
+    code: 'CREDITS_IDEMPOTENCY_KEY_REUSED',
+    message:
+      'This idempotency key was already used for a different ledger entry ' +
+      `(${prior.reason}, ${prior.delta > 0 ? '+' : ''}${prior.delta}).`,
+    fix: 'Use a new idempotency key for a different grant. Retry with the same key only with the same body.',
+  });
 }
 
 export interface ApplyDeltaResult {
@@ -91,11 +126,53 @@ const INSUFFICIENT = (need: number, have: number): RekeyError =>
     fix: 'Buy a credit pack (CREDIT plan/entitlement), or grant credits from the panel.',
   });
 
+/**
+ * Which webhook announces a ledger entry.
+ *
+ * Not the sign alone. A consume is usage and a correction is not, and a
+ * consumer mirroring usage must be able to tell them apart without parsing
+ * `reason`: an operator taking back 50 mistakenly granted credits arriving as
+ * `credit.consumed` would read as 50 units of work nobody did. So CONSUME is
+ * `credit.consumed`, ADJUST (either sign) and any other removal is
+ * `credit.adjusted`, and everything else adds and is `credit.granted`.
+ */
+export function creditEventType(entry: { delta: number; reason: CreditReason }): WebhookEventType {
+  if (entry.reason === 'CONSUME') return 'credit.consumed';
+  if (entry.reason === 'ADJUST' || entry.delta < 0) return 'credit.adjusted';
+  return 'credit.granted';
+}
+
+/**
+ * Write the `credit.*` delivery rows for one ledger entry through the
+ * transaction that wrote the entry. Returns the row ids to kick after commit.
+ */
+function enqueueCreditEvent(tx: Prisma.TransactionClient, entry: CreditLedger): Promise<string[]> {
+  return enqueueEvent(tx, {
+    applicationId: entry.applicationId,
+    type: creditEventType(entry),
+    data: {
+      credit: {
+        entryId: entry.id,
+        endUserId: entry.endUserId,
+        organizationId: entry.organizationId,
+        delta: entry.delta,
+        amount: Math.abs(entry.delta),
+        reason: entry.reason,
+        balance: entry.balanceAfter,
+        idempotencyKey: entry.idempotencyKey,
+        description: entry.description,
+        createdAt: entry.createdAt.toISOString(),
+      },
+    },
+  });
+}
+
 async function applyDelta(input: ApplyDeltaInput): Promise<ApplyDeltaResult> {
   const subject = resolveCreditSubject(input);
   const balanceWhere = {
     applicationId_subjectKey: { applicationId: input.applicationId, subjectKey: subject.subjectKey },
   };
+  let deliveryIds: string[] = [];
 
   const run = async (tx: Prisma.TransactionClient): Promise<ApplyDeltaResult> => {
     if (input.idempotencyKey) {
@@ -112,7 +189,7 @@ async function applyDelta(input: ApplyDeltaInput): Promise<ApplyDeltaResult> {
           },
         },
       });
-      if (prior) return { balance: prior.balanceAfter, entryId: prior.id, applied: false };
+      if (prior) return replayOf(prior);
     }
 
     let balanceAfter: number;
@@ -158,16 +235,38 @@ async function applyDelta(input: ApplyDeltaInput): Promise<ApplyDeltaResult> {
         metadata: (input.metadata ?? {}) as Prisma.InputJsonValue,
       },
     });
+    // Same transaction as the entry: the event exists exactly when the entry
+    // does. Only reached for a new entry, so an idempotent replay (returned
+    // above) and a refused debit (thrown above) announce nothing.
+    deliveryIds = await enqueueCreditEvent(tx, entry);
+    if (input.afterEntry) await input.afterEntry(tx, entry);
     return { balance: balanceAfter, entryId: entry.id, applied: true };
+  };
+
+  // A replay is only "already done" when it is the same entry. With
+  // `strictReplay`, a key that matched a different amount or reason is
+  // refused instead of answering `applied: false` for work that never happened.
+  const replayOf = (prior: CreditLedger): ApplyDeltaResult => {
+    if (input.strictReplay && (prior.delta !== input.delta || prior.reason !== input.reason)) {
+      throw creditsReplayMismatch(prior);
+    }
+    return { balance: prior.balanceAfter, entryId: prior.id, applied: false };
   };
 
   // Caller-owned transaction: run inline and let their rollback cover us. The
   // P2002 recovery below deliberately does not apply, a failed statement has
   // already aborted their transaction, so a read inside it would fail too.
-  if (input.tx) return run(input.tx);
+  // Kicking is theirs as well: from here the rows are not committed yet.
+  if (input.tx) {
+    const result = await run(input.tx);
+    input.onDeliveries?.(deliveryIds);
+    return result;
+  }
 
   try {
-    return await prisma.$transaction(run);
+    const result = await prisma.$transaction(run);
+    kickDeliveries(deliveryIds);
+    return result;
   } catch (e) {
     if (isUniqueViolation(e) && input.idempotencyKey) {
       const prior = await prisma.creditLedger.findUnique({
@@ -180,7 +279,7 @@ async function applyDelta(input: ApplyDeltaInput): Promise<ApplyDeltaResult> {
           },
         },
       });
-      if (prior) return { balance: prior.balanceAfter, entryId: prior.id, applied: false };
+      if (prior) return replayOf(prior);
     }
     throw e;
   }
@@ -209,6 +308,8 @@ export const creditsService = {
      * a unit recorded but not paid for is precisely the bug.
      */
     tx?: Prisma.TransactionClient | undefined;
+    /** With `tx`: the `credit.consumed` delivery ids to kick after the caller commits. */
+    onDeliveries?: ((deliveryIds: string[]) => void) | undefined;
   }): Promise<ApplyDeltaResult> {
     if (!Number.isInteger(input.amount) || input.amount <= 0) {
       throw new RekeyError({
@@ -228,6 +329,7 @@ export const creditsService = {
       description: input.description,
       metadata: input.metadata,
       ...(input.tx ? { tx: input.tx } : {}),
+      ...(input.onDeliveries ? { onDeliveries: input.onDeliveries } : {}),
     });
   },
 
@@ -239,6 +341,10 @@ export const creditsService = {
     idempotencyKey?: string | undefined;
     description?: string | undefined;
     metadata?: Record<string, unknown> | undefined;
+    /** See `ApplyDeltaInput.afterEntry`. */
+    afterEntry?: ApplyDeltaInput['afterEntry'];
+    /** See `ApplyDeltaInput.strictReplay`. */
+    strictReplay?: boolean | undefined;
   }): Promise<ApplyDeltaResult> {
     if (!Number.isInteger(input.amount) || input.amount === 0) {
       throw new RekeyError({
@@ -257,6 +363,8 @@ export const creditsService = {
       idempotencyKey: input.idempotencyKey,
       description: input.description,
       metadata: input.metadata,
+      afterEntry: input.afterEntry,
+      strictReplay: input.strictReplay,
     });
   },
 
@@ -292,7 +400,10 @@ export const creditsService = {
     const { subjectKey } = resolveCreditSubject(subject);
     return prisma.creditLedger.findMany({
       where: { applicationId, subjectKey },
-      orderBy: { createdAt: 'desc' },
+      // `id` breaks ties: entries written in the same millisecond (a batch,
+      // a usage charge and its grant) otherwise come back in whatever order
+      // Postgres finds them, and offset paging can repeat or skip one.
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: Math.min(Math.max(opts.limit ?? 50, 1), 200),
       skip: Math.max(opts.offset ?? 0, 0),
     });

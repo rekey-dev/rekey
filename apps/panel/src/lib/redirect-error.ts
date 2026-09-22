@@ -18,3 +18,11 @@ export function isRedirectError(e: unknown): boolean {
       (e as { digest: string }).digest === 'NEXT_NOT_FOUND')
   );
 }
+
+/**
+ * Only a `redirect()`, not `notFound()`. See `ActionForm`, which swallows this
+ * one because the router has already applied the navigation it describes.
+ */
+export function isRedirectSignal(e: unknown): boolean {
+  return isRedirectError(e) && (e as { digest: string }).digest.startsWith('NEXT_REDIRECT');
+}

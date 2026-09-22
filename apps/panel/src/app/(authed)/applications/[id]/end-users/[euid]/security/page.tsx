@@ -12,17 +12,17 @@
  */
 
 import * as React from 'react';
-import { cookies } from 'next/headers';
 import { errorMessage } from '@/lib/error-message';
-import { humanizeEventType } from '@/lib/security-events';
+import { actorLabel, eventSummary, humanizeEventType } from '@/lib/security-events';
 import { formatDateTime } from '@/lib/date';
 import { Card, SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { Banner } from '@/components/Banner';
 import { EmptyState } from '@/components/EmptyState';
-import { CopyButton } from '@/components/CopyButton';
 import { ActionForm } from '@/components/ActionForm';
+import { RevealActionForm } from '@/components/RevealActionForm';
+import { WhileUrlHas } from '@/components/WhileUrlHas';
 import { SubmitButton } from '@/components/SubmitButton';
 import Link from '@/components/Link';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -33,7 +33,6 @@ import {
   getEndUserEvents,
   getEndUserSessions,
   AUTH_EVENTS_SHOWN,
-  IMPERSONATE_COOKIE,
   LOGIN_LOCK_MINUTES,
   LOGIN_LOCK_THRESHOLD,
 } from '../shared';
@@ -42,33 +41,6 @@ const IMPERSONATE_ERR: Record<string, string> = {
   END_USER_NOT_FOUND: 'That end-user no longer exists in this Application.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can impersonate end-users.',
 };
-
-/**
- * Readable one-liner from an event's `metadata`. The shape varies by type
- * (`{via}` on sign-in, `{reason}` where the API records one, `{deviceId}` and
- * `{sessionsRevoked}` on the device events), so pick the keys worth surfacing
- * and fall back to a compact render of whatever is there.
- */
-function eventDetail(metadata: Record<string, unknown> | null | undefined): string | null {
-  if (!metadata || typeof metadata !== 'object') return null;
-  const parts: string[] = [];
-  for (const key of [
-    'via',
-    'reason',
-    'deviceName',
-    'provider',
-    'releasedBy',
-    'sessionsRevoked',
-    'count',
-  ] as const) {
-    const v = metadata[key];
-    if (typeof v === 'string' && v !== '') parts.push(`${key}: ${v.replace(/_/g, ' ')}`);
-    else if (typeof v === 'number') parts.push(`${key}: ${v}`);
-  }
-  if (parts.length > 0) return parts.join(' · ');
-  const keys = Object.keys(metadata);
-  return keys.length === 0 ? null : keys.slice(0, 3).join(', ');
-}
 
 const inputCls =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:border-[var(--color-primary)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)]';
@@ -83,7 +55,6 @@ export default async function EndUserSecurityPage({
   const { id, euid } = await params;
   const sp = await searchParams;
   const impError = typeof sp.impError === 'string' ? sp.impError : undefined;
-  const impersonated = sp.impersonated === '1';
   // Three of the six support actions land HERE, not on Overview: clearing a
   // lockout, revoking one session, and signing every session out. Without
   // these two lines their outcome, success and refusal alike, was never
@@ -98,20 +69,6 @@ export default async function EndUserSecurityPage({
     getEndUserSessions(id, euid),
   ]);
 
-  type Reveal = { accessToken: string; accessTokenExpiresAt: string };
-  let reveal: Reveal | null = null;
-  if (impersonated) {
-    const jar = await cookies();
-    const raw = jar.get(IMPERSONATE_COOKIE)?.value;
-    if (raw) {
-      try {
-        reveal = JSON.parse(raw) as Reveal;
-      } catch {
-        /* stale */
-      }
-    }
-  }
-
   const lockedUntil = detail.endUser.lockedUntil ? new Date(detail.endUser.lockedUntil) : null;
   const lockedNow = lockedUntil !== null && lockedUntil > new Date();
   const shown = events?.slice(0, AUTH_EVENTS_SHOWN) ?? [];
@@ -119,29 +76,11 @@ export default async function EndUserSecurityPage({
   return (
     <div className="space-y-6">
       <SupportFeedback done={supportDone} error={supportError} />
-      {impersonated && reveal && (
-        <div
-          aria-live="polite"
-          className="space-y-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-700 dark:bg-amber-950"
-        >
-          <div className="text-sm font-medium text-amber-900 dark:text-amber-200">
-            Impersonation token minted, shown once
-          </div>
-          <p className="text-xs text-amber-800 dark:text-amber-300">
-            Expires {formatDateTime(reveal.accessTokenExpiresAt)}. Use as{' '}
-            <code className="font-mono">X-Rekey-User-Token</code> against your customer app&apos;s
-            Rekey-backed endpoints. Rekey records this in{' '}
-            <code className="font-mono">impersonation_audits</code> with your operator id.
-          </p>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 break-all rounded border border-amber-200 bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-fg)] dark:border-amber-800">
-              {reveal.accessToken}
-            </code>
-            <CopyButton value={reveal.accessToken} label="Copy" />
-          </div>
-        </div>
+      {impError && (
+        <WhileUrlHas param="impError">
+          <Banner tone="error">{errorMessage(IMPERSONATE_ERR, impError)}</Banner>
+        </WhileUrlHas>
       )}
-      {impError && <Banner tone="error">{errorMessage(IMPERSONATE_ERR, impError)}</Banner>}
 
       <Card className="space-y-3">
         <SectionHeader
@@ -338,15 +277,11 @@ export default async function EndUserSecurityPage({
                     </div>
                     <div className="font-mono text-xs text-[var(--color-muted-fg)]">{e.type}</div>
                   </TD>
-                  <TD muted className="text-xs">
-                    {e.actorType === 'end_user'
-                      ? 'this user'
-                      : e.actorType === 'operator'
-                        ? 'operator'
-                        : 'system'}
+                  <TD muted className="max-w-[16rem] truncate text-xs" title={e.actorId ?? undefined}>
+                    {actorLabel(e, euid)}
                   </TD>
                   <TD className="text-xs text-[var(--color-muted-fg)]">
-                    {eventDetail(e.metadata) ?? '—'}
+                    {eventSummary(e.metadata) ?? '—'}
                   </TD>
                   <TD mono muted className="text-xs">
                     <span title={e.userAgent ?? undefined}>{e.ip ?? '—'}</span>
@@ -369,7 +304,7 @@ export default async function EndUserSecurityPage({
             against your customer app. Every minting is audit-logged with your operator id.
           </p>
         </div>
-        <ActionForm action={impersonate.bind(null, id, euid)} className="flex items-end gap-2">
+        <RevealActionForm action={impersonate.bind(null, id, euid)} clearParams={['impError']} className="flex items-end gap-2">
           <label className="block flex-1 space-y-1.5">
             <span className="text-sm font-medium text-[var(--color-fg)]">
               Reason (optional, audit-logged)
@@ -383,7 +318,7 @@ export default async function EndUserSecurityPage({
             />
           </label>
           <SubmitButton pendingLabel="Minting…">Mint impersonation token</SubmitButton>
-        </ActionForm>
+        </RevealActionForm>
       </Card>
 
       <section className="space-y-3">
@@ -461,8 +396,8 @@ export default async function EndUserSecurityPage({
               {detail.recentImpersonations.map((r) => (
                 <TR key={r.id} hover>
                   <TD className="whitespace-nowrap text-xs">{formatDateTime(r.startedAt)}</TD>
-                  <TD mono className="max-w-[10rem] truncate">
-                    {r.operatorUserId}
+                  <TD className="max-w-[16rem] truncate text-xs" title={r.operatorUserId}>
+                    {r.operatorEmail ?? <span className="font-mono">{r.operatorUserId}</span>}
                   </TD>
                   <TD className="text-xs">
                     {r.reason ?? <span className="text-[var(--color-muted-fg)]">—</span>}

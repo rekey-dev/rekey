@@ -4,7 +4,7 @@ Rekey hosts **two MCP surfaces**:
 
 1. **Per-Application end-user MCP** at `/api/v1/mcp/<slug>` — end-users sign
    into one of your Applications via OAuth 2.1 + PKCE and read their own
-   account through four tools. Full RFC 8414 / 9728 / 7591 stack.
+   account through five tools. Full RFC 8414 / 9728 / 7591 stack.
 2. **Operator MCP** at `/api/v1/tenant/mcp` — workspace operator reads their
    own workspace (applications, end-users, payments, webhook health, security
    events). Two auth paths: OAuth 2.1 + PKCE with workspace picker at consent
@@ -59,11 +59,11 @@ panel  →  Applications  →  <app>  →  MCP tab  →  Enable MCP
 | AS service — issuer URL, discovery metadata, scope grant, token mint, registration | `apps/api/src/modules/mcp/oauth.service.ts` |
 | OIDC layer — provider metadata, ID Token, identity claims | `apps/api/src/modules/mcp/oidc.service.ts` |
 | MCP JSON-RPC handler — `initialize`, `tools/list`, `tools/call`, `ping` | `apps/api/src/modules/mcp/mcp-server.ts` |
-| Tool definitions (the four read-only account tools) | `apps/api/src/modules/mcp/account-tools.ts` |
+| Tool definitions (the five read-only account tools) | `apps/api/src/modules/mcp/account-tools.ts` |
 | Per-Application gate (`authConfig.mcpEnabled`) | `apps/api/src/modules/mcp/oauth.service.ts` (`resolveMcpApp`) |
 | Panel UI — operator-side toggle + setup card | `apps/panel/src/app/(authed)/applications/[id]/mcp/page.tsx` |
 | Marketing page — public guide | `apps/marketing/src/app/docs/mcp/page.tsx` |
-| Tests | `apps/api/test/mcp.test.ts` |
+| Tests | `apps/api/test/mcp.test.ts`, `apps/api/test/mcp-org-binding.test.ts` |
 
 ## URL layout
 
@@ -111,17 +111,84 @@ discovery documents; existing clients keep working. Leave it open for MCP —
 clients self-register as their first act — and close it once the clients that
 need to exist do, especially on an Application that is also an OpenID Provider.
 
+### Organization binding
+
+A connection can act for one of the end-user's organizations instead of for
+them personally. The choice is made once, at consent, and belongs to the grant.
+
+**When it is offered.** The Application has `authConfig.organizationsEnabled`,
+the grant includes `mcp:account` (an OIDC sign-in alone never asks), and the
+user can act for at least one organization in this Application: a member whose
+role is not disabled. Everyone else sees the consent page exactly as before and
+gets a code in one step.
+
+**The consent page.** After a successful sign-in (password, plus MFA when
+required) the page asks "Act for": the personal account, preselected, or one of
+those organizations. The sign-in is carried to this second step by a signed,
+10-minute `mcp_consent` token that pins the client, redirect URI, PKCE
+challenge, granted scope and nonce, so the hidden fields cannot be edited in
+between. The chosen organization is re-checked against the user's memberships
+on submit; an id edited into the form, or one from another Application, is
+refused and the choice asked again. The token is not single-use, and needs no
+stored one-time check: resubmitting it only mints another code for the same
+client, redirect URI and PKCE challenge, and each code is single-use and
+redeemable only with that client's verifier.
+
+**Session handoff.** `POST /oauth/authorize/grant` takes `organization_id`:
+an organization the user can act for (`403 ORGANIZATION_NOT_MEMBER` /
+`ORGANIZATION_ROLE_DISABLED` otherwise), or `null` for personal. Omitted is
+personal too, even when the session has an active organization (`oid`):
+binding an organization is always an explicit choice, so a handoff integration
+written before this cannot start acting for a team without asking. It is a `400 INVALID_GRANT_REQUEST` on a grant without
+`mcp:account` or on an Application without organizations.
+
+**Where it lives.** The authorization code (`oauth_auth_codes.organization_id`),
+then the refresh chain (`refresh_tokens.grant_organization_id`, carried across
+every rotation like `scope`), and the access token's `oid` claim. Token
+introspection reports it as `oid`.
+
+**When membership ends, the binding fails closed.** Leaving the organization,
+being removed, having the role disabled, or the organization being deleted:
+
+- a live access token is refused at the MCP endpoint (`401 invalid_token`),
+  at `/oauth/userinfo` (`401 invalid_token`) and introspects as
+  `{ "active": false }`;
+- the refresh grant answers `400 invalid_grant` ("This connection acts for an
+  organization you can no longer act for"), before rotating, so the chain is
+  left as it was. Rejoining (or re-enabling the role) makes it work again; the
+  user can also reconnect and choose another account.
+
+It never degrades to the personal account: a client told it acts for Acme would
+go on reporting the user's own plan and balance as Acme's.
+
+**Grants made before this existed** have no binding and stay personal, with the
+same tools and the same subject as before.
+
 ## Tools
 
-All zero-argument; scoped to `(applicationId, endUserId)` of the access token.
+All zero-argument; scoped to `(applicationId, endUserId)` of the access token,
+and to the bound organization where the table says so. The billing tools pick
+their subject with the helper `GET /auth/me?include=`, `GET /users/me/licenses`
+and `GET /credits/me/ledger` use (`billingSubjectOrganization`): the bound
+organization is the subject only when the Application bills organizations
+(`billingConfig.billingSubject: "org"`); otherwise they answer for the user
+personally, because in a user-billed Application an organization holds no
+subscription. `organizationId` in their output says which subject answered.
+`GET /billing/subscription` is the exception on the HTTP side: without
+`?organizationId=` it always answers for the user personally, so it matches
+`get_subscription` for an organization only when that id is passed.
 
 | Tool | Returns |
 |---|---|
-| `get_profile` | `{ id, email, emailVerified, role, metadata, createdAt }` |
-| `get_subscription` | `{ status, provider, currentPeriodEnd, cancelAt, plan } \| null` (ACTIVE or PAST_DUE only) |
-| `get_credits` | `{ balance }` (unit-less) |
-| `list_licenses` | `{ licenses: [{ id, kind, status, seatsAllowed, expiresAt, createdAt }] }` (no keys) |
-| `list_my_devices` | `{ devices: [{ id, label, status, firstSeenAt, lastSeenAt, releasedAt }] }` (no IPs, no operator notes) |
+| `get_profile` | `{ id, email, emailVerified, role, metadata, createdAt, organization }`. `organization` is the bound organization with the user's role in it, `{ id, name, slug, role, baseRole }`, in any Application, or `null` for a personal grant. |
+| `get_subscription` | `{ status, provider, currentPeriodEnd, cancelAt, plan, organizationId } \| null`, the subscription `GET /billing/subscription` reports for the same subject, picked by the same ranking (`billingService.getCurrentSubscription`), without `providerCapabilities` |
+| `get_credits` | `{ balance, organizationId }`, the organization's shared pool or the user's own balance (`creditsService.getBalance`) |
+| `list_licenses` | `{ licenses: [{ id, kind, status, organizationId, seatsAllowed, expiresAt, createdAt }], organizationId, truncated }` (no keys): the same rows `GET /users/me/licenses` returns for the same subject (`licensesService.listForEndUser`), with fewer fields (no `keyPrefix`), the user's own plus, when bound in an org-billed Application, the organization's pool. Newest 100; `truncated: true` when there are more. |
+| `list_my_devices` | `{ devices: [{ id, label, status, firstSeenAt, lastSeenAt, releasedAt }] }` (no IPs, no operator notes). Always personal: a device belongs to a person. |
+
+`get_subscription`, `get_credits` and `list_licenses` refuse when the
+Application has billing disabled, as the REST reads they mirror do: the call
+returns `isError: true` with `{ "error": "...", "code": "BILLING_DISABLED" }`.
 
 No tool returns license keys, password hashes, provider credentials, or any
 other Application's data.
@@ -151,6 +218,12 @@ re-run the OAuth flow.
 - Refresh-token rotation
 - Audience binding (tokens for app A rejected by app B)
 - `tokenGeneration` kill-switch
+
+`apps/api/test/mcp-org-binding.test.ts` covers the organization binding:
+consent with a choice, token and refresh claims, each tool in org-billed and
+user-billed Applications, pre-binding grants, and the refusals (not a member,
+another Application, left, role disabled, organization deleted, edited consent
+step, session handoff).
 
 ---
 

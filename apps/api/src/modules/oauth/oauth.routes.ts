@@ -21,7 +21,11 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { DeviceBindingRequestSchema } from '@rekey.dev/shared-types';
 import { oauthService } from './oauth.service.js';
-import { requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
+import {
+  requirePublishableOrSecretKey,
+  requireScope,
+  requireScopeByMethod,
+} from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { shapeSignInOutcome } from '../auth/auth.routes.js';
@@ -51,14 +55,17 @@ const KEY_ERRORS = {
   429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
 } as const;
 
-/** Additionally required by `oauthLinkRoutes`, `requireUserSession` runs after the key hooks. */
+/**
+ * Additionally required by `oauthLinkRoutes`, `requireUserSession` runs after the key hooks.
+ * The scope there is `auth:read` for GET and `auth:write` for the rest.
+ */
 const USER_SESSION_ERRORS = {
   401:
     `${KEY_ERRORS[401]}; or USER_TOKEN_MISSING — no \`X-Rekey-User-Token\` header; or ` +
     'USER_TOKEN_INVALID — the user token is invalid, expired, or wrongly signed; or ' +
     'USER_TOKEN_WRONG_APPLICATION — the token was issued by a different Application; or ' +
     'IMPERSONATION_SESSION_ENDED — the impersonation session behind this token has ended.',
-  403: KEY_ERRORS[403],
+  403: KEY_ERRORS[403].replace('the secret key lacks the `auth:write` scope.', 'the secret key lacks the scope the method needs (`auth:read` for GET, `auth:write` for every other method).'),
   429: KEY_ERRORS[429],
 } as const;
 
@@ -229,7 +236,9 @@ export async function oauthLinkRoutes(app: FastifyInstance): Promise<void> {
   // `req.endUser`, so OAuth sign-in and OAuth linking are reachable from the
   // same browser client instead of only the former.
   app.addHook('onRequest', requirePublishableOrSecretKey);
-  app.addHook('onRequest', requireScope('auth:write'));
+  // Listing your own linked providers needs `auth:read`; linking and
+  // unlinking need `auth:write`.
+  app.addHook('onRequest', requireScopeByMethod({ read: 'auth:read', write: 'auth:write' }));
   app.addHook('onRequest', requireUserSession);
 
   app.get(

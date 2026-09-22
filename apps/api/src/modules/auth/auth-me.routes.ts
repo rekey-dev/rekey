@@ -15,36 +15,156 @@
  * exists for server-to-server callers that want the cross-app guard.
  */
 
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RekeyError } from '../../lib/error.js';
-import { verifyUserAccessTokenAnyAlg, peekTokenApplicationId } from '../../lib/jwt.js';
+import {
+  verifyUserAccessTokenAnyAlg,
+  peekTokenApplicationId,
+  type UserSessionClaims,
+} from '../../lib/jwt.js';
 import { prisma } from '../../lib/prisma.js';
 import { authService } from './auth.service.js';
 import { applicationDisabled } from '../../middleware/api-key-auth.js';
+import { resolveImpersonation } from '../../middleware/user-session.js';
 import { organizationsService } from '../organizations/organizations.service.js';
 import { ok, errs, ref } from '../../lib/openapi.js';
 import { sessionIssuedBefore } from '../../lib/session-stamp.js';
+import {
+  ME_INCLUDED_PROPERTIES_SCHEMA,
+  ME_INCLUDE_ERRORS,
+  ME_INCLUDE_QUERYSTRING,
+  parseMeInclude,
+  resolveMeIncludes,
+} from './me-include.js';
 
 const TOKEN_HEADER = 'x-rekey-user-token';
 
 /**
  * This route reads only `X-Rekey-User-Token`, no Application key, no IP or
  * origin gate, so its error surface is just the token checks plus whatever
- * `authService.getById` (invoked at the bottom of the handler) can throw.
+ * `authService.getByIdForSession` can throw, and the `include` refusals.
  */
 const AUTH_ME_ERRORS = {
+  400: ME_INCLUDE_ERRORS[400],
   401:
     'USER_TOKEN_MISSING — no X-Rekey-User-Token header; or USER_TOKEN_INVALID — the token is ' +
-    'missing, expired, malformed, or the Application it names no longer exists.',
+    'missing, expired, malformed, or the Application it names no longer exists; or ' +
+    'IMPERSONATION_SESSION_ENDED: the operator impersonation behind the token has ended.',
+  403:
+    'APPLICATION_DISABLED: the Application that issued the token is frozen by its operator; or ' +
+    ME_INCLUDE_ERRORS[403],
   404: 'END_USER_NOT_FOUND — the end-user behind this token no longer exists in this Application.',
   410: 'END_USER_ERASED — this end-user was erased (GDPR) and can no longer authenticate.',
   429: 'RATE_LIMITED — too many requests for this window. Honour the `Retry-After` header.',
 } as const;
 
+/**
+ * The verified claims behind a request, set by `requireTokenOnlySession`.
+ * Kept off `FastifyRequest` because nothing outside this route reads them.
+ */
+const verifiedClaims = new WeakMap<FastifyRequest, UserSessionClaims>();
+
+/**
+ * Every check this route makes before it answers, run as an `onRequest` hook
+ * rather than inside the handler.
+ *
+ * The position is what keys the global rate limiter. Its hook runs after the
+ * route's own `onRequest` hooks and buckets on `request.endUser` when one is
+ * set, so verifying here puts this route on the per-end-user budget. Verified
+ * in the handler, it ran after the limiter had already counted the request
+ * against the anonymous per-IP budget, and a backend calling it for many users
+ * from one address shared that budget between all of them.
+ *
+ * It also means every token check still wins over `include`: a request is
+ * refused for its token before its query string is looked at.
+ *
+ * A refusal here happens before the limiter, so it is marked for the
+ * rejected-credential limiter whatever its status: a frozen Application's 403
+ * or an erased user's 410 would otherwise be unmetered lookups from anyone
+ * holding such a token.
+ */
+async function requireTokenOnlySession(req: FastifyRequest): Promise<void> {
+  try {
+    await verifyTokenOnlySession(req);
+  } catch (err) {
+    req.credentialRefused = true;
+    throw err;
+  }
+}
+
+async function verifyTokenOnlySession(req: FastifyRequest): Promise<void> {
+  const header = req.headers[TOKEN_HEADER];
+  const presented = typeof header === 'string' ? header : '';
+  if (!presented) {
+    throw new RekeyError({
+      statusCode: 401,
+      code: 'USER_TOKEN_MISSING',
+      message: 'This endpoint requires an X-Rekey-User-Token header (the user JWT).',
+      fix: 'After sign-in, pass the returned `accessToken` via the X-Rekey-User-Token header.',
+    });
+  }
+
+  // End-user tokens are signed with a per-app derived key, so we need the
+  // app's tokenGeneration to verify. Read the (unverified) applicationId
+  // claim, load the app, then cryptographically verify, so the session
+  // kill-switch (tokenGeneration bump) revokes these tokens here too.
+  const invalid = new RekeyError({
+    statusCode: 401,
+    code: 'USER_TOKEN_INVALID',
+    message: 'The user token is invalid, expired, or signed with a different secret.',
+    fix: 'Have the user sign in again to obtain a fresh token.',
+  });
+  const appId = peekTokenApplicationId(presented);
+  if (!appId) throw invalid;
+  const application = await prisma.application.findUnique({
+    where: { id: appId },
+    select: { id: true, tokenGeneration: true, disabledAt: true },
+  });
+  if (!application) throw invalid;
+  // This plugin deliberately takes no API key, so it does not inherit the
+  // freeze check both key middlewares perform. Without this line it was the
+  // one end-user route a disabled Application still answered: sign-in and
+  // refresh were refused, and a token minted before the freeze kept reading
+  // the holder's full record here until it expired.
+  //
+  // That is not merely a leak with a 15-minute window. `disable` justifies
+  // NOT bumping `tokenGeneration` on the grounds that existing tokens stop
+  // working anyway "because both API-key middlewares refuse the Application
+  // at the door", which was false for this door, so the reasoning that
+  // makes the freeze safe depended on a check that was not here.
+  if (application.disabledAt !== null) throw applicationDisabled();
+  const claims = await verifyUserAccessTokenAnyAlg(
+    presented,
+    application.id,
+    application.tokenGeneration,
+  );
+  if (!claims) throw invalid;
+  // An operator's impersonation token ends when its audit row does, here as on
+  // every key-guarded route. Without it an ended impersonation kept reading the
+  // user's record, and now their billing, until the token expired.
+  const impersonation = await resolveImpersonation(claims, application.id);
+  if (impersonation) req.impersonation = impersonation;
+
+  const { endUser, sessionsInvalidBefore, sessionEnded } = await authService.getByIdForSession(
+    claims.applicationId,
+    claims.sub,
+    claims,
+  );
+  // The same kill switches requireUserSession applies: a token that
+  // predates the user's last revoke-everything, or whose own session or
+  // device was ended, must not read their record here either.
+  if (sessionIssuedBefore(claims, sessionsInvalidBefore) || sessionEnded) throw invalid;
+
+  req.endUser = endUser;
+  if (claims.dev) req.deviceId = claims.dev;
+  verifiedClaims.set(req, claims);
+}
+
 export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/me',
     {
+      onRequest: requireTokenOnlySession,
       schema: {
         tags: ['Public · Auth'],
         security: [{ userToken: [] }],
@@ -52,7 +172,11 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Resolves the end-user from the X-Rekey-User-Token JWT only, no Application secret ' +
           'key required. Intended for browser/client SDKs that hold only the user access token. ' +
-          'Returns 401 USER_TOKEN_INVALID when the token is missing, expired, or malformed.',
+          'Returns 401 USER_TOKEN_INVALID when the token is missing, expired, or malformed. ' +
+          'Pass `?include=` to add entitlements, the bound device, the current subscription, the ' +
+          'active organization or the caller\'s licences to the same response; token checks run ' +
+          'first either way.',
+        querystring: ME_INCLUDE_QUERYSTRING,
         response: {
           // Same shape as GET /api/v1/users/me, see END_USER_SELF_SCHEMA in
           // routes/users-me.ts for why this `allOf` was unsatisfiable before
@@ -113,6 +237,7 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
                     'updatedAt',
                   ],
                 },
+                ME_INCLUDED_PROPERTIES_SCHEMA,
               ],
             },
             "The current end-user, plus the session's active organization (if any).",
@@ -122,66 +247,21 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
       },
     },
     async (req) => {
-      const header = req.headers[TOKEN_HEADER];
-      const presented = typeof header === 'string' ? header : '';
-      if (!presented) {
-        throw new RekeyError({
-          statusCode: 401,
-          code: 'USER_TOKEN_MISSING',
-          message: 'This endpoint requires an X-Rekey-User-Token header (the user JWT).',
-          fix: 'After sign-in, pass the returned `accessToken` via the X-Rekey-User-Token header.',
-        });
-      }
-
-      // End-user tokens are signed with a per-app derived key, so we need the
-      // app's tokenGeneration to verify. Read the (unverified) applicationId
-      // claim, load the app, then cryptographically verify, so the session
-      // kill-switch (tokenGeneration bump) revokes these tokens here too.
-      const invalid = new RekeyError({
-        statusCode: 401,
-        code: 'USER_TOKEN_INVALID',
-        message: 'The user token is invalid, expired, or signed with a different secret.',
-        fix: 'Have the user sign in again to obtain a fresh token.',
-      });
-      const appId = peekTokenApplicationId(presented);
-      if (!appId) throw invalid;
-      const application = await prisma.application.findUnique({
-        where: { id: appId },
-        select: { id: true, tokenGeneration: true, disabledAt: true },
-      });
-      if (!application) throw invalid;
-      // This plugin deliberately takes no API key, so it does not inherit the
-      // freeze check both key middlewares perform. Without this line it was the
-      // one end-user route a disabled Application still answered: sign-in and
-      // refresh were refused, and a token minted before the freeze kept reading
-      // the holder's full record here until it expired.
-      //
-      // That is not merely a leak with a 15-minute window. `disable` justifies
-      // NOT bumping `tokenGeneration` on the grounds that existing tokens stop
-      // working anyway "because both API-key middlewares refuse the Application
-      // at the door", which was false for this door, so the reasoning that
-      // makes the freeze safe depended on a check that was not here.
-      if (application.disabledAt !== null) throw applicationDisabled();
-      const claims = await verifyUserAccessTokenAnyAlg(
-        presented,
-        application.id,
-        application.tokenGeneration,
-      );
-      if (!claims) throw invalid;
-
-      const { endUser, sessionsInvalidBefore, sessionEnded } = await authService.getByIdForSession(
-        claims.applicationId,
-        claims.sub,
-        claims,
-      );
-      // The same kill switches requireUserSession applies: a token that
-      // predates the user's last revoke-everything, or whose own session or
-      // device was ended, must not read their record here either.
-      if (sessionIssuedBefore(claims, sessionsInvalidBefore) || sessionEnded) throw invalid;
+      const include = parseMeInclude(req.query);
+      const claims = verifiedClaims.get(req)!;
+      const endUser = req.endUser!;
       const active = await organizationsService.activeRoleFor({
         applicationId: claims.applicationId,
         endUserId: claims.sub,
         organizationId: claims.oid,
+      });
+      const included = await resolveMeIncludes(include, {
+        endUser,
+        deviceId: req.deviceId,
+        activeOrganizationId: claims.oid,
+        activeOrganizationRole: active,
+        loadApplication: () =>
+          prisma.application.findUniqueOrThrow({ where: { id: claims.applicationId } }),
       });
       return {
         success: true,
@@ -190,6 +270,7 @@ export async function userTokenMeRoutes(app: FastifyInstance): Promise<void> {
           activeOrganizationId: claims.oid ?? null,
           activeOrganizationRole: active?.role ?? null,
           activeOrganizationBaseRole: active?.baseRole ?? null,
+          ...included,
         },
       };
     },

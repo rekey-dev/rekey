@@ -91,9 +91,74 @@ Publishable **or** secret key (`Authorization: Bearer rp_pub_…` / `rp_live_…
 ```
 GET   /api/v1/billing/plans                                  — Application key only (pricing pages)
 GET   /api/v1/billing/subscription                           — Application key + user JWT
+GET   /api/v1/billing/entitlements/features/:key             (Application key + user JWT)
+GET   /api/v1/users/me/licenses                              (Application key + user JWT)
 POST  /api/v1/billing/checkout    { planSlug, successUrl, cancelUrl }
 POST  /api/v1/billing/subscribe   { organizationId? }            — Application key + user JWT
 ```
+
+### Hiding a plan that would fail at checkout
+
+Every plan on `GET /billing/plans` carries `checkout: { ready }`. It is `false`
+when a buyer sent to checkout for that plan would be refused by a provider they
+could be routed to: no provider is connected, the plan was created before the
+provider and never registered, or it offers a trial a provider cannot run. A
+pricing page can hide such a plan instead of letting a buyer find out at the
+Buy button.
+
+It is the same readiness the operator plan list reports, computed in the same
+pass, but only the boolean. The operator list's `checkout.blockers` names the
+provider, the error code and the repair; that is configuration a publishable
+key must not read, and a buyer has nothing to repair. Only providers a buyer
+can be routed to count: an inbound-only external billing system enabled beside
+Stripe does not make every plan read `false`, though it is the reason when it
+is the only provider. The readiness costs one extra query per page, whatever
+the number of plans on it.
+
+`ready` describes checkout only. A free default plan (`billingConfig.defaultPlanSlug`) reads `ready: false` when no provider is connected, because nothing can check out on it, yet it still applies to every signed-in user. Do not filter your free tier out on `ready`; filter paid plans only.
+
+```ts
+const { items } = await rekey.billing.getPlans();
+const freeSlug = 'free'; // your billingConfig.defaultPlanSlug
+const shown = items.filter((p) => p.slug === freeSlug || p.checkout.ready);
+```
+
+### Checking one feature
+
+`GET /billing/entitlements/features/:key` answers one feature for the signed-in
+user:
+
+```json
+{ "key": "projects", "granted": true, "value": 5 }
+```
+
+`value` is what `features[key]` holds in the full `GET /billing/entitlements`
+answer, or `null` when nothing grants the key (an unknown key is not an error).
+`granted` is `Boolean(value)`, the test `if (features[key])` makes, so a
+`false` flag, a `0` limit and an absent key are all not granted; compare
+`value` yourself for a numeric limit. The subject is the one
+`GET /auth/me?include=entitlements` and `GET /billing/entitlements` resolve: the active organization in an
+org-billed Application while the caller still belongs to it, otherwise the
+end-user. Pass `?organizationId=` (member-only) for that organization's view.
+It skips the credit balance read the full call makes.
+
+The secret-key counterpart for a user you name is
+`GET /billing/entitlements/for-user/features/:key?endUserId=` (with optional
+`organizationId`), next to `/entitlements/for-user`. Both need `billing:read`
+on a secret key.
+
+### The signed-in user's licences
+
+`GET /users/me/licenses` lists every licence issued to the caller, newest
+first, paginated. In an org-billed Application whose session acts for an
+organization the caller still belongs to, the licences pooled to that
+organization are included, whoever bought them. Each row carries `keyPrefix`
+but never the key: only its hash is stored, and the raw key is shown once, at
+issue. The operator's licence `metadata` is not on this surface. It needs
+`billing:read` on a secret key and answers `403 BILLING_DISABLED` when billing
+is off. The same list is `include=licenses` on `/auth/me` and `/users/me`, as
+`{ items, truncated }`: the first 100 rows, with `truncated: true` when there
+are more to page through here.
 
 `POST /subscribe` puts the caller on the Application's nominated free plan (`billingConfig.defaultPlanSlug`) with no provider involved. When that plan grants CREDIT or LICENSE entitlements, the claim is **once per end-user**, across their personal account and every organization they own or administer, and it survives cancellation: activating it for a second beneficiary answers `409 BILLING_FREE_TIER_ALREADY_CLAIMED`. Cancelling and reactivating for the same beneficiary is allowed and issues nothing new. A free plan carrying only FEATURE or USAGE entitlements has no such limit, because nothing is handed over that outlives the subscription. To give a second organization the plan anyway, grant it as an operator. Credits already issued stay with their beneficiary after a cancel.
 
@@ -115,6 +180,17 @@ const { items: plans, page } = await rekey.billing.getPlans();
 // Every list endpoint returns this envelope. `page.hasMore` is how you learn
 // the response was a window rather than the whole catalogue — pass
 // `{ offset: page.offset + page.limit }` for the next one.
+// Hide plans checkout would refuse, but never the free tier: with no provider
+// connected it reads ready: false and still applies to every signed-in user.
+// FREE_PLAN_SLUG is your billingConfig.defaultPlanSlug.
+const shown = plans.filter((p) => p.slug === FREE_PLAN_SLUG || p.checkout.ready);
+
+// Gate one feature without fetching the rest
+if (!(await rekey.billing.hasFeature(userAccessToken, 'reports'))) throw new Forbidden();
+const { value: projectLimit } = await rekey.billing.getFeature(userAccessToken, 'projects');
+
+// The signed-in user's licences (no raw keys, just keyPrefix)
+const { items: licences } = await rekey.licenses.listMine(userAccessToken);
 
 // User clicks "Subscribe"
 const { url } = await rekey.billing.createCheckout(userAccessToken, {
@@ -142,6 +218,63 @@ if (sub === null) {
   // CANCELED / EXPIRED — say what they were on and when it ended, and offer
   // a way back. Do NOT treat this as entitled.
 }
+```
+
+## Usage and credits
+
+Metered usage and prepaid credits have their own routes under `/api/v1/usage` and `/api/v1/credits`. What each credential can reach:
+
+```
+POST  /api/v1/usage/record                 secret key, billing:write
+GET   /api/v1/usage/aggregate              secret key, billing:read
+GET   /api/v1/usage/meters                 secret key, billing:read       meter catalogue
+GET   /api/v1/usage/remaining              Application key + user JWT      the caller's quota
+GET   /api/v1/usage/remaining/for-user     secret key, billing:read       a named subject's quota
+
+GET   /api/v1/credits/balance              secret key, billing:read
+GET   /api/v1/credits/ledger               secret key, billing:read
+POST  /api/v1/credits/consume              secret key, billing:write
+POST  /api/v1/credits/grant                secret key, credits:grant       elevated, see api-keys.md
+GET   /api/v1/credits/me/ledger            Application key + user JWT      the caller's own ledger
+```
+
+### How much is left
+
+`GET /usage/remaining` answers "how many of my included units are left this period" for the signed-in user, per meter or for one with `?meter=`:
+
+```json
+{
+  "endUserId": "eu_...", "organizationId": null,
+  "periodStart": "2026-09-01T00:00:00.000Z", "periodEnd": "2026-10-01T00:00:00.000Z",
+  "meters": [{
+    "meterSlug": "api_calls", "name": "API calls", "unit": "calls", "active": true,
+    "included": 1000, "used": 940, "remaining": 60, "creditsPerUnit": null,
+    "periodStart": "2026-09-01T00:00:00.000Z", "periodEnd": "2026-10-01T00:00:00.000Z"
+  }]
+}
+```
+
+It is computed by the same code `POST /usage/record` enforces with: the calendar month in UTC, the plan quota from the subject's live subscriptions (plus the free-tier default plan for a personal subject), and the same sum over recorded units. So a record dated now of more than `remaining` units is exactly the one that comes back `402 USAGE_QUOTA_EXCEEDED`, or, when `creditsPerUnit` is set, the one whose excess is charged in credits. `included: null` means the subject has no quota for the meter, and records are neither capped nor charged. A backdated record (`occurredAt` in an earlier month) is measured against its own month, and a record on an inactive meter is refused with `USAGE_METER_INACTIVE` whatever `remaining` says; an unknown `?meter=` is `404 USAGE_METER_NOT_FOUND`. The read takes no lock, so under concurrent records it is a snapshot. Without `?meter=` it reports up to 200 meters, oldest first; `totalMeters` and `truncated: true` say when the catalogue is larger, and the rest are read one at a time.
+
+Whose quota: the personal one; in an Application that bills organizations (`billingSubject: "org"`), the session's active organization while the caller is still a member; or `?organizationId=` (member-only). A backend with no user token uses `/remaining/for-user?endUserId=` (or `organizationId=`, or both to read the organization as that member).
+
+### Granting credits from your server
+
+`POST /credits/grant` adds credits to an end-user or an organization pool, through the same ledger write as an operator grant from the panel. It needs a key minted with the elevated `credits:grant` scope; a default `*` key is refused. One call grants 1 to 1,000,000 credits, `idempotencyKey` is required (reusing one with a different amount or reason is `409 CREDITS_IDEMPOTENCY_KEY_REUSED`), and every grant is recorded in the security log against the key, in the same transaction. See [api-keys.md](api-keys.md#elevated-scopes-and-why--does-not-include-them).
+
+```ts
+const rekey = new Rekey({ apiUrl, secretKey: process.env.REKEY_GRANT_KEY! }); // minted with credits:grant
+await rekey.credits.grant({ endUserId, amount: 500, idempotencyKey: `referral:${referralId}` });
+```
+
+### The caller's own ledger
+
+`GET /credits/me/ledger` pages through the signed-in user's own ledger, newest first, with the same subject rules as `/usage/remaining`. Entries omit `metadata`, which the operator and your backend write for their own use; the secret-key `GET /credits/ledger` still returns it. Credit changes are also announced as `credit.granted`, `credit.consumed` and `credit.adjusted` webhooks, see [webhooks.md](webhooks.md#credits).
+
+```ts
+// Browser, with the publishable key
+const { meters } = await client.getUsageRemaining(accessToken, { meter: 'api_calls' });
+const { items } = await client.listMyCreditLedger(accessToken, { limit: 20 });
 ```
 
 ## Subscription state machine

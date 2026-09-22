@@ -24,6 +24,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance, InjectOptions, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { prisma } from '../src/lib/prisma.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const PANEL_IP = '10.77.0.10';
@@ -201,6 +202,7 @@ describe('global limiter keys on the caller, not the panel IP', () => {
   describe('API keys and end users', () => {
     let secretKey: string;
     let publicKey: string;
+    let applicationId: string;
 
     beforeEach(async () => {
       const tenant = await fixtures
@@ -229,6 +231,7 @@ describe('global limiter keys on the caller, not the panel IP', () => {
         .then((r) => r.json().data as { rawKey: string });
       secretKey = key.rawKey;
       publicKey = application.publicKey;
+      applicationId = application.id;
     });
 
     it('a secret API key gets its own, larger budget', async () => {
@@ -268,6 +271,69 @@ describe('global limiter keys on the caller, not the panel IP', () => {
       expect(res.statusCode).toBe(200);
       expect(res.headers['x-ratelimit-limit']).toBe('600');
       expect(res.headers['x-ratelimit-remaining']).toBe('599');
+    });
+
+    // GET /auth/me verifies the token itself, with no key hook in front of it.
+    // It used to do that inside the handler, after the limiter had already
+    // counted the request against the caller's IP, so a backend resolving many
+    // users from one address shared 100 requests a minute between all of them.
+    it('GET /auth/me is keyed on the end user, not the IP', async () => {
+      const signUp = (email: string) =>
+        fixtures
+          .inject({
+            method: 'POST',
+            url: '/api/v1/auth/sign-up',
+            headers: { authorization: `Bearer ${publicKey}` },
+            payload: { email, password: 'correct-horse-battery' },
+          })
+          .then((r) => (r.json().data as { accessToken: string }).accessToken);
+      const alice = await signUp('rl-alice@example.com');
+      const bob = await signUp('rl-bob@example.com');
+      const authMe = (token: string) => ({
+        method: 'GET' as const,
+        url: '/api/v1/auth/me?include=device',
+        remoteAddress: '203.0.113.22',
+        headers: { 'x-rekey-user-token': token },
+      });
+
+      expect((await fire(app, 101, anon('203.0.113.22'))).statusCode).toBe(429);
+
+      const first = await app.inject(authMe(alice));
+      expect(first.statusCode).toBe(200);
+      expect(first.headers['x-ratelimit-limit']).toBe('600');
+      expect(first.headers['x-ratelimit-remaining']).toBe('599');
+      const second = await app.inject(authMe(bob));
+      expect(second.statusCode).toBe(200);
+      expect(second.headers['x-ratelimit-remaining']).toBe('599');
+    });
+
+    // Refused before the limiter runs, so a refusal other than 401 (a frozen
+    // Application here) must still reach the rejected-credential limiter, or a
+    // held token buys unmetered lookups.
+    it('GET /auth/me refusals other than 401 are still counted per IP', async () => {
+      const token = await fixtures
+        .inject({
+          method: 'POST',
+          url: '/api/v1/auth/sign-up',
+          headers: { authorization: `Bearer ${publicKey}` },
+          payload: { email: 'rl-frozen@example.com', password: 'correct-horse-battery' },
+        })
+        .then((r) => (r.json().data as { accessToken: string }).accessToken);
+      await prisma.application.update({ where: { id: applicationId }, data: { disabledAt: new Date() } });
+      const req = {
+        method: 'GET' as const,
+        url: '/api/v1/auth/me',
+        remoteAddress: '203.0.113.23',
+        headers: { 'x-rekey-user-token': token },
+      };
+      for (let i = 0; i < 100; i++) {
+        const r = await app.inject(req);
+        expect(r.statusCode).toBe(403);
+        expect(r.json().error.code).toBe('APPLICATION_DISABLED');
+      }
+      const over = await app.inject(req);
+      expect(over.statusCode).toBe(429);
+      expect(over.json().error.code).toBe('RATE_LIMITED');
     });
   });
 });

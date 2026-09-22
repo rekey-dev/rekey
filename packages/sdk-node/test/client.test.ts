@@ -501,11 +501,70 @@ describe('WEBHOOK_EVENTS registry', () => {
       'device.unblocked',
       'device.limit_reached',
       'license.deactivated',
+      'credit.granted',
+      'credit.consumed',
+      'credit.adjusted',
     ]);
     expect(WEBHOOK_EVENTS.map((e) => e.name)).toEqual(KNOWN_WEBHOOK_EVENTS);
     // Every entry carries a non-empty description for picker/autocomplete UIs.
     for (const e of WEBHOOK_EVENTS) expect(e.description.length).toBeGreaterThan(10);
     expect(isKnownWebhookEvent('payment.succeeded')).toBe(true);
     expect(isKnownWebhookEvent('payment.exploded')).toBe(false);
+  });
+});
+
+describe('usage + credits self-serve methods', () => {
+  function makeClient(fetchImpl: typeof fetch): Rekey {
+    return new Rekey({ apiUrl: 'https://api.example.com', secretKey: 'rp_live_token', fetch: fetchImpl });
+  }
+  const okBody = (data: unknown) => vi.fn().mockResolvedValue(jsonResponse(200, { success: true, data }));
+  const call = (spy: ReturnType<typeof vi.fn>) => spy.mock.calls[0]! as [string, RequestInit];
+
+  it('usage.getRemaining sends the user token and the meter', async () => {
+    const spy = okBody({ meters: [] });
+    await makeClient(spy).usage.getRemaining('user.tok', { meter: 'api_calls' });
+    const [url, init] = call(spy);
+    expect(url).toBe('https://api.example.com/api/v1/usage/remaining?meter=api_calls');
+    expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBe('user.tok');
+  });
+
+  it('usage.getRemaining with no options sends no querystring', async () => {
+    const spy = okBody({ meters: [] });
+    await makeClient(spy).usage.getRemaining('user.tok');
+    expect(call(spy)[0]).toBe('https://api.example.com/api/v1/usage/remaining');
+  });
+
+  it('usage.getRemainingFor names the subject and carries no user token', async () => {
+    const spy = okBody({ meters: [] });
+    await makeClient(spy).usage.getRemainingFor({ organizationId: 'org_1', endUserId: 'eu_1' }, { meter: 'm' });
+    const [url, init] = call(spy);
+    expect(url).toBe(
+      'https://api.example.com/api/v1/usage/remaining/for-user?endUserId=eu_1&organizationId=org_1&meter=m',
+    );
+    expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBeUndefined();
+  });
+
+  it('usage.listMeters pages', async () => {
+    const spy = okBody({ items: [], page: {} });
+    await makeClient(spy).usage.listMeters({ limit: 10, offset: 20 });
+    expect(call(spy)[0]).toBe('https://api.example.com/api/v1/usage/meters?limit=10&offset=20');
+  });
+
+  it('credits.grant POSTs the body to /credits/grant', async () => {
+    const spy = okBody({ balance: 5, entryId: 'e1', applied: true });
+    const res = await makeClient(spy).credits.grant({ endUserId: 'eu_1', amount: 5, idempotencyKey: 'k1' });
+    const [url, init] = call(spy);
+    expect(url).toBe('https://api.example.com/api/v1/credits/grant');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({ endUserId: 'eu_1', amount: 5, idempotencyKey: 'k1' });
+    expect(res).toEqual({ balance: 5, entryId: 'e1', applied: true });
+  });
+
+  it('credits.listMyLedger sends the user token', async () => {
+    const spy = okBody({ items: [], page: {} });
+    await makeClient(spy).credits.listMyLedger('user.tok', { limit: 5 });
+    const [url, init] = call(spy);
+    expect(url).toBe('https://api.example.com/api/v1/credits/me/ledger?limit=5');
+    expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBe('user.tok');
   });
 });

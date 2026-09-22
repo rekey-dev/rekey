@@ -4,7 +4,7 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
-## 2.2.0-rc.1
+## 2.2.0-rc.2
 
 A minor release, and NOT a patch. It changes what an existing subscriber
 resolves at read time and closes an input the API used to accept, so a patch
@@ -22,32 +22,25 @@ it did not require in 2.1.x; see **Breaking changes** below.
 ### Breaking changes
 
 Every item here is a behaviour or a configuration an existing 2.1.x deployment
-depends on today. Read this list before you upgrade.
+depends on today. Read this list before you upgrade. The API behaviour an
+integrator's code sees comes first, then deployment configuration, then the
+operator panel and CLI.
 
-- **Admin endpoints refuse an address the API cannot verify.** With
-  `ADMIN_IP_ALLOWLIST` set, a request that arrives through a proxy the API
-  cannot identify is answered `403 ADMIN_IP_UNVERIFIABLE` before the key is
-  read. That address belongs to the proxy and is shared by everyone behind it,
-  so matching the allowlist against it admitted them all. Set
-  `API_PROXY_SECRET` and have the proxy send it as `X-Rekey-Proxy-Secret`, or
-  clear the allowlist. The API logs this once at boot.
+- **`GET /api/v1/billing/subscription` returns a live subscription before an
+  unfinished checkout.** A buyer already on a plan (a free tier, say) who opens
+  a checkout now reads as that plan, not PENDING, while the checkout settles,
+  and a paid plan outranks a free one. A UI that shows "confirming your
+  payment" by reading PENDING here has to key that state off its own return
+  flag instead. The entry under **Changed** has the full rule.
 
-- **Credential routes cap their request body, and answer `413
-  PAYLOAD_TOO_LARGE`.** Sign-in, sign-up, magic links, password reset, MFA,
-  passkeys and the OAuth token endpoints refuse an oversized body before it is
-  read, rather than parsing up to the global 1 MiB. A sign-up whose `metadata`
-  is over the cap now gets 413 where it used to get `400 METADATA_TOO_LARGE`.
-
-- **Erasing or cascade-deleting an end-user is workspace-OWNER only.** Both
-  were open to workspace ADMINs, and the cascade delete was gated on `write`
-  alone, so a member holding an application grant could delete a person the
-  erase form refused them. An ADMIN who handles erasure requests today gets a
-  403 naming the OWNER; the data export still works for them.
-
-- **Free-tier rows now sort FIRST in the `entitlements[]` array** returned by
-  `GET /billing/entitlements`. A consumer that locates a value with `.find()`
-  by key rather than reading `features` will now find the free tier's row where
-  it used to find a subscription's. Read `features` instead.
+- **`GET /api/v1/billing/entitlements` without `?organizationId=` answers for
+  the end-user in a user-billed Application**, even when the session is
+  switched into a team. It used the active organization in every Application.
+  Only an Application with `billingSubject: "org"` still resolves the
+  organization by default. If a user-billed Application grants credits to an
+  organization's pool and reads them from a switched session, pass
+  `?organizationId=` now: the default `creditBalance` is the member's personal
+  pool. See **Fixed**.
 
 - **Entitlement resolution changes what three existing populations resolve.**
   The Application's free tier is a base layer now rather than another voter in
@@ -59,6 +52,11 @@ depends on today. Read this list before you upgrade.
   now resolves to zero included units. The "A per-subscription entitlement
   override now beats the Application's free tier" entry under **Changed** has
   the full account, including which subjects to check before upgrading.
+
+- **Free-tier rows now sort FIRST in the `entitlements[]` array** returned by
+  `GET /billing/entitlements`. A consumer that locates a value with `.find()`
+  by key rather than reading `features` will now find the free tier's row where
+  it used to find a subscription's. Read `features` instead.
 
 - **A repeat free trial is refused with `BILLING_TRIAL_ALREADY_USED` (409).**
   A buyer gets one trial per Application (`billingConfig.trialPolicy`,
@@ -72,6 +70,53 @@ depends on today. Read this list before you upgrade.
   `PLAN_TRIAL_MATERIALISES_ENTITLEMENTS`, because such a trial hands over
   credits or a licence key on day 0 with no inverse.
 
+- **A free plan that materialises CREDIT or LICENSE is claimable once per
+  end-user per Application.** Another beneficiary gets
+  `409 BILLING_FREE_TIER_ALREADY_CLAIMED`. Reactivating for the same
+  beneficiary still works. Existing self-serve activations are backfilled as
+  claims, and credits already issued are not clawed back.
+
+- **Buying the same one-off plan twice now delivers twice.** It charged twice
+  and delivered once before. If you sell credit packs, buyers who repurchased
+  were charged and not credited; the **Fixed** entry says how to find them.
+
+- **`*` on an API key means every standard scope, not every scope.** The new
+  `credits:grant` scope (for `POST /api/v1/credits/grant`) is elevated: no key
+  that exists today holds it, `*` keys included, and a key gets it only when an
+  operator names it at mint. Code that treated `*` as "can call anything" is
+  refused on that route with `403 API_KEY_SCOPE_INSUFFICIENT`. See
+  [docs/api-keys.md](docs/api-keys.md#elevated-scopes-and-why--does-not-include-them).
+
+- **Webhook endpoints subscribed to `*` start receiving three new events**,
+  `credit.granted`, `credit.consumed` and `credit.adjusted`, one per credit
+  ledger entry. `credit.consumed` fires once per `POST /usage/record` that is
+  charged in credits, so a busy priced meter means one delivery per record. If
+  that is more than an endpoint should take, list its events by name. Code with
+  an exhaustive `switch` over `KnownWebhookEventType` needs branches for the
+  new names (and for the six device and licence events below).
+
+- **Credential routes cap their request body, and answer `413
+  PAYLOAD_TOO_LARGE`.** Sign-in, sign-up, magic links, password reset, MFA,
+  passkeys and the OAuth token endpoints refuse an oversized body before it is
+  read, rather than parsing up to the global 1 MiB. A sign-up whose `metadata`
+  is over the cap now gets 413 where it used to get `400 METADATA_TOO_LARGE`.
+
+- **An impersonation token can no longer mint a real session.** Switching or
+  clearing the active organization, and linking or unlinking an OAuth provider,
+  answer 403 `IMPERSONATION_ACTION_FORBIDDEN` from an impersonated session.
+  An ended impersonation's token is also refused on `GET /auth/me` with
+  `401 IMPERSONATION_SESSION_ENDED`, as every key-guarded route already did.
+
+- **A FEATURE override of `""`, and a quantity on a licence with no seats, are
+  refused** with `ENTITLEMENT_OVERRIDE_INVALID`. Both were previously accepted
+  and neither reached anything that read it. See **Removed**.
+
+- **`POST /api/v1/admin/applications/:id/plans` refuses fields it used to drop
+  silently.** An unrecognised key, or a typo like `intervall`, answers
+  `400 VALIDATION_ERROR` naming the field, where it previously answered 201 and
+  built a SUBSCRIPTION plan. Per-kind plans and `trialDays` are created on
+  `POST /api/v1/tenant/applications/:id/plans`.
+
 - **`docker-compose.prod.yml` refuses to start without `PANEL_PROXY_SECRET`,
   `API_PROXY_SECRET` and `PORTAL_PROXY_SECRET`.** All three are `:?` in that
   file now. Without them the panel would forward a browser-chosen
@@ -79,7 +124,7 @@ depends on today. Read this list before you upgrade.
   per-IP limit protecting sign-in would be off after one warning line at boot.
   Generate each with `openssl rand -hex 32` and put them in `.env` before you
   redeploy. `docker-compose.yml`, the development stack, requires none of the
-  three — it still requires `POSTGRES_PASSWORD`, `REDIS_PASSWORD` and
+  three; it still requires `POSTGRES_PASSWORD`, `REDIS_PASSWORD` and
   `ENCRYPTION_KEY`, as it did before.
 
 - **The split-unit compose files require their secrets too.**
@@ -90,45 +135,46 @@ depends on today. Read this list before you upgrade.
   `INTERNAL_CALLER_SECRET` and `PORTAL_PROXY_SECRET`. The API, panel and portal
   units must share one `INTERNAL_CALLER_SECRET`.
 
+- **Admin endpoints refuse an address the API cannot verify.** With
+  `ADMIN_IP_ALLOWLIST` set, a request that arrives through a proxy the API
+  cannot identify is answered `403 ADMIN_IP_UNVERIFIABLE` before the key is
+  read. That address belongs to the proxy and is shared by everyone behind it,
+  so matching the allowlist against it admitted them all. Set
+  `API_PROXY_SECRET` and have the proxy send it as `X-Rekey-Proxy-Secret`, or
+  clear the allowlist. The API logs this once at boot.
+
 - **Redis is replaced by Valkey, on a NEW volume, so the store starts empty.**
   See the entry under **Changed** for what that resets and how to remove the
   old volume.
-
-- **A free plan that materialises CREDIT or LICENSE is claimable once per
-  end-user per Application.** Another beneficiary gets
-  `409 BILLING_FREE_TIER_ALREADY_CLAIMED`. Reactivating for the same
-  beneficiary still works. Existing self-serve activations are backfilled as
-  claims, and credits already issued are not clawed back.
-
-- **An impersonation token can no longer mint a real session.** Switching or
-  clearing the active organization, and linking or unlinking an OAuth provider,
-  answer 403 `IMPERSONATION_ACTION_FORBIDDEN` from an impersonated session.
-
-- **`POST /api/v1/admin/applications/:id/plans` refuses fields it used to drop
-  silently.** An unrecognised key, or a typo like `intervall`, answers
-  `400 VALIDATION_ERROR` naming the field, where it previously answered 201 and
-  built a SUBSCRIPTION plan. Per-kind plans and `trialDays` are created on
-  `POST /api/v1/tenant/applications/:id/plans`.
-
-- **`rekey plans create` no longer accepts `--kind`, `--license-kind`,
-  `--license-duration-days`, `--license-seats-allowed`, `--meter-slug`,
-  `--price-per-unit-cents` or `--credits-amount`.** They are refused with
-  `CLI_PLANS_KIND_UNSUPPORTED`, which names the panel and the tenant route,
-  because the admin route behind them never implemented any of it.
-
-- **A FEATURE override of `""`, and a quantity on a licence with no seats, are
-  refused** with `ENTITLEMENT_OVERRIDE_INVALID`. Both were previously accepted
-  and neither reached anything that read it. See **Removed**.
-
-- **Buying the same one-off plan twice now delivers twice.** It charged twice
-  and delivered once before. If you sell credit packs, buyers who repurchased
-  were charged and not credited; the **Fixed** entry says how to find them.
 
 - **Revocation can lag briefly across API replicas.** Operator auth is cached
   per API process and invalidated over Redis. If Redis loses that message, the
   other replicas can keep admitting a revoked session for at most
   `OPERATOR_AUTH_CACHE_TTL_MS` (new, default 5000). Set it to 0 to turn the
   cache off and restore the previous read-every-request behaviour.
+
+- **Erasing or cascade-deleting an end-user is workspace-OWNER only.** Both
+  were open to workspace ADMINs, and the cascade delete was gated on `write`
+  alone, so a member holding an application grant could delete a person the
+  erase form refused them. An ADMIN who handles erasure requests today gets a
+  403 naming the OWNER; the data export still works for them.
+
+- **Panel forms need JavaScript to submit.** The 75 forms built on
+  `ActionForm` do nothing in a browser with scripts off. See **Changed**.
+
+- **`rekey plans create` no longer accepts `--kind`, `--license-kind`,
+  `--license-duration-days`, `--license-seats-allowed`, `--meter-slug`,
+  `--price-per-unit-cents` or `--credits-amount`.** They are refused with
+  `CLI_PLANS_KIND_UNSUPPORTED`, which names the panel and the tenant route,
+  because the admin route behind them never implemented any of it.
+- **The session handoff needs a key with `auth:write`.**
+  `POST /api/v1/mcp/:slug/oauth/authorize/grant` checked for a secret key but
+  not its scopes, so a key minted with only `credits:grant` could mint an
+  authorization code that becomes a session and an MCP grant for the user. A
+  key without `auth:write` now gets `403 API_KEY_SCOPE_INSUFFICIENT`. Keys
+  with `*` are unaffected, and a key that signs users in already holds
+  `auth:write`. If your hosted login page calls this with a narrowed key, add
+  `auth:write` to it.
 
 ### Changed
 
@@ -138,29 +184,57 @@ depends on today. Read this list before you upgrade.
   checkout and closed the tab read as PENDING from then on. Every entitlement
   gate built on that answer refused them, and `POST /billing/subscription/cancel`
   cancelled the abandoned checkout instead of their plan. It now returns a
-  live (ACTIVE, TRIALING or PAST_DUE) row whenever there is one, and among live
-  rows the Application's free tier (`billingConfig.defaultPlanSlug`) ranks
-  last, so a paid plan wins even when its row is older. A live row that lapses
-  on the read no longer hides another live one. PENDING is returned only when
-  nothing is live.
+  live (ACTIVE, TRIALING or PAST_DUE) row whenever there is one, newest first,
+  with free rows ranked last: a row whose plan costs nothing (no amount and no
+  per-unit price) or is the Application's `billingConfig.defaultPlanSlug`. So a
+  paid plan wins even when its row is older. A live row that lapses on the read
+  no longer hides another live one. PENDING is returned only when nothing is
+  live. The end-user MCP `get_subscription` tool picks its row through the same
+  service, so a pending checkout, or a paid plan held next to a free one, reads
+  the same on both, including for connections made before this release.
 
   **Check before upgrading** if your UI shows a "confirming your payment" state
   by reading PENDING from this endpoint: a buyer who is already on another plan
   (a free tier, say) now reads as that plan while the new checkout settles. Key
   that state off your own return flag from the provider redirect instead.
 
-- **Panel forms need JavaScript to submit.** `ActionForm` now lets React
-  dispatch the submit, so the navigation a save's `redirect()` triggers is
-  committed instead of dropped (#569: on the Auth methods page, 0 of 14 saves
-  showed the saved state before, 9 of 10 after). The trade is that React no
-  longer emits the fields a no-JavaScript post needs, so the 75 forms that use
-  `ActionForm` do nothing without scripts. That path was already partial:
-  confirmation buttons, slug checks and the unsaved-changes guard all needed
-  scripts. The remaining tenth of #569 is a separate race in Next's redirect
-  handling and stays open.
+  Without `?organizationId=` this route still answers for the end-user
+  personally, in every Application. `GET /auth/me?include=subscription` and the
+  MCP tool follow the billing subject instead (the active or bound organization
+  in an org-billed Application), so pass the organization's id here to compare
+  the two.
+
+- **Behaviour change: an `auth:read` secret key can now read the signed-in
+  user's own organizations, sessions, passkeys, MFA status and linked OAuth
+  identities.** These GET routes used to require `auth:write`, because their
+  plugins applied it to every route, reads included, which pushed backends
+  that only read to hold a key that can also write. They now require
+  `auth:read`, like `GET /users/me` and `GET /users/me/devices` already did.
+  Every other method on those routes still requires `auth:write`, and a key
+  with `auth:write` (or `*`) can do everything it could before. This is more
+  permissive, not less: nothing that worked stops working, but an `auth:read`
+  key that was refused with `403 API_KEY_SCOPE_INSUFFICIENT` on
+  `GET /users/me/organizations`, `/users/me/organizations/roles`,
+  `/users/me/organizations/:id`, `/users/me/organizations/:id/members`,
+  `GET /auth/sessions`, `GET /auth/passkeys`, `GET /auth/mfa/status` or
+  `GET /auth/oauth/identities` is now answered. Review which services hold an
+  `auth:read` key if that matters to you. `include=organization` on
+  `GET /users/me` follows its route and needs only `auth:read` too.
+
+- **Behaviour change: `GET /api/v1/auth/me` is rate limited per end-user.**
+  It is now keyed on the end-user it resolved (600 a minute by default,
+  `RATE_LIMIT_AUTHENTICATED_MAX`) under the 3000-a-minute ceiling for every
+  end-user seen from one client IP, instead of per client IP at 100 a minute
+  shared by every user a backend resolved from one address, because the token
+  is verified before the limiter runs rather than inside the handler. Its
+  refusals other than 401 (a frozen Application's 403, an unknown or erased
+  user's 404 and 410) count toward the per-IP rejected-credential limit, like
+  a 401. A backend resolving many users from one address is better served by
+  `GET /users/me` with its secret key, which counts against the key. See
+  [docs/rate-limits.md](docs/rate-limits.md).
 
 - **A per-subscription entitlement override now beats the Application's free
-  tier.** Resolution merges across sources — booleans OR-true, numbers take the
+  tier.** Resolution merges across sources: booleans OR-true, numbers take the
   max, included usage is summed. The free tier
   (`billingConfig.defaultPlanSlug`) was merged in as one more source, so a
   default the subject had not bought could only ever raise the answer. An
@@ -171,7 +245,7 @@ depends on today. Read this list before you upgrade.
 
   The free tier is now a base layer: it fills in where nothing else answered, and
   it is withheld for a key or meter a per-subscription override names. A plan row
-  does **not** withhold it — buying a credit pack that happens to mention a key is
+  does **not** withhold it: buying a credit pack that happens to mention a key is
   a top-up, not being on a plan, and does not take a free tier away.
 
   **Three populations resolve differently after this. Check before upgrading.**
@@ -194,30 +268,46 @@ depends on today. Read this list before you upgrade.
   An override of `0` on a meter now resolves to **zero included units**. It
   previously had the default plan's allowance added to it. If a later plan edit
   clears the price out from under such an override, the zero still stands rather
-  than falling back — the alternative answers "unmetered" for a subject the
-  operator explicitly restricted.
+  than falling back, because the alternative answers "unmetered" for a subject
+  the operator explicitly restricted.
 
   The free tier's per-unit price still floors the rate charged wherever the free
   tier applies at all, even when its quantity is withheld. A SUBSCRIPTION or
-  USAGE plan suppresses the free tier entirely, price included — that is
+  USAGE plan suppresses the free tier entirely, price included; that is
+  unchanged. Free-tier rows also sort first in `entitlements[]` now (see
+  **Breaking changes**).
+
+- **`PATCH /api/v1/users/me` returns what `GET` returns.** It returned
+  `activeOrganizationId` but not `activeOrganizationRole` and
+  `activeOrganizationBaseRole`, which its own published schema marks required,
+  so a typed client read `undefined`. Both now come from one builder, and
+  `@rekey.dev/node` types both `getCurrentUser` and `updateCurrentUser` as
+  `CurrentUserDto`.
+
+- **Security events name their actor: `actorEmail` on every event.**
+  `GET /api/v1/tenant/security-events` (JSON, and CSV, where it is a new last
+  column) and the operator MCP `recent_security_events` tool now return the
+  actor's email, looked up when the log is read: the operator account for
+  `operator`, including one who has since left the workspace, the end-user for
+  `end_user` (only within the event's Application), and `null` for `system` or
+  an actor that no longer exists. The end-user detail's `recentImpersonations`
+  gains `operatorEmail` the same way. Nothing is stored twice; `actorId` is
   unchanged.
-
-  Free-tier rows now sort **first** in the `entitlements[]` array returned by
-  `GET /billing/entitlements`. If you locate a value with `.find()` by key rather
-  than reading `features`, and the free tier carries that key too, you will now
-  find the free tier's row. Read `features` instead.
-
-- **Erasing or cascade-deleting an end-user is workspace-owner only.** Both used
-  to be open to workspace ADMINs, and the cascade delete was gated on `write`
-  alone, so a member holding an application grant could delete a person the
-  erase form refused them. **Breaking for admins:** an ADMIN who handles erasure
-  requests today gets a 403 and needs an OWNER to act. They can still run the
-  data export.
 
 - **The `APP_BILLING` grant role can now manage provider credentials and issue
   refunds.** Both were plain `write` before, so the billing role could do
   neither. This widens what an existing `APP_BILLING` holder can do; review who
   holds it if that matters to you.
+
+- **Panel forms need JavaScript to submit.** `ActionForm` now lets React
+  dispatch the submit, so the navigation a save's `redirect()` triggers is
+  committed instead of dropped (#569: on the Auth methods page, 0 of 14 saves
+  showed the saved state before, 9 of 10 after). The trade is that React no
+  longer emits the fields a no-JavaScript post needs, so the 75 forms that use
+  `ActionForm` do nothing without scripts. That path was already partial:
+  confirmation buttons, slug checks and the unsaved-changes guard all needed
+  scripts. The remaining tenth of #569 was the same lost render that left
+  minted secrets unshown, and is fixed with it (see **Fixed**).
 
 - **The end-user page is split into tabs** (overview, subscriptions, devices,
   credits, security, data) with a breadcrumb, and the email page into settings,
@@ -230,12 +320,11 @@ depends on today. Read this list before you upgrade.
   anything. Those reads are now cached in each API process and a warm request
   makes none. Measured with the same data: the application overview page went
   from 48 statements to 9, one operator request from 3 to 0.
-- **Revocation is still immediate.** Sign-out, sign out everywhere, a revoked
-  session, a password change or reset, and any role, scope, grant or membership
-  change drop the cached entry at once in the process that made the change and,
-  over Redis, in every other API replica. If Redis loses that message, the
-  other replicas can keep admitting the revoked session for at most
-  `OPERATOR_AUTH_CACHE_TTL_MS` (new, default 5000; 0 turns the cache off).
+- **Revocation is still immediate within a replica.** Sign-out, sign out
+  everywhere, a revoked session, a password change or reset, and any role,
+  scope, grant or membership change drop the cached entry at once in the
+  process that made the change and, over Redis, in every other API replica.
+  The bound on a lost invalidation is under **Breaking changes**.
 - **Per-application stats are one query, cached for 60s in Redis**
   (`rk:stats:app:<id>`). The overview tile's counts may lag by up to a minute;
   turning billing on or off shows at once.
@@ -260,13 +349,167 @@ depends on today. Read this list before you upgrade.
   `rekey_redis` / `redis-data`): Valkey refuses to start on a Redis
   7.4-format AOF/RDB file, which most existing self-hosted volumes already
   are, so an in-place volume swap would have been a boot-time outage on
-  upgrade. The store starts empty instead — see "Why Valkey, not Redis" in
+  upgrade. The store starts empty instead. See "Why Valkey, not Redis" in
   DEPLOY.md for exactly what that resets (queued webhook retries, lockouts,
-  rate-limit windows, in-flight PKCE state — all recoverable or reconstructible,
-  nothing in Postgres) and how to remove the old volume once you've confirmed
-  the deploy is healthy.
+  rate-limit windows, in-flight PKCE state: all recoverable or
+  reconstructible, nothing in Postgres) and how to remove the old volume once
+  you've confirmed the deploy is healthy.
 
 ### Added
+
+- **`GET /api/v1/auth/me` and `GET /api/v1/users/me` answer who, what and
+  which device in one call** (rekey#41). A new `?include=` takes any of
+  `entitlements`, `device`, `subscription`, `organization` and `licenses`,
+  comma-separated or repeated (`include=a&include=b`), and adds each as a
+  top-level property of the same name. `entitlements` and `subscription` are
+  what `GET /billing/entitlements/for-user` and `GET /billing/subscription`
+  return for the Application's billing subject, from the same service code: in
+  an org-billed Application the active organization while the caller is still a
+  member of it, otherwise the end-user, including a user-billed session
+  switched into a team. `licenses` is what `GET /users/me/licenses` returns for
+  that subject, as `{ items, truncated }`: the first 100 rows, `truncated: true`
+  when there are more. `device` is the device the token's `dev` claim names, or
+  null for a session that is not device-bound. `organization` is the active
+  organization with the caller's role and base role. Without `include` the
+  response and the queries it runs are unchanged. An unknown value is a
+  `400 VALIDATION_ERROR` naming the supported ones. Every session check still
+  runs first. With a secret key on `/users/me`, each value needs the scope of
+  the route that serves it (`billing:read` for the three billing values,
+  `auth:read` for `organization`), and on an Application with billing off the
+  billing values answer `403 BILLING_DISABLED` on both routes.
+  `@rekey.dev/node` takes it as `auth.getCurrentUser(token, { include })`
+  (which calls `/users/me`) and the React browser client as
+  `getMe(token, { include })` (which calls `/auth/me`), both typed so a literal
+  list gives exactly the properties asked for; a list typed `MeInclude[]` makes
+  them optional. `/auth/me` changes how it is rate limited; see **Changed**. See
+  [Authorising requests in your own backend](docs/auth.md#authorising-requests-in-your-own-backend).
+
+- **A signed-in user can list their own licences.** `GET /api/v1/users/me/licenses`
+  (publishable or secret key plus the user token, `billing:read` on a secret
+  key, billing enabled) returns every licence issued to the caller, newest
+  first and paginated (`limit`, `offset`), and in an org-billed Application
+  whose session acts for an organization the caller belongs to, that
+  organization's pooled licences as well. Rows carry `keyPrefix`, never the key
+  (only its hash is stored), and not the operator's licence `metadata`. SDK:
+  `rekey.licenses.listMine(token)` in `@rekey.dev/node`, `listMyLicenses(token)`
+  in the React browser client.
+
+- **A single-feature check.** `GET /api/v1/billing/entitlements/features/:key`
+  answers `{ key, granted, value }` for the signed-in user, for the same subject
+  `include=entitlements` resolves, without the credit balance read; `granted`
+  is `Boolean(value)`, and an unknown key is a 200 with `granted: false`.
+  `GET /billing/entitlements/for-user/features/:key?endUserId=` is the
+  secret-key variant (`billing:read`). SDK: `billing.hasFeature` /
+  `getFeature` in both SDKs, and `hasFeatureFor` / `getFeatureFor` in
+  `@rekey.dev/node`.
+
+- **Usage remaining is readable by the user it belongs to** (rekey#473).
+  `GET /api/v1/usage/remaining` takes an end-user token with the publishable
+  or secret key (`billing:read` on a secret key) and answers, per meter (or one
+  with `?meter=`), the `included` quota, the units `used` this period, what is
+  `remaining`, the `creditsPerUnit` charged past the quota, and the period
+  window. `GET /api/v1/usage/remaining/for-user` answers the same for a named
+  end-user or organization with a secret key (`billing:read`). Both are
+  computed by the code `POST /usage/record` enforces with, so a record dated
+  now of more than `remaining` units is exactly the one refused with
+  `402 USAGE_QUOTA_EXCEEDED` (or charged, on a priced meter). Without
+  `?meter=` it reports up to 200 meters and says so with `totalMeters` and
+  `truncated`. `@rekey.dev/node`: `usage.getRemaining(token)`,
+  `usage.getRemainingFor()`; React browser client: `getUsageRemaining(token)`.
+
+- **`GET /api/v1/credits/me/ledger` pages through the signed-in user's own
+  credit ledger** (or their active organization's, in an org-billed
+  Application), newest first, without `metadata` or the idempotency key.
+  Entries written in the same instant now page in a fixed order here and on
+  `GET /credits/ledger`. `@rekey.dev/node`: `credits.listMyLedger(token)`;
+  React browser client: `listMyCreditLedger(token)`.
+
+- **`POST /api/v1/credits/grant` grants credits with the Application key**
+  (rekey#473), to an end-user or an organization pool, through the same ledger
+  write as a panel grant. It needs the new **elevated** `credits:grant` scope,
+  which `*` does not include (see **Breaking changes**). Minting a key with it
+  needs the authority of a panel credit grant, billing-write access and the
+  `billing:write` operator scope, on the panel, the operator PAT route and the
+  MCP `mint_api_key` tool; otherwise `403 SCOPE_INSUFFICIENT`. The panel's API
+  key form has an "Elevated scopes" group, can mint a key holding only that
+  scope, and the key list flags elevated scopes. One call grants 1 to
+  1,000,000 credits, as `GRANT` (the default) or `REFUND`. `idempotencyKey` is
+  required and belongs to this route (stored as `api-grant:<key>`): an exact
+  retry grants nothing and returns the original entry, and reusing the key
+  with a different amount or reason is `409 CREDITS_IDEMPOTENCY_KEY_REUSED`.
+  Each grant is written to the security log as
+  `app.credits_granted_by_api_key` naming the key, in the grant's own
+  transaction. `@rekey.dev/node`: `credits.grant()`. `@rekey.dev/shared-types`
+  exports `STANDARD_API_KEY_SCOPES`, `ELEVATED_API_KEY_SCOPES` and
+  `isElevatedApiKeyScope`.
+
+- **Credit webhooks: `credit.granted`, `credit.consumed`, `credit.adjusted`**
+  (rekey#473). One per credit ledger entry, enqueued in the transaction that
+  writes the entry, so a mirror of balances no longer has to poll. A consume is
+  `credit.consumed`, an operator ADJUST of either sign (or any other entry that
+  removes credits) is `credit.adjusted`, and every other entry (a grant, a
+  refund, a purchase) is `credit.granted`. The payload is `data.credit` with the
+  entry id, the subject, the signed `delta`, `amount`, `reason`, the `balance`
+  after the entry, the idempotency key, description and time
+  (`CreditWebhookData`). A refused consume or an idempotent replay emits
+  nothing. `credit.consumed` also fires for usage charged in credits, once per
+  charged record; see **Breaking changes** for what that means for `*`
+  endpoints. Erasing an end-user scrubs their `credit.*` delivery payloads like
+  every other event's. See [docs/webhooks.md](docs/webhooks.md#credits).
+
+- **`GET /api/v1/users/me/licenses` accepts `?organizationId=`**, as every
+  other self read does. The caller's own licences are listed with that
+  organization's pooled ones; it is member-only
+  (`403 ORGANIZATION_NOT_MEMBER` otherwise).
+- **An end-user MCP connection can act for one of the user's organizations**
+  (EtherLabZ/Rekey#473 item 3, #587). When the Application has
+  organizations on and the user can act for at least one, the MCP consent page
+  asks, after sign-in, whether the connection acts for them personally
+  (preselected) or for one of those organizations. The choice is stored on the
+  grant, carried in the access token as `oid` and through every refresh, and
+  reported by token introspection. `get_profile` now returns the bound
+  `organization` with the user's role in it. `get_subscription` and
+  `get_credits` answer for the organization when the Application bills
+  organizations (`billingSubject: "org"`) and for the user otherwise, by the
+  subject rule `include=` uses, and say which in a new `organizationId` field.
+  `list_licenses` returns the rows `GET /users/me/licenses` does for the same
+  subject: the user's own licences plus, in that case, the organization's
+  pool, the newest 100 with `truncated` when there are more.
+  `list_my_devices` stays personal.
+  The session handoff (`POST /oauth/authorize/grant`) takes `organization_id`;
+  omitted is personal, as before, even when the session has an active
+  organization. A binding fails closed:
+  once the user leaves the organization, is removed, has the role disabled or
+  the organization is deleted, the access token is refused and the refresh
+  answers `invalid_grant` rather than quietly switching to the personal
+  account. Grants made before this change carry no binding and keep acting
+  for the user personally. Migration `20260922120000_mcp_grant_organization`
+  adds two nullable columns and rewrites no rows. See
+  [docs/mcp.md](docs/mcp.md#organization-binding).
+
+- **`GET /api/v1/usage/meters` lists the meter catalogue** with a secret key
+  (`billing:read`): slug, name, unit, active flag and fallback credit price
+  (`creditsPerUnit`), so a backend learns meter slugs instead of hard-coding
+  them. `@rekey.dev/node`: `usage.listMeters()`.
+
+- **Checkout readiness on the public plan list.** Each plan on
+  `GET /api/v1/billing/plans` carries `checkout: { ready: boolean }`, false
+  when a buyer sent to checkout for it would be refused (no provider
+  connected, a plan never registered with Stripe, a trial a provider cannot
+  run), so a pricing page can hide it. Only the boolean: which provider refuses
+  and how to repair it stay on the operator list, and the two lists serialise
+  through one function so they cannot disagree about whether a plan is
+  buyable. One extra query per page, however many plans are on it. A free
+  default plan reads `ready: false` with no provider connected yet still
+  applies, so do not filter the free tier out. SDK type `PublicPlanDto`;
+  `PlanDto.checkout.blockers` is now optional in the TypeScript type so a
+  public row still assigns to `PlanDto` (the operator routes always send it).
+
+- **The published spec documents `creditsPerUnit`** on the entitlement rows of
+  `GET /billing/entitlements` and `GET /billing/entitlements/for-user`. Both
+  routes already returned it (USAGE only: credits charged per unit past the
+  included quantity, null for a hard cap); only the OpenAPI document and the
+  `ResolvedEntitlementDto` type were missing it.
 
 - **`PATCH /api/v1/admin/applications/:id/default-plan`** sets or clears an
   Application's free-tier plan (`billingConfig.defaultPlanSlug`) with the
@@ -297,13 +540,13 @@ depends on today. Read this list before you upgrade.
 
   It named two ways a trial lost money. One is fixed: nothing recorded that a
   buyer had already trialled, which `TrialRedemption` and `trialPolicy` now do.
-  The other is closed by construction rather than accepted — `provision` has no
+  The other is closed by construction rather than accepted: `provision` has no
   trial gate, so a plan carrying a CREDIT or LICENSE entitlement hands over
   credits or a licence key on day 0, before any money moves, with no inverse.
   A trial is therefore refused on such a plan with
   `PLAN_TRIAL_MATERIALISES_ENTITLEMENTS`, on every write path that could
-  introduce the combination — creating a plan, patching one, adding an
-  entitlement to one, and the legacy `creditsAmount` column. FEATURE and USAGE
+  introduce the combination (creating a plan, patching one, adding an
+  entitlement to one, and the legacy `creditsAmount` column). FEATURE and USAGE
   entitlements resolve at read time and lapse with the subscription, which is
   the ordinary feature-gated SaaS trial `trialDays` exists for.
 
@@ -313,7 +556,7 @@ depends on today. Read this list before you upgrade.
   `PLAN_HAS_NO_TRIAL`, `PLAN_TRIAL_MISCONFIGURED` (the plan is currently
   unbuyable and checkout would answer 400), `TRIAL_IN_PROGRESS` (scoped to that
   plan, with `endsAt`), then `ALREADY_REDEEMED`. A buyer's own live reservation
-  reads **eligible** — reporting it as a refusal would make an SDK send
+  reads **eligible**, because reporting it as a refusal would make an SDK send
   `allowWithoutTrial` and charge them today for the trial checkout was about to
   grant.
 
@@ -321,7 +564,7 @@ depends on today. Read this list before you upgrade.
   lock at checkout, and the response echoes the resolved `provider` because a
   plan can be unbuyable on one processor and fine on another.
 
-- **A buyer gets one free trial per Application, not one per checkout.**
+  **A buyer gets one free trial per Application, not one per checkout.**
   `resolveCheckoutTrial` was a pure function of the plan and nothing anywhere
   asked whether the buyer had trialled before, so a buyer could trial, cancel on
   the last day and trial again without limit. On a plan carrying CREDIT or
@@ -331,27 +574,22 @@ depends on today. Read this list before you upgrade.
   way a coupon reservation works, and refuses a repeat trialist with
   `BILLING_TRIAL_ALREADY_USED` (409). The refusal names the plan already
   trialled and the price that would be charged instead. To sell to that buyer at
-  full price, retry with `allowWithoutTrial: true` **and a new Idempotency-Key**
-  — checkout stores 4xx responses, so reusing the key answers
+  full price, retry with `allowWithoutTrial: true` **and a new Idempotency-Key**:
+  checkout stores 4xx responses, so reusing the key answers
   `IDEMPOTENCY_KEY_REUSED`.
 
   `billingConfig.trialPolicy` chooses the rule: `once_per_application` (the
-  default — trialling two plans is two free months of the product),
+  default, since trialling two plans is two free months of the product),
   `once_per_plan`, or `unlimited`, which never refuses. The subject is whatever
   the Application bills, so an org-billed Application counts the trial against
   the organization rather than handing a five-person team five trials.
 
-  **Who is affected.** Only an Application whose plans carry `trialDays`.
-  Writing one has been refused since 2.1.0 (`PLAN_TRIAL_UNAVAILABLE`) and only
-  became possible at all in 2.1.0, so the exposed population is plans written in
-  that window. They keep working; a repeat buyer now sees a 409 where they
-  previously got a second free trial. Set `trialPolicy: 'unlimited'` to restore
-  the old behaviour.
-
-  Free trials remain closed to new plans. This change removes the repeatability
-  half of why they were held; the other half, that a trial on a plan carrying
-  entitlements hands over credits or a licence key before the first payment, is
-  unchanged and still gates lifting the hold.
+  **Who is affected on upgrade.** Only an Application whose plans already carry
+  `trialDays`: writing one first became possible in 2.1.0 and was refused for
+  the rest of 2.1.x (`PLAN_TRIAL_UNAVAILABLE`), so the exposed population is
+  plans written in that window. They keep working; a repeat buyer now sees a
+  409 where they previously got a second free trial. Set
+  `trialPolicy: 'unlimited'` to restore the old behaviour.
 
 The entries below came from one contribution by @libworky
 (rekey-dev/rekey#39), written while running Rekey as the licensing layer for a
@@ -485,6 +723,46 @@ desktop product. Thank you.
 
 ### Fixed
 
+- **The end-user MCP billing tools refuse when billing is disabled.**
+  `get_subscription`, `get_credits` and `list_licenses` answered for an
+  Application with billing off, while the REST reads they mirror return
+  `403 BILLING_DISABLED`. They now return an MCP tool error carrying
+  `code: "BILLING_DISABLED"`, and every tool error that comes from the API's
+  own refusals carries its `code`.
+- **The panel names the API key behind a credit grant.** An
+  `app.credits_granted_by_api_key` event read "system, reason GRANT" on the
+  end-user Security and Overview tabs. The actor is now the key, by name and
+  prefix, and the Security tab, audit log and Activity show the amount.
+- **`GET /api/v1/billing/entitlements` no longer reads a paying user as entitled
+  to nothing after they switch into a team.** Without `?organizationId=` it
+  resolved the session's active organization in every Application, and in a
+  user-billed one an organization holds no subscription, so the answer was
+  `features: {}`. It now resolves the subject `include=entitlements`, the
+  single-feature check and `GET /users/me/licenses` use: the organization only
+  when `billingSubject: "org"` and the caller is still a member, otherwise the
+  end-user. An explicit `?organizationId=` is unchanged (member-only). What
+  this changes for a user-billed Application that reads an organization's
+  credit pool is under **Breaking changes**.
+- **Panel: minted secrets are always shown, and tables refresh after an
+  action.** On a production build the panel's post-action re-render could be
+  left suspended by React after its payload had arrived, so a webhook signing
+  secret was minted and never shown, a redirect never landed, and tables kept
+  their old rows until a reload. Forms now nudge that render until it commits,
+  and the full-page reloads some forms used to work around it are gone.
+  Every one-time secret (API keys, webhook signing secrets, invite links,
+  licence keys, API tokens, impersonation tokens) is returned by its action to
+  a "shown once" dialog with a copy button, instead of a cookie read by a
+  redirect; no secret travels in a cookie or a URL any more. The end-user edit
+  modal closes on save without the page blinking (rekey-dev/rekey#25). Activity and
+  Security tabs show which operator acted, by email. Light-mode primary
+  buttons use a darker teal with white text (5.47:1).
+- **Plan checkout readiness ignores inbound-only providers when a real one is
+  enabled.** With the external billing system enabled beside Stripe, every
+  plan read `checkout.ready: false` with a `PROVIDER_INBOUND_ONLY` blocker,
+  though buyers are only ever routed to Stripe. Readiness now judges the
+  providers a buyer can be routed to; the inbound-only blocker appears only
+  when nothing else can host a checkout.
+
 - **A role edit can no longer be undone by a read already in flight.** The
   organization-role catalog cache stored whatever a read returned, so a catalog
   read that started before an edit committed could overwrite the invalidation
@@ -583,15 +861,15 @@ desktop product. Thank you.
 - **A day-0 trialist is stored `TRIALING`, not `ACTIVE`.** `applyCheckoutCompleted`
   hard-wrote `ACTIVE` and never wrote `trialEndsAt`. Stripe's
   `customer.subscription.created` is not translated, and for a plain trial no
-  `customer.subscription.updated` arrives until conversion — so the row read
+  `customer.subscription.updated` arrives until conversion, so the row read
   `ACTIVE` for the whole trial. Reported MRR sums `plan.amount` over
   `status: 'ACTIVE'`, so a 30-day trial on a $99 plan added **$99 of MRR on day
   zero against zero cash**.
 
   Both statuses are entitling, so what a trialist can DO is unchanged. What
   changes is that unpaid revenue stops being reported as revenue, and `TRIALING`
-  — the status the Stripe mapper emits and the provider-switch refusal wording
-  branches on — becomes reachable for hosted checkout again.
+  (the status the Stripe mapper emits and the provider-switch refusal wording
+  branches on) becomes reachable for hosted checkout again.
 
   `trialEndsAt` is now written from the days actually sent to the provider,
   taken from the trial ledger added in this release.
@@ -606,7 +884,7 @@ desktop product. Thank you.
   The ceiling is reconciled from the write path, since that path never provisions
   and a provider-less subscription would otherwise never re-provision at all. It
   is computed as the **maximum** across every entitling subscription funding the
-  pool, so one owner's renewal cannot lower a ceiling negotiated on another's —
+  pool, so one owner's renewal cannot lower a ceiling negotiated on another's:
   two owners can each hold a subscription on the same plan for the same
   organization, and both fund one pooled licence.
 
@@ -621,7 +899,7 @@ desktop product. Thank you.
 - **A credit idempotency key is now scoped to the buyer.** `CreditLedger` was
   unique on `(applicationId, idempotencyKey)`, so a client-supplied key was
   treated as globally unique within the Application. But such a key names what
-  is being paid **for**, not who is paying — the schema's own documented example
+  is being paid **for**, not who is paying. The schema's own documented example
   is a lead id, and a lead identifies a lead, not a buyer.
 
   Two end users drawing down for the same lead sent the same key. The second
@@ -638,7 +916,7 @@ desktop product. Thank you.
 - **Buying the same one-off plan twice now delivers twice.** It charged twice
   and delivered once, permanently. The idempotency anchor for a provisioned
   purchase was the billing period, and a one-off plan (a credit pack, a
-  perpetual licence) never gets a `currentPeriodEnd` — so both branches of that
+  perpetual licence) never gets a `currentPeriodEnd`, so both branches of that
   expression resolved to the same constant forever. The checkout upsert reuses
   one `(applicationId, endUserId, planId)` row, so the subscription id did not
   change either: the second purchase computed a ledger key identical to the
@@ -654,7 +932,7 @@ desktop product. Thank you.
   This also changes a second case that was previously asserted as correct: a
   buyer who opens two checkout tabs for the same one-off plan and pays on both
   now receives both packs. It used to record both payments and grant one, so the
-  operator kept the second charge and nothing surfaced the duplicate — the
+  operator kept the second charge and nothing surfaced the duplicate, and the
   payment is attributed to a subscription, so it never reached the
   unapplied-payment queue either. Two charges are two purchases; a buyer who did
   not mean to pay twice is made whole by refunding one.
@@ -674,8 +952,8 @@ desktop product. Thank you.
   the signed-in user.
 
   Only affects deployments using org-beneficiary subscriptions where one end
-  user both holds a personal subscription and is the buyer of record for an org
-  — the ordinary shape of a team plan bought by its admin. The org-scoped
+  user both holds a personal subscription and is the buyer of record for an org:
+  the ordinary shape of a team plan bought by its admin. The org-scoped
   lookups are unchanged.
 
 - **Device security events are shown.** They were written with an application
@@ -760,8 +1038,8 @@ desktop product. Thank you.
   `PORTAL_TRUSTED_PROXY_HOPS` set, so the API's per-IP limits count visitors
   rather than the portal. Its API calls now time out after 10 seconds.
 - **Change password and the passkey step-up are credential routes.** They cap
-  at 10 per minute per account and address, and a wrong current password counts
-  toward the account lockout like a failed sign-in. End-user sign-up caps at 10
+  at 10 per minute per account and address, and a wrong password on either
+  counts toward the account lockout like a failed sign-in. End-user sign-up caps at 10
   per minute per Application and address, `send-verification` at 10.
 - **Rejected credentials are counted.** More than 100 401s a minute from one
   client IP (`RATE_LIMIT_AUTH_FAILURE_MAX`) refuses the address before any
@@ -769,8 +1047,6 @@ desktop product. Thank you.
   and end users seen from one IP share a 3000/min ceiling
   (`RATE_LIMIT_AUTHENTICATED_IP_MAX`). Both apply only to an address that is
   the client's, never to a shared proxy.
-- A wrong password on the passkey step-up counts toward the account lockout,
-  like a failed sign-in.
 - **`INTERNAL_CALLER_SECRET`** lets the panel and portal prove their calls
   when they reach the API through its public origin (the split Dokploy
   units): they send it as `X-Rekey-Caller-Secret`, and the API believes the
@@ -794,8 +1070,8 @@ desktop product. Thank you.
   clicks in a headless run never committed; with it off, none did.
 - **A save refreshes stale pages exactly once.** The refresh after a server
   action is tied to that action, fires even if the operator has already moved
-  to another tab, waits for the landing page to finish streaming, and is
-  retried (at most three times) when Next discards it. It could previously be
+  to another tab, waits until nothing on the landing page is still loading,
+  and is fired again when Next discards it, at most three times in all. It could previously be
   discarded, leaving a pre-save render on the next tab.
 - **A busy API is shown as busy.** A 429 or 503 now renders "The Rekey API is
   busy" with a countdown and a bounded automatic retry that honours
@@ -807,12 +1083,9 @@ desktop product. Thank you.
 
 ### Security
 
-- **Credential routes cap their own request body.** Sign-in, sign-up, magic
-  links, password reset, MFA, passkeys and the OAuth token endpoints now refuse
-  an oversized body with `413 PAYLOAD_TOO_LARGE` before it is read, instead of
-  parsing up to the global 1 MiB and rate-limiting afterwards. A sign-up whose
-  metadata is over the ceiling now answers 413 where it used to answer
-  `400 METADATA_TOO_LARGE`.
+- **Credential routes cap their own request body** before it is read or
+  rate-limited. See **Breaking changes** for the `413 PAYLOAD_TOO_LARGE` it
+  answers.
 
 - **The panel no longer forwards a client-chosen IP to the API.** With no
   proxy in front, a browser's own `X-Forwarded-For` became the address the
@@ -845,8 +1118,8 @@ desktop product. Thank you.
   quantity is its seat count; on a PERPETUAL or TIMED row no Rekey code reads it,
   so it was stored, reported sold, and delivered nowhere.
 
-  It **is** on the wire — `quantity` appears in the resolved entitlement array
-  and in `subscription.*` webhook payloads — so if you provision against it for a
+  It **is** on the wire (`quantity` appears in the resolved entitlement array
+  and in `subscription.*` webhook payloads), so if you provision against it for a
   non-SEATS licence, that write path is now closed and the plan's `licenseKind`
   needs to be SEATS. Removing such an override still works: `null` deletes.
 

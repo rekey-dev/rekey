@@ -31,6 +31,18 @@ import { createHash } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import { RekeyError } from './error.js';
 
+declare module 'fastify' {
+  interface FastifyRequest {
+    /**
+     * Set by an authentication hook that refused the request with something
+     * other than 401 (a frozen Application, an erased or unknown end-user), so
+     * the rejected-credential limiter counts it like a 401. Such a refusal
+     * never reaches the per-caller limiter either, since the hook threw first.
+     */
+    credentialRefused?: boolean;
+  }
+}
+
 /** Context `@fastify/rate-limit` hands `errorResponseBuilder`. */
 export interface RateLimitContext {
   statusCode: number;

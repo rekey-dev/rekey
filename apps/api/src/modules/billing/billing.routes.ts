@@ -8,13 +8,20 @@ import { requireBillingEnabled } from '../../middleware/billing-enabled.js';
 import { billingCredentialsService, type BillingProviderName } from './credentials.service.js';
 import { countryFromRequest, pickProvider } from './providers/index.js';
 import { getModule, providerNameSchema } from './providers/registry.js';
+import {
+  NULLABLE_SUBSCRIPTION_SCHEMA,
+  RESOLVED_ENTITLEMENTS_SCHEMA,
+  billingSubjectOrganization,
+  readCurrentSubscription,
+} from './session-reads.js';
 import { entitlementsService } from './entitlements.service.js';
+import { serializePlans } from '../plans/plan-dto.js';
 import { resolveTrialEligibility, trialSubjectKey } from './trial-eligibility.service.js';
 import { RekeyError } from '../../lib/error.js';
 import { prisma } from '../../lib/prisma.js';
 import { BillingConfigSchema } from '@rekey.dev/shared-types';
 import { organizationsService } from '../organizations/organizations.service.js';
-import { ok, okPage, errs, ref, type JsonSchema } from '../../lib/openapi.js';
+import { ok, okPage, errs, ref } from '../../lib/openapi.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
 
 /**
@@ -62,47 +69,6 @@ const USER_WRITE_GATE_ERRORS = {
   429: READ_GATE_ERRORS[429],
 } as const;
 
-/**
- * `GET /entitlements` and `GET /subscription` return
- * `{success, data: <...>}` for `entitlementsService.resolveForEndUser` and
- * the nullable current Subscription respectively, neither has a registered
- * component, so they're modelled inline here.
- */
-const ResolvedEntitlements: JsonSchema = {
-  type: 'object',
-  description:
-    "The union of the caller's benefits: feature flags, the live credit balance, and the raw " +
-    'resolved entitlement list.',
-  properties: {
-    features: {
-      type: 'object',
-      description: 'Feature flag key → typed value (boolean, number, or string).',
-      additionalProperties: { oneOf: [{ type: 'boolean' }, { type: 'number' }, { type: 'string' }] },
-    },
-    entitlements: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          kind: { type: 'string', description: 'e.g. FEATURE, CREDIT, LICENSE, USAGE.' },
-          key: { type: 'string' },
-          valueType: { type: 'string', nullable: true },
-          value: { type: 'string', nullable: true },
-          quantity: { type: 'integer', nullable: true },
-          licenseKind: { type: 'string', nullable: true },
-          rollover: { type: 'boolean' },
-        },
-        required: ['kind', 'key', 'rollover'],
-      },
-    },
-    creditBalance: { type: 'integer' },
-  },
-  required: ['features', 'entitlements', 'creditBalance'],
-};
-
-/** `data` for `GET /subscription`, the current Subscription, or `null`. */
-const NullableSubscription: JsonSchema = { nullable: true, allOf: [ref('Subscription')] };
-
 const CheckoutBody = z.object({
   planSlug: z.string().min(1).max(40),
   successUrl: z.string().url(),
@@ -122,6 +88,31 @@ const CheckoutBody = z.object({
 });
 
 const EntitlementsQuery = z.object({ organizationId: z.string().min(1).optional() });
+
+/** Entitlement keys are at most 80 characters (the plan entitlement PUT). */
+const FeatureParam = z.object({ key: z.string().min(1).max(80) });
+const FEATURE_PARAM_SCHEMA = {
+  type: 'object',
+  required: ['key'],
+  properties: { key: { type: 'string', minLength: 1, maxLength: 80, description: 'The feature key.' } },
+} as const;
+
+/** The secret-key routes that name an end-user: 404 unless it is in the key's Application. */
+async function namedEndUser(applicationId: string, endUserId: string): Promise<{ id: string }> {
+  const endUser = await prisma.endUser.findUnique({
+    where: { id: endUserId },
+    select: { id: true, applicationId: true },
+  });
+  if (!endUser || endUser.applicationId !== applicationId) {
+    throw new RekeyError({
+      statusCode: 404,
+      code: 'END_USER_NOT_FOUND',
+      message: `End-user "${endUserId}" not found in this Application.`,
+      fix: 'Confirm the id belongs to the Application this secret key represents.',
+    });
+  }
+  return endUser;
+}
 
 const TrialEligibilityQuery = z.object({
   organizationId: z.string().min(1).optional(),
@@ -169,11 +160,16 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         tags: ['Public · Billing'],
         summary: 'List active plans for the calling application',
         description:
-          'Returns the public plan catalogue. End-users typically reach this via your pricing page.',
+          'Returns the public plan catalogue. End-users typically reach this via your pricing page. ' +
+          'Each plan carries `checkout.ready`: false when a buyer sent to checkout for it would be ' +
+          'refused by a provider they could be routed to (no provider connected, the plan was ' +
+          'never registered with one, or it offers a trial a provider cannot express), so a ' +
+          'pricing page can hide it. Only the boolean: the operator plan list names the provider ' +
+          'and the repair. It describes checkout only; a free default plan applies without one.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
         querystring: { type: 'object', properties: { ...paginationJsonSchema } },
         response: {
-          200: okPage(ref('Plan'), 'A page of active plans for the calling application.'),
+          200: okPage(ref('PublicPlan'), 'A page of active plans for the calling application.'),
           ...errs({
             400: 'VALIDATION_ERROR — `limit` or `offset` is out of range.',
             ...READ_GATE_ERRORS,
@@ -183,10 +179,11 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
-      const [items, total] = await Promise.all([
+      const [plans, total] = await Promise.all([
         billingService.listActivePlans(req.application!, { take, skip }),
         billingService.countActivePlans(req.application!),
       ]);
+      const items = await serializePlans(req.application!.id, plans, 'public');
       return { success: true, data: paged(items, total, take, skip) };
     },
   );
@@ -201,12 +198,16 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Union of the benefits granted by the user\'s ACTIVE subscriptions: feature flags ' +
           '(key → typed value), the live credit balance, and the raw resolved entitlement list. ' +
-          'Default = the user view (own subs + subs of orgs they belong to). Pass ' +
-          '`?organizationId=` (member-only) for that org\'s view + shared pool. Requires the user JWT.',
+          'Default subject: in an org-billed Application (`billingSubject: "org"`) whose session ' +
+          'acts for an organization the caller still belongs to, that organization\'s view and ' +
+          'shared pool; otherwise the user view (own subs + subs of orgs they belong to), even ' +
+          'from a session switched into a team. The same subject `include=entitlements` and ' +
+          '/entitlements/features/:key resolve. Pass `?organizationId=` (member-only) for that ' +
+          'org\'s view + shared pool. Requires the user JWT.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         querystring: { type: 'object', properties: { organizationId: { type: 'string' } } },
         response: {
-          200: ok(ResolvedEntitlements, "The caller's resolved entitlements."),
+          200: ok(RESOLVED_ENTITLEMENTS_SCHEMA, "The caller's resolved entitlements."),
           ...errs({
             ...USER_READ_GATE_ERRORS,
             403:
@@ -228,16 +229,16 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           organizationId: explicit,
         });
         orgView = explicit;
-      } else if (req.activeOrganizationId) {
-        // No explicit org → default to the session's active org (`oid` claim),
-        // but only if still a member. A stale claim silently falls back to the
-        // personal view rather than 403-ing the whole call.
-        const member = await organizationsService.isMember({
+      } else {
+        // The subject every self read uses. The active organization only where
+        // organizations are what the Application bills: in a user-billed one an
+        // organization holds no subscription, so its view read as `features: {}`
+        // for a paying user who had switched into a team.
+        orgView = await billingSubjectOrganization(req.application!, {
           applicationId: req.application!.id,
           endUserId: req.endUser!.id,
-          organizationId: req.activeOrganizationId,
+          activeOrganizationId: req.activeOrganizationId,
         });
-        if (member) orgView = req.activeOrganizationId;
       }
       return {
         success: true,
@@ -276,7 +277,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           },
         },
         response: {
-          200: ok(ResolvedEntitlements, "The named end-user's resolved entitlements."),
+          200: ok(RESOLVED_ENTITLEMENTS_SCHEMA, "The named end-user's resolved entitlements."),
           ...errs({
             400: 'VALIDATION_ERROR — `endUserId` is missing.',
             401: 'API_KEY_MISSING / API_KEY_INVALID — the secret key is missing, unknown, revoked, or expired (a publishable key is refused here).',
@@ -294,18 +295,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
       const { endUserId, organizationId } = z
         .object({ endUserId: z.string().min(1), organizationId: z.string().min(1).optional() })
         .parse(req.query);
-      const endUser = await prisma.endUser.findUnique({
-        where: { id: endUserId },
-        select: { id: true, applicationId: true },
-      });
-      if (!endUser || endUser.applicationId !== req.application!.id) {
-        throw new RekeyError({
-          statusCode: 404,
-          code: 'END_USER_NOT_FOUND',
-          message: `End-user "${endUserId}" not found in this Application.`,
-          fix: 'Confirm the id belongs to the Application this secret key represents.',
-        });
-      }
+      const endUser = await namedEndUser(req.application!.id, endUserId);
       if (organizationId) {
         await organizationsService.requireMembership({
           application: req.application!,
@@ -318,6 +308,132 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         data: await entitlementsService.resolveForEndUser(
           req.application!.id,
           endUser.id,
+          organizationId ? { organizationId } : undefined,
+        ),
+      };
+    },
+  );
+
+  app.get(
+    '/entitlements/features/:key',
+    {
+      onRequest: [requirePublishableOrSecretKey, requireBillingEnabled, requireScope('billing:read'), requireUserSession],
+      schema: {
+        tags: ['Public · Billing'],
+        summary: 'Check one feature for the calling end-user',
+        description:
+          'Whether the caller holds one feature, and its value: `{ key, granted, value }`. The ' +
+          'value is what `features[key]` holds in GET /billing/entitlements, or null when nothing ' +
+          'grants the key; `granted` is `Boolean(value)`, the test `if (features[key])` makes, so ' +
+          'a false flag, a 0 limit and an unknown key are all not granted (compare `value` for a ' +
+          'numeric limit). An unknown key is not an error. The subject is the one ' +
+          '`include=entitlements` on /auth/me resolves: the active organization in an org-billed ' +
+          'Application while the caller still belongs to it, otherwise the end-user. Pass ' +
+          '`?organizationId=` (member-only) for that organization\'s view. Skips the credit ' +
+          'balance read the full entitlements call makes.',
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        params: FEATURE_PARAM_SCHEMA,
+        querystring: { type: 'object', properties: { organizationId: { type: 'string' } } },
+        response: {
+          200: ok(ref('FeatureCheck'), 'The feature\'s value for the caller.'),
+          ...errs({
+            400: 'BAD_REQUEST: `key` is empty or longer than 80 characters.',
+            ...USER_READ_GATE_ERRORS,
+            403:
+              USER_READ_GATE_ERRORS[403] +
+              ' ORGANIZATION_NOT_MEMBER: `organizationId` was passed but the caller is not a ' +
+              'member of that organization.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { key } = FeatureParam.parse(req.params);
+      const { organizationId: explicit } = EntitlementsQuery.parse(req.query);
+      let organizationId: string | undefined;
+      if (explicit) {
+        await organizationsService.requireMembership({
+          application: req.application!,
+          actorEndUserId: req.endUser!.id,
+          organizationId: explicit,
+        });
+        organizationId = explicit;
+      } else {
+        organizationId = await billingSubjectOrganization(req.application!, {
+          applicationId: req.application!.id,
+          endUserId: req.endUser!.id,
+          activeOrganizationId: req.activeOrganizationId,
+        });
+      }
+      return {
+        success: true,
+        data: await entitlementsService.resolveFeature(
+          req.application!.id,
+          req.endUser!.id,
+          key,
+          organizationId ? { organizationId } : undefined,
+        ),
+      };
+    },
+  );
+
+  app.get(
+    '/entitlements/for-user/features/:key',
+    {
+      // Secret key ONLY, for the same reason as /entitlements/for-user.
+      onRequest: [requireApiKey, requireBillingEnabled, requireScope('billing:read')],
+      schema: {
+        tags: ['Public · Billing'],
+        summary: "Check one feature for a named end-user (server-side)",
+        description:
+          'The single-feature check for the end-user named by `?endUserId=`, as ' +
+          '/entitlements/for-user is to /entitlements: the same `{ key, granted, value }` for ' +
+          'the subject for-user resolves (the end-user, or with `?organizationId=` that ' +
+          'organization, which the end-user must belong to).',
+        security: [{ apiKey: [] }],
+        params: FEATURE_PARAM_SCHEMA,
+        querystring: {
+          type: 'object',
+          required: ['endUserId'],
+          properties: {
+            endUserId: { type: 'string', minLength: 1 },
+            organizationId: { type: 'string' },
+          },
+        },
+        response: {
+          200: ok(ref('FeatureCheck'), "The feature's value for the named end-user."),
+          ...errs({
+            400: 'BAD_REQUEST: `endUserId` is missing, or `key` is empty or longer than 80 characters.',
+            401: 'API_KEY_MISSING / API_KEY_INVALID: the secret key is missing, unknown, revoked, or expired (a publishable key is refused here).',
+            403:
+              "IP_NOT_ALLOWED: caller IP outside the secret key's allowlist; or BILLING_DISABLED; or " +
+              'API_KEY_SCOPE_INSUFFICIENT: the key lacks `billing:read`; or ORGANIZATION_NOT_MEMBER: ' +
+              '`organizationId` was passed but the end-user is not a member of it.',
+            404: 'END_USER_NOT_FOUND: no end-user with that id in this Application.',
+            429: READ_GATE_ERRORS[429],
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { key } = FeatureParam.parse(req.params);
+      const { endUserId, organizationId } = z
+        .object({ endUserId: z.string().min(1), organizationId: z.string().min(1).optional() })
+        .parse(req.query);
+      const endUser = await namedEndUser(req.application!.id, endUserId);
+      if (organizationId) {
+        await organizationsService.requireMembership({
+          application: req.application!,
+          actorEndUserId: endUser.id,
+          organizationId,
+        });
+      }
+      return {
+        success: true,
+        data: await entitlementsService.resolveFeature(
+          req.application!.id,
+          endUser.id,
+          key,
           organizationId ? { organizationId } : undefined,
         ),
       };
@@ -354,7 +470,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           },
         },
         response: {
-          200: ok(NullableSubscription, 'The current subscription, or null when none exists.'),
+          200: ok(NULLABLE_SUBSCRIPTION_SCHEMA, 'The current subscription, or null when none exists.'),
           ...errs({
             400: 'VALIDATION_ERROR — `includeEnded` is not a boolean.',
             ...USER_READ_GATE_ERRORS,
@@ -376,22 +492,12 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           organizationId,
         });
       }
-      // PublicEndUser lacks passwordHash; the service signature wants EndUser.
-      // Cast is safe, billing only reads id/applicationId.
-      const sub = await billingService.getCurrentSubscription(
-        req.application!,
-        { ...req.endUser!, passwordHash: null } as never,
-        { ...(organizationId && { organizationId }), includeEnded },
-      );
       return {
         success: true,
-        // `providerCapabilities` is additive: it lets a portal ask what the
-        // provider holding this row can do (an inbound-only one cannot be
-        // cancelled here) instead of matching on the provider's name.
-        data: sub && {
-          ...sub,
-          providerCapabilities: (sub.provider !== null && getModule(sub.provider)?.capabilities) || null,
-        },
+        data: await readCurrentSubscription(req.application!, req.endUser!, {
+          ...(organizationId && { organizationId }),
+          includeEnded,
+        }),
       };
     },
   );

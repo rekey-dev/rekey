@@ -59,20 +59,22 @@ export function WorkspaceSwitcher({
   // Pending feedback: the switch is a full server round-trip, so without this
   // the picked item just sits inert until navigation lands.
   //
-  // The flag used to have no way back down: it was set, the form was
-  // `requestSubmit()`ed, and the only thing that ever cleared it was the
-  // component being remounted by the navigation the action ends in. A switch
-  // whose navigation does not commit therefore left the trigger reading
-  // "Switching…", disabled, until the operator reloaded the page by hand. So
-  // we call the action ourselves and clear the flag when its promise settles,
-  // the same bargain `ActionForm` makes for a form with a submit button in it.
-  // The action is started inside a transition so the router has one to
-  // navigate with, and the promise chain is left outside that transition on
-  // purpose: an action ending in `redirect()` puts the navigation into
-  // whichever transition dispatched it, and it is the navigation, not the
-  // write, that can hang.
+  // The switch goes through the hidden `ActionForm` below with
+  // `requestSubmit()`, so React dispatches it and `ActionForm` does what it
+  // does for every other form: keeps the redirect's navigation in React's own
+  // transition, and nudges the render until it commits (`lib/commit-nudge.ts`).
+  // This used to call the action by hand inside `startTransition`, which got
+  // neither. The flag is cleared in the wrapped action's `finally`, so a
+  // switch that fails does not leave the trigger reading "Switching…".
   const [switching, setSwitching] = React.useState(false);
-  const [, startTransition] = React.useTransition();
+
+  async function runSwitch(formData: FormData): Promise<void> {
+    try {
+      await switchAction(formData);
+    } finally {
+      setSwitching(false);
+    }
+  }
 
   function switchTo(tenantId: string): void {
     if (tenantId === activeTenantId || switching) return;
@@ -80,13 +82,8 @@ export function WorkspaceSwitcher({
     const input = tenantIdInputRef.current;
     if (!form || !input) return;
     input.value = tenantId;
-    const formData = new FormData(form);
     setSwitching(true);
-    startTransition(() => {
-      void Promise.resolve(switchAction(formData)).finally(() => {
-        setSwitching(false);
-      });
-    });
+    form.requestSubmit();
   }
 
   const active = memberships.find((m) => m.tenantId === activeTenantId);
@@ -95,9 +92,9 @@ export function WorkspaceSwitcher({
   return (
     <>
       {/* Hidden form drives the switch action. */}
-      <form ref={formRef} action={switchAction} className="hidden">
+      <ActionForm ref={formRef} action={runSwitch} className="hidden">
         <input ref={tenantIdInputRef} type="hidden" name="tenantId" defaultValue={activeTenantId} />
-      </form>
+      </ActionForm>
 
       <DropdownMenu>
         <DropdownMenuTrigger>

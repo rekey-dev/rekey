@@ -258,7 +258,7 @@ error code at the authorization endpoint:
 | `claims` request parameter | Not supported (`claims_parameter_supported: false`) |
 | `response_type` other than `code` | `unsupported_response_type` — no implicit or hybrid flow |
 | `code_challenge_method` other than `S256` | `invalid_request` — PKCE is mandatory |
-| `max_age` | Always satisfied; `auth_time` is minted seconds before redemption |
+| `max_age` | Not enforced by the AS. `auth_time` is the real sign-in: normally seconds before the code, but up to 10 minutes earlier when the MCP organization step is shown (a grant including `mcp:account` for a user in an organization). A relying party with a tighter `max_age` compares `auth_time` and rejects. |
 | Signed/encrypted UserInfo responses | Not supported — plain JSON only |
 
 Two deliberate departures from the letter of the spec:

@@ -5,16 +5,21 @@
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { usageService } from './usage.service.js';
-import { requireApiKey, requireScope } from '../../middleware/api-key-auth.js';
+import type { UsageMeter } from '@prisma/client';
+import { usageService, type UsageQuotaSubject } from './usage.service.js';
+import { requireApiKey, requirePublishableOrSecretKey, requireScope } from '../../middleware/api-key-auth.js';
+import { requireUserSession } from '../../middleware/user-session.js';
 import { requireBillingEnabled } from '../../middleware/billing-enabled.js';
+import { organizationsService } from '../organizations/organizations.service.js';
+import { resolveSelfBillingSubject } from '../billing/self-subject.js';
+import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { env } from '../../config/env.js';
 import { resolveGlobalBudgets } from '../../lib/rate-limit.js';
 import { positiveBoundedInt } from '../../lib/bounded-int.js';
 import { assertMetadataWithinLimit } from '../../lib/metadata-limit.js';
-import { ok, errs, ref } from '../../lib/openapi.js';
+import { ok, okPage, errs, ref } from '../../lib/openapi.js';
 
 /**
  * Auth/gate errors shared by every route in this file: `requireApiKey`
@@ -93,6 +98,52 @@ async function assertSubjectInApp(
       });
     }
   }
+}
+
+const meterParam = z.string().min(1).max(40).optional();
+
+const SelfRemainingQuery = z.object({
+  meter: meterParam,
+  organizationId: z.string().min(1).optional(),
+});
+
+const ForUserRemainingQuery = z
+  .object({
+    meter: meterParam,
+    endUserId: z.string().min(1).optional(),
+    organizationId: z.string().min(1).optional(),
+  })
+  .refine((q) => Boolean(q.endUserId) || Boolean(q.organizationId), {
+    message: 'Pass endUserId, organizationId, or both.',
+  });
+
+/** The `meter` querystring shared by both remaining reads. */
+const METER_QUERY_PROPERTY = {
+  type: 'string',
+  minLength: 1,
+  maxLength: 40,
+  description: 'One meter slug. Omit to report every meter on the Application.',
+} as const;
+
+const REMAINING_DESCRIPTION =
+  'Per meter: the included quota the subject\'s plans grant (`included`, null when there is ' +
+  'none, which means records are not capped), units recorded this period (`used`), what ' +
+  'is left (`remaining`), the credits charged per unit past the quota (`creditsPerUnit`, ' +
+  'null means a record past it is refused with 402 USAGE_QUOTA_EXCEEDED), and the period ' +
+  'window. The period is the calendar month in UTC, the window `POST /usage/record` ' +
+  'enforces in, and the numbers come from the same code, so a record of more than ' +
+  '`remaining` units is exactly the one that is refused (or charged).';
+
+function catalogueEntry(meter: UsageMeter): Record<string, unknown> {
+  return {
+    id: meter.id,
+    slug: meter.slug,
+    name: meter.name,
+    unit: meter.unit,
+    active: meter.active,
+    creditsPerUnit: meter.creditsPerUnit,
+    createdAt: meter.createdAt.toISOString(),
+  };
 }
 
 const AggregateQuery = z.object({
@@ -280,6 +331,165 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
           from: q.from ?? null,
           to: q.to ?? null,
         },
+      };
+    },
+  );
+
+  app.get(
+    '/remaining/for-user',
+    {
+      onRequest: requireScope('billing:read'),
+      schema: {
+        tags: ['Public · Usage'],
+        summary: "Read a named subject's included quota, usage and remaining units this period",
+        description:
+          'The same answer `GET /usage/remaining` gives a signed-in end-user, for a subject ' +
+          'you name instead: `?endUserId=` for a personal quota, `?organizationId=` for an ' +
+          'organization pool, or both to read the organization as that member (the end-user ' +
+          'must belong to it). For your own backend, which holds a secret key but not the ' +
+          'user\'s session. Accepts a narrow `billing:read` key.\n\n' +
+          REMAINING_DESCRIPTION,
+        security: [{ apiKey: [] }],
+        querystring: {
+          type: 'object',
+          properties: {
+            meter: METER_QUERY_PROPERTY,
+            endUserId: { type: 'string', minLength: 1 },
+            organizationId: { type: 'string', minLength: 1 },
+          },
+        },
+        response: {
+          200: ok(ref('UsageRemaining'), "The subject's standing per meter this period."),
+          ...errs({
+            400: 'VALIDATION_ERROR: pass `endUserId`, `organizationId`, or both.',
+            ...READ_GATE_ERRORS,
+            403:
+              READ_GATE_ERRORS[403] +
+              ' Or ORGANIZATION_NOT_MEMBER: both ids were passed and the end-user is not a ' +
+              'member of the organization.',
+            404:
+              'USAGE_METER_NOT_FOUND: `meter` names no meter in this application; or ' +
+              'ORGANIZATION_NOT_FOUND / END_USER_NOT_FOUND: an id names no subject in this ' +
+              'application.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const q = ForUserRemainingQuery.parse(req.query);
+      const application = req.application!;
+      if (q.endUserId) await assertSubjectInApp(application.id, { endUserId: q.endUserId });
+      if (q.organizationId) await assertSubjectInApp(application.id, { organizationId: q.organizationId });
+      if (q.endUserId && q.organizationId) {
+        await organizationsService.requireMembership({
+          application,
+          actorEndUserId: q.endUserId,
+          organizationId: q.organizationId,
+        });
+      }
+      const subject: UsageQuotaSubject = q.organizationId
+        ? { organizationId: q.organizationId }
+        : { endUserId: q.endUserId! };
+      return {
+        success: true,
+        data: await usageService.remaining({ applicationId: application.id, subject, meterSlug: q.meter }),
+      };
+    },
+  );
+
+  app.get(
+    '/meters',
+    {
+      onRequest: requireScope('billing:read'),
+      schema: {
+        tags: ['Public · Usage'],
+        summary: 'List the usage meters on this Application',
+        description:
+          'The meter catalogue, oldest first: the slug `POST /usage/record` takes as ' +
+          '`meterSlug`, what a unit counts, whether the meter accepts records, and its ' +
+          'fallback price in credits. Lets a backend learn the slugs instead of hard-coding ' +
+          'them. Accepts a narrow `billing:read` key. Secret key only.',
+        security: [{ apiKey: [] }],
+        querystring: { type: 'object', properties: { ...paginationJsonSchema } },
+        response: {
+          200: okPage(ref('UsageMeterCatalogueEntry'), 'A page of usage meters.'),
+          ...errs({
+            400: 'VALIDATION_ERROR: `limit` or `offset` is out of range.',
+            ...READ_GATE_ERRORS,
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
+      const applicationId = req.application!.id;
+      const [meters, total] = await Promise.all([
+        usageService.listMeters(applicationId, { take, skip }),
+        usageService.countMeters(applicationId),
+      ]);
+      return { success: true, data: paged(meters.map(catalogueEntry), total, take, skip) };
+    },
+  );
+}
+
+/**
+ * The signed-in end-user's own usage reads. A separate plugin because the one
+ * above is secret-key only for the whole plugin (`requireApiKey` as a plugin
+ * hook), and this is for a browser holding the publishable key and the user's
+ * token, as `GET /billing/entitlements` is.
+ */
+export async function usageSelfRoutes(app: FastifyInstance): Promise<void> {
+  app.get(
+    '/remaining',
+    {
+      onRequest: [requirePublishableOrSecretKey, requireBillingEnabled, requireScope('billing:read'), requireUserSession],
+      schema: {
+        tags: ['Public · Usage'],
+        summary: "Read the signed-in end-user's included quota, usage and remaining units this period",
+        description:
+          'Whose quota: the token holder\'s personal one; in an Application that bills ' +
+          'organizations (`billingSubject: "org"`) the session\'s active organization\'s ' +
+          'while the caller is still a member; or, with `?organizationId=` (member-only), ' +
+          'that organization\'s. Requires the user token.\n\n' +
+          REMAINING_DESCRIPTION,
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        querystring: {
+          type: 'object',
+          properties: {
+            meter: METER_QUERY_PROPERTY,
+            organizationId: { type: 'string', minLength: 1 },
+          },
+        },
+        response: {
+          200: ok(ref('UsageRemaining'), "The caller's standing per meter this period."),
+          ...errs({
+            400: 'VALIDATION_ERROR: the querystring failed schema validation.',
+            401:
+              'API_KEY_MISSING / API_KEY_INVALID / PUBLISHABLE_KEY_INVALID: the Application key ' +
+              'is missing or unknown; or USER_TOKEN_MISSING / USER_TOKEN_INVALID / ' +
+              'USER_TOKEN_WRONG_APPLICATION / IMPERSONATION_SESSION_ENDED: the user token is ' +
+              'absent, invalid, for another Application, or from an ended impersonation.',
+            403:
+              "IP_NOT_ALLOWED / ORIGIN_NOT_ALLOWED: outside the key's allowlist; or " +
+              'BILLING_DISABLED; or API_KEY_SCOPE_INSUFFICIENT: a secret key lacks `billing:read`; ' +
+              'or ORGANIZATION_NOT_MEMBER: `organizationId` names an organization the caller is ' +
+              'not a member of.',
+            404: 'USAGE_METER_NOT_FOUND: `meter` names no meter in this application.',
+            429: 'RATE_LIMITED: too many requests. Honour the Retry-After header.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const q = SelfRemainingQuery.parse(req.query);
+      const subject = await resolveSelfBillingSubject(req, q.organizationId);
+      return {
+        success: true,
+        data: await usageService.remaining({
+          applicationId: req.application!.id,
+          subject,
+          meterSlug: q.meter,
+        }),
       };
     },
   );

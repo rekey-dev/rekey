@@ -1,31 +1,8 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { cookies } from 'next/headers';
+import { revalidatePath } from 'next/cache';
 import { errorQuery, readErrorFlash, api, PanelApiError, type ApiKeyRow, getApplication } from '@/lib/api';
 
-// One-time reveal of a freshly minted secret key. Carried in a short-lived,
-// httpOnly, path-scoped cookie instead of the URL query, a raw key in the URL
-// leaks into browser history, the referer header, and server access logs.
-const REVEAL_COOKIE = 'rekey_reveal_key';
-
-/**
- * Whether the last mint on this page refused, and why.
- *
- * The reveal is a one-time credential, so the render that carries it has to
- * happen. It used to depend on the action's `redirect()` being committed by
- * the client, and on a production build that is not something this app can
- * rely on: rekey issue #569 has redirects that are answered, rendered and then
- * dropped, and a dropped one here costs the operator a live key they were
- * never shown and cannot use. The form below reloads the page instead, which
- * is the one delivery measured to always land, and the reveal is waiting in
- * `REVEAL_COOKIE` when it does.
- *
- * That reload arrives with no query, so the refusal has to travel the same
- * way. Same path scope and a short TTL, and written on the success path too,
- * so a retry that works cannot leave the previous failure on screen.
- */
-const MINT_FLASH_COOKIE = 'rekey_mint_flash';
-const MINT_FLASH_MAX_AGE = 20;
 import { CopyButton } from '@/components/CopyButton';
 import { ApiErrorText } from '@/components/api-error';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
@@ -35,10 +12,13 @@ import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { EmptyState } from '@/components/EmptyState';
 import { ActionForm } from '@/components/ActionForm';
+import { RevealActionForm, type RevealResult } from '@/components/RevealActionForm';
+import { WhileUrlHas } from '@/components/WhileUrlHas';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate, formatDateTime } from '@/lib/date';
 import { keyPrefixFor } from '@/components/EnvironmentBadge';
-import { cookieSecure } from '@/lib/cookie-secure';
+import { isElevatedApiKeyScope, type ElevatedApiKeyScope } from '@rekey.dev/shared-types';
+import { keyScopesFromForm } from '@/lib/api-key-scopes';
 
 /**
  * Scopes an API key can carry, mirroring `SCOPE_IMPLICATIONS` in the API's
@@ -83,6 +63,21 @@ const KEY_SCOPES = [
   },
 ] as const;
 
+/**
+ * Scopes "Full access" (`*`) does NOT include, mirroring
+ * `ELEVATED_API_KEY_SCOPES` in shared-types. A key holds one only if it is
+ * ticked here, which is the point: `*` is on nearly every key already minted,
+ * so an authority that mints value must be something an operator adds to one
+ * key on purpose. They combine with either "Full access" or a narrow list.
+ */
+const ELEVATED_KEY_SCOPES = [
+  {
+    value: 'credits:grant',
+    label: 'credits:grant',
+    help: 'Grant credits to end-users and organizations with POST /credits/grant (up to 1,000,000 per call, audited per key). Not part of Full access.',
+  },
+] as const satisfies ReadonlyArray<{ value: ElevatedApiKeyScope; label: string; help: string }>;
+
 const ERR: Record<string, string> = {
   missing: 'A key name is required.',
   EXPIRY_INVALID: 'That expiry date could not be read. Use the date picker.',
@@ -101,8 +96,9 @@ interface CreateKeyResp {
   warning: string;
 }
 
-// These actions deliberately redirect without revalidatePath, pairing the two
-// is what blanked this page after a key was minted. Reasoning in `(authed)/layout.tsx`.
+// No action here pairs revalidatePath with redirect: that pairing is what
+// blanked this page after a key was minted (reasoning in `(authed)/layout.tsx`).
+// A refusal redirects; a successful mint revalidates and returns the key.
 
 async function rotatePublicKey(applicationId: string, force: boolean): Promise<void> {
   'use server';
@@ -123,11 +119,10 @@ async function rotatePublicKey(applicationId: string, force: boolean): Promise<v
   redirect(`/applications/${applicationId}/api-keys?e=pubkey_rotated`);
 }
 
-async function createKey(applicationId: string, formData: FormData): Promise<void> {
+async function createKey(applicationId: string, formData: FormData): Promise<RevealResult> {
   'use server';
   const name = String(formData.get('name') ?? '').trim();
   if (!name) {
-    await setMintFlash(applicationId, 'missing');
     redirect(`/applications/${applicationId}/api-keys?error=missing&newKey=1`);
   }
 
@@ -136,9 +131,14 @@ async function createKey(applicationId: string, formData: FormData): Promise<voi
   // silently mints a full-access key. Only send the list when the operator
   // narrowed it; otherwise omit the field entirely so the default is explicit
   // rather than an accident of an empty checkbox group.
-  const picked = formData.getAll('scopes').map(String).filter((s) => KEY_SCOPES.some((k) => k.value === s));
-  const fullAccess = String(formData.get('fullAccess') ?? '') === '1';
-  const scopes = fullAccess || picked.length === 0 ? undefined : picked;
+  // Elevated scopes ride on top of either choice (Full access does not include
+  // them), or alone with "Nothing else". See `keyScopesFromForm`.
+  const scopes = keyScopesFromForm({
+    fullAccess: String(formData.get('fullAccess') ?? '') === '1',
+    picked: formData.getAll('scopes').map(String).filter((s) => KEY_SCOPES.some((k) => k.value === s)),
+    elevated: formData.getAll('elevatedScopes').map(String),
+    elevatedOnly: String(formData.get('elevatedOnly') ?? '') === '1',
+  });
 
   // Expiry. `<input type="date">` gives a bare yyyy-mm-dd; the API wants a
   // strict ISO-8601 datetime (Zod `.datetime()` rejects an offset, so it must
@@ -150,14 +150,14 @@ async function createKey(applicationId: string, formData: FormData): Promise<voi
   if (expiresOn !== '') {
     const parsed = new Date(`${expiresOn}T23:59:59.999Z`);
     if (Number.isNaN(parsed.getTime())) {
-      await setMintFlash(applicationId, 'EXPIRY_INVALID');
       redirect(`/applications/${applicationId}/api-keys?error=EXPIRY_INVALID&newKey=1`);
     }
     expiresAt = parsed.toISOString();
   }
 
+  let result: CreateKeyResp;
   try {
-    const result = await api<CreateKeyResp>({
+    result = await api<CreateKeyResp>({
       method: 'POST',
       path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/api-keys`,
       // The prefix follows the application's environment; it is not a choice here.
@@ -167,52 +167,27 @@ async function createKey(applicationId: string, formData: FormData): Promise<voi
         ...(expiresAt !== undefined ? { expiresAt } : {}),
       },
     });
-    // Hand the raw key to the next render via a short-lived httpOnly cookie,
-    // never the URL. Path-scoped so it's only sent to this route; ~2 min TTL.
-    // The key's id rides along so the banner can tell whether the credential it
-    // is holding is still live, see the render below.
-    const jar = await cookies();
-    jar.set(REVEAL_COOKIE, `${result.apiKey.id}:${result.rawKey}`, {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: await cookieSecure(),
-      path: `/applications/${applicationId}/api-keys`,
-      maxAge: 120,
-    });
-    await setMintFlash(applicationId, undefined);
-    redirect(`/applications/${applicationId}/api-keys?e=apikey_created`);
   } catch (err) {
     if (err instanceof PanelApiError) {
-      await setMintFlash(applicationId, err.code);
       redirect(`/applications/${applicationId}/api-keys?${await errorQuery(err, { newKey: '1' })}`);
     }
     throw err;
   }
-}
-
-/** The refusal code the last mint left behind, or nothing. */
-function readMintFlash(raw: string | undefined): string | undefined {
-  if (!raw) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null) return undefined;
-    const { error } = parsed as Record<string, unknown>;
-    return typeof error === 'string' && error !== '' ? error : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** Park the mint's outcome where the reload that follows it can read it. */
-async function setMintFlash(applicationId: string, error: string | undefined): Promise<void> {
-  const jar = await cookies();
-  jar.set(MINT_FLASH_COOKIE, error === undefined ? '' : JSON.stringify({ error }), {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: await cookieSecure(),
-    path: `/applications/${applicationId}/api-keys`,
-    maxAge: error === undefined ? 0 : MINT_FLASH_MAX_AGE,
-  });
+  // The key goes back in this action's response, to the dialog that
+  // `RevealActionForm` opens. Never a URL, never a cookie. Revalidating (and
+  // not redirecting) puts the new row in the table behind the dialog.
+  revalidatePath(`/applications/${applicationId}/api-keys`);
+  return {
+    secret: {
+      title: 'Your new API key',
+      value: result.rawKey,
+      flag: 'apikey_created',
+      notes: [
+        `"${result.apiKey.name}" is in the list below. Only a hash of the key is stored.`,
+        'Pass it as Authorization: Bearer <key> from your server-side code, for example via @rekey.dev/node.',
+      ],
+    },
+  };
 }
 
 async function revokeKey(applicationId: string, keyId: string): Promise<void> {
@@ -233,27 +208,7 @@ export default async function ApiKeysPage({
 }): Promise<React.JSX.Element> {
   const { id } = await params;
   const sp = await searchParams;
-  // Read the one-time key from the httpOnly cookie set by createKey (auto-expires
-  // ~2 min later, so a refresh stops showing it without us mutating cookies here).
-  // Stored as `<keyId>:<rawKey>`. Splitting on the first colon is safe because
-  // neither half can contain one: ids are cuids and the key body is base64url
-  // (apps/api `lib/keys.ts`, `prisma/schema.prisma`). Those live in a different
-  // deployable, so a future key-format change is worth checking against this.
-  const revealCookie = (await cookies()).get(REVEAL_COOKIE)?.value;
-  const sep = revealCookie?.indexOf(':') ?? -1;
-  // A cookie with no colon was written by the previous deploy, which stored the
-  // raw key alone. During a rolling deploy the POST can be served by an old pod
-  // and the redirected GET by a new one, and treating that as unreadable would
-  // hide the secret entirely, the operator is billed a key against the cap and
-  // has to revoke and re-mint. Showing it, at the cost of the stale-banner bug
-  // for the remaining two minutes, is the better end of that trade.
-  const legacyReveal = revealCookie !== undefined && sep === -1;
-  const revealedId = sep > 0 ? revealCookie!.slice(0, sep) : undefined;
-  const revealedKey = legacyReveal ? revealCookie : sep > 0 ? revealCookie!.slice(sep + 1) : undefined;
-  // The URL first, then the cookie the action left behind: after the mint
-  // form's reload there is no query to read.
-  const mintFlash = readMintFlash((await cookies()).get(MINT_FLASH_COOKIE)?.value);
-  const error = typeof sp.error === 'string' ? sp.error : mintFlash;
+  const error = typeof sp.error === 'string' ? sp.error : undefined;
   // The API's own message and fix for this failure, left by `errorQuery`
   // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
   // written by whoever composes the link, and this text renders inside the
@@ -263,12 +218,6 @@ export default async function ApiKeysPage({
   // (createKey failures). Errors without it, e.g. rotatePublicKey, would
   // otherwise render invisibly inside the closed modal, so show those at page
   // level instead (never both).
-  //
-  // A refusal that arrived on the cookie deliberately does NOT reopen the
-  // modal: only the URL flag can, because `Modal` decides from the query, and
-  // an error rendered inside a dialog nothing opens is an error nobody reads.
-  // The reload has already cost the operator the form's contents, so the
-  // honest thing is to say what was refused where they can see it.
   const mintModalOpen = sp.newKey === '1';
   // Earliest expiry the API will accept is "later than now"; make the picker
   // refuse a past date up front rather than round-tripping API_KEY_EXPIRY_IN_PAST.
@@ -289,9 +238,11 @@ export default async function ApiKeysPage({
   return (
     <div className="space-y-6">
       {error && !mintModalOpen && (
-        <p role="alert" className="rounded-lg border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
-        </p>
+        <WhileUrlHas param="error">
+          <p role="alert" className="rounded-lg border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
+          </p>
+        </WhileUrlHas>
       )}
       <SectionHeader
         title="Publishable key"
@@ -341,31 +292,6 @@ export default async function ApiKeysPage({
         )}
       </div>
 
-      {/*
-        Show the freshly minted key only while it is still a working credential.
-        The cookie outlives a revocation by up to two minutes, and without this
-        check the banner kept offering "Copy key" for a key that had just been
-        deleted, above a table reading "No API keys yet". Checking against the
-        list the server just returned also covers revocation from another tab
-        or another operator, which no amount of cookie-clearing here would.
-      */}
-      {revealedKey && (legacyReveal || keys.some((k) => k.id === revealedId)) && (
-        <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-500/60 dark:bg-amber-950/60 space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-              New API key (shown once, copy now)
-            </p>
-            <CopyButton value={revealedKey} label="Copy key" />
-          </div>
-          <code className="block break-all rounded-md bg-[var(--color-surface)] px-3 py-2 text-xs font-mono">
-            {revealedKey}
-          </code>
-          <p className="text-xs text-amber-800 dark:text-amber-300">
-            Pass as <code>Authorization: Bearer &lt;key&gt;</code> from your server-side code via <code>@rekey.dev/node</code>.
-          </p>
-        </div>
-      )}
-
       {/* Promotion deliberately does not touch existing keys: revoking them
           would break the integration at the exact moment the operator goes
           live. The cost is a cosmetic mismatch, production application, keys
@@ -400,11 +326,13 @@ export default async function ApiKeysPage({
             description={`Server-side key for your backend + SDKs (${keyPrefixFor(app.environment)}…, from this application's environment). Shown once at creation.`}
             trigger="+ New API key"
           >
-            <ActionForm action={createKey.bind(null, id)} className="space-y-3" reloadOnSettle>
+            <RevealActionForm action={createKey.bind(null, id)} className="space-y-3">
               {error && mintModalOpen && (
-                <p role="alert" className="rounded-lg border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-                  <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
-                </p>
+                <WhileUrlHas param="error">
+                  <p role="alert" className="rounded-lg border border-red-300 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+                    <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
+                  </p>
+                </WhileUrlHas>
               )}
               <label className="block space-y-1">
                 <span className="text-xs font-medium">Name</span>
@@ -423,8 +351,8 @@ export default async function ApiKeysPage({
                   <span>
                     Full access
                     <span className="block text-xs text-[var(--color-muted-fg)]">
-                      Everything this application exposes. Fine for a first key; narrow it for a
-                      key that only does one job.
+                      Every standard scope. Fine for a first key; narrow it for a key that only
+                      does one job. Elevated scopes, below, are never included.
                     </span>
                   </span>
                 </label>
@@ -448,6 +376,34 @@ export default async function ApiKeysPage({
                     every box clear also mints a full-access key.
                   </p>
                 </details>
+                <div className="rounded-md border border-[var(--color-border)] px-3 py-2">
+                  <p className="text-xs font-medium">Elevated scopes</p>
+                  <p className="mt-0.5 text-xs text-[var(--color-muted-fg)]">
+                    Never part of Full access. Tick one to add it to this key, whichever of the two
+                    choices above you made.
+                  </p>
+                  <div className="mt-2 space-y-1.5">
+                    {ELEVATED_KEY_SCOPES.map((s) => (
+                      <label key={s.value} className="flex items-start gap-2 text-xs">
+                        <input type="checkbox" name="elevatedScopes" value={s.value} className="mt-0.5" />
+                        <span>
+                          <span className="font-mono">{s.label}</span>
+                          <span className="block text-[var(--color-muted-fg)]">{s.help}</span>
+                        </span>
+                      </label>
+                    ))}
+                    <label className="flex items-start gap-2 text-xs">
+                      <input type="checkbox" name="elevatedOnly" value="1" className="mt-0.5" />
+                      <span>
+                        Nothing else
+                        <span className="block text-[var(--color-muted-fg)]">
+                          The key gets only the elevated scopes ticked here, ignoring the choice
+                          above. Use it for the one service that grants credits.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+                </div>
               </fieldset>
 
               <label className="block space-y-1">
@@ -468,7 +424,7 @@ export default async function ApiKeysPage({
               <p className="text-xs text-[var(--color-muted-fg)]">
                 You'll see the raw key once after creation, so copy it then. Only the SHA-256 hash is stored.
               </p>
-            </ActionForm>
+            </RevealActionForm>
           </Modal>
         }
       />
@@ -476,11 +432,12 @@ export default async function ApiKeysPage({
       {keys.length === 0 ? (
         <EmptyState title="No active keys yet" description="Mint your first one with the button above." />
       ) : (
-        <Table minWidth="min-w-[44rem]">
+        <Table minWidth="min-w-[52rem]">
           <THead>
             <TR>
               <TH>Name</TH>
               <TH>Prefix</TH>
+              <TH>Scopes</TH>
               <TH>Last used</TH>
               <TH>Expires</TH>
               <TH align="right">
@@ -493,6 +450,28 @@ export default async function ApiKeysPage({
               <TR key={k.id} hover>
                 <TD>{k.name}</TD>
                 <TD mono>{k.keyPrefix}…</TD>
+                <TD className="text-xs">
+                  {/* Elevated scopes are flagged: they are the ones Full access
+                      does not include, so this is how an operator finds the
+                      key that can mint credits. */}
+                  <span className="flex flex-wrap gap-1">
+                    {k.scopes.map((s) =>
+                      isElevatedApiKeyScope(s) ? (
+                        <span
+                          key={s}
+                          title="Elevated scope: not part of Full access"
+                          className="rounded border border-amber-500/25 bg-amber-500/10 px-1 font-mono text-amber-700 dark:text-amber-400"
+                        >
+                          {s} (elevated)
+                        </span>
+                      ) : (
+                        <span key={s} className="font-mono text-[var(--color-muted-fg)]">
+                          {s === '*' ? 'full access' : s}
+                        </span>
+                      ),
+                    )}
+                  </span>
+                </TD>
                 <TD muted className="text-xs">
                   {k.lastUsedAt ? formatDateTime(k.lastUsedAt) : 'never'}
                 </TD>

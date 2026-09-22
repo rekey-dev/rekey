@@ -2,22 +2,22 @@ import { KNOWN_WEBHOOK_EVENTS } from '@rekey.dev/shared-types';
 import * as React from 'react';
 import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
-import { cookies } from 'next/headers';
+import { revalidatePath } from 'next/cache';
 import { errorQuery, readErrorFlash, api, PanelApiError } from '@/lib/api';
 import type { Page } from '@/lib/paginate';
 import { Modal } from '@/components/Modal';
 import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { ActionForm } from '@/components/ActionForm';
+import { RevealActionForm, type RevealResult } from '@/components/RevealActionForm';
+import { WhileUrlHas } from '@/components/WhileUrlHas';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
-import { CopyButton } from '@/components/CopyButton';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
-import { cookieSecure } from '@/lib/cookie-secure';
 
 interface EndpointRow {
   id: string;
@@ -168,11 +168,11 @@ const ERR: Record<string, string> = {
   APPLICATION_NOT_FOUND: 'Application not found.',
 };
 
-// These actions deliberately redirect without revalidatePath, pairing the two
-// is what blanked this page after an endpoint was added. Reasoning in
-// `(authed)/layout.tsx`.
+// No action here pairs revalidatePath with redirect: that pairing is what
+// blanked this page after an endpoint was added (reasoning in
+// `(authed)/layout.tsx`). Creating one revalidates and returns its secret.
 
-async function createEndpoint(applicationId: string, formData: FormData): Promise<void> {
+async function createEndpoint(applicationId: string, formData: FormData): Promise<RevealResult> {
   'use server';
   const url = String(formData.get('url') ?? '').trim();
   const events = formData.getAll('events').map(String).filter(Boolean);
@@ -200,18 +200,20 @@ async function createEndpoint(applicationId: string, formData: FormData): Promis
     }
     throw err;
   }
-  // One-time signing secret via a short-lived httpOnly cookie, not the URL.
-  const jar = await cookies();
-  jar.set('rekey_reveal_whsec', secret, {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: await cookieSecure(),
-    path: `/applications/${applicationId}/webhooks`,
-    maxAge: 120,
-  });
-  redirect(
-    `/applications/${applicationId}/webhooks?created=1&e=webhook_created`,
-  );
+  // The signing secret goes back in this action's response, to the dialog
+  // `RevealActionForm` opens. Never a URL, never a cookie.
+  revalidatePath(`/applications/${applicationId}/webhooks`);
+  return {
+    secret: {
+      title: 'Webhook signing secret',
+      value: secret,
+      flag: 'webhook_created',
+      notes: [
+        `Deliveries to ${url} are signed with it. Use it to verify the X-Rekey-Signature header in your handler.`,
+        'Lost it? Rotate the secret from the endpoint detail page.',
+      ],
+    },
+  };
 }
 
 async function deleteEndpoint(applicationId: string, endpointId: string): Promise<void> {
@@ -242,8 +244,6 @@ export default async function WebhooksPage({
 }): Promise<React.JSX.Element> {
   const { id } = await params;
   const sp = await searchParams;
-  const created = typeof sp.created === 'string';
-  const secret = (await cookies()).get('rekey_reveal_whsec')?.value ?? null;
   const removed = typeof sp.removed === 'string';
   const toggled = typeof sp.toggled === 'string';
   const error = typeof sp.error === 'string' ? sp.error : undefined;
@@ -268,8 +268,6 @@ export default async function WebhooksPage({
   const healthById = new Map(endpoints.map((e, i) => [e.id, healths[i] ?? null]));
   const failingCount = healths.filter((h) => h !== null && h.failed > 0).length;
 
-  const createBound = createEndpoint.bind(null, id);
-
   return (
     <div className="space-y-5">
       <SectionHeader
@@ -288,9 +286,11 @@ export default async function WebhooksPage({
           description="Rekey POSTs user lifecycle events to the URL with an HMAC-signed body."
           modalKey="newWebhook"
         >
-          <ActionForm action={createBound} className="space-y-3">
+          <RevealActionForm action={createEndpoint.bind(null, id)} clearParams={['url']} className="space-y-3">
             {error && addModalOpen && (
-              <Banner tone="error"><ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." /></Banner>
+              <WhileUrlHas param="error">
+                <Banner tone="error"><ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." /></Banner>
+              </WhileUrlHas>
             )}
             <label className="block space-y-1.5">
               <span className="text-sm font-medium">URL</span>
@@ -327,7 +327,7 @@ export default async function WebhooksPage({
               </details>
             </fieldset>
             <SubmitButton pendingLabel="Creating endpoint…">Create endpoint</SubmitButton>
-          </ActionForm>
+          </RevealActionForm>
         </Modal>
         }
       />
@@ -346,24 +346,6 @@ export default async function WebhooksPage({
         <code className="font-mono">X-Rekey-Signature</code> header in your handler.
       </p>
 
-      {created && secret && (
-        <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-700 dark:bg-amber-950/60 space-y-2">
-          <div className="text-sm font-medium text-amber-900 dark:text-amber-200">
-            Signing secret, shown once
-          </div>
-          <p className="text-xs text-amber-800 dark:text-amber-300">
-            Store this now. You'll use it to verify the{' '}
-            <code className="font-mono">X-Rekey-Signature</code> header on every inbound
-            delivery. Rekey never displays it again. Rotate from the endpoint detail page if lost.
-          </p>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 break-all rounded-md border border-amber-200 bg-[var(--color-surface)] px-3 py-2 font-mono text-xs dark:border-amber-800">
-              {secret}
-            </code>
-            <CopyButton value={secret} label="Copy" />
-          </div>
-        </div>
-      )}
       {(removed || toggled) && (
         <SavedBanner
           params={['removed', 'toggled']}
@@ -371,9 +353,11 @@ export default async function WebhooksPage({
         />
       )}
       {error && !addModalOpen && (
-        <Banner tone="error">
-          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
-        </Banner>
+        <WhileUrlHas param="error">
+          <Banner tone="error">
+            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
+          </Banner>
+        </WhileUrlHas>
       )}
 
       {failingCount > 0 && (

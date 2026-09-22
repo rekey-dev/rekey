@@ -23,6 +23,8 @@
 import type {
   ApplicationDto,
   AuthResultDto,
+  MeInclude,
+  MeIncludedFor,
   ListPage,
   Paged,
   JwkRsaPublic,
@@ -34,7 +36,10 @@ import type {
   CreateCheckoutRequest,
   CreditBalanceDto,
   CreditLedgerEntryDto,
+  CurrentUserDto,
   EndUserDto,
+  EndUserLicenseDto,
+  FeatureCheckDto,
   ForgotPasswordRequest,
   ForgotPasswordResultDto,
   LicenseVerifyResultDto,
@@ -54,7 +59,7 @@ import type {
   OrganizationRoleDefDto,
   OrganizationRole,
   OrganizationBaseRole,
-  PlanDto,
+  PublicPlanDto,
   ProvidersListDto,
   RekeyErrorShape,
   ResetPasswordRequest,
@@ -64,7 +69,11 @@ import type {
   SignUpRequest,
   SubscriptionDto,
   UsageAggregateDto,
+  UsageMeterCatalogueEntryDto,
   UsageRecordDto,
+  UsageRemainingDto,
+  KeyGrantCreditsRequest,
+  SelfCreditLedgerEntryDto,
   ValidateCouponRequest,
   ValidateCouponResultDto,
 } from '@rekey.dev/shared-types';
@@ -78,6 +87,16 @@ import { RekeyError } from '@rekey.dev/shared-types/error';
 export type {
   ApplicationDto,
   EndUserDto,
+  CurrentUserDto,
+  EndUserLicenseDto,
+  FeatureCheckDto,
+  PublicPlanDto,
+  PublicPlanCheckoutDto,
+  MeInclude,
+  MeIncluded,
+  MeIncludedFor,
+  MeIncludedFields,
+  ResolvedEntitlementsDto,
   ApiKeyDto,
   AuthResultDto,
   MfaChallengeResultDto,
@@ -147,6 +166,12 @@ export type {
   DeviceStatusType,
   UsageRecordDto,
   UsageAggregateDto,
+  UsageRemainingDto,
+  UsageMeterRemainingDto,
+  UsageMeterCatalogueEntryDto,
+  KeyGrantCreditsRequest,
+  SelfCreditLedgerEntryDto,
+  CreditWebhookData,
   SubscriptionStatusType,
   RekeyErrorShape,
   AuthConfig,
@@ -914,12 +939,37 @@ class AuthClient {
   /**
    * Resolve the end-user behind a presented access token.
    *
-   * @throws {RekeyError} `USER_TOKEN_INVALID` (401) if expired/forged/wrong-secret.
+   * Pass `include` to get more of what a backend needs to authorise the
+   * request in the same round trip: `entitlements` (as `billing.getEntitlements`
+   * returns them), `device` (the device the session is bound to, or null),
+   * `subscription` (as `billing.getSubscription` returns it), `organization`
+   * (the active organization with the caller's role) and `licenses` (as
+   * `{ items, truncated }`, the first 100 of `licenses.listMine`). With a literal list
+   * (inline or `as const`) the return type gains exactly those properties;
+   * with a list typed `MeInclude[]` they are optional, since the compiler
+   * cannot know which it holds.
+   *
+   * @example
+   * ```ts
+   * const me = await rekey.auth.getCurrentUser(accessToken, { include: ['entitlements', 'device'] });
+   * if (!me.entitlements.features.reports) throw new Forbidden();
+   * me.device?.status; // 'ACTIVE' when bound; a released or blocked device is a 401 instead
+   * ```
+   *
+   * @throws {RekeyError} `USER_TOKEN_INVALID` (401) if expired/forged/wrong-secret, or
+   *   if the session's device was released or blocked.
    * @throws {RekeyError} `USER_TOKEN_WRONG_APPLICATION` (401) if the token was issued
    *   by a different Application than the calling secret key represents.
+   * @throws {RekeyError} `VALIDATION_ERROR` (400) for an unknown `include` value.
+   * @throws {RekeyError} `BILLING_DISABLED` (403) or `API_KEY_SCOPE_INSUFFICIENT` (403)
+   *   when `entitlements`, `subscription` or `licenses` is asked for and billing is off,
+   *   or the key lacks `billing:read`.
    */
-  getCurrentUser(accessToken: string): Promise<EndUserDto & { activeOrganizationId: string | null }> {
-    return this.client.send('GET', '/api/v1/users/me/', undefined, {
+  getCurrentUser<const L extends readonly MeInclude[] = []>(
+    accessToken: string,
+    options: { include?: L } = {},
+  ): Promise<CurrentUserDto & MeIncludedFor<L>> {
+    return this.client.send('GET', `/api/v1/users/me/${meIncludeQuery(options.include)}`, undefined, {
       'X-Rekey-User-Token': accessToken,
     });
   }
@@ -954,7 +1004,7 @@ class AuthClient {
   updateCurrentUser(
     accessToken: string,
     input: { metadata?: Record<string, unknown> | null },
-  ): Promise<EndUserDto & { activeOrganizationId: string | null }> {
+  ): Promise<CurrentUserDto> {
     return this.client.send('PATCH', '/api/v1/users/me/', input, {
       'X-Rekey-User-Token': accessToken,
     });
@@ -1613,6 +1663,27 @@ class LicensesClient {
   deactivate(input: LicenseDeactivateRequest): Promise<LicenseDeactivateResultDto> {
     return this.client.send('POST', '/api/v1/licenses/deactivate', input);
   }
+
+  /**
+   * The signed-in end-user's own licences, newest first:
+   * `GET /api/v1/users/me/licenses`, authorized by their access token. In an
+   * org-billed Application whose session acts for an organization, that
+   * organization's pooled licences are included too.
+   *
+   * No raw keys: only a hash is stored, so each row carries its display
+   * `keyPrefix`. Needs `billing:read` on a secret key.
+   *
+   * @example
+   * ```ts
+   * const { items } = await rekey.licenses.listMine(accessToken);
+   * const active = items.filter((l) => l.status === 'ACTIVE');
+   * ```
+   */
+  listMine(accessToken: string, page?: ListPage): Promise<Paged<EndUserLicenseDto>> {
+    return this.client.send('GET', `/api/v1/users/me/licenses/${listQuery(page)}`, undefined, {
+      'X-Rekey-User-Token': accessToken,
+    });
+  }
 }
 
 /**
@@ -1819,6 +1890,62 @@ class UsageClient {
     if (input.organizationId) params.set('organizationId', input.organizationId);
     return this.client.send('GET', `/api/v1/usage/aggregate?${params.toString()}`);
   }
+
+  /**
+   * The signed-in end-user's included quota, usage and remaining units this
+   * period, per meter (or one meter with `{ meter }`). Computed by the code
+   * `record` enforces with: a record of more than `remaining` is the one that
+   * is refused (402 `USAGE_QUOTA_EXCEEDED`) or, on a priced meter, charged.
+   *
+   * Reads the personal quota, or the active organization's in an Application
+   * that bills organizations; `{ organizationId }` (member-only) picks one.
+   *
+   * @example
+   * ```ts
+   * const { meters } = await rekey.usage.getRemaining(accessToken, { meter: 'api_calls' });
+   * if (meters[0].remaining === 0) showUpgradePrompt();
+   * ```
+   */
+  getRemaining(
+    accessToken: string,
+    opts?: { meter?: string; organizationId?: string },
+  ): Promise<UsageRemainingDto> {
+    const q = new URLSearchParams();
+    if (opts?.meter) q.set('meter', opts.meter);
+    if (opts?.organizationId) q.set('organizationId', opts.organizationId);
+    const qs = q.toString() ? `?${q.toString()}` : '';
+    return this.client.send('GET', `/api/v1/usage/remaining${qs}`, undefined, {
+      'X-Rekey-User-Token': accessToken,
+    });
+  }
+
+  /**
+   * The same answer as `getRemaining`, for a subject you name instead of one
+   * whose token you hold: `{ endUserId }`, `{ organizationId }`, or both to
+   * read the organization as that member. Secret key only.
+   */
+  getRemainingFor(
+    subject: { endUserId: string; organizationId?: string } | { organizationId: string; endUserId?: string },
+    opts?: { meter?: string },
+  ): Promise<UsageRemainingDto> {
+    const q = new URLSearchParams();
+    if (subject.endUserId) q.set('endUserId', subject.endUserId);
+    if (subject.organizationId) q.set('organizationId', subject.organizationId);
+    if (opts?.meter) q.set('meter', opts.meter);
+    return this.client.send('GET', `/api/v1/usage/remaining/for-user?${q.toString()}`);
+  }
+
+  /**
+   * The Application's usage meters: the slugs `record` takes, their units,
+   * whether each accepts records, and its fallback credit price. Secret key.
+   */
+  listMeters(opts?: { limit?: number; offset?: number }): Promise<Paged<UsageMeterCatalogueEntryDto>> {
+    const q = new URLSearchParams();
+    if (opts?.limit !== undefined) q.set('limit', String(opts.limit));
+    if (opts?.offset !== undefined) q.set('offset', String(opts.offset));
+    const qs = q.toString() ? `?${q.toString()}` : '';
+    return this.client.send('GET', `/api/v1/usage/meters${qs}`);
+  }
 }
 
 /**
@@ -1876,6 +2003,52 @@ class CreditsClient {
     if (offset !== undefined) params.set('offset', String(offset));
     return this.client.send('GET', `/api/v1/credits/ledger?${params.toString()}`);
   }
+
+  /**
+   * Grant credits to an end-user or organization pool with the Application
+   * key. Needs a key minted with the elevated `credits:grant` scope named:
+   * `*` does not include it, so a default key gets 403
+   * `API_KEY_SCOPE_INSUFFICIENT`.
+   *
+   * `idempotencyKey` is required; a repeat returns the original entry with
+   * `applied: false` and grants nothing. `amount` is 1 to 1,000,000 per call.
+   *
+   * @example
+   * ```ts
+   * await rekey.credits.grant({ endUserId, amount: 500, idempotencyKey: `referral:${referralId}` });
+   * ```
+   */
+  grant(input: KeyGrantCreditsRequest): Promise<ConsumeCreditsResultDto> {
+    return this.client.send('POST', '/api/v1/credits/grant', input);
+  }
+
+  /**
+   * The signed-in end-user's own credit ledger, newest first (the active
+   * organization's pool in an Application that bills organizations, or the one
+   * `{ organizationId }` names, member-only). Entries carry no `metadata`.
+   */
+  listMyLedger(
+    accessToken: string,
+    opts?: { organizationId?: string; limit?: number; offset?: number },
+  ): Promise<Paged<SelfCreditLedgerEntryDto>> {
+    const q = new URLSearchParams();
+    if (opts?.organizationId) q.set('organizationId', opts.organizationId);
+    if (opts?.limit !== undefined) q.set('limit', String(opts.limit));
+    if (opts?.offset !== undefined) q.set('offset', String(opts.offset));
+    const qs = q.toString() ? `?${q.toString()}` : '';
+    return this.client.send('GET', `/api/v1/credits/me/ledger${qs}`, undefined, {
+      'X-Rekey-User-Token': accessToken,
+    });
+  }
+}
+
+/**
+ * `?include=` for the current-user routes, deduplicated. The API ignores order
+ * and duplicates too; this keeps the URL short and stable for caching.
+ */
+function meIncludeQuery(include: readonly MeInclude[] | undefined): string {
+  const values = [...new Set(include ?? [])];
+  return values.length > 0 ? `?include=${values.join(',')}` : '';
 }
 
 /** What an end-user (or org) is entitled to right now, from active subs. */
@@ -2319,8 +2492,13 @@ class BillingClient {
    *
    * `amount` is in the smallest currency unit (cents/paise/sen), never
    * a float. Format on display: `${amount / 100} ${currency}`.
+   *
+   * `checkout.ready` is false when a buyer sent to checkout for the plan would
+   * be refused, so a pricing page can hide it. Why is on the operator plan
+   * list, not here. Keep the free tier in: with no provider connected it reads
+   * `ready: false` and still applies to every signed-in user.
    */
-  getPlans(page?: ListPage): Promise<Paged<PlanDto>> {
+  getPlans(page?: ListPage): Promise<Paged<PublicPlanDto>> {
     return this.client.send('GET', `/api/v1/billing/plans${listQuery(page)}`);
   }
 
@@ -2565,6 +2743,58 @@ class BillingClient {
     const q = new URLSearchParams({ endUserId });
     if (opts?.organizationId) q.set('organizationId', opts.organizationId);
     return this.client.send('GET', `/api/v1/billing/entitlements/for-user?${q.toString()}`);
+  }
+
+  /**
+   * One feature for the calling end-user: `{ key, granted, value }`, where
+   * `value` is what `features[key]` holds in `getEntitlements` (null when
+   * nothing grants it) and `granted` is `Boolean(value)`. The subject is the
+   * one `getCurrentUser(token, { include: ['entitlements'] })` resolves, or
+   * the organization you pass (member-only).
+   *
+   * @example
+   * ```ts
+   * const { value } = await rekey.billing.getFeature(accessToken, 'projects');
+   * if (typeof value === 'number' && count >= value) throw new LimitReached();
+   * ```
+   */
+  getFeature(accessToken: string, key: string, opts?: { organizationId?: string }): Promise<FeatureCheckDto> {
+    const qs = opts?.organizationId ? `?organizationId=${encodeURIComponent(opts.organizationId)}` : '';
+    return this.client.send(
+      'GET',
+      `/api/v1/billing/entitlements/features/${encodeURIComponent(key)}${qs}`,
+      undefined,
+      { 'X-Rekey-User-Token': accessToken },
+    );
+  }
+
+  /**
+   * Whether the calling end-user holds a feature: `Boolean(value)`, the test
+   * `if (features[key])` makes, so a false flag, a 0 limit and an unknown key
+   * are all `false`. Use `getFeature` to read a numeric limit.
+   *
+   * @example
+   * ```ts
+   * if (!(await rekey.billing.hasFeature(accessToken, 'reports'))) throw new Forbidden();
+   * ```
+   */
+  async hasFeature(accessToken: string, key: string, opts?: { organizationId?: string }): Promise<boolean> {
+    return (await this.getFeature(accessToken, key, opts)).granted;
+  }
+
+  /** `getFeature` for an end-user you name. Secret key only, like `getEntitlementsFor`. */
+  getFeatureFor(endUserId: string, key: string, opts?: { organizationId?: string }): Promise<FeatureCheckDto> {
+    const q = new URLSearchParams({ endUserId });
+    if (opts?.organizationId) q.set('organizationId', opts.organizationId);
+    return this.client.send(
+      'GET',
+      `/api/v1/billing/entitlements/for-user/features/${encodeURIComponent(key)}?${q.toString()}`,
+    );
+  }
+
+  /** `hasFeature` for an end-user you name. Secret key only. */
+  async hasFeatureFor(endUserId: string, key: string, opts?: { organizationId?: string }): Promise<boolean> {
+    return (await this.getFeatureFor(endUserId, key, opts)).granted;
   }
 
   /**

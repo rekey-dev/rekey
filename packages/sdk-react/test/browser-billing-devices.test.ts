@@ -182,3 +182,25 @@ describe('listMyDevices / releaseMyDevice', () => {
     expect(err.code).toBe('DEVICE_BLOCKED');
   });
 });
+
+describe('usage remaining and own credit ledger', () => {
+  it('getUsageRemaining sends the publishable key and the user token', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(200, { success: true, data: { meters: [] } }));
+    await makeClient(fetchSpy).getUsageRemaining(TOKEN, { meter: 'api_calls' });
+    const [url, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
+    expect(url).toBe('https://api.example.com/api/v1/usage/remaining?meter=api_calls');
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer rp_pub_demo');
+    expect(headers['X-Rekey-User-Token']).toBe(TOKEN);
+  });
+
+  it('listMyCreditLedger pages and names an organization', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse(200, { success: true, data: { items: [], page: { total: 0, limit: 10, offset: 0, hasMore: false } } }),
+    );
+    await makeClient(fetchSpy).listMyCreditLedger(TOKEN, { organizationId: 'org_1', limit: 10 });
+    const [url, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
+    expect(url).toBe('https://api.example.com/api/v1/credits/me/ledger?organizationId=org_1&limit=10');
+    expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBe(TOKEN);
+  });
+});

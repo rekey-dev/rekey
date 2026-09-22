@@ -3,6 +3,7 @@
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
 import { createRearmGate, rearmRefresh, scheduleRefreshOnce, type RefreshOnceDeps } from '@/lib/refresh-once';
+import { useCommitNudge } from './use-commit-nudge';
 
 /**
  * One `router.refresh()` after a Server Action's redirect has landed, and never
@@ -32,15 +33,23 @@ import { createRearmGate, rearmRefresh, scheduleRefreshOnce, type RefreshOnceDep
 export function RefreshAfterAction({ actionId }: { actionId: string }): null {
   const router = useRouter();
   const [isPending, startTransition] = React.useTransition();
+  const nudge = useCommitNudge();
   const deps = React.useMemo<RefreshOnceDeps>(
     () => ({
-      refresh: () => startTransition(() => router.refresh()),
+      // The refresh re-renders the page on screen, which is the transition that
+      // can be left suspended for good (`lib/commit-nudge.ts`), so it gets the
+      // same nudging as an action.
+      refresh: () => {
+        nudge.mark();
+        startTransition(() => router.refresh());
+        nudge.start();
+      },
       isSettled: () => document.querySelector('[aria-busy="true"]') === null,
       setTimer: (fn, ms) => window.setTimeout(fn, ms),
       clearTimer: (h) => window.clearTimeout(h as number),
       now: () => Date.now(),
     }),
-    [router],
+    [router, nudge],
   );
 
   React.useEffect(() => scheduleRefreshOnce(actionId, deps), [actionId, deps]);

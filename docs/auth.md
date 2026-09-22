@@ -68,16 +68,29 @@ Authenticates an existing EndUser. Same response shape as sign-up. Errors: `INVA
 
 Returns the current EndUser. Requires **two** headers:
 
-- `Authorization: Bearer rp_live_…` — the Application secret key
+- `Authorization: Bearer rp_live_…`: the Application secret key (or the
+  publishable key, from a browser)
 - `X-Rekey-User-Token: <jwt>` — the user JWT obtained from sign-up/sign-in
 
 Errors: `USER_TOKEN_MISSING` (401), `USER_TOKEN_INVALID` (401), `USER_TOKEN_WRONG_APPLICATION` (401).
+
+The body is the EndUser plus the session's active organization:
+`activeOrganizationId`, `activeOrganizationRole` (the caller's role name in
+it) and `activeOrganizationBaseRole` (`OWNER`, `ADMIN` or `MEMBER`), each null
+when the session acts for no organization or membership lapsed. `PATCH`
+returns exactly the same shape (SDK type `CurrentUserDto`).
+
+`GET /api/v1/auth/me` returns the same thing from the user JWT alone, with no
+Application key. Both take `?include=`, described in
+[Authorising requests in your own backend](#authorising-requests-in-your-own-backend).
 
 ### `PATCH /api/v1/users/me/`
 
 Lets the signed-in EndUser edit **their own** record. Same two headers as the
 GET; the JWT is the subject, so there is no user id anywhere in the request and
-no way to aim this at another user.
+no way to aim this at another user. It returns the record after the update in
+the GET's shape, active organization role fields included (before 2.2.0 it
+left out `activeOrganizationRole` and `activeOrganizationBaseRole`).
 
 Only `metadata` is writable. Email, role, password and erasure state are not
 self-service and a body naming them is **refused** (`END_USER_UPDATE_INVALID`,
@@ -263,8 +276,9 @@ Set `authConfig.hostedAuthorizeUrl` to your own login page and Rekey forwards
 the authorization request there instead, parameters untouched. Your page signs
 the user in however it likes, skips the prompt entirely if they already have a
 session, and finishes by calling
-`POST /api/v1/mcp/:slug/oauth/authorize/grant` with your secret key and the
-user's access token, then redirecting to the `redirect_uri` with the returned
+`POST /api/v1/mcp/:slug/oauth/authorize/grant` with your secret key (it needs
+the `auth:write` scope, which `*` includes) and the user's access token, then
+redirecting to the `redirect_uri` with the returned
 code.
 
 The API forwards only the standard authorization parameters, which are already
@@ -289,6 +303,94 @@ login screen's problem.
 `activeOrganizationRole` and `activeOrganizationBaseRole` are null when the
 session has no active organization, or when membership lapsed since the token
 was minted. A stale `oid` claim degrades to "no org", it never grants access.
+
+## Authorising requests in your own backend
+
+A backend that protects its own API with Rekey access tokens needs three
+answers per request: who the caller is and whether the session is still valid,
+what they are entitled to, and whether the device the session is bound to is
+still allowed. One call answers all three:
+
+```http
+GET /api/v1/auth/me?include=entitlements,device
+X-Rekey-User-Token: <access token>
+```
+
+```ts
+const me = await rekey.auth.getCurrentUser(accessToken, { include: ['entitlements', 'device'] });
+if (!me.entitlements.features.reports) return forbidden();
+```
+
+`include` is a comma-separated list, in any order, duplicates ignored. Each
+value adds one top-level property of the same name:
+
+| Value | Adds | Same answer as |
+| --- | --- | --- |
+| `entitlements` | `{ features, entitlements, creditBalance }`, every kind: FEATURE, CREDIT, USAGE, LICENSE | `GET /billing/entitlements/for-user` for the billing subject (below) |
+| `subscription` | The current subscription, or `null` | `GET /billing/subscription` for the billing subject (below) |
+| `device` | The device the token's `dev` claim names, or `null` when the session is not device-bound | `GET /users/me/devices`, that one row |
+| `organization` | The active organization with the caller's `role` and `baseRole`, or `null` | `GET /users/me/organizations/:id` |
+| `licenses` | `{ items, truncated }`: the caller's licences, newest first, first 100 (the active organization's too, in an org-billed Application); `truncated` is true when there are more | `GET /users/me/licenses` for the billing subject (below) |
+
+What to rely on:
+
+- **Without `include` nothing changes.** Same body, same queries.
+- **The session checks run first and win.** An expired token, a session older
+  than the user's last sign-out everywhere, an erased user, a frozen
+  Application or an ended impersonation get the same error with or without
+  `include`.
+- **A 200 means the device is ACTIVE.** A session whose device was released or
+  blocked is refused with `401 USER_TOKEN_INVALID` before anything is read, so
+  a blocked laptop cannot keep working downstream while a cache says otherwise.
+  `device` is there for the record itself (label, first and last seen).
+- **The billing values follow what the Application bills.** In an org-billed
+  Application (`billingSubject: "org"`), while the session acts for an
+  organization the caller still belongs to, `entitlements` and `subscription`
+  are that organization's (as `for-user?organizationId=` and
+  `/billing/subscription?organizationId=` give them), and `licenses` adds the
+  organization's pooled licences to the caller's own. In every other case,
+  including the default user-billed Application with a session switched into
+  a team, they are the end-user's own, so a paying user never reads as
+  entitled to nothing because they changed team. `GET /billing/entitlements`,
+  `GET /billing/entitlements/features/:key` and `GET /users/me/licenses`
+  resolve the same subject when no `organizationId` is passed (since 2.2.0;
+  `GET /billing/entitlements` used the active organization in both kinds of
+  Application before). `GET /billing/subscription` does not: without
+  `?organizationId=` it always answers for the end-user, so in an org-billed
+  Application pass the organization's id to it to match
+  `include=subscription`.
+- **An unknown value is a 400** (`VALIDATION_ERROR`, naming the supported
+  values), so a typo is never silently answered with less.
+- **The billing values are gated like the billing routes.** `entitlements`,
+  `subscription` and `licenses` on an Application with billing off answer
+  `403 BILLING_DISABLED`. On `/users/me` a secret key needs the scope of the
+  route that serves each value: `billing:read` for `entitlements`,
+  `subscription` and `licenses`; `organization` needs only the route's own
+  `auth:read`, as `GET /users/me/organizations/:id` does.
+- **`include` can be repeated.** `include=device&include=organization`, which
+  `URLSearchParams.append` builds, is the same as `include=device,organization`.
+- **SDK types narrow on a literal list.** `getCurrentUser(token, { include:
+  ['entitlements'] })` (or a list declared `as const`) promises `entitlements`.
+  A list typed `MeInclude[]` could hold anything, so every field it might add
+  is optional.
+
+To gate on one feature without the rest, `GET /billing/entitlements/features/:key`
+(SDK `billing.hasFeature(token, key)` / `getFeature`) answers
+`{ key, granted, value }` for the same subject `include=entitlements` resolves;
+see [billing](billing.md#checking-one-feature).
+
+Cache the answer for a short time, a minute or two, keyed on the end-user id
+plus the token's `dev` claim, so one browser session does not cost a Rekey call
+per request, and so a second device never reads the first one's cached answer.
+The access token itself lives 15 minutes by default, so a cache no longer than
+that never outlives the session it describes by more than its own TTL.
+
+**Rate limits.** `GET /auth/me` counts against the end-user it resolved (600 a
+minute each by default, `RATE_LIMIT_AUTHENTICATED_MAX`), and all end-users seen from one client IP together are capped at
+3000 a minute. A backend resolving many users from one address after a cold
+start is better served by `GET /users/me` with its secret key: that counts
+against the key (6000 a minute) and is exempt from the per-IP ceiling. See
+[rate-limits.md](rate-limits.md).
 
 ## Devices
 
@@ -518,6 +620,11 @@ const { endUser, accessToken, refreshToken } = await rekey.auth.signUp({
 
 // 2. on subsequent requests, look up the user
 const user = await rekey.auth.getCurrentUser(req.cookies.session);
+
+// ...or everything needed to authorise the request, in the same call
+const me = await rekey.auth.getCurrentUser(req.cookies.session, {
+  include: ['entitlements', 'device', 'subscription', 'organization', 'licenses'],
+});
 ```
 
 See the type definitions in `@rekey.dev/node` for the full method surface.

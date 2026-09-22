@@ -35,7 +35,7 @@ export function Field({
    * element) gets `aria-invalid` + a red border, so the broken field is
    * findable at a glance, not just from a page-top banner.
    */
-  error?: string;
+  error?: React.ReactNode;
   children: React.ReactNode;
 }): React.JSX.Element {
   let content = children;

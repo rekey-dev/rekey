@@ -16,15 +16,13 @@
  */
 
 import { redirect } from 'next/navigation';
+import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { api, errorQuery, PanelApiError } from '@/lib/api';
 import { cookieSecure } from '@/lib/cookie-secure';
-import {
-  IMPERSONATE_COOKIE,
-  IMPERSONATE_COOKIE_MAX_AGE,
-  SUPPORT_FLASH_COOKIE,
-  SUPPORT_FLASH_MAX_AGE,
-} from './shared';
+import { formatDateTime } from '@/lib/date';
+import type { RevealResult } from '@/lib/one-time-secret';
+import { SUPPORT_FLASH_COOKIE, SUPPORT_FLASH_MAX_AGE } from './shared';
 
 function tabBase(applicationId: string, euid: string): string {
   return `/applications/${applicationId}/end-users/${euid}`;
@@ -62,36 +60,28 @@ export async function grantCredits(
 }
 
 /**
- * The impersonation token is sensitive, same treatment as the MFA setup
- * secret. It is stashed in a short-lived HttpOnly cookie scoped to this
- * end-user's pages and rendered server-side; it never goes in the URL.
+ * The impersonation token is a live credential for the end-user. It goes back
+ * in this action's response to the dialog `RevealActionForm` opens, never a URL
+ * or a cookie, and the Security tab is revalidated so the new audit row is in
+ * "Recent impersonations" behind it.
  */
 export async function impersonate(
   applicationId: string,
   euid: string,
   formData: FormData,
-): Promise<void> {
+): Promise<RevealResult> {
   const reason = String(formData.get('reason') ?? '').trim();
   const base = `${tabBase(applicationId, euid)}/security`;
+  let result: {
+    accessToken: string;
+    accessTokenExpiresAt: string;
+    impersonatedUser: { id: string; email: string };
+  };
   try {
-    const result = await api<{
-      accessToken: string;
-      accessTokenExpiresAt: string;
-      impersonatedUser: { id: string; email: string };
-    }>({
+    result = await api({
       method: 'POST',
       path: `${apiBase(applicationId, euid)}/impersonate`,
       body: { reason: reason || undefined },
-    });
-    const jar = await cookies();
-    jar.set(IMPERSONATE_COOKIE, JSON.stringify(result), {
-      httpOnly: true,
-      sameSite: 'strict',
-      secure: await cookieSecure(),
-      // Scoped to the end-user, so it covers every tab under them and nothing
-      // else. The reveal only renders on Security, which is where it is minted.
-      path: tabBase(applicationId, euid),
-      maxAge: IMPERSONATE_COOKIE_MAX_AGE,
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
@@ -99,7 +89,17 @@ export async function impersonate(
     }
     throw err;
   }
-  redirect(`${base}?impersonated=1`);
+  revalidatePath(base);
+  return {
+    secret: {
+      title: `Impersonation token for ${result.impersonatedUser.email}`,
+      value: result.accessToken,
+      notes: [
+        `Expires ${formatDateTime(result.accessTokenExpiresAt)}. Use it as X-Rekey-User-Token against your customer app's Rekey-backed endpoints.`,
+        'Rekey records this in impersonation_audits with your operator id.',
+      ],
+    },
+  };
 }
 
 export async function eraseUser(applicationId: string, euid: string): Promise<void> {

@@ -44,8 +44,9 @@
  */
 
 import * as React from 'react';
-import { useSearchParams, useRouter, usePathname } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import { shouldReopen } from '@/lib/modal-reopen';
+import { committedRender, subscribeCommittedRender } from '@/lib/render-stamp';
 
 /**
  * Stable dialog id, identical on the server and the client.
@@ -175,8 +176,6 @@ export function Modal({
 }): React.JSX.Element {
   const ref = React.useRef<HTMLDialogElement>(null);
   const search = useSearchParams();
-  const router = useRouter();
-  const pathname = usePathname();
   const baseId = useModalId();
   const titleId = `${baseId}-title`;
   const descId = `${baseId}-desc`;
@@ -208,6 +207,36 @@ export function Modal({
     }
   }, [reopen]);
 
+  // Close once the action submitted from INSIDE this dialog has landed. A save
+  // redirects back to this page, and the new server render is the signal that
+  // it landed: the URL then decides, so the dialog stays open only when the
+  // redirect carries this modal's flag (a refusal to show inside it). This
+  // used to happen by accident: the redirect was rethrown into a boundary that
+  // unmounted the page, dialog and all, which is also what made the page blink
+  // (rekey issue #25, see `ActionForm`).
+  //
+  // Armed by a submit from inside, and only by that: a render caused by
+  // anything else (a `RefreshAfterAction` refresh from an earlier save landing
+  // after this dialog was opened) must not close a dialog the operator is
+  // filling in. A render that lands while the submit is still pending (its
+  // button is `aria-busy`) is not this action's either, so it stays armed.
+  // Left alone while a one-time secret is open on top of it;
+  // `RevealActionForm` closes this one when that is done.
+  const armed = React.useRef(false);
+  const landed = React.useSyncExternalStore(subscribeCommittedRender, committedRender, () => null);
+  const seenLanded = React.useRef(landed);
+  React.useEffect(() => {
+    if (landed === seenLanded.current) return;
+    seenLanded.current = landed;
+    const dialog = ref.current;
+    if (!armed.current || !dialog?.open) return;
+    if (dialog.querySelector('[aria-busy="true"]')) return;
+    armed.current = false;
+    if (reopen) return;
+    if (dialog.querySelector('dialog[open]')) return;
+    dialog.close();
+  }, [landed, reopen]);
+
   // Always release the scroll lock if the component unmounts while open.
   React.useEffect(() => () => unlockScroll(), []);
 
@@ -231,6 +260,7 @@ export function Modal({
   }
 
   function open(): void {
+    armed.current = false;
     try {
       resetForms();
       ref.current?.showModal();
@@ -301,12 +331,18 @@ export function Modal({
   // trigger that navigates back to the same `?modalKey=1` is a no-op (URL
   // unchanged → `useSearchParams` doesn't change → the reopen effect never
   // re-fires) and the modal can't be reopened until a full reload.
+  //
+  // A native `replaceState`, not `router.replace`. Next 15 feeds it back into
+  // `useSearchParams`, which is all the reopen effect needs, and it starts no
+  // navigation. `router.replace` did: a server round-trip for the same page
+  // that, on a production build, could be left uncommitted
+  // (`lib/commit-nudge.ts`), so closing the dialog after a mint left the URL
+  // on `?newKey=1` and a reload reopened an empty mint form.
   function stripModalParam(): void {
     if (modalKey && search.get(modalKey)) {
-      const params = new URLSearchParams(search.toString());
-      params.delete(modalKey);
-      const qs = params.toString();
-      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+      const url = new URL(window.location.href);
+      url.searchParams.delete(modalKey);
+      window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
     }
   }
 
@@ -331,6 +367,9 @@ export function Modal({
         aria-describedby={description ? descId : undefined}
         className={dialogChromeCls(size)}
         onClose={handleClose}
+        onSubmit={() => {
+          armed.current = true;
+        }}
         onClick={(e) => {
           // Click on backdrop → close, but only when nothing would be lost.
           // These dialogs hold real forms (credentials, role definitions, new

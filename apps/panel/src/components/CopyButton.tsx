@@ -15,10 +15,13 @@ export function CopyButton({
   value,
   label = 'Copy',
   variant = 'inline',
+  onCopied,
 }: {
   value: string;
   label?: string;
   variant?: 'inline' | 'block';
+  /** Called once the value is on the clipboard. */
+  onCopied?: () => void;
 }): React.JSX.Element {
   const [copied, setCopied] = React.useState(false);
 
@@ -26,6 +29,7 @@ export function CopyButton({
     try {
       await navigator.clipboard.writeText(value);
       setCopied(true);
+      onCopied?.();
       track(AnalyticsEvent.CopyClicked, { label });
       setTimeout(() => setCopied(false), 1500);
     } catch {

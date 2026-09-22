@@ -98,6 +98,11 @@ export const SECURITY_EVENT_LABEL = {
   // A bulk write against somebody else's data. Worth its own entry so the
   // trail says which run produced a batch of subscriptions.
   'app.subscriptions_imported': 'Subscriptions imported from a billing provider',
+  // Credits minted by the Application's own server through
+  // `POST /api/v1/credits/grant`, under the elevated `credits:grant` scope.
+  // The actor is the key (`actorId` + `metadata.apiKeyId`/`apiKeyName`), so a
+  // leaked or misused key can be traced to exactly what it minted.
+  'app.credits_granted_by_api_key': 'Credits granted with an API key',
   'app.webhook_endpoint_created': 'Webhook endpoint created',
   'app.webhook_endpoint_updated': 'Webhook endpoint updated',
 

@@ -311,6 +311,13 @@ export interface McpAccessClaims {
   applicationId: string;
   aud: string; // MCP resource URL
   scope: string;
+  /**
+   * The organization this `mcp:account` grant acts for, chosen at consent.
+   * Absent on personal grants and on every token minted before the binding
+   * existed. Verified against a live membership on every use, never trusted
+   * from the token alone.
+   */
+  oid?: string;
   iat: number;
   exp: number;
 }
@@ -323,11 +330,18 @@ export function issueMcpAccessToken(args: {
   tokenGeneration: number;
   audience: string;
   scope: string;
+  organizationId?: string | null | undefined;
   lifetimeSeconds?: number;
 }): { token: string; expiresAt: Date } {
   const lifetime = args.lifetimeSeconds ?? DEFAULT_MCP_ACCESS_LIFETIME_SECONDS;
   const token = jwt.sign(
-    { typ: 'mcp_access' as const, sub: args.endUserId, applicationId: args.applicationId, scope: args.scope },
+    {
+      typ: 'mcp_access' as const,
+      sub: args.endUserId,
+      applicationId: args.applicationId,
+      scope: args.scope,
+      ...(args.organizationId && { oid: args.organizationId }),
+    },
     appSigningKey(args.applicationId, args.tokenGeneration),
     { expiresIn: lifetime, algorithm: 'HS256', audience: args.audience },
   );
@@ -360,6 +374,83 @@ export function verifyMcpAccessToken(
       return null;
     }
     return decoded as unknown as McpAccessClaims;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Proof, carried between the two steps of the MCP consent page, that the
+ * end-user signed in (password, and MFA when required) moments ago. The second
+ * step asks which account the connection acts for; without this the page would
+ * have to ask for the password twice.
+ *
+ * Everything the first step validated is pinned into the token (client,
+ * redirect URI, PKCE challenge, granted scope, nonce), so the hidden form
+ * fields cannot be edited between the steps to redirect the resulting code
+ * elsewhere. Short-lived, HS256 under the per-app key like every other
+ * end-user token, and its own `typ`, so it never passes as an access token.
+ */
+export interface McpConsentClaims {
+  typ: 'mcp_consent';
+  sub: string; // endUserId
+  applicationId: string;
+  cid: string; // OAuth client_id
+  ruri: string; // redirect_uri
+  cc: string; // PKCE code_challenge
+  scope: string; // granted scope
+  nonce?: string;
+  iat: number;
+  exp: number;
+}
+
+const MCP_CONSENT_LIFETIME_SECONDS = 10 * 60;
+
+export function issueMcpConsentToken(args: {
+  endUserId: string;
+  applicationId: string;
+  tokenGeneration: number;
+  clientId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  scope: string;
+  nonce?: string | undefined;
+}): string {
+  return jwt.sign(
+    {
+      typ: 'mcp_consent' as const,
+      sub: args.endUserId,
+      applicationId: args.applicationId,
+      cid: args.clientId,
+      ruri: args.redirectUri,
+      cc: args.codeChallenge,
+      scope: args.scope,
+      ...(args.nonce !== undefined && { nonce: args.nonce }),
+    },
+    appSigningKey(args.applicationId, args.tokenGeneration),
+    { expiresIn: MCP_CONSENT_LIFETIME_SECONDS, algorithm: 'HS256' },
+  );
+}
+
+export function verifyMcpConsentToken(
+  token: string,
+  applicationId: string,
+  tokenGeneration: number,
+): McpConsentClaims | null {
+  try {
+    const decoded = jwt.verify(token, appSigningKey(applicationId, tokenGeneration), {
+      algorithms: ['HS256'],
+    }) as Record<string, unknown>;
+    if (
+      typeof decoded !== 'object' ||
+      decoded === null ||
+      decoded.typ !== 'mcp_consent' ||
+      typeof decoded.sub !== 'string' ||
+      decoded.applicationId !== applicationId
+    ) {
+      return null;
+    }
+    return decoded as unknown as McpConsentClaims;
   } catch {
     return null;
   }

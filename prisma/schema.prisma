@@ -1764,6 +1764,13 @@ model RefreshToken {
   // the active org survives refresh. SetNull if the org is deleted. Per-session
   // (not per-user) so different devices can have different active orgs.
   activeOrganizationId String? @map("active_organization_id")
+  // For `kind: "mcp"` only: the organization this MCP grant acts for, chosen
+  // at consent and carried across rotations. A binding, not a hint like
+  // `activeOrganizationId`: the refresh grant FAILS when the end-user is no
+  // longer a member with a usable role, rather than degrading to the personal
+  // view. No FK for the same reason as OAuthAuthCode.organizationId: SetNull
+  // on organization delete would silently re-scope the grant to personal.
+  grantOrganizationId String? @map("grant_organization_id")
   // Set when this token is rotated — points at the new token issued in its place.
   replacedById  String?   @map("replaced_by_id")
   // Device fingerprint captured at issue time. Used by /me/sessions to
@@ -3027,6 +3034,13 @@ model OAuthAuthCode {
   // consent and redemption is the RP's, not the user's, and auth_time must
   // report the authentication event.
   authTime      DateTime? @map("auth_time")
+  // The organization the end-user chose at consent for an `mcp:account` grant
+  // to act for, or null for their personal account. Copied onto the refresh
+  // chain at redemption (RefreshToken.grantOrganizationId). Deliberately no FK:
+  // membership is re-checked at every use, so an id whose organization was
+  // deleted fails that check and the grant stops working. SetNull would turn
+  // the grant into a personal one nobody consented to.
+  organizationId String?  @map("organization_id")
   expiresAt     DateTime  @map("expires_at")
   consumedAt    DateTime? @map("consumed_at")
   createdAt     DateTime  @default(now()) @map("created_at")

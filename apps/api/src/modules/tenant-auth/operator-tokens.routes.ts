@@ -21,6 +21,8 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { applicationsService } from '../applications/applications.service.js';
 import { apiKeysService, MAX_KEYS_PER_APP } from '../api-keys/api-keys.service.js';
+import { assertMayMintScopes } from '../api-keys/elevated-scopes.js';
+import { accessContextFromRequest } from '../../lib/access-context.js';
 import { RekeyError } from '../../lib/error.js';
 import {
   resolveOperatorToken,
@@ -251,6 +253,7 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
       const { id } = AppParam.parse(req.params);
       await ensureAppInTenant(id, req.tenantId!, req.tenantRole);
       const body = MintKeyBody.parse(req.body);
+      await assertMayMintScopes(await accessContextFromRequest(req), id, body.scopes);
       const result = await apiKeysService.create({
         applicationId: id,
         name: body.name,

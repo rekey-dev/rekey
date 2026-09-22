@@ -32,17 +32,22 @@ import {
   mcpIssuer,
   OAuthError,
   MCP_SCOPE,
+  consentOrganizationChoices,
 } from './oauth.service.js';
+import { organizationsService } from '../organizations/organizations.service.js';
+import { AuthConfigSchema } from '@rekey.dev/shared-types';
+import { prisma } from '../../lib/prisma.js';
+import { sessionIssuedBefore } from '../../lib/session-stamp.js';
 import { hasScope } from './oidc.service.js';
 import { authRateLimit } from '../../lib/rate-limit.js';
 import { authService } from '../auth/auth.service.js';
 import { apiKeysService } from '../api-keys/api-keys.service.js';
 import { randomBytes } from 'node:crypto';
 import { RekeyError } from '../../lib/error.js';
-import { verifyMcpAccessToken } from '../../lib/jwt.js';
+import { issueMcpConsentToken, verifyMcpAccessToken, verifyMcpConsentToken } from '../../lib/jwt.js';
 import { handleMcpMessage, type JsonRpcMessage } from './mcp-server.js';
 import { errs, ref, raw, type JsonSchema } from '../../lib/openapi.js';
-import { requireApiKey } from '../../middleware/api-key-auth.js';
+import { requireApiKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
@@ -64,6 +69,10 @@ const GrantBody = z.object({
   code_challenge_method: z.string(),
   scope: z.string().max(256).optional(),
   nonce: z.string().max(256).optional(),
+  // The organization an `mcp:account` grant acts for. Omitted or `null`:
+  // personal, whatever the session's active organization. Binding one is
+  // always an explicit choice.
+  organization_id: z.string().min(1).max(64).nullable().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -385,6 +394,16 @@ function renderAuthorizePage(opts: {
   branding?: { displayName?: string; logoUrl?: string; primaryColor?: string } | null;
   /** Per-response CSP nonce for the one inline script this page carries. */
   nonce: string;
+  /**
+   * The second step, after a successful sign-in, when the end-user belongs to
+   * organizations the grant could act for: the page asks which account the
+   * connection acts for instead of asking for credentials. `consentToken`
+   * carries the sign-in across the step (see `issueMcpConsentToken`).
+   */
+  organizationChoice?: {
+    consentToken: string;
+    options: Array<{ id: string; name: string; role: string }>;
+  };
 }): string {
   const hidden = (['response_type', 'client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'scope', 'state', 'nonce'] as const)
     .map((k) => {
@@ -417,9 +436,34 @@ function renderAuthorizePage(opts: {
     ? opts.branding!.primaryColor!
     : '#0d9488';
   const shown = opts.branding?.displayName?.trim() || opts.appName;
-  const reset = opts.appUrl
-    ? `<p class="muted"><a href="${esc(opts.appUrl.replace(/\/+$/, ''))}/forgot-password">Forgot your password?</a></p>`
-    : '';
+  const choice = opts.organizationChoice;
+  const reset =
+    opts.appUrl && !choice
+      ? `<p class="muted"><a href="${esc(opts.appUrl.replace(/\/+$/, ''))}/forgot-password">Forgot your password?</a></p>`
+      : '';
+  // Personal is preselected: it is what every connection acted for before
+  // organizations could be chosen, and the choice that reaches the least.
+  const fields = choice
+    ? `<input type="hidden" name="consent_token" value="${esc(choice.consentToken)}">
+      <fieldset class="orgs">
+        <legend>Act for</legend>
+        <label class="opt"><input type="radio" name="organization" value="personal" checked> Your personal account</label>
+        ${choice.options
+          .map(
+            (o) =>
+              `<label class="opt"><input type="radio" name="organization" value="${esc(o.id)}"> ${esc(o.name)} <span class="role">${esc(o.role)}</span></label>`,
+          )
+          .join('')}
+      </fieldset>`
+    : `<label for="email">Email</label>
+      <input id="email" type="email" name="email" required autocomplete="username" autofocus value="${esc(opts.email ?? '')}">
+      <label for="password">Password</label>
+      <input id="password" type="password" name="password" required autocomplete="current-password">
+      ${opts.mfa ? '<label for="mfaCode">Authenticator code</label><input id="mfaCode" type="text" name="mfaCode" inputmode="numeric" autocomplete="one-time-code">' : ''}`;
+  const heading = choice ? `Choose an account for ${esc(opts.clientName)}` : `Sign in to ${esc(shown)}`;
+  const who = choice
+    ? `You are signed in to ${esc(shown)}. Choose whether ${esc(opts.clientName)} acts for you personally or for one of your organizations. It sees that account's subscription, credits and licences.`
+    : `${esc(opts.clientName)} is asking for access. Sign in with your ${esc(shown)} account, the one you use for ${esc(shown)} itself. An administrator login will not work here.`;
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sign in to ${esc(shown)}</title>
 <style>
@@ -452,17 +496,23 @@ button{flex:1;padding:.5625rem 1rem;border-radius:.375rem;border:0;cursor:pointe
 .muted{font-size:.75rem;color:#78716c;margin:1rem 0 0;text-align:center}
 @media(prefers-color-scheme:dark){.muted{color:#a8a29e}}
 .muted a{color:inherit}
+.orgs{border:0;margin:0;padding:0}
+.orgs legend{font-size:.8125rem;font-weight:500;margin:0 0 .375rem;padding:0}
+.opt{display:flex;align-items:center;gap:.5rem;margin:.25rem 0;padding:.5rem .625rem;border:1px solid #d6d3d1;border-radius:.375rem;font-weight:400;font-size:.875rem;cursor:pointer}
+@media(prefers-color-scheme:dark){.opt{border-color:#44403c}}
+.opt input{width:auto;margin:0}
+.role{margin-left:auto;font-size:.75rem;color:#78716c}
 </style>
 </head><body>
   <main class="card">
     ${logo}
-    <h1>Sign in to ${esc(shown)}</h1>
+    <h1>${heading}</h1>
     <!-- Naming the client AND the account is the whole job of this line. The
          previous wording ("X wants to access your Y account") left people
          entering the wrong credentials, because on a deployment that runs its
          own panel the reader assumes it means their operator login. It does
          not: this is the end-user account for this Application. -->
-    <p class="who">${esc(opts.clientName)} is asking for access. Sign in with your ${esc(shown)} account, the one you use for ${esc(shown)} itself. An administrator login will not work here.</p>
+    <p class="who">${who}</p>
     <div class="grants">
       <p>It will be able to:</p>
       <ul>${grants}</ul>
@@ -470,11 +520,7 @@ button{flex:1;padding:.5625rem 1rem;border-radius:.375rem;border:0;cursor:pointe
     ${opts.error ? `<p class="err">${esc(opts.error)}</p>` : ''}
     <form method="post" action="${esc(opts.actionUrl)}">
       ${hidden}
-      <label for="email">Email</label>
-      <input id="email" type="email" name="email" required autocomplete="username" autofocus value="${esc(opts.email ?? '')}">
-      <label for="password">Password</label>
-      <input id="password" type="password" name="password" required autocomplete="current-password">
-      ${opts.mfa ? '<label for="mfaCode">Authenticator code</label><input id="mfaCode" type="text" name="mfaCode" inputmode="numeric" autocomplete="one-time-code">' : ''}
+      ${fields}
       <div class="row">
         <button class="allow" type="submit" name="consent" value="allow">Allow</button>
         <button class="deny" type="submit" name="consent" value="deny">Deny</button>
@@ -541,9 +587,11 @@ const AuthorizeQuery = z.object({
  * form has been lied to.
  *
  * `prompt=none` can never succeed here: there is no AS-side SSO session to
- * reuse, so every authorization re-authenticates the end-user. That also means
- * `max_age` is always satisfied and needs no handling, `auth_time` is minted
- * seconds before the code is redeemed.
+ * reuse, so every authorization re-authenticates the end-user. `max_age` is not
+ * enforced here: `auth_time` is the moment of that sign-in, normally seconds
+ * before the code, but up to 10 minutes earlier when the organization step is
+ * shown (the consent token's lifetime). It is reported honestly, so a relying
+ * party with a tighter `max_age` can compare and reject.
  */
 function unsupportedRequestError(params: {
   response_type: string;
@@ -566,6 +614,40 @@ const RegisterBody = z.object({
   redirect_uris: z.array(z.string().min(1).max(2048)).min(1).max(20),
   client_name: z.string().max(120).optional(),
 });
+
+/**
+ * The organization a session handoff binds its MCP grant to. Only an explicit
+ * `organization_id` binds one, checked out loud (the same 403s the organization
+ * routes give). Omitted or `null` is personal, as every handoff was before the
+ * binding existed: the session's active organization is NOT inherited, so an
+ * integration written before this cannot silently start acting for a team.
+ */
+async function handoffOrganization(args: {
+  application: { id: string; authConfig: unknown };
+  endUserId: string;
+  granted: string;
+  requested: string | null | undefined;
+}): Promise<string | null> {
+  if (args.requested === null || args.requested === undefined) return null;
+  const bindable =
+    hasScope(args.granted, MCP_SCOPE) &&
+    AuthConfigSchema.parse(args.application.authConfig).organizationsEnabled;
+  if (!bindable) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'INVALID_GRANT_REQUEST',
+      message:
+        'organization_id applies only to a grant that includes mcp:account, on an Application with organizations enabled.',
+      fix: 'Omit organization_id, or request the mcp:account scope on an Application with authConfig.organizationsEnabled.',
+    });
+  }
+  await organizationsService.requireMembership({
+    application: args.application,
+    actorEndUserId: args.endUserId,
+    organizationId: args.requested,
+  });
+  return args.requested;
+}
 
 export async function mcpRoutes(app: FastifyInstance): Promise<void> {
   // RFC 9728, protected-resource metadata. The 401 from the MCP endpoint
@@ -891,6 +973,89 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           }),
         );
 
+      const renderChoice = (
+        consentToken: string,
+        options: Array<{ id: string; name: string; role: string }>,
+        error?: string,
+      ): unknown =>
+        reply
+          .header('content-security-policy', authorizePageCsp(params.redirect_uri, pageNonce))
+          .type('text/html')
+          .code(200)
+          .send(
+            renderAuthorizePage({
+              nonce: pageNonce,
+              actionUrl: `/api/v1/mcp/${slug}/oauth/authorize`,
+              appName: application.name,
+              clientName: client.clientName ?? 'An application',
+              params,
+              grantedScopes: granted.split(' '),
+              organizationChoice: { consentToken, options },
+              ...(error !== undefined && { error }),
+            }),
+          );
+
+      // Second step: the user signed in on the first and is now choosing which
+      // account the connection acts for. The consent token stands in for the
+      // password they already typed, and pins everything the first step
+      // checked, so the hidden fields cannot be edited in between.
+      //
+      // The token is deliberately not single-use: resubmitting it within its
+      // 10 minutes only mints another code for the same client, redirect URI
+      // and PKCE challenge, and each code is itself single-use and redeemable
+      // only with the client's verifier, so a stored one-time check would add
+      // a write per consent and guard nothing a replay could reach.
+      const consentToken = typeof body.consent_token === 'string' ? body.consent_token : '';
+      if (consentToken) {
+        const consent = verifyMcpConsentToken(consentToken, application.id, application.tokenGeneration);
+        const user =
+          consent &&
+          consent.cid === client.id &&
+          consent.ruri === params.redirect_uri &&
+          consent.cc === params.code_challenge &&
+          consent.scope === granted &&
+          consent.nonce === params.nonce
+            ? await prisma.endUser.findFirst({
+                where: { id: consent.sub, applicationId: application.id },
+                select: { id: true, sessionsInvalidBefore: true },
+              })
+            : null;
+        // A password change or sign-out everywhere since the first step ends
+        // the sign-in it proved, exactly as it ends a session.
+        if (!consent || !user || sessionIssuedBefore(consent, user.sessionsInvalidBefore)) {
+          return renderErr('Your sign-in expired. Sign in again to continue.');
+        }
+        const options = await consentOrganizationChoices(application, user.id, granted);
+        const picked = typeof body.organization === 'string' ? body.organization : 'personal';
+        let organizationId: string | null = null;
+        if (picked !== 'personal') {
+          // Only an organization offered to THIS user now: a member, in this
+          // Application, with a usable role. Anything else, including an id
+          // edited into the form, is refused and the choice asked again.
+          if (!options.some((o) => o.id === picked)) {
+            return renderChoice(
+              consentToken,
+              options,
+              'You cannot act for that organization. Choose another account.',
+            );
+          }
+          organizationId = picked;
+        }
+        const code = await mcpOAuthService.createAuthCode({
+          applicationId: application.id,
+          clientId: client.id,
+          endUserId: user.id,
+          redirectUri: params.redirect_uri,
+          codeChallenge: params.code_challenge,
+          scope: granted,
+          nonce: params.nonce,
+          // The authentication is the first step's sign-in, not this click.
+          authTime: new Date(consent.iat * 1000),
+          organizationId,
+        });
+        return redirectWith({ code });
+      }
+
       let endUserId: string;
       try {
         const ua = req.headers['user-agent'];
@@ -923,6 +1088,26 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         }
       } catch (err) {
         return renderErr(err instanceof RekeyError ? err.message : 'Sign-in failed.', Boolean(mfaCode));
+      }
+
+      // A user who can act for an organization is asked which account the
+      // connection is for. Everyone else gets their code straight away, as
+      // before organizations could be chosen.
+      const options = await consentOrganizationChoices(application, endUserId, granted);
+      if (options.length > 0) {
+        return renderChoice(
+          issueMcpConsentToken({
+            endUserId,
+            applicationId: application.id,
+            tokenGeneration: application.tokenGeneration,
+            clientId: client.id,
+            redirectUri: params.redirect_uri,
+            codeChallenge: params.code_challenge,
+            scope: granted,
+            nonce: params.nonce,
+          }),
+          options,
+        );
       }
 
       const code = await mcpOAuthService.createAuthCode({
@@ -973,7 +1158,16 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
     '/:slug/oauth/authorize/grant',
     {
       bodyLimit: TOKEN_BODY_LIMIT,
-      preHandler: [requireApiKey, requireUserSession, refuseWhileImpersonating('hand off a session')],
+      // `auth:write`: the code this mints becomes a session (and an MCP grant)
+      // for the user, which is what that scope governs. Without the check any
+      // secret key could mint one, including a key minted with nothing but
+      // `credits:grant`. `*` includes it, so a full key is unaffected.
+      preHandler: [
+        requireApiKey,
+        requireScope('auth:write'),
+        requireUserSession,
+        refuseWhileImpersonating('hand off a session'),
+      ],
       config: { rateLimit: authRateLimit(30) },
       schema: {
         tags: ['MCP · OAuth'],
@@ -982,7 +1176,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           "The Application's own server authorises a sign-in it has already performed. Requires " +
           'BOTH the Application secret key (`Authorization: Bearer rp_live_…`) and the ' +
           "end-user's live access token (`X-Rekey-User-Token`), which must belong to the same " +
-          'Application. Returns a single-use, PKCE-bound authorization code to redeem at ' +
+          'Application. The key needs the `auth:write` scope (`*` includes it). Returns a single-use, PKCE-bound authorization code to redeem at ' +
           '`/oauth/token` exactly like one from the interactive endpoint.',
         body: {
           type: 'object',
@@ -994,6 +1188,15 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
             code_challenge_method: { type: 'string', enum: ['S256'] },
             scope: { type: 'string' },
             nonce: { type: 'string' },
+            organization_id: {
+              type: 'string',
+              nullable: true,
+              description:
+                'The organization an `mcp:account` grant acts for; the end-user must be a member ' +
+                'with a usable role. Omitted or `null`: personal, even when the session has an ' +
+                'active organization (`oid`); binding one is always explicit. Needs ' +
+                '`authConfig.organizationsEnabled` and a grant that includes `mcp:account`.',
+            },
           },
         },
         response: {
@@ -1008,9 +1211,17 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           },
           ...errs({
             ...AUTH_SERVER_GATE_404,
-            400: 'INVALID_GRANT_REQUEST — unknown `client_id`, unregistered `redirect_uri`, non-S256 PKCE, or no grantable scope.',
+            400:
+              'INVALID_GRANT_REQUEST: unknown `client_id`, unregistered `redirect_uri`, non-S256 PKCE, ' +
+              'no grantable scope, or `organization_id` on a grant without `mcp:account` or on an ' +
+              'Application without organizations.',
             401: 'API_KEY_MISSING / API_KEY_INVALID / USER_TOKEN_MISSING / USER_TOKEN_INVALID / USER_TOKEN_WRONG_APPLICATION.',
-            403: 'SESSION_HANDOFF_FORBIDDEN — the secret key belongs to a different Application than `:slug`, or the session is impersonated.',
+            403:
+              'API_KEY_SCOPE_INSUFFICIENT: the secret key lacks `auth:write`; ' +
+              'SESSION_HANDOFF_FORBIDDEN: the secret key belongs to a different Application than ' +
+              '`:slug`, or the session is impersonated; ORGANIZATION_NOT_MEMBER / ' +
+              'ORGANIZATION_ROLE_DISABLED: `organization_id` names an organization the end-user ' +
+              'cannot act for.',
             429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
           }),
         },
@@ -1085,6 +1296,13 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
+      const organizationId = await handoffOrganization({
+        application,
+        endUserId: endUser.id,
+        granted,
+        requested: body.organization_id,
+      });
+
       const code = await mcpOAuthService.createAuthCode({
         applicationId: application.id,
         clientId: client.id,
@@ -1093,6 +1311,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         codeChallenge: body.code_challenge,
         scope: granted,
         nonce: body.nonce,
+        organizationId,
         // The authentication this code attests to is the one that minted the
         // access token presented above, not this call. We do not know when
         // that happened, so `auth_time` is the moment we last SAW proof of it
@@ -1112,7 +1331,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         applicationId: application.id,
         ip,
         userAgent,
-        metadata: { clientId: client.id, scope: granted },
+        metadata: { clientId: client.id, scope: granted, organizationId },
       });
 
       return reply.send({ code, expires_in: 60 });
@@ -1409,7 +1628,10 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       // `assertEndUserNotErased`, phrased as an RFC 6750 challenge. The same
       // call refuses a token issued before the user's last password change,
       // sign-out everywhere or refresh-token reuse (`sessionsInvalidBefore`).
-      if (!(await mcpOAuthService.accessTokenIsLive(application.id, claims))) {
+      // An organization-bound token also stops here once the user can no
+      // longer act for that organization (left, removed, role disabled).
+      const live = await mcpOAuthService.liveAccessToken(application.id, claims);
+      if (!live) {
         return reply
           .header(
             'WWW-Authenticate',
@@ -1418,7 +1640,11 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           .code(401)
           .send({ error: 'invalid_token', error_description: 'Missing or invalid MCP access token.' });
       }
-      const ctx = { applicationId: application.id, endUserId: claims.sub };
+      const ctx = {
+        applicationId: application.id,
+        endUserId: live.user.id,
+        organization: live.organization,
+      };
       const body = req.body as unknown;
       const messages: JsonRpcMessage[] = Array.isArray(body)
         ? (body as JsonRpcMessage[])

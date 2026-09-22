@@ -89,6 +89,8 @@ import {
   JwkRsaPublicSchema,
   JwksDtoSchema,
   LicenseDtoSchema,
+  EndUserLicenseDtoSchema,
+  FeatureCheckDtoSchema,
   LicenseVerifyResultDtoSchema,
   DeviceDtoSchema,
   EndUserDeviceDtoSchema,
@@ -103,6 +105,7 @@ import {
   OrganizationMemberDtoSchema,
   OrganizationWithRoleDtoSchema,
   PlanDtoSchema,
+  PublicPlanDtoSchema,
   PublicCouponDtoSchema,
   RetryWebhookDeliveryResultDtoSchema,
   SecurityEventDtoSchema,
@@ -112,6 +115,9 @@ import {
   TenantLimitsSchema,
   TenantPaymentDtoSchema,
   UsageAggregateDtoSchema,
+  UsageMeterCatalogueEntryDtoSchema,
+  UsageRemainingDtoSchema,
+  SelfCreditLedgerEntryDtoSchema,
   UsageRecordDtoSchema,
   ValidateCouponResultDtoSchema,
   WebhookDeliveryDtoSchema,
@@ -788,6 +794,8 @@ const ZOD_COMPONENTS: Record<string, z.ZodTypeAny> = {
   SignInOutcome: SignInOutcomeDtoSchema,
 
   Plan: PlanDtoSchema,
+  PublicPlan: PublicPlanDtoSchema,
+  FeatureCheck: FeatureCheckDtoSchema,
   Subscription: SubscriptionDtoSchema,
   Payment: TenantPaymentDtoSchema,
   CheckoutResult: CheckoutResultDtoSchema,
@@ -800,6 +808,7 @@ const ZOD_COMPONENTS: Record<string, z.ZodTypeAny> = {
   MonthlyRevenuePoint: MonthlyRevenuePointSchema,
 
   License: LicenseDtoSchema,
+  EndUserLicense: EndUserLicenseDtoSchema,
   LicenseVerifyResult: LicenseVerifyResultDtoSchema,
 
   Device: DeviceDtoSchema,
@@ -809,10 +818,16 @@ const ZOD_COMPONENTS: Record<string, z.ZodTypeAny> = {
 
   UsageRecord: UsageRecordDtoSchema,
   UsageAggregate: UsageAggregateDtoSchema,
+  UsageRemaining: UsageRemainingDtoSchema,
+  UsageMeterCatalogueEntry: UsageMeterCatalogueEntryDtoSchema,
 
   CreditBalance: CreditBalanceDtoSchema,
   CreditLedgerEntry: CreditLedgerEntryDtoSchema,
   ConsumeCreditsResult: ConsumeCreditsResultDtoSchema,
+  // Same shape as a consume result: the entry, the balance after it, and
+  // whether this call applied it or matched an earlier one.
+  CreditGrantResult: ConsumeCreditsResultDtoSchema,
+  SelfCreditLedgerEntry: SelfCreditLedgerEntryDtoSchema,
 
   Organization: OrganizationDtoSchema,
   OrganizationWithRole: OrganizationWithRoleDtoSchema,

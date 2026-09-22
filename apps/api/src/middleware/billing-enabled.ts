@@ -24,7 +24,12 @@ export async function requireBillingEnabled(
       fix: 'Register requireApiKey before requireBillingEnabled on the route.',
     });
   }
-  const config = BillingConfigSchema.parse(request.application.billingConfig);
+  assertBillingEnabled(request.application);
+}
+
+/** The same gate for a caller that decides per request, not per route. */
+export function assertBillingEnabled(application: { billingConfig: unknown }): void {
+  const config = BillingConfigSchema.parse(application.billingConfig);
   if (!config.enabled) {
     throw new RekeyError({
       statusCode: 403,

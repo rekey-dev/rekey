@@ -52,6 +52,8 @@ export interface EndUserDetailDto {
   recentImpersonations: Array<{
     id: string;
     operatorUserId: string;
+    /** Resolved by the API at read time; absent from an older API. */
+    operatorEmail?: string | null;
     reason: string | null;
     startedAt: string;
     endedAt: string | null;
@@ -248,29 +250,17 @@ export async function getEndUserDeviceCounts(
 }
 
 /**
- * Where the freshly minted impersonation token is parked between the server
- * action that creates it and the render that shows it once. HttpOnly, scoped to
- * this end-user's pages, and deliberately not a URL parameter.
- *
- * These live here rather than in `actions.ts` because a `'use server'` module
- * may only export async functions, and the Security tab needs to read the
- * cookie back by name.
- */
-export const IMPERSONATE_COOKIE = 'rekey_impersonate_reveal';
-/** Slightly outlives the 5-minute token so the page can re-render. */
-export const IMPERSONATE_COOKIE_MAX_AGE = 60 * 6;
-
-/**
- * What the last Overview support action did, on the same channel as the
- * reveals above rather than in the URL.
+ * What the last Overview support action did, in a short-lived cookie rather
+ * than the URL.
  *
  * "Send password reset" reported nothing at all: the action ran, recorded
  * `end_user.password_reset_sent` and redirected to `?support=reset-sent`, and
  * on a production build that navigation is never committed, so the render
  * that would have shown the banner never happened (rekey issue #569, still
  * open). The dialog just sat there. Carrying the outcome in a cookie means the
- * banner does not depend on that navigation: the form reloads the page it was
- * submitted from and the result is waiting.
+ * banner does not depend on that navigation: the page re-renders in place
+ * after the action (ActionForm retries that render until it commits) and the
+ * result is waiting for it.
  *
  * Only the Overview actions write it, because only Overview reads it. An
  * action that redirects to another tab would otherwise leave a flash here that
@@ -278,7 +268,7 @@ export const IMPERSONATE_COOKIE_MAX_AGE = 60 * 6;
  */
 export const SUPPORT_FLASH_COOKIE = 'rekey_support_flash';
 /**
- * Long enough to outlive the reload that reads it, short enough that a
+ * Long enough to outlive the re-render that reads it, short enough that a
  * refresh a moment later is not told about it again. A Server Component may
  * read cookies but not write them, so it cannot be cleared on read and the
  * TTL is the whole mechanism.

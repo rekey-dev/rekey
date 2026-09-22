@@ -94,7 +94,18 @@ const client = new RekeyBrowserClient({ apiUrl, publishableKey: 'rp_pub_…' });
 const out = await client.signIn({ email, password });   // → SignInOutcome (branch on mfaRequired)
 const { items: plans, page } = await client.getPlans();  // public catalogue → {items, page}
 const lic = await client.verifyLicense({ key, machineFingerprint });
+
+// The signed-in user's own state, with their access token
+const me = await client.getMe(accessToken, { include: ['entitlements', 'device'] }); // GET /auth/me
+const { meters } = await client.getUsageRemaining(accessToken);
 ```
+
+With the user's access token the browser client also reads what that user
+may see about themselves: `getMe` (`include` any of `entitlements`, `device`,
+`subscription`, `organization`, `licenses`), `getEntitlements`, `getFeature` /
+`hasFeature`, `getSubscription`, `listMyLicenses`, `getUsageRemaining`,
+`listMyCreditLedger`, `listMyDevices` and `getTrialEligibility`. Each plan from
+`getPlans` carries `checkout.ready`.
 
 Restrict where the key works via the Application's **CORS origin allowlist** (Panel → Application → Access); off-allowlist origins get `403 ORIGIN_NOT_ALLOWED`. Money + account-management routes still require the secret key on a server. See [api-keys.md → Publishable key](https://github.com/rekey-dev/rekey/blob/main/docs/api-keys.md#publishable-key).
 

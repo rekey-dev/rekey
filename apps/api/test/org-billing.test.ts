@@ -262,7 +262,15 @@ describe('Org-beneficiary billing', () => {
 
     // Same defect, second surface: the end-user MCP `get_subscription` tool,
     // whose description says it answers for the signed-in user. Handlers are
-    // transport-agnostic, so call it directly.
+    // transport-agnostic, so call it directly. Billing on first: the tool
+    // refuses BILLING_DISABLED as `GET /billing/subscription` does.
+    const billingOn = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/tenant/applications/${appId}/billing-config`,
+      headers: auth(),
+      payload: { enabled: true },
+    });
+    expect(billingOn.statusCode, billingOn.body).toBe(200);
     const getSubscription = accountTools.find((t) => t.name === 'get_subscription');
     expect(getSubscription).toBeDefined();
     const viaMcp = (await getSubscription!.handler({

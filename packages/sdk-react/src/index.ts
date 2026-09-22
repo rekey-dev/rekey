@@ -34,7 +34,16 @@ export { RekeyBrowserClient, RekeyError } from './client.js';
 export type {
   RekeyBrowserConfig,
   EndUserDto,
+  CurrentUserDto,
+  EndUserLicenseDto,
+  FeatureCheckDto,
+  PublicPlanDto,
+  PublicPlanCheckoutDto,
   EntitlementsDto,
+  MeInclude,
+  MeIncluded,
+  MeIncludedFor,
+  MeIncludedFields,
   PortalPaymentDto,
   ProvidersListDto,
   BillingProviderInfoDto,
@@ -46,6 +55,9 @@ export type {
   EndUserDeviceDto,
   DeviceLimitDetails,
   DeviceStatusType,
+  UsageRemainingDto,
+  UsageMeterRemainingDto,
+  SelfCreditLedgerEntryDto,
 } from './client.js';
 export { mcpConnectionInfo } from './mcp.js';
 export type { McpConnectionInfo } from './mcp.js';

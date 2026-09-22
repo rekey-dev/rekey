@@ -128,6 +128,9 @@ never gets a session. The result is a session that knows its machine:
   an authorization: `requireUserSession` surfaces it as `request.deviceId`,
   and anything that needs to trust it resolves the row and checks `status`,
   the way `oid` is re-confirmed against membership.
+  `GET /auth/me?include=device` returns that row for the session's own
+  device, and refuses the session outright once the device is released or
+  blocked (see [auth.md](auth.md#authorising-requests-in-your-own-backend)).
 - The refresh token records `deviceId`, and every rotation carries it.
 - `GET /auth/sessions` lists `deviceId` per session, so "sign out this
   laptop" is `DELETE /auth/sessions/:id` for the session on that device — or

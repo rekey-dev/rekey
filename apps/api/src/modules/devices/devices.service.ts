@@ -154,6 +154,12 @@ function devicePayload(d: Device): Record<string, unknown> {
   };
 }
 
+/** What an end-user sees of their own device: no operator notes, no IP. */
+export function forEndUser(d: Device): Omit<Device, 'blockedReason' | 'lastSeenIp'> {
+  const { blockedReason, lastSeenIp, ...rest } = d;
+  return rest;
+}
+
 function notFound(deviceId: string): RekeyError {
   return new RekeyError({
     statusCode: 404,
@@ -373,9 +379,16 @@ export const devicesService = {
 
   /** One device, scoped to (application, end-user). 404 across either boundary. */
   async get(applicationId: string, endUserId: string, deviceId: string): Promise<Device> {
+    const device = await this.find(applicationId, endUserId, deviceId);
+    if (!device) throw notFound(deviceId);
+    return device;
+  },
+
+  /** `get` without the throw: null for an unknown id and across either boundary. */
+  async find(applicationId: string, endUserId: string, deviceId: string): Promise<Device | null> {
     const device = await prisma.device.findUnique({ where: { id: deviceId } });
     if (!device || device.applicationId !== applicationId || device.endUserId !== endUserId) {
-      throw notFound(deviceId);
+      return null;
     }
     return device;
   },

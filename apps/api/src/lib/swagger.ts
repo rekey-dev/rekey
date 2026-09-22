@@ -144,7 +144,9 @@ export async function registerSwagger(app: FastifyInstance): Promise<void> {
               '**Where used:** every non-admin, non-operator route. Some keys are minted ' +
               'with narrow scopes (`auth:read`, `auth:write`, `billing:read`, ' +
               '`billing:write`, `webhooks:read`); when a route needs a specific scope its ' +
-              'description says so. May also be restricted by the ' +
+              'description says so. `*`, the default, grants those five and nothing ' +
+              'else: an **elevated** scope (`credits:grant`) is held only by a key minted ' +
+              'with it named, so no existing full-access key gains it. May also be restricted by the ' +
               "Application's IP allowlist.\n\n" +
               '**Never** put this in browser or mobile-client code, use the publishable ' +
               'key there.',

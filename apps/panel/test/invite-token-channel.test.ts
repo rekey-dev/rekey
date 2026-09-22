@@ -1,22 +1,15 @@
 /**
- * Guard: a credential never travels in a `redirect()` query, and the team
- * page's invitation link reaches the operator.
+ * Guard: a credential never travels in a `redirect()` query.
  *
- * Both halves of rekey issue #569. The invitation token used to be handed to
- * the next render as `/team?inviteToken=…`, which was wrong twice over.
+ * The invitation token used to be handed to the next render as
+ * `/team?inviteToken=…`. That token joins a workspace, and in the URL it lands
+ * in browser history, in the `Referer` of the next outbound link, and in every
+ * access log in between.
  *
- * It leaked: that token joins a workspace, and in the URL it lands in browser
- * history, in the `Referer` of the next outbound link, and in every access log
- * in between. The panel's other one-time secrets (the API key, the webhook
- * signing secret, the licence keys) already go through a short-lived httpOnly
- * `rekey_reveal_*` cookie instead, and now so does this one.
- *
- * And it never arrived: on a production build the client does not commit an
- * action's `redirect()`, so the query the token was riding in was never read
- * by anything. The link is shown exactly once, so the operator got it zero
- * times and had to revoke and retry, which did the same thing again. The form
- * opts into `reloadOnSettle` for that, which is the only mechanism measured to
- * put a rendered result back on screen.
+ * Every one-time secret now goes back in the minting action's own response to
+ * the dialog `RevealActionForm` opens (`test/one-time-secret.test.ts` pins
+ * that). This file keeps the older, wider rule: whatever an action redirects
+ * to, no credential rides in its query.
  *
  * A source scan, for the same reason `action-form.test.ts` is one: the
  * behaviour only reproduces on a production build, so a browser test of it
@@ -31,13 +24,12 @@ import { blankBlockComments } from './action-form.test';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(here, '..', 'src');
-const teamPage = path.join(srcDir, 'app', '(authed)', 'team', 'page.tsx');
 
 /**
  * Query parameter names that carry a credential. A redirect target is a URL:
  * whatever is in it is logged, refered and kept in history, so none of these
  * belongs in one. Add a name here when a new secret appears; the fix is always
- * the `rekey_reveal_*` cookie, never a longer name.
+ * to return it to `RevealActionForm`, never a longer name.
  */
 const CREDENTIAL_PARAMS = [
   'inviteToken',
@@ -55,8 +47,8 @@ const CREDENTIAL_PARAMS = [
  * accept-invite landing page and the password reset form. The token is in
  * their URL by construction, put there by the email, and these redirects only
  * preserve it across a validation failure so the form still works on the
- * second try. There is nothing to move to a cookie, because the cookie would
- * have to be written by a request that has not happened yet. Anything else
+ * second try. There is nothing to move out of the URL, because the token
+ * arrived in it. Anything else
  * that wants to be here is the bug this file is about.
  */
 const ARRIVED_BY_LINK = [
@@ -119,28 +111,5 @@ describe('credentials never ride in a redirect query', () => {
       }
     }
     expect(offenders, offenders.join('\n')).toEqual([]);
-  });
-});
-
-describe('the team page hands the invitation link over a cookie', () => {
-  const source = readFileSync(teamPage, 'utf8');
-
-  it('writes the token to a short-lived httpOnly rekey_reveal cookie', () => {
-    expect(source).toMatch(/rekey_reveal_invite/);
-    const set = source.slice(source.indexOf('INVITE_REVEAL_COOKIE,'));
-    expect(set).toMatch(/httpOnly: true/);
-    expect(set).toMatch(/secure: await cookieSecure\(\)/);
-    expect(set).toMatch(/path: '\/team'/);
-  });
-
-  it('reads the token from that cookie, not from searchParams', () => {
-    expect(source).not.toMatch(/sp\.inviteToken/);
-    expect(source).toMatch(/get\(INVITE_REVEAL_COOKIE\)/);
-  });
-
-  it('gives the invite form a mechanism that puts the link back on screen', () => {
-    // Without this the action's `redirect()` is the only thing that could show
-    // the banner, and on a production build it never commits.
-    expect(blankBlockComments(source)).toMatch(/<ActionForm[^>]*\breloadOnSettle\b/s);
   });
 });

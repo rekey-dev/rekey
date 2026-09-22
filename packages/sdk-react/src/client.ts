@@ -25,14 +25,17 @@
  */
 
 import type {
+  CurrentUserDto,
   EndUserDto,
+  EndUserLicenseDto,
+  FeatureCheckDto,
+  PublicPlanDto,
   RekeyErrorShape,
   SignUpRequest,
   SignInRequest,
   MfaVerifyRequest,
   AuthResultDto,
   SignInOutcomeDto,
-  PlanDto,
   LicenseVerifyResultDto,
   SubscriptionDto,
   CreateCheckoutRequest,
@@ -43,7 +46,11 @@ import type {
   EndUserDeviceDto,
   DeviceStatusType,
   ListPage,
+  MeInclude,
+  MeIncludedFor,
   Paged,
+  UsageRemainingDto,
+  SelfCreditLedgerEntryDto,
 } from '@rekey.dev/shared-types';
 // NOTE the subpath. `RekeyError` is the ONLY value this package imports from
 // shared-types, everything above is a type and erases. Importing it from the
@@ -52,6 +59,15 @@ import type {
 // bytes minified. `@rekey.dev/shared-types/error` has zero imports, and the
 // same import measured 902 bytes. Same class, same `instanceof`. Keep it.
 import { RekeyError } from '@rekey.dev/shared-types/error';
+
+/**
+ * `?include=` for `GET /auth/me`, deduplicated. The API ignores order and
+ * duplicates too; this keeps the URL short and stable for caching.
+ */
+function meIncludeQuery(include: readonly MeInclude[] | undefined): string {
+  const values = [...new Set(include ?? [])];
+  return values.length > 0 ? `?include=${values.join(',')}` : '';
+}
 
 /** Resolved entitlements for the signed-in user (mirrors @rekey.dev/node). */
 export interface EntitlementsDto {
@@ -166,6 +182,38 @@ export class RekeyBrowserClient {
     }
   }
 
+  /**
+   * `getCurrentUser` plus the extras `include` names, from the same
+   * user-token-only `GET /api/v1/auth/me`: `entitlements`, `device` (the
+   * device this session is bound to, or null), `subscription`,
+   * `organization` (the active organization with the caller's role) and
+   * `licenses` (`{ items, truncated }`, the first 100 of `listMyLicenses`). With a
+   * literal list (inline or `as const`) the return type gains exactly those
+   * properties; with a list typed `MeInclude[]` they are optional. Null on
+   * USER_TOKEN_INVALID, like `getCurrentUser`.
+   *
+   * @example
+   * ```ts
+   * const me = await client.getMe(accessToken, { include: ['entitlements'] });
+   * if (me?.entitlements.features.reports) showReports();
+   * ```
+   */
+  async getMe<const L extends readonly MeInclude[] = []>(
+    accessToken: string,
+    options: { include?: L; meEndpoint?: string } = {},
+  ): Promise<(CurrentUserDto & MeIncludedFor<L>) | null> {
+    const path = `${options.meEndpoint ?? '/api/v1/auth/me'}${meIncludeQuery(options.include)}`;
+    try {
+      const res = await this.raw<CurrentUserDto & MeIncludedFor<L>>('GET', path, undefined, { accessToken });
+      return res.data;
+    } catch (err) {
+      if (err instanceof RekeyError && err.code === 'USER_TOKEN_INVALID') {
+        return null;
+      }
+      throw err;
+    }
+  }
+
   // ---------- Public-bootstrap methods (publishable-key authorized) ----------
 
   /** Create a new end-user (email + password). Returns the user + session tokens. */
@@ -234,9 +282,13 @@ export class RekeyBrowserClient {
    * quietly renders the first 50 of 80 plans is a pricing page that is wrong,
    * and only `page.total` can tell you that happened. Pass `page.offset` for
    * the next window.
+   *
+   * Each plan carries `checkout.ready`: false when a buyer sent to checkout
+   * for it would be refused, so the page can hide it. Keep the free tier in:
+   * with no provider connected it reads `ready: false` and still applies.
    */
-  getPlans(page?: ListPage): Promise<Paged<PlanDto>> {
-    return this.bootstrap<Paged<PlanDto>>('GET', `/api/v1/billing/plans${listQuery(page)}`, undefined);
+  getPlans(page?: ListPage): Promise<Paged<PublicPlanDto>> {
+    return this.bootstrap<Paged<PublicPlanDto>>('GET', `/api/v1/billing/plans${listQuery(page)}`, undefined);
   }
 
   /**
@@ -308,6 +360,84 @@ export class RekeyBrowserClient {
   getEntitlements(accessToken: string, opts?: { organizationId?: string }): Promise<EntitlementsDto> {
     const qs = opts?.organizationId ? `?organizationId=${encodeURIComponent(opts.organizationId)}` : '';
     return this.selfService<EntitlementsDto>('GET', `/api/v1/billing/entitlements${qs}`, undefined, accessToken);
+  }
+
+  /**
+   * The signed-in user's included quota, usage and remaining units this
+   * period, per meter (or one meter with `{ meter }`). `remaining` is what the
+   * next record is measured against, so "3 of 100 left" is what the server
+   * will enforce. The active organization's quota in an Application that bills
+   * organizations; `{ organizationId }` (member-only) picks one.
+   */
+  getUsageRemaining(
+    accessToken: string,
+    opts?: { meter?: string; organizationId?: string },
+  ): Promise<UsageRemainingDto> {
+    const p = new URLSearchParams();
+    if (opts?.meter) p.set('meter', opts.meter);
+    if (opts?.organizationId) p.set('organizationId', opts.organizationId);
+    const qs = p.toString() ? `?${p.toString()}` : '';
+    return this.selfService<UsageRemainingDto>('GET', `/api/v1/usage/remaining${qs}`, undefined, accessToken);
+  }
+
+  /**
+   * The signed-in user's own credit ledger, newest first (their active
+   * organization's pool in an Application that bills organizations). Entries
+   * carry no `metadata`; that stays with your backend.
+   */
+  listMyCreditLedger(
+    accessToken: string,
+    opts?: ListPage & { organizationId?: string },
+  ): Promise<Paged<SelfCreditLedgerEntryDto>> {
+    const p = new URLSearchParams();
+    if (opts?.organizationId) p.set('organizationId', opts.organizationId);
+    if (opts?.limit !== undefined) p.set('limit', String(opts.limit));
+    if (opts?.offset !== undefined) p.set('offset', String(opts.offset));
+    const qs = p.toString() ? `?${p.toString()}` : '';
+    return this.selfService<Paged<SelfCreditLedgerEntryDto>>(
+      'GET',
+      `/api/v1/credits/me/ledger${qs}`,
+      undefined,
+      accessToken,
+    );
+  }
+
+  /**
+   * One feature for the signed-in user: `{ key, granted, value }`. `value` is
+   * what `features[key]` holds in `getEntitlements` (null when nothing grants
+   * it); `granted` is `Boolean(value)`. Same subject as
+   * `getMe(token, { include: ['entitlements'] })`, or the organization you pass.
+   */
+  getFeature(accessToken: string, key: string, opts?: { organizationId?: string }): Promise<FeatureCheckDto> {
+    const qs = opts?.organizationId ? `?organizationId=${encodeURIComponent(opts.organizationId)}` : '';
+    return this.selfService<FeatureCheckDto>(
+      'GET',
+      `/api/v1/billing/entitlements/features/${encodeURIComponent(key)}${qs}`,
+      undefined,
+      accessToken,
+    );
+  }
+
+  /**
+   * Whether the signed-in user holds a feature: a false flag, a 0 limit and an
+   * unknown key are all `false`. Use `getFeature` to read a numeric limit.
+   */
+  async hasFeature(accessToken: string, key: string, opts?: { organizationId?: string }): Promise<boolean> {
+    return (await this.getFeature(accessToken, key, opts)).granted;
+  }
+
+  /**
+   * The signed-in user's own licences, newest first, plus the active
+   * organization's in an org-billed Application. No raw keys, only each
+   * licence's display `keyPrefix`.
+   */
+  listMyLicenses(accessToken: string, page?: ListPage): Promise<Paged<EndUserLicenseDto>> {
+    return this.selfService<Paged<EndUserLicenseDto>>(
+      'GET',
+      `/api/v1/users/me/licenses/${listQuery(page)}`,
+      undefined,
+      accessToken,
+    );
   }
 
   /**
@@ -573,6 +703,18 @@ export class RekeyBrowserClient {
 
 export type {
   EndUserDto,
+  // What `getMe()` resolves to before any include.
+  CurrentUserDto,
+  // `listMyLicenses()`, `getFeature()` and `getPlans()` rows.
+  EndUserLicenseDto,
+  FeatureCheckDto,
+  PublicPlanDto,
+  PublicPlanCheckoutDto,
+  // `getMe({ include })`: the accepted values and what each one adds.
+  MeInclude,
+  MeIncluded,
+  MeIncludedFor,
+  MeIncludedFields,
   ProvidersListDto,
   BillingProviderInfoDto,
   BillingProviderCapabilities,
@@ -593,4 +735,8 @@ export type {
   EndUserDeviceDto,
   DeviceLimitDetails,
   DeviceStatusType,
+  // What `getUsageRemaining()` and `listMyCreditLedger()` resolve to.
+  UsageRemainingDto,
+  UsageMeterRemainingDto,
+  SelfCreditLedgerEntryDto,
 } from '@rekey.dev/shared-types';

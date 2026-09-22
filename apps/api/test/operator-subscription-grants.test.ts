@@ -239,10 +239,15 @@ describe('operator subscription grants', () => {
     // The audit entry says "a sale happened". A no-op is not a second sale, and
     // an entry per double-click makes the trail unreadable exactly when
     // somebody is trying to reconstruct who granted what.
-    const audits = await prisma.securityEvent.count({
-      where: { applicationId: w.applicationId, type: 'app.subscription_granted' },
+    //
+    // The first grant's entry is written fire-and-forget, so it is waited for
+    // rather than counted the instant the second grant returns: an immediate
+    // count read 0 on a loaded CI runner.
+    const audits = await waitForSecurityEvents({
+      applicationId: w.applicationId,
+      type: 'app.subscription_granted',
     });
-    expect(audits).toBe(1);
+    expect(audits).toHaveLength(1);
   });
 
   it('records the note and the operator on the audit entry', async () => {

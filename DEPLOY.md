@@ -565,7 +565,10 @@ short maintenance window.
 `20260906110000_request_log_admitted_scope` adds one column to
 `api_request_logs`. The change itself is instant, but it has to wait for a lock
 on a table every request writes to, and writes queue behind it while it waits.
-Deploy at a quiet moment if your API is busy.
+Deploy at a quiet moment if your API is busy. `20260922120000_mcp_grant_organization`
+is the same shape: it adds one nullable column to `refresh_tokens` and one to
+`oauth_auth_codes`, rewrites no rows, and waits for a lock on the table every
+sign-in and refresh writes to.
 
 If your deploy keeps the old `api` container serving while the new one runs
 its migrations, the old container cannot create refresh tokens once
@@ -616,7 +619,11 @@ ALTER TABLE license_activations ALTER COLUMN application_id DROP NOT NULL;
 
 Without the first two, every sign-in and refresh fails on the old API. Without
 the third, activating a licence on a new machine fails. Everything else in the
-new schema is ignored by the old code.
+new schema is ignored by the old code. One consequence of that: an end-user MCP
+connection bound to an organization (`refresh_tokens.grant_organization_id`)
+refreshes as a personal connection on the old API, and the refresh token the
+old API issues no longer carries the binding, so it stays personal after you
+upgrade again. Revoke those connections before rolling back if that matters.
 
 **Before upgrading to 2.2.0 again**, fill in what the old API left empty and
 restore the constraints, since `prisma migrate deploy` will not re-run a

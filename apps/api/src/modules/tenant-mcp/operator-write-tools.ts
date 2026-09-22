@@ -48,6 +48,8 @@ import { RekeyError } from '../../lib/error.js';
 import type { SecurityEventType } from '@rekey.dev/shared-types';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 import { apiKeysService } from '../api-keys/api-keys.service.js';
+import { assertMayMintScopes } from '../api-keys/elevated-scopes.js';
+import { accessContextFromTool } from '../../lib/access-context.js';
 import { entitlementsService } from '../billing/entitlements.service.js';
 import { usageService } from '../usage/usage.service.js';
 import { applicationsService } from '../applications/applications.service.js';
@@ -755,6 +757,8 @@ export const operatorWriteTools: OperatorTool[] = [
       // Empty scopes mean full access in the service, which is the same default
       // the panel's mint form applies. Passing a list narrows the key.
       const scopes = Array.isArray(args.scopes) ? args.scopes.map(String) : [];
+      // An elevated scope needs the authority of what it does, see elevated-scopes.ts.
+      await assertMayMintScopes(accessContextFromTool({ ...ctx, scopes: ctx.scopes }), app.id, scopes);
 
       let expiresAt: Date | undefined;
       if (typeof args.expiresAt === 'string' && args.expiresAt !== '') {

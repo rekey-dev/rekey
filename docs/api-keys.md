@@ -44,11 +44,11 @@ const lic = await client.verifyLicense({ key, machineFingerprint });
 | Allowed | Rejected (secret key only) |
 |---|---|
 | `auth`: sign-up, sign-in, mfa-verify, refresh, sign-out, forgot/reset/verify-email, magic-link, passkey authenticate | `GET /me` (credential self-inspection) |
-| `oauth`: provider start + callback | `usage/record` + `usage/aggregate` |
-| `licenses/verify` | `credits/*` (balance, consume, ledger) |
+| `oauth`: provider start + callback | `usage/record`, `usage/aggregate`, `usage/meters`, `usage/remaining/for-user` |
+| `licenses/verify` | `credits/balance`, `credits/consume`, `credits/ledger`, `credits/grant` |
 | `billing/plans` + `billing/providers` (catalogue) | |
 | † account management: change-password, list/revoke passkeys + sessions, sign-out-everywhere | |
-| † self-service billing: entitlements, payments, checkout, `billing/coupons/validate`, subscription cancel | |
+| † self-service billing: entitlements (and `billing/entitlements/features/:key`), payments, checkout, `billing/coupons/validate`, subscription cancel, `users/me/licenses`, `usage/remaining`, `credits/me/ledger` | |
 | † org management (`users/me/organizations/*`) | |
 | ‡ passkey **enrollment** (`passkey/register/*`) | |
 
@@ -56,7 +56,7 @@ const lic = await client.verifyLicense({ key, machineFingerprint });
 
 ‡ Publishable callers must additionally **step up** — send `password`, or a current TOTP / unused backup `code` — at `passkey/register/start`. A passkey bypasses the MFA challenge at sign-in, and neither a password change nor sign-out-everywhere removes one, so a stolen access token alone must not be able to enroll it. `/complete` needs no second proof: the single-use challenge binds it to the `/start` that already stepped up. Secret-key callers skip step-up, because the customer's backend is the gate.
 
-The gate is **route membership, not scope**. A publishable key is accepted only on routes that opted into `requirePublishableOrSecretKey`; `requireScope` returns early for a publishable caller rather than consulting scopes. Presenting one on a `requireApiKey` route returns **401 `API_KEY_INVALID`**. So widening the publishable set is a deliberate per-route decision — and a breaking one for tenants relying on `ipAllowlist`, which only constrains the secret-key path.
+The gate is **route membership, not scope**. A publishable key is accepted only on routes that opted into `requirePublishableOrSecretKey`; `requireScope` returns early for a publishable caller rather than consulting scopes, except for an elevated scope, which it refuses with `403 API_KEY_SCOPE_INSUFFICIENT`. Presenting one on a `requireApiKey` route returns **401 `API_KEY_INVALID`**. So widening the publishable set is a deliberate per-route decision, and a breaking one for tenants relying on `ipAllowlist`, which only constrains the secret-key path.
 
 ### Origin allowlist
 
@@ -107,9 +107,36 @@ There is no `mode` in the request body. The `rp_live_` / `rp_test_` prefix follo
   - `auth:read`, `auth:write`
   - `billing:read`, `billing:write`
   - `webhooks:read`
-  - `*` — all of the above
+  - `*`: every **standard** scope, which is the five above and nothing else
+  - `credits:grant`: **elevated**, see below
+
+  A write scope implies its read scope. On the routes a signed-in user calls
+  about their own account with a secret key (`/users/me`, its devices,
+  organizations and licences, `/auth/sessions`, `/auth/passkeys`,
+  `/auth/mfa/status`, `/auth/oauth/identities`), a GET needs the read scope
+  and any other method the write scope. Before 2.2.0 the organization, session,
+  passkey, MFA and linked-identity reads needed `auth:write`; an `auth:read`
+  key can now read them, and still cannot change them.
 - `expires_at` — optional. Verification rejects expired keys.
 - `revoked_at` — soft-delete. Revoked keys are kept for audit.
+
+### Elevated scopes, and why `*` does not include them
+
+An elevated scope is granted only by naming it on the key. `*` does not imply it, and neither does any other scope. Today there is one, `credits:grant`, which lets a key add credits to an end-user or organization with `POST /api/v1/credits/grant`.
+
+`*` is the default for every key minted without a `scopes` array, so it sits on nearly every key in every deployment. If `*` meant "every scope, including ones added later", adding `credits:grant` would have handed the power to mint credits to all of those keys at once, and no operator would have decided that. So `*` means "every standard scope", and an authority that creates value is held only by a key someone minted with it on purpose. The same reasoning is why it is not folded into `billing:write`, which every default key already holds.
+
+To mint one: in the panel, tick `credits:grant` under **Elevated scopes** (it combines with Full access or with a narrow list), or pass it in `scopes` to the create endpoint, for example `["billing:read", "credits:grant"]` or `["*", "credits:grant"]`. A `*`-only key calling the grant route gets `403 API_KEY_SCOPE_INSUFFICIENT`, and its `fix` says the scope is elevated.
+
+What a `credits:grant` key can do, and what bounds it:
+
+- One grant is 1 to 1,000,000 credits, positive only. Removing credits is `POST /credits/consume` (which cannot overdraw) or an operator ADJUST.
+- `idempotencyKey` is required, per subject, and belongs to this route alone: it is stored as `api-grant:<key>`, so it never matches a consume made under the same string. An exact retry grants nothing and returns the original entry; the same key with a different `amount` or `reason` is `409 CREDITS_IDEMPOTENCY_KEY_REUSED`.
+- Each grant writes `app.credits_granted_by_api_key` to the security log with the key's id, name and prefix, in the same transaction as the ledger entry: a grant that cannot be audited is not made. A leaked key can be traced to exactly what it minted, and revoking it stops it.
+
+Who may mint such a key: the same people who may grant credits from the panel. Minting or creating a key whose scopes include an elevated one needs billing-write access to the Application and the `billing:write` operator scope, on every path that sets key scopes (the panel and tenant API, an operator PAT, the operator MCP `mint_api_key` tool). A member who can mint ordinary keys but not grant credits gets `403 SCOPE_INSUFFICIENT`, and so does a PAT that carries only `keys:mint`. The panel's key list flags elevated scopes, and "Nothing else" in the form mints a key that holds only `credits:grant`.
+
+The elevated list lives in `@rekey.dev/shared-types` (`ELEVATED_API_KEY_SCOPES`), next to `STANDARD_API_KEY_SCOPES`, which is what `*` expands to.
 
 ### Why SHA-256, not Argon2?
 

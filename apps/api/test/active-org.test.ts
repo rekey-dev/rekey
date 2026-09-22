@@ -1,9 +1,10 @@
 /**
  * Active-organization (`oid`) claim. POST /users/me/organizations/:id/switch
- * re-mints the token pair with an active org; read endpoints (entitlements)
- * then default to that org's view + shared pool without an explicit
- * organizationId. The active org persists across refresh and self-heals when
- * the user leaves the org. Clearing switches back to the personal pool.
+ * re-mints the token pair with an active org; in an org-billed Application
+ * read endpoints (entitlements) then default to that org's view + shared pool
+ * without an explicit organizationId. The active org persists across refresh
+ * and self-heals when the user leaves the org. Clearing switches back to the
+ * personal pool. In a user-billed Application the default stays personal.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -55,6 +56,14 @@ describe('Active organization (oid claim)', () => {
         payload: { name: 'k', mode: 'live', scopes: ['auth:write', 'billing:read'] },
       })
       .then((r) => (r.json().data as { rawKey: string }).rawKey);
+    // The org-pool default applies where organizations are what is billed.
+    const cfg = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/tenant/applications/${appId}/billing-config`,
+      headers: auth(),
+      payload: { billingSubject: 'org' },
+    });
+    expect(cfg.statusCode, cfg.body).toBe(200);
   });
 
   interface Session {
@@ -127,6 +136,32 @@ describe('Active organization (oid claim)', () => {
       })
       .then((r) => r.json().data as { activeOrganizationId: string | null });
     expect(me.activeOrganizationId).toBe(orgId);
+  });
+
+  it('in a USER-billed Application a switch leaves the default on the personal pool', async () => {
+    const cfg = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/tenant/applications/${appId}/billing-config`,
+      headers: auth(),
+      payload: { billingSubject: 'user' },
+    });
+    expect(cfg.statusCode, cfg.body).toBe(200);
+    const owner = await signUpUser(`ub-${Math.random().toString(36).slice(2, 7)}@example.com`);
+    const orgId = await makeOrg(owner.endUser.id, 'userbilled');
+    await creditsService.grant({ applicationId: appId, endUserId: owner.endUser.id, amount: 10, reason: 'GRANT' });
+    await creditsService.grant({ applicationId: appId, organizationId: orgId, amount: 500, reason: 'GRANT' });
+
+    const switched = await switchTo(owner.accessToken, orgId).then((r) => r.json().data as Session);
+    expect((await entitlements(switched.accessToken)).creditBalance).toBe(10);
+    // The organization's pool is still one explicit parameter away.
+    const explicit = await app
+      .inject({
+        method: 'GET',
+        url: `/api/v1/billing/entitlements?organizationId=${orgId}`,
+        headers: { ...key(), 'x-rekey-user-token': switched.accessToken },
+      })
+      .then((r) => r.json().data as { creditBalance: number });
+    expect(explicit.creditBalance).toBe(500);
   });
 
   it('the active org survives refresh', async () => {

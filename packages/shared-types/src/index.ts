@@ -694,6 +694,40 @@ export const ApiKeyDtoSchema = z.object({
 });
 export type ApiKeyDto = z.infer<typeof ApiKeyDtoSchema>;
 
+/**
+ * API-key scopes the `*` wildcard grants. A key minted without a `scopes`
+ * array gets `["*"]`, so this list is what a default key can do.
+ */
+export const STANDARD_API_KEY_SCOPES = [
+  'auth:read',
+  'auth:write',
+  'billing:read',
+  'billing:write',
+  'webhooks:read',
+] as const;
+
+/**
+ * API-key scopes `*` does NOT grant: they must be named on the key.
+ *
+ * Every existing key defaults to `["*"]`, so adding an authority to the
+ * wildcard would hand it to every key already deployed without anyone having
+ * chosen to. An elevated scope is only ever held by a key an operator minted
+ * with it deliberately.
+ *
+ * - `credits:grant`: add credits to an end-user or organization with
+ *   `POST /api/v1/credits/grant`. It mints value, so it is not folded into
+ *   `billing:write`, which every default key already holds.
+ */
+export const ELEVATED_API_KEY_SCOPES = ['credits:grant'] as const;
+
+export type StandardApiKeyScope = (typeof STANDARD_API_KEY_SCOPES)[number];
+export type ElevatedApiKeyScope = (typeof ELEVATED_API_KEY_SCOPES)[number];
+
+/** True for a scope that `*` does not grant. */
+export function isElevatedApiKeyScope(scope: string): scope is ElevatedApiKeyScope {
+  return (ELEVATED_API_KEY_SCOPES as ReadonlyArray<string>).includes(scope);
+}
+
 // ============================================================================
 // Auth requests + responses
 // ============================================================================
@@ -981,15 +1015,52 @@ export const PlanDtoSchema = z.object({
    * plans that already exist. Such a plan is indistinguishable from a working
    * one until a buyer clicks Buy.
    *
-   * Absent on the public catalogue on purpose. A buyer has no repair to
-   * perform and `blockers` names internal state.
+   * The public catalogue (`GET /billing/plans`) carries `checkout.ready`
+   * only, see {@link PublicPlanDtoSchema}: a buyer has no repair to perform
+   * and `blockers` names internal state.
    */
   checkout: PlanCheckoutReadinessSchema.optional(),
 });
-export type PlanDto = Omit<z.infer<typeof PlanDtoSchema>, 'kind'> & {
+export type PlanDto = Omit<z.infer<typeof PlanDtoSchema>, 'kind' | 'checkout'> & {
   /** {@link Open}, always give your `switch` a default branch. */
   kind: PlanKindType;
+  /**
+   * `blockers` is optional in this type so a public catalogue row
+   * ({@link PublicPlanDto}, `ready` only) is still a `PlanDto`. The operator
+   * routes always send it.
+   */
+  checkout?: { ready: boolean; blockers?: PlanCheckoutBlockerDto[] };
 };
+
+/**
+ * The public catalogue's readiness signal: whether a buyer sent to checkout
+ * for this plan would get one from every provider they could be routed to.
+ * Only the boolean: which provider refuses and why is operator configuration.
+ * A pricing page can hide a plan whose `ready` is false. It describes
+ * checkout only, so a free default plan granted without checkout can read
+ * false while still applying to every signed-in user.
+ */
+export const PublicPlanCheckoutSchema = z.object({ ready: z.boolean() });
+export type PublicPlanCheckoutDto = z.infer<typeof PublicPlanCheckoutSchema>;
+
+/** A plan as `GET /billing/plans` returns it: the plan plus `checkout.ready`. */
+export const PublicPlanDtoSchema = PlanDtoSchema.extend({ checkout: PublicPlanCheckoutSchema });
+export type PublicPlanDto = Omit<PlanDto, 'checkout'> & { checkout: PublicPlanCheckoutDto };
+
+/**
+ * One feature's value for a subject (`GET /billing/entitlements/features/:key`).
+ *
+ * `value` is what `features[key]` holds in the full entitlements response, or
+ * null when nothing grants the key. `granted` is `Boolean(value)`, the same
+ * test as `if (features[key])`: a `false` flag, a `0` limit and an absent key
+ * all read as not granted. Compare `value` yourself for a numeric limit.
+ */
+export const FeatureCheckDtoSchema = z.object({
+  key: z.string(),
+  granted: z.boolean(),
+  value: z.union([z.boolean(), z.number(), z.string()]).nullable(),
+});
+export type FeatureCheckDto = z.infer<typeof FeatureCheckDtoSchema>;
 
 // ── Credits (prepaid balance / lead-pack drawdown) ──
 export const CreditReasonSchema = z.enum(['PURCHASE', 'GRANT', 'CONSUME', 'REFUND', 'ADJUST']);
@@ -1059,6 +1130,77 @@ export const GrantCreditsRequestSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 export type GrantCreditsRequest = z.infer<typeof GrantCreditsRequestSchema>;
+
+/**
+ * Largest grant one `POST /api/v1/credits/grant` call may make.
+ *
+ * A bound on a single call, not a budget. The route exists for a referral
+ * payout or a support top-up, and a key that can mint any int4 in one request
+ * turns one bad deploy into an unbounded liability. Larger amounts are an
+ * operator grant from the panel.
+ */
+export const MAX_KEY_CREDIT_GRANT = 1_000_000;
+
+/**
+ * Body for `POST /api/v1/credits/grant`, the Application-key grant.
+ *
+ * Narrower than the operator's {@link GrantCreditsRequestSchema} on purpose:
+ * positive amounts only (a key never removes credits; `consume` does that and
+ * refuses to overdraw), a per-call ceiling, and a REQUIRED idempotency key so a
+ * retried request can never mint twice.
+ */
+export const KeyGrantCreditsRequestSchema = z.object({
+  /** Exactly one of `endUserId` / `organizationId`. */
+  endUserId: z.string().min(1).optional(),
+  organizationId: z.string().min(1).optional(),
+  amount: z.number().int().min(1).max(MAX_KEY_CREDIT_GRANT),
+  reason: z.enum(['GRANT', 'REFUND']).default('GRANT'),
+  /** Required. A repeat with the same key (per subject) grants nothing and returns the original entry. */
+  idempotencyKey: z.string().min(1).max(200),
+  description: z.string().max(500).optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+export type KeyGrantCreditsRequest = z.input<typeof KeyGrantCreditsRequestSchema>;
+
+/**
+ * One entry of the signed-in end-user's own credit ledger
+ * (`GET /api/v1/credits/me/ledger`).
+ *
+ * {@link CreditLedgerEntryDtoSchema} without `metadata`. The route is reachable
+ * from a browser with the publishable key, and ledger metadata is written by
+ * the operator and the Application's backend for their own use (support notes,
+ * internal references). The description is the line a person should read.
+ */
+export const SelfCreditLedgerEntryDtoSchema = CreditLedgerEntryDtoSchema.omit({ metadata: true });
+export type SelfCreditLedgerEntryDto = Omit<CreditLedgerEntryDto, 'metadata'>;
+
+/**
+ * `data` of the `credit.granted`, `credit.consumed` and `credit.adjusted`
+ * webhooks: one ledger entry, as written, with the balance it left behind.
+ *
+ * `delta` is signed and `balance` is the subject's balance after this entry,
+ * so a mirror can apply every credit event the same way, whichever of the
+ * three names it arrived under.
+ */
+export interface CreditWebhookData {
+  credit: {
+    /** The ledger entry id. Stable, and unique per entry. */
+    entryId: string;
+    /** Exactly one of `endUserId` / `organizationId` is set. */
+    endUserId: string | null;
+    organizationId: string | null;
+    /** Signed change: positive added, negative removed. */
+    delta: number;
+    /** `Math.abs(delta)`. */
+    amount: number;
+    reason: CreditReasonType;
+    /** Balance of the subject immediately after this entry. */
+    balance: number;
+    idempotencyKey: string | null;
+    description: string | null;
+    createdAt: string;
+  };
+}
 
 /**
  * What a billing provider module can do, as declared by its registry entry.
@@ -1471,6 +1613,12 @@ export const OAuthIntrospectionResponseSchema = z.object({
   iat: z.number().optional(),
   token_type: z.string().optional(),
   client_id: z.string().optional(),
+  /**
+   * End-user MCP tokens only: the organization the grant acts for, chosen at
+   * consent. Absent on a personal grant. A token whose holder can no longer
+   * act for it is reported `active: false`.
+   */
+  oid: z.string().optional(),
 });
 export type OAuthIntrospectionResponse = z.infer<typeof OAuthIntrospectionResponseSchema>;
 
@@ -1514,6 +1662,19 @@ export const SecurityEventDtoSchema = z.object({
   type: z.string(),
   actorType: z.string(),
   actorId: z.string().nullable(),
+  /**
+   * The actor's email, resolved when the log is read: the operator account for
+   * `operator`, the end-user (within this event's Application) for `end_user`.
+   * `null` for `system`, and for an actor that no longer exists; `actorId`
+   * still identifies it.
+   */
+  actorEmail: z
+    .string()
+    .nullable()
+    .describe(
+      'Email of the actor, resolved at read time: the operator for `operator`, the end-user for `end_user`. ' +
+        'Null for `system` and for an actor that no longer exists.',
+    ),
   applicationId: z.string().nullable(),
   ip: z.string().nullable(),
   userAgent: z.string().nullable(),
@@ -1682,6 +1843,93 @@ export const DeviceLimitDetailsSchema = z.object({
 export type DeviceLimitDetails = z.infer<typeof DeviceLimitDetailsSchema>;
 
 // ============================================================================
+// `?include=` on GET /api/v1/auth/me and GET /api/v1/users/me
+// ============================================================================
+
+/**
+ * The values `?include=` accepts on the two current-user routes. Each one adds
+ * a top-level property of the same name to the response; with none, the
+ * response is exactly what it was before the parameter existed.
+ */
+export const ME_INCLUDE_VALUES = ['entitlements', 'device', 'subscription', 'organization', 'licenses'] as const;
+export type MeInclude = (typeof ME_INCLUDE_VALUES)[number];
+
+/** One row of `GET /billing/entitlements` → `entitlements`. */
+export interface ResolvedEntitlementDto {
+  kind: 'FEATURE' | 'CREDIT' | 'LICENSE' | 'USAGE';
+  key: string;
+  valueType: 'BOOL' | 'INT' | 'STRING' | null;
+  value: string | null;
+  quantity: number | null;
+  /** USAGE only: credits charged per unit past `quantity`. Null means a hard cap. */
+  creditsPerUnit?: number | null;
+  licenseKind: 'PERPETUAL' | 'TIMED' | 'SEATS' | null;
+  rollover: boolean;
+}
+
+/** `data` of `GET /billing/entitlements`, and `entitlements` on the current-user routes. */
+export interface ResolvedEntitlementsDto {
+  /** Feature flags and numeric limits, keyed by code. Gate your app on these. */
+  features: Record<string, boolean | number | string>;
+  /** The raw resolved entitlement rows, every kind. */
+  entitlements: ResolvedEntitlementDto[];
+  /** Live credit balance of the resolved subject. */
+  creditBalance: number;
+}
+
+/** What each `include` value adds to the current-user response, under its own name. */
+export interface MeIncludedFields {
+  /**
+   * Same object as `GET /billing/entitlements/for-user` for the Application's
+   * billing subject: the active organization in an org-billed Application,
+   * otherwise the end-user.
+   */
+  entitlements: ResolvedEntitlementsDto;
+  /**
+   * The device the access token's `dev` claim names. Null when the session is
+   * not device-bound. A session whose device was released or blocked is
+   * refused with 401 before this is read, so a returned device is ACTIVE.
+   */
+  device: EndUserDeviceDto | null;
+  /** Same value as `GET /billing/subscription` for the same billing subject as `entitlements`. */
+  subscription: SubscriptionDto | null;
+  /** The session's active organization with the caller's role, or null. */
+  organization: OrganizationWithRoleDto | null;
+  /**
+   * The first 100 rows of `GET /users/me/licenses`: the caller's own licences,
+   * plus the active organization's in an org-billed Application. `truncated`
+   * is true when there are more; page the route for the rest.
+   */
+  licenses: { items: EndUserLicenseDto[]; truncated: boolean };
+}
+
+/**
+ * What `GET /users/me`, `PATCH /users/me` and `GET /auth/me` return before any
+ * `include`: the end-user plus the session's active organization and the
+ * caller's role in it (null when there is none or membership lapsed).
+ */
+export type CurrentUserDto = EndUserDto & {
+  activeOrganizationId: string | null;
+  /** The caller's role NAME in the active organization. Not the app-wide `role`. */
+  activeOrganizationRole: string | null;
+  /** The tier that role maps to. Gate organization permissions on this. */
+  activeOrganizationBaseRole: OrganizationBaseRole | null;
+};
+
+/** The properties a given `include` list adds. `MeIncluded<never>` is `{}`. */
+export type MeIncluded<I extends MeInclude> = Pick<MeIncludedFields, I>;
+
+/**
+ * What an `include` LIST adds, as the SDKs type it. A literal list (inline, or
+ * `as const`) is a tuple, so the result has exactly those properties. A list
+ * typed as `MeInclude[]` could hold any subset at runtime, so every property
+ * it might add is optional rather than promised.
+ */
+export type MeIncludedFor<L extends readonly MeInclude[]> = number extends L['length']
+  ? Partial<MeIncluded<L[number]>>
+  : MeIncluded<L[number]>;
+
+// ============================================================================
 // Licenses, keys issued by LICENSE-kind plans
 // ============================================================================
 
@@ -1704,6 +1952,33 @@ export const LicenseDtoSchema = z.object({
   revokedAt: z.string().datetime().nullable(),
 });
 export type LicenseDto = z.infer<typeof LicenseDtoSchema>;
+
+/**
+ * A licence as its holder sees it (`GET /users/me/licenses`, `include=licenses`).
+ *
+ * The raw key is never stored, only its hash, so it cannot be returned here;
+ * `keyPrefix` is the display prefix every other licence surface shows.
+ * `metadata` is the operator's own notes about the licence and is left out.
+ * `organizationId` is set when the licence's seats are pooled to a team.
+ */
+export const EndUserLicenseDtoSchema = z.object({
+  id: z.string(),
+  applicationId: z.string(),
+  endUserId: z.string(),
+  organizationId: z.string().nullable(),
+  planId: z.string().nullable(),
+  kind: LicenseKindSchema,
+  status: LicenseStatusSchema,
+  keyPrefix: z.string(),
+  /** Which of the plan's LICENSE entitlements issued it; "" for a plan's single one. */
+  entitlementKey: z.string(),
+  expiresAt: z.string().datetime().nullable(),
+  seatsAllowed: z.number().int().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  revokedAt: z.string().datetime().nullable(),
+});
+export type EndUserLicenseDto = z.infer<typeof EndUserLicenseDtoSchema>;
 
 /**
  * Result of POST /api/v1/licenses/verify. Always HTTP 200, branch on `ok`
@@ -1796,6 +2071,83 @@ export const UsageAggregateDtoSchema = z.object({
   to: z.string().datetime().nullable(),
 });
 export type UsageAggregateDto = z.infer<typeof UsageAggregateDtoSchema>;
+
+/**
+ * A usage meter as an integrator sees it (`GET /api/v1/usage/meters`): the
+ * slug to record against and what one unit costs past the included quota.
+ */
+export const UsageMeterCatalogueEntryDtoSchema = z.object({
+  id: z.string(),
+  /** What `POST /usage/record` takes as `meterSlug`. */
+  slug: z.string(),
+  name: z.string(),
+  /** What one unit counts, e.g. `calls`, `tokens`. */
+  unit: z.string(),
+  /** An inactive meter refuses records with `USAGE_METER_INACTIVE`. */
+  active: z.boolean(),
+  /**
+   * Fallback credits charged per unit past a subscriber's included quota, for
+   * a subscriber whose plan does not price this meter. Null: no fallback.
+   */
+  creditsPerUnit: z.number().int().nullable(),
+  createdAt: z.string().datetime(),
+});
+export type UsageMeterCatalogueEntryDto = z.infer<typeof UsageMeterCatalogueEntryDtoSchema>;
+
+/**
+ * One meter's standing for one subject in the current quota period. Computed
+ * by the same code `POST /usage/record` enforces with, so `remaining` is what
+ * the next record will be measured against.
+ */
+export const UsageMeterRemainingDtoSchema = z.object({
+  meterSlug: z.string(),
+  name: z.string(),
+  unit: z.string(),
+  active: z.boolean(),
+  /**
+   * Units the subject's plans include this period. Null: the subject has no
+   * quota for this meter, so records are neither capped nor charged.
+   */
+  included: z.number().int().nullable(),
+  /** Units recorded for this subject in the current period. */
+  used: z.number().int(),
+  /**
+   * `max(0, included - used)`, or null when `included` is null. A record of
+   * more than this is refused with 402 `USAGE_QUOTA_EXCEEDED` when
+   * `creditsPerUnit` is null, and charged in credits past it otherwise.
+   */
+  remaining: z.number().int().nullable(),
+  /**
+   * Credits charged per unit past the quota, the rate `record` would apply
+   * (the subject's plan rate, else the meter's). Null: past the quota is
+   * refused, not charged. Always null when `included` is null.
+   */
+  creditsPerUnit: z.number().int().nullable(),
+  /** Start of the quota period (inclusive): the first instant of the calendar month, UTC. */
+  periodStart: z.string().datetime(),
+  /** End of the quota period (exclusive): the first instant of the next calendar month, UTC. */
+  periodEnd: z.string().datetime(),
+});
+export type UsageMeterRemainingDto = z.infer<typeof UsageMeterRemainingDtoSchema>;
+
+/** `data` of `GET /api/v1/usage/remaining` and `GET /api/v1/usage/remaining/for-user`. */
+export const UsageRemainingDtoSchema = z.object({
+  /** Whose quota this is. Exactly one of the two is set. */
+  endUserId: z.string().nullable(),
+  organizationId: z.string().nullable(),
+  periodStart: z.string().datetime(),
+  periodEnd: z.string().datetime(),
+  /** One entry per meter, oldest first, or just the one asked for with `?meter=`. */
+  meters: z.array(UsageMeterRemainingDtoSchema),
+  /** How many meters the Application has (1 with `?meter=`). */
+  totalMeters: z.number().int(),
+  /**
+   * True when `meters` stops short of `totalMeters`: an unfiltered read reports
+   * the first 200 meters. Read the rest one at a time with `?meter=`.
+   */
+  truncated: z.boolean(),
+});
+export type UsageRemainingDto = z.infer<typeof UsageRemainingDtoSchema>;
 
 // ============================================================================
 // Outbound webhooks, the events Rekey POSTs to YOUR app
@@ -1949,6 +2301,26 @@ export const WEBHOOK_EVENTS = [
     name: 'license.deactivated',
     description:
       'A machine gave back its seat on a license: the customer\'s software called POST /licenses/deactivate, or an operator released the activation (`data.releasedBy`). Payload: `data.license` (id, endUserId, kind) and `data.machineFingerprint`.',
+  },
+  // Credits. One event per ledger entry, written in the transaction that wrote
+  // the entry, so a balance change and its event commit together or not at
+  // all. Every payload is `data.credit` (see `CreditWebhookData`) with the
+  // signed `delta` and the `balance` after it, so a mirror can apply all three
+  // the same way. An idempotent replay writes no entry and emits nothing.
+  {
+    name: 'credit.granted',
+    description:
+      'Credits were added to an end-user or organization: an operator or Application-key grant, a refund, or a credit-pack purchase or plan provisioning (`data.credit.reason`). Payload: `data.credit` with entryId, endUserId or organizationId, delta, amount, reason, balance (after), idempotencyKey, description, createdAt.',
+  },
+  {
+    name: 'credit.consumed',
+    description:
+      'Credits were drawn down (`POST /credits/consume`, or usage recorded past an included quota on a priced meter). Fires once per ledger entry and never for a refused (402) or replayed call. Payload: `data.credit`, `delta` negative.',
+  },
+  {
+    name: 'credit.adjusted',
+    description:
+      'An operator corrected a balance: reason ADJUST in either direction, or any other operator entry that removes credits (`data.credit.delta` carries the sign). Separate from `credit.consumed` so a correction is never read as usage. Payload: `data.credit`.',
   },
 ] as const;
 

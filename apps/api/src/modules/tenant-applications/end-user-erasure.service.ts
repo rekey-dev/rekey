@@ -412,7 +412,8 @@ export async function eraseEndUser(args: {
             payload #>> '{data,subscription,endUserId}',
             payload #>> '{data,payment,endUserId}',
             payload #>> '{data,dunningCase,endUserId}',
-            payload #>> '{data,license,endUserId}'
+            payload #>> '{data,license,endUserId}',
+            payload #>> '{data,credit,endUserId}'
           )`
     ).map((r) => r.id);
     const deliveriesScrubbed = await scrubPayloads(tx, 'webhook_deliveries', deliveryIds, {
