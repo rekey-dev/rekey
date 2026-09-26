@@ -19,7 +19,9 @@ import {
   isProviderSdkError,
   shouldRecordOutageEvent,
   OUTAGE_SUBSYSTEM_LABEL,
+  postgresBusyReason,
   type OutageSubsystem,
+  type PostgresBusyReason,
 } from './dependency-outage.js';
 import { recordSecurityEvent } from './security-events.js';
 
@@ -205,13 +207,45 @@ const DEPENDENCY_RETRY_AFTER_SECONDS = 5;
  * `db` and `redis` individually). Carries no connection string, credential,
  * host, or port, the underlying error message is logged, never returned.
  */
-export function dependencyUnavailablePayload(subsystem: OutageSubsystem): {
+export function dependencyUnavailablePayload(
+  subsystem: OutageSubsystem,
+  busy: PostgresBusyReason | null = null,
+): {
   statusCode: number;
   code: string;
   message: string;
   fix: string;
   retryAfterSeconds: number;
+  details?: { reason: PostgresBusyReason };
 } {
+  // A saturated pool or an over-long transaction is not an unreachable
+  // database, so the outage text would send the operator to restore something
+  // that is up. Same code (clients already back off on it), its own text and a
+  // reason. Note /health/ready probes through the SAME pool (routes/health.ts),
+  // so while the pool is saturated it can report `db: unreachable` too; the
+  // pool_busy text says so rather than promising the probe stays green.
+  if (busy === 'pool_busy') {
+    return {
+      statusCode: 503,
+      code: 'DEPENDENCY_UNAVAILABLE',
+      message:
+        "Every connection in this API instance's PostgreSQL pool stayed busy past the wait limit, so this request could not be served.",
+      fix: 'Retry after Retry-After. This is load on the connection pool, not proof the database is down: GET /health/ready checks through the same pool, so while the pool is saturated it can also report `db` unreachable. If requests recover on their own within seconds, without a restart, the pool was busy rather than the database down. If it persists, raise DATABASE_POOL_SIZE (or `connection_limit` in DATABASE_URL, which wins over it), keeping the total across API instances under Postgres max_connections, or reduce concurrent load.',
+      retryAfterSeconds: DEPENDENCY_RETRY_AFTER_SECONDS,
+      details: { reason: busy },
+    };
+  }
+  if (busy === 'transaction_timeout') {
+    return {
+      statusCode: 503,
+      code: 'DEPENDENCY_UNAVAILABLE',
+      message:
+        'A database transaction ran past its time limit and was rolled back, so this request could not be served.',
+      fix: 'Retry after Retry-After. GET /health/ready can report `db` ok while this happens. If it persists, look for long-running queries or lock waits on the database.',
+      retryAfterSeconds: DEPENDENCY_RETRY_AFTER_SECONDS,
+      details: { reason: busy },
+    };
+  }
   return {
     statusCode: 503,
     code: 'DEPENDENCY_UNAVAILABLE',
@@ -326,7 +360,8 @@ export function rekeyErrorHandler(
   // instead of the generic 500 every outage used to share.
   const outage = classifyDependencyOutage(err);
   if (outage) {
-    req.log.error({ err, requestId, subsystem: outage }, 'dependency unavailable');
+    const busy = postgresBusyReason(err);
+    req.log.error({ err, requestId, subsystem: outage, reason: busy ?? undefined }, 'dependency unavailable');
     // Durable, operator-visible trail. Throttled per (subsystem, tenant): an
     // outage hits every request, and a row each would bury the log it is meant to
     // explain. Fire-and-forget, an audit write must never replace the response.
@@ -338,10 +373,14 @@ export function rekeyErrorHandler(
         ...(outageTenantId !== null && { tenantId: outageTenantId }),
         ...(req.application?.id !== undefined && { applicationId: req.application.id }),
         ip: req.ip,
-        metadata: { subsystem: outage, route: req.routeOptions?.url ?? req.url },
+        metadata: {
+          subsystem: outage,
+          ...(busy !== null && { reason: busy }),
+          route: req.routeOptions?.url ?? req.url,
+        },
       });
     }
-    const payload = dependencyUnavailablePayload(outage);
+    const payload = dependencyUnavailablePayload(outage, busy);
     reply.header('Retry-After', String(payload.retryAfterSeconds));
     return reply.status(payload.statusCode).send({
       success: false,
@@ -350,6 +389,7 @@ export function rekeyErrorHandler(
         message: payload.message,
         fix: payload.fix,
         retryAfterSeconds: payload.retryAfterSeconds,
+        ...(payload.details !== undefined && { details: payload.details }),
         requestId,
       },
     });

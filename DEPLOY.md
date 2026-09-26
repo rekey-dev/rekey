@@ -181,8 +181,10 @@ Each API process holds up to `DATABASE_POOL_SIZE` Postgres connections (default
 **20**), applied to `DATABASE_URL` as `connection_limit`. A request that finds
 every connection busy waits `DATABASE_POOL_TIMEOUT_SECONDS` (default 10) and
 then fails. The same pool serves the HTTP handlers, the outbound-webhook worker
-(up to 10 jobs at once) and the periodic jobs, so keep it above 10 with room
-for requests.
+and the periodic jobs. Webhook delivery runs up to 50 sends at once per
+replica, but holds no connection while it waits on a receiver, and its
+database statements use at most half the pool (up to 10 connections), so the
+other half always stays free for requests.
 
 The ceiling is the database, not the API:
 

@@ -50,7 +50,7 @@ describe('the device reaches the refresh call', () => {
   it('sends the configured device when rotating', async () => {
     jar.set('rekey_refresh', 'rt1');
 
-    await getSession(cookies, req(), { ...base, device: DEVICE });
+    await getSession(cookies, req(), { ...base, device: DEVICE }, { refresh: true });
 
     expect(refresh).toHaveBeenCalledWith('rt1', { device: DEVICE });
   });
@@ -58,7 +58,7 @@ describe('the device reaches the refresh call', () => {
   it('sends no device key at all when none is configured', async () => {
     jar.set('rekey_refresh', 'rt1');
 
-    await getSession(cookies, req(), base);
+    await getSession(cookies, req(), base, { refresh: true });
 
     expect(refresh).toHaveBeenCalledWith('rt1');
   });

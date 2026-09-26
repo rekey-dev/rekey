@@ -74,7 +74,7 @@ export interface CheckoutButtonProps {
 }
 
 /**
- * A single checkout button for one plan (Clerk's `<CheckoutButton>`). Posts the
+ * A single checkout button for one plan. Posts the
  * plan slug to your checkout Server Action, which redirects to the hosted
  * checkout. Append the active org id via `hiddenFields` for org-scoped billing.
  *
@@ -162,8 +162,8 @@ export interface PricingTableProps {
 }
 
 /**
- * Render the Application's plans as a pricing grid with upgrade buttons (Clerk's
- * `<PricingTable>`). Plans come in as a prop (server-fetched); each upgrade posts
+ * Render the Application's plans as a pricing grid with upgrade buttons. Plans
+ * come in as a prop (server-fetched); each upgrade posts
  * to your checkout Server Action. Org-scoped when `hiddenFields` carries the
  * active org id, and gated when `orgGateBlocking`.
  *

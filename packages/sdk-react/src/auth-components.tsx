@@ -472,7 +472,7 @@ function UserButtonBody({
 }
 
 /**
- * Avatar + dropdown menu for the signed-in user (Clerk's `<UserButton>`).
+ * Avatar + dropdown menu for the signed-in user.
  * Renders nothing when signed out. The avatar shows the user's email initial.
  *
  * @example

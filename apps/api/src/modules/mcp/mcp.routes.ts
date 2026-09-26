@@ -17,7 +17,8 @@
  * shape.
  */
 
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { Application } from '@prisma/client';
 import { z } from 'zod';
 import {
   resolveMcpApp,
@@ -49,6 +50,7 @@ import { handleMcpMessage, type JsonRpcMessage } from './mcp-server.js';
 import { errs, ref, raw, type JsonSchema } from '../../lib/openapi.js';
 import { requireApiKey, requireScope } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
+import type { PublicEndUser } from '../auth/auth.service.js';
 import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
 import { CLIENT_REGISTRATION_BODY_LIMIT, TOKEN_BODY_LIMIT } from '../../lib/body-limits.js';
@@ -616,6 +618,34 @@ const RegisterBody = z.object({
 });
 
 /**
+ * Identify the secret key on `POST /:slug/oauth/introspect` before the global
+ * limiter runs, so the call is counted against that key's budget
+ * (`RATE_LIMIT_API_KEY_MAX`) instead of the caller's address.
+ *
+ * A paid MCP server introspects on every tool call, from one backend address,
+ * with its secret key. The route used to carry the sign-in tier's 30 a minute,
+ * keyed on the address because the key was only checked inside the handler,
+ * so real traffic was refused. Introspection guesses nothing: the key is a
+ * secret credential and the token is a signed JWT.
+ *
+ * Never refuses. A missing or unknown key leaves the request anonymous: it is
+ * counted per client IP at `RATE_LIMIT_MAX`, and the handler answers the RFC
+ * 7662 `invalid_client`, which the rejected-credential block counts. A key of
+ * another Application is counted against that key and refused by the handler.
+ * Publishable keys are not in the key table, so they stay anonymous.
+ */
+async function identifyIntrospectionKey(req: FastifyRequest): Promise<void> {
+  const header = req.headers.authorization ?? '';
+  const presented = header.startsWith('Bearer ') ? header.slice(7) : '';
+  if (!presented) return;
+  const verified = await apiKeysService.verify(presented);
+  if (!verified) return;
+  req.apiKey = verified.apiKey;
+  req.application = verified.application;
+  req.authKind = 'secret';
+}
+
+/**
  * The organization a session handoff binds its MCP grant to. Only an explicit
  * `organization_id` binds one, checked out loud (the same 403s the organization
  * routes give). Omitted or `null` is personal, as every handoff was before the
@@ -647,6 +677,108 @@ async function handoffOrganization(args: {
     organizationId: args.requested,
   });
   return args.requested;
+}
+
+/**
+ * Everything `POST /oauth/authorize/grant` checks before it mints a code, and
+ * everything `POST /oauth/authorize/preview` checks before it describes the
+ * request. The two lists must be the same one: a preview that passed a request
+ * the grant then refused would show a consent screen for nothing, and one that
+ * refused a request the grant would pass would hide a real one.
+ *
+ * Refusals after the client and its redirect URI are confirmed carry
+ * `details` (`oauth_error` + the registered `redirect_uri`), so a hosted page
+ * may send them back to the client. Refusals before that carry none on
+ * purpose: nothing has confirmed where the browser may go.
+ */
+async function checkedHandoffRequest(req: FastifyRequest): Promise<{
+  application: Application;
+  endUser: PublicEndUser;
+  body: z.infer<typeof GrantBody>;
+  client: { id: string; redirectUris: string[]; clientName: string | null };
+  redirectUri: string;
+  granted: string;
+}> {
+  const { slug } = SlugParam.parse(req.params);
+  const application = await resolveAuthServerApp(slug);
+
+  // Defence in depth. `requireApiKey` already refuses a publishable key
+  // (wrong prefix → API_KEY_INVALID), so this is unreachable, which is
+  // why it can carry a specific code without becoming a probing oracle.
+  if (req.authKind === 'publishable') {
+    throw new RekeyError({
+      statusCode: 403,
+      code: 'SESSION_HANDOFF_FORBIDDEN',
+      message: 'A publishable key cannot hand off a session.',
+      fix: 'Call this from your server with the Application secret key.',
+    });
+  }
+
+  // The slug names one Application and the secret key resolves to another
+  //, refuse rather than letting a key for app A mint codes on app B.
+  // `requireUserSession` has already bound the user token to the KEY's
+  // Application, so without this the code would be minted on the wrong one.
+  if (!req.application || req.application.id !== application.id) {
+    throw new RekeyError({
+      statusCode: 403,
+      code: 'SESSION_HANDOFF_FORBIDDEN',
+      message: 'The presented secret key belongs to a different Application.',
+      fix: `Use the secret key for the Application "${slug}".`,
+    });
+  }
+
+  const endUser = req.endUser;
+  if (!endUser) {
+    // Programming error, requireUserSession guarantees this.
+    throw new RekeyError({
+      statusCode: 500,
+      code: 'INTERNAL_ERROR',
+      message: 'Session handoff ran without a resolved end-user.',
+      fix: 'Register requireUserSession before this handler.',
+    });
+  }
+
+  const body = GrantBody.parse(req.body ?? {});
+
+  const client = await mcpOAuthService.getClient(application.id, body.client_id);
+  const redirectUri = client?.redirectUris.find((uri) => uri === body.redirect_uri);
+  if (!client || redirectUri === undefined) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'INVALID_GRANT_REQUEST',
+      message: 'Unknown client_id, or the redirect_uri is not registered for it.',
+      fix: 'Register the client and its exact redirect URI at POST /oauth/register.',
+    });
+  }
+  // From here on the redirect URI is proven registered for this client, so
+  // a refusal may go back to it as an RFC 6749 §4.1.2.1 error. `details`
+  // says so, and names the URI, so the hosted page never has to decide for
+  // itself whether a caller-supplied URI is safe to send a browser to.
+  // Refusals above this line carry no `details` on purpose.
+  const refuse = (oauthError: string, message: string, fix: string): RekeyError =>
+    new RekeyError({
+      statusCode: 400,
+      code: 'INVALID_GRANT_REQUEST',
+      message,
+      fix,
+      details: { oauth_error: oauthError, redirect_uri: redirectUri },
+    });
+  if (body.code_challenge_method !== 'S256') {
+    throw refuse(
+      'invalid_request',
+      'code_challenge_method must be S256.',
+      'Send base64url(sha256(code_verifier)) as `code_challenge` with method S256.',
+    );
+  }
+  const granted = grantScopes(application, body.scope);
+  if (granted === '') {
+    throw refuse(
+      'invalid_scope',
+      'None of the requested scopes can be granted by this Application.',
+      'Request scopes this Application supports (e.g. `openid email`).',
+    );
+  }
+  return { application, endUser, body, client, redirectUri, granted };
 }
 
 export async function mcpRoutes(app: FastifyInstance): Promise<void> {
@@ -1206,15 +1338,24 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
             properties: {
               code: { type: 'string' },
               expires_in: { type: 'integer' },
+              redirect_uri: {
+                type: 'string',
+                description:
+                  'The registered redirect URI the code is bound to. Send the browser here with ' +
+                  '`code` and the original `state`.',
+              },
             },
-            required: ['code', 'expires_in'],
+            required: ['code', 'expires_in', 'redirect_uri'],
           },
           ...errs({
             ...AUTH_SERVER_GATE_404,
             400:
               'INVALID_GRANT_REQUEST: unknown `client_id`, unregistered `redirect_uri`, non-S256 PKCE, ' +
               'no grantable scope, or `organization_id` on a grant without `mcp:account` or on an ' +
-              'Application without organizations.',
+              'Application without organizations. When the client and `redirect_uri` were valid and ' +
+              'the refusal can go back to the client, `details` carries `oauth_error` ' +
+              '(`invalid_request` or `invalid_scope`) and the registered `redirect_uri`; without ' +
+              '`details`, do not redirect the browser anywhere.',
             401: 'API_KEY_MISSING / API_KEY_INVALID / USER_TOKEN_MISSING / USER_TOKEN_INVALID / USER_TOKEN_WRONG_APPLICATION.',
             403:
               'API_KEY_SCOPE_INSUFFICIENT: the secret key lacks `auth:write`; ' +
@@ -1228,73 +1369,8 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       },
     },
     async (req, reply) => {
-      const { slug } = SlugParam.parse(req.params);
-      const application = await resolveAuthServerApp(slug);
-
-      // Defence in depth. `requireApiKey` already refuses a publishable key
-      // (wrong prefix → API_KEY_INVALID), so this is unreachable, which is
-      // why it can carry a specific code without becoming a probing oracle.
-      if (req.authKind === 'publishable') {
-        throw new RekeyError({
-          statusCode: 403,
-          code: 'SESSION_HANDOFF_FORBIDDEN',
-          message: 'A publishable key cannot hand off a session.',
-          fix: 'Call this from your server with the Application secret key.',
-        });
-      }
-
-      // The slug names one Application and the secret key resolves to another
-      //, refuse rather than letting a key for app A mint codes on app B.
-      // `requireUserSession` has already bound the user token to the KEY's
-      // Application, so without this the code would be minted on the wrong one.
-      if (!req.application || req.application.id !== application.id) {
-        throw new RekeyError({
-          statusCode: 403,
-          code: 'SESSION_HANDOFF_FORBIDDEN',
-          message: 'The presented secret key belongs to a different Application.',
-          fix: `Use the secret key for the Application "${slug}".`,
-        });
-      }
-
-      const endUser = req.endUser;
-      if (!endUser) {
-        // Programming error, requireUserSession guarantees this.
-        throw new RekeyError({
-          statusCode: 500,
-          code: 'INTERNAL_ERROR',
-          message: 'Session handoff ran without a resolved end-user.',
-          fix: 'Register requireUserSession before this handler.',
-        });
-      }
-
-      const body = GrantBody.parse(req.body ?? {});
-
-      const client = await mcpOAuthService.getClient(application.id, body.client_id);
-      if (!client || !client.redirectUris.includes(body.redirect_uri)) {
-        throw new RekeyError({
-          statusCode: 400,
-          code: 'INVALID_GRANT_REQUEST',
-          message: 'Unknown client_id, or the redirect_uri is not registered for it.',
-          fix: 'Register the client and its exact redirect URI at POST /oauth/register.',
-        });
-      }
-      if (body.code_challenge_method !== 'S256') {
-        throw new RekeyError({
-          statusCode: 400,
-          code: 'INVALID_GRANT_REQUEST',
-          message: 'code_challenge_method must be S256.',
-          fix: 'Send base64url(sha256(code_verifier)) as `code_challenge` with method S256.',
-        });
-      }
-      const granted = grantScopes(application, body.scope);
-      if (granted === '') {
-        throw new RekeyError({
-          statusCode: 400,
-          code: 'INVALID_GRANT_REQUEST',
-          message: 'None of the requested scopes can be granted by this Application.',
-          fix: 'Request scopes this Application supports (e.g. `openid email`).',
-        });
-      }
+      const { application, endUser, body, client, redirectUri, granted } =
+        await checkedHandoffRequest(req);
 
       const organizationId = await handoffOrganization({
         application,
@@ -1334,7 +1410,102 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
         metadata: { clientId: client.id, scope: granted, organizationId },
       });
 
-      return reply.send({ code, expires_in: 60 });
+      return reply.send({ code, expires_in: 60, redirect_uri: redirectUri });
+    },
+  );
+
+  // ---- What a hosted authorize page shows before it asks ------------------
+  //
+  // A hosted authorize page (`authConfig.hostedAuthorizeUrl`) holds the
+  // user's session, so it could call `/grant` the moment the browser arrives.
+  // It must not: a client registers itself (RFC 7591) with any redirect URI it
+  // likes, so a link to the hosted page is enough to deliver a signed-in
+  // user's code to whoever wrote the link. The page has to ask first, and to
+  // ask it needs what this returns: the client's name, the registered URI the
+  // answer will go to, the scopes that would be granted, and whose account it
+  // is. Same credentials and the same checks as `/grant`, and nothing minted.
+  //
+  // A separate route rather than a flag on `/grant` on purpose: an API that
+  // predates the flag would ignore it and mint, which is the bug this exists
+  // to prevent. An API that predates this route answers 404, and the page
+  // shows an error.
+  app.post(
+    '/:slug/oauth/authorize/preview',
+    {
+      bodyLimit: TOKEN_BODY_LIMIT,
+      preHandler: [
+        requireApiKey,
+        requireScope('auth:write'),
+        requireUserSession,
+        refuseWhileImpersonating('hand off a session'),
+      ],
+      config: { rateLimit: authRateLimit(30) },
+      schema: {
+        tags: ['MCP · OAuth'],
+        summary: 'Describe an authorization request before asking the end-user',
+        description:
+          'For a hosted authorize page: runs every check `POST /oauth/authorize/grant` runs, with ' +
+          'the same credentials, and returns what the consent screen must show instead of a code. ' +
+          'Mints nothing and writes nothing. Call `/grant` only after the end-user allows.',
+        body: {
+          type: 'object',
+          required: ['client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method'],
+          properties: {
+            client_id: { type: 'string' },
+            redirect_uri: { type: 'string' },
+            code_challenge: { type: 'string' },
+            code_challenge_method: { type: 'string', enum: ['S256'] },
+            scope: { type: 'string' },
+            nonce: { type: 'string' },
+          },
+        },
+        response: {
+          200: {
+            description: 'The request is valid. Show these to the end-user and ask.',
+            type: 'object',
+            properties: {
+              client_id: { type: 'string' },
+              client_name: {
+                type: 'string',
+                nullable: true,
+                description:
+                  'The name the client gave itself at registration. Unverified: show it as a claim.',
+              },
+              redirect_uri: {
+                type: 'string',
+                description: 'The registered redirect URI the answer will be delivered to.',
+              },
+              scope: { type: 'string', description: 'The scopes a grant would carry, space-separated.' },
+              account: {
+                type: 'object',
+                properties: { email: { type: 'string' } },
+                required: ['email'],
+              },
+            },
+            required: ['client_id', 'client_name', 'redirect_uri', 'scope', 'account'],
+          },
+          ...errs({
+            ...AUTH_SERVER_GATE_404,
+            400:
+              'INVALID_GRANT_REQUEST: the same refusals as `/grant`, with `details` under the same ' +
+              'rule (present only once the client and `redirect_uri` are confirmed).',
+            401: 'API_KEY_MISSING / API_KEY_INVALID / USER_TOKEN_MISSING / USER_TOKEN_INVALID / USER_TOKEN_WRONG_APPLICATION.',
+            403:
+              'API_KEY_SCOPE_INSUFFICIENT / SESSION_HANDOFF_FORBIDDEN, as for `/grant`.',
+            429: 'RATE_LIMITED: too many requests. Honour the `Retry-After` header.',
+          }),
+        },
+      },
+    },
+    async (req, reply) => {
+      const { endUser, client, redirectUri, granted } = await checkedHandoffRequest(req);
+      return reply.send({
+        client_id: client.id,
+        client_name: client.clientName,
+        redirect_uri: redirectUri,
+        scope: granted,
+        account: { email: endUser.email },
+      });
     },
   );
 
@@ -1430,8 +1601,11 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
     '/:slug/oauth/introspect',
     {
       bodyLimit: TOKEN_BODY_LIMIT,
-      // RFC 7662 §2.1 mandates application/x-www-form-urlencoded.
-      config: { rateLimit: authRateLimit(30), acceptsForm: true },
+      // RFC 7662 §2.1 mandates application/x-www-form-urlencoded. No route
+      // rate limit: the global limiter counts the call against the secret key
+      // `identifyIntrospectionKey` found, else against the client IP.
+      config: { acceptsForm: true },
+      onRequest: identifyIntrospectionKey,
       schema: {
         tags: ['MCP · OAuth'],
         security: [{ apiKey: [] }],
@@ -1441,7 +1615,8 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           'handler verifies it and rejects a key belonging to any other Application with ' +
           '401 `invalid_client`. The publishable key is not accepted: introspection reveals ' +
           'token state. Intended for a customer running their own MCP server against ' +
-          "Rekey-issued end-user MCP tokens.",
+          'Rekey-issued end-user MCP tokens. Counted against the secret key\'s own budget ' +
+          '(`RATE_LIMIT_API_KEY_MAX`, 30000 a minute by default), not a sign-in limit.',
         response: {
           200: { description: 'Token state (RFC 7662).', ...ref('OAuthIntrospectionResponse') },
           401: oauthError(
@@ -1460,10 +1635,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
       const application = await resolveAuthServerApp(slug);
       // Token state is sensitive, never let a proxy cache an introspection result.
       reply.header('Cache-Control', 'no-store');
-      const header = req.headers.authorization ?? '';
-      const key = header.startsWith('Bearer ') ? header.slice(7) : '';
-      const verified = key ? await apiKeysService.verify(key) : null;
-      if (!verified || verified.applicationId !== application.id) {
+      if (!req.apiKey || req.apiKey.applicationId !== application.id) {
         return reply.code(401).send({
           error: 'invalid_client',
           error_description: "Introspection requires this application's secret key.",

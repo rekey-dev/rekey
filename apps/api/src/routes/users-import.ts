@@ -26,7 +26,7 @@ import { isSupportedPasswordHash, MAX_BCRYPT_COST } from '../lib/passwords.js';
 import { assertEndUserQuota } from '../lib/tenant-limits.js';
 import { assertMetadataWithinLimit } from '../modules/auth/auth.service.js';
 import { applicationRolesService } from '../modules/application-roles/application-roles.service.js';
-import { emitDetached } from '../modules/webhooks/webhook.service.js';
+import { enqueueEvent, kickDeliveries } from '../modules/webhooks/webhook.service.js';
 import { ok, errs } from '../lib/openapi.js';
 
 const MAX_BATCH = 500;
@@ -196,6 +196,7 @@ export async function usersImportRoutes(app: FastifyInstance): Promise<void> {
           throw e;
         }
         let row: { id: string; email: string };
+        let deliveryIds: string[] = [];
         try {
           row = await prisma.$transaction(async (tx) => {
             const endUser = await tx.endUser.create({
@@ -239,6 +240,11 @@ export async function usersImportRoutes(app: FastifyInstance): Promise<void> {
                 },
               });
             }
+            deliveryIds = await enqueueEvent(tx, {
+              applicationId: application.id,
+              type: 'user.created',
+              data: { user: { id: endUser.id, email: endUser.email }, via: 'import' },
+            });
             return endUser;
           });
         } catch (e) {
@@ -249,11 +255,7 @@ export async function usersImportRoutes(app: FastifyInstance): Promise<void> {
           continue;
         }
         created.push(row);
-        emitDetached({
-          applicationId: application.id,
-          type: 'user.created',
-          data: { user: { id: row.id, email: row.email }, via: 'import' },
-        });
+        kickDeliveries(deliveryIds);
       }
       return { success: true, data: { created, skipped, unlinked } };
     },

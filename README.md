@@ -12,6 +12,16 @@ If you're an AI coding agent reading this repo, start at [AGENTS.md](AGENTS.md).
 
 ## Quick start
 
+**Building an app on Rekey Cloud?** You need none of the self-host setup below.
+[rekey.dev/docs/quickstart](https://rekey.dev/docs/quickstart) goes from a free
+workspace (no card) to a signed-in user in a Next.js app, with the drop-in
+`<SignIn>` form and two environment variables. Or clone a starter:
+[Next.js](https://github.com/rekey-dev/nextjs-starter),
+[Astro](https://github.com/rekey-dev/astro-starter),
+[digital shop](https://github.com/rekey-dev/nextjs-commerce).
+
+### Self-host
+
 The whole stack boots with one command — the API auto-migrates on start:
 
 ```bash
@@ -47,7 +57,9 @@ a fresh clone needs no separate build step.
 API at `http://localhost:3030`, interactive docs at `/docs`, operator panel at
 `http://localhost:3031`.
 
-Then bootstrap the first Tenant, Application and API key in one command:
+Then bootstrap the first Tenant, Application and API key in one command. The
+CLI is self-host only: it authenticates with `SUPER_ADMIN_KEY`, which a Rekey
+Cloud workspace does not have.
 
 ```bash
 export REKEY_URL=http://localhost:3030
@@ -57,7 +69,7 @@ npx @rekey.dev/cli init --tenant-name "Acme Co" --owner-email ops@acme.example \
                         --app-name "Acme Prod" --app-slug acme-prod
 ```
 
-See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough (boot →
+See [docs/quickstart.md](docs/quickstart.md), the self-host quickstart, for the full walkthrough (boot →
 bootstrap → call from your app → sign up an end-user), and
 [DEPLOY.md](DEPLOY.md) to run it in production (Traefik + TLS).
 
@@ -71,12 +83,12 @@ Apps (each runs on a fixed dev port):
 | `apps/panel` | `@rekey.dev/panel` | 3031 | Next.js admin panel (panel.rekey.dev) |
 | `apps/portal` | `@rekey.dev/portal` | 3050 | Hosted customer portal V2 (portal.rekey.dev) |
 
-`examples/` is currently empty: the previous demo apps were removed in #261
-because they had drifted from the API they demonstrated, and a rebuilt set has
-not landed yet. Until it does, the worked integrations are
+There is no `examples/` directory: the demo apps that lived there were removed
+in #261 because they had drifted from the API they demonstrated. Working
+integrations live in their own repositories instead, the three starters linked
+under [Quick start](#quick-start), alongside
 [docs/quickstart.md](docs/quickstart.md) and
-[docs/react-components.md](docs/react-components.md), both of which are checked
-against a running stack.
+[docs/react-components.md](docs/react-components.md).
 
 Packages:
 
@@ -91,7 +103,7 @@ Docs (`docs/`):
 
 | Doc | What |
 |---|---|
-| [quickstart.md](docs/quickstart.md) | Fresh clone → running API → first Application → first end-user |
+| [quickstart.md](docs/quickstart.md) | Self-host quickstart: fresh clone → running API → first Application → first end-user. The Cloud quickstart is [rekey.dev/docs/quickstart](https://rekey.dev/docs/quickstart) |
 | [api-url.md](docs/api-url.md) | Which URL to point the SDK at — Rekey Cloud vs self-hosted |
 | [concepts.md](docs/concepts.md) | Tenant / Application / EndUser data model |
 | [api-keys.md](docs/api-keys.md) | The three credential types, and environments |

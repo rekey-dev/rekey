@@ -506,7 +506,12 @@ describe('Application lifecycle', () => {
       // re-enable path the operator is bringing a real product back online and
       // it is not a remedy at all, it is a dead end dressed as help.
       expect(err.fix).not.toContain('staging');
-      expect(err.fix).toContain('contact support');
+      // Both routes to a higher ceiling, each true on the deployment it names.
+      // It used to say "contact support", which is nobody on a self-hosted
+      // deployment, and never said where a Cloud workspace gets more.
+      expect(err.fix).toContain('PUT /api/v1/admin/tenants/:id/limits');
+      expect(err.fix).toContain('https://rekey.dev/pricing');
+      expect(err.fix).not.toContain('contact support');
     });
 
     it('swapping which production app runs is allowed at a ceiling of one', async () => {

@@ -177,8 +177,18 @@ export const organizationRolesService = {
    * not only new assignments.
    */
   async isUsable(applicationId: string, name: string): Promise<boolean> {
-    const row = (await getOrganizationRoles(applicationId)).find((r) => r.name === name);
-    return row !== undefined && !row.disabled;
+    return (await this.usableNames(applicationId)).has(name);
+  },
+
+  /**
+   * Every role name `isUsable` would accept, for a caller that must decide
+   * inside a transaction: the catalog read goes through the global client
+   * (and the cache), so it belongs before the transaction opens, not inside
+   * it holding a second pool connection.
+   */
+  async usableNames(applicationId: string): Promise<ReadonlySet<string>> {
+    const roles = await getOrganizationRoles(applicationId);
+    return new Set(roles.filter((r) => !r.disabled).map((r) => r.name));
   },
 
   /**

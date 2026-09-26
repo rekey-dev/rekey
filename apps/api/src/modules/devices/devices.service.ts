@@ -35,7 +35,7 @@ import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 import { entitlementsService } from '../billing/entitlements.service.js';
-import { emitDetached } from '../webhooks/webhook.service.js';
+import { emitDetached, enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
 
 export type { Device, DeviceStatus };
 
@@ -154,6 +154,20 @@ function devicePayload(d: Device): Record<string, unknown> {
   };
 }
 
+/** Write `device.registered` for a device that just took a slot, in `tx`. */
+function enqueueRegistered(
+  tx: Prisma.TransactionClient,
+  applicationId: string,
+  device: Device,
+  reactivated: boolean,
+): Promise<string[]> {
+  return enqueueEvent(tx, {
+    applicationId,
+    type: 'device.registered',
+    data: { device: devicePayload(device), reactivated },
+  });
+}
+
 /** What an end-user sees of their own device: no operator notes, no IP. */
 export function forEndUser(d: Device): Omit<Device, 'blockedReason' | 'lastSeenIp'> {
   const { blockedReason, lastSeenIp, ...rest } = d;
@@ -210,6 +224,9 @@ export const devicesService = {
     const ip = input.ip ? input.ip.slice(0, 64) : null;
     const label = input.label === undefined ? undefined : input.label?.slice(0, 120) ?? null;
 
+    // `device.registered` rows, written under the lock with the device they
+    // announce. Only the two branches that take a slot write any.
+    let deliveryIds: string[] = [];
     const outcome = await prisma.$transaction(async (tx) => {
       await lockDevices(tx, input.applicationId, input.endUserId);
 
@@ -264,6 +281,7 @@ export const devicesService = {
             ...(label !== undefined && { label }),
           },
         });
+        deliveryIds = await enqueueRegistered(tx, input.applicationId, device, true);
         return { kind: 'ok' as const, device, created: false, reactivated: true };
       }
 
@@ -279,16 +297,13 @@ export const devicesService = {
           lastSeenIp: ip,
         },
       });
+      deliveryIds = await enqueueRegistered(tx, input.applicationId, device, false);
       return { kind: 'ok' as const, device, created: true, reactivated: false };
     });
 
     // Side effects after commit, never on the request's critical path.
     if (outcome.kind === 'ok' && (outcome.created || outcome.reactivated)) {
-      emitDetached({
-        applicationId: input.applicationId,
-        type: 'device.registered',
-        data: { device: devicePayload(outcome.device), reactivated: outcome.reactivated },
-      });
+      kickDeliveries(deliveryIds);
       void recordSecurityEvent({
         type: 'user.device_registered',
         actorType: 'end_user',
@@ -426,7 +441,9 @@ export const devicesService = {
           fix: 'An operator must unblock it first (POST …/devices/:id/unblock).',
         });
       }
-      if (current.status === 'RELEASED') return { device: current, sessionsRevoked: 0, changed: false };
+      if (current.status === 'RELEASED') {
+        return { device: current, sessionsRevoked: 0, changed: false, deliveryIds: [] };
+      }
       const device = await tx.device.update({
         where: { id: current.id },
         data: { status: 'RELEASED', releasedAt: now },
@@ -440,20 +457,21 @@ export const devicesService = {
         where: { deviceId: current.id, revokedAt: null },
         data: { revokedAt: now },
       });
-      return { device, sessionsRevoked: revoked.count, changed: true };
+      const deliveryIds = await enqueueEvent(tx, {
+        applicationId: args.applicationId,
+        type: 'device.released',
+        data: {
+          device: devicePayload(device),
+          sessionsRevoked: revoked.count,
+          releasedBy: args.actor.type,
+        },
+      });
+      return { device, sessionsRevoked: revoked.count, changed: true, deliveryIds };
     });
     if (!result.changed) return { device: result.device, sessionsRevoked: 0 };
     const released = { device: result.device, sessionsRevoked: result.sessionsRevoked };
 
-    emitDetached({
-      applicationId: args.applicationId,
-      type: 'device.released',
-      data: {
-        device: devicePayload(result.device),
-        sessionsRevoked: result.sessionsRevoked,
-        releasedBy: args.actor.type,
-      },
-    });
+    kickDeliveries(result.deliveryIds);
     void recordSecurityEvent({
       type: args.actor.type === 'end_user' ? 'user.device_released' : 'end_user.device_released',
       actorType: args.actor.type === 'server' ? 'system' : args.actor.type,
@@ -486,7 +504,9 @@ export const devicesService = {
     const result = await prisma.$transaction(async (tx) => {
       await lockDevices(tx, args.applicationId, args.endUserId);
       const current = await tx.device.findUniqueOrThrow({ where: { id: found.id } });
-      if (current.status === 'BLOCKED') return { device: current, sessionsRevoked: 0, changed: false };
+      if (current.status === 'BLOCKED') {
+        return { device: current, sessionsRevoked: 0, changed: false, deliveryIds: [] };
+      }
       const device = await tx.device.update({
         where: { id: current.id },
         data: {
@@ -501,16 +521,17 @@ export const devicesService = {
         where: { deviceId: current.id, revokedAt: null },
         data: { revokedAt: now },
       });
-      return { device, sessionsRevoked: revoked.count, changed: true };
+      const deliveryIds = await enqueueEvent(tx, {
+        applicationId: args.applicationId,
+        type: 'device.blocked',
+        data: { device: devicePayload(device), sessionsRevoked: revoked.count },
+      });
+      return { device, sessionsRevoked: revoked.count, changed: true, deliveryIds };
     });
     if (!result.changed) return { device: result.device, sessionsRevoked: 0 };
     const blocked = { device: result.device, sessionsRevoked: result.sessionsRevoked };
 
-    emitDetached({
-      applicationId: args.applicationId,
-      type: 'device.blocked',
-      data: { device: devicePayload(result.device), sessionsRevoked: result.sessionsRevoked },
-    });
+    kickDeliveries(result.deliveryIds);
     void recordSecurityEvent({
       type: 'end_user.device_blocked',
       actorType: 'operator',
@@ -538,23 +559,24 @@ export const devicesService = {
     operatorUserId: string | null;
   }): Promise<Device> {
     const found = await this.get(args.applicationId, args.endUserId, args.deviceId);
-    const { device, changed } = await prisma.$transaction(async (tx) => {
+    const { device, changed, deliveryIds } = await prisma.$transaction(async (tx) => {
       await lockDevices(tx, args.applicationId, args.endUserId);
       const current = await tx.device.findUniqueOrThrow({ where: { id: found.id } });
-      if (current.status !== 'BLOCKED') return { device: current, changed: false };
+      if (current.status !== 'BLOCKED') return { device: current, changed: false, deliveryIds: [] };
       const updated = await tx.device.update({
         where: { id: current.id },
         data: { status: 'RELEASED', releasedAt: new Date(), blockedAt: null, blockedReason: null },
       });
-      return { device: updated, changed: true };
+      const ids = await enqueueEvent(tx, {
+        applicationId: args.applicationId,
+        type: 'device.unblocked',
+        data: { device: devicePayload(updated) },
+      });
+      return { device: updated, changed: true, deliveryIds: ids };
     });
     if (!changed) return device;
 
-    emitDetached({
-      applicationId: args.applicationId,
-      type: 'device.unblocked',
-      data: { device: devicePayload(device) },
-    });
+    kickDeliveries(deliveryIds);
     void recordSecurityEvent({
       type: 'end_user.device_unblocked',
       actorType: 'operator',

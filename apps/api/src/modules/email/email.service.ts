@@ -178,12 +178,21 @@ const ESSENTIAL_EVENTS: readonly EmailEventKey[] = [
  * check re-read under it. All three writers (master switch, per-event switch,
  * auth-config update) must take it. A lock only one door takes serialises
  * nothing.
+ *
+ * `FOR NO KEY UPDATE`, not `FOR UPDATE`. Every child insert that references
+ * the Application (an end user at sign-up, a refresh token at rotation) takes
+ * `FOR KEY SHARE` on this row through its foreign key, and `FOR UPDATE`
+ * conflicts with that, so an operator flipping an email switch stalled every
+ * sign-up for the Application until the switch committed. `FOR NO KEY UPDATE`
+ * still conflicts with itself, which is all the three writers need, and the
+ * columns they write (`emailsEnabled`, `authConfig`) are not key columns, so
+ * the lock is never upgraded.
  */
 export async function lockEmailCoupling(
   tx: Prisma.TransactionClient,
   applicationId: string,
 ): Promise<void> {
-  await tx.$queryRaw`SELECT id FROM applications WHERE id = ${applicationId} FOR UPDATE`;
+  await tx.$queryRaw`SELECT id FROM applications WHERE id = ${applicationId} FOR NO KEY UPDATE`;
 }
 
 /**

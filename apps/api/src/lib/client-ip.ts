@@ -63,6 +63,8 @@ export const CLIENT_IP_HEADER = 'x-rekey-client-ip';
 
 /** Where the resolver leaves its decision on the raw request (see `rewriteUrl` in app.ts). */
 export const CLIENT_IP_VOUCHED = Symbol('rekey.clientIpVouched');
+/** Where the resolver leaves a well-formed `X-Rekey-Client-Ip`, whoever sent it. */
+export const DECLARED_CLIENT_IP = Symbol('rekey.declaredClientIp');
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -72,7 +74,25 @@ declare module 'fastify' {
      * behind it. Set by the first onRequest hook in app.ts.
      */
     clientIpVouched: boolean;
+    /**
+     * The one address the caller sent in `X-Rekey-Client-Ip`, when it is a
+     * syntactically valid IP; null otherwise. UNVERIFIED: anyone can send the
+     * header. It becomes `request.ip` only with the internal caller secret
+     * (above), and the auth tier reads it only from a verified secret-key
+     * caller (`attributedAuthClientIp` in lib/rate-limit.ts). Nothing else may
+     * read it.
+     */
+    declaredClientIp: string | null;
   }
+}
+
+/** A single, syntactically valid address from `X-Rekey-Client-Ip`, else null. */
+function declaredAddress(value: string | string[] | undefined): string | null {
+  // A repeated header arrives as an array: more than one address is not one
+  // visitor, so it is ignored rather than picking one.
+  if (typeof value !== 'string') return null;
+  const single = normalizeIp(value);
+  return single !== '' && isIP(single) !== 0 ? single : null;
 }
 
 export interface ClientIpPolicy {
@@ -209,12 +229,15 @@ export function createClientIpResolver(policy: ClientIpPolicy): (raw: IncomingMe
     const xff = headerValue(raw, 'x-forwarded-for');
     const presented = headerValue(raw, PROXY_SECRET_HEADER);
     const presentedCaller = headerValue(raw, CALLER_SECRET_HEADER);
-    const callerClientIp = raw.headers[CLIENT_IP_HEADER];
+    const callerClientIp = declaredAddress(raw.headers[CLIENT_IP_HEADER]);
     // Neither secret may reach a log line, a handler, or anything forwarded,
-    // and the caller-vouched address means nothing without its secret.
+    // and the caller-vouched address means nothing without its secret. The
+    // declared address is kept aside, unverified, for the one reader allowed
+    // to use it without the secret: the auth tier, for a secret-key caller.
     delete raw.headers[PROXY_SECRET_HEADER];
     delete raw.headers[CALLER_SECRET_HEADER];
     delete raw.headers[CLIENT_IP_HEADER];
+    (raw as unknown as Record<symbol, string | null>)[DECLARED_CLIENT_IP] = callerClientIp;
     const viaOurProxy =
       secret !== null && presented !== undefined && sameSecret(presented, secret);
     // Forwarded host and scheme are believed only from our proxy. Nothing
@@ -243,8 +266,7 @@ export function createClientIpResolver(policy: ClientIpPolicy): (raw: IncomingMe
     // the caller's own egress or the proxy, shared by every visitor. Missing
     // or malformed means the caller had no visitor address: not vouched.
     if (callerSecret && presentedCaller !== undefined && sameSecret(presentedCaller, callerSecret)) {
-      const single = typeof callerClientIp === 'string' ? normalizeIp(callerClientIp) : '';
-      return believe(single !== '' && isIP(single) !== 0 ? single : null);
+      return believe(callerClientIp);
     }
 
     // Legacy: a hop count believes the chain from any peer.

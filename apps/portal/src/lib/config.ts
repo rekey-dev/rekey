@@ -93,17 +93,50 @@ export function safeHttpUrl(value: string | undefined): string | undefined {
  * route per (slug, client IP) with a per-IP ceiling, and without the header
  * every visitor would count as the portal itself. Bounded by a timeout so a
  * stalled API fails the page instead of holding a server worker.
+ *
+ * Throws {@link PortalConfigUnavailableError} for every failure but a 404.
  */
 export const getPortalConfig = cache(async (slug: string): Promise<PortalConfig | null> => {
-  const res = await fetch(`${rekeyApiUrl()}/api/v1/portal/config/${encodeURIComponent(slug)}`, {
-    cache: 'no-store',
-    headers: await forwardedClientHeaders(),
-    signal: AbortSignal.timeout(API_TIMEOUT_MS),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${rekeyApiUrl()}/api/v1/portal/config/${encodeURIComponent(slug)}`, {
+      cache: 'no-store',
+      headers: await forwardedClientHeaders(),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    });
+  } catch (err) {
+    throw new PortalConfigUnavailableError(slug, 'no response', DEFAULT_RETRY_AFTER_SECONDS, err);
+  }
   if (res.status === 404) return null;
   if (!res.ok) {
-    throw new Error(`portal config lookup failed for "${slug}" (HTTP ${res.status})`);
+    throw new PortalConfigUnavailableError(slug, `HTTP ${res.status}`, retryAfterFrom(res.headers.get('retry-after')));
   }
-  const json = (await res.json()) as { success: true; data: PortalConfig };
+  const json = (await res.json().catch(() => null)) as { success: true; data: PortalConfig } | null;
+  if (!json?.data) throw new PortalConfigUnavailableError(slug, 'unreadable body', DEFAULT_RETRY_AFTER_SECONDS);
   return json.data;
 });
+
+/**
+ * The config lookup got no usable answer: a status other than 200 or 404, an
+ * unreadable body, a timeout, or no connection. It says nothing about the
+ * visitor's session, so whatever catches it must leave the session cookies
+ * alone. `retryAfterSeconds` is the upstream `Retry-After`, or a short default.
+ */
+export class PortalConfigUnavailableError extends Error {
+  readonly retryAfterSeconds: number;
+
+  constructor(slug: string, detail: string, retryAfterSeconds: number, cause?: unknown) {
+    super(`portal config lookup failed for "${slug}" (${detail})`, cause === undefined ? undefined : { cause });
+    this.name = 'PortalConfigUnavailableError';
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+export const DEFAULT_RETRY_AFTER_SECONDS = 5;
+
+/** Whole seconds from a `Retry-After` header; the default for a date, junk or nothing. */
+export function retryAfterFrom(header: string | null): number {
+  const trimmed = header?.trim() ?? '';
+  if (!/^\d+$/.test(trimmed)) return DEFAULT_RETRY_AFTER_SECONDS;
+  return Math.max(1, Number(trimmed));
+}

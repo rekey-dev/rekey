@@ -29,10 +29,44 @@ export const OUTAGE_SUBSYSTEM_LABEL: Record<OutageSubsystem, string> = {
  * Prisma connection-level error codes.
  *   P1001, can't reach the database server
  *   P1017, server closed the connection
+ *   P2024, timed out waiting for a connection from the pool
+ *   P2028, interactive transaction error; raised when a transaction cannot
+ *          get a connection within `maxWait` (see lib/prisma.ts) or runs
+ *          past its `timeout`
+ * The last two are pool exhaustion rather than a dead server, but the remedy
+ * is the same shape: back off and retry, which is what a 503 with
+ * Retry-After tells the caller. A generic 500 told them nothing. They answer
+ * with their own message and `details.reason` (`postgresBusyReason`), because
+ * "the database is unreachable" is false for them. (/health/ready probes
+ * through the same pool, so under saturation it can ALSO say unreachable; the
+ * pool_busy text in lib/error.ts says so.)
  * `PrismaClientInitializationError` carries the code on `errorCode` instead of
  * `code`, and can also surface with no code at all (bad DSN, no server).
  */
-const PRISMA_CONNECTION_CODES = new Set(['P1001', 'P1017']);
+const PRISMA_CONNECTION_CODES = new Set(['P1001', 'P1017', 'P2024', 'P2028']);
+
+/**
+ * Why a reachable database still could not serve the request.
+ *   pool_busy            every pooled connection stayed checked out past the
+ *                        wait: P2024, or P2028 "Unable to start a transaction
+ *                        in the given time" (the transaction's `maxWait`)
+ *   transaction_timeout  an interactive transaction ran past its `timeout` and
+ *                        Prisma closed it: every other P2028
+ */
+export type PostgresBusyReason = 'pool_busy' | 'transaction_timeout';
+
+/**
+ * The busy reason for a pool or transaction error, or null for anything else
+ * (including a genuinely unreachable database).
+ */
+export function postgresBusyReason(err: unknown): PostgresBusyReason | null {
+  const e = asErrorLike(err);
+  if (!e) return null;
+  const code = str(e.code) || str(e.errorCode);
+  if (code === 'P2024') return 'pool_busy';
+  if (code !== 'P2028') return null;
+  return /unable to start a transaction/i.test(str(e.message)) ? 'pool_busy' : 'transaction_timeout';
+}
 
 /**
  * ioredis command rejections during an outage. With `enableOfflineQueue: false`

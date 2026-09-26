@@ -4,6 +4,317 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.2.0-rc.3
+
+A release candidate on the 2.2.0 line. Most of it is about sessions: the
+operator panel, the hosted portal, rekey.dev, `@rekey.dev/nextjs` and
+`@rekey.dev/astro` could spend a refresh token without storing its
+replacement, and the next request then replayed the spent token, which made
+the API revoke every session the user had on every device. Refresh now happens
+where the new cookies can be stored, the API forgives a replay that is only a
+race, and a refresh that may have spent the token signs the browser out
+instead of replaying it. It also isolates tenants from each other's slow
+webhook receivers, resizes the rate limits for a busy Application, and closes
+several open redirects.
+
+**Upgrading an existing deployment:** one migration adds a nullable column,
+`docker-compose.yml` now requires `JWT_SECRET` and `SUPER_ADMIN_KEY`, and the
+default per-key rate limit goes from 6000 to 30000 a minute. See **Upgrade
+notes** at the end of this section for every new environment variable and its
+default.
+
+### Breaking changes
+
+Every item here changes a behaviour or a configuration that an existing
+2.2.0-rc.2 deployment or integration can see. Read this list before you
+upgrade.
+
+- **Outbound webhook delivery is capped per endpoint and per Application.** At
+  most 4 sends to one endpoint and 8 sends for one Application
+  (`WEBHOOK_APP_MAX_IN_FLIGHT`) are in flight at once, across every replica.
+  A send over a cap waits its turn and does not use up a retry. After 5 failed
+  sends in a row an endpoint's circuit breaker opens for 60 seconds: attempts
+  that come due meanwhile are recorded as failed without a request (the error
+  starts `Not sent:`) and stay on the normal retry schedule. One success closes
+  it. The request timeout is still 10 seconds and is now configurable with
+  `WEBHOOK_TIMEOUT_MS` (1000 to 30000). Each replica runs up to 50 sends at
+  once, where it ran 10. Deliveries to one endpoint can arrive slightly more
+  out of order than before; order was never guaranteed.
+
+- **An Application can register at most 100 webhook endpoints.** Creating
+  another answers `400 WEBHOOK_ENDPOINT_LIMIT_REACHED`.
+
+- **`@rekey.dev/astro`: `getSession` no longer refreshes outside
+  `rekeyMiddleware`** unless you pass `{ refresh: true }`. Called from a
+  component after the response had started, it rotated the token and lost the
+  new cookies. With `rekeyMiddleware` installed nothing changes. Without it,
+  add the middleware, or pass `{ refresh: true }` from an API endpoint or
+  top-level page frontmatter; otherwise a visitor whose access token has
+  expired reads as signed out.
+
+- **`@rekey.dev/nextjs` and `@rekey.dev/astro` sign the browser out when a
+  refresh may have spent the token.** The API rotates the token before the
+  work that can fail, so a 5xx from the API itself (one that carries a Rekey
+  error envelope), a timeout, or a connection dropped mid-request can come
+  after the rotation. Both SDKs now clear the session cookies then;
+  `rekeyRefreshHandler` redirects to `signInUrl?next=…&reason=session_interrupted`,
+  and the Astro middleware continues signed out. The session is kept on a 429
+  or any other 4xx that is not a `REFRESH_TOKEN_*` verdict, on a connection
+  that was never made (DNS failure, connection refused), and on a 502, 503 or
+  504 with no Rekey envelope, which is a proxy answering while the API
+  restarts. The refresh route answers those with `503` and `Retry-After`.
+
+- **A refresh token replayed moments after its rotation answers `401
+  REFRESH_TOKEN_RACED` and revokes nothing.** That is two tabs or two server
+  instances refreshing at once, or a retry after a lost response. It applies
+  within `REFRESH_TOKEN_REUSE_WINDOW_SECONDS` (default 15, 0 turns it off)
+  while the replacement is unused, to end-user and operator sessions. Nothing
+  is issued to the replayer, and the replay is recorded as
+  `user.refresh_token_raced` or `operator.refresh_token_raced`. A later
+  replay, or one after the replacement was used, still answers
+  `REFRESH_TOKEN_REUSED` and revokes every session. A client that gets
+  `RACED` should use the replacement another request stored, or sign in again
+  if it has none, and must never present the spent token again. Both SDKs do
+  this: `rekeyRefreshHandler` redirects back to `next` with the session
+  cookies untouched, and the Astro middleware sends a GET or HEAD back to its
+  own URL. The same token racing a second time is treated as finished.
+
+- **`@rekey.dev/nextjs`: `rekeyMiddleware` changes three answers.** A Server
+  Action whose `Origin` is `null` or otherwise not a URL gets a `403` (Next 15
+  crashed on it with a 500). Only GET and HEAD are redirected to the refresh
+  route; a Server Action or other non-GET with a stale session reaches your
+  code and refreshes in place through `auth()`, where it used to fail with a
+  405. Its redirects carry `Cache-Control: no-store`, and the sign-in bounce
+  keeps the page's query in `next`.
+
+- **Refresh routes answer a cross-site navigation with an interstitial page
+  instead of rotating.** `rekeyRefreshHandler`, the Astro middleware and the
+  panel, portal and rekey.dev refresh routes rotate only when
+  `Sec-Fetch-Site` is `same-origin` or `none`, or absent. Any other request,
+  `same-site` included, gets a small `no-store` page that asks for the same
+  URL again from this origin, with no script, no cookie and no API call.
+
+- **`@rekey.dev/nextjs`: the access cookie's `maxAge` follows the access
+  token's own lifetime**, read from its `exp` and `iat`, instead of a fixed
+  default.
+
+- **Auth and lifecycle webhooks are written in the transaction of the change
+  they announce.** `user.created`, `password.changed`, `email.verified`,
+  `session.revoked`, `mfa.enabled`, `mfa.disabled`, `user.deleted`,
+  `user.erased`, the `device.*` events and `license.deactivated` can no longer
+  be lost to a crash after the change committed. Payloads are unchanged. The
+  trade: if the event cannot be written, the request now fails and the change
+  does not commit, where it used to succeed and log the lost event.
+
+- **A busy connection pool answers `503 DEPENDENCY_UNAVAILABLE`, not 500.**
+  Prisma `P2024` (no pool connection in time) and `P2028` (a transaction that
+  could not start or ran past its timeout) now map to 503 with `Retry-After`,
+  and `details.reason` says `pool_busy` or `transaction_timeout` rather than
+  claiming the database is unreachable.
+
+- **New `503 USAGE_RECORD_BUSY` on `POST /api/v1/usage/record`.** Capped
+  records now queue only behind records for the same end-user or
+  organization, not every subject of the meter, and a record that waits more
+  than 2 seconds for that lock is refused with this code. Nothing was
+  recorded or charged, so retrying after `Retry-After` is safe.
+
+- **Rate limits are resized for one Application at 50,000 DAU.**
+  - The per-secret-key budget (`RATE_LIMIT_API_KEY_MAX`) defaults to 30000 a
+    minute, was 6000. `RATE_LIMIT_USAGE_MAX` follows it.
+  - The per-Application ceiling across sign-in, sign-up, MFA, magic link,
+    reset and verify has its own setting, `RATE_LIMIT_AUTH_CEILING_MAX`
+    (default 3000). It used `RATE_LIMIT_MAX` (100), which let one address
+    using the public publishable key block an Application's sign-in.
+  - One client address is still held to `RATE_LIMIT_MAX` (100 a minute) across
+    an Application's auth routes, now as a per-(Application, client IP)
+    bucket.
+  - A secret-key caller can name the visitor in `X-Rekey-Client-Ip`, and its
+    auth requests are then counted per visitor, like browser traffic. The API
+    believes the header from a secret key only, and only for these limits.
+  - Auth traffic with no visitor address (a secret key that does not send the
+    header, or a publishable key behind a proxy the API cannot identify) gets
+    a new cap, `RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX` (default 300 failed
+    sign-in or MFA attempts per Application a minute). Past it, only accounts
+    that already failed in the window are refused; every other account still
+    signs in, and sign-up, reset, magic link, verification and passkeys are
+    never refused by it. The first time an Application reaches it in a
+    window, the API writes an `auth.unattributed_failure_cap_reached`
+    security event.
+
+- **MCP token introspection counts against the secret key's budget.**
+  `POST /api/v1/mcp/:slug/oauth/introspect` (`rekey.mcp.introspect()`) was
+  held to a 30-a-minute sign-in limit per address; it now uses the key's own
+  budget (30000 a minute by default). The operator
+  `POST /api/v1/tenant/mcp/oauth/introspect` counts against the token's
+  operator at the authenticated limit.
+
+- **Hosted authorize pages must ask for consent.** The rekey.dev hosted
+  authorize page now shows Allow and Deny before any authorization code is
+  minted. New `POST /api/v1/mcp/:slug/oauth/authorize/preview` describes an
+  authorization request (client name, confirmed `redirect_uri`, scope and the
+  account's email) without minting a code, for a hosted page to build its
+  consent screen from. `POST /api/v1/mcp/:slug/oauth/authorize/grant` now
+  returns the confirmed `redirect_uri`, and includes it in `details` on
+  refusals made after it was confirmed. See docs/auth.md.
+
+- **`GET /health/live` and `GET /health/ready` report `version` and
+  `commit`.** `version` is the running release; `commit` is the
+  `REKEY_COMMIT` build argument, or `unknown`.
+  `scripts/check-deployed-version.sh` compares it with npm.
+
+- **`docker-compose.yml` refuses to start without `JWT_SECRET` and
+  `SUPER_ADMIN_KEY`**, and names the missing one. Their old
+  `change-me-in-prod` default was too short for the API, so it only ever
+  produced a crash-looping container.
+
+- **An operator's refresh keeps the workspace they switched to** (or joined
+  through an invitation), instead of moving them back to their oldest
+  workspace every time the access token expired. Migration
+  `20260923120000_operator_refresh_active_tenant` adds a nullable column to
+  `tenant_refresh_tokens`.
+
+- **The API image sets `UV_THREADPOOL_SIZE=16` and runs at most 4 argon2
+  hashes at once.** Hashing throughput and memory are unchanged, and outbound
+  DNS lookups (webhooks, breached-password checks, email) no longer queue
+  behind a burst of sign-ins. A deployment that runs the API outside this
+  image should set the variable itself.
+
+### Added
+
+- **`@rekey.dev/nextjs`: `rekeyRefreshHandler()`** on `/server`, the refresh
+  route `rekeyMiddleware` redirects to. `export const GET =
+  rekeyRefreshHandler();` in `app/api/rekey/refresh/route.ts` is the whole
+  route. It follows `next` only to a same-origin path, and requests presenting
+  the same token at the same moment share one exchange with the API.
+- **`@rekey.dev/nextjs`: `rejectMalformedActionOrigin(req)`** on
+  `/middleware`, for hand-written middleware that wants the same 403.
+- **`@rekey.dev/nextjs`: `DEFAULT_REFRESH_PATH`** (`/api/rekey/refresh`) and
+  **`DEFAULT_SIGN_IN_PATH`** (`/sign-in`).
+- **`@rekey.dev/nextjs`: `signIn`, `signUp` and `mfaVerify` forward the
+  visitor's address** as `X-Rekey-Client-Ip`: the
+  `REKEY_TRUSTED_PROXY_HOPS`-th entry from the right of `X-Forwarded-For`
+  (default 1), or `X-Real-IP`. An optional `{ clientIp }` argument overrides
+  it, and `null` sends none. With nothing in front of the app, set
+  `REKEY_TRUSTED_PROXY_HOPS=0`, or a visitor could pick a fresh rate-limit
+  bucket per request.
+- **`@rekey.dev/node`: `clientIp`**, client-wide or per call with
+  `rekey.with({ clientIp })`, sent as `X-Rekey-Client-Ip` only when it is
+  exactly one IPv4 or IPv6 address. `normalizeClientIp` and `CLIENT_IP_HEADER`
+  are exported.
+- **`@rekey.dev/shared-types/transport`**: `neverConnected` and
+  `NEVER_CONNECTED_CODES`, the one list the refresh clients use to tell a
+  connection that was never made from one that failed mid-request.
+- **Sign-in pages explain an interrupted session.** The panel, portal and
+  rekey.dev sign-in pages show one line for `reason=session_interrupted`.
+- **New security events:** `user.refresh_token_raced`,
+  `user.refresh_token_reused`, `operator.refresh_token_raced`,
+  `operator.refresh_token_reused` and `auth.unattributed_failure_cap_reached`.
+
+### Fixed
+
+- **Opening two magic links for a new address at once, or double-clicking
+  Accept on a workspace or organization invitation, no longer answers 500 to
+  the slower request.** It signs in or joins like the first one, and a new
+  user gets one welcome email.
+- **A user created through an OAuth provider is written together with its
+  identity**, so a failed identity insert no longer leaves a user with no way
+  to sign in.
+- **One slow or unresponsive webhook receiver no longer delays other
+  tenants' deliveries.** A receiver that never answered held every delivery
+  slot on a replica for the full timeout. See **Breaking changes** for the
+  caps and the breaker that replace this.
+- **An MCP server that introspects on every tool call is no longer
+  throttled** after 30 calls a minute.
+
+### Security
+
+- **Open redirects in `next` and redirect handling.** A validator that checks
+  its input and then returns the path rebuilt by the URL parser is not enough:
+  the parser collapses dot segments, so `/..//evil.com` and
+  `/%2e%2e//evil.com` come back as `//evil.com`, a URL on another host. Every
+  validator below now refuses control characters, backslashes and encoded
+  separators, and checks the path it returns as well as the one it was given.
+  - `@rekey.dev/astro`'s `safePath` returned those protocol-relative URLs in
+    every published version since 2.0.0-rc.7. The hash of a legitimate path is
+    now kept alongside the query.
+  - The panel's `next` on sign-in, sign-up, MFA, OAuth and passkey sign-in
+    had the same dot-segment flaw.
+  - rekey.dev's sign-in `next` let `/%09/evil.com` through, which a browser
+    follows to another host once it strips the tab.
+  - The refresh route the `@rekey.dev/nextjs` README and the rekey.dev
+    quickstart showed for apps to copy followed `next` off-site. It is
+    replaced by `rekeyRefreshHandler`, which applies the checks above.
+  - The portal refuses a slug that is not one plain path segment, so an
+    encoded slash (`/%2Fevil.com/...`), which Next decodes, can never become a
+    protocol-relative `Location`.
+  - The rekey.dev hosted OAuth authorize page could redirect to a
+    `redirect_uri` the API had not confirmed. It now shows an error on
+    rekey.dev instead, asks for consent before minting a code, and refuses to
+    be framed.
+- **A refresh token spent during a Server Component render revoked every
+  session.** The panel, the portal and rekey.dev refreshed a stale session
+  while a page rendered, where Next cannot write cookies, so the replacement
+  was lost and the next request replayed the spent token. They now refresh in
+  a route handler (`/session/refresh` on the panel and rekey.dev,
+  `/<slug>/session/refresh` on the portal) and return to the page.
+  `@rekey.dev/astro`'s `getSession` had the same failure; see **Breaking
+  changes**.
+- **A malformed `Origin` on a Server Action is refused, not stripped.** The
+  panel, portal, admin and rekey.dev apps removed an `Origin: null` header to
+  stop Next 15 crashing, which made Next skip its CSRF origin check for that
+  action. They now answer 403, as `rekeyMiddleware` does.
+- **Refresh clients never re-issue tokens from a local cache.** The panel,
+  portal, rekey.dev and `@rekey.dev/nextjs` share only an exchange that is
+  still in flight, keyed by a hash of the token (and of the device in the
+  SDK). A request that arrives with a spent refresh cookie after the exchange
+  finished goes to the API, which answers `REFRESH_TOKEN_RACED`, so nobody
+  holding a copy of a spent cookie is handed its successor.
+- **rekey.dev no longer sends URL query strings to Google Analytics**, where
+  email verification and password reset links carried their tokens.
+- **Operator refresh-replay security events are filed under the session's
+  workspace**, not the operator's oldest one, so another workspace's owner no
+  longer sees them.
+
+### Upgrade notes
+
+New environment variables for the API, all optional:
+
+- `REFRESH_TOKEN_REUSE_WINDOW_SECONDS`, default `15` (0 to 60, 0 turns the
+  reuse window off).
+- `RATE_LIMIT_AUTH_CEILING_MAX`, default `3000`, never below
+  `RATE_LIMIT_MAX`.
+- `RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX`, default `300`.
+- `WEBHOOK_TIMEOUT_MS`, default `10000` (1000 to 30000).
+- `WEBHOOK_APP_MAX_IN_FLIGHT`, default `8` (1 to 200).
+- `REKEY_COMMIT`, a build argument and environment variable for the API and
+  billing images, reported by the health probes. Unset reads as `unknown`.
+- `UV_THREADPOOL_SIZE`, set to `16` by the API image.
+
+Changed defaults: `RATE_LIMIT_API_KEY_MAX` is `30000` (was `6000`), and
+`RATE_LIMIT_USAGE_MAX` follows it. A deployment that set either explicitly to
+the old `6000` keeps 6000; remove the setting to get the new default.
+
+For `@rekey.dev/nextjs` apps: `REKEY_TRUSTED_PROXY_HOPS`, default `1`, the
+number of proxies in front of the app that append to `X-Forwarded-For`. Set
+`0` when nothing sits in front.
+
+Also:
+
+- `docker-compose.yml` needs `JWT_SECRET` and `SUPER_ADMIN_KEY` in `.env`
+  (`openssl rand -hex 32` each).
+- Run `pnpm db:migrate:deploy` for
+  `20260923120000_operator_refresh_active_tenant`. It adds a nullable column,
+  so rolling back the code does not need a SQL step.
+- A Next.js app using `rekeyMiddleware` needs the refresh route:
+  `export const GET = rekeyRefreshHandler();` in
+  `app/api/rekey/refresh/route.ts`. Replace a hand-written one; the copies the
+  README and quickstart used to show were open redirects.
+- An Astro site calling `getSession` without `rekeyMiddleware` needs the
+  middleware or `{ refresh: true }`.
+- A backend that signs users in with a secret key should send the visitor's
+  address (`clientIp` in `@rekey.dev/node`), or its failed sign-ins count
+  toward the unattributed cap.
+
 ## 2.2.0-rc.2
 
 A minor release, and NOT a patch. It changes what an existing subscriber

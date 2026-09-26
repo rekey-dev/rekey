@@ -43,7 +43,7 @@ before wiring keys.
 | Import | Runtime | Credential | Use case |
 | --- | --- | --- | --- |
 | `@rekey.dev/nextjs/middleware` | **Edge** | none (cookie presence) | Gate routes in `middleware.ts` (cheap, no network). |
-| `@rekey.dev/nextjs/server` | **Node** | secret key | `auth()`, `signIn()`, `signUp()`, `createSession()` + your `@rekey.dev/node` API calls. |
+| `@rekey.dev/nextjs/server` | **Node** | secret key | `auth()`, `signIn()`, `signUp()`, `createSession()`, `rekeyRefreshHandler()` + your `@rekey.dev/node` API calls. |
 | `@rekey.dev/nextjs/client` | **Browser** | publishable key | `rekeyBrowser()` — sign-in/up, magic-link, passkey, license verify, plans from a Client Component, no backend round-trip. |
 | `@rekey.dev/nextjs/cookies` | **anywhere** | none | `ACCESS_COOKIE` / `REFRESH_COOKIE` / `*_OPTS` / `cookieSecureFrom()`. Zero dependencies — import cookie names from **here**, not from the root barrel. |
 | `@rekey.dev/nextjs/errors` | **anywhere** | none | `classifySignInError()` + its types. Zero dependencies, safe from a Client Component rendering a failure a server action returned. |
@@ -82,26 +82,86 @@ export const config = {
 **2. Keep sessions alive — `app/api/rekey/refresh/route.ts`:**
 
 The middleware above sends a visitor whose access cookie has lapsed to
-`/api/rekey/refresh` before it decides they are signed out. That route is
-yours to create, and without it every signed-in visitor hits a 404 about
-fifteen minutes in. `refreshSession` rotates the tokens and writes the new
-cookies, which a server component cannot always do.
+`/api/rekey/refresh` before it decides they are signed out. The route has to
+exist, or every signed-in visitor hits a 404 about fifteen minutes in. It is
+one line:
 
 ```ts
 // app/api/rekey/refresh/route.ts
-import { NextResponse } from 'next/server';
-import { refreshSession } from '@rekey.dev/nextjs/server';
+import { rekeyRefreshHandler } from '@rekey.dev/nextjs/server';
 
-export async function GET(req: Request) {
-  const next = new URL(req.url).searchParams.get('next') ?? '/';
-  await refreshSession();
-  return NextResponse.redirect(new URL(next, req.url));
-}
+export const GET = rekeyRefreshHandler();
 ```
 
-Pass `refreshUrl` to `rekeyMiddleware` to put it somewhere else, or
+It rotates the refresh cookie, writes both cookies and sends the browser back to
+the page it asked for. `next` is only ever followed to a path on your own origin
+and never back to the refresh route; anything else lands on `/`. A finished
+token clears both cookies and goes to the sign-in page.
+
+Whether a failed refresh keeps the cookies depends on whether the token could
+have been spent. Rekey rotates the token before the part of a refresh that can
+fail, so:
+
+- A rate limit (429), any other refusal that is not a `REFRESH_TOKEN_*` code, a
+  connection that was never made, or a 502, 503 or 504 that carries no Rekey
+  error body (a proxy answering while the API restarts, as on every deploy)
+  never reached the rotation. The handler answers 503 with `Retry-After` and
+  leaves the cookies alone.
+- A 5xx that Rekey itself answered, or a timeout, may have come after the
+  rotation. Presenting that token again could make Rekey revoke every session
+  the user has, so both cookies are cleared and the browser goes to
+  `signInUrl?next=…&reason=session_interrupted`. Your sign-in page can read
+  `reason` and say the session was interrupted rather than expired.
+
+Requests that present the same token at the same moment (a page and its
+prefetches) share one exchange. Nothing is cached after it finishes: a request
+that arrives later with the old token goes to Rekey, which answers
+`REFRESH_TOKEN_RACED` for a token it rotated moments ago and revokes nothing.
+The handler then sends the browser back to the page with its cookies untouched,
+since they now hold (or are about to hold) the winner's new pair. If the same
+token races a second time, the new pair never reached this browser, and it
+signs in again.
+
+The handler only rotates for a request from your own origin (`Sec-Fetch-Site`
+of `same-origin` or `none`, or no header at all). A cross-site navigation gets
+a small page that asks for the same URL again from your origin, so a page on
+another site cannot start a rotation and throw away its result.
+
+The sign-in helpers (`signIn`, `signUp`, `mfaVerify`) send the visitor's IP
+address to Rekey in `X-Rekey-Client-Ip`, so its per-IP sign-in limits count the
+visitor and not your server. The address is taken from `X-Forwarded-For`,
+counting `REKEY_TRUSTED_PROXY_HOPS` entries from the right (default 1, the
+entry your own proxy wrote), or from `X-Real-IP`. Set it to `2` behind a CDN
+and a proxy, or pass `{ clientIp }` as the second argument to choose the
+address yourself.
+
+**Set `REKEY_TRUSTED_PROXY_HOPS=0` when no proxy sits in front of the app.**
+Without a proxy, the visitor writes `X-Forwarded-For` themselves. A sign-in
+script that sends a different address on every request would then get a fresh
+per-IP bucket each time, escaping Rekey's per-IP limit and its cap on
+unattributed traffic. A forged address is worse than no address, so `0` sends
+none.
+
+Options, all optional: `signInUrl` (defaults to `/sign-in`, like the
+middleware; pass the same value you gave `rekeyMiddleware`), `fallbackUrl`
+(defaults to `/`) and `device` (a function of the request, for device-bound
+sessions, see [Device binding](#device-binding)).
+
+Only page loads (GET and HEAD) take that hop. A Server Action, or any other
+POST, PUT, PATCH or DELETE, arriving with a stale session is let through
+instead, because a redirect would drop its body. It refreshes in place: call
+`auth()` (or `refreshSession()` in a route handler) and it rotates and writes
+both cookies, which an action and a route handler are allowed to do. If another
+request won that rotation, `auth()` throws a `RekeyError` with code
+`REFRESH_TOKEN_RACED` and leaves the cookies alone: the user is still signed
+in, and retrying the action sends the browser's current cookies. An
+action that never calls `auth()` never refreshes, which is also how you
+already had to treat the gate: it checks that a cookie is present, never that
+it is valid, so every action has to check the session itself.
+
+Pass `refreshUrl` to `rekeyMiddleware` to put the route somewhere else, or
 `refreshUrl: false` to turn the hop off and let stale sessions go to the sign-in
-page instead.
+page instead. The default is exported as `DEFAULT_REFRESH_PATH`.
 
 **3. Read the session — any server component:**
 
@@ -275,12 +335,39 @@ It reads `error.code`, `error.details` and `error.retryAfterSeconds`, all of whi
 
 Codes and `details` shapes: [docs/errors.md](https://github.com/rekey-dev/rekey/blob/main/docs/errors.md).
 
+## Server Actions from a sandboxed iframe
+
+A browser sends the literal string `null` as the `Origin` header when a page has an opaque origin: a sandboxed `<iframe>`, a `data:` document, or a form POST that followed a cross-origin redirect. Next 15 passes that header straight to `new URL()` while checking a Server Action, which throws before any of your code runs, and the action answers 500.
+
+`rekeyMiddleware` answers such an action itself, with a `403` and a short `text/plain` message, before any redirect. You get this without doing anything. Next's action client rejects the action with that message, so the form leaves its pending state and the error reaches your nearest error boundary instead of the button waiting on a 500.
+
+The header is refused rather than removed on purpose. With no `Origin` at all, Next assumes an old browser, logs a warning and runs the action without its origin check. `Origin: null` comes from exactly the requests that deserve the least trust, and a same-site POST that crossed a cross-origin redirect still carries `sameSite=lax` cookies, so removing the header would turn a crash into an unchecked action.
+
+Only a Server Action (a POST with the `Next-Action` header) is judged. Every other request reaches Next exactly as sent, and a valid `Origin`, cross-site or not, is left for Next's own comparison with the host (which honours `serverActions.allowedOrigins`). A form posted before hydration carries no `Next-Action` header and still gets Next's 500, which fails closed: the action does not run.
+
+If you write your own middleware instead of `rekeyMiddleware`, apply the same refusal with `rejectMalformedActionOrigin`:
+
+```ts
+// middleware.ts
+import { NextResponse, type NextRequest } from 'next/server';
+import { rejectMalformedActionOrigin } from '@rekey.dev/nextjs/middleware';
+
+export function middleware(req: NextRequest) {
+  return rejectMalformedActionOrigin(req) ?? NextResponse.next();
+}
+```
+
+It returns the `403` response, or `null` when the request should proceed. Call it first and return its response when it gives one. If you wrap `rekeyMiddleware`, return its response rather than your own `NextResponse.next()`, or the refusal is lost.
+
+Your `matcher` must cover the pages that post actions. A Server Action POSTs to the page's own path.
+
 ## Core API
 
 ### `@rekey.dev/nextjs/middleware`
 | Export | Description |
 | --- | --- |
-| `rekeyMiddleware({ publicRoutes?, signInUrl? })` | Middleware that lets `publicRoutes` through and redirects unauthenticated requests to `signInUrl?next=…`. Gates on cookie *presence*; validity is checked deeper via `auth()`. |
+| `rekeyMiddleware({ publicRoutes?, signInUrl?, refreshUrl? })` | Middleware that lets `publicRoutes` through and redirects unauthenticated requests to `signInUrl?next=…`. Gates on cookie *presence*; validity is checked deeper via `auth()`. Refuses a Server Action whose `Origin` is not a URL with a `403`, see [Server Actions from a sandboxed iframe](#server-actions-from-a-sandboxed-iframe). |
+| `rejectMalformedActionOrigin(req)` | For middleware you write yourself: a `403` response for a Server Action whose `Origin` is not a URL, or `null` when the request should proceed. Also exported from the root entry, with `MALFORMED_ACTION_ORIGIN_MESSAGE` (the response body). |
 | `MiddlewareConfig` | Type for the config object. |
 
 ### `@rekey.dev/nextjs/server`
@@ -288,6 +375,8 @@ Codes and `details` shapes: [docs/errors.md](https://github.com/rekey-dev/rekey/
 | --- | --- |
 | `auth({ device? })` | Resolve the session from cookies. Tries the access token, refreshes-and-rotates once on expiry, returns `null` only when both fail. `device` is carried into the rotation, see [Device binding](#device-binding). |
 | `refreshSession({ device? })` | Rotate and persist from a route handler or middleware, where cookie writes are allowed. |
+| `rekeyRefreshHandler({ signInUrl?, fallbackUrl?, device? })` | The refresh route `rekeyMiddleware` sends stale sessions to: `export const GET = rekeyRefreshHandler();` in `app/api/rekey/refresh/route.ts`. See [Quickstart](#quickstart) step 2. |
+| `DEFAULT_REFRESH_PATH` / `DEFAULT_SIGN_IN_PATH` | `"/api/rekey/refresh"` / `"/sign-in"`, the defaults the middleware and the refresh handler share. Also exported from `/middleware`. |
 | `signIn({ email, password, device? })` | Returns `{ kind: 'session' }` (cookies set) or `{ kind: 'mfa_required', mfaChallengeToken }` (**no cookies**: collect a code and complete via `mfaVerify`). |
 | `mfaVerify({ mfaChallengeToken, code, device? })` | Complete an MFA-required sign-in; sets cookies on success. |
 | `signUp({ email, password, metadata?, device? })` | Create the user + start a session (always sets cookies). |
@@ -356,7 +445,9 @@ need the same decision for a cookie of your own.
 ## Links
 
 - Docs: [/docs](https://rekey.dev/docs) · [SDK guide](https://rekey.dev/docs/sdk) · [API reference](https://rekey.dev/docs/api) · [agent prompt](https://rekey.dev/docs/prompt)
-- Component reference: [docs/react-components.md](https://github.com/rekey-dev/rekey/blob/main/docs/react-components.md) — the `<SignIn>` / `<PricingTable>` family these helpers pair with, including the matching Server Actions. (The `examples/` apps were removed pending a rebuilt set.)
+- Component reference: [docs/react-components.md](https://github.com/rekey-dev/rekey/blob/main/docs/react-components.md), the `<SignIn>` / `<PricingTable>` family these helpers pair with, including the matching Server Actions.
+- Walkthrough: [rekey.dev/docs/quickstart](https://rekey.dev/docs/quickstart), a free Rekey Cloud workspace to a signed-in user with these helpers and `<SignIn>`.
+- Working apps: [nextjs-starter](https://github.com/rekey-dev/nextjs-starter) and [nextjs-commerce](https://github.com/rekey-dev/nextjs-commerce).
 
 ## License
 

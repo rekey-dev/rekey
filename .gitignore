@@ -33,3 +33,4 @@ dump.rdb
 
 # Local .env backups (pre-flight snapshots). Never committed.
 .env.bak*
+.vitest-reports

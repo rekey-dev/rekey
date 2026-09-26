@@ -60,7 +60,12 @@ const { auth } = await import('../src/server.js');
 
 const USER = { id: 'u1', email: 'a@b.c' };
 
+/** A refresh token no other test used: the exchange grace is per process. */
+let R1 = '';
+let seq = 0;
+
 beforeEach(() => {
+  R1 = `r1_${++seq}`;
   jar.clear();
   sealed = true;
   getCurrentUser.mockReset();
@@ -69,7 +74,7 @@ beforeEach(() => {
 
 describe('auth() during a render, with the cookie jar sealed', () => {
   it('does not throw, and does not spend a token it cannot store', async () => {
-    jar.set('rekey_refresh', 'r1');
+    jar.set('rekey_refresh', R1);
     refresh.mockResolvedValue({ accessToken: 'a2', refreshToken: 'r2' });
     getCurrentUser.mockResolvedValue(USER);
 
@@ -84,19 +89,19 @@ describe('auth() during a render, with the cookie jar sealed', () => {
     // here would leave the browser holding the old token, and the next request
     // would sign the user out of every device.
     expect(refresh).not.toHaveBeenCalled();
-    expect(jar.get('rekey_refresh')).toBe('r1');
+    expect(jar.get('rekey_refresh')).toBe(R1);
   });
 
   it('returns null rather than throwing when the refresh token is spent', async () => {
     sealed = false;
-    jar.set('rekey_refresh', 'r1');
+    jar.set('rekey_refresh', R1);
     refresh.mockRejectedValue(new FakeRekeyError('REFRESH_TOKEN_EXPIRED'));
     await expect(auth()).resolves.toBeNull();
   });
 
   it('persists when the jar is writable', async () => {
     sealed = false;
-    jar.set('rekey_refresh', 'r1');
+    jar.set('rekey_refresh', R1);
     refresh.mockResolvedValue({ accessToken: 'a2', refreshToken: 'r2' });
     getCurrentUser.mockResolvedValue(USER);
 
@@ -110,24 +115,26 @@ describe('auth() during a render, with the cookie jar sealed', () => {
 describe('auth() distinguishes a dead token from a bad day', () => {
   it('rethrows a transport failure rather than reporting a signed-out user', async () => {
     sealed = false;
-    jar.set('rekey_refresh', 'r1');
+    jar.set('rekey_refresh', R1);
     refresh.mockRejectedValue(new FakeRekeyError('NETWORK_ERROR'));
     // Reporting an outage as "signed out" is how a blip becomes a mass logout.
     await expect(auth()).rejects.toBeInstanceOf(FakeRekeyError);
   });
 
-  it('keeps the refresh cookie when the failure was not the token', async () => {
+  it('keeps the refresh cookie when the API refused before rotating', async () => {
+    // A 429 never rotated anything. A timeout or a 5xx might have, and clears
+    // the cookies instead: see in-place-refresh.test.ts.
     sealed = false;
-    jar.set('rekey_refresh', 'r1');
-    refresh.mockRejectedValue(new FakeRekeyError('REQUEST_TIMEOUT'));
+    jar.set('rekey_refresh', R1);
+    refresh.mockRejectedValue(Object.assign(new FakeRekeyError('RATE_LIMITED'), { statusCode: 429 }));
     await expect(auth()).rejects.toThrow();
-    expect(jar.get('rekey_refresh')).toBe('r1');
+    expect(jar.get('rekey_refresh')).toBe(R1);
   });
 
   it('clears both cookies when the token really is finished', async () => {
     sealed = false;
     jar.set('rekey_access', 'a1');
-    jar.set('rekey_refresh', 'r1');
+    jar.set('rekey_refresh', R1);
     // The access token has to be rejected first, or auth() returns on it and
     // never reaches the refresh branch under test.
     getCurrentUser.mockRejectedValue(new FakeRekeyError('USER_TOKEN_INVALID'));

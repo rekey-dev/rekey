@@ -344,13 +344,19 @@ export default async function AuthMethodsPage({
                   {' '}
                   Point this at your own login page and Rekey forwards the request there instead,
                   with the parameters untouched. Your page signs the user in however it likes, and
-                  a user who is <em>already signed in</em> is not asked again. It finishes by
-                  calling{' '}
+                  a user who is <em>already signed in</em> is not asked to sign in again.
+                  It must still ask for consent: clients register themselves, so a page that
+                  hands out a code on arrival gives the user&apos;s account to whoever sent
+                  the link. Show what{' '}
+                  <code className="font-mono text-xs">
+                    POST /api/v1/mcp/{app.slug}/oauth/authorize/preview
+                  </code>{' '}
+                  returns, and only on Allow call{' '}
                   <code className="font-mono text-xs">
                     POST /api/v1/mcp/{app.slug}/oauth/authorize/grant
                   </code>{' '}
                   with your secret key (it needs <code className="font-mono text-xs">auth:write</code>)
-                  and the user&apos;s access token, then redirects to the returned code.
+                  and the user&apos;s access token, then redirect with the returned code.
                 </>
               }
             >

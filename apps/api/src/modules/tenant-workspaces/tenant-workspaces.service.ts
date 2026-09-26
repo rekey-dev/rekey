@@ -42,6 +42,7 @@ import { env } from '../../config/env.js';
 import { emailService } from '../email/email.service.js';
 import { buildTokenUrl } from '../../lib/app-url.js';
 import { panelBaseUrl } from '../../lib/panel-url.js';
+import { withSavepoint } from '../../lib/savepoint.js';
 
 /**
  * Deployment policy for CREATING another workspace (`WORKSPACE_CREATION`).
@@ -608,13 +609,17 @@ export const tenantWorkspacesService = {
         membership = existing;
       } else {
         try {
-          membership = await tx.tenantMembership.create({
-            data: {
-              tenantUserId: args.tenantUserId,
-              tenantId: inv.tenantId,
-              role: inv.role,
-            },
-          });
+          // Inside a savepoint so the P2002 below leaves the transaction usable
+          // for the read that recovers from it.
+          membership = await withSavepoint(tx, () =>
+            tx.tenantMembership.create({
+              data: {
+                tenantUserId: args.tenantUserId,
+                tenantId: inv.tenantId,
+                role: inv.role,
+              },
+            }),
+          );
         } catch (e) {
           if ((e as { code?: string }).code === 'P2002') {
             membership = await tx.tenantMembership.findUniqueOrThrow({
@@ -637,8 +642,14 @@ export const tenantWorkspacesService = {
       });
 
       // Issue a session scoped to the newly-joined workspace so the panel can
-      // hop straight in.
-      const refresh = await issueTenantRefreshToken(args.tenantUserId);
+      // hop straight in. Through `tx`, so the session commits with the
+      // membership: written on the global client it took a second pool
+      // connection and survived a rolled-back accept.
+      const refresh = await issueTenantRefreshToken(
+        args.tenantUserId,
+        { activeTenantId: inv.tenantId },
+        tx,
+      );
       const access = issueTenantAccessToken(args.tenantUserId, inv.tenantId, inv.role, {
         sessionId: refresh.record.sessionId,
       });

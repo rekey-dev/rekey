@@ -18,7 +18,7 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
-import type { RefreshToken } from '@prisma/client';
+import type { Prisma, RefreshToken } from '@prisma/client';
 import { prisma } from './prisma.js';
 import { env } from '../config/env.js';
 
@@ -297,8 +297,9 @@ export async function listActiveSessions(
 export async function revokeSessionForEndUser(
   endUserId: string,
   sessionId: string,
+  client: Prisma.TransactionClient = prisma,
 ): Promise<boolean> {
-  const result = await prisma.refreshToken.updateMany({
+  const result = await client.refreshToken.updateMany({
     where: { id: sessionId, endUserId, revokedAt: null },
     data: { revokedAt: new Date() },
   });

@@ -1,6 +1,18 @@
-# Quickstart
+# Self-host quickstart
 
 From a fresh clone to a working API + first Application + first key. Copy-pasteable for both humans and AI agents.
+
+> **Not self-hosting?** The canonical quickstart is
+> [rekey.dev/docs/quickstart](https://rekey.dev/docs/quickstart): a free Rekey
+> Cloud workspace (no card) to a signed-in user in a Next.js app, with the
+> drop-in `<SignIn>` form and two environment variables. Nothing on this page
+> is needed for that.
+>
+> **Self-hosting and building a Next.js app?** Do steps 0 to 3 here to get a
+> running API and a secret key, then follow steps 4 to 7 of the
+> [canonical quickstart](https://rekey.dev/docs/quickstart#step-4) with
+> `REKEY_URL=http://localhost:3030`. Steps 4 onward on this page show the same
+> API from plain Node and `curl`, for any other stack.
 
 ## 0 — Prerequisites
 
@@ -79,6 +91,10 @@ point a container liveness probe at.
 
 `rekey init` creates the Tenant, the Application, and the Application's first
 API key in a single call. That is the whole bootstrap.
+
+The CLI is **self-host only (needs `SUPER_ADMIN_KEY`)**: it calls the
+deployment-wide admin API, and that key exists only on a deployment you run.
+A Rekey Cloud workspace has no such key; there, the panel does this step.
 
 ```bash
 export REKEY_URL=http://localhost:3030

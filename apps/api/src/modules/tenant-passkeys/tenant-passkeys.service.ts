@@ -264,6 +264,7 @@ export const tenantPasskeysService = {
     const refresh = await issueTenantRefreshToken(user.id, {
       userAgent: args.device?.userAgent ?? null,
       ip: args.device?.ip ?? null,
+      activeTenantId: active.tenantId,
     });
     const access = issueTenantAccessToken(user.id, active.tenantId, active.role, {
       sessionId: refresh.record.sessionId,

@@ -29,7 +29,7 @@ import {
   type DeviceContext,
   type SignInOutcome,
 } from '../auth/auth.service.js';
-import { emitDetached } from '../webhooks/webhook.service.js';
+import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
 
 export interface OAuthPublicConfigEntry {
   clientId: string;
@@ -251,25 +251,51 @@ export const oauthService = {
     // exactly like password / magic-link creation. Linking a provider to an
     // ALREADY-EXISTING user returned above and is never gated.
     await assertEndUserQuota(args.application.tenantId);
-    const created = await prisma.endUser.create({
-      data: {
+    const email = identity.email;
+    // One unit: the user, the identity that signs them in, and the
+    // `user.created` that announces them. Written separately, a failed
+    // identity insert left a user with no way in, and a crash after the
+    // commit lost the event.
+    const { created, deliveryIds } = await prisma.$transaction(async (tx) => {
+      const user = await tx.endUser.create({
+        data: {
+          applicationId: args.application.id,
+          email: email.toLowerCase(),
+          // Reflect the provider's verification claim faithfully, the
+          // EndUser.emailVerified column was previously hardcoded `true`
+          // which silently laundered unverified emails into trusted state.
+          emailVerified: identity.emailVerified,
+        },
+      });
+      await tx.oAuthIdentity.create({
+        data: {
+          applicationId: args.application.id,
+          endUserId: user.id,
+          provider: args.providerName,
+          providerAccountId: identity.providerAccountId,
+          email,
+        },
+      });
+      // Outbound webhook for new-via-OAuth users, mirrors password sign-up.
+      const ids = await enqueueEvent(tx, {
         applicationId: args.application.id,
-        email: identity.email.toLowerCase(),
-        // Reflect the provider's verification claim faithfully, the
-        // EndUser.emailVerified column was previously hardcoded `true`
-        // which silently laundered unverified emails into trusted state.
-        emailVerified: identity.emailVerified,
-      },
+        type: 'user.created',
+        data: {
+          user: {
+            id: user.id,
+            email: user.email,
+            emailVerified: user.emailVerified,
+            role: user.role,
+            createdAt: user.createdAt.toISOString(),
+            metadata: user.metadata ?? null,
+          },
+          via: 'oauth',
+          provider: args.providerName,
+        },
+      });
+      return { created: user, deliveryIds: ids };
     });
-    await prisma.oAuthIdentity.create({
-      data: {
-        applicationId: args.application.id,
-        endUserId: created.id,
-        provider: args.providerName,
-        providerAccountId: identity.providerAccountId,
-        email: identity.email,
-      },
-    });
+    kickDeliveries(deliveryIds);
 
     // The provider would not vouch for this address, so the account exists and
     // cannot sign in: `requireEmailVerification` refuses it, and nothing has
@@ -290,23 +316,6 @@ export const oauthService = {
         endUser: created,
       });
     }
-    // Outbound webhook for new-via-OAuth users, mirrors password sign-up.
-    emitDetached({
-      applicationId: args.application.id,
-      type: 'user.created',
-      data: {
-        user: {
-          id: created.id,
-          email: created.email,
-          emailVerified: created.emailVerified,
-          role: created.role,
-          createdAt: created.createdAt.toISOString(),
-          metadata: created.metadata ?? null,
-        },
-        via: 'oauth',
-        provider: args.providerName,
-      },
-    });
     return issueSessionOrMfaChallenge(args.application, created, args.device);
   },
 

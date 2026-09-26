@@ -35,7 +35,9 @@ class FakeJar {
     this.store.set(name, { value });
   }
   delete(name: string): void {
-    this.deletes += 1;
+    // Session cookies only: `api()` probes whether it may write cookies by
+    // deleting a cookie nothing sets, and that is not a sign-out.
+    if (name.startsWith('rekey_')) this.deletes += 1;
     this.store.delete(name);
   }
   seed(name: string, value: string): void {
@@ -129,14 +131,14 @@ describe('a rate-limited token refresh', () => {
       json(503, { success: false, error: { code: 'DEPENDENCY_UNAVAILABLE', message: 'down' } }, { 'retry-after': '5' });
     const { api } = await import('@/lib/api');
 
-    await expect(api({ method: 'GET', path: '/x' })).rejects.toThrow(/NEXT_REDIRECT:\/login\?reason=expired/);
+    await expect(api({ method: 'GET', path: '/x' })).rejects.toThrow(/NEXT_REDIRECT:\/login\?reason=session_interrupted/);
   });
 
   it('any other 5xx on refresh signs out too', async () => {
     refreshReply = () => json(500, { success: false, error: { code: 'INTERNAL', message: 'boom' } });
     const { api } = await import('@/lib/api');
 
-    await expect(api({ method: 'GET', path: '/x' })).rejects.toThrow(/NEXT_REDIRECT:\/login\?reason=expired/);
+    await expect(api({ method: 'GET', path: '/x' })).rejects.toThrow(/NEXT_REDIRECT:\/login\?reason=session_interrupted/);
   });
 
   it('a refused refresh (401) still signs out', async () => {

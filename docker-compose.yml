@@ -103,7 +103,11 @@ services:
       NODE_ENV: production
       DATABASE_URL: postgresql://rekey:${POSTGRES_PASSWORD}@postgres:5432/rekey?schema=public
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
-      JWT_SECRET:        ${JWT_SECRET:-change-me-in-prod}
+      # No default for this or SUPER_ADMIN_KEY. The old `change-me-in-prod`
+      # placeholder is 17 characters, the API requires 32, so its only possible
+      # outcome was a crash-looping container. `:?` fails the same way at
+      # `docker compose up`, earlier, and names the variable.
+      JWT_SECRET:        "${JWT_SECRET:?set JWT_SECRET in .env (openssl rand -hex 32)}"
       # No default, deliberately. This key is AES-256-GCM over every provider
       # credential, OAuth client secret, TOTP seed, SMTP password and RS256
       # private key in the database — a published default means anyone holding
@@ -113,7 +117,7 @@ services:
       # nested mapping and rejects. Unquoted, this made every `docker compose`
       # command on the repo fail — including quickstart step one.
       ENCRYPTION_KEY:    "${ENCRYPTION_KEY:?generate one with openssl rand -hex 32}"
-      SUPER_ADMIN_KEY:   ${SUPER_ADMIN_KEY:-change-me-in-prod}
+      SUPER_ADMIN_KEY:   "${SUPER_ADMIN_KEY:?set SUPER_ADMIN_KEY in .env (openssl rand -hex 32)}"
       API_URL:           http://api:3030
       # Public panel origin — the operator MCP OAuth authorize endpoint
       # redirects here (/mcp-consent). MUST be the public panel URL in a real

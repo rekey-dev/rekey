@@ -308,6 +308,11 @@ export default async function LoginPage({
             Your session expired. Please sign in again.
           </p>
         )}
+        {reason === 'session_interrupted' && (
+          <p className="rounded border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950 px-3 py-2 text-sm text-amber-800 dark:text-amber-300">
+            Your session was interrupted while it renewed, so it was signed out to keep your account safe. Sign in again to carry on.
+          </p>
+        )}
         {reason === 'reset' && (
           <Banner tone="success">Password updated. Sign in with your new password.</Banner>
         )}

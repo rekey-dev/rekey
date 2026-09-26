@@ -13,7 +13,7 @@ Requires an SSR adapter and `output: 'server'`. Sessions are httpOnly cookies re
 
 Astro gives you `cookies` and `locals` and leaves the rest to you, so every Astro app that talks to Rekey ends up writing the same ninety lines. Two of those lines are easy to get wrong, and both fail in the silent direction — no error, no red build, just a bad afternoon that costs more than it should. Those two lines are the reason this package is not "a thin wrapper you could write yourself":
 
-**Only a verdict about the token clears it.** The obvious refresh handler catches everything and signs the user out. That turns a thirty-second API blip into a mass logout, because the refresh cookie — the one credential that could have recovered every session — has been deleted from every browser. Users do not come back from that on their own; they get a login screen and no explanation. `getSession` clears cookies only when the API returns a verdict about the token itself — any `REFRESH_TOKEN_*` code, or a `USER_TOKEN_*` one. Anything else throws, so the cookie survives and the next request tries again. It is matched by prefix rather than a fixed list, because a list is right the day it is written and silently wrong the day the API adds a code.
+**Only a verdict about the token clears it.** The obvious refresh handler catches everything and signs the user out. That turns a thirty-second API blip into a mass logout, because the refresh cookie, the one credential that could have recovered every session, has been deleted from every browser. Users do not come back from that on their own; they get a login screen and no explanation. The refresh clears cookies on a verdict about the token itself (any `REFRESH_TOKEN_*` code, matched by prefix, because a list is right the day it is written and silently wrong the day the API adds a code), and on a failure that may have come after the API rotated the token: a 5xx, a timeout, or a connection lost mid-request. The API rotates first and does the fallible work after, so keeping the cookie there would replay a spent token, which Rekey reads as theft and answers by revoking every session the user has. A 429, any other non-verdict 4xx, and a connection that was never made (DNS failure, connection refused) all come before the rotation: those keep the cookie, so the next request tries again. Every failure that is not a verdict throws. One `REFRESH_TOKEN_*` code is not a verdict, and it is matched exactly, before the prefix rule: `REFRESH_TOKEN_RACED`, which Rekey answers when another request (a second tab) rotated the same token moments earlier, revoking nothing. The browser already holds, or is about to hold, that request's new pair, so the cookies are kept: the middleware sends a GET or HEAD back to its own URL to pick it up, and anything else renders signed out for that one request. The same token racing a second time means the new pair never reached this browser, and it is cleared like a verdict, since keeping a spent token only turns into `REFRESH_TOKEN_REUSED` later. These are the same rules as `@rekey.dev/nextjs`.
 
 **`Secure` is a per-request decision.** `import.meta.env.PROD` is a build-time answer to a request-time question, and the two ways of guessing wrong are not equally bad: mark a cookie `Secure` on plain HTTP and the browser refuses it — loud, one variable to fix. Omit it on HTTPS and a session credential travels in cleartext — silent, and you find out from someone else. This package reads `x-forwarded-proto` and `Host` per request, treats localhost as the secure context browsers already consider it, and leans `Secure` when it cannot tell.
 
@@ -68,7 +68,7 @@ declare namespace App {
 }
 ```
 
-The middleware resolves the session, refreshes it when the access token has expired, and sets `Astro.locals.session`. It does **not** gate routes: whether a route needs a session is a property of that route, so the check lives in the page.
+The middleware resolves the session, refreshes it when the access token has expired (the only place that happens by default, see [below](#where-a-session-is-refreshed)), and sets `Astro.locals.session`. It does **not** gate routes: whether a route needs a session is a property of that route, so the check lives in the page.
 
 ```astro
 ---
@@ -83,7 +83,28 @@ If the session read fails outright, the middleware logs and continues signed out
 
 The one exception is a `RekeyAstroConfigError` — a missing or malformed `REKEY_SECRET` — which is rethrown. A deploy with no credentials would otherwise render perfectly while signing out every user and bouncing every protected page to sign-in, with a log line per request as the only clue. A misconfigured deploy should fail like a misconfigured deploy.
 
-`getSession` must be called from middleware or top-level frontmatter, not from an imported component. Refreshing writes cookies, and Astro throws once the response has started; the package detects that and reports no session rather than spending a refresh token it cannot store, but the result is a signed-in user seeing a signed-out page.
+### Where a session is refreshed
+
+Only in the middleware, before the page renders. Anywhere else, `getSession` never refreshes unless you ask it to.
+
+Every refresh rotates the token: the one presented is dead the moment the new pair is issued, and presenting it again reads as a stolen credential, which revokes every session the user has on every device. A refresh is only safe where the new cookies are certain to reach the browser. Once Astro has started streaming a page, they are not: in production `cookies.set()` logs a warning and the value goes nowhere, and under `astro dev` it throws after the token is already spent. Either way the browser keeps the spent token and its next request signs the user out everywhere. Astro gives no reliable way to ask whether that point has passed, so the package does not guess.
+
+- **In a request the middleware handled**, `getSession` returns what the middleware resolved (the same value as `Astro.locals.session`) without calling the API again. Reading `Astro.locals.session` is simpler still.
+- **Without the middleware**, `getSession` reads the access token only. When it has expired, it returns `null` and leaves the refresh token alone, and logs one warning per process saying why.
+- **In an API endpoint** (or the top-level frontmatter of a page, never a layout or an imported component) without the middleware, pass `{ refresh: true }` to refresh there:
+
+```ts
+// src/pages/api/me.ts
+import type { APIRoute } from 'astro';
+import { getSession } from '@rekey.dev/astro';
+
+export const GET: APIRoute = async ({ cookies, request }) => {
+  const session = await getSession(cookies, request, {}, { refresh: true });
+  return session ? Response.json(session.user) : new Response(null, { status: 401 });
+};
+```
+
+> **Behaviour change in `2.2.0-rc.3`.** `getSession` used to refresh wherever it was called, guarded by a probe that assumed Astro throws once the response has started. Real Astro does not throw there in production, so called from an imported component it could spend the refresh token without storing the replacement. It no longer refreshes outside the middleware unless you pass `{ refresh: true }`. With `rekeyMiddleware` installed nothing changes. Without it, add the middleware, or pass `{ refresh: true }` where the response has not started; otherwise a visitor whose access token has expired reads as signed out.
 
 ## Signing in
 
@@ -194,7 +215,7 @@ export const POST: APIRoute = async ({ cookies, redirect }) => {
 | Export | Purpose |
 | --- | --- |
 | `rekeyMiddleware(config?)` | Astro middleware; sets `locals.session`. |
-| `getSession(cookies, request, config?)` | Resolve the session, refreshing if needed. `null` when signed out; throws when the API failed. |
+| `getSession(cookies, request, config?, { refresh? })` | Resolve the session. Returns the middleware's result when it ran; otherwise refreshes only with `refresh: true` (endpoints and top-level page frontmatter). `null` when signed out; throws when the API failed, and throws `REFRESH_TOKEN_RACED` with the cookies kept when another request won the rotation (retry). |
 | `setSession(cookies, request, tokens, config?)` | Write both cookies with the right flags. |
 | `clearSession(cookies)` | Delete both cookies. |
 | `signOut(cookies, config?)` | Revoke the refresh token, then clear. Returns `{ revoked }`. |
@@ -244,12 +265,21 @@ if (err instanceof RekeyError && err.code === 'DEVICE_LIMIT_REACHED') {
 ### `safePath`
 
 ```ts
-safePath('/dashboard?tab=usage', '/'); // → '/dashboard?tab=usage'
-safePath('//evil.com', '/');           // → '/'
-safePath('/\\evil.com', '/');          // → '/'
+safePath('/dashboard?tab=usage', '/');  // → '/dashboard?tab=usage'
+safePath('/docs/setup#install', '/');   // → '/docs/setup#install'
+safePath('//evil.com', '/');            // → '/'
+safePath('/\\evil.com', '/');           // → '/'
+safePath('/..//evil.com', '/');         // → '/'
+safePath('/%09/evil.com', '/');         // → '/'
 ```
 
-The obvious check — `startsWith('/') && !startsWith('//')` — passes `/\evil.com`, and browsers resolve that off-origin. Asking the same URL parser the browser will use is the version that holds.
+Use its return value as the redirect target, and never the raw `next`:
+
+```ts
+return Astro.redirect(safePath(Astro.url.searchParams.get('next'), '/dashboard'));
+```
+
+The obvious check, `startsWith('/') && !startsWith('//')`, passes `/\evil.com`, and browsers resolve that off-origin. Handing the value to a URL parser is not enough either: the parser collapses dot segments, so `/..//evil.com` and `/%2e%2e//evil.com` come out as `//evil.com`, which a browser reads as another host. `safePath` refuses control characters, backslashes and encoded separators in the input, requires exactly one leading `/`, keeps the parsed result only if it is still on this site, and checks the rebuilt path again so it cannot start with `//` or `/\`. Anything it refuses becomes the fallback. Versions up to and including 2.2.0-rc.2 returned `//evil.com` for the dot-segment forms.
 
 ## Cookie names
 

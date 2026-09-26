@@ -274,12 +274,51 @@ account that has none.
 
 Set `authConfig.hostedAuthorizeUrl` to your own login page and Rekey forwards
 the authorization request there instead, parameters untouched. Your page signs
-the user in however it likes, skips the prompt entirely if they already have a
-session, and finishes by calling
-`POST /api/v1/mcp/:slug/oauth/authorize/grant` with your secret key (it needs
-the `auth:write` scope, which `*` includes) and the user's access token, then
-redirecting to the `redirect_uri` with the returned
-code.
+the user in however it likes, and skips the sign-in prompt if they already have
+a session. It must not skip the consent step.
+
+**Your page must ask before it mints a code.** Any client can register itself
+(`POST /oauth/register`, open by default) with a redirect URI it controls, so a
+page that mints a code as soon as a signed-in user arrives hands that user's
+account to whoever wrote the link: the attacker registers a client, sends a
+signed-in user a link to your page with their own PKCE challenge, and redeems
+the code the page delivers. Do this instead:
+
+1. On `GET`, call `POST /api/v1/mcp/:slug/oauth/authorize/preview` with the
+   same credentials and body as the grant below. It runs every check the grant
+   runs, mints nothing, and returns `client_name` (the name the client gave
+   itself, unverified), the confirmed `redirect_uri`, the `scope` a grant would
+   carry, and the signed-in `account.email`. Show all of it, with Allow and
+   Deny. Name where the answer goes (the redirect URI's host), because the
+   client name is whatever the registrant typed. Check `response_type` here
+   too: the handoff endpoints never receive it, so a page reached directly is
+   the only place it is checked. Anything but `code` redirects to the
+   confirmed URI with `error=unsupported_response_type`.
+2. Submit Allow and Deny as a `POST` from your own origin, with CSRF protection
+   (a Next.js Server Action has an Origin check built in). Treat the posted
+   fields as a fresh request: they are the client's own parameters handed back.
+3. On Allow, call `POST /api/v1/mcp/:slug/oauth/authorize/grant` with your
+   secret key (it needs the `auth:write` scope, which `*` includes) and the
+   user's access token, then redirect to the `redirect_uri` in the response
+   with the returned `code` and the original `state`.
+4. On Deny, call `/preview` again and redirect to the `redirect_uri` it
+   confirms with `error=access_denied` and the original `state`.
+5. Refuse to be framed: send `X-Frame-Options: DENY` or
+   `Content-Security-Policy: frame-ancestors 'none'` on the page, or the Allow
+   button can be clicked through someone else's overlay.
+
+The API keeps no record of past consent, so ask every time. Rekey Cloud's own
+page (`apps/marketing/src/app/oauth/authorize`) is a working example.
+
+Your page is a public URL, so anyone can reach it with a `redirect_uri` of their
+choosing: it is not only reached through the forward. Redirect the browser only
+to a URI the preview or grant response confirmed. A `200` carries it as `redirect_uri`. A
+`400` whose `error.details` carries `oauth_error` and `redirect_uri` means the
+client and URI were valid and the request was not, so redirect there with
+`error` (plus `error_description` and `state`). Any other failure, including an
+unknown `client_id`, an unregistered `redirect_uri` or the API being
+unreachable, must be shown on your own page and not redirected (RFC 6749
+§4.1.2.1). Redirecting on those makes your login page an open redirect.
 
 The API forwards only the standard authorization parameters, which are already
 public, and refuses to delegate to its own authorize path so a misconfiguration
@@ -389,7 +428,7 @@ that never outlives the session it describes by more than its own TTL.
 minute each by default, `RATE_LIMIT_AUTHENTICATED_MAX`), and all end-users seen from one client IP together are capped at
 3000 a minute. A backend resolving many users from one address after a cold
 start is better served by `GET /users/me` with its secret key: that counts
-against the key (6000 a minute) and is exempt from the per-IP ceiling. See
+against the key (30000 a minute) and is exempt from the per-IP ceiling. See
 [rate-limits.md](rate-limits.md).
 
 ## Devices
@@ -451,6 +490,7 @@ expires. Call the API when immediate revocation matters.
 - Stored as SHA-256 hash in `refresh_tokens` (hash-only DB, same model as ApiKey). Raw value is shown to the caller exactly once when issued and is **unrecoverable** afterwards.
 - **Rotated on use.** Calling `POST /auth/refresh` revokes the presented token (sets `revokedAt`) atomically with issuing the replacement. The chain is walkable via `replacedById`.
 - **Single-use, and a replay burns the family.** Replaying an already-used refresh returns `REFRESH_TOKEN_REUSED` (401) **and** revokes every refresh token the user holds (`revokeAllForEndUser`) before throwing. Treat the code as a strong signal of compromise — the original was likely leaked, and we can't tell the thief from the victim, so both are signed out rather than leaving the attacker's rotated token alive.
+- **Except a race, which costs nothing.** A token presented again within `REFRESH_TOKEN_REUSE_WINDOW_SECONDS` (15 by default, 0 turns it off) of its rotation, while its replacement is still unused, returns `REFRESH_TOKEN_RACED` (401) and revokes nothing: that is two tabs or two server instances refreshing at once, or a retry whose first response was lost. Nothing is issued to the replayer either, so a stolen token replayed inside the window buys an attacker nothing. The replay is still recorded (`user.refresh_token_raced`, with its IP and user agent). The allowance ends early once the replacement has itself been used or revoked, and it never covers a request carrying a device fingerprint the session is not bound to, or another Application's key: those are `REFRESH_TOKEN_REUSED`, as before. A client that gets `RACED` should pick up the replacement another request stored, or sign in again if it has none, and must not keep the spent token: presented after the window it revokes everything.
 - **Cross-application guard.** The refresh row carries `applicationId`; presenting it through a different Application's secret key returns `REFRESH_TOKEN_WRONG_APPLICATION`.
 
 ### Sign-out

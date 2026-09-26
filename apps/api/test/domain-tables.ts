@@ -95,6 +95,7 @@ const RESET_MODULES = [
   '../src/lib/dependency-outage.js',
   '../src/modules/oauth/providers/oidc.js',
   '../src/lib/operator-auth-cache.js',
+  '../src/modules/webhooks/endpoint-gate.js',
 ] as const;
 
 let resetFns: Array<() => void> | null = null;

@@ -46,6 +46,10 @@ export const SECURITY_EVENT_LABEL = {
   'operator.mcp_tool_called': 'MCP tool called',
   'operator.api_token.revoked': 'Operator API token revoked',
   'operator.invite_redeemed': 'Operator invite redeemed',
+  // Refresh-token replay, the operator counterparts of the `user.refresh_token_*`
+  // pair below (same semantics, see there).
+  'operator.refresh_token_raced': 'Operator refresh token replayed within the reuse window',
+  'operator.refresh_token_reused': 'Operator refresh token reused (all sessions revoked)',
 
   // ── Application configuration ──
   'app.created': 'Application created',
@@ -120,6 +124,15 @@ export const SECURITY_EVENT_LABEL = {
   'user.passkey_added': 'End-user added a passkey',
   'user.passkey_removed': 'End-user removed a passkey',
   'user.sessions_revoked': 'End-user revoked their sessions',
+  // Refresh-token replay. `raced`: a rotated token came back within
+  // REFRESH_TOKEN_REUSE_WINDOW_SECONDS while its successor was unused, and was
+  // refused WITHOUT revoking anything (two tabs refreshing at once, a retry
+  // after a lost response). It is recorded because the same shape is also a
+  // thief replaying a token moments after the victim used it, and the IP and
+  // user agent here are what tell the two apart afterwards. `reused`: a replay
+  // outside that allowance, and every session the user had was revoked.
+  'user.refresh_token_raced': 'End-user refresh token replayed within the reuse window',
+  'user.refresh_token_reused': 'End-user refresh token reused (all sessions revoked)',
   // App-authorised session handoff, the Application's own server exchanged a
   // live end-user session for an OIDC authorization code (see
   // POST /api/v1/mcp/:slug/oauth/authorize/grant). The end-user is the actor
@@ -185,6 +198,10 @@ export const SECURITY_EVENT_LABEL = {
   'admin.operator_invite.revoked': 'Operator invite revoked',
   'license.org_key_rotated': 'Organization licence key rotated',
   'auth.email_delivery_failed': 'Outbound email failed to send',
+  // Failed sign-in / MFA attempts with no visitor address (a backend that
+  // does not send X-Rekey-Client-Ip) reached RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX
+  // for one Application. At most one per Application per rate-limit window.
+  'auth.unattributed_failure_cap_reached': 'Failed sign-ins without a visitor address reached the cap',
   'system.dependency_unavailable': 'A dependency was unavailable',
 } as const satisfies Record<string, string>;
 

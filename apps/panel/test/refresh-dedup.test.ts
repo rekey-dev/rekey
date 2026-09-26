@@ -164,11 +164,20 @@ describe('api() refresh dedup', () => {
     await expect(api({ method: 'GET', path: '/one' })).rejects.toThrow(/NEXT_REDIRECT:\/login\?reason=expired/);
   });
 
-  it('bounces through /sign-out when cookies cannot be written (server component)', async () => {
-    refreshesRemaining = 0;
+  it('never refreshes where cookies cannot be written (server component), and redirects to the refresh route', async () => {
     jar.readOnly = true;
     const { api } = await import('@/lib/api');
 
+    await expect(api({ method: 'GET', path: '/one' })).rejects.toThrow(/NEXT_REDIRECT:\/session\/refresh\?next=%2F/);
+    expect(refreshCalls).toBe(0);
+  });
+
+  it('bounces through /sign-out from a server component when there is no refresh token to repair with', async () => {
+    jar.readOnly = true;
+    jar.seed('rekey_refresh', '');
+    const { api } = await import('@/lib/api');
+
     await expect(api({ method: 'GET', path: '/one' })).rejects.toThrow(/NEXT_REDIRECT:\/sign-out\?reason=expired/);
+    expect(refreshCalls).toBe(0);
   });
 });

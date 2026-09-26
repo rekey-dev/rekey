@@ -406,7 +406,9 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
             401:
               'REFRESH_TOKEN_INVALID — the token is unknown; or REFRESH_TOKEN_REUSED — a ' +
               'rotated token was replayed (every session for the operator is revoked); or ' +
-              'REFRESH_TOKEN_REVOKED — it was already revoked; or REFRESH_TOKEN_EXPIRED.',
+              'REFRESH_TOKEN_RACED, the token was rotated moments ago by another request and ' +
+              'its successor is unused (nothing was revoked; use the successor or sign in ' +
+              'again); or REFRESH_TOKEN_REVOKED — it was already revoked; or REFRESH_TOKEN_EXPIRED.',
             403: 'NO_TENANT_MEMBERSHIPS — the operator has no workspace memberships.',
             429: 'RATE_LIMITED: too many refreshes from this address. Honour the `Retry-After` header.',
           }),
@@ -415,7 +417,7 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const body = RefreshBody.parse(req.body);
-      const result = await tenantAuthService.refresh(body.refreshToken);
+      const result = await tenantAuthService.refresh(body.refreshToken, deviceContext(req));
       return { success: true, data: shape(result) };
     },
   );

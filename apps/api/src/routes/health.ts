@@ -19,6 +19,21 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../lib/prisma.js';
 import { getRedis } from '../lib/redis.js';
+import { BUILD_INFO } from '../lib/build-info.js';
+
+// Which build answered, on the probes only. Deliberately not a header on every
+// response: that would hand the version to anything that makes one request,
+// for no operational gain over asking here.
+const buildInfoSchema = {
+  version: {
+    type: 'string',
+    description: 'Release version of the running build, e.g. `2.2.0-rc.2`.',
+  },
+  commit: {
+    type: 'string',
+    description: 'Git commit the image was built from, or `unknown` when the build did not record one.',
+  },
+} as const;
 
 interface DependencyReport {
   ready: boolean;
@@ -79,7 +94,8 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
         description:
           'Returns 200 as soon as the process can serve HTTP. Touches no dependencies, so ' +
           'it stays green through a database or Redis outage. Unauthenticated and exempt ' +
-          'from rate limiting so an orchestrator can always reach it.',
+          'from rate limiting so an orchestrator can always reach it. Also reports the ' +
+          'running release version and git commit, so a deploy can be checked from outside.',
         response: {
           200: {
             description: 'The process is up. No `{success, data}` envelope, this route predates it.',
@@ -87,14 +103,15 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
             properties: {
               status: { type: 'string', enum: ['ok'] },
               service: { type: 'string', enum: ['rekey-api'] },
+              ...buildInfoSchema,
             },
-            required: ['status', 'service'],
+            required: ['status', 'service', 'version', 'commit'],
           },
         },
       },
     },
     async () => {
-      return { status: 'ok', service: 'rekey-api' };
+      return { status: 'ok', service: 'rekey-api', ...BUILD_INFO };
     },
   );
 
@@ -117,8 +134,9 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
               status: { type: 'string', enum: ['ready'] },
               db: { type: 'string', enum: ['ok', 'unreachable'] },
               redis: { type: 'string', enum: ['ok', 'unreachable', 'not_configured'] },
+              ...buildInfoSchema,
             },
-            required: ['status', 'db', 'redis'],
+            required: ['status', 'db', 'redis', 'version', 'commit'],
           },
           503: {
             description:
@@ -129,8 +147,9 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
               status: { type: 'string', enum: ['not_ready'] },
               db: { type: 'string', enum: ['ok', 'unreachable'] },
               redis: { type: 'string', enum: ['ok', 'unreachable', 'not_configured'] },
+              ...buildInfoSchema,
             },
-            required: ['status', 'db', 'redis'],
+            required: ['status', 'db', 'redis', 'version', 'commit'],
           },
         },
       },
@@ -140,9 +159,9 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       if (!report.ready) {
         return reply
           .status(503)
-          .send({ status: 'not_ready', db: report.db, redis: report.redis });
+          .send({ status: 'not_ready', db: report.db, redis: report.redis, ...BUILD_INFO });
       }
-      return { status: 'ready', db: report.db, redis: report.redis };
+      return { status: 'ready', db: report.db, redis: report.redis, ...BUILD_INFO };
     },
   );
 

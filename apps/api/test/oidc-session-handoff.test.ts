@@ -157,12 +157,14 @@ describe('app-authorised session handoff', () => {
       method?: string;
       scope?: string;
       nonce?: string;
+      /** `preview` describes the request without minting (the consent step). */
+      endpoint?: 'grant' | 'preview';
     },
   ) {
     const token = opts.userToken === undefined ? fx.userToken : opts.userToken;
     return app.inject({
       method: 'POST',
-      url: `/api/v1/mcp/${opts.slug ?? fx.slug}/oauth/authorize/grant`,
+      url: `/api/v1/mcp/${opts.slug ?? fx.slug}/oauth/authorize/${opts.endpoint ?? 'grant'}`,
       headers: {
         authorization: `Bearer ${opts.key ?? fx.liveKey}`,
         ...(token ? { 'x-rekey-user-token': token } : {}),
@@ -189,6 +191,9 @@ describe('app-authorised session handoff', () => {
     const { code, expires_in } = granted.json() as { code: string; expires_in: number };
     expect(code).toBeTruthy();
     expect(expires_in).toBe(60);
+    // The registered URI the code is bound to, so the hosted page redirects to
+    // what the API confirmed rather than to the caller's query string.
+    expect((granted.json() as { redirect_uri: string }).redirect_uri).toBe(REDIRECT);
 
     // Redeemed at the ordinary token endpoint, no special path.
     const tok = await app.inject({
@@ -382,6 +387,9 @@ describe('app-authorised session handoff', () => {
     const res = await handoff(fx, { challenge, clientId: 'no-such-client' });
     expect(res.statusCode).toBe(400);
     expect((res.json().error as { code: string }).code).toBe('INVALID_GRANT_REQUEST');
+    // No `details`: the redirect_uri is unconfirmed, so a hosted page must not
+    // send the browser to it.
+    expect(res.json().error).not.toHaveProperty('details');
   });
 
   it('refuses a redirect_uri that is not registered for the client', async () => {
@@ -390,6 +398,7 @@ describe('app-authorised session handoff', () => {
     const res = await handoff(fx, { challenge, redirectUri: 'https://evil.example/cb' });
     expect(res.statusCode).toBe(400);
     expect((res.json().error as { code: string }).code).toBe('INVALID_GRANT_REQUEST');
+    expect(res.json().error).not.toHaveProperty('details');
   });
 
   it('refuses a PKCE method other than S256', async () => {
@@ -397,6 +406,10 @@ describe('app-authorised session handoff', () => {
     const { challenge } = pkce();
     const res = await handoff(fx, { challenge, method: 'plain' });
     expect(res.statusCode).toBe(400);
+    // Refused by the body schema's enum, before the client is looked up, so
+    // nothing has confirmed the redirect_uri and the refusal carries no
+    // `details`: a hosted page must show its own error, not redirect.
+    expect(res.json().error).not.toHaveProperty('details');
   });
 
   it('refuses a request whose scopes the Application cannot grant', async () => {
@@ -405,6 +418,7 @@ describe('app-authorised session handoff', () => {
     const res = await handoff(fx, { challenge, scope: 'wat' });
     expect(res.statusCode).toBe(400);
     expect((res.json().error as { code: string }).code).toBe('INVALID_GRANT_REQUEST');
+    expect(res.json().error.details).toEqual({ oauth_error: 'invalid_scope', redirect_uri: REDIRECT });
   });
 
   it('404s when the Application is not an OIDC provider', async () => {
@@ -415,5 +429,80 @@ describe('app-authorised session handoff', () => {
     // field would 400 in schema validation before reaching the gate under test.
     const res = await handoff(fx, { challenge, clientId: 'irrelevant' });
     expect(res.statusCode).toBe(404);
+  });
+
+  // ---- Preview: what a hosted page shows before it asks --------------------
+  //
+  // A hosted authorize page that minted on arrival handed a signed-in user's
+  // code to any self-registered client a link named. The page now asks first,
+  // and this is where it learns what to ask about. The property that matters
+  // is that it mints nothing; the rest is that it refuses exactly what the
+  // grant refuses, so the screen never asks about a request the grant would
+  // not honour.
+
+  it('preview describes the request and mints no code', async () => {
+    const fx = await bootstrap();
+    const res = await handoff(fx, { challenge: pkce().challenge, endpoint: 'preview', scope: 'openid email wat' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toEqual({
+      client_id: fx.clientId,
+      client_name: 'Rekey Panel',
+      redirect_uri: REDIRECT,
+      // The GRANTED scopes, not the requested ones: the screen must list what
+      // Allow would actually give, and `wat` is not grantable.
+      scope: 'openid email',
+      account: { email: fx.euEmail },
+    });
+    expect(res.json()).not.toHaveProperty('code');
+    expect(await prisma.oAuthAuthCode.count({ where: { applicationId: fx.appId } })).toBe(0);
+  });
+
+  it('preview refuses what the grant refuses, with details only once the uri is confirmed', async () => {
+    const fx = await bootstrap();
+    const challenge = pkce().challenge;
+
+    const unknown = await handoff(fx, { challenge, endpoint: 'preview', clientId: 'no-such-client' });
+    expect(unknown.statusCode).toBe(400);
+    expect(unknown.json().error).not.toHaveProperty('details');
+
+    const unregistered = await handoff(fx, { challenge, endpoint: 'preview', redirectUri: 'https://evil.example/cb' });
+    expect(unregistered.statusCode).toBe(400);
+    expect(unregistered.json().error).not.toHaveProperty('details');
+
+    const badScope = await handoff(fx, { challenge, endpoint: 'preview', scope: 'wat' });
+    expect(badScope.statusCode).toBe(400);
+    expect(badScope.json().error.details).toEqual({ oauth_error: 'invalid_scope', redirect_uri: REDIRECT });
+
+    const noUser = await handoff(fx, { challenge, endpoint: 'preview', userToken: null });
+    expect(noUser.statusCode).toBe(401);
+    expect(noUser.json().error.code).toBe('USER_TOKEN_MISSING');
+
+    const publishable = await handoff(fx, { challenge, endpoint: 'preview', key: fx.publishableKey });
+    expect(publishable.statusCode).toBe(401);
+
+    expect(await prisma.oAuthAuthCode.count({ where: { applicationId: fx.appId } })).toBe(0);
+  });
+
+  it('preview refuses a key for another Application and an impersonated session', async () => {
+    const a = await bootstrap();
+    const b = await bootstrap();
+    const wrongApp = await handoff(b, {
+      challenge: pkce().challenge,
+      endpoint: 'preview',
+      slug: a.slug,
+      clientId: a.clientId,
+    });
+    expect(wrongApp.statusCode).toBe(403);
+    expect(wrongApp.json().error.code).toBe('SESSION_HANDOFF_FORBIDDEN');
+
+    const imp = await app.inject({
+      method: 'POST',
+      url: `/api/v1/tenant/applications/${a.appId}/end-users/${a.euId}/impersonate`,
+      headers: { authorization: `Bearer ${a.operatorToken}` },
+      payload: { reason: 'support ticket 456' },
+    });
+    const impToken = (imp.json().data as { accessToken: string }).accessToken;
+    const impersonated = await handoff(a, { challenge: pkce().challenge, endpoint: 'preview', userToken: impToken });
+    expect(impersonated.statusCode).toBe(403);
   });
 });

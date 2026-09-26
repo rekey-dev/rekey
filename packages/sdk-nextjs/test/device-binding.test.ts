@@ -66,7 +66,12 @@ const SESSION = {
   endUser: USER,
 };
 
+/** A refresh token no other test used: the exchange grace is per process. */
+let RT0 = '';
+let seq = 0;
+
 beforeEach(() => {
+  RT0 = `rt0_${++seq}`;
   jar.clear();
   for (const m of [signInRemote, signUpRemote, mfaVerifyRemote, refresh, getCurrentUser]) {
     m.mockReset();
@@ -127,29 +132,29 @@ describe('refresh carries the device too', () => {
   // small asymmetry. It is the unbound half of a bound session, and an
   // unbound chain that should have been bound never gets bound at all.
   it('refreshSession passes the configured device', async () => {
-    jar.set('rekey_refresh', 'rt0');
+    jar.set('rekey_refresh', RT0);
     refresh.mockResolvedValue({ accessToken: 'at2', refreshToken: 'rt2' });
 
     await refreshSession({ device: DEVICE });
 
-    expect(refresh).toHaveBeenCalledWith('rt0', { device: DEVICE });
+    expect(refresh).toHaveBeenCalledWith(RT0, { device: DEVICE });
   });
 
   it('auth() passes the configured device when it rotates', async () => {
-    jar.set('rekey_refresh', 'rt0');
+    jar.set('rekey_refresh', RT0);
     refresh.mockResolvedValue({ accessToken: 'at2', refreshToken: 'rt2' });
 
     await auth({ device: DEVICE });
 
-    expect(refresh).toHaveBeenCalledWith('rt0', { device: DEVICE });
+    expect(refresh).toHaveBeenCalledWith(RT0, { device: DEVICE });
   });
 
   it('no device given means the call is byte-for-byte what it always was', async () => {
-    jar.set('rekey_refresh', 'rt0');
+    jar.set('rekey_refresh', RT0);
     refresh.mockResolvedValue({ accessToken: 'at2', refreshToken: 'rt2' });
 
     await refreshSession();
 
-    expect(refresh).toHaveBeenCalledWith('rt0');
+    expect(refresh).toHaveBeenCalledWith(RT0);
   });
 });

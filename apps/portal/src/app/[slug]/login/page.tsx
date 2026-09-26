@@ -73,6 +73,12 @@ export default async function LoginPage({
     <div className="mx-auto max-w-sm space-y-5 pt-10">
       <h1 className="text-lg font-semibold text-[var(--color-fg)]">Sign in</h1>
       {reason === 'expired' && <Banner tone="info">Your session expired — sign in again.</Banner>}
+      {reason === 'session_interrupted' && (
+        <Banner tone="info">
+          Your session was interrupted while it renewed, so it was signed out to keep your account safe. Sign in again
+          to carry on.
+        </Banner>
+      )}
       {reason === 'reset' && (
         <Banner tone="success">Password updated. Sign in with your new password.</Banner>
       )}

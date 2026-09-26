@@ -217,8 +217,9 @@ describe('the auth rate-limit tier fails closed too', () => {
     // `magic-link/request` have no brute-force scope behind them (they are not
     // sign-in attempts), so a skipped limiter would accept unbounded requests,
     // each one sending an email.
-    const { authCeilingOptions, authRateLimit } = await import('../src/lib/rate-limit.js');
-    expect(authCeilingOptions(100, 60_000).skipOnError).toBe(false);
+    const { authCeilingOptions, authClientIpCeilingOptions, authRateLimit } = await import('../src/lib/rate-limit.js');
+    expect(authCeilingOptions({ perApplication: 3000, perClientIp: 100 }, 60_000).skipOnError).toBe(false);
+    expect(authClientIpCeilingOptions(100, 60_000).skipOnError).toBe(false);
     expect(authRateLimit(10).skipOnError).toBe(false);
   });
 });

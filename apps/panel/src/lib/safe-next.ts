@@ -1,59 +1,67 @@
 /**
- * The one validator for a caller-supplied `?next=` / `next` form field.
+ * The one validator for a caller-supplied `?next=` / `next` form field, and
+ * for any other path the panel is about to put in a `Location` header.
  *
  * There were four copies of this and every one of them was wrong the same way.
  * Each checked `startsWith('/') && !startsWith('//') && !startsWith('/\\') &&
  * !includes('://')`, which reads as airtight and is not: **browsers strip tab,
  * LF and CR out of a URL before they parse it.** So `/%09/evil.com` decodes to
  * `/\t/evil.com`, passes every one of those tests, and then resolves as
- * `https://evil.com/` once a browser has removed the tab. Measured:
+ * `https://evil.com/` once a browser has removed the tab.
  *
- *   new URL('/\t/evil.com', 'https://panel.rekey.dev').href
- *   // => 'https://evil.com/'
+ * The replacement had a second hole of the same shape. It checked the INPUT,
+ * then returned `pathname + search + hash` rebuilt from `new URL(input)`. The
+ * URL parser collapses dot-segments, so an input that passes every input test
+ * comes back out as a protocol-relative URL:
  *
- * On an operator console an open redirect is a phishing primitive: the victim
- * clicks a link on the real panel origin, is "signed in", and lands on a
- * copy of it. Login, sign-up, MFA verify and the OAuth callback all took this
- * parameter.
+ *   new URL('/..//evil.com', 'https://next.invalid').pathname
+ *   // => '//evil.com'
  *
- * Three protections, and they were checked individually rather than assumed.
- * Deleting any ONE of them leaves the tests green, because each covers the
- * others; deleting the first two together turns them red:
+ * and a browser given `Location: //evil.com` leaves the site. The same goes for
+ * `/x/..//evil.com`, `/%2e%2e//evil.com` and `/./\evil.com` (the parser turns
+ * `\` into `/`). On an operator console an open redirect is a phishing
+ * primitive: the victim clicks a link on the real panel origin, is "signed
+ * in", and lands on a copy of it.
  *
- *   1. strip the C0 control range and DEL, so nothing a browser would remove
- *      later can change the meaning of what we validated. With this in place
- *      `/<TAB>/evil.com` collapses to `//evil.com` and the prefix test below
- *      is what rejects it;
+ * So the rule is: check what you return, not only what you were given.
+ *
+ *   1. refuse control characters and backslashes outright. A browser removes
+ *      the first and reads the second as `/`, so either can change the meaning
+ *      of a string after it was checked;
  *   2. resolve against a placeholder origin and require the result to still be
- *      on it. This is what catches an escape spelled some way nobody
- *      predicted, including a future change in the URL parser;
- *   3. return `pathname + search + hash` rebuilt from the PARSED url, never
- *      the caller's string. This is the quiet one and the strongest: even with
- *      both checks above removed, `/<TAB>/evil.com` comes back as `/`, because
- *      the host half was never ours to return.
- *
- * Prefer keeping all three. They are three lines and they fail independently.
+ *      on it;
+ *   3. rebuild the path from the PARSED url, and then require THAT to be a
+ *      local path ({@link isLocalPath}). This last check is the one that
+ *      catches dot-segment collapse; nothing about the input predicts it.
  *
  * Returns a same-origin path (with query and hash preserved), or null. Callers
  * treat null as "no destination was supplied" and fall back to their default.
  */
 const PLACEHOLDER_ORIGIN = 'https://next.invalid';
 
+// eslint-disable-next-line no-control-regex
+const UNSAFE_CHARS = /[\u0000-\u001F\u007F\\]/;
+
+/**
+ * True when `path` can only resolve to this origin: exactly one leading `/`,
+ * not `//` or `/\` (both protocol-relative to a browser), and no character a
+ * browser would strip or rewrite before parsing.
+ */
+export function isLocalPath(path: string): boolean {
+  return path.startsWith('/') && path[1] !== '/' && !UNSAFE_CHARS.test(path);
+}
+
 export function safeNext(raw: unknown): string | null {
   const v = typeof raw === 'string' ? raw : String(raw ?? '');
-  if (!v) return null;
+  if (!v || !isLocalPath(v)) return null;
 
-  // eslint-disable-next-line no-control-regex
-  const cleaned = v.replace(/[\u0000-\u001F\u007F]/g, '');
-  if (!cleaned.startsWith('/') || cleaned.startsWith('//') || cleaned.startsWith('/\\')) {
-    return null;
-  }
-
+  let url: URL;
   try {
-    const url = new URL(cleaned, PLACEHOLDER_ORIGIN);
-    if (url.origin !== PLACEHOLDER_ORIGIN) return null;
-    return `${url.pathname}${url.search}${url.hash}`;
+    url = new URL(v, PLACEHOLDER_ORIGIN);
   } catch {
     return null;
   }
+  if (url.origin !== PLACEHOLDER_ORIGIN) return null;
+  const rebuilt = `${url.pathname}${url.search}${url.hash}`;
+  return isLocalPath(rebuilt) ? rebuilt : null;
 }

@@ -1,6 +1,6 @@
 {
   "name": "@rekey.dev/astro",
-  "version": "2.2.0-rc.2",
+  "version": "2.2.0-rc.3",
   "description": "Rekey session handling for Astro \u2014 middleware, cookies, and the two rules that are easy to get wrong.",
   "license": "MIT",
   "type": "module",

@@ -12,7 +12,7 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
-import type { TenantRefreshToken } from '@prisma/client';
+import type { Prisma, TenantRefreshToken } from '@prisma/client';
 import { invalidateOperatorAuth } from './operator-auth-cache.js';
 import { prisma } from './prisma.js';
 import { env } from '../config/env.js';
@@ -37,22 +37,34 @@ export interface IssuedTenantRefreshToken {
 export interface IssueTenantRefreshTokenOptions {
   userAgent?: string | null;
   ip?: string | null;
+  /**
+   * The workspace the session is minted into. Refresh re-emits it as `tid`
+   * while the operator is still a member (see tenantAuthService.refresh).
+   */
+  activeTenantId?: string | null;
 }
 
+/**
+ * `client` lets a caller that is inside a transaction write the token with
+ * its other changes (invitation accept), so the session commits or rolls back
+ * with them and no second pool connection is taken mid-transaction.
+ */
 export async function issueTenantRefreshToken(
   tenantUserId: string,
   options: IssueTenantRefreshTokenOptions = {},
+  client: Prisma.TransactionClient = prisma,
 ): Promise<IssuedTenantRefreshToken> {
   const raw = generateRawToken();
   const ua = options.userAgent ? options.userAgent.slice(0, 512) : null;
   const ip = options.ip ? options.ip.slice(0, 64) : null;
-  const record = await prisma.tenantRefreshToken.create({
+  const record = await client.tenantRefreshToken.create({
     data: {
       tenantUserId,
       tokenHash: hashTenantRefreshToken(raw),
       expiresAt: new Date(Date.now() + REFRESH_TOKEN_LIFETIME_MS),
       userAgent: ua,
       ip,
+      activeTenantId: options.activeTenantId ?? null,
     },
   });
   return { raw, record };
@@ -74,8 +86,15 @@ export async function lookupTenantRefreshToken(raw: string): Promise<TenantRefre
   return { kind: 'ok', token };
 }
 
+/**
+ * `activeTenantId` is the workspace the replacement row is scoped to. It
+ * defaults to the presented row's; the refresh handler passes the workspace it
+ * re-checked against live memberships, so a fallback is written by the
+ * rotation itself and nothing can fail after the presented token is spent.
+ */
 export async function rotateTenantRefreshToken(
   presented: TenantRefreshToken,
+  activeTenantId: string | null = presented.activeTenantId,
 ): Promise<IssuedTenantRefreshToken> {
   const raw = generateRawToken();
   const tokenHash = hashTenantRefreshToken(raw);
@@ -98,6 +117,9 @@ export async function rotateTenantRefreshToken(
         ip: presented.ip,
         // Same session, same `sid` on the access token minted from it.
         sessionId: presented.sessionId,
+        // And the same workspace, unless the refresh handler's membership
+        // re-check moved it.
+        activeTenantId,
       },
     });
     await tx.tenantRefreshToken.update({

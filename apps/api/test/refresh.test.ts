@@ -5,12 +5,19 @@
  * token is single-use. Reusing it should always be detected and rejected
  * (REFRESH_TOKEN_REUSED), because reuse strongly implies the token was
  * leaked.
+ *
+ * The replays here are replays AFTER the reuse window: each ages the rotation
+ * past `REFRESH_TOKEN_REUSE_WINDOW_SECONDS` first. A replay inside the window
+ * is a different answer (REFRESH_TOKEN_RACED, nothing revoked) and has its own
+ * suite, refresh-reuse-window.test.ts.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { hashRefreshToken } from '../src/lib/refresh-tokens.js';
+import { REFRESH_REUSE_WINDOW_MS } from '../src/lib/refresh-reuse-window.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -79,6 +86,14 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
     return { accessToken: data.accessToken, refreshToken: data.refreshToken, endUserId: data.endUser.id };
   }
 
+  /** Move a spent token's rotation to just past the reuse window. */
+  async function ageRotation(raw: string): Promise<void> {
+    await prisma.refreshToken.update({
+      where: { tokenHash: hashRefreshToken(raw) },
+      data: { revokedAt: new Date(Date.now() - REFRESH_REUSE_WINDOW_MS - 1_000) },
+    });
+  }
+
   beforeEach(async () => {
     appA = await bootstrap('refresh-a');
     appB = await bootstrap('refresh-b');
@@ -110,6 +125,7 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
       payload: { refreshToken: original },
     });
     expect(first.statusCode).toBe(200);
+    await ageRotation(original);
 
     // Second use of the same original token must fail.
     const second = await app.inject({
@@ -134,6 +150,7 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
       payload: { refreshToken: original },
     });
     const replacement = (r1.json().data as { refreshToken: string }).refreshToken;
+    await ageRotation(original);
 
     // Replay the original, strong compromise signal.
     const replay = await app.inject({
@@ -199,9 +216,10 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
 
   // One live row per session is enforced by a unique partial index
   // (migration 20260915120000). Rotation revokes before it inserts, so racing
-  // refreshes of one token must still end as before: one winner, every loser
-  // REFRESH_TOKEN_REUSED, and no unique violation surfacing as a 500.
-  it('concurrent refreshes of one token: one winner, the rest REUSED, never a 500', async () => {
+  // refreshes of one token must end with one winner, every loser answered
+  // REFRESH_TOKEN_RACED (inside the reuse window, nothing revoked), and no
+  // unique violation surfacing as a 500.
+  it('concurrent refreshes of one token: one winner, the rest RACED, never a 500', async () => {
     const { refreshToken, endUserId } = await signUp(appA, 'race@example.com');
 
     const results = await Promise.all(
@@ -218,12 +236,12 @@ describe('POST /auth/refresh + /auth/sign-out', () => {
     expect(statuses.filter((s) => s === 200)).toHaveLength(1);
     for (const r of results.filter((x) => x.statusCode !== 200)) {
       expect(r.statusCode).toBe(401);
-      expect(r.json().error.code).toBe('REFRESH_TOKEN_REUSED');
+      expect(r.json().error.code).toBe('REFRESH_TOKEN_RACED');
     }
     const heads = await prisma.refreshToken.count({
       where: { endUserId, replacedById: null, revokedAt: null },
     });
-    expect(heads).toBeLessThanOrEqual(1);
+    expect(heads).toBe(1);
   });
 
   it('the database refuses a second live row in one session', async () => {

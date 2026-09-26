@@ -517,7 +517,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         summary: 'Exchange a refresh token for a new {access, refresh} pair',
         description:
           'The presented refresh token is revoked atomically with issuing the replacement. ' +
-          'A presented-but-revoked token is treated as a replay and rejected with REFRESH_TOKEN_REUSED.',
+          'A token that was already rotated is refused. Presented again within the reuse window ' +
+          '(REFRESH_TOKEN_REUSE_WINDOW_SECONDS) while its replacement is still unused, it is ' +
+          'REFRESH_TOKEN_RACED and nothing is revoked: another request (a second tab, a retry) ' +
+          'rotated it moments ago. Otherwise it is treated as a replay, REFRESH_TOKEN_REUSED, and ' +
+          'every session for the user is revoked. A token revoked without being rotated (a ' +
+          'sign-out, a revoked session) is REFRESH_TOKEN_REVOKED.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
         body: {
           type: 'object',
@@ -535,7 +540,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
               BOOTSTRAP_401 +
               ' Or REFRESH_TOKEN_INVALID — the token is unknown or not a session-kind token; or ' +
               'REFRESH_TOKEN_REUSED — a rotated-out token was replayed (every session for this ' +
-              'user has been revoked as a precaution); or REFRESH_TOKEN_REVOKED — this session ' +
+              'user has been revoked as a precaution); or REFRESH_TOKEN_RACED, the token was ' +
+              'rotated moments ago by another request and its successor is unused (nothing was ' +
+              'revoked; use the successor or sign in again); or REFRESH_TOKEN_REVOKED — this session ' +
               'was revoked, or its device was refused after the token was spent (`details.reason`); ' +
               'or REFRESH_TOKEN_EXPIRED — the token has expired; or ' +
               'REFRESH_TOKEN_WRONG_APPLICATION — the token belongs to a different Application; or ' +

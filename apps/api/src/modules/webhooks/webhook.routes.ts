@@ -239,7 +239,8 @@ export async function tenantWebhookRoutes(app: FastifyInstance): Promise<void> {
             400:
               'VALIDATION_ERROR — `url` or `events` failed schema validation; or ' +
               'WEBHOOK_URL_UNSAFE — the URL resolves to a private/loopback/link-local address ' +
-              '(unless `WEBHOOK_ALLOW_PRIVATE_TARGETS=true` on a self-hosted deploy).',
+              '(unless `WEBHOOK_ALLOW_PRIVATE_TARGETS=true` on a self-hosted deploy); or ' +
+              'WEBHOOK_ENDPOINT_LIMIT_REACHED — the Application already has 100 webhook endpoints.',
             ...APP_WRITE_ERRORS,
           }),
         },

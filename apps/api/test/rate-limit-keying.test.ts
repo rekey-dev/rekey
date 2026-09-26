@@ -18,13 +18,18 @@
  * build their own enforced app.
  *
  * Budgets are the env defaults: 100 anonymous per IP, 600 per operator or end
- * user, 6000 per secret key, 60 refreshes per IP, auth routes 10.
+ * user, 30000 per secret key, 60 refreshes per IP, auth routes 10.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance, InjectOptions, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import {
+  resolveGlobalBudgets,
+  unattributedAttemptSubject,
+  type GlobalRateLimitBudgets,
+} from '../src/lib/rate-limit.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 const PANEL_IP = '10.77.0.10';
@@ -51,14 +56,17 @@ afterAll(async () => {
  * Build an app with the real caps on. `trustedProxies` sets TRUSTED_PROXIES for
  * this build only; it is read once, in buildApp.
  */
-async function enforcedApp(trustedProxies?: string): Promise<FastifyInstance> {
+async function enforcedApp(
+  trustedProxies?: string,
+  rateLimitOverrides?: Partial<GlobalRateLimitBudgets>,
+): Promise<FastifyInstance> {
   const prevEnforce = process.env.REKEY_TEST_ENFORCE_RATE_LIMITS;
   const prevTrust = process.env.TRUSTED_PROXIES;
   process.env.REKEY_TEST_ENFORCE_RATE_LIMITS = '1';
   if (trustedProxies === undefined) delete process.env.TRUSTED_PROXIES;
   else process.env.TRUSTED_PROXIES = trustedProxies;
   try {
-    const app = await buildApp({ logger: false });
+    const app = await buildApp({ logger: false, ...(rateLimitOverrides ? { rateLimitOverrides } : {}) });
     await app.ready();
     return app;
   } finally {
@@ -245,8 +253,8 @@ describe('global limiter keys on the caller, not the panel IP', () => {
         headers: { authorization: `Bearer ${secretKey}` },
       });
       expect(res.statusCode).toBe(200);
-      expect(res.headers['x-ratelimit-limit']).toBe('6000');
-      expect(res.headers['x-ratelimit-remaining']).toBe('5999');
+      expect(res.headers['x-ratelimit-limit']).toBe('30000');
+      expect(res.headers['x-ratelimit-remaining']).toBe('29999');
     });
 
     it('a signed-in end user is keyed on the user, not the IP', async () => {
@@ -489,5 +497,376 @@ describe('portal config keys on (slug, client IP) with a per-IP ceiling', () => 
     const over = await app.inject(config('guess-final', ip));
     expect(over.statusCode).toBe(429);
     expect(over.json().error.code).toBe('RATE_LIMITED');
+  });
+});
+
+/**
+ * The per-Application auth ceiling has its own budget (RATE_LIMIT_AUTH_CEILING_MAX,
+ * 3000) instead of reusing RATE_LIMIT_MAX (100), and what one client IP may
+ * spend of it is still RATE_LIMIT_MAX. At 100 per Application, one address with
+ * the public publishable key could refuse every sign-in to the Application.
+ */
+describe('per-Application auth ceiling', () => {
+  let publicKey: string;
+  let secretKey: string;
+
+  beforeEach(async () => {
+    const tenant = await fixtures
+      .inject({
+        method: 'POST',
+        url: '/api/v1/admin/tenants',
+        headers: { authorization: `Bearer ${ADMIN_KEY}` },
+        payload: { name: 'T', ownerEmail: 'ceil-owner@example.com' },
+      })
+      .then((r) => r.json().data as { id: string });
+    const application = await fixtures
+      .inject({
+        method: 'POST',
+        url: '/api/v1/admin/applications',
+        headers: { authorization: `Bearer ${ADMIN_KEY}` },
+        payload: { tenantId: tenant.id, name: 'A', slug: 'ceil-app' },
+      })
+      .then((r) => r.json().data as { id: string; publicKey: string });
+    const key = await fixtures
+      .inject({
+        method: 'POST',
+        url: `/api/v1/admin/applications/${application.id}/api-keys`,
+        headers: { authorization: `Bearer ${ADMIN_KEY}` },
+        payload: { name: 'backend', mode: 'live' },
+      })
+      .then((r) => r.json().data as { rawKey: string });
+    publicKey = application.publicKey;
+    secretKey = key.rawKey;
+  });
+
+  // Distinct emails, so the 10-per-identity cap never trips: only the ceiling
+  // and its per-IP share can refuse these.
+  let seq = 0;
+  const forgot = (ip: string, bearer: string) => ({
+    method: 'POST' as const,
+    url: '/api/v1/auth/forgot-password',
+    remoteAddress: ip,
+    headers: { authorization: `Bearer ${bearer}` },
+    payload: { email: `ceil-${seq++}@example.com` },
+  });
+
+  async function spend(app: FastifyInstance, n: number, ip: string, bearer = publicKey): Promise<void> {
+    for (let i = 0; i < n; i++) {
+      const r = await app.inject(forgot(ip, bearer));
+      expect(r.statusCode, `request ${i + 1} from ${ip}`).not.toBe(429);
+    }
+  }
+
+  it('one client IP is still held to RATE_LIMIT_MAX, and that does not spend the Application', async () => {
+    const app = await enforcedApp();
+    try {
+      await spend(app, 100, '198.51.100.120');
+      const over = await app.inject(forgot('198.51.100.120', publicKey));
+      expect(over.statusCode).toBe(429);
+      expect(over.json().error.code).toBe('RATE_LIMITED');
+      // The old ceiling was RATE_LIMIT_MAX per Application: this bystander
+      // would have been refused along with the sprayer.
+      const bystander = await app.inject(forgot('198.51.100.121', publicKey));
+      expect(bystander.statusCode).not.toBe(429);
+    } finally {
+      await app.close();
+    }
+  }, 60_000);
+
+  it('the Application ceiling uses its own budget, independent of RATE_LIMIT_MAX', async () => {
+    // A small ceiling so it can be exhausted on the wire; the anonymous budget
+    // (RATE_LIMIT_MAX) stays at its default of 100.
+    const app = await enforcedApp(undefined, { authCeiling: 150 });
+    try {
+      await spend(app, 100, '198.51.100.130');
+      await spend(app, 50, '198.51.100.131');
+      const overSecondIp = await app.inject(forgot('198.51.100.131', publicKey));
+      expect(overSecondIp.statusCode).toBe(429);
+      // A third address has spent nothing of its own: the Application is out.
+      const third = await app.inject(forgot('198.51.100.132', publicKey));
+      expect(third.statusCode).toBe(429);
+      // Anonymous traffic from a fresh address still gets RATE_LIMIT_MAX.
+      const anonRes = await app.inject(anon('198.51.100.133'));
+      expect(anonRes.statusCode).toBe(200);
+      expect(anonRes.headers['x-ratelimit-limit']).toBe('100');
+    } finally {
+      await app.close();
+    }
+  }, 60_000);
+
+  it('a secret key is not held to the per-IP share (one backend address serves every user)', async () => {
+    const app = await enforcedApp();
+    try {
+      await spend(app, 120, '198.51.100.140', secretKey);
+    } finally {
+      await app.close();
+    }
+  }, 60_000);
+
+  // A backend signing users in with its secret key sends every request from
+  // its own address, so a password spray through its sign-in form had no
+  // per-address limit at all, only the 3000-a-minute Application ceiling.
+  describe('secret-key traffic that names the visitor in X-Rekey-Client-Ip', () => {
+    const forgotFor = (visitor: string | string[], backendIp = '198.51.100.150') => ({
+      ...forgot(backendIp, secretKey),
+      headers: { authorization: `Bearer ${secretKey}`, 'x-rekey-client-ip': visitor as string },
+    });
+
+    it('holds each visitor to RATE_LIMIT_MAX, and one visitor spending it leaves the next alone', async () => {
+      const app = await enforcedApp();
+      try {
+        for (let i = 0; i < 100; i++) {
+          const r = await app.inject(forgotFor('203.0.113.7'));
+          expect(r.statusCode, `request ${i + 1}`).not.toBe(429);
+        }
+        const over = await app.inject(forgotFor('203.0.113.7'));
+        expect(over.statusCode).toBe(429);
+        expect(over.json().error.code).toBe('RATE_LIMITED');
+        // Same backend, same key, another visitor.
+        const next = await app.inject(forgotFor('203.0.113.8'));
+        expect(next.statusCode).not.toBe(429);
+        // IPv6, and the IPv4-mapped form of the first visitor is the same visitor.
+        expect((await app.inject(forgotFor('2001:db8::1'))).statusCode).not.toBe(429);
+        expect((await app.inject(forgotFor('::ffff:203.0.113.7'))).statusCode).toBe(429);
+      } finally {
+        await app.close();
+      }
+    }, 60_000);
+
+    it('ignores a malformed or repeated header: the call stays unattributed, not per-IP limited', async () => {
+      const app = await enforcedApp();
+      try {
+        for (let i = 0; i < 60; i++) {
+          const r = await app.inject(forgotFor('not-an-ip'));
+          expect(r.statusCode, `malformed ${i + 1}`).not.toBe(429);
+        }
+        for (let i = 0; i < 60; i++) {
+          const r = await app.inject(forgotFor(['203.0.113.9', '203.0.113.9']));
+          expect(r.statusCode, `repeated ${i + 1}`).not.toBe(429);
+        }
+      } finally {
+        await app.close();
+      }
+    }, 60_000);
+
+    it('is not believed from a publishable key: the socket address stays the client', async () => {
+      const app = await enforcedApp();
+      try {
+        // Rotating the header per request would mint a fresh bucket each time
+        // if it were read here.
+        for (let i = 0; i < 100; i++) {
+          const r = await app.inject({
+            ...forgot('198.51.100.160', publicKey),
+            headers: { authorization: `Bearer ${publicKey}`, 'x-rekey-client-ip': `203.0.113.${i + 1}` },
+          });
+          expect(r.statusCode, `request ${i + 1}`).not.toBe(429);
+        }
+        const over = await app.inject({
+          ...forgot('198.51.100.160', publicKey),
+          headers: { authorization: `Bearer ${publicKey}`, 'x-rekey-client-ip': '203.0.113.250' },
+        });
+        expect(over.statusCode).toBe(429);
+      } finally {
+        await app.close();
+      }
+    }, 60_000);
+  });
+
+  // Traffic with no visitor address (a backend that does not forward one, or
+  // a proxy the API cannot identify) gets a per-Application cap on FAILED
+  // attempts instead.
+  describe('unattributed failed attempts', () => {
+    let wrong = 0;
+    const signIn = (
+      bearer: string,
+      remoteAddress: string,
+      opts: { email?: string; password?: string; headers?: Record<string, string> } = {},
+    ) => ({
+      method: 'POST' as const,
+      url: '/api/v1/auth/sign-in',
+      remoteAddress,
+      headers: { authorization: `Bearer ${bearer}`, ...opts.headers },
+      payload: { email: opts.email ?? `spray-${wrong++}@example.com`, password: opts.password ?? 'Summer2026!' },
+    });
+    // Rows survive between tests in this file, so count only this test's.
+    let testStart = new Date();
+    beforeEach(() => {
+      testStart = new Date();
+    });
+    const capEvents = () =>
+      prisma.securityEvent.count({
+        where: { type: 'auth.unattributed_failure_cap_reached', createdAt: { gte: testStart } },
+      });
+
+    it('past the cap, refuses only accounts that already failed; everyone else, and every other route, proceeds', async () => {
+      // A real user of the Application, created before the spray.
+      const real = await fixtures.inject({
+        method: 'POST',
+        url: '/api/v1/auth/sign-up',
+        headers: { authorization: `Bearer ${secretKey}` },
+        payload: { email: 'real-user@example.com', password: 'correct-horse-battery' },
+      });
+      expect(real.statusCode).toBe(201);
+
+      const app = await enforcedApp(undefined, { authUnattributedFailures: 5 });
+      const backend = '198.51.100.170';
+      try {
+        // Successful, non-failing traffic does not count toward it.
+        await spend(app, 20, backend, secretKey);
+        for (let i = 0; i < 5; i++) {
+          const r = await app.inject(signIn(secretKey, backend, { email: `victim-${i}@example.com` }));
+          expect(r.statusCode, `failure ${i + 1}`).toBe(401);
+          expect(r.json().error.code).toBe('INVALID_CREDENTIALS');
+        }
+        // An email that already failed this window is refused.
+        const repeat = await app.inject(signIn(secretKey, backend, { email: 'victim-0@example.com' }));
+        expect(repeat.statusCode).toBe(429);
+        expect(repeat.json().error.code).toBe('RATE_LIMITED');
+        // A real user with a different email still signs in.
+        const ok = await app.inject(
+          signIn(secretKey, backend, { email: 'real-user@example.com', password: 'correct-horse-battery' }),
+        );
+        expect(ok.statusCode).toBe(200);
+        // A fresh email gets its one attempt (a spray costs one guess per account).
+        expect((await app.inject(signIn(secretKey, backend))).statusCode).toBe(401);
+        // Sign-up and the other auth routes are never refused by this cap.
+        const signUp = await app.inject({
+          method: 'POST',
+          url: '/api/v1/auth/sign-up',
+          remoteAddress: backend,
+          headers: { authorization: `Bearer ${secretKey}` },
+          // An email that already failed a sign-in this window, on purpose.
+          payload: { email: 'victim-1@example.com', password: 'correct-horse-battery' },
+        });
+        expect(signUp.statusCode).toBe(201);
+        expect((await app.inject(forgot(backend, secretKey))).statusCode).toBe(200);
+        // A backend call that names its visitor is limited per visitor instead.
+        const attributed = await app.inject(
+          signIn(secretKey, backend, { email: 'victim-0@example.com', headers: { 'x-rekey-client-ip': '203.0.113.20' } }),
+        );
+        expect(attributed.statusCode).toBe(401);
+      } finally {
+        await app.close();
+      }
+    }, 60_000);
+
+    it('tells the operator once per window that the backend is not forwarding the visitor address', async () => {
+      const app = await enforcedApp(undefined, { authUnattributedFailures: 3 });
+      try {
+        for (let i = 0; i < 3; i++) await app.inject(signIn(secretKey, '198.51.100.173'));
+        expect(await capEvents()).toBe(1);
+        // Further failures in the same window add nothing.
+        for (let i = 0; i < 4; i++) await app.inject(signIn(secretKey, '198.51.100.173'));
+        expect(await capEvents()).toBe(1);
+        const [event] = await prisma.securityEvent.findMany({
+          where: { type: 'auth.unattributed_failure_cap_reached', createdAt: { gte: testStart } },
+        });
+        expect(event?.applicationId).not.toBeNull();
+        expect(event?.tenantId).not.toBeNull();
+      } finally {
+        await app.close();
+      }
+    }, 60_000);
+
+    it('failures from a named visitor do not spend the unattributed cap', async () => {
+      const app = await enforcedApp(undefined, { authUnattributedFailures: 5 });
+      try {
+        for (let i = 0; i < 8; i++) {
+          const r = await app.inject(
+            signIn(secretKey, '198.51.100.172', {
+              email: 'named-0@example.com',
+              headers: { 'x-rekey-client-ip': `203.0.113.${30 + i}` },
+            }),
+          );
+          expect(r.statusCode, `failure ${i + 1}`).toBe(401);
+        }
+        // Unattributed now, for an email that failed only while attributed.
+        const r = await app.inject(signIn(secretKey, '198.51.100.172', { email: 'named-0@example.com' }));
+        expect(r.statusCode).toBe(401);
+        expect(await capEvents()).toBe(0);
+      } finally {
+        await app.close();
+      }
+    }, 60_000);
+
+    it('applies the same cap to publishable-key traffic through a proxy the API cannot identify', async () => {
+      const app = await enforcedApp(undefined, { authUnattributedFailures: 5 });
+      // A private-network peer that forwards without the proxy secret: not vouched.
+      const viaUnknownProxy = { 'x-forwarded-for': '203.0.113.40' };
+      try {
+        for (let i = 0; i < 5; i++) {
+          const r = await app.inject(
+            signIn(publicKey, '10.9.0.5', { email: `proxied-${i}@example.com`, headers: viaUnknownProxy }),
+          );
+          expect(r.statusCode, `failure ${i + 1}`).toBe(401);
+        }
+        const refused = await app.inject(
+          signIn(publicKey, '10.9.0.5', { email: 'proxied-2@example.com', headers: viaUnknownProxy }),
+        );
+        expect(refused.statusCode).toBe(429);
+        expect(refused.json().error.code).toBe('RATE_LIMITED');
+        const fresh = await app.inject(signIn(publicKey, '10.9.0.5', { headers: viaUnknownProxy }));
+        expect(fresh.statusCode).toBe(401);
+      } finally {
+        await app.close();
+      }
+    }, 60_000);
+  });
+
+  describe('which attempts the unattributed cap can see', () => {
+    const req = (url: string, body: unknown) =>
+      ({ routeOptions: { url }, body }) as unknown as Parameters<typeof unattributedAttemptSubject>[0];
+    const mfa = (token: string) => (token === 'good-token' ? 'eu_123' : null);
+
+    it('sign-in keys on the normalised email, MFA on the pending user, and nothing else is watched', () => {
+      expect(unattributedAttemptSubject(req('/api/v1/auth/sign-in', { email: ' Victim@Example.com ' }), mfa)).toBe(
+        'email:victim@example.com',
+      );
+      expect(unattributedAttemptSubject(req('/api/v1/auth/sign-in', {}), mfa)).toBeNull();
+      expect(
+        unattributedAttemptSubject(req('/api/v1/auth/mfa-verify', { mfaChallengeToken: 'good-token', code: '1' }), mfa),
+      ).toBe('eu:eu_123');
+      expect(
+        unattributedAttemptSubject(req('/api/v1/auth/mfa-verify', { mfaChallengeToken: 'forged', code: '1' }), mfa),
+      ).toBeNull();
+      for (const url of [
+        '/api/v1/auth/sign-up',
+        '/api/v1/auth/forgot-password',
+        '/api/v1/auth/reset-password',
+        '/api/v1/auth/magic-link/request',
+        '/api/v1/auth/verify-email',
+      ]) {
+        expect(unattributedAttemptSubject(req(url, { email: 'victim@example.com' }), mfa), url).toBeNull();
+      }
+    });
+  });
+});
+
+describe('budget defaults', () => {
+  it('sizes the per-key and auth-ceiling budgets for a 50k-DAU Application', () => {
+    const b = resolveGlobalBudgets({ RATE_LIMIT_MAX: 100 });
+    expect(b.apiKey).toBe(30_000);
+    expect(b.authCeiling).toBe(3000);
+    expect(b.anonymous).toBe(100);
+    expect(b.authFailuresPerIp).toBe(100);
+    expect(b.authUnattributedFailures).toBe(300);
+    expect(
+      resolveGlobalBudgets({ RATE_LIMIT_MAX: 100, RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX: 50 })
+        .authUnattributedFailures,
+    ).toBe(50);
+  });
+
+  it('RATE_LIMIT_AUTH_CEILING_MAX sets the ceiling without touching RATE_LIMIT_MAX, and the reverse', () => {
+    const own = resolveGlobalBudgets({ RATE_LIMIT_MAX: 100, RATE_LIMIT_AUTH_CEILING_MAX: 600 });
+    expect(own.authCeiling).toBe(600);
+    expect(own.anonymous).toBe(100);
+    const raisedAnon = resolveGlobalBudgets({ RATE_LIMIT_MAX: 200, RATE_LIMIT_AUTH_CEILING_MAX: 600 });
+    expect(raisedAnon.authCeiling).toBe(600);
+  });
+
+  it('an unset ceiling and key budget never fall below a raised RATE_LIMIT_MAX', () => {
+    const b = resolveGlobalBudgets({ RATE_LIMIT_MAX: 50_000 });
+    expect(b.authCeiling).toBe(50_000);
+    expect(b.apiKey).toBe(50_000);
   });
 });

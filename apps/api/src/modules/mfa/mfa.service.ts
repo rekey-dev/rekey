@@ -25,7 +25,7 @@ import {
 } from '../../lib/mfa.js';
 import { assertNotLocked, registerFailure, clearFailures, MFA_POLICY } from '../../lib/brute-force.js';
 import { emailService } from '../email/email.service.js';
-import { emitDetached } from '../webhooks/webhook.service.js';
+import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
 
 interface SetupResult {
   /** otpauth:// URI for QR. The customer's app turns this into a QR code. */
@@ -107,17 +107,29 @@ export const mfaService = {
       });
     }
     const enabledAt = new Date();
-    await prisma.mfaCredential.update({
-      where: { endUserId: args.endUserId },
-      data: { enrolledAt: enabledAt },
+    // `mfa.enabled` commits with the enrollment it announces.
+    const { endUser, deliveryIds } = await prisma.$transaction(async (tx) => {
+      await tx.mfaCredential.update({
+        where: { endUserId: args.endUserId },
+        data: { enrolledAt: enabledAt },
+      });
+      const user = await tx.endUser.findUnique({
+        where: { id: args.endUserId },
+        select: { email: true },
+      });
+      const ids = user
+        ? await enqueueEvent(tx, {
+            applicationId: args.application.id,
+            type: 'mfa.enabled',
+            data: { userId: args.endUserId, email: user.email, enabledAt: enabledAt.toISOString() },
+          })
+        : [];
+      return { endUser: user, deliveryIds: ids };
     });
+    kickDeliveries(deliveryIds);
 
     // Security-critical confirmation: notify the user that 2FA was turned
     // on. Fire-and-forget, a delivery failure must not block enrollment.
-    const endUser = await prisma.endUser.findUnique({
-      where: { id: args.endUserId },
-      select: { email: true },
-    });
     if (endUser) {
       void emailService
         .dispatch({
@@ -130,11 +142,6 @@ export const mfaService = {
           },
         })
         .catch(() => undefined);
-      emitDetached({
-        applicationId: args.application.id,
-        type: 'mfa.enabled',
-        data: { userId: args.endUserId, email: endUser.email, enabledAt: enabledAt.toISOString() },
-      });
     }
 
     return { ok: true };
@@ -220,14 +227,17 @@ export const mfaService = {
         });
       }
     }
-    const removed = await prisma.mfaCredential.deleteMany({ where: { endUserId: args.endUserId } });
-    if (removed.count > 0 && args.application) {
-      emitDetached({
-        applicationId: args.application.id,
+    const application = args.application;
+    const deliveryIds = await prisma.$transaction(async (tx) => {
+      const removed = await tx.mfaCredential.deleteMany({ where: { endUserId: args.endUserId } });
+      if (removed.count === 0 || !application) return [];
+      return enqueueEvent(tx, {
+        applicationId: application.id,
         type: 'mfa.disabled',
         data: { userId: args.endUserId },
       });
-    }
+    });
+    kickDeliveries(deliveryIds);
   },
 
   async status(endUserId: string): Promise<{ enabled: boolean; remainingBackupCodes: number | null }> {

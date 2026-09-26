@@ -1,20 +1,20 @@
 import type { ReactNode } from 'react';
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
-import { getPortalConfig, safeCssColor, safeHttpUrl, supportLink } from '@/lib/config';
-import { getPortalUser } from '@/lib/session';
+import { safeCssColor, safeHttpUrl, supportLink } from '@/lib/config';
+import { getPortalConfigOrRefresh, getPortalUser } from '@/lib/session';
 import { signOutAction } from '@/lib/actions';
 import { Button } from '@/components/button';
 
 // Tab title carries the merchant's brand, the only name a customer knows.
-// getPortalConfig is React-cached, so the layout render reuses this fetch.
+// The config lookup is React-cached, so the layout render reuses this fetch.
 export async function generateMetadata({
   params,
 }: {
   params: Promise<{ slug: string }>;
 }): Promise<Metadata> {
   const { slug } = await params;
-  const config = await getPortalConfig(slug);
+  const config = await getPortalConfigOrRefresh(slug);
   if (!config) return {};
   const appName = config.branding.displayName || config.name;
   return { title: `${appName} — customer portal` };
@@ -28,7 +28,7 @@ export default async function SlugLayout({
   params: Promise<{ slug: string }>;
 }): Promise<React.JSX.Element> {
   const { slug } = await params;
-  const config = await getPortalConfig(slug);
+  const config = await getPortalConfigOrRefresh(slug);
   if (!config) notFound();
   const session = await getPortalUser(slug);
 

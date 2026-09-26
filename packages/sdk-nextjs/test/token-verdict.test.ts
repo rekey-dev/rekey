@@ -46,7 +46,12 @@ vi.mock('@rekey.dev/node', () => ({
 
 const { auth } = await import('../src/server.js');
 
+/** A refresh token no other test used: the exchange grace is per process. */
+let R1 = '';
+let seq = 0;
+
 beforeEach(() => {
+  R1 = `r1_${++seq}`;
   jar.clear();
   refresh.mockReset();
   getCurrentUser.mockReset();
@@ -63,7 +68,7 @@ describe('every terminal refresh code clears the session', () => {
     'REFRESH_TOKEN_RACE',
     'REFRESH_TOKEN_WRONG_APPLICATION',
   ])('%s', async (code) => {
-    jar.set('rekey_refresh', 'r1');
+    jar.set('rekey_refresh', R1);
     refresh.mockRejectedValue(new FakeRekeyError(code));
 
     await expect(auth()).resolves.toBeNull();
@@ -73,18 +78,27 @@ describe('every terminal refresh code clears the session', () => {
 
 describe('a failed request is still not a verdict', () => {
   it('keeps the refresh cookie when the API was merely unreachable', async () => {
-    jar.set('rekey_refresh', 'r1');
-    refresh.mockRejectedValue(new FakeRekeyError('REQUEST_TIMEOUT'));
+    // Unreachable in the sense that proves nothing was sent: the connection
+    // was refused. A timeout may have come after the rotation and clears
+    // the cookies instead (in-place-refresh.test.ts).
+    jar.set('rekey_refresh', R1);
+    refresh.mockRejectedValue(
+      Object.assign(new FakeRekeyError('NETWORK_ERROR'), {
+        cause: Object.assign(new TypeError('fetch failed'), {
+          cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+        }),
+      }),
+    );
 
     await expect(auth()).rejects.toBeInstanceOf(FakeRekeyError);
-    expect(jar.get('rekey_refresh')).toBe('r1');
+    expect(jar.get('rekey_refresh')).toBe(R1);
   });
 });
 
 describe('a wrong-application access token refreshes instead of looping', () => {
   it('falls through to refresh rather than rethrowing forever', async () => {
     jar.set('rekey_access', 'a1');
-    jar.set('rekey_refresh', 'r1');
+    jar.set('rekey_refresh', R1);
     getCurrentUser
       .mockRejectedValueOnce(new FakeRekeyError('USER_TOKEN_WRONG_APPLICATION'))
       .mockResolvedValue({ id: 'u1' });

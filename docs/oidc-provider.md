@@ -298,14 +298,17 @@ Not built (deliberately, listed so nobody assumes otherwise):
   tool can write, since it names where a signing-in user's browser is sent, so
   its description carries an explicit security note and the parity test asserts
   that note stays there.
-- No panel toggle for `dynamicClientRegistration` — `PATCH …/auth-config` is
-  still the only surface for that one.
+- `dynamicClientRegistration` is switched on the Application's **OAuth
+  clients** tab in the panel (or with `PATCH …/auth-config`), next to the list
+  of what has registered.
 - No operator-side client registration. `POST /oauth/register` is the only way
   to create an OAuth client, which is why open registration is the default —
   see [Client registration](#client-registration).
 - No RP-initiated logout, front/back-channel logout, or session management.
 - No `client_secret` clients, no `private_key_jwt` — public clients + PKCE only.
-- No consent persistence: the end-user re-authenticates on every authorization.
+- No consent persistence: the end-user re-authenticates on every authorization,
+  and a hosted authorize page (`hostedAuthorizeUrl`) asks for consent every
+  time, because there is no stored grant to consult.
 
 ## Tests
 

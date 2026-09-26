@@ -201,7 +201,7 @@ function OrganizationSwitcherBody({
 }
 
 /**
- * Pick / switch / create the active organization (Clerk's `<OrganizationSwitcher>`).
+ * Pick / switch / create the active organization.
  * Reads the org list as a prop (server-resolved) and delegates switching +
  * creation to your Server Actions. Respects `billingSubject='org'` by nudging the
  * user to select a team when none is active.
@@ -282,8 +282,7 @@ function CreateOrganizationBody({
 }
 
 /**
- * Standalone "create a team" card (Clerk's `<CreateOrganization>`). Delegates to
- * your create Server Action.
+ * Standalone "create a team" card. Delegates to your create Server Action.
  *
  * @example
  * ```tsx
@@ -446,7 +445,7 @@ function OrganizationProfileBody({
 }
 
 /**
- * Manage a team's members + invitations (Clerk's `<OrganizationProfile>`). Reads
+ * Manage a team's members + invitations. Reads
  * members/invitations as props (server-resolved) and delegates every mutation to
  * your Server Actions. Manage affordances render only for OWNER/ADMIN viewers.
  *

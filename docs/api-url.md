@@ -72,7 +72,10 @@ curl -s https://api.rekey.dev/health/live
 ```
 
 `/health/live` is the cheap liveness ping and answers `200` from any reachable
-Rekey deployment. Swap in your own origin when self-hosting.
+Rekey deployment. Swap in your own origin when self-hosting. It also names the
+running build, `version` (the release) and `commit` (`unknown` unless the image
+was built with `--build-arg REKEY_COMMIT=<sha>`), so you can confirm an upgrade
+actually landed.
 
 `/health` is the fuller check and reports the datastores:
 
