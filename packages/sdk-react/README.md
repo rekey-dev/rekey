@@ -434,8 +434,10 @@ Slots: `root`, `card`, `header`, `title`, `subtitle`, `label`, `input`, `button`
 
 Every component's props, defaults and a working example per component:
 [docs/react-components.md](https://github.com/rekey-dev/rekey/blob/main/docs/react-components.md).
-(The `examples/` apps that used to live here were removed pending a rebuilt
-set — the reference is checked against the source instead.)
+For the components in a running app, see the
+[quickstart](https://rekey.dev/docs/quickstart) (`<SignIn>` and `<SignUp>`
+wired to Next.js server actions) and the
+[nextjs-starter](https://github.com/rekey-dev/nextjs-starter) repository.
 
 ## Headless escape hatch
 

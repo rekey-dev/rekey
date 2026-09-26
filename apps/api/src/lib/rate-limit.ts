@@ -175,27 +175,181 @@ export function authCeilingKey(req: FastifyRequest): string {
   //
   // The existing test passed because it injects from 127.0.0.1 with no key,
   // asserting per-IP behaviour while naming it per-Application.
-  const principal = req.application?.id ?? req.apiKey?.id;
-  return `authceil:${principal ?? req.ip}`;
+  return `authceil:${authCeilingPrincipal(req) ?? req.ip}`;
+}
+
+/**
+ * The Application (else the secret key) the auth ceiling counts a request
+ * against, or undefined for a route with neither (operator sign-in), where the
+ * ceiling falls back to the client IP. One function so the bucket key and the
+ * budget it gets cannot disagree.
+ */
+export function authCeilingPrincipal(req: FastifyRequest): string | undefined {
+  return req.application?.id ?? req.apiKey?.id;
+}
+
+/**
+ * The end user's address an auth-tier request can be attributed to, or null
+ * when it has none we can use.
+ *
+ *   - A secret key: the address its backend declared in `X-Rekey-Client-Ip`
+ *     (`req.declaredClientIp`), else null. `req.ip` is the backend's own
+ *     address, shared by all of its users, so it is never used.
+ *   - Anything else: `req.ip` when lib/client-ip.ts vouched for it, else null
+ *     (a proxy we cannot identify, shared by everyone behind it).
+ *
+ * A declared address is believed only from a secret-key caller, and only for
+ * these limits. Whoever holds the secret key already controls every request
+ * its Application sees, so letting it name the visitor gives it nothing new:
+ * it could always spread its own traffic across several secret keys. What it
+ * buys is that a password spray sent THROUGH the customer's backend is held
+ * per visitor, like browser traffic, instead of only by the per-Application
+ * ceiling.
+ */
+export function attributedAuthClientIp(req: FastifyRequest): string | null {
+  if (req.apiKey) return req.declaredClientIp ?? null;
+  return req.clientIpVouched ? req.ip : null;
+}
+
+/**
+ * Bucket for the per-(Application, client IP) share of the auth ceiling.
+ *
+ * The per-Application ceiling is an aggregate guard sized for a busy
+ * Application (`RATE_LIMIT_AUTH_CEILING_MAX`), so on its own it would let one
+ * address spend all of it. This bucket keeps what one address may do across
+ * every auth route of one Application at `RATE_LIMIT_MAX`, exactly what the
+ * old shared ceiling allowed it. It applies only to traffic with an end user's
+ * address: see `attributedAuthClientIp`.
+ */
+export function authClientIpCeilingKey(req: FastifyRequest): string {
+  return `authceilip:${authCeilingPrincipal(req) ?? '-'}:${attributedAuthClientIp(req) ?? req.ip}`;
+}
+
+/**
+ * Whether a request also counts against the per-(Application, client IP)
+ * bucket: whenever it names an Application and carries an end user's address.
+ * Not without a principal: the ceiling itself is already per IP there. A
+ * secret key that declared no address, and an address we cannot vouch for,
+ * get `wantsUnattributedFailureCap` instead.
+ */
+export function wantsAuthClientIpCeiling(req: FastifyRequest): boolean {
+  return authCeilingPrincipal(req) !== undefined && attributedAuthClientIp(req) !== null;
+}
+
+/**
+ * Whether an auth-tier request is UNATTRIBUTED: it names an Application but
+ * carries no end user's address. That is a secret-key backend that does not
+ * send `X-Rekey-Client-Ip`, or publishable-key traffic behind a proxy we cannot
+ * identify. Such traffic has no per-address bucket, so without a cap of its
+ * own a password spray through it was bounded only by the per-Application
+ * ceiling (`RATE_LIMIT_AUTH_CEILING_MAX`, 3000 a minute).
+ */
+export function wantsUnattributedFailureCap(req: FastifyRequest): boolean {
+  return authCeilingPrincipal(req) !== undefined && attributedAuthClientIp(req) === null;
+}
+
+/** Store key for one Application's unattributed failed attempts. */
+export function unattributedFailureKey(req: FastifyRequest): string {
+  return `unattributed:${authCeilingPrincipal(req) ?? '-'}`;
+}
+
+/**
+ * The routes the unattributed cap watches: the two that answer a wrong guess
+ * with a counted code (`FAILED_AUTH_ATTEMPT_CODES`). Nothing else is counted
+ * and nothing else is ever refused by it, so sign-up, reset, magic link,
+ * verification and passkey routes keep working however far past the cap an
+ * Application is.
+ */
+export const UNATTRIBUTED_CAP_ROUTES = {
+  signIn: '/api/v1/auth/sign-in',
+  mfaVerify: '/api/v1/auth/mfa-verify',
+} as const;
+
+/**
+ * Whose secret an unattributed attempt is testing, for the cap's per-subject
+ * memory, or null when the request is not on a watched route or names nobody.
+ * Sign-in: the normalised email. MFA verification: the end user the pending
+ * challenge token belongs to (`mfaSubject` verifies it; an invalid token is
+ * refused with a code the cap does not count, so it needs no subject).
+ */
+export function unattributedAttemptSubject(
+  req: FastifyRequest,
+  mfaSubject: (challengeToken: string) => string | null,
+): string | null {
+  const route = req.routeOptions?.url;
+  if (route === UNATTRIBUTED_CAP_ROUTES.signIn) {
+    const email = authIdentityOf(req.body);
+    return email === '-' ? null : `email:${email}`;
+  }
+  if (route === UNATTRIBUTED_CAP_ROUTES.mfaVerify) {
+    const body = req.body as Record<string, unknown> | null | undefined;
+    const token = typeof body === 'object' && body !== null ? body.mfaChallengeToken : undefined;
+    if (typeof token !== 'string') return null;
+    const endUserId = mfaSubject(token);
+    return endUserId === null ? null : `eu:${endUserId}`;
+  }
+  return null;
+}
+
+/** Store key for one subject's unattributed failures inside one Application. */
+export function unattributedSubjectKey(req: FastifyRequest, subject: string): string {
+  return `unattributed:${authCeilingPrincipal(req) ?? '-'}:${subject}`;
+}
+
+/**
+ * Error codes that mean a guessed secret was wrong, which is what a password
+ * spray or a code guesser produces. Only these count against the unattributed
+ * cap, so ordinary volume (sign-ins that succeed, resets, verifications) never
+ * does.
+ */
+export const FAILED_AUTH_ATTEMPT_CODES: ReadonlySet<string> = new Set([
+  'INVALID_CREDENTIALS',
+  'MFA_CODE_INVALID',
+]);
+
+/** Budgets for the auth tier's aggregate buckets, per window. */
+export interface AuthCeilingBudgets {
+  /** All auth routes of one Application together (`RATE_LIMIT_AUTH_CEILING_MAX`). */
+  perApplication: number;
+  /**
+   * One client IP: across one Application's auth routes, and across operator
+   * auth routes, which have no Application (`RATE_LIMIT_MAX`).
+   */
+  perClientIp: number;
 }
 
 /**
  * Options for the per-Application auth ceiling (wired in app.ts via
- * `createRateLimit`). Neutered under NODE_ENV=test for the same reason
+ * `createRateLimit`).
+ *
+ * The ceiling used to reuse `RATE_LIMIT_MAX` (100 a minute), sized for one
+ * anonymous address, as the budget of a whole Application. A 50,000-DAU
+ * Application needs 200 to 300 auth requests a minute at its peak, and
+ * because a publishable key is public, anyone could spend those 100 and
+ * refuse every sign-in to the Application for the rest of the window. It now
+ * has its own budget (`RATE_LIMIT_AUTH_CEILING_MAX`), and what one address may
+ * spend of it stays at `RATE_LIMIT_MAX` through `authClientIpCeilingOptions`,
+ * so exhausting it takes about thirty addresses instead of one.
+ *
+ * Neutered under NODE_ENV=test for the same reason
  * `authRateLimit` is: the suite fires far more than a minute's worth of auth
  * requests from 127.0.0.1 in one run and would throttle itself.
  */
 export function authCeilingOptions(
-  max: number,
+  budgets: AuthCeilingBudgets,
   timeWindowMs: number,
 ): {
-  max: number;
+  max: (req: FastifyRequest) => number;
   timeWindow: number;
   keyGenerator: (req: FastifyRequest) => string;
   skipOnError: boolean;
 } {
+  const perApplication = globalRateLimitMax(budgets.perApplication);
+  const perClientIp = globalRateLimitMax(budgets.perClientIp);
   return {
-    max: globalRateLimitMax(max),
+    // A bucket keyed on the Application gets the Application's budget; one
+    // that fell back to the client IP (operator routes) keeps the per-IP one.
+    max: (req) => (authCeilingPrincipal(req) === undefined ? perClientIp : perApplication),
     timeWindow: timeWindowMs,
     keyGenerator: authCeilingKey,
     // Fail CLOSED on the auth tier, overriding the global `skipOnError: true`.
@@ -210,6 +364,27 @@ export function authCeilingOptions(
     // The plugin rethrows the store error when this is false; ioredis errors are
     // classified in lib/dependency-outage.ts and surface as 503
     // DEPENDENCY_UNAVAILABLE, which is what we want a client to see.
+    skipOnError: false,
+  };
+}
+
+/**
+ * Options for the per-(Application, client IP) auth bucket. Fails closed like
+ * the rest of the auth tier, see `authCeilingOptions`.
+ */
+export function authClientIpCeilingOptions(
+  maxPerWindow: number,
+  timeWindowMs: number,
+): {
+  max: number;
+  timeWindow: number;
+  keyGenerator: (req: FastifyRequest) => string;
+  skipOnError: boolean;
+} {
+  return {
+    max: globalRateLimitMax(maxPerWindow),
+    timeWindow: timeWindowMs,
+    keyGenerator: authClientIpCeilingKey,
     skipOnError: false,
   };
 }
@@ -434,17 +609,38 @@ export interface GlobalRateLimitBudgets {
   authenticatedPerIp: number;
   /** Rejected credentials per client IP before it is refused outright (`RATE_LIMIT_AUTH_FAILURE_MAX`). */
   authFailuresPerIp: number;
+  /**
+   * All auth routes of one Application together (`RATE_LIMIT_AUTH_CEILING_MAX`).
+   * Not a global-limiter budget, but resolved here with the others so the
+   * never-below-`RATE_LIMIT_MAX` rule is written once.
+   */
+  authCeiling: number;
+  /**
+   * Failed sign-in and MFA attempts per Application per window from traffic
+   * with no end user's address (`RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX`):
+   * a secret-key backend that does not forward `X-Rekey-Client-Ip`, or
+   * publishable-key traffic behind a proxy we cannot identify. Once spent, an
+   * unattributed sign-in or MFA attempt for an account that has already failed
+   * this window is refused for the rest of the window; every other account,
+   * every other route and all attributed traffic are unaffected.
+   */
+  authUnattributedFailures: number;
 }
+
+/** Default per-Application budget of unattributed failed auth attempts, per window. */
+export const DEFAULT_AUTH_UNATTRIBUTED_FAILURE_MAX = 300;
 
 /** Default authenticated (operator / end-user) budget per window. */
 export const DEFAULT_AUTHENTICATED_MAX = 600;
-/** Default per-secret-key budget per window. */
-export const DEFAULT_API_KEY_MAX = 6000;
+/** Default per-secret-key budget per window. Sizing: docs/rate-limits.md. */
+export const DEFAULT_API_KEY_MAX = 30_000;
+/** Default per-Application budget across all auth routes, per window. */
+export const DEFAULT_AUTH_CEILING_MAX = 3000;
 /** Default per-IP ceiling across authenticated identities, per window. */
 export const DEFAULT_AUTHENTICATED_IP_MAX = 3000;
 
 /**
- * Resolve the five budgets from env. The authenticated and API-key budgets
+ * Resolve the budgets from env. The authenticated and API-key budgets
  * never default BELOW `RATE_LIMIT_MAX`: a deployment that raised that single
  * knob to feed a busy backend (the only knob that existed) must not see its
  * key budget drop to the new default on upgrade.
@@ -455,6 +651,8 @@ export function resolveGlobalBudgets(input: {
   RATE_LIMIT_API_KEY_MAX?: number | undefined;
   RATE_LIMIT_AUTHENTICATED_IP_MAX?: number | undefined;
   RATE_LIMIT_AUTH_FAILURE_MAX?: number | undefined;
+  RATE_LIMIT_AUTH_CEILING_MAX?: number | undefined;
+  RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX?: number | undefined;
 }): GlobalRateLimitBudgets {
   const authenticated =
     input.RATE_LIMIT_AUTHENTICATED_MAX ?? Math.max(DEFAULT_AUTHENTICATED_MAX, input.RATE_LIMIT_MAX);
@@ -468,6 +666,10 @@ export function resolveGlobalBudgets(input: {
       input.RATE_LIMIT_AUTHENTICATED_IP_MAX ?? Math.max(DEFAULT_AUTHENTICATED_IP_MAX, authenticated),
     // A rejected credential is anonymous traffic, so it gets the anonymous budget.
     authFailuresPerIp: input.RATE_LIMIT_AUTH_FAILURE_MAX ?? input.RATE_LIMIT_MAX,
+    authCeiling:
+      input.RATE_LIMIT_AUTH_CEILING_MAX ?? Math.max(DEFAULT_AUTH_CEILING_MAX, input.RATE_LIMIT_MAX),
+    authUnattributedFailures:
+      input.RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX ?? DEFAULT_AUTH_UNATTRIBUTED_FAILURE_MAX,
   };
 }
 
@@ -641,12 +843,14 @@ export function licenseRateLimit(maxPerMinute: number): Omit<AuthRateLimitConfig
 /**
  * Does this matched route want the per-Application auth ceiling?
  *
- * The ceiling reuses the global budget (`RATE_LIMIT_MAX` per
- * `RATE_LIMIT_WINDOW_MS`), precisely what auth routes lost by overriding the
- * global limiter with their own config. So the aggregate posture is unchanged
- * (one Application still can't exceed the deployment's per-key budget on auth
- * endpoints) while the tight per-identity cap is what actually throttles a
- * credential-guesser.
+ * Auth routes override the global limiter with their own config, so without
+ * the ceiling they would have only the tight per-identity cap. The ceiling
+ * (`RATE_LIMIT_AUTH_CEILING_MAX` per Application, `RATE_LIMIT_MAX` per client
+ * IP) bounds the aggregate. The per-identity cap and the account lockout
+ * throttle a guesser working on one account; one password sprayed across many
+ * accounts is held by the per-(Application, client IP) share, or, for traffic
+ * with no client address, by the unattributed failure cap
+ * (`wantsUnattributedFailureCap`).
  */
 export function wantsAuthCeiling(rateLimitConfig: unknown): boolean {
   if (typeof rateLimitConfig !== 'object' || rateLimitConfig === null) return false;

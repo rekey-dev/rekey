@@ -1,10 +1,10 @@
-import type { NextRequest } from 'next/server';
+import { NextResponse } from 'next/server';
 
 /**
- * Strip an `Origin` header that is present but not a URL.
+ * Refuse a Server Action whose `Origin` header is present but not a URL.
  *
  * Next 15's Server Action handler does this, unguarded
- * (`next/dist/server/app-render/action-handler.js`):
+ * (`next/dist/server/app-render/action-handler.js`, next@15.5.18 line 355):
  *
  *     const originDomain =
  *       typeof req.headers['origin'] === 'string'
@@ -16,25 +16,36 @@ import type { NextRequest } from 'next/server';
  * form POST that followed a cross-origin redirect. That value is a string, so
  * the guard passes, `new URL('null')` throws `TypeError [ERR_INVALID_URL]`,
  * and nothing catches it. Every Server Action from such a client answers 500.
+ * Reported against the panel's OAuth provider form; it was never specific to
+ * that form, or to the panel.
  *
- * The visible symptom is worse than a failed save. `useFormStatus().pending`
- * never resolves, so the submit button sits on "Saving…" forever: the operator
- * is told the write is still in flight when it never started, and the only way
- * out is a reload. Reported against the panel's OAuth provider form; it was
- * never specific to that form, or to the panel.
+ * This used to delete the header, which was wrong. Lines 365-368 of the same
+ * file treat an ABSENT origin as an old browser: Next warns and runs the
+ * action with its origin-versus-host CSRF check skipped. Stripping turned a
+ * crash into an unchecked action, for exactly the requests that deserve the
+ * least trust: a same-site POST that crossed a cross-origin redirect still
+ * carries `sameSite=lax` cookies. So the action is refused instead.
  *
- * Deleting the header rather than repairing it is the deliberate choice.
- * Next's own next branch treats an ABSENT origin as an old browser, warns, and
- * proceeds, so removal restores exactly the behaviour Next already ships for
- * a request it cannot attribute. Rewriting the header to this deployment's own
- * origin would instead ASSERT same-origin on a request that is provably not,
- * which is the one thing the check exists to prevent. What actually defends
- * these routes is the session cookie's `sameSite`, which a genuine cross-site
- * POST does not carry.
+ * The 403 is `text/plain` with no charset because Next's action client
+ * (`server-action-reducer.js`, lines 98-111) rejects the action promise on any
+ * non-RSC response and uses the body as the message only on exactly that
+ * content type. The form leaves its pending state rather than sitting on
+ * "Saving…".
  *
- * Returns the headers to forward, or `null` when nothing needs changing.
+ * Only a POST carrying `Next-Action` is judged. Nothing else in Next parses
+ * `Origin` unguarded, so other requests are left as the browser sent them. A
+ * valid origin, same-site or not, is left for Next's own comparison.
+ *
+ * This mirrors `rejectMalformedActionOrigin` in `@rekey.dev/nextjs`; a change
+ * to one must be made to the other.
+ *
+ * Returns the refusal, or `null` when the request should proceed unchanged.
  */
-export function sanitizedActionHeaders(req: NextRequest): Headers | null {
+export function rejectMalformedActionOrigin(req: {
+  method: string;
+  headers: Headers;
+}): NextResponse | null {
+  if (req.method !== 'POST' || !req.headers.has('next-action')) return null;
   const origin = req.headers.get('origin');
   if (origin === null) return null;
   try {
@@ -42,8 +53,9 @@ export function sanitizedActionHeaders(req: NextRequest): Headers | null {
     new URL(origin);
     return null;
   } catch {
-    const headers = new Headers(req.headers);
-    headers.delete('origin');
-    return headers;
+    return new NextResponse(
+      'Server Action refused: the request came from an opaque origin (Origin header is not a URL).',
+      { status: 403, headers: { 'content-type': 'text/plain', 'cache-control': 'no-store' } },
+    );
   }
 }

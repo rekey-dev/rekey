@@ -418,7 +418,7 @@ describe("rejected credentials are counted per client IP", () => {
       expect(r.statusCode).toBe(401);
       // Never the authenticated budget.
       expect(r.headers["x-ratelimit-limit"]).not.toBe("600");
-      expect(r.headers["x-ratelimit-limit"]).not.toBe("6000");
+      expect(r.headers["x-ratelimit-limit"]).not.toBe("30000");
     }
     const over = await app.inject({ ...attempts[0]!, remoteAddress: ip });
     expect(over.statusCode).toBe(429);

@@ -13,6 +13,16 @@ npx -y @rekey.dev/mcp
 
 It's a stdio MCP server — you don't run it by hand. Wire it into your MCP client's config (below) and the client launches it.
 
+> **Self-host only (needs `SUPER_ADMIN_KEY`).** The read tools authenticate
+> with the deployment-wide `SUPER_ADMIN_KEY`, which only whoever runs the
+> deployment holds. On **Rekey Cloud** you have no such key: use the hosted
+> operator MCP at `https://api.rekey.dev/api/v1/tenant/mcp` instead. It signs
+> you in with your panel account over OAuth, scopes the agent to one
+> workspace, and needs nothing installed. Setup:
+> [docs/mcp.md](../../docs/mcp.md) and [rekey.dev/docs/mcp](https://rekey.dev/docs/mcp).
+> (`mint_api_key` alone works with a `REKEY_OPERATOR_TOKEN` on either, but the
+> hosted server has the same tool.)
+
 ## Setup
 
 The server reads three env vars (set them in your MCP client config, not your shell):

@@ -44,7 +44,7 @@ import type { BillingProviderName } from './credentials.service.js';
 import { subscriptionGrantsService } from './grant.service.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 import { applicationRolesService } from '../application-roles/application-roles.service.js';
-import { emitDetached, kickDeliveries } from '../webhooks/webhook.service.js';
+import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
 import { assertMetadataWithinLimit } from '../../lib/metadata-limit.js';
 import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { entitlementOverridesService } from './entitlement-overrides.service.js';
@@ -665,17 +665,38 @@ export const subscriptionImportService = {
             role: string;
             createdAt: Date;
           } | null;
+          let createdDeliveryIds: string[] = [];
           try {
-            created = await prisma.endUser.create({
-              data: {
+            // The row and its `user.created` commit together; the P2002
+            // loser below rolls its event back with its insert.
+            created = await prisma.$transaction(async (tx) => {
+              const row = await tx.endUser.create({
+                data: {
+                  applicationId: args.application.id,
+                  email: item.email!,
+                  passwordHash: null,
+                  emailVerified: false,
+                  role: role.name,
+                  metadata: { importedFrom: run.provider, importRunId: run.id },
+                },
+                select: { id: true, email: true, emailVerified: true, role: true, createdAt: true },
+              });
+              createdDeliveryIds = await enqueueEvent(tx, {
                 applicationId: args.application.id,
-                email: item.email!,
-                passwordHash: null,
-                emailVerified: false,
-                role: role.name,
-                metadata: { importedFrom: run.provider, importRunId: run.id },
-              },
-              select: { id: true, email: true, emailVerified: true, role: true, createdAt: true },
+                type: 'user.created',
+                data: {
+                  user: {
+                    id: row.id,
+                    email: row.email,
+                    emailVerified: row.emailVerified,
+                    role: row.role,
+                    createdAt: row.createdAt.toISOString(),
+                    metadata: null,
+                  },
+                  via: `import:${run.provider}`,
+                },
+              });
+              return row;
             });
           } catch (e) {
             // Two rows in the SAME run can carry one address, a customer with
@@ -712,21 +733,7 @@ export const subscriptionImportService = {
             applicationId: args.application.id,
             metadata: { endUserId, provider: run.provider, importRunId: run.id },
           });
-          emitDetached({
-            applicationId: args.application.id,
-            type: 'user.created',
-            data: {
-              user: {
-                id: created.id,
-                email: created.email,
-                emailVerified: created.emailVerified,
-                role: created.role,
-                createdAt: created.createdAt.toISOString(),
-                metadata: null,
-              },
-              via: `import:${run.provider}`,
-            },
-          });
+          kickDeliveries(createdDeliveryIds);
           }
         }
 

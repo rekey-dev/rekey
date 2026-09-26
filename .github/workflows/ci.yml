@@ -222,27 +222,18 @@ jobs:
     # a change confined to one of the front-end workspaces needs its own suite
     # and has no way to reach the API, and paying 14 minutes for that was the
     # whole complaint.
+    #
+    # The API suite itself is not in this job any more. It runs sharded in
+    # `api-test` below, each shard on its own database. What stays here is the
+    # migration checks and the package + app suites, which are minutes, not
+    # the twenty-odd the API suite had grown to.
     if: needs.changes.outputs.api == 'true' || needs.changes.outputs.packages == 'true'
-    # 45, not 20.
-    #
-    # A healthy run of this job is 9-11 minutes. The old ceiling left under 2x
-    # headroom, and GitHub's shared runners are not consistent enough for that:
-    # on a slow one every test file takes 2-10x longer — `operator-pat` measured
-    # 6.5s on one run and 65s on the next, with the diff between them touching
-    # neither — and the job is killed mid-suite with ZERO failing tests. It
-    # reports as a red X on the PR, which reads as "your change broke CI".
-    #
-    # That happened five times in one afternoon across three unrelated
-    # branches. It was diagnosed rather than assumed: a same-machine A/B of the
-    # suite before and after one of those branches came out 627.7s vs 609.2s,
-    # so the diffs were not the cause, and the identical commit passed in
-    # 11m27s on a re-run.
-    #
-    # 45 gives ~4x on a healthy run and survives a 3x-slow runner. It is a
-    # ceiling for a hung job, not a performance budget — if the suite ever
-    # genuinely approaches it, that is a signal to split it, not to raise this
-    # again.
-    timeout-minutes: 45
+    # A ceiling for a hung job, not a performance budget. GitHub's shared
+    # runners are inconsistent enough that a test file can take 2-10x longer
+    # from one run to the next (`operator-pat` measured 6.5s on one run and 65s
+    # on the next, with the diff between them touching neither), so this
+    # leaves a wide margin.
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -256,17 +247,6 @@ jobs:
         # actually answers queries.
         options: >-
           --health-cmd "pg_isready -U rekey"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      # The app itself runs Redis-free in test mode, but the prune sweep lease
-      # is only meaningful against a real Redis (SET NX PX plus two Lua scripts),
-      # so its suite connects to this one through REDIS_URL.
-      redis:
-        image: valkey/valkey:8.1-alpine
-        ports: ['6379:6379']
-        options: >-
-          --health-cmd "valkey-cli ping"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -321,54 +301,15 @@ jobs:
             --shadow-database-url postgresql://rekey:rekey@localhost:5432/rekey_shadow?schema=public \
             --exit-code
 
-      # concurrency=1 is deliberate and must stay: every suite shares ONE
-      # database and truncates between files, so two packages testing at once
-      # eat each other's fixtures. This is the one place serialisation is
-      # correctness, not slowness — do not "optimise" it.
-      #
-      # apps/api is invoked directly instead of through turbo so it can emit a
-      # coverage report. It is the SAME single run, not an extra one, and it
-      # stays sequential with the package tests below for the reason above.
-      - name: Run API tests (with coverage)
-        if: needs.changes.outputs.api == 'true'
-        env:
-          TEST_DATABASE_URL: postgresql://rekey:rekey@localhost:5432/rekey_test?schema=public
-          REDIS_URL: redis://localhost:6379
-          SUPER_ADMIN_KEY: test-admin-key-test-admin-key-test-admin-key
-          JWT_SECRET: test-jwt-secret-test-jwt-secret-test-jwt-secret
-        run: pnpm --filter @rekey.dev/api run test:coverage
-
-      # Runs even when the thresholds fail — "what is the number now" is
-      # exactly what you want in the summary when the gate is red.
-      - name: Publish coverage summary
-        # always(), so the number still lands in the summary when the coverage
-        # gate itself is what went red. Scoped to runs that actually ran the API
-        # suite, or it reports "no coverage" on every packages-only change.
-        if: always() && needs.changes.outputs.api == 'true'
-        run: |
-          if [ ! -f apps/api/coverage/coverage-summary.json ]; then
-            echo "No coverage report was produced." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          {
-            echo "### apps/api coverage"
-            echo
-            echo "| metric | covered | total | % |"
-            echo "| --- | ---: | ---: | ---: |"
-            node -e '
-              const fs = require("fs");
-              const path = "apps/api/coverage/coverage-summary.json";
-              const total = JSON.parse(fs.readFileSync(path, "utf8")).total;
-              for (const key of ["lines", "statements", "functions", "branches"]) {
-                const m = total[key];
-                console.log("| " + key + " | " + m.covered + " | " + m.total + " | " + m.pct + "% |");
-              }
-            '
-          } >> "$GITHUB_STEP_SUMMARY"
+      # concurrency=1 is deliberate and must stay: every suite in this job
+      # shares ONE database and truncates between files, so two packages
+      # testing at once eat each other's fixtures. This is the one place
+      # serialisation is correctness, not slowness. (The API suite gets its
+      # parallelism a different way: separate jobs, separate databases.)
 
 
-      # apps/api is not in this filter because the step above already ran it
-      # directly, for coverage. One run, not two.
+      # apps/api is not in this filter because it has its own sharded jobs,
+      # `api-test` and `api-coverage`, below. One run, not two.
       #
       # panel, portal and admin ARE in it, as of this change. All three have had
       # vitest suites and a `test` script for as long as they have existed, and
@@ -392,6 +333,219 @@ jobs:
           --filter="./packages/*"
           --filter=@rekey.dev/panel
           --filter=@rekey.dev/portal
+
+  # ---------------------------------------------------------------------------
+  # The API suite, split across parallel jobs.
+  #
+  # It used to be one step inside `test`: ~212 files, serial, one database,
+  # about 22 minutes of a 24-minute job. It was also where nearly every red CI
+  # run died, because the longer a single job runs on a shared runner the more
+  # of that runner's bad minutes it collects.
+  #
+  # The suite is serial for correctness, not speed: every file TRUNCATEs the
+  # tables between tests, so two files on one database eat each other's
+  # fixtures. Sharding keeps that property intact rather than working around
+  # it. Each shard is a separate job with its OWN Postgres and Redis service
+  # containers, and inside a shard the suite still runs single-fork exactly as
+  # it does locally. Nothing about test isolation changed.
+  #
+  # vitest assigns files to shards by a hash of the path, so the split is even
+  # by file count, not by duration. Measured against a full run's per-file
+  # timings, four shards come out at roughly 280s to 350s of test time each.
+  # If one shard starts to dominate, raise the count: extend the matrix below
+  # and the `expected` count in `api-coverage`, which refuses a merge that is
+  # missing a shard.
+  api-test:
+    name: API tests (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    # Same reasoning as the old single job's ceiling: a hung shard must die,
+    # but a runner 3x slower than usual must not.
+    timeout-minutes: 30
+    strategy:
+      # Every shard runs to the end even when one fails, so a red run reports
+      # every failing file at once instead of whichever shard lost first.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rekey
+          POSTGRES_PASSWORD: rekey
+          POSTGRES_DB: rekey
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U rekey"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      # The app itself runs Redis-free in test mode, but the prune sweep lease
+      # is only meaningful against a real Redis (SET NX PX plus two Lua scripts),
+      # so its suite connects to this one through REDIS_URL. Per shard, like
+      # Postgres: the suite clears Redis state between tests too.
+      redis:
+        image: valkey/valkey:8.1-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9.12.0 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec prisma generate --schema prisma/schema.prisma
+      - uses: ./.github/actions/turbo-cache
+
+      # dist is load-bearing here for the same reason as in `test`: without it
+      # a large share of the API test files fail to load.
+      - name: Build test dependencies
+        run: pnpm exec turbo run build --filter="./packages/*"
+
+      - name: Create the test database
+        run: PGPASSWORD=rekey psql -h localhost -U rekey -d rekey -c "CREATE DATABASE rekey_test;"
+
+      # Coverage is COLLECTED per shard but not judged per shard: one shard
+      # exercises a quarter of the suite, so the real thresholds would fail on
+      # every one of them. They are zeroed here and enforced once, on the merged
+      # report, by `api-coverage` below. The blob reporter writes this shard's
+      # results and coverage to .vitest-reports for that merge.
+      - name: Run API tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
+        working-directory: apps/api
+        env:
+          TEST_DATABASE_URL: postgresql://rekey:rekey@localhost:5432/rekey_test?schema=public
+          REDIS_URL: redis://localhost:6379
+          SUPER_ADMIN_KEY: test-admin-key-test-admin-key-test-admin-key
+          JWT_SECRET: test-jwt-secret-test-jwt-secret-test-jwt-secret
+        run: >-
+          pnpm run test:prepare &&
+          pnpm exec vitest run
+          --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+          --coverage
+          --coverage.thresholds.lines=0
+          --coverage.thresholds.statements=0
+          --coverage.thresholds.functions=0
+          --coverage.thresholds.branches=0
+          --reporter=default
+          --reporter=blob
+
+      # Uploaded even when tests failed: the merge job reports the failures
+      # from these blobs, so a missing blob would hide exactly the shard that
+      # needs looking at.
+      - name: Upload shard report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-blob-${{ matrix.shard }}
+          path: apps/api/.vitest-reports/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+
+  # One result for the whole API suite: merges the shard reports, applies the
+  # coverage thresholds from apps/api/vitest.config.ts to the combined number,
+  # and fails if any shard failed or went missing.
+  api-coverage:
+    name: API tests
+    runs-on: ubuntu-latest
+    needs: [changes, api-test]
+    # always(), so a failed shard still gets its merged report and coverage
+    # summary. Scoped to runs where the API suite was supposed to run.
+    if: always() && needs.changes.outputs.api == 'true'
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9.12.0 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Download shard reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: api-blob-*
+          path: apps/api/.vitest-reports
+          merge-multiple: true
+
+      # The merge reports whatever blobs it is given. A shard that never
+      # uploaded one (cancelled, runner lost) would otherwise just be absent
+      # from the totals, a smaller green run.
+      - name: Every shard reported
+        env:
+          SHARDS_RESULT: ${{ needs.api-test.result }}
+        run: |
+          expected=4
+          found=$(find apps/api/.vitest-reports -maxdepth 1 -name 'blob-*.json' 2>/dev/null | wc -l | tr -d ' ')
+          echo "shard job result: $SHARDS_RESULT; shard reports found: $found of $expected"
+          if [ "$found" -ne "$expected" ]; then
+            echo "::error::expected $expected shard reports, found $found"
+            exit 1
+          fi
+
+      # Exits non-zero if any test in any shard failed, and again if the merged
+      # coverage is under the thresholds in vitest.config.ts.
+      - name: Merge shard reports and check coverage
+        working-directory: apps/api
+        run: >-
+          pnpm exec vitest run --merge-reports --coverage
+          --reporter=default --reporter=json --outputFile.json=merged-results.json
+
+      # A shard can go green having run fewer files than it should: a file that
+      # fails to LOAD is not always reported as a failure. So the merged total
+      # is compared with the number of test files on disk.
+      - name: Every test file ran
+        if: always()
+        working-directory: apps/api
+        run: |
+          if [ ! -f merged-results.json ]; then
+            echo "::error::no merged results to count"
+            exit 1
+          fi
+          on_disk=$( (find src -path '*/__tests__/*' -name '*.test.ts'; find test -name '*.test.ts') | wc -l | tr -d ' ')
+          ran=$(node -e 'console.log(require("./merged-results.json").testResults.length)')
+          echo "test files on disk: $on_disk, test files in the merged run: $ran"
+          echo "API test files run across all shards: $ran of $on_disk" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$ran" -ne "$on_disk" ]; then
+            echo "::error::the merged run covered $ran test files, but $on_disk exist"
+            exit 1
+          fi
+
+      # always(), so the number still lands in the summary when the coverage
+      # gate itself is what went red.
+      - name: Publish coverage summary
+        if: always()
+        run: |
+          if [ ! -f apps/api/coverage/coverage-summary.json ]; then
+            echo "No coverage report was produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "### apps/api coverage"
+            echo
+            echo "| metric | covered | total | % |"
+            echo "| --- | ---: | ---: | ---: |"
+            node -e '
+              const fs = require("fs");
+              const path = "apps/api/coverage/coverage-summary.json";
+              const total = JSON.parse(fs.readFileSync(path, "utf8")).total;
+              for (const key of ["lines", "statements", "functions", "branches"]) {
+                const m = total[key];
+                console.log("| " + key + " | " + m.covered + " | " + m.total + " | " + m.pct + "% |");
+              }
+            '
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build:
     name: Build
@@ -536,7 +690,7 @@ jobs:
     name: CI
     runs-on: ubuntu-latest
     if: always()
-    needs: [changes, config, oss-strip, typecheck, lint, test, build]
+    needs: [changes, config, oss-strip, typecheck, lint, test, api-test, api-coverage, build]
     steps:
       - name: Every job passed or was deliberately skipped
         env:

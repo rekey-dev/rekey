@@ -154,6 +154,9 @@ services:
       END_USER_REFRESH_TOKEN_TTL_DAYS: ${END_USER_REFRESH_TOKEN_TTL_DAYS:-}
       OPERATOR_ACCESS_TOKEN_TTL_SECONDS: ${OPERATOR_ACCESS_TOKEN_TTL_SECONDS:-}
       OPERATOR_REFRESH_TOKEN_TTL_DAYS: ${OPERATOR_REFRESH_TOKEN_TTL_DAYS:-}
+      # Seconds a just-rotated refresh token may be replayed without revoking
+      # every session (answers REFRESH_TOKEN_RACED). Empty = 15; 0 = off.
+      REFRESH_TOKEN_REUSE_WINDOW_SECONDS: ${REFRESH_TOKEN_REUSE_WINDOW_SECONDS:-}
 
       # ── Secrets ──────────────────────────────────────────────────────────
       JWT_SECRET: ${JWT_SECRET}
@@ -291,6 +294,13 @@ services:
       # "true" lets outbound webhooks target private/internal addresses. Leave
       # empty on an internet-facing deployment: it is the SSRF guard.
       WEBHOOK_ALLOW_PRIVATE_TARGETS: ${WEBHOOK_ALLOW_PRIVATE_TARGETS:-}
+      # Outbound webhook request timeout in ms. Empty = 10000; allowed range
+      # 1000-30000. Raise it for receivers that answer slowly from a cold start.
+      WEBHOOK_TIMEOUT_MS: ${WEBHOOK_TIMEOUT_MS:-}
+      # Outbound webhook sends one Application may have in flight at once,
+      # across replicas and endpoints. Empty = 8. Keeps one tenant with many
+      # slow endpoints from holding every delivery slot.
+      WEBHOOK_APP_MAX_IN_FLIGHT: ${WEBHOOK_APP_MAX_IN_FLIGHT:-}
       # How long a processed inbound billing webhook is remembered, which is
       # what makes a provider's redelivery idempotent. Empty = kept forever;
       # set a number of days to turn pruning on.
@@ -311,13 +321,17 @@ services:
       LOG_ARCHIVE_S3_PREFIX: ${LOG_ARCHIVE_S3_PREFIX:-}
       # Rate limits, per RATE_LIMIT_WINDOW_MS (60s). Empty = the defaults:
       # 100 per client IP unauthenticated, 600 per operator or signed-in end
-      # user, 3000 per IP across those, 6000 per secret API key (and for
-      # POST /api/v1/usage/record), 100 rejected credentials per IP, 60
-      # operator refreshes per IP. Sizing: docs/rate-limits.md.
+      # user, 3000 per IP across those, 30000 per secret API key (and for
+      # POST /api/v1/usage/record), 3000 per Application across its sign-in,
+      # sign-up, MFA, magic-link, reset and verify routes (100 of that per
+      # client IP), 100 rejected credentials per IP, 60 operator refreshes per
+      # IP. Sizing: docs/rate-limits.md.
       RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-}
       RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-}
       RATE_LIMIT_AUTHENTICATED_MAX: ${RATE_LIMIT_AUTHENTICATED_MAX:-}
       RATE_LIMIT_API_KEY_MAX: ${RATE_LIMIT_API_KEY_MAX:-}
+      RATE_LIMIT_AUTH_CEILING_MAX: ${RATE_LIMIT_AUTH_CEILING_MAX:-}
+      RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX: ${RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX:-}
       RATE_LIMIT_AUTHENTICATED_IP_MAX: ${RATE_LIMIT_AUTHENTICATED_IP_MAX:-}
       RATE_LIMIT_AUTH_FAILURE_MAX: ${RATE_LIMIT_AUTH_FAILURE_MAX:-}
       RATE_LIMIT_REFRESH_MAX: ${RATE_LIMIT_REFRESH_MAX:-}

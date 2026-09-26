@@ -294,6 +294,24 @@ async function runningProductionAppNames(tenantId: string, db: LimitsDb): Promis
 }
 
 /**
+ * How the production-app ceiling gets raised, for the refusal's `fix`.
+ *
+ * The API cannot tell whether it is a self-hosted deployment or Rekey Cloud,
+ * so both are named, each with the step that is true for it. Self-hosted: the
+ * limit is a super-admin setting (or DEFAULT_TENANT_LIMITS at creation), and no
+ * workspace role can write it. Cloud: the billing service writes it from the
+ * workspace's plan. It deliberately does not name a
+ * plan or a number, because what each plan includes is set in billing and
+ * published on /pricing, and a sentence here would go stale the day that
+ * changes.
+ */
+export const RAISE_PRODUCTION_APP_LIMIT =
+  'on a self-hosted deployment, a super-admin sets it with ' +
+  'PUT /api/v1/admin/tenants/:id/limits. On Rekey Cloud it comes from the ' +
+  "workspace's plan: https://rekey.dev/pricing lists what each plan includes, and " +
+  'https://rekey.dev/contact is where to ask for more.';
+
+/**
  * Throw `TENANT_QUOTA_EXCEEDED` when this workspace has no room for another
  * RUNNING production Application.
  *
@@ -344,18 +362,17 @@ export async function assertProductionAppQuota(
   const fix =
     door === 'enable'
       ? 'Disable one of the production applications listed above to free its slot, then ' +
-        'enable this one. If you need to run more production applications at the same ' +
-        'time, contact support to raise the workspace limit — there is no self-serve way ' +
-        'to raise it.'
+        'enable this one. To run more production applications at the same time, raise ' +
+        `the workspace limit: ${RAISE_PRODUCTION_APP_LIMIT}`
       : door === 'promote'
         ? 'Disable a production application the workspace is no longer running to free its ' +
-          'slot, or contact support to raise the workspace limit. Leaving this application ' +
-          'in its current environment changes nothing about how it works today — only the ' +
-          'key prefix and the production slot are at stake.'
+          `slot, or raise the workspace limit: ${RAISE_PRODUCTION_APP_LIMIT} Leaving this ` +
+          'application in its current environment changes nothing about how it works today; ' +
+          'only the key prefix and the production slot are at stake.'
         : 'Create the application in the development or staging environment instead (you ' +
           'can promote it to production later), disable a production application the ' +
-          'workspace is no longer running to free its slot, or contact support to raise ' +
-          'the workspace limit.';
+          'workspace is no longer running to free its slot, or raise the workspace limit: ' +
+          RAISE_PRODUCTION_APP_LIMIT;
 
   throw new RekeyError({ statusCode: 403, code: 'TENANT_QUOTA_EXCEEDED', message, fix });
 }

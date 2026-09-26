@@ -135,14 +135,28 @@ leaks the correct prefix a byte at a time.
   event.
 - Delivery is fire-and-forget with respect to the API request that caused it. A
   slow receiver of yours never slows down the call your user is waiting on.
-- The request times out after **10 seconds**. Return 2xx immediately and do the
-  work asynchronously — a queue insert, then 200.
+- The request times out after **10 seconds** by default. A self-hosted
+  deployment can change that with `WEBHOOK_TIMEOUT_MS` (1000 to 30000
+  milliseconds), so check with whoever runs yours. Either way, return 2xx
+  immediately and do the work asynchronously: a queue insert, then 200.
+- At most **4 deliveries to one endpoint**, and at most **8 across all of one
+  Application's endpoints** (`WEBHOOK_APP_MAX_IN_FLIGHT` on a self-hosted
+  deployment), are in flight at once. The rest wait their turn; waiting is not
+  a failed attempt and does not use up a retry. A burst of events is therefore
+  spread out over a few seconds rather than arriving all at once.
+- An Application can have up to **100 webhook endpoints**. Creating one more is
+  refused with `WEBHOOK_ENDPOINT_LIMIT_REACHED`.
 - Any 2xx is success. Everything else — 4xx, 5xx, timeout, connection error —
   is retried. Redirects are **not** followed; a 3xx is a failed attempt.
 - **5 attempts total**, backing off 30s → 2m → 10m → 1h. That is roughly 72
   minutes of forgiveness from the first attempt, after which the delivery is
   marked `FAILED` and left for you to inspect and retry by hand from the panel
   or `POST …/deliveries/:deliveryId/retry`.
+- After **5 failed requests in a row** to an endpoint, Rekey stops sending to it
+  for 60 seconds. An attempt that comes due in that window is recorded as failed
+  without a request (its error starts `Not sent:`) and retried on the schedule
+  above, so the 72 minutes still apply. The first successful delivery after the
+  pause resumes normal sending.
 - Up to 4 KB of your response body is stored against the delivery row, so a
   descriptive error body from your handler shows up in the panel. That is a
   debugging aid, not a contract — don't put anything sensitive in it.
@@ -277,7 +291,7 @@ sent with as `api-grant:<key>`, the form the ledger stores it in.
 - **Verify first, parse second.** Read the raw body, check the signature,
   and only then `JSON.parse`.
 - **Dedupe on `eventId` before side effects.** Retries are normal operation.
-- **Return 2xx fast.** Ten seconds is the budget; queue the work.
+- **Return 2xx fast.** Five seconds is the budget; queue the work.
 - **Don't infer order.** Two events emitted close together can arrive in
   either order, and a retried one arrives up to an hour late. Reconcile against
   the current state (`getSubscription`, `getEntitlements`) rather than assuming

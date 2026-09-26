@@ -61,6 +61,8 @@ model Tenant {
   invitations  TenantInvitation[]
   emailLogs    EmailLog[]
   apiTokens    TenantApiToken[]
+  // Operator sessions currently in this workspace (TenantRefreshToken.activeTenantId).
+  activeOperatorSessions TenantRefreshToken[]
 
   @@map("tenants")
 }
@@ -302,10 +304,18 @@ model TenantRefreshToken {
   ip           String?   @map("ip")
   // See RefreshToken.sessionId: the family id, carried in the `sid` claim.
   sessionId    String    @default(cuid()) @map("session_id")
+  // The workspace this session is in, re-emitted as the `tid` claim on
+  // refresh (the operator twin of RefreshToken.activeOrganizationId). Set by
+  // sign-in and by a workspace switch, carried across rotations, re-checked
+  // against the memberships on every refresh. Null on rows minted before the
+  // column existed: those refresh into the oldest membership, as they always did.
+  activeTenantId String? @map("active_tenant_id")
 
-  tenantUser TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
+  tenantUser   TenantUser @relation(fields: [tenantUserId], references: [id], onDelete: Cascade)
+  activeTenant Tenant?    @relation(fields: [activeTenantId], references: [id], onDelete: SetNull)
 
   @@index([tenantUserId])
+  @@index([activeTenantId])
   // sessionId is indexed by `tenant_refresh_tokens_session_live_head_key`, a
   // migration-only partial UNIQUE index. See RefreshToken for why.
   @@index([expiresAt])

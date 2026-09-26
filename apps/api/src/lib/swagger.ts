@@ -24,7 +24,6 @@
  * route's `description`.
  */
 
-import { createRequire } from 'node:module';
 import type { FastifyInstance } from 'fastify';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
@@ -39,19 +38,12 @@ import { registerOpenApiComponents } from './openapi.js';
  * while we were cutting 2.0.0, which every client generator, registry, and
  * integrator diffing against the previous release would have believed.
  *
- * `@rekey.dev/shared-types` is the right source: the CHANGELOG states the
- * packages share one version and release together with the API, panel, and
- * portal, so its `package.json` IS the release version. (`apps/api`'s own
- * package.json is `0.0.0`, it is private and never published.) `createRequire`
- * rather than an import attribute so this resolves identically from `src/` under
- * tsx and from `dist/` under node, without depending on the build layout.
- *
- * `test/openapi-contract.test.ts` asserts this matches both the package version
- * and the top CHANGELOG heading, so the three cannot drift apart again.
+ * It is the same value `/health/live` reports; build-info.ts explains why
+ * `@rekey.dev/shared-types` is the source. `test/openapi-contract.test.ts`
+ * asserts it matches both the package version and the top CHANGELOG heading,
+ * so the three cannot drift apart again.
  */
-const { version: RELEASE_VERSION } = createRequire(import.meta.url)(
-  '@rekey.dev/shared-types/package.json',
-) as { version: string };
+import { RELEASE_VERSION } from './build-info.js';
 
 export async function registerSwagger(app: FastifyInstance): Promise<void> {
   // Shared response components (`components.schemas`) + the pass-through

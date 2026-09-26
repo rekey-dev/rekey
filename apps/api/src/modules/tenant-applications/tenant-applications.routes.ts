@@ -48,7 +48,7 @@ import { assertMetadataWithinLimit } from '../../lib/metadata-limit.js';
 import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { entitlementOverridesService } from '../billing/entitlement-overrides.service.js';
 import { reconcileSeatsForSubscription } from '../billing/seat-reconciler.js';
-import { kickDeliveries } from '../webhooks/webhook.service.js';
+import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
 import { applicationRolesService } from '../application-roles/application-roles.service.js';
 import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 import { organizationsService } from '../organizations/organizations.service.js';
@@ -77,7 +77,6 @@ import { billingService } from '../billing/billing.service.js';
 import { subscriptionGrantsService } from '../billing/grant.service.js';
 import { isApplyStale, subscriptionImportService } from '../billing/import.service.js';
 import { env } from '../../config/env.js';
-import { emitDetached } from '../webhooks/webhook.service.js';
 import {
   clearFailures,
   euLoginLockScope,
@@ -1248,8 +1247,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           '**Can be refused.** A disabled PRODUCTION Application holds no production slot, ' +
           'so re-enabling one consumes a slot and fails with `TENANT_QUOTA_EXCEEDED` when ' +
           'the workspace is already running its `maxProductionApps` limit. Free a slot by ' +
-          'disabling a different production application, or contact support to raise the ' +
-          'limit, it cannot be raised self-serve. DEVELOPMENT and STAGING Applications ' +
+          'disabling a different production application, or raise the limit: on a ' +
+          'self-hosted deployment a super-admin sets it with ' +
+          '`PUT /api/v1/admin/tenants/:id/limits`; on Rekey Cloud it comes from the ' +
+          "workspace's plan. DEVELOPMENT and STAGING Applications " +
           'hold no slot and always enable.',
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
         response: {
@@ -4692,7 +4693,15 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         });
       }
 
-      await prisma.endUser.delete({ where: { id: params.euid } });
+      // `user.deleted` commits with the delete (see below).
+      const deliveryIds = await prisma.$transaction(async (tx) => {
+        await tx.endUser.delete({ where: { id: params.euid } });
+        return enqueueEvent(tx, {
+          applicationId: params.id,
+          type: 'user.deleted',
+          data: { user: { id: params.euid } },
+        });
+      });
 
       // Audit the operator mutation (durable: a deletion is a sensitive action).
       void recordSecurityEvent({
@@ -4709,13 +4718,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         },
       });
 
-      // Outbound webhook, `user.deleted` (registered event). Fire-and-forget,
-      // same contract as `user.created` / `user.erased`.
-      emitDetached({
-        applicationId: params.id,
-        type: 'user.deleted',
-        data: { user: { id: params.euid } },
-      });
+      // Outbound webhook, `user.deleted` (registered event), written in the
+      // delete's transaction above, so it cannot outlive a delete that failed
+      // or be lost to a crash after one that committed.
+      kickDeliveries(deliveryIds);
 
       return { success: true, data: { removed: true } };
     },

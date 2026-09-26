@@ -4,6 +4,15 @@
 
 `rekey` — command-line interface for **[Rekey](https://rekey.dev)** deployments. Designed for both human developers and AI agents.
 
+> **Self-host only (needs `SUPER_ADMIN_KEY`).** Every command except `version`
+> and `doctor` calls the deployment-wide admin API (`/api/v1/admin/*`) with
+> `SUPER_ADMIN_KEY`, which only whoever runs the deployment holds. A Rekey Cloud
+> workspace has no such key, so on Cloud use the panel (panel.rekey.dev) for
+> what `rekey init` does, and the hosted operator MCP
+> ([docs/mcp.md](../../docs/mcp.md), [rekey.dev/docs/mcp](https://rekey.dev/docs/mcp))
+> to give an agent your workspace. The Cloud quickstart is
+> [rekey.dev/docs/quickstart](https://rekey.dev/docs/quickstart).
+
 > **What is Rekey?** An auth + billing backend for your SaaS: sign-in (password, magic-link, passkeys, OAuth, MFA), subscriptions, usage, credits, licenses, and teams — behind one API, multi-tenant, provider-agnostic. Docs: **[rekey.dev/docs](https://rekey.dev/docs)**. This CLI manages a deployment — tenants, applications, API keys — from your terminal or an agent.
 
 > **For AI agents**: start at [AGENTS.md](../../AGENTS.md).

@@ -38,7 +38,17 @@ import { createQueueRedis, isQueueEnabled, lastQueueConnectionError } from '../.
 import { attemptDelivery, setDeliveryScheduler } from './webhook.service.js';
 
 const QUEUE_NAME = 'webhook-delivery';
-const WORKER_CONCURRENCY = 10;
+// Attempts this replica runs at once. It was 10, and one customer endpoint that
+// hung could hold all ten for the full timeout. Each endpoint and each
+// Application is now held to a few slots deployment-wide (endpoint-gate.ts), so
+// the pool can be sized for throughput instead: a slow tenant takes at most
+// WEBHOOK_APP_MAX_IN_FLIGHT of these, and every other tenant keeps the rest.
+// An attempt spends nearly all of its time waiting on the receiver and holds no
+// database connection while it does (its statements run outside any
+// transaction); its few short statements go through the delivery database
+// lanes in webhook.service.ts, at most half the pool, so 50 costs open sockets
+// rather than connections the HTTP handlers need.
+const WORKER_CONCURRENCY = 50;
 // Boot-time Redis reachability check. Bounded so an unreachable Redis fails the
 // startup fast instead of hanging on ioredis's buffered-command retry.
 const REDIS_PING_TIMEOUT_MS = 5_000;
@@ -73,8 +83,10 @@ let workerConn: Redis | null = null;
  * Underscore separator, NOT colon: BullMQ reserves `:` for its internal Redis
  * key structure and rejects custom job ids that contain one.
  */
-function jobId(deliveryId: string, attempts: number): string {
-  return `${deliveryId}_${attempts}`;
+function jobId(deliveryId: string, attempts: number, waitKey?: string): string {
+  // A wait (no endpoint slot free) keeps the attempt count, so without the key
+  // the re-add would collide with the job that is running it and be dropped.
+  return waitKey ? `${deliveryId}_${attempts}_w${waitKey}` : `${deliveryId}_${attempts}`;
 }
 
 /**
@@ -138,12 +150,12 @@ export async function startWebhookWorker(log: FastifyBaseLogger): Promise<void> 
     // Route all scheduling through Redis. `void`: emit() is fire-and-forget and
     // must not await Redis; a failed enqueue is logged and the DB poller
     // recovers the row off `nextAttemptAt`.
-    setDeliveryScheduler((deliveryId, delayMs, attempts) => {
+    setDeliveryScheduler((deliveryId, delayMs, attempts, waitKey) => {
       const data: JobData = { deliveryId };
       void q
         .add('deliver', data, {
           delay: Math.max(0, delayMs),
-          jobId: jobId(deliveryId, attempts),
+          jobId: jobId(deliveryId, attempts, waitKey),
           ...KEEP,
         })
         .catch((err) => log.error({ err, deliveryId }, 'failed to enqueue webhook delivery'));

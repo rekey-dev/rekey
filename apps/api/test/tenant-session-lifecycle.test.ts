@@ -18,6 +18,8 @@ import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { invalidateOperatorAuth } from '../src/lib/operator-auth-cache.js';
+import { hashTenantRefreshToken } from '../src/lib/tenant-refresh-tokens.js';
+import { REFRESH_REUSE_WINDOW_MS } from '../src/lib/refresh-reuse-window.js';
 
 interface Session {
   user: { id: string; email: string };
@@ -78,6 +80,18 @@ describe('operator session lifecycle', () => {
     });
   }
 
+  /**
+   * Move a spent token's rotation to just past the reuse window. The replays
+   * below model a replay AFTER it; inside it the answer is RACED and nothing
+   * is revoked (refresh-reuse-window.test.ts).
+   */
+  async function ageRotation(raw: string): Promise<void> {
+    await prisma.tenantRefreshToken.update({
+      where: { tokenHash: hashTenantRefreshToken(raw) },
+      data: { revokedAt: new Date(Date.now() - REFRESH_REUSE_WINDOW_MS - 1_000) },
+    });
+  }
+
   // ---------- refresh ----------
 
   it('refresh rotates the pair and the new access token works', async () => {
@@ -100,6 +114,7 @@ describe('operator session lifecycle', () => {
   it('replaying a rotated refresh token revokes the whole chain', async () => {
     const s = await signUp(uniqueEmail('reuse'));
     const rotated = (await refresh(s.refreshToken)).json().data as Session;
+    await ageRotation(s.refreshToken);
 
     // Replay the consumed token.
     const replay = await refresh(s.refreshToken);
@@ -115,20 +130,21 @@ describe('operator session lifecycle', () => {
   });
 
   // tenant_refresh_tokens allows one live row per session (unique partial
-  // index, migration 20260915120000). Racing refreshes must still resolve to
-  // one winner and REUSED for the rest, never a unique violation as a 500.
-  it('concurrent refreshes of one token: one winner, the rest REUSED, never a 500', async () => {
+  // index, migration 20260915120000). Racing refreshes must resolve to one
+  // winner and RACED for the rest (inside the reuse window, nothing revoked),
+  // never a unique violation as a 500.
+  it('concurrent refreshes of one token: one winner, the rest RACED, never a 500', async () => {
     const s = await signUp(uniqueEmail('race'));
 
     const results = await Promise.all(Array.from({ length: 8 }, () => refresh(s.refreshToken)));
     expect(results.filter((r) => r.statusCode === 200)).toHaveLength(1);
     for (const r of results.filter((x) => x.statusCode !== 200)) {
       expect(r.statusCode).toBe(401);
-      expect(r.json().error.code).toBe('REFRESH_TOKEN_REUSED');
+      expect(r.json().error.code).toBe('REFRESH_TOKEN_RACED');
     }
     expect(await prisma.tenantRefreshToken.count({
       where: { tenantUserId: s.user.id, replacedById: null, revokedAt: null },
-    })).toBeLessThanOrEqual(1);
+    })).toBe(1);
   });
 
   it('the database refuses a second live operator row in one session', async () => {
@@ -315,6 +331,7 @@ describe('operator session lifecycle', () => {
 
     const rotated = await refresh(first.refreshToken);
     expect(rotated.statusCode).toBe(200);
+    await ageRotation(first.refreshToken);
 
     const replay = await refresh(first.refreshToken);
     expect(replay.statusCode).toBe(401);

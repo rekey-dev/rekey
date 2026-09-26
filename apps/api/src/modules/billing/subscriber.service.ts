@@ -29,7 +29,7 @@ import { RekeyError } from '../../lib/error.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { applicationRolesService } from '../application-roles/application-roles.service.js';
-import { emitDetached } from '../webhooks/webhook.service.js';
+import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
 
 export type SubscriberRef = { endUserId: string } | { email: string; emailVerified?: boolean };
 
@@ -107,11 +107,33 @@ export const subscriberService = {
       createdAt: Date;
       metadata: Prisma.JsonValue | null;
     };
+    let deliveryIds: string[];
     try {
-      created = await prisma.endUser.create({
-        data,
-        select: { id: true, email: true, emailVerified: true, role: true, createdAt: true, metadata: true },
-      });
+      // `user.created` commits with the row. A create that loses the P2002
+      // race below rolls its event back with it, and the winner's is the one
+      // that goes out.
+      ({ created, deliveryIds } = await prisma.$transaction(async (tx) => {
+        const row = await tx.endUser.create({
+          data,
+          select: { id: true, email: true, emailVerified: true, role: true, createdAt: true, metadata: true },
+        });
+        const ids = await enqueueEvent(tx, {
+          applicationId,
+          type: 'user.created',
+          data: {
+            user: {
+              id: row.id,
+              email: row.email,
+              emailVerified: row.emailVerified,
+              role: row.role,
+              createdAt: row.createdAt.toISOString(),
+              metadata: row.metadata ?? null,
+            },
+            via: `billing:${input.provider}`,
+          },
+        });
+        return { created: row, deliveryIds: ids };
+      }));
     } catch (e) {
       // Two events for one new address raced; the loser reads the winner.
       if ((e as { code?: string }).code !== 'P2002') throw e;
@@ -138,21 +160,7 @@ export const subscriberService = {
         emailVerified: created.emailVerified,
       },
     });
-    emitDetached({
-      applicationId,
-      type: 'user.created',
-      data: {
-        user: {
-          id: created.id,
-          email: created.email,
-          emailVerified: created.emailVerified,
-          role: created.role,
-          createdAt: created.createdAt.toISOString(),
-          metadata: created.metadata ?? null,
-        },
-        via: `billing:${input.provider}`,
-      },
-    });
+    kickDeliveries(deliveryIds);
     return { id: created.id, email: created.email, created: true };
   },
 };

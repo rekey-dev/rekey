@@ -6,7 +6,9 @@
  * binding, no flaky network behaviour.
  */
 
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import { verifyMfaChallengeToken } from "./lib/jwt.js";
+import { recordSecurityEvent } from "./lib/security-events.js";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
@@ -27,6 +29,13 @@ import { rekeyErrorHandler } from "./lib/error.js";
 import { requestIdFor } from "./lib/request-id.js";
 import {
   authCeilingOptions,
+  authClientIpCeilingOptions,
+  wantsAuthClientIpCeiling,
+  wantsUnattributedFailureCap,
+  unattributedFailureKey,
+  unattributedAttemptSubject,
+  unattributedSubjectKey,
+  FAILED_AUTH_ATTEMPT_CODES,
   globalRateLimitKey,
   globalRateLimitAllowList,
   globalRateLimitMaxFor,
@@ -45,6 +54,7 @@ import {
 import { rejectUnsupportedMediaType } from "./middleware/media-type.js";
 import {
   CLIENT_IP_VOUCHED,
+  DECLARED_CLIENT_IP,
   createClientIpResolver,
   proxySecretWarning,
   type ClientIpPolicy,
@@ -350,10 +360,12 @@ export async function buildApp(
       "client address resolver failed; request treated as unvouched",
     );
   app.decorateRequest("clientIpVouched", false);
+  app.decorateRequest("declaredClientIp", null);
   app.addHook("onRequest", async (req) => {
-    req.clientIpVouched =
-      (req.raw as unknown as Record<symbol, boolean>)[CLIENT_IP_VOUCHED] ===
-      true;
+    const raw = req.raw as unknown as Record<symbol, unknown>;
+    req.clientIpVouched = raw[CLIENT_IP_VOUCHED] === true;
+    const declared = raw[DECLARED_CLIENT_IP];
+    req.declaredClientIp = typeof declared === "string" ? declared : null;
   });
   const proxyWarning = proxySecretWarning(clientIpPolicy);
   if (proxyWarning && env.NODE_ENV !== "test") app.log.warn(proxyWarning);
@@ -626,8 +638,12 @@ export async function buildApp(
   // identity and bites on `Content-Length` before a byte is read.
   //
   // The key is the Application where one resolved, else the secret key, else
-  // the client IP (`authCeilingKey`). Operator sign-in routes have no
-  // Application, so they key on the IP, and that is only the REAL client when
+  // the client IP (`authCeilingKey`). An Application's bucket gets
+  // RATE_LIMIT_AUTH_CEILING_MAX, sized for a busy Application; a second bucket
+  // holds each end-user address to RATE_LIMIT_MAX of it, so the public
+  // publishable key does not let one address refuse every sign-in to the
+  // Application. Operator sign-in routes have no Application, so they key on
+  // the IP (at RATE_LIMIT_MAX), and that is only the REAL client when
   // lib/client-ip.ts can vouch for it: otherwise every sign-in attempt on the
   // deployment would share one bucket and anyone spraying the login page would
   // lock every operator out, which is why the hook below skips an unvouched
@@ -637,8 +653,51 @@ export async function buildApp(
   // purpose: the hook form sets a per-request "already ran" flag that the
   // route's own limiter shares, so it would silently disable the tight cap.
   const authCeiling = app.createRateLimit(
-    authCeilingOptions(env.RATE_LIMIT_MAX, env.RATE_LIMIT_WINDOW_MS),
+    authCeilingOptions(
+      { perApplication: budgets.authCeiling, perClientIp: budgets.anonymous },
+      env.RATE_LIMIT_WINDOW_MS,
+    ),
   );
+  const authClientIpCeiling = app.createRateLimit(
+    authClientIpCeilingOptions(budgets.anonymous, env.RATE_LIMIT_WINDOW_MS),
+  );
+  // Failed attempts per Application from traffic with no visitor address (a
+  // secret-key backend that does not send X-Rekey-Client-Ip, or a proxy we
+  // cannot identify). Checking must not count, only failures do, hence the
+  // failure limiter rather than a `createRateLimit` bucket.
+  const unattributedFailures = createAuthFailureLimiter({
+    max: budgets.authUnattributedFailures,
+    windowMs: env.RATE_LIMIT_WINDOW_MS,
+    redis: sharedRedis,
+    onStoreError: (err) =>
+      app.log.warn(
+        { err },
+        "unattributed auth-failure limiter store unavailable; failing open",
+      ),
+  });
+  // Which accounts have failed an unattributed attempt this window: one
+  // failure marks the (Application, subject) pair, and past the cap a marked
+  // pair is refused.
+  const unattributedSubjectFailures = createAuthFailureLimiter({
+    max: 1,
+    windowMs: env.RATE_LIMIT_WINDOW_MS,
+    redis: sharedRedis,
+    onStoreError: (err) =>
+      app.log.warn(
+        { err },
+        "unattributed auth-failure limiter store unavailable; failing open",
+      ),
+  });
+  const unattributedSubjectOf = (req: FastifyRequest): string | null =>
+    unattributedAttemptSubject(req, (token) => {
+      if (!req.application) return null;
+      const claims = verifyMfaChallengeToken(
+        token,
+        req.application.id,
+        req.application.tokenGeneration,
+      );
+      return claims?.sub ?? null;
+    });
   // preValidation, not onRequest. The key needs the resolved Application, and
   // `requireApiKey` runs as an onRequest hook on a CHILD instance, parent
   // hooks always run first, so at onRequest time there is nothing to key on
@@ -648,11 +707,65 @@ export async function buildApp(
     // No Application to key on and an address shared by everyone behind an
     // unidentified proxy: this ceiling would lock every operator out.
     if (!req.application && !req.apiKey && !req.clientIpVouched) return;
+    // The address's share first, so one address that has spent its own
+    // budget stops counting against the Application's. For a secret key the
+    // address is the visitor its backend declared in X-Rekey-Client-Ip.
+    if (wantsAuthClientIpCeiling(req)) {
+      const perIp = await authClientIpCeiling(req);
+      if (!perIp.isAllowed && perIp.isExceeded) throw rateLimitedAfter(perIp.ttl, perIp.max);
+    }
+    // No visitor address at all, on sign-in or MFA verification: once the
+    // Application's unattributed traffic has failed too many attempts this
+    // window, an email (or pending MFA user) that has ALREADY failed this
+    // window is refused. Everyone else still gets their attempt, so a spray
+    // costs each account at most one wasted guess and real users are never
+    // shut out wholesale. The per-(Application, email) lockout is unchanged.
+    const attemptSubject = unattributedSubjectOf(req);
+    if (attemptSubject !== null && wantsUnattributedFailureCap(req)) {
+      const overCap = await unattributedFailures.blocked(unattributedFailureKey(req));
+      if (overCap > 0) {
+        const ttl = await unattributedSubjectFailures.blocked(
+          unattributedSubjectKey(req, attemptSubject),
+        );
+        if (ttl > 0) throw rateLimitedAfter(ttl, budgets.authUnattributedFailures);
+      }
+    }
     const result = await authCeiling(req);
     // `isAllowed` is the union discriminant, not redundant with `isExceeded`:
     // narrowing on it is what makes ttl/max visible on the failure branch.
     if (result.isAllowed || !result.isExceeded) return;
     throw rateLimitedAfter(result.ttl, result.max);
+  });
+  // Counts the failed attempts the check above refuses on. Only wrong
+  // passwords and MFA codes (FAILED_AUTH_ATTEMPT_CODES) on the two routes that
+  // produce them, so a busy backend's successful sign-ins never spend it.
+  app.addHook("onError", async (req, _reply, err) => {
+    if (!FAILED_AUTH_ATTEMPT_CODES.has((err as { code?: unknown }).code as string)) return;
+    const subject = unattributedSubjectOf(req);
+    if (subject === null || !wantsUnattributedFailureCap(req)) return;
+    await unattributedSubjectFailures.record(unattributedSubjectKey(req, subject));
+    const count = await unattributedFailures.record(unattributedFailureKey(req));
+    // Exactly once per window per Application: the count passes the cap once.
+    if (count !== budgets.authUnattributedFailures) return;
+    req.log.warn(
+      { applicationId: req.application?.id, failuresInWindow: count },
+      "failed sign-in attempts with no client address reached RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX; until the window ends, unattributed sign-in and MFA attempts for accounts that already failed this window are refused. Forward X-Rekey-Client-Ip from the backend to limit per visitor instead",
+    );
+    if (req.application) {
+      await recordSecurityEvent({
+        type: "auth.unattributed_failure_cap_reached",
+        actorType: "system",
+        tenantId: req.application.tenantId,
+        applicationId: req.application.id,
+        ip: req.ip,
+        metadata: {
+          failuresInWindow: count,
+          windowSeconds: env.RATE_LIMIT_WINDOW_MS / 1000,
+          credential: req.apiKey ? "secret-key" : "publishable-key",
+          fix: "Send the visitor's address in X-Rekey-Client-Ip on secret-key sign-in and MFA calls (docs/rate-limits.md), or set API_PROXY_SECRET if browser traffic reaches the API through a proxy.",
+        },
+      });
+    }
   });
 
   // Generic Idempotency-Key support, opt-in per route via

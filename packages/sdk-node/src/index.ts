@@ -218,6 +218,44 @@ export interface RekeyConfig {
    * replaced by, any per-call `signal`.
    */
   signal?: AbortSignal | undefined;
+  /**
+   * The address of the visitor this server is acting for, sent to the API as
+   * `X-Rekey-Client-Ip` so its per-IP sign-in limits count the visitor rather
+   * than your server. Without it every sign-in your server makes shares one
+   * address, and the per-IP bucket either never fills or fills for everyone.
+   *
+   * Set it per visitor, usually with {@link Rekey.with}:
+   * `rekey.with({ clientIp }).auth.signIn(...)`. Take it from the header your
+   * own proxy sets, never from anything the browser can choose. One address,
+   * IPv4 or IPv6; anything else is not sent.
+   */
+  clientIp?: string | undefined;
+}
+
+/**
+ * The header {@link RekeyConfig.clientIp} travels in. The API reads it from a
+ * secret-key caller as the visitor's address; it is never the caller's own.
+ */
+export const CLIENT_IP_HEADER = 'X-Rekey-Client-Ip';
+
+/**
+ * `value` as a single IP address, or null. Deliberately strict: a list
+ * (`a, b`), a port, or anything with whitespace inside is refused rather than
+ * guessed at, so what reaches the API is always exactly one address.
+ */
+export function normalizeClientIp(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  let ip = value.trim();
+  if (ip.startsWith('[') && ip.endsWith(']')) ip = ip.slice(1, -1);
+  if (ip.length === 0 || ip.length > 45) return null;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+    return ip.split('.').every((o) => Number(o) <= 255) ? ip : null;
+  }
+  // IPv6, optionally with an embedded IPv4 tail (::ffff:203.0.113.9).
+  // Two colons at least, so `203.0.113.9:443` (an address with a port) is not one.
+  const colons = ip.split(':').length - 1;
+  if (/^[0-9a-fA-F:.]+$/.test(ip) && colons >= 2 && colons <= 7) return ip;
+  return null;
 }
 
 /**
@@ -242,6 +280,8 @@ export interface RekeyCallOptions {
   timeoutMs?: number | undefined;
   /** Abort signal for this one call. Composed with the client's signal and the deadline. */
   signal?: AbortSignal | undefined;
+  /** The visitor's address for this call. See {@link RekeyConfig.clientIp}. */
+  clientIp?: string | undefined;
 }
 
 // RekeyError is the shared class (imported above), re-exported so the public
@@ -391,10 +431,12 @@ export class Rekey {
       options.signal && this.signal
         ? AbortSignal.any([this.signal, options.signal])
         : (options.signal ?? this.signal);
+    const clientIp = options.clientIp ?? this.config.clientIp;
     return new Rekey({
       ...this.config,
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       ...(signal !== undefined && { signal }),
+      ...(clientIp !== undefined && { clientIp }),
     });
   }
 
@@ -466,6 +508,7 @@ export class Rekey {
         headers: {
           Authorization: `Bearer ${this.secretKey}`,
           ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          ...this.clientIpHeader(options),
           ...extraHeaders,
         },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -521,6 +564,7 @@ export class Rekey {
         headers: {
           ...(auth ? { Authorization: `Bearer ${this.secretKey}` } : {}),
           ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          ...this.clientIpHeader(options),
         },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       },
@@ -538,6 +582,12 @@ export class Rekey {
       throw new RekeyError({ code, message, statusCode: res.status });
     }
     return json as T;
+  }
+
+  /** @internal The visitor-address header for one call, or nothing. */
+  private clientIpHeader(options?: RekeyCallOptions): Record<string, string> {
+    const ip = normalizeClientIp(options?.clientIp ?? this.config.clientIp);
+    return ip ? { [CLIENT_IP_HEADER]: ip } : {};
   }
 
   /**

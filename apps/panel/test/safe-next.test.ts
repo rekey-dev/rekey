@@ -59,6 +59,42 @@ describe('safeNext', () => {
     expect(safeNext(payload)).toBeNull();
   });
 
+  // These pass every test on the INPUT and only escape once the URL parser has
+  // collapsed their dot-segments (or turned `\` into `/`): the old validator
+  // returned `//evil.com` for all of the first four. `/%09/evil.com` is the
+  // literal percent form, which must stay an in-app path.
+  it.each([
+    ['dot-segment', '/..//evil.com'],
+    ['nested dot-segment', '/x/..//evil.com'],
+    ['dot then backslash', '/./\\evil.com'],
+    ['encoded dot-segment', '/%2e%2e//evil.com'],
+    ['mixed encoded dot-segment', '/x/.%2E//evil.com'],
+    ['literal %09', '/%09/evil.com'],
+    ['tab', '/\t/evil.com'],
+    ['protocol-relative', '//evil.com'],
+    ['backslash', '/\\evil.com'],
+    ['absolute', 'https://evil.com'],
+  ])('never returns anything a browser would resolve off-site (%s)', (_label, payload) => {
+    const next = safeNext(payload);
+    if (next !== null) {
+      expect(next.startsWith('//')).toBe(false);
+      expect(next.startsWith('/\\')).toBe(false);
+      expect(landsOn(next)).toBe(ORIGIN);
+    }
+  });
+
+  it('refuses the dot-segment collapse outright rather than rewriting it', () => {
+    expect(safeNext('/..//evil.com')).toBeNull();
+    expect(safeNext('/x/..//evil.com')).toBeNull();
+    expect(safeNext('/%2e%2e//evil.com')).toBeNull();
+    expect(safeNext('/./\\evil.com')).toBeNull();
+  });
+
+  it('still normalises an ordinary dot-segment and keeps query and hash', () => {
+    expect(safeNext('/applications/../team?tab=invites#pending')).toBe('/team?tab=invites#pending');
+    expect(safeNext('/%09/evil.com?x=1#h')).toBe('/%09/evil.com?x=1#h');
+  });
+
   it('treats a missing or empty value as no destination', () => {
     expect(safeNext(null)).toBeNull();
     expect(safeNext(undefined)).toBeNull();

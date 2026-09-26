@@ -230,6 +230,9 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
               'IDEMPOTENCY_KEY_IN_FLIGHT — a request with this Idempotency-Key is still being ' +
               'processed; or IDEMPOTENCY_KEY_REUSED — the key was already used for a different ' +
               'method, path, or body.',
+            503:
+              'USAGE_RECORD_BUSY: another record for the same subject held the quota lock past ' +
+              'the wait limit; nothing was recorded or charged, retry after `Retry-After`.',
           }),
         },
       },

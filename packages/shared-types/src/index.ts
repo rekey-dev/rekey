@@ -43,6 +43,10 @@ import { type RekeyErrorShape } from './error.js';
 export { cookieSecureFor } from './cookie-security.js';
 export type { CookieSecurityInput } from './cookie-security.js';
 
+// Whether a failed request ever reached the server. Zero-import for the same
+// reason, and shared so every refresh client keeps one list of codes.
+export { NEVER_CONNECTED_CODES, neverConnected } from './transport.js';
+
 /**
  * The error envelope every Rekey API response uses on failure. The runtime
  * schema; `RekeyErrorShape` (from `./error.js`) is the identical static type.
@@ -305,10 +309,13 @@ export const AuthConfigSchema = z.object({
    * untouched, and the Application's own login page handles it. That page
    * already has whatever sign-in methods the Application offers, and already
    * knows whether this browser is signed in, so a user with a live session is
-   * not asked to authenticate a second time. When it is satisfied who the user
-   * is, it calls `POST /api/v1/mcp/:slug/oauth/authorize/grant` with its
-   * secret key and the user's access token, and redirects the browser to the
-   * `redirect_uri` with the returned code.
+   * not asked to authenticate a second time. It is NOT excused from asking:
+   * clients register themselves, so the page must show a consent screen
+   * (`POST /api/v1/mcp/:slug/oauth/authorize/preview` says what to show and
+   * mints nothing) and only after the user allows call
+   * `POST /api/v1/mcp/:slug/oauth/authorize/grant` with its secret key and the
+   * user's access token, then redirect the browser to the confirmed
+   * `redirect_uri` with the returned code. See docs/auth.md.
    *
    * Trust: operator-configured, same as `redirectUrls`, and the API forwards
    * only the standard authorization parameters, which are already public. It

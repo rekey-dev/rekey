@@ -29,9 +29,55 @@ const HASH_OPTIONS: argon2.Options = process.env.VITEST
   ? { type: TYPE, memoryCost: 4096, timeCost: 2, parallelism: 1 }
   : { type: TYPE };
 
+/**
+ * How many argon2 hashes or verifies may run at once in this process.
+ *
+ * `argon2` is a native addon whose work runs on libuv's threadpool, the same
+ * pool `dns.lookup` uses for every outbound connection (webhook deliveries,
+ * the breached-password check, email), and that pool has 4 threads unless
+ * UV_THREADPOOL_SIZE says otherwise. A burst of sign-ins used to take all of
+ * them, and every outbound request waited behind the hashes to resolve a
+ * hostname.
+ *
+ * The image now sets UV_THREADPOOL_SIZE=16 (Dockerfile) and hashing keeps 4 of
+ * them: the concurrency it effectively had before, so hashing throughput and
+ * its worst-case memory (64 MiB per hash at the production cost) do not
+ * change, and 12 threads stay free for everything else. Raising the pool
+ * without this gate would only have let 16 hashes run at once, a gigabyte of
+ * memory on a box sized for 256 MiB of it, and DNS would still queue behind
+ * the seventeenth. Work beyond the gate waits in order, as it did in libuv's
+ * own queue.
+ */
+export const ARGON2_CONCURRENCY = 4;
+
+let argon2Running = 0;
+const argon2Waiting: Array<() => void> = [];
+
+async function withArgon2Slot<T>(work: () => Promise<T>): Promise<T> {
+  if (argon2Running >= ARGON2_CONCURRENCY) {
+    await new Promise<void>((resolve) => argon2Waiting.push(resolve));
+  } else {
+    argon2Running++;
+  }
+  try {
+    return await work();
+  } finally {
+    // Hand the slot straight to the next waiter, so the count never dips and
+    // a newcomer cannot jump the queue.
+    const next = argon2Waiting.shift();
+    if (next) next();
+    else argon2Running--;
+  }
+}
+
+/** Test seam: how many argon2 jobs hold or await a slot right now. */
+export function argon2Load(): { running: number; waiting: number } {
+  return { running: argon2Running, waiting: argon2Waiting.length };
+}
+
 /** Hash a plaintext password. Output is the encoded `$argon2id$...` string. */
 export function hashPassword(plain: string): Promise<string> {
-  return argon2.hash(plain, HASH_OPTIONS);
+  return withArgon2Slot(() => argon2.hash(plain, HASH_OPTIONS));
 }
 
 /**
@@ -149,7 +195,7 @@ export async function verifyPassword(hash: string | null, plain: string): Promis
     // before the ceiling existed. Refusing is the point: the verify would
     // otherwise honour whatever the string asks for.
     if (hash.startsWith('$argon2id$') && !argon2WithinBudget(hash)) return false;
-    return await argon2.verify(hash, plain);
+    return await withArgon2Slot(() => argon2.verify(hash, plain));
   } catch (err) {
     if (err instanceof RekeyError) throw err;
     return false;
@@ -168,7 +214,7 @@ export async function verifyPassword(hash: string | null, plain: string): Promis
  */
 let decoyHash: Promise<string> | null = null;
 function decoy(): Promise<string> {
-  decoyHash ??= argon2.hash(randomBytes(32).toString('hex'), HASH_OPTIONS);
+  decoyHash ??= hashPassword(randomBytes(32).toString('hex'));
   return decoyHash;
 }
 

@@ -27,7 +27,7 @@ import type { Application, EndUser, License, LicenseActivation, LicenseKind } fr
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { generateLicenseKey, hashLicenseKey } from '../../lib/license-keys.js';
-import { emitDetached } from '../webhooks/webhook.service.js';
+import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
 import { devicesService } from '../devices/devices.service.js';
 
 export type PublicLicense = Omit<License, 'keyHash'>;
@@ -479,13 +479,13 @@ export const licensesService = {
     if (license.expiresAt !== null && license.expiresAt <= new Date()) return { ok: false, reason: 'expired' };
 
     const now = new Date();
-    const updated = await prisma.licenseActivation.updateMany({
-      where: { licenseId: license.id, machineFingerprint: input.machineFingerprint, releasedAt: null },
-      data: { releasedAt: now },
-    });
-    const released = updated.count === 1;
-    if (released) {
-      emitDetached({
+    const { released, deliveryIds } = await prisma.$transaction(async (tx) => {
+      const updated = await tx.licenseActivation.updateMany({
+        where: { licenseId: license.id, machineFingerprint: input.machineFingerprint, releasedAt: null },
+        data: { releasedAt: now },
+      });
+      if (updated.count !== 1) return { released: false, deliveryIds: [] };
+      const ids = await enqueueEvent(tx, {
         applicationId: license.applicationId,
         type: 'license.deactivated',
         data: {
@@ -494,7 +494,9 @@ export const licensesService = {
           releasedBy: 'client',
         },
       });
-    }
+      return { released: true, deliveryIds: ids };
+    });
+    kickDeliveries(deliveryIds);
     return { ok: true, released };
   },
 
@@ -521,20 +523,24 @@ export const licensesService = {
       });
     }
     if (activation.releasedAt !== null) return activation;
-    const released = await prisma.licenseActivation.update({
-      where: { id: activation.id },
-      data: { releasedAt: new Date() },
+    const { released, deliveryIds } = await prisma.$transaction(async (tx) => {
+      const row = await tx.licenseActivation.update({
+        where: { id: activation.id },
+        data: { releasedAt: new Date() },
+      });
+      const license = await tx.license.findUniqueOrThrow({ where: { id: row.licenseId } });
+      const ids = await enqueueEvent(tx, {
+        applicationId: args.applicationId,
+        type: 'license.deactivated',
+        data: {
+          license: { id: license.id, endUserId: license.endUserId, kind: license.kind },
+          machineFingerprint: row.machineFingerprint,
+          releasedBy: 'operator',
+        },
+      });
+      return { released: row, deliveryIds: ids };
     });
-    const license = await prisma.license.findUniqueOrThrow({ where: { id: released.licenseId } });
-    emitDetached({
-      applicationId: args.applicationId,
-      type: 'license.deactivated',
-      data: {
-        license: { id: license.id, endUserId: license.endUserId, kind: license.kind },
-        machineFingerprint: released.machineFingerprint,
-        releasedBy: 'operator',
-      },
-    });
+    kickDeliveries(deliveryIds);
     return released;
   },
 };

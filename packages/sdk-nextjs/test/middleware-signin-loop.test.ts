@@ -106,4 +106,61 @@ describe('stale session repair', () => {
     const res = rekeyMiddleware({ refreshUrl: '/session/renew' })(withRefresh('/dashboard'));
     expect(new URL(res.headers.get('location')!).pathname).toBe('/session/renew');
   });
+
+  it('sends a stale HEAD through the refresh route like a GET', () => {
+    const req = new NextRequest(new URL('https://app.example/dashboard'), { method: 'HEAD' });
+    req.cookies.set('rekey_refresh', 'r1');
+    const res = rekeyMiddleware()(req);
+    expect(new URL(res.headers.get('location')!).pathname).toBe('/api/rekey/refresh');
+  });
+
+  // A Server Action POSTs to the page's own path. Redirecting it would lose the
+  // submission (the refresh route answers GET only, so it was a 405), and the
+  // action can refresh in place because it may write cookies.
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE'])(
+    'lets a stale %s through to refresh in place, on a protected route',
+    (method) => {
+      const req = new NextRequest(new URL('https://app.example/dashboard'), { method });
+      req.cookies.set('rekey_refresh', 'r1');
+      const res = rekeyMiddleware({ publicRoutes: ['/'] })(req);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('location')).toBeNull();
+    },
+  );
+
+  it('refuses a stale Server Action with Origin: null before letting it through', () => {
+    // The Origin check runs ahead of the stale-session pass-through, so an
+    // action from an opaque origin never reaches `auth()` and never rotates.
+    const req = new NextRequest(new URL('https://app.example/dashboard'), {
+      method: 'POST',
+      headers: { origin: 'null', 'next-action': 'abc123' },
+    });
+    req.cookies.set('rekey_refresh', 'r1');
+    const res = rekeyMiddleware()(req);
+    expect(res.status).toBe(403);
+    expect(res.headers.get('x-middleware-next')).toBeNull();
+  });
+
+  it('lets a stale Server Action with a well-formed Origin through', () => {
+    const req = new NextRequest(new URL('https://app.example/dashboard'), {
+      method: 'POST',
+      headers: { origin: 'https://app.example', 'next-action': 'abc123' },
+    });
+    req.cookies.set('rekey_refresh', 'r1');
+    const res = rekeyMiddleware()(req);
+    expect(res.headers.get('x-middleware-next')).toBe('1');
+  });
+
+  it('still sends a signed-out POST to sign-in', () => {
+    const req = new NextRequest(new URL('https://app.example/dashboard'), { method: 'POST' });
+    const res = rekeyMiddleware({ publicRoutes: ['/'] })(req);
+    expect(new URL(res.headers.get('location')!).pathname).toBe('/sign-in');
+  });
+
+  it('with the hop switched off, a stale POST goes to sign-in as before', () => {
+    const req = new NextRequest(new URL('https://app.example/dashboard'), { method: 'POST' });
+    req.cookies.set('rekey_refresh', 'r1');
+    const res = rekeyMiddleware({ refreshUrl: false, publicRoutes: ['/'] })(req);
+    expect(new URL(res.headers.get('location')!).pathname).toBe('/sign-in');
+  });
 });

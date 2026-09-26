@@ -5,18 +5,31 @@
  */
 
 import 'server-only';
+import { createHash } from 'node:crypto';
 import { cache } from 'react';
-import { cookies } from 'next/headers';
-import { RekeyBrowserClient } from '@rekey.dev/react';
+import { cookies, headers } from 'next/headers';
+import { redirect } from 'next/navigation';
+import { RekeyBrowserClient, RekeyError } from '@rekey.dev/react';
+import { neverConnected } from '@rekey.dev/shared-types/transport';
 import { rekeyApiUrl } from './env';
-import { getPortalConfig } from './config';
+import { PortalConfigUnavailableError, getPortalConfig, type PortalConfig } from './config';
 import { cookieSecure } from './cookie-secure';
 import { API_TIMEOUT_MS, forwardedClientHeaders } from './client-ip';
+import {
+  RACED_COOKIE,
+  RACED_MARK_MAX_AGE_SECONDS,
+  REFRESH_RACED_CODE,
+  RETURN_TO_HEADER,
+  isGatewayFailure,
+  racedMark,
+  refreshRouteFor,
+  wasIssuedRecently,
+} from './session-refresh';
 
-const ACCESS = 'rekey_portal_access';
-const REFRESH = 'rekey_portal_refresh';
+export const ACCESS = 'rekey_portal_access';
+export const REFRESH = 'rekey_portal_refresh';
 // Fallbacks only: the API's lifetimes are deployment settings and every auth
-// response carries the expiries, which `setSession` prefers.
+// response carries the expiries, which `writeSession` prefers.
 const ACCESS_MAX_AGE = 60 * 15;
 const REFRESH_MAX_AGE = 60 * 60 * 24 * 30;
 
@@ -56,42 +69,55 @@ export async function portalClientFor(slug: string): Promise<RekeyBrowserClient 
   });
 }
 
-/**
- * Cookie writes are only allowed from server actions / route handlers. During a
- * Server Component render (e.g. the silent refresh inside `getPortalUser`) Next
- * throws "Cookies can only be modified in a Server Action or Route Handler", we
- * swallow that one case so the request still renders with the fresh token; the
- * cookie lands on the next action-context write. Other errors propagate.
- */
-function tolerateRenderContext(err: unknown): void {
-  const message = err instanceof Error ? err.message : String(err);
-  if (message.includes('Cookies can only be modified')) return;
-  throw err;
+type Expiries = { accessTokenExpiresAt?: string; refreshTokenExpiresAt?: string };
+
+/** Anything cookies can be set on: the `cookies()` jar, or a response's. */
+interface CookieSink {
+  set(
+    name: string,
+    value: string,
+    options: { httpOnly: boolean; sameSite: 'lax'; secure: boolean; path: string; maxAge: number },
+  ): unknown;
 }
 
+/**
+ * The session cookies for `slug`, written to `sink`. The refresh route writes
+ * them onto its own redirect response.
+ */
+export async function writeSession(
+  sink: CookieSink,
+  slug: string,
+  accessToken: string,
+  refreshToken: string,
+  expiries: Expiries = {},
+): Promise<void> {
+  sink.set(ACCESS, accessToken, await cookieOpts(slug, secondsUntil(expiries.accessTokenExpiresAt) ?? ACCESS_MAX_AGE));
+  sink.set(REFRESH, refreshToken, await cookieOpts(slug, secondsUntil(expiries.refreshTokenExpiresAt) ?? REFRESH_MAX_AGE));
+}
+
+/** Both session cookies for `slug`, expired, written to `sink`. */
+export async function clearSessionOn(sink: CookieSink, slug: string): Promise<void> {
+  sink.set(ACCESS, '', await cookieOpts(slug, 0));
+  sink.set(REFRESH, '', await cookieOpts(slug, 0));
+}
+
+/**
+ * Server Actions and Route Handlers only. A Server Component render cannot
+ * write cookies and this throws there, deliberately. The render-time caller
+ * used to be the silent refresh in `getPortalUser`, and swallowing the error
+ * there is what left a spent refresh token in the browser.
+ */
 export async function setSession(
   slug: string,
   accessToken: string,
   refreshToken: string,
-  expiries: { accessTokenExpiresAt?: string; refreshTokenExpiresAt?: string } = {},
+  expiries: Expiries = {},
 ): Promise<void> {
-  try {
-    const jar = await cookies();
-    jar.set(ACCESS, accessToken, await cookieOpts(slug, secondsUntil(expiries.accessTokenExpiresAt) ?? ACCESS_MAX_AGE));
-    jar.set(REFRESH, refreshToken, await cookieOpts(slug, secondsUntil(expiries.refreshTokenExpiresAt) ?? REFRESH_MAX_AGE));
-  } catch (err) {
-    tolerateRenderContext(err);
-  }
+  await writeSession(await cookies(), slug, accessToken, refreshToken, expiries);
 }
 
 export async function clearSession(slug: string): Promise<void> {
-  try {
-    const jar = await cookies();
-    jar.set(ACCESS, '', await cookieOpts(slug, 0));
-    jar.set(REFRESH, '', await cookieOpts(slug, 0));
-  } catch (err) {
-    tolerateRenderContext(err);
-  }
+  await clearSessionOn(await cookies(), slug);
 }
 
 export async function getAccessToken(): Promise<string | null> {
@@ -105,58 +131,185 @@ export async function getRefreshToken(): Promise<string | null> {
 }
 
 /**
- * In-flight refresh exchanges, keyed by the refresh token being spent.
+ * Refresh exchanges IN FLIGHT, keyed by a SHA-256 digest of the refresh token
+ * being spent (never the token itself).
  *
  * Refresh tokens rotate and are single-use: the first exchange invalidates the
- * presented token, so a second CONCURRENT exchange of the same token gets a
- * 401. That is correct server behaviour, reuse detection is a security
- * feature, but it means concurrent refreshers cannot both win, and the loser
- * here lands in the `catch` below, which clears the session and signs the
- * customer out mid-page.
+ * presented token, and a second exchange of the same token is refused. So
+ * callers presenting the same token at the same moment wait on one exchange.
+ * The portal used to make that collision the default: `[slug]/layout.tsx` and
+ * `[slug]/page.tsx` both call `getPortalUser(slug)` and React renders them
+ * concurrently, the same failure the panel diagnosed in production ("5 of 8
+ * refreshes in a 40-minute session returned 401").
  *
- * The portal makes that collision the default rather than a rare race:
- * `[slug]/layout.tsx` and `[slug]/page.tsx` BOTH call `getPortalUser(slug)`,
- * and React renders them concurrently. Fifteen minutes after signing in, the
- * next navigation fires two refreshes of the same token in the same tick; one
- * rotates the cookies and the other is told its token is already spent.
+ * An entry is deleted the moment its exchange settles. A request that arrives
+ * after that (a prefetch or a second tab sent before the new cookie landed)
+ * goes to the API with the token it holds, and the API decides: a token it
+ * rotated moments ago is `REFRESH_TOKEN_RACED`, refused with nothing revoked,
+ * and the raced handling sends the browser back with whatever it holds by
+ * then. This map used to keep a settled pair for ten seconds and hand it to
+ * any later request presenting the spent cookie, which re-issued a live
+ * session to a copy of that cookie without the API ever seeing the request.
  *
- * This is the same failure the panel diagnosed in production and fixed in
- * `apps/panel/src/lib/api.ts`, "5 of 8 refreshes in a 40-minute session
- * returned 401, with pairs landing in the same millisecond". The panel's bug
- * report was a spec for a bug that was still live here.
- *
- * Keying on the token rather than using a bare module-level promise matters:
- * two different tokens (different customers, or a stale tab) must not share an
- * exchange. The entry is deleted in a `finally` so a later expiry refreshes
- * again rather than replaying a resolved promise.
+ * Keyed per token, not a bare module-level promise: two different tokens
+ * (different customers, or a stale tab) must not share an exchange.
  */
-const inFlightRefreshes = new Map<string, ReturnType<RekeyBrowserClient['refresh']>>();
+const refreshExchanges = new Map<string, Promise<RefreshOutcome>>();
 
-function dedupedRefresh(
-  client: RekeyBrowserClient,
-  refresh: string,
-): ReturnType<RekeyBrowserClient['refresh']> {
-  const existing = inFlightRefreshes.get(refresh);
-  if (existing) return existing;
-  const exchange = client.refresh(refresh).finally(() => {
-    inFlightRefreshes.delete(refresh);
-  });
-  inFlightRefreshes.set(refresh, exchange);
-  return exchange;
+/**
+ * What a refresh came to.
+ *
+ *   - `ok`: rotated. The caller must persist `fresh`.
+ *   - `busy`: the token is unspent and the session intact. A 429 (the API's
+ *     limiter answers before the refresh handler runs), or a 502/503/504 with
+ *     no Rekey error body (a proxy answering while the API restarts: the
+ *     request never reached it), or a connection that was never made
+ *     (refused, DNS failure, connect timeout).
+ *   - `failed`: anything else, and the session is treated as over. That
+ *     includes a 5xx the API itself answered, or a timeout: the API may have
+ *     rotated before we stopped listening, and presenting the token again
+ *     would be a replay. Those set `interrupted`, so sign-in can say the
+ *     session was interrupted rather than expired.
+ *   - `raced`: `REFRESH_TOKEN_RACED`. Another request rotated this token
+ *     moments ago and nothing was revoked, so the session lives on in the pair
+ *     that request received. The caller leaves the session cookies alone,
+ *     writes `mark` to `RACED_COOKIE` and lets the browser retry with what it
+ *     holds next. Returned once per token: when the browser already carries
+ *     this token's mark it comes back as `failed` (see `RACED_COOKIE` in
+ *     `lib/session-refresh.ts` for why a repeat clears the spent token).
+ */
+export type RefreshOutcome =
+  | { kind: 'ok'; fresh: Awaited<ReturnType<RekeyBrowserClient['refresh']>> }
+  | { kind: 'busy'; retryAfterSeconds: number }
+  | { kind: 'raced'; mark: string }
+  | { kind: 'failed'; interrupted?: boolean };
+
+async function exchange(client: RekeyBrowserClient, refresh: string): Promise<RefreshOutcome> {
+  try {
+    return { kind: 'ok', fresh: await client.refresh(refresh) };
+  } catch (err) {
+    if (err instanceof RekeyError && err.statusCode === 429) {
+      return { kind: 'busy', retryAfterSeconds: err.retryAfterSeconds ?? 5 };
+    }
+    if (err instanceof RekeyError && isGatewayFailure(err)) {
+      return { kind: 'busy', retryAfterSeconds: err.retryAfterSeconds ?? 5 };
+    }
+    // The browser client lets `fetch`'s own error through. A refused
+    // connection or a failed DNS lookup never reached the API: every self-host
+    // redeploy, where the portal talks to the API container directly.
+    if (neverConnected(err instanceof RekeyError ? err.cause : err)) {
+      return { kind: 'busy', retryAfterSeconds: 5 };
+    }
+    // The one refusal that is not terminal, checked before the rest fall
+    // through to `failed`.
+    if (err instanceof RekeyError && err.statusCode === 401 && err.code === REFRESH_RACED_CODE) {
+      return { kind: 'raced', mark: await racedMark(refresh) };
+    }
+    // A refusal is a verdict on the token. Anything else (the API's own 5xx,
+    // a timeout, a dropped connection) may have come after the rotation.
+    const refused = err instanceof RekeyError && typeof err.statusCode === 'number' && err.statusCode < 500;
+    return refused ? { kind: 'failed' } : { kind: 'failed', interrupted: true };
+  }
 }
 
 /**
- * Resolve the signed-in end-user for `slug`, refreshing once on an expired
- * access token. Returns null when signed out. Cookie writes only land when
- * called from a server action / route handler (Next limitation).
+ * Spend `refresh` for a new pair. Only call it where the result can be
+ * written: a Server Action or a Route Handler.
  *
- * `cache()`d per request, which is the other half of the fix above: the layout,
- * the page and the login redirect guard all ask the same question during one
- * render, and without memoisation each one issued its own `getCurrentUser`
- * round-trip. Deduping the refresh stops the sign-outs; deduping this stops the
- * duplicate reads that provoke them.
+ * `seenMark` is the browser's `RACED_COOKIE` value, if any: the loop guard is
+ * per browser, so it is applied here rather than inside the exchange that
+ * concurrent callers share.
+ */
+export async function refreshPortalSession(
+  client: RekeyBrowserClient,
+  refresh: string,
+  seenMark?: string | null,
+): Promise<RefreshOutcome> {
+  const outcome = await sharedExchange(client, refresh);
+  if (outcome.kind === 'raced' && seenMark === outcome.mark) return { kind: 'failed' };
+  return outcome;
+}
+
+/** Set the raced-refresh loop guard for `slug`. Touches no session cookie. */
+export async function writeRacedMark(sink: CookieSink, slug: string, mark: string): Promise<void> {
+  sink.set(RACED_COOKIE, mark, await cookieOpts(slug, RACED_MARK_MAX_AGE_SECONDS));
+}
+
+function sharedExchange(client: RekeyBrowserClient, refresh: string): Promise<RefreshOutcome> {
+  // Hashed synchronously: nothing may await between this lookup and the
+  // insert below, or two concurrent callers could both miss and both rotate.
+  const key = createHash('sha256').update(refresh).digest('hex');
+  const existing = refreshExchanges.get(key);
+  if (existing) return existing;
+  const pending = exchange(client, refresh);
+  refreshExchanges.set(key, pending);
+  void pending.finally(() => {
+    if (refreshExchanges.get(key) === pending) refreshExchanges.delete(key);
+  });
+  return pending;
+}
+
+/**
+ * Can this context write cookies?
+ *
+ * Next seals the cookie jar outside a Server Action or Route Handler; `set` and
+ * `delete` both throw there. The probe deletes a cookie nobody sets. Same probe
+ * as `canWriteCookies` in `@rekey.dev/nextjs/server`, and asked for the same
+ * reason: BEFORE refreshing, because a refresh whose result cannot be stored
+ * leaves the browser holding a spent token, and its next request is a replay.
+ */
+async function canWriteCookies(jar: Awaited<ReturnType<typeof cookies>>): Promise<boolean> {
+  try {
+    jar.delete(PROBE_COOKIE);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Deleting a cookie nothing ever sets. */
+const PROBE_COOKIE = '__rekey_probe';
+
+/**
+ * `getPortalConfig` for a page render.
+ *
+ * When the lookup fails (the API is redeploying, or not listening) and the
+ * visitor holds a refresh cookie, this redirects to the refresh route instead
+ * of throwing. That route answers the 503 retry page with `Retry-After`, keeps
+ * the cookies, and once the API is back refreshes and returns the visitor to
+ * the page they asked for. Without a session there is nothing to keep, and the
+ * error propagates to the error page as before.
+ */
+export async function getPortalConfigOrRefresh(slug: string): Promise<PortalConfig | null> {
+  try {
+    return await getPortalConfig(slug);
+  } catch (err) {
+    if (err instanceof PortalConfigUnavailableError && (await getRefreshToken())) {
+      redirect(refreshRouteFor(slug, (await headers()).get(RETURN_TO_HEADER)));
+    }
+    throw err;
+  }
+}
+
+/**
+ * Resolve the signed-in end-user for `slug`. Returns null when signed out.
+ *
+ * **Never spends a refresh token it cannot store.** From a Server Component,
+ * which cannot write cookies, an expired access token is not refreshed here:
+ * the render redirects to `/<slug>/session/refresh`, which rotates, writes
+ * the cookies and comes back. The middleware sends most stale sessions there
+ * before anything renders; this covers an access cookie the API refused.
+ * From a Server Action or Route Handler it refreshes in place.
+ *
+ * A token minted in the last minute that the API still refuses is not sent
+ * round again, since that is the refresh route's own result and another lap
+ * would only rotate again. It reads as signed out.
+ *
+ * `cache()`d per request: the layout, the page and the login redirect guard
+ * all ask the same question during one render.
  */
 export const getPortalUser = cache(async (slug: string) => {
+  if (!(await getPortalConfigOrRefresh(slug))) return null;
   const client = await portalClientFor(slug);
   if (!client) return null;
   const access = await getAccessToken();
@@ -166,13 +319,27 @@ export const getPortalUser = cache(async (slug: string) => {
   }
   const refresh = await getRefreshToken();
   if (!refresh) return null;
-  try {
-    const fresh = await dedupedRefresh(client, refresh);
-    await setSession(slug, fresh.accessToken, fresh.refreshToken);
-    const user = await client.getCurrentUser(fresh.accessToken);
-    return user ? { user, accessToken: fresh.accessToken } : null;
-  } catch {
+  if (wasIssuedRecently(access)) return null;
+
+  const jar = await cookies();
+  if (!(await canWriteCookies(jar))) {
+    redirect(refreshRouteFor(slug, (await headers()).get(RETURN_TO_HEADER)));
+  }
+
+  const outcome = await refreshPortalSession(client, refresh, jar.get(RACED_COOKIE)?.value);
+  if (outcome.kind === 'busy') return null;
+  if (outcome.kind === 'raced') {
+    // Signed out for THIS request only, as with `busy`: the session cookies
+    // stay, so the next request carries the pair the winning request stored.
+    await writeRacedMark(jar, slug, outcome.mark);
+    return null;
+  }
+  if (outcome.kind === 'failed') {
     await clearSession(slug);
     return null;
   }
+  const { fresh } = outcome;
+  await setSession(slug, fresh.accessToken, fresh.refreshToken, fresh);
+  const user = await client.getCurrentUser(fresh.accessToken);
+  return user ? { user, accessToken: fresh.accessToken } : null;
 });

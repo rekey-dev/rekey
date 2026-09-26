@@ -245,8 +245,9 @@ export default async function LifecyclePage({
                 <strong>No production slots free.</strong> This workspace is already running its
                 limit of {promoteState.max} production application
                 {promoteState.max === 1 ? '' : 's'}. Disable a production application you are no
-                longer running to free its slot, or contact support to raise the limit. It cannot
-                be raised from the panel.
+                longer running to free its slot, or raise the limit. It cannot be raised from the
+                panel: on a self-hosted deployment a super-admin sets it, and on Rekey Cloud it
+                comes from the workspace&apos;s plan (see rekey.dev/pricing).
               </Banner>
             )}
 

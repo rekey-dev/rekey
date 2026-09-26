@@ -10,6 +10,12 @@ Rekey hosts **two MCP surfaces**:
    events). Two auth paths: OAuth 2.1 + PKCE with workspace picker at consent
    (preferred), or PAT-Bearer with an `rp_op_…` token (headless / non-browser).
 
+**On Rekey Cloud, the operator MCP is the one to connect an agent to**
+(`https://api.rekey.dev/api/v1/tenant/mcp`). The separate stdio package
+[`@rekey.dev/mcp`](../packages/mcp/README.md) is a third, local option, and its
+read tools need the deployment-wide `SUPER_ADMIN_KEY`, so it is self-host only.
+The same goes for [`@rekey.dev/cli`](../packages/cli/README.md).
+
 The full operator-facing guide is published at
 [**rekey.dev/docs/mcp**](https://rekey.dev/docs/mcp). This file is the
 repo-level cross-reference for developers working on the API itself.
@@ -83,6 +89,28 @@ For an Application with slug `<slug>`, given `PUBLIC_WEBHOOK_BASE_URL=https://ap
 The MCP endpoint replies `401` + `WWW-Authenticate: Bearer resource_metadata="<protected-resource-url>"`
 on unauthenticated calls, so any RFC-compliant MCP client auto-discovers the rest of the flow.
 
+### Introspection from your own MCP server
+
+If you run your own MCP server against Rekey-issued tokens, it calls
+introspection (`rekey.mcp.introspect(token)` in `@rekey.dev/node`) with the
+Application's **secret** key, typically on every tool call. That call counts
+against the secret key's own budget, the same one every other secret-key call
+spends: 30000 a minute per key by default (`RATE_LIMIT_API_KEY_MAX`, see
+[rate-limits.md](rate-limits.md)). It is not held to a sign-in limit, and one
+backend address serving every user is fine. A call without a valid secret key
+(none, a publishable key, a forged key) is answered `401 invalid_client` and
+counted against the caller's address at 100 a minute (`RATE_LIMIT_MAX`), where
+it also feeds the rejected-credential block.
+
+The answer is never cached on Rekey's side and is sent with
+`Cache-Control: no-store`, so a token Rekey has stopped honouring (the user
+erased, every session revoked, the organization binding no longer valid) reads
+`active: false` on the next call. If your volume is high enough to matter, you may cache an
+`active: true` answer in process for a few seconds (never past its `exp`),
+keyed by a hash of the token. That trades exactly that many seconds of
+revocation latency for fewer calls; do not cache for longer than you would
+accept a revoked token still being honoured.
+
 ## Scopes + grants
 
 | Field | Value |
@@ -141,6 +169,14 @@ personal too, even when the session has an active organization (`oid`):
 binding an organization is always an explicit choice, so a handoff integration
 written before this cannot start acting for a team without asking. It is a `400 INVALID_GRANT_REQUEST` on a grant without
 `mcp:account` or on an Application without organizations.
+
+A hosted authorize page (`authConfig.hostedAuthorizeUrl`) that uses the
+handoff must show a consent screen before it calls `/grant`: MCP clients
+register themselves, so a page that mints on arrival delivers a signed-in
+user's `mcp:account` grant to whichever client a link names.
+`POST /oauth/authorize/preview` returns what that screen needs (client name,
+confirmed redirect URI, granted scopes, signed-in account) and mints nothing.
+See [auth.md](auth.md#acting-as-an-openid-connect-provider-for-another-app).
 
 **Where it lives.** The authorization code (`oauth_auth_codes.organization_id`),
 then the refresh chain (`refresh_tokens.grant_organization_id`, carried across
@@ -355,7 +391,7 @@ workspace at consent.
 | Authorization (redirects the operator to the panel to sign in + pick a workspace) | `GET …/oauth/authorize` — **GET only**; `POST` here is a 404 |
 | Consent decision (the panel posts the operator's approval back) | `POST …/oauth/grant` — guarded by `requireTenantSession`, i.e. a panel **session** token; a PAT is deliberately not accepted, because consent is a human act |
 | Token (auth-code + refresh) | `POST …/oauth/token` |
-| Introspection (RFC 7662) | `POST …/oauth/introspect` |
+| Introspection (RFC 7662) | `POST …/oauth/introspect`, counted against the PAT's operator (600 a minute, `RATE_LIMIT_AUTHENTICATED_MAX`) |
 
 The consent screen names the **host the authorization code will be delivered to**
 — the registered `redirect_uri`'s origin — and marks it as not vouched for by

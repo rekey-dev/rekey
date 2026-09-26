@@ -12,11 +12,14 @@ const realSet = (n: string, v: string): void => void jar.set(n, v);
 const realDel = (n: string): void => void jar.delete(n);
 const setSpy = vi.fn(realSet);
 const delSpy = vi.fn(realDel);
-const cookies = {
+// A new jar object per test, as Astro makes one per request: the middleware
+// remembers what it resolved against the jar it was handed.
+const newJar = () => ({
   get: (n: string) => (jar.has(n) ? { value: jar.get(n)! } : undefined),
   set: setSpy,
   delete: delSpy,
-};
+});
+let cookies = newJar();
 
 class FakeRekeyError extends Error {
   constructor(public code: string) {
@@ -48,6 +51,7 @@ const USER = { id: 'u1', email: 'a@b.c' };
 
 beforeEach(() => {
   jar.clear();
+  cookies = newJar();
   // mockReset, not mockClear: a `mockImplementationOnce` that a test queued but
   // did not consume would otherwise fire inside the next one.
   setSpy.mockReset().mockImplementation(realSet);
@@ -58,15 +62,19 @@ beforeEach(() => {
 });
 
 describe('a bad afternoon must not cost everyone their session', () => {
-  it('keeps the refresh cookie when the API merely failed', async () => {
+  it('keeps the refresh cookie when the API refused before rotating', async () => {
+    // A rate limit is answered before the handler runs, so the token was not
+    // spent. The failure rules in full are in render-time-refresh.test.ts,
+    // against real AstroCookies and the real client.
     jar.set('rekey_refresh', 'r1');
-    refresh.mockRejectedValue(new FakeRekeyError('REQUEST_TIMEOUT'));
+    refresh.mockRejectedValue(new FakeRekeyError('RATE_LIMITED'));
 
-    await expect(getSession(cookies, req(), cfg)).rejects.toBeInstanceOf(FakeRekeyError);
+    await expect(getSession(cookies, req(), cfg, { refresh: true })).rejects.toBeInstanceOf(
+      FakeRekeyError,
+    );
     // The one credential that can recover the session is still there.
     expect(jar.get('rekey_refresh')).toBe('r1');
-    // The write probe deletes a cookie nothing sets; no session cookie goes.
-    expect(delSpy.mock.calls.map((c) => c[0])).not.toContain('rekey_refresh');
+    expect(delSpy).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -80,24 +88,8 @@ describe('a bad afternoon must not cost everyone their session', () => {
     jar.set('rekey_refresh', 'r1');
     refresh.mockRejectedValue(new FakeRekeyError(code));
 
-    await expect(getSession(cookies, req(), cfg)).resolves.toBeNull();
+    await expect(getSession(cookies, req(), cfg, { refresh: true })).resolves.toBeNull();
     expect(jar.has('rekey_refresh')).toBe(false);
-  });
-
-  it('never spends a refresh token it cannot store the replacement for', async () => {
-    // Astro throws from cookies.set() once the response has started. Spending
-    // the token anyway leaves the browser holding a revoked credential, and
-    // replaying it revokes every session the user has on every device.
-    jar.set('rekey_refresh', 'r1');
-    setSpy.mockImplementationOnce(() => {
-      throw new Error('ResponseSentError');
-    });
-    delSpy.mockImplementationOnce(() => {
-      throw new Error('ResponseSentError');
-    });
-
-    await expect(getSession(cookies, req(), cfg)).resolves.toBeNull();
-    expect(refresh).not.toHaveBeenCalled();
   });
 
   it('refreshes on a wrong-application access token instead of looping forever', async () => {
@@ -108,7 +100,7 @@ describe('a bad afternoon must not cost everyone their session', () => {
       .mockResolvedValue(USER);
     refresh.mockResolvedValue({ accessToken: 'a2', refreshToken: 'r2' });
 
-    await expect(getSession(cookies, req(), cfg)).resolves.toEqual({
+    await expect(getSession(cookies, req(), cfg, { refresh: true })).resolves.toEqual({
       user: USER,
       accessToken: 'a2',
     });
@@ -204,6 +196,43 @@ describe('safePath', () => {
     }
   });
 
+  // Every one of these passes a "starts with one slash" check on the INPUT and
+  // parses to the pathname `//evil.com`, because WHATWG URL collapses dot
+  // segments. Returning the parsed path handed the browser a protocol-relative
+  // URL to another host. Only the check on the rebuilt output catches them.
+  it.each(['/..//evil.com', '/x/..//evil.com', '/%2e%2e//evil.com', '/.//evil.com'])(
+    'refuses %s, which parses to //evil.com',
+    (evil) => {
+      expect(new URL(evil, 'http://internal.invalid').pathname).toBe('//evil.com');
+      expect(safePath(evil, '/home')).toBe('/home');
+    },
+  );
+
+  it.each([
+    '/./\\evil.com',
+    '/\\evil.com',
+    '/%09/evil.com',
+    '/\t/evil.com',
+    '/\r\n/evil.com',
+    '/..%2f/evil.com',
+    '/..%5C/evil.com',
+    'evil.com',
+    'javascript:alert(1)',
+  ])('refuses %j', (evil) => {
+    expect(safePath(evil, '/home')).toBe('/home');
+  });
+
+  it.each([
+    ['/dashboard', '/dashboard'],
+    ['/dashboard?tab=usage&x=1', '/dashboard?tab=usage&x=1'],
+    ['/docs/page#section', '/docs/page#section'],
+    ['/a/b?q=1#frag', '/a/b?q=1#frag'],
+    ['/a/../b', '/b'],
+    ['/', '/'],
+  ])('keeps the same-site path %s', (input, expected) => {
+    expect(safePath(input, '/home')).toBe(expected);
+  });
+
   it('keeps a genuine path and its query', () => {
     expect(safePath('/dashboard?tab=usage', '/home')).toBe('/dashboard?tab=usage');
   });
@@ -234,7 +263,10 @@ describe('the happy path still works', () => {
     getCurrentUser.mockRejectedValueOnce(new FakeRekeyError('USER_TOKEN_INVALID')).mockResolvedValue(USER);
     refresh.mockResolvedValue({ accessToken: 'a2', refreshToken: 'r2' });
 
-    expect(await getSession(cookies, req(), cfg)).toEqual({ user: USER, accessToken: 'a2' });
+    expect(await getSession(cookies, req(), cfg, { refresh: true })).toEqual({
+      user: USER,
+      accessToken: 'a2',
+    });
     expect(jar.get('rekey_access')).toBe('a2');
     expect(jar.get('rekey_refresh')).toBe('r2');
   });

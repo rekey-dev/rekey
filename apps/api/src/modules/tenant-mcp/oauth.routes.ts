@@ -597,7 +597,11 @@ export async function operatorMcpOAuthRoutes(app: FastifyInstance): Promise<void
       //
       // Introspection is a resource-server call, and our resource server is
       // this API, so this has no external consumers to break.
-      config: { rateLimit: authRateLimit(30), acceptsForm: true },
+      //
+      // No route rate limit, like the per-app twin: introspection guesses no
+      // secret, and `resolveOperatorToken` runs at onRequest, so the global
+      // limiter counts the call against the PAT's operator.
+      config: { acceptsForm: true },
       onRequest: resolveOperatorToken,
       schema: {
         tags: ['MCP · Operator · OAuth'],

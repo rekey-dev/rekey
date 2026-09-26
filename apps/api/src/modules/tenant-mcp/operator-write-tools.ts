@@ -870,7 +870,9 @@ export const operatorWriteTools: OperatorTool[] = [
             'dead end for users who sign in with Google and have no password. Null or "" ' +
             'turns delegation back off. SECURITY: this is a redirect target in a live ' +
             "sign-in flow, so only ever set it to a page the application's own operator " +
-            'controls. The API refuses to delegate to its own authorize endpoint.',
+            'controls. The API refuses to delegate to its own authorize endpoint. That page ' +
+            'must show a consent screen (POST /oauth/authorize/preview) before it calls ' +
+            '/oauth/authorize/grant.',
         },
         organizationsEnabled: { type: 'boolean' },
         signupMode: { type: 'string', enum: ['public', 'secret_only', 'invite_only'] },

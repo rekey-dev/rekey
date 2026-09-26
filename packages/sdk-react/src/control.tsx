@@ -112,8 +112,8 @@ export function Protect({
 }
 
 /**
- * Renders children only while the provider is resolving the session, the
- * `<ClerkLoading>` equivalent. Pair with `<RekeyLoaded>`.
+ * Renders children only while the provider is resolving the session. Pair
+ * with `<RekeyLoaded>`.
  *
  * @example
  * ```tsx
@@ -126,7 +126,7 @@ export function RekeyLoading({ children }: { children: React.ReactNode }): React
   return loading ? <>{children}</> : null;
 }
 
-/** Renders children once the provider has resolved the session (the `<ClerkLoaded>` equivalent). */
+/** Renders children once the provider has resolved the session. Pair with `<RekeyLoading>`. */
 export function RekeyLoaded({ children }: { children: React.ReactNode }): React.JSX.Element | null {
   const { loading } = useUser();
   return loading ? null : <>{children}</>;

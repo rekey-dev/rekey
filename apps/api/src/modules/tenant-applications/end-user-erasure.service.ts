@@ -34,7 +34,7 @@
 
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { emitDetached } from '../webhooks/webhook.service.js';
+import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
 import { clearFailures, euLoginLockScope } from '../../lib/brute-force.js';
 
 /** Non-routable tombstone address. `.invalid` is reserved (RFC 2606) so it can never deliver. */
@@ -185,6 +185,9 @@ export async function eraseEndUser(args: {
   // Captured inside the tx, used after it commits: the brute-force limiter is
   // in Redis, so clearing the lock cannot join the transaction.
   let erasedEmail: string | null = null;
+  // `user.erased` rows, written as the last statement of the erasure's own
+  // transaction and kicked after it commits.
+  let erasedDeliveryIds: string[] = [];
 
   const result = await prisma.$transaction(async (tx) => {
     // Re-read inside the tx, guards against a concurrent erase / delete.
@@ -462,6 +465,20 @@ export async function eraseEndUser(args: {
       },
     });
 
+    // Outbound webhook, only on a real transition (the no-op returned above).
+    // Enqueued AFTER the delivery scrub in step 2, so this row is not one the
+    // scrub rewrites; it carries the id and the time and nothing personal.
+    erasedDeliveryIds = await enqueueEvent(tx, {
+      applicationId,
+      type: 'user.erased',
+      data: {
+        user: {
+          id: endUserId,
+          erasedAt: erasedAt.toISOString(),
+        },
+      },
+    });
+
     return {
       erased: true,
       erasedAt: erasedAt.toISOString(),
@@ -511,20 +528,7 @@ export async function eraseEndUser(args: {
     await clearFailures(euLoginLockScope(applicationId, erasedEmail));
   }
 
-  // Outbound webhook, only on a real transition (not the idempotent no-op).
-  // Fire-and-forget, same contract as the auth emit-sites.
-  if (result.erased) {
-    emitDetached({
-      applicationId,
-      type: 'user.erased',
-      data: {
-        user: {
-          id: endUserId,
-          erasedAt: result.erasedAt,
-        },
-      },
-    });
-  }
+  kickDeliveries(erasedDeliveryIds);
 
   return result;
 }

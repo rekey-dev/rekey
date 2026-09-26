@@ -60,7 +60,7 @@ describe('request deadline against a black-hole server', () => {
     expect(elapsed).toBeGreaterThanOrEqual(200);
   });
 
-  it('defaults to 10s — the same deadline the API uses for its own webhooks', () => {
+  it('defaults to 10s', () => {
     expect(DEFAULT_TIMEOUT_MS).toBe(10_000);
   });
 

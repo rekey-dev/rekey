@@ -92,8 +92,8 @@ deliberate:
 That second point matters on a deployment running `OPERATOR_SIGNUP_MODE=invite`
 (which is what Rekey Cloud runs). There, an assertion can only ever *sign in* an
 operator that already exists — something else must have provisioned it. On Rekey
-Cloud that something is the private billing service, at payment time. Provision
-first, then assert.
+Cloud that something is the private billing service, when the buyer starts the
+free plan or a paid subscription activates. Provision first, then assert.
 
 ## Scope and limits
 

@@ -11,6 +11,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { RELEASE_VERSION, resolveCommit } from '../src/lib/build-info.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
 
@@ -45,7 +46,39 @@ describe('admin surface — end to end', () => {
     // here, and restarting the API cannot fix a Postgres or Redis outage.
     const res = await app.inject({ method: 'GET', url: '/health/live' });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ status: 'ok', service: 'rekey-api' });
+    expect(res.json()).toEqual({
+      status: 'ok',
+      service: 'rekey-api',
+      version: RELEASE_VERSION,
+      commit: expect.stringMatching(/^([0-9a-f]{7,40}|unknown)$/),
+    });
+  });
+
+  it('GET /health/live and /health/ready name the running build', async () => {
+    // The version is the published packages' version, so a deploy can be
+    // compared against npm from outside. apps/api's own package.json is 0.0.0,
+    // which is the value this must never report.
+    const live = (await app.inject({ method: 'GET', url: '/health/live' })).json();
+    const ready = (await app.inject({ method: 'GET', url: '/health/ready' })).json();
+    expect(live.version).toBe(RELEASE_VERSION);
+    expect(live.version).not.toBe('0.0.0');
+    expect(ready.version).toBe(live.version);
+    expect(ready.commit).toBe(live.commit);
+  });
+
+  it('reports a commit only when REKEY_COMMIT is a hex SHA', () => {
+    // The route is public and unauthenticated, so it echoes nothing that is
+    // not shaped like a commit.
+    expect(resolveCommit('A8DD9E97')).toBe('a8dd9e97');
+    expect(resolveCommit(' a8dd9e97c0ffee1234567890abcdef1234567890 \n')).toBe(
+      'a8dd9e97c0ffee1234567890abcdef1234567890',
+    );
+    expect(resolveCommit(undefined)).toBe('unknown');
+    expect(resolveCommit('')).toBe('unknown');
+    expect(resolveCommit('unknown')).toBe('unknown');
+    expect(resolveCommit('abc12')).toBe('unknown');
+    expect(resolveCommit('main')).toBe('unknown');
+    expect(resolveCommit('<script>alert(1)</script>')).toBe('unknown');
   });
 
   it('GET /health → ok, and reports which dependencies it checked', async () => {

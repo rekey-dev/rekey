@@ -55,6 +55,7 @@ import { RekeyError } from '../../lib/error.js';
 import { assertMetadataWithinLimit } from '../../lib/metadata-limit.js';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
+import { withSavepoint } from '../../lib/savepoint.js';
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const INVITATION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
@@ -438,6 +439,9 @@ export const organizationsService = {
     rawToken: string;
   }): Promise<MembershipDto> {
     const tokenHash = hashInviteToken(args.rawToken);
+    // Before the transaction: the catalog is read through the global client,
+    // which inside the callback would hold a second pool connection.
+    const usableRoles = await organizationRolesService.usableNames(args.application.id);
     return prisma.$transaction(async (tx) => {
       const inv = await tx.organizationInvitation.findUnique({
         where: { tokenHash },
@@ -493,7 +497,7 @@ export const organizationsService = {
       });
       // The role may have been disabled between issuing and redeeming. Joining
       // at a role that immediately refuses is worse than saying so.
-      if (!(await organizationRolesService.isUsable(args.application.id, inv.role))) {
+      if (!usableRoles.has(inv.role)) {
         throw new RekeyError({
           statusCode: 400,
           code: 'ORGANIZATION_ROLE_DISABLED',
@@ -506,13 +510,17 @@ export const organizationsService = {
         membership = existing;
       } else {
         try {
-          membership = await tx.organizationMembership.create({
-            data: {
-              organizationId: inv.organizationId,
-              endUserId: args.actorEndUserId,
-              role: inv.role,
-            },
-          });
+          // Inside a savepoint so the P2002 below leaves the transaction usable
+          // for the read that recovers from it.
+          membership = await withSavepoint(tx, () =>
+            tx.organizationMembership.create({
+              data: {
+                organizationId: inv.organizationId,
+                endUserId: args.actorEndUserId,
+                role: inv.role,
+              },
+            }),
+          );
         } catch (e) {
           if ((e as { code?: string }).code === 'P2002') {
             membership = await tx.organizationMembership.findUniqueOrThrow({

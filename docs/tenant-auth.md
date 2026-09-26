@@ -16,7 +16,7 @@ Tenant (workspace)
   └── many Application (the customer-facing products this workspace ships)
 ```
 
-One operator can belong to many Tenants. The active workspace is encoded in the JWT (`tid` claim), not the row — switching workspaces re-issues tokens with a different `tid`.
+One operator can belong to many Tenants. The active workspace is encoded in the JWT (`tid` claim), not the row — switching workspaces re-issues tokens with a different `tid`. The session's refresh token remembers it too, so a refresh keeps the operator in the workspace they switched to (or the one an invitation accept put them in); if they have since been removed from it, the refresh falls back to their oldest workspace.
 
 ## Roles
 
@@ -200,6 +200,14 @@ one session (`DELETE /tenant/auth/sessions/:id`) does not stamp: the access
 token carries the session in its `sid` claim and is refused once that session
 is revoked, while the operator's other sessions and MCP connections keep
 working.
+
+Refresh-token reuse means a rotated token presented again. The one exception
+is a race: a token replayed within `REFRESH_TOKEN_REUSE_WINDOW_SECONDS` (15 by
+default) of its rotation, while its replacement is still unused, answers
+`REFRESH_TOKEN_RACED` and revokes nothing (two panel tabs or two panel
+instances refreshing at once, a retry after a lost response). Nothing is
+issued to the replayer, and the replay is recorded as an
+`operator.refresh_token_raced` security event.
 
 ## Endpoints
 
