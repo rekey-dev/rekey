@@ -19,6 +19,7 @@ import { z } from 'zod';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { mfaService } from './mfa.service.js';
 import { RekeyError } from '../../lib/error.js';
+import { mfaCodeReusedError } from '../../lib/mfa-replay.js';
 import { requirePublishableOrSecretKey, requireScopeByMethod } from '../../middleware/api-key-auth.js';
 import { requireUserSession } from '../../middleware/user-session.js';
 import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
@@ -185,7 +186,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...USER_SESSION_ERRORS,
-            401: `${USER_SESSION_ERRORS[401]}; or MFA_CODE_INVALID — re-enrolling from a browser over an existing enrollment requires a current TOTP or backup code.`,
+            401: `${USER_SESSION_ERRORS[401]}; or MFA_CODE_INVALID: re-enrolling from a browser over an existing enrollment requires a current TOTP or backup code; or MFA_CODE_REUSED: the TOTP code was already accepted, wait for the next one.`,
             403: `${USER_SESSION_ERRORS[403]}; or MFA_NOT_ENABLED — this Application's authConfig.mfa policy is "off"; or ${IMPERSONATION_DESC}`,
           }),
         },
@@ -200,11 +201,12 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
       // impossible.
       if (req.authKind === 'publishable' && (await mfaService.isEnrolled(req.endUser!.id))) {
         const body = (req.body ?? {}) as { code?: unknown };
-        const ok =
+        const outcome =
           typeof body.code === 'string'
-            ? await mfaService.verify({ endUserId: req.endUser!.id, code: body.code })
-            : false;
-        if (!ok) {
+            ? await mfaService.check({ endUserId: req.endUser!.id, code: body.code })
+            : 'invalid';
+        if (outcome === 'reused') throw mfaCodeReusedError('step-up');
+        if (outcome !== 'accepted') {
           // Same code + message shape as /disable: clients already switch on
           // MFA_CODE_INVALID, and this is the same demand for the same reason.
           throw new RekeyError({
@@ -258,7 +260,8 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
             400: 'MFA_NOT_INITIATED — call POST /mfa/setup before /mfa/setup-confirm.',
             ...USER_SESSION_ERRORS,
             403: `${USER_SESSION_ERRORS[403]}; or ${IMPERSONATION_DESC}`,
-            422: 'MFA_CODE_INVALID — the TOTP code did not verify.',
+            422:
+              'MFA_CODE_INVALID: the TOTP code did not verify; or MFA_CODE_REUSED: the code was already accepted, wait for the next one.',
           }),
         },
       },
@@ -288,7 +291,8 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
           { apiKey: [], userToken: [] },
         ],
         summary: 'Verify a TOTP or backup code (step-up auth). Returns { ok: bool }.',
-        description: 'Backup codes are single-use, consumed on success.',
+        description:
+          'Every code is single-use: a backup code is consumed on success, and a TOTP code is refused (`ok: false`) once it, or a later code, has been accepted for this user.',
         body: {
           type: 'object',
           required: ['code'],
@@ -365,7 +369,7 @@ export async function mfaRoutes(app: FastifyInstance): Promise<void> {
           ),
           ...errs({
             ...USER_SESSION_ERRORS,
-            401: `${USER_SESSION_ERRORS[401]}; or MFA_CODE_INVALID — browser callers must send a current TOTP or backup code to disable an enrolled factor.`,
+            401: `${USER_SESSION_ERRORS[401]}; or MFA_CODE_INVALID: browser callers must send a current TOTP or backup code to disable an enrolled factor; or MFA_CODE_REUSED: the TOTP code was already accepted, wait for the next one.`,
             403: `${USER_SESSION_ERRORS[403]}; or ${IMPERSONATION_DESC}`,
           }),
         },

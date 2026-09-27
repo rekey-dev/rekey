@@ -21,7 +21,7 @@ export function EmailCredentialsForm({
   currentProvider,
 }: {
   action: (formData: FormData) => void | Promise<void>;
-  defaults: { fromAddress: string; fromName: string; replyTo: string };
+  defaults: { fromAddress: string };
   hasCustomCredentials: boolean;
   currentProvider: Provider | null;
 }): React.JSX.Element {
@@ -94,14 +94,9 @@ export function EmailCredentialsForm({
           <span className="text-sm font-medium">From address</span>
           <input type="email" name="fromAddress" required defaultValue={defaults.fromAddress} placeholder="hello@yourdomain.com" className={inputCls} />
         </label>
-        <label className="block space-y-1.5">
-          <span className="text-sm font-medium">From name (optional)</span>
-          <input type="text" name="fromName" defaultValue={defaults.fromName} placeholder="Acme Inc" className={inputCls} />
-        </label>
-        <label className="block space-y-1.5">
-          <span className="text-sm font-medium">Reply-To (optional)</span>
-          <input type="email" name="replyTo" defaultValue={defaults.replyTo} placeholder="support@yourdomain.com" className={inputCls} />
-        </label>
+        <p className="self-end text-xs text-[var(--color-muted-fg)]">
+          The sender name and Reply-To are set in Sender, above.
+        </p>
       </div>
 
       <SubmitButton pendingLabel="Saving credentials…">

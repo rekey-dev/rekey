@@ -14,6 +14,7 @@
 import Stripe from 'stripe';
 import { RekeyError } from '../../../lib/error.js';
 import { planNotRegisteredError } from '../../plans/plan-registration.js';
+import { STRIPE_API_VERSION } from './stripe-api-version.js';
 import type {
   BillingProvider,
   CancelSubscriptionInput,
@@ -54,7 +55,7 @@ export class RealStripeProvider implements BillingProvider {
 
   constructor(private readonly creds: RealStripeCreds) {
     this.stripe = new Stripe(creds.apiKey, {
-      apiVersion: '2024-11-20.acacia' as Stripe.LatestApiVersion,
+      apiVersion: STRIPE_API_VERSION as Stripe.LatestApiVersion,
       // The SDK default is 80 seconds. Every call from this class is made
       // while an operator or an end-user is waiting on an HTTP response, and
       // 80s of holding a handler open is indistinguishable from an outage
@@ -209,9 +210,11 @@ export class RealStripeProvider implements BillingProvider {
 
     let session: Stripe.Checkout.Session;
     try {
+      // No `payment_method_types`: Checkout offers what the account enables
+      // (Link, wallets, local methods). Delayed methods complete unpaid, which
+      // the webhook translator holds until `async_payment_succeeded`.
       session = await this.stripe.checkout.sessions.create({
         mode: 'subscription',
-        payment_method_types: ['card'],
         line_items: [{ price: priceId, quantity: 1 }],
         customer_email: input.endUser.email,
         success_url: input.successUrl,
@@ -264,7 +267,6 @@ export class RealStripeProvider implements BillingProvider {
     try {
       session = await this.stripe.checkout.sessions.create({
         mode: 'payment',
-        payment_method_types: ['card'],
         line_items: [
           {
             quantity: 1,
@@ -312,10 +314,15 @@ export class RealStripeProvider implements BillingProvider {
   async registerWebhook(publicUrl: string): Promise<{ secret?: string; webhookId?: string }> {
     const enabledEvents: Stripe.WebhookEndpointCreateParams.EnabledEvent[] = [
       'checkout.session.completed',
+      // Checkout offers whatever methods the account enables, and a delayed
+      // one (bank debits, vouchers) completes the session unpaid. This is
+      // when its money actually arrives.
+      'checkout.session.async_payment_succeeded',
       'customer.subscription.updated',
       'customer.subscription.deleted',
       'invoice.paid',
       'invoice.payment_failed',
+      'charge.refunded',
     ];
     const existing = await this.stripe.webhookEndpoints.list({ limit: 100 });
     const match = existing.data.find((e) => e.url === publicUrl);
@@ -324,6 +331,7 @@ export class RealStripeProvider implements BillingProvider {
     }
     const created = await this.stripe.webhookEndpoints.create({
       url: publicUrl,
+      api_version: STRIPE_API_VERSION,
       enabled_events: enabledEvents,
       description: 'Rekey (auto-configured)',
     });

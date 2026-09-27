@@ -1,9 +1,54 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { rejectMalformedActionOrigin } from '@rekey.dev/nextjs/middleware';
+import { checkoutTokenMode } from '@rekey.dev/shared-types/checkout';
 import { RETURN_TO_HEADER, returnPathOf, staleSessionRedirect } from '@/lib/session-refresh';
+import {
+  buildCheckoutCsp,
+  CHECKOUT_CSP_HEADER,
+  CHECKOUT_PATH,
+  FRAME_GUARD_CSP,
+  NONCE_HEADER,
+} from '@/lib/checkout-csp';
 
 const ACCESS_COOKIE = 'rekey_portal_access';
 const REFRESH_COOKIE = 'rekey_portal_refresh';
+
+/**
+ * Phase 1 serves PayPal only, and the token does not name its processor. The
+ * page itself refuses to load processor scripts for any other provider.
+ */
+const CHECKOUT_PAGE_PROVIDER = 'paypal';
+
+/**
+ * The checkout page gets its own treatment: no portal session handling (the
+ * buyer arrives from the operator's app, not a portal sign-in), a fresh nonce
+ * per request, and a CSP naming only this session's processor and mode.
+ */
+function checkoutResponse(req: NextRequest, token: string): NextResponse {
+  const nonce = btoa(crypto.randomUUID());
+  const csp = buildCheckoutCsp({ nonce, provider: CHECKOUT_PAGE_PROVIDER, mode: checkoutTokenMode(token) });
+  const headers = new Headers(req.headers);
+  headers.set(NONCE_HEADER, nonce);
+  // Next reads the nonce for its own scripts from the REQUEST's
+  // `content-security-policy` header, falling back to the report-only one,
+  // and a response CSP set below reaches that lookup too. So the full policy
+  // goes on the enforcing request header name whatever the response sends,
+  // or the frame guard's nonce-less policy wins and Next's scripts ship
+  // without a nonce.
+  headers.set('content-security-policy', csp);
+  headers.set(CHECKOUT_CSP_HEADER.toLowerCase(), csp);
+  const res = NextResponse.next({ request: { headers } });
+  res.headers.set(CHECKOUT_CSP_HEADER, csp);
+  // No second, enforcing Content-Security-Policy on this response: Next takes
+  // the nonce for its own scripts from a response CSP set here in preference
+  // to the request header above, so a nonce-less frame guard strips every
+  // Next script of its nonce (seen in a real render). While the page policy
+  // only reports, `X-Frame-Options: DENY` (next.config.mjs) refuses framing.
+  res.headers.set('Referrer-Policy', 'no-referrer');
+  res.headers.set('Cache-Control', 'no-store');
+  res.headers.set('X-Robots-Tag', 'noindex, nofollow');
+  return res;
+}
 
 /**
  * Three jobs, in this order, all before any page or action runs:
@@ -20,11 +65,29 @@ const REFRESH_COOKIE = 'rekey_portal_refresh';
  *     `lib/session-refresh.ts`.
  *   - `X-Rekey-Return-To` is set to the requested path, replacing anything the
  *     client sent, so a render that needs a refresh can name where to return.
+ *
+ * Checkout paths skip the last two and get `checkoutResponse` instead.
  */
 export function middleware(req: NextRequest): NextResponse {
   const refused = rejectMalformedActionOrigin(req);
-  if (refused) return refused;
+  if (refused) return guardFraming(refused);
 
+  const checkout = CHECKOUT_PATH.exec(req.nextUrl.pathname);
+  if (checkout) return checkoutResponse(req, checkout[1]!);
+  return guardFraming(portalResponse(req));
+}
+
+/**
+ * Every portal response refuses to be framed. Set here rather than in
+ * next.config.mjs so the checkout page's own policy is the only
+ * Content-Security-Policy it carries once that policy enforces.
+ */
+function guardFraming(res: NextResponse): NextResponse {
+  res.headers.set('Content-Security-Policy', FRAME_GUARD_CSP);
+  return res;
+}
+
+function portalResponse(req: NextRequest): NextResponse {
   const refreshAt = staleSessionRedirect({
     method: req.method,
     url: req.nextUrl,

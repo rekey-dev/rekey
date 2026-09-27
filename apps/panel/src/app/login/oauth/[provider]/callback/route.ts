@@ -13,6 +13,8 @@ import { type NextRequest, NextResponse } from 'next/server';
 import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE, sessionCookieMaxAges } from '@/lib/api';
 import { cookieSecure } from '@/lib/cookie-secure';
 import { safeNext } from '@/lib/safe-next';
+import { normalizeErrorCode } from '@/lib/error-code';
+import { LOGIN_ERROR_MESSAGES } from '../../../error-messages';
 
 type CallbackResult =
   | { mfaRequired: true; mfaChallengeToken: string }
@@ -88,7 +90,7 @@ export async function GET(
       { code, state },
     );
   } catch (err) {
-    if (err instanceof PanelApiError) return fail(err.code);
+    if (err instanceof PanelApiError) return fail(normalizeErrorCode(err.code, LOGIN_ERROR_MESSAGES));
     throw err;
   }
 

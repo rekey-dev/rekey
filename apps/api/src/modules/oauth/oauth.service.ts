@@ -30,6 +30,7 @@ import {
   type SignInOutcome,
 } from '../auth/auth.service.js';
 import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
+import { sendWelcomeEmail, userSnapshot, welcomeTiming } from '../auth/user-lifecycle.js';
 
 export interface OAuthPublicConfigEntry {
   clientId: string;
@@ -55,35 +56,75 @@ function decryptedSecrets(application: Application): Record<string, { clientSecr
   return decryptJson<Record<string, { clientSecret: string }>>(application.oauthCredentialsCiphertext);
 }
 
-function buildProviderConfig(
-  application: Application,
-  providerName: string,
-): OAuthProviderConfig {
+type ProviderResolution =
+  | { ok: true; config: OAuthProviderConfig }
+  | { ok: false; message: string; fix: string };
+
+/**
+ * The one rule for "this Application can start a sign-in with this provider".
+ * `/:provider/start`, the callback, linking, and the public provider list all
+ * go through it, so a provider is listed exactly when starting it would work.
+ */
+function resolveProviderConfig(application: Application, providerName: string): ProviderResolution {
+  const configUrl = `PUT /api/v1/tenant/applications/${application.id}/oauth-config/${providerName}`;
   const pub = publicConfig(application, providerName);
   if (!pub) {
-    throw new RekeyError({
-      statusCode: 400,
-      code: 'OAUTH_PROVIDER_NOT_CONFIGURED',
+    return {
+      ok: false,
       message: `Application "${application.slug}" has no "${providerName}" OAuth config.`,
-      fix: `Configure it via PUT /api/v1/tenant/applications/${application.id}/oauth-config.`,
-    });
+      fix: `Configure it via ${configUrl}.`,
+    };
   }
-  const secrets = decryptedSecrets(application);
-  const providerSecrets = secrets[providerName];
-  if (!providerSecrets) {
-    throw new RekeyError({
-      statusCode: 400,
-      code: 'OAUTH_PROVIDER_NOT_CONFIGURED',
+  const clientSecret = decryptedSecrets(application)[providerName]?.clientSecret;
+  if (!clientSecret) {
+    return {
+      ok: false,
       message: `Application "${application.slug}" has no clientSecret for "${providerName}".`,
-      fix: `Set the secret via PUT /api/v1/tenant/applications/${application.id}/oauth-config.`,
-    });
+      fix: `Set the secret via ${configUrl}.`,
+    };
+  }
+  if (providerName === 'oidc' && !pub.issuerUrl) {
+    return {
+      ok: false,
+      message: `Application "${application.slug}" has an "oidc" OAuth config with no issuerUrl.`,
+      fix: `Set issuerUrl via ${configUrl}.`,
+    };
   }
   return {
-    clientId: pub.clientId,
-    redirectUri: pub.redirectUri,
-    clientSecret: providerSecrets.clientSecret,
-    ...(pub.issuerUrl !== undefined && { issuerUrl: pub.issuerUrl }),
+    ok: true,
+    config: {
+      clientId: pub.clientId,
+      redirectUri: pub.redirectUri,
+      clientSecret,
+      ...(pub.issuerUrl !== undefined && { issuerUrl: pub.issuerUrl }),
+    },
   };
+}
+
+/**
+ * Whether an end-user can sign in with `providerName` on this Application:
+ * the provider is registered and its config is complete.
+ *
+ * @example
+ * ```ts
+ * usableProvider(application, 'google'); // true once client id + secret are set
+ * ```
+ */
+export function usableProvider(application: Application, providerName: string): boolean {
+  return getOAuthProvider(providerName) !== null && resolveProviderConfig(application, providerName).ok;
+}
+
+function buildProviderConfig(application: Application, providerName: string): OAuthProviderConfig {
+  const resolved = resolveProviderConfig(application, providerName);
+  if (!resolved.ok) {
+    throw new RekeyError({
+      statusCode: 400,
+      code: 'OAUTH_PROVIDER_NOT_CONFIGURED',
+      message: resolved.message,
+      fix: resolved.fix,
+    });
+  }
+  return resolved.config;
 }
 
 export const oauthService = {
@@ -170,7 +211,7 @@ export const oauthService = {
           fix: 'Sign in to the Application this account belongs to, or use a different provider account.',
         });
       }
-      return issueSessionOrMfaChallenge(args.application, existing.endUser, args.device);
+      return issueSessionOrMfaChallenge(args.application, existing.endUser, { via: 'oauth' }, args.device);
     }
 
     // 2. Match by email within this Application → link + sign in.
@@ -200,7 +241,7 @@ export const oauthService = {
             email: identity.email,
           },
         });
-        return issueSessionOrMfaChallenge(args.application, matchedByEmail, args.device);
+        return issueSessionOrMfaChallenge(args.application, matchedByEmail, { via: 'oauth' }, args.device);
       }
     }
 
@@ -236,6 +277,7 @@ export const oauthService = {
     assertSignupAllowed(
       AuthConfigSchema.parse(args.application.authConfig),
       args.authKind,
+      identity.email,
     );
     // Before the row exists, for the same reason sign-up asks first.
     assertDeviceBindingSatisfiable(args.application, args.device);
@@ -252,6 +294,7 @@ export const oauthService = {
     // ALREADY-EXISTING user returned above and is never gated.
     await assertEndUserQuota(args.application.tenantId);
     const email = identity.email;
+    const welcome = welcomeTiming(args.application, identity.emailVerified);
     // One unit: the user, the identity that signs them in, and the
     // `user.created` that announces them. Written separately, a failed
     // identity insert left a user with no way in, and a crash after the
@@ -265,6 +308,7 @@ export const oauthService = {
           // EndUser.emailVerified column was previously hardcoded `true`
           // which silently laundered unverified emails into trusted state.
           emailVerified: identity.emailVerified,
+          welcomeEmailPending: welcome === 'pending',
         },
       });
       await tx.oAuthIdentity.create({
@@ -281,14 +325,7 @@ export const oauthService = {
         applicationId: args.application.id,
         type: 'user.created',
         data: {
-          user: {
-            id: user.id,
-            email: user.email,
-            emailVerified: user.emailVerified,
-            role: user.role,
-            createdAt: user.createdAt.toISOString(),
-            metadata: user.metadata ?? null,
-          },
+          user: userSnapshot(user),
           via: 'oauth',
           provider: args.providerName,
         },
@@ -296,6 +333,9 @@ export const oauthService = {
       return { created: user, deliveryIds: ids };
     });
     kickDeliveries(deliveryIds);
+    // Only here, where this callback created the user: a returning or
+    // auto-linked user signed in above without one.
+    if (welcome === 'now') sendWelcomeEmail(args.application, created.email);
 
     // The provider would not vouch for this address, so the account exists and
     // cannot sign in: `requireEmailVerification` refuses it, and nothing has
@@ -316,7 +356,12 @@ export const oauthService = {
         endUser: created,
       });
     }
-    return issueSessionOrMfaChallenge(args.application, created, args.device);
+    return issueSessionOrMfaChallenge(
+      args.application,
+      created,
+      { via: 'oauth', isNewUser: true },
+      args.device,
+    );
   },
 
   /**

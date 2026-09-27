@@ -23,7 +23,8 @@
 
 import { describe, expect, it, beforeAll } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -88,5 +89,30 @@ describe('importing @rekey.dev/mcp is inert', () => {
       console.log(built.ok ? 'BUILT' : 'FAILED: ' + built.message);
     `);
     expect(r.stdout).toContain('BUILT');
+  });
+});
+
+/**
+ * npx and `node_modules/.bin` start the bin through a symlink. The old gate
+ * compared `process.argv[1]` (the link) with `import.meta.url` (the real file),
+ * never matched, and `npx @rekey.dev/mcp` exited 0 having done nothing.
+ */
+describe('@rekey.dev/mcp as a bin', () => {
+  it('runs main when started through a symlink', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'rekey-mcp-bin-'));
+    try {
+      const link = path.join(dir, 'rekey-mcp');
+      symlinkSync(distEntry, link);
+      const r = spawnSync(process.execPath, [link], {
+        encoding: 'utf8',
+        input: '',
+        env: { ...process.env, REKEY_URL: '', SUPER_ADMIN_KEY: '', REKEY_OPERATOR_TOKEN: '' },
+      });
+      // main() ran: it refused the empty credential env instead of exiting silently.
+      expect(r.stderr).toContain('REKEY_URL');
+      expect(r.status).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

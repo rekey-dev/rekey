@@ -129,12 +129,16 @@ describe('Phase-1 security hardening', () => {
     expect(data.accessToken).toBeUndefined();
     expect(data.refreshToken).toBeUndefined();
 
-    // Exchange the challenge token + current TOTP for a real session.
+    // Exchange the challenge token + a TOTP code for a real session. The
+    // confirming code spent the current step, so this uses the next one.
     const verify = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/mfa-verify',
       headers: { authorization: `Bearer ${b.liveKey}` },
-      payload: { mfaChallengeToken: data.mfaChallengeToken, code: totp.generate() },
+      payload: {
+        mfaChallengeToken: data.mfaChallengeToken,
+        code: totp.generate({ timestamp: Date.now() + 30_000 }),
+      },
     });
     expect(verify.statusCode).toBe(200);
     const verified = verify.json().data as { mfaRequired: boolean; accessToken: string; refreshToken: string };
@@ -303,13 +307,13 @@ describe('Phase-1 security hardening', () => {
     expect(signInData.mfaChallengeToken).toBeTruthy();
     expect(signInData.accessToken).toBeUndefined();
 
-    // Exchange + complete sign-in.
+    // Exchange + complete sign-in, with the step after the confirming code's.
     const verified = await app.inject({
       method: 'POST',
       url: '/api/v1/tenant/auth/mfa-verify',
       payload: {
         mfaChallengeToken: signInData.mfaChallengeToken,
-        code: totp.generate(),
+        code: totp.generate({ timestamp: Date.now() + 30_000 }),
       },
     });
     expect(verified.statusCode).toBe(200);

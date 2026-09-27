@@ -39,8 +39,6 @@ import { requireSuperAdmin } from "../../middleware/admin-auth.js";
 import { applicationsService } from "../applications/applications.service.js";
 import { subscriptionGrantsService } from "./grant.service.js";
 import { recordSecurityEvent } from "../../lib/security-events.js";
-import { prisma } from "../../lib/prisma.js";
-import { RekeyError } from "../../lib/error.js";
 import { ok, errs, ref, type JsonSchema } from "../../lib/openapi.js";
 
 /**
@@ -185,6 +183,10 @@ export async function billingAdminRoutes(app: FastifyInstance): Promise<void> {
               "APPLICATION_NOT_FOUND — no application with that id; or PLAN_NOT_FOUND — no such " +
               "plan in this application; or END_USER_NOT_FOUND — nobody in this application " +
               "matches that id or email; or ORGANIZATION_NOT_FOUND — no such organization here.",
+            409:
+              "BILLING_SUBSCRIPTION_SUBJECT_CONFLICT: the subscriber already holds this plan " +
+              "live for a different billing subject (another organization, or their personal " +
+              "account). A subscription to one plan is stored once per subscriber.",
           }),
         },
       },
@@ -260,7 +262,8 @@ export async function billingAdminRoutes(app: FastifyInstance): Promise<void> {
         description:
           "Sets `billingConfig.defaultPlanSlug`, the plan `POST /api/v1/billing/subscribe` " +
           "activates and whose FEATURE flags and included usage apply as the free tier. Pass " +
-          "`null` to clear it. The slug must name an active plan on this Application. " +
+          "`null` to clear it. The slug must name an active plan on this Application that costs " +
+          "nothing (`amount` 0, no `pricePerUnitCents`). " +
           "Operators do the same through `PATCH /api/v1/tenant/applications/:id/billing-config`.",
         params: {
           type: "object",
@@ -290,6 +293,9 @@ export async function billingAdminRoutes(app: FastifyInstance): Promise<void> {
               "VALIDATION_ERROR — the body is not `{ slug: string | null }`.",
             ...SUPER_ADMIN_ERRORS,
             404: "APPLICATION_NOT_FOUND — no application with that id.",
+            409:
+              "BILLING_FREE_PLAN_NOT_FREE: the plan has a nonzero `amount` or a " +
+              "`pricePerUnitCents`, and the free tier must cost nothing.",
           }),
         },
       },
@@ -301,20 +307,6 @@ export async function billingAdminRoutes(app: FastifyInstance): Promise<void> {
         .strict()
         .parse(req.body ?? {});
       const application = await applicationsService.get(id);
-      if (slug !== null) {
-        const plan = await prisma.plan.findFirst({
-          where: { applicationId: id, slug, active: true },
-          select: { id: true },
-        });
-        if (!plan) {
-          throw new RekeyError({
-            statusCode: 400,
-            code: "DEFAULT_PLAN_NOT_FOUND",
-            message: `No active plan "${slug}" in this Application.`,
-            fix: "Pass the slug of an existing active plan to use as the free tier, or null to clear it.",
-          });
-        }
-      }
       const updated = await applicationsService.updateBillingConfig({
         applicationId: id,
         patch: { defaultPlanSlug: slug },

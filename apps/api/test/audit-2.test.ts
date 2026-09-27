@@ -218,7 +218,7 @@ describe('Audit-2 regression', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${b.applicationId}/coupons`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { code: 'replayable', discountType: 'AMOUNT', amountOff: 100 },
+      payload: { code: 'replayable', discountType: 'AMOUNT', currency: 'USD', amountOff: 100 },
     });
     const coupon = await prisma.coupon.findUniqueOrThrow({
       where: { applicationId_code: { applicationId: b.applicationId, code: 'replayable' } },
@@ -258,6 +258,7 @@ describe('Audit-2 regression', () => {
       payload: {
         code: 'limit3',
         discountType: 'AMOUNT',
+        currency: 'USD',
         amountOff: 100,
         maxRedemptions: 3,
       },

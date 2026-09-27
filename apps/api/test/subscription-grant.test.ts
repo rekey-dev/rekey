@@ -348,10 +348,14 @@ describe('Granting a subscription without a payment provider', () => {
     const owner = await grant(payload, auth());
     expect(owner.statusCode).toBe(401);
 
-    // Nothing was written by any of the three.
+    // Nothing was written by any of the three. The only delivery is the
+    // operator create in `makeEndUser` announcing the buyer.
     expect(await prisma.subscription.count({ where: { applicationId: appId } })).toBe(0);
     await settle();
-    expect(await prisma.webhookDelivery.count({ where: { endpointId } })).toBe(0);
+    const rows = await prisma.webhookDelivery.findMany({ where: { endpointId } });
+    expect(rows.map((r) => [r.eventType, (r.payload as { data: { via?: string } }).data.via])).toEqual([
+      ['user.created', 'operator'],
+    ]);
   });
 
   it('writes the grant to the security-event trail, visible to the workspace', async () => {

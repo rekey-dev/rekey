@@ -16,7 +16,7 @@
  * unreachable URL), same approach as billing-outbound-events.test.ts.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import Stripe from 'stripe';
 import { randomUUID } from 'node:crypto';
@@ -26,6 +26,7 @@ import { billingCredentialsService } from '../src/modules/billing/credentials.se
 import { applicationsService } from '../src/modules/applications/applications.service.js';
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
 import { processDueDunningCases } from '../src/modules/billing/dunning.service.js';
+import { emailService } from '../src/modules/email/email.service.js';
 import type { WebhookDelivery } from '@prisma/client';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
@@ -50,9 +51,8 @@ async function waitForDeliveries(
   timeoutMs = 4000,
 ): Promise<WebhookDelivery[]> {
   const deadline = Date.now() + timeoutMs;
-  let rows: WebhookDelivery[] = [];
   for (;;) {
-    rows = await prisma.webhookDelivery.findMany({ where: { endpointId, eventType } });
+    const rows = await prisma.webhookDelivery.findMany({ where: { endpointId, eventType } });
     if (rows.length >= count || Date.now() > deadline) return rows;
     await new Promise((r) => setTimeout(r, 25));
   }
@@ -340,6 +340,46 @@ describe('Dunning', () => {
     expect(emails).toHaveLength(1);
     expect(emails[0]!.toAddress).toBe(b.endUserEmail);
     expect(emails[0]!.status).toBe('no_transport');
+  });
+
+  it('the reminder links the hosted billing portal when the Application has one, and nothing when it does not', async () => {
+    const dispatch = vi.spyOn(emailService, 'dispatch');
+    try {
+      const seen: Record<string, unknown> = {};
+      for (const [slug, portal] of [['dun-portal-on', true], ['dun-portal-off', false]] as const) {
+        const b = await bootstrap(slug, 'stripe');
+        await prisma.application.update({ where: { id: b.applicationId }, data: { hostedPortalEnabled: portal } });
+        await prisma.subscription.create({
+          data: {
+            applicationId: b.applicationId,
+            endUserId: b.endUserId,
+            planId: b.planId,
+            status: 'ACTIVE',
+            provider: 'stripe',
+            providerSubId: `sub_${slug}`,
+          },
+        });
+        await fireStripe(
+          slug,
+          invoiceFailedEvt({
+            applicationId: b.applicationId,
+            providerSubId: `sub_${slug}`,
+            eventId: `evt_${slug}`,
+            invoiceId: `in_${slug}`,
+          }),
+        );
+        await waitForEmailLogs(b.applicationId, 'billing_payment_failed_reminder', 1);
+        const call = dispatch.mock.calls.find(
+          ([input]) => input.application.id === b.applicationId && input.eventKey === 'billing_payment_failed_reminder',
+        );
+        seen[slug] = call?.[0].variables.portalUrl;
+      }
+      const origin = new URL(process.env.PUBLIC_PORTAL_URL!).origin;
+      expect(seen['dun-portal-on']).toBe(`${origin}/dun-portal-on`);
+      expect(seen['dun-portal-off']).toBe('');
+    } finally {
+      dispatch.mockRestore();
+    }
   });
 
   it('stripe: a repeat failure bumps failedAttempts on the SAME case — no second case, no re-emit', async () => {

@@ -144,10 +144,10 @@ export class RealRazorpayProvider implements BillingProvider {
       }),
       'subscriptions.create',
     );
-    // Razorpay returns a `short_url` users hit to authorize. Wrap with our
-    // success/cancel via `callback_url` style, Razorpay doesn't natively
-    // support cancel/return URLs on subscriptions, so we encode them in
-    // notes for the integrator's frontend to read on redirect-back.
+    // The buyer authorizes at `short_url`. Razorpay subscriptions take no
+    // return or cancel URL, so `successUrl` and `cancelUrl` are NOT used here
+    // and the buyer finishes on Razorpay's page rather than back in the app.
+    // The hosted checkout spec (#641) plans the fix: Razorpay's modal on our page.
     const subTyped = sub as { id: string; short_url: string };
     return { url: subTyped.short_url, sessionId: subTyped.id };
   }

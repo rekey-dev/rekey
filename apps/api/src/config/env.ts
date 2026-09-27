@@ -212,6 +212,19 @@ export const env = createEnv({
     // infrastructure. Unset means portal links are simply not offered.
     PUBLIC_PORTAL_URL: z.string().url().optional(),
 
+    // Kill switch for the Rekey-hosted checkout page. `false` makes every
+    // readiness check fail at checkout time, so each Application falls back
+    // to the provider's page or refuses, per its own failure behaviour.
+    CHECKOUT_EMBEDDED_ENABLED: z
+      .union([z.literal('true'), z.literal('false'), z.literal('')])
+      .optional()
+      .transform((v) => v !== 'false'),
+    // Checkout creation ceilings on top of the per-end-user 10/hour, 30/day
+    // (see billing/checkout/creation-limit.ts). Per vouched client IP, and
+    // per Application, both per rolling hour.
+    CHECKOUT_LIMIT_PER_IP_HOUR: z.coerce.number().int().min(1).max(100_000).default(20),
+    CHECKOUT_LIMIT_PER_APP_HOUR: z.coerce.number().int().min(1).max(10_000_000).default(1000),
+
     // Public base URL of the operator panel. The operator MCP OAuth authorize
     // endpoint redirects here (`/mcp-consent`) so the operator signs in through
     // the real panel login (session reuse, passkeys, MFA, magic-link) instead
@@ -255,6 +268,26 @@ export const env = createEnv({
     RESEND_DEFAULT_API_KEY: z.string().optional(),
     RESEND_DEFAULT_FROM: z.string().email().optional(),
     RESEND_DEFAULT_FROM_NAME: z.string().optional(),
+
+    // Default caps on `POST /api/v1/email/send` (custom templates), counted per
+    // workspace. `Tenant.limits.emailSendDailyCap` / `emailSendRecipientHourlyCap`
+    // override them for one workspace. The backstop if a key holding
+    // `email:send` leaks. Replays and suppressed sends are not counted.
+    EMAIL_SEND_DAILY_CAP: z.coerce.number().int().positive().default(1000),
+    EMAIL_SEND_RECIPIENT_HOURLY_CAP: z.coerce.number().int().positive().default(10),
+
+    // Signs one-click unsubscribe links in custom notification email. The links
+    // never expire, so the key rotates by id: set a new secret and id, and move
+    // the old pair into EMAIL_UNSUBSCRIBE_PREVIOUS_SECRETS (`id:secret,id:secret`)
+    // so links already in inboxes keep working. Unset, the key is derived from
+    // JWT_SECRET under id `jwt`, and those links break if JWT_SECRET changes.
+    EMAIL_UNSUBSCRIBE_SECRET: z.string().min(32).optional(),
+    EMAIL_UNSUBSCRIBE_SECRET_ID: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{1,32}$/)
+      .refine((id) => id !== 'jwt', 'The id "jwt" is reserved for the key derived from JWT_SECRET.')
+      .default('k1'),
+    EMAIL_UNSUBSCRIBE_PREVIOUS_SECRETS: z.string().optional(),
 
     // Deployment-wide fallback for the base URL transactional emails link
     // back to (`{{appUrl}}`, and the base for reset/verify/magic-link URLs

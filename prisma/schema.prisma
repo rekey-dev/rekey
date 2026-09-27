@@ -455,6 +455,38 @@ model TenantApiToken {
 // because the prefix is a label and `requireApiKey` accepts both forms
 // identically. Revoking them would break the customer's integration at the
 // exact moment they went live, which is the worst possible timing for it.
+/// How a checkout is presented: the provider's hosted page, or the Rekey page.
+enum CheckoutMode {
+  REDIRECT
+  EMBEDDED
+}
+
+enum CheckoutFailureMode {
+  FALLBACK_TO_REDIRECT
+  REFUSE
+}
+
+/// Whether a checkout moves real money, from the mode of its credential set.
+enum PaymentMode {
+  TEST
+  LIVE
+}
+
+enum CheckoutKind {
+  RECURRING
+  ONE_TIME
+}
+
+enum CheckoutSessionStatus {
+  OPEN
+  // The processor said yes in the browser and Rekey verified it with the
+  // processor. Nothing is activated until the webhook arrives.
+  CONFIRMING
+  COMPLETE
+  EXPIRED
+  CANCELED
+}
+
 enum AppEnvironment {
   PRODUCTION
   STAGING
@@ -508,10 +540,9 @@ model Application {
   // deliberately unaffected: an Application-level switch must not be able to
   // lock operators out of their own workspace.
   //
-  // A COLUMN, not a key inside `emailConfig`, because `setCredentials` rewrites
-  // that object wholesale — a flag living there would be silently cleared every
-  // time somebody saved transport credentials. `authConfig.appUrl` sits where it
-  // does for exactly the same reason, and says so.
+  // A COLUMN, not a key inside `emailConfig`: that object is the sender
+  // identity, written key by key by two routes (credentials and sender), and a
+  // switch hidden inside it is one careless write away from being cleared.
   emailsEnabled                Boolean @default(true) @map("emails_enabled")
   // Encrypted per-Application transport credentials. AES-256-GCM via
   // lib/secrets.ts. Shape is the `EmailCredentials` union in
@@ -522,6 +553,10 @@ model Application {
   // Null = no BYO; we fall back to RESEND_DEFAULT_API_KEY if set, otherwise we
   // return the raw token to the caller (legacy "Rekey does not send email" mode).
   emailCredentialsCiphertext   String? @map("email_credentials_ciphertext")
+  // When true, `POST /api/v1/email/send` only mails addresses that belong to
+  // an end user of this Application. A column rather than a key in
+  // `emailConfig` for the same reason as `emailsEnabled` above.
+  emailRecipientsMustBeEndUsers Boolean @default(false) @map("email_recipients_must_be_end_users")
   // End-user session generation. End-user JWTs are signed with a key derived
   // from JWT_SECRET + this counter (see lib/jwt.ts). Bumping it instantly
   // invalidates every previously-issued access/MFA-challenge token for this
@@ -595,6 +630,19 @@ model Application {
   portalDomainVerifiedAt DateTime? @map("portal_domain_verified_at")
   // Portal branding (logo URL, colors) — reuses the tokens-based theming shape.
   portalBranding         Json     @default("{}") @map("portal_branding")
+  // Which checkout page buyers get, set separately for each payment mode so an
+  // Application can run the Rekey page on sandbox credentials while live
+  // checkouts stay on the provider's page. A checkout uses the setting for the
+  // mode of the credential set its provider resolved to.
+  checkoutModeTest       CheckoutMode        @default(REDIRECT) @map("checkout_mode_test")
+  checkoutModeLive       CheckoutMode        @default(REDIRECT) @map("checkout_mode_live")
+  // What an EMBEDDED checkout does when a readiness check fails at checkout
+  // time: fall back to the provider's page, or refuse with 409.
+  checkoutFailureMode    CheckoutFailureMode @default(FALLBACK_TO_REDIRECT) @map("checkout_failure_mode")
+  // Last readiness run, both modes, and when it ran. A cache for the panel and
+  // for the per-checkout guard's portal probe, never a permission.
+  checkoutReadiness      Json?               @map("checkout_readiness")
+  checkoutReadinessAt    DateTime?           @map("checkout_readiness_at")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
@@ -624,6 +672,8 @@ model Application {
   emailLogs           EmailLog[]
   emailEventSettings  EmailEventSetting[]
   emailSuppressions   EmailSuppression[]
+  customEmailTemplates        CustomEmailTemplate[]
+  customEmailTemplateVersions CustomEmailTemplateVersion[]
   subscriptionImports SubscriptionImportRun[]
   webhookEndpoints    WebhookEndpoint[]
   organizations       Organization[]
@@ -635,6 +685,7 @@ model Application {
   applicationGrants   ApplicationGrant[]
   trialRedemptions    TrialRedemption[]
   freeTierClaims      FreeTierClaim[]
+  checkoutSessions    CheckoutSession[]
 
   @@index([tenantId])
   @@map("applications")
@@ -673,6 +724,81 @@ model EmailTemplate {
   @@unique([applicationId, eventKey])
   @@index([applicationId])
   @@map("email_templates")
+}
+
+// ============================================================================
+// An Application's own transactional templates, sent by key through
+// `POST /api/v1/email/send` (docs/specs/custom-email-templates.md).
+//
+// The row is the working DRAFT. Publishing snapshots it into an immutable
+// CustomEmailTemplateVersion and bumps `version`; a send always renders a
+// version, never the draft, so editing cannot change what production sends
+// until the operator publishes again.
+// ============================================================================
+model CustomEmailTemplate {
+  id             String    @id @default(cuid())
+  applicationId  String    @map("application_id")
+  /** `^[a-z][a-z0-9_]{2,63}$`, never a built-in EMAIL_EVENTS key. Immutable. */
+  key            String
+  name           String
+  /** critical | notification. Only notification mail carries List-Unsubscribe. */
+  category       String
+  fromName       String?   @map("from_name")
+  subject        String
+  designJson     Json?     @map("design_json")
+  bodyHtml       String    @map("body_html")
+  bodyText       String?   @map("body_text")
+  /** Array of { name, type, required, maxLength, sample? }. */
+  variableSchema Json      @map("variable_schema")
+  /** Hostnames a `url` variable may point at, lowercased, exact match. */
+  linkDomains    String[]  @map("link_domains")
+  /** draft | published. Published once any version exists. */
+  status         String    @default("draft")
+  /** Latest published version; 0 before the first publish. */
+  version        Int       @default(0)
+  publishedAt    DateTime? @map("published_at")
+  /**
+   * Soft delete: sends answer EMAIL_TEMPLATE_NOT_FOUND, versions stay for
+   * history, and creating the key again reuses this row.
+   */
+  deletedAt      DateTime? @map("deleted_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  application Application                  @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  versions    CustomEmailTemplateVersion[]
+
+  @@unique([applicationId, key])
+  @@map("custom_email_templates")
+}
+
+model CustomEmailTemplateVersion {
+  id             String   @id @default(cuid())
+  templateId     String   @map("template_id")
+  applicationId  String   @map("application_id")
+  version        Int
+  category       String
+  fromName       String?  @map("from_name")
+  subject        String
+  bodyHtml       String   @map("body_html")
+  bodyText       String?  @map("body_text")
+  variableSchema Json     @map("variable_schema")
+  linkDomains    String[] @map("link_domains")
+  /**
+   * Domain of `emailConfig.fromAddress` when this version was published. A send
+   * refuses if the Application's sending domain has changed since.
+   */
+  senderDomain   String   @map("sender_domain")
+  /** Operator id. */
+  publishedBy    String?  @map("published_by")
+  publishedAt    DateTime @default(now()) @map("published_at")
+
+  template    CustomEmailTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  application Application         @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([templateId, version])
+  @@index([applicationId])
+  @@map("custom_email_template_versions")
 }
 
 // ============================================================================
@@ -721,6 +847,13 @@ model EmailSuppression {
   address       String
   /** bounce | complaint | manual | unsubscribe */
   reason        String   @default("manual")
+  /**
+   * Which mail this row stops. Null: every email the Application sends (manual,
+   * bounce, complaint). "notification": only notification-category custom mail,
+   * written by one-click unsubscribe so that leaving a newsletter never blocks a
+   * password reset. Read through `sendableTo` (modules/email/send-policy.ts).
+   */
+  category      String?
   note          String?
   /** Operator id for a manual entry; null when Rekey added it itself. */
   createdBy     String?  @map("created_by")
@@ -844,16 +977,28 @@ model EmailLog {
   eventKey      String?  @map("event_key")
   /** Transport used: byo_resend | default_resend | byo_smtp | none. */
   via           String
-  /** Outcome: sent | error | no_transport | suppressed. */
+  /** Outcome: sent | error | no_transport | suppressed | pending (a custom send in flight) | unknown (pending past its cutoff). */
   status        String
   /** Provider message id when status=sent (nullable — some providers omit). */
   messageId     String?  @map("message_id")
   /** Error message when status=error. */
   error         String?
+  /**
+   * Caller-supplied key on `POST /api/v1/email/send`. Unique per Application:
+   * the pending row inserted before the transport call is the lock that makes
+   * a repeated send replay instead of delivering twice.
+   */
+  idempotencyKey         String? @map("idempotency_key")
+  /** SHA-256 of the send request, so a reused key with a different request is refused. */
+  idempotencyFingerprint String? @map("idempotency_fingerprint")
+  customTemplateKey      String? @map("custom_template_key")
+  customTemplateVersion  Int?    @map("custom_template_version")
   createdAt     DateTime @default(now()) @map("created_at")
 
   application Application? @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   tenant      Tenant?      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, idempotencyKey])
 
   @@index([applicationId, createdAt])
   @@index([tenantId, createdAt])
@@ -1328,6 +1473,15 @@ model EndUser {
   // user's other sessions too. Those are refused per session instead, through
   // the access token's `sid` (RefreshToken.sessionId) and `dev` claims.
   sessionsInvalidBefore DateTime? @map("sessions_invalid_before")
+  // Set when sign-up held the welcome mail back because the Application
+  // requires a verified address and this one was not. The first verification
+  // clears it and sends the mail, so the welcome goes out once and never to a
+  // user who already got one before the setting was switched on.
+  welcomeEmailPending Boolean @default(false) @map("welcome_email_pending")
+  // When the first session was minted for this user by a real sign-in. Null
+  // until then. Claimed with a conditional update, so of several concurrent
+  // first sign-ins exactly one reports `firstSignIn: true`.
+  firstSignedInAt DateTime? @map("first_signed_in_at")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
@@ -1347,6 +1501,7 @@ model EndUser {
   creditLedger            CreditLedger[]
   trialRedemptions        TrialRedemption[]
   freeTierClaims          FreeTierClaim[]
+  checkoutSessions        CheckoutSession[]
 
   @@unique([applicationId, email])
   @@index([applicationId])
@@ -2127,6 +2282,11 @@ model Subscription {
   // when did it end" stays answerable — conversion reporting needs the date,
   // not just the status it used to have.
   trialEndsAt      DateTime?       @map("trial_ends_at")
+  // The `trialEndsAt` that `subscription.trial_will_end` was last sent for.
+  // The sweep claims a row by moving this to the current trial end, so each
+  // (subscription, trial end) pair is announced once across replicas, and a
+  // re-dated trial is announced again for its new end.
+  trialWillEndNotifiedFor DateTime? @map("trial_will_end_notified_for")
   cancelAt         DateTime?       @map("cancel_at")
   canceledAt       DateTime?       @map("canceled_at")
   // Provider's id for this subscription (sub_..., I-...., etc.). Scoped by
@@ -2153,6 +2313,7 @@ model Subscription {
   beneficiaryOrg Organization? @relation("SubscriptionBeneficiary", fields: [beneficiaryOrgId], references: [id], onDelete: SetNull)
   payments    Payment[]
   dunningCases DunningCase[]
+  checkoutSessions CheckoutSession[]
 
   // One active subscription per (application, end-user). Status PENDING
   // shouldn't conflict with ACTIVE in the same row — handled in service.
@@ -2175,7 +2336,53 @@ model Subscription {
   @@index([applicationId, createdAt])
   // Active-subscription counts per app (overview stats, super-admin lists).
   @@index([applicationId, status])
+  // The trial-ending sweep: TRIALING rows by trial end.
+  @@index([status, trialEndsAt])
   @@map("subscriptions")
+}
+
+// ============================================================================
+// One checkout as Rekey issued it, in either presentation.
+//
+// The EMBEDDED page is reached through a bearer URL whose token is stored only
+// as its SHA-256 hash, so a database read never yields a working link. REDIRECT
+// rows carry no token at all and exist for metrics and the status panel.
+// COMPLETE is written only by the webhook applier; the browser can move an
+// OPEN session to CONFIRMING and no further.
+// ============================================================================
+
+model CheckoutSession {
+  id                String                @id @default(cuid())
+  tokenHash         String?               @unique @map("token_hash")
+  applicationId     String                @map("application_id")
+  endUserId         String                @map("end_user_id")
+  subscriptionId    String                @map("subscription_id")
+  provider          String
+  providerSessionId String                @map("provider_session_id")
+  mode              CheckoutMode
+  paymentMode       PaymentMode           @map("payment_mode")
+  kind              CheckoutKind
+  successUrl        String                @map("success_url")
+  cancelUrl         String                @map("cancel_url")
+  locale            String?
+  status            CheckoutSessionStatus @default(OPEN)
+  expiresAt         DateTime              @map("expires_at")
+  // Browser-safe processor config for the page (client id, subscription id)
+  // and the processor-hosted fallback URL. Never a secret.
+  metadata          Json                  @default("{}")
+  createdAt         DateTime              @default(now()) @map("created_at")
+  updatedAt         DateTime              @updatedAt @map("updated_at")
+
+  application  Application  @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  endUser      EndUser      @relation(fields: [endUserId], references: [id], onDelete: Cascade)
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId, status])
+  @@index([applicationId, providerSessionId])
+  @@index([subscriptionId])
+  @@index([expiresAt])
+  @@index([endUserId, createdAt])
+  @@map("checkout_sessions")
 }
 
 model Payment {
@@ -2704,6 +2911,9 @@ model WebhookEvent {
   receivedAt      DateTime  @default(now()) @map("received_at")
   processedAt     DateTime? @map("processed_at")
   processingError String?   @map("processing_error")
+  // The mode ('test' | 'live') of the credential set that verified this event.
+  // Null on rows received before it was recorded, which prove neither mode.
+  mode            String?
 
   application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
 
@@ -2711,6 +2921,7 @@ model WebhookEvent {
   @@index([applicationId])
   @@index([provider, eventType])
   @@index([receivedAt])
+  @@index([applicationId, provider, mode, receivedAt])
   @@map("webhook_events")
 }
 

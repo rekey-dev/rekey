@@ -38,6 +38,7 @@ export { DEFAULT_REFRESH_PATH, DEFAULT_SIGN_IN_PATH } from './paths.js';
 export type {
   RefreshHandlerOptions,
   Session,
+  SignedInSession,
   SignInOutcome,
   SessionDeviceOptions,
   DeviceBindingRequest,

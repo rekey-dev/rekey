@@ -37,11 +37,12 @@ import type {
   AuthResultDto,
   SignInOutcomeDto,
   LicenseVerifyResultDto,
-  SubscriptionDto,
+  SelfSubscriptionDto,
   CreateCheckoutRequest,
   CheckoutResultDto,
   OrganizationWithRoleDto,
   ProvidersListDto,
+  OAuthProvidersListDto,
   TrialEligibilityDto,
   EndUserDeviceDto,
   DeviceStatusType,
@@ -306,6 +307,16 @@ export class RekeyBrowserClient {
   }
 
   /**
+   * The OAuth providers this Application offers for sign-in, one entry per
+   * button to render, e.g. `{ providers: [{ id: 'google', name: 'Google' }] }`.
+   * Lists only providers the operator configured with both a client id and a
+   * secret, and returns names only. Needs only the publishable key.
+   */
+  listOAuthProviders(): Promise<OAuthProvidersListDto> {
+    return this.bootstrap<OAuthProvidersListDto>('GET', '/api/v1/auth/oauth/providers', undefined);
+  }
+
+  /**
    * Verify a license key for this machine. The license `key` is the entitlement
    * bearer; the publishable key only identifies the Application. `ok=false` is a
    * normal result for an invalid/expired license, not an exception.
@@ -333,17 +344,45 @@ export class RekeyBrowserClient {
    * billing page can say what a former subscriber was on and when it ended
    * instead of rendering the never-subscribed empty state at them. It never
    * replaces a live subscription; leave it off for entitlement checks.
+   *
+   * A buyer can hold several live subscriptions; this returns one of them (a
+   * paid plan before the free tier, then the newest). Use
+   * {@link listSubscriptions} to show them all. No `metadata`: that is the
+   * operator's.
    */
   getSubscription(
     accessToken: string,
     opts?: { organizationId?: string; includeEnded?: boolean },
-  ): Promise<SubscriptionDto | null> {
+  ): Promise<SelfSubscriptionDto | null> {
     const params = new URLSearchParams();
     if (opts?.organizationId) params.set('organizationId', opts.organizationId);
     if (opts?.includeEnded) params.set('includeEnded', 'true');
     const query = params.toString();
     const qs = query ? `?${query}` : '';
-    return this.selfService<SubscriptionDto | null>('GET', `/api/v1/billing/subscription${qs}`, undefined, accessToken);
+    return this.selfService<SelfSubscriptionDto | null>('GET', `/api/v1/billing/subscription${qs}`, undefined, accessToken);
+  }
+
+  /**
+   * Every live (ACTIVE, TRIALING, PAST_DUE) subscription of the user, or of
+   * `opts.organizationId` (member-only), the one {@link getSubscription}
+   * returns first. Check it before offering a checkout, so a buyer is never
+   * offered a plan they already hold.
+   *
+   * @example
+   * const { items } = await rekey.listSubscriptions(accessToken);
+   * const held = new Set(items.map((s) => s.planId));
+   */
+  listSubscriptions(
+    accessToken: string,
+    opts?: { organizationId?: string },
+  ): Promise<{ items: SelfSubscriptionDto[] }> {
+    const qs = opts?.organizationId ? `?organizationId=${encodeURIComponent(opts.organizationId)}` : '';
+    return this.selfService<{ items: SelfSubscriptionDto[] }>(
+      'GET',
+      `/api/v1/billing/subscriptions${qs}`,
+      undefined,
+      accessToken,
+    );
   }
 
   /** Organizations the signed-in user belongs to, each with their role. */
@@ -429,12 +468,21 @@ export class RekeyBrowserClient {
   /**
    * The signed-in user's own licences, newest first, plus the active
    * organization's in an org-billed Application. No raw keys, only each
-   * licence's display `keyPrefix`.
+   * licence's display `keyPrefix`. Pass `{ organizationId }` to include that
+   * organization's pool instead; the caller must be a member, or the API
+   * answers 403 `ORGANIZATION_NOT_MEMBER`.
    */
-  listMyLicenses(accessToken: string, page?: ListPage): Promise<Paged<EndUserLicenseDto>> {
+  listMyLicenses(
+    accessToken: string,
+    page?: ListPage,
+    opts?: { organizationId?: string },
+  ): Promise<Paged<EndUserLicenseDto>> {
+    const q = new URLSearchParams(listQuery(page));
+    if (opts?.organizationId) q.set('organizationId', opts.organizationId);
+    const query = q.toString();
     return this.selfService<Paged<EndUserLicenseDto>>(
       'GET',
-      `/api/v1/users/me/licenses/${listQuery(page)}`,
+      `/api/v1/users/me/licenses/${query ? `?${query}` : ''}`,
       undefined,
       accessToken,
     );
@@ -462,18 +510,20 @@ export class RekeyBrowserClient {
   /**
    * Cancel the current subscription (default: at period end). Pass
    * `opts.organizationId` to cancel an org's subscription (caller must be
-   * OWNER/ADMIN of that org).
+   * OWNER/ADMIN of that org), and `opts.subscriptionId` to cancel one of
+   * several live subscriptions ({@link listSubscriptions}).
    */
   cancelSubscription(
     accessToken: string,
-    opts?: { atPeriodEnd?: boolean; organizationId?: string },
-  ): Promise<SubscriptionDto> {
-    return this.selfService<SubscriptionDto>(
+    opts?: { atPeriodEnd?: boolean; organizationId?: string; subscriptionId?: string },
+  ): Promise<SelfSubscriptionDto> {
+    return this.selfService<SelfSubscriptionDto>(
       'POST',
       '/api/v1/billing/subscription/cancel',
       {
         ...(opts?.atPeriodEnd !== undefined && { atPeriodEnd: opts.atPeriodEnd }),
         ...(opts?.organizationId && { organizationId: opts.organizationId }),
+        ...(opts?.subscriptionId && { subscriptionId: opts.subscriptionId }),
       },
       accessToken,
     );
@@ -521,8 +571,8 @@ export class RekeyBrowserClient {
   async subscribe(
     accessToken: string,
     opts?: { organizationId?: string },
-  ): Promise<{ subscription: SubscriptionDto; activated: boolean }> {
-    const res = await this.selfServiceWithStatus<SubscriptionDto>(
+  ): Promise<{ subscription: SelfSubscriptionDto; activated: boolean }> {
+    const res = await this.selfServiceWithStatus<SelfSubscriptionDto>(
       'POST',
       '/api/v1/billing/subscribe',
       { ...(opts?.organizationId ? { organizationId: opts.organizationId } : {}) },
@@ -709,6 +759,7 @@ export type {
   EndUserLicenseDto,
   FeatureCheckDto,
   PublicPlanDto,
+  SelfSubscriptionDto,
   PublicPlanCheckoutDto,
   // `getMe({ include })`: the accepted values and what each one adds.
   MeInclude,
@@ -716,6 +767,8 @@ export type {
   MeIncludedFor,
   MeIncludedFields,
   ProvidersListDto,
+  OAuthProvidersListDto,
+  OAuthProviderSummaryDto,
   BillingProviderInfoDto,
   BillingProviderCapabilities,
   BillingProvider,

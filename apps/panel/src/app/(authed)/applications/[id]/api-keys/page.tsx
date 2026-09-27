@@ -76,6 +76,11 @@ const ELEVATED_KEY_SCOPES = [
     label: 'credits:grant',
     help: 'Grant credits to end-users and organizations with POST /credits/grant (up to 1,000,000 per call, audited per key). Not part of Full access.',
   },
+  {
+    value: 'email:send',
+    label: 'email:send',
+    help: "Send published custom email templates with POST /email/send, through this Application's own email provider and within its send limits. Not part of Full access.",
+  },
 ] as const satisfies ReadonlyArray<{ value: ElevatedApiKeyScope; label: string; help: string }>;
 
 const ERR: Record<string, string> = {

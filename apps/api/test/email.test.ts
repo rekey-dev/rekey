@@ -21,6 +21,8 @@ import { prisma } from '../src/lib/prisma.js';
 import { emailService } from '../src/modules/email/email.service.js';
 import { describeTransport } from '../src/lib/email-transport.js';
 import { renderTemplate } from '../src/modules/email/render.js';
+import { brandFromApplication, defaultTemplate } from '../src/modules/email/defaults/index.js';
+import { EMAIL_EVENTS, type EmailEventKey } from '../src/modules/email/events.js';
 
 interface Bootstrapped {
   applicationId: string;
@@ -102,7 +104,7 @@ describe('Email pipeline', () => {
       expiresAtIso: '2026-01-01T00:00:00Z',
     });
     expect(rendered.customised).toBe(false);
-    expect(rendered.subject).toBe('Reset your password');
+    expect(rendered.subject).toBe('Reset your App def password');
     expect(rendered.html).toContain('alice@example.com');
     expect(rendered.html).toContain('https://example.com/r');
   });
@@ -125,6 +127,128 @@ describe('Email pipeline', () => {
     expect(rendered.subject).toBe('Custom subject for bob@example.com');
     expect(rendered.html).toContain('Custom body for bob@example.com');
     expect(rendered.html).toContain('https://example.com/r2');
+  });
+
+  it("the built-in default wears the Application's portal branding", async () => {
+    const b = await bootstrap('brand');
+    await prisma.application.update({
+      where: { id: b.applicationId },
+      data: {
+        portalBranding: {
+          displayName: 'Acme',
+          logoUrl: 'https://cdn.example.com/acme.png',
+          primaryColor: '#e11d48',
+          supportEmail: 'help@acme.example',
+        },
+      },
+    });
+    const rendered = await emailService.renderForEvent(b.applicationId, 'password_reset', {
+      userEmail: 'alice@example.com',
+      resetUrl: 'https://example.com/r',
+      expiresAtIso: '2026-01-01T00:00:00Z',
+    });
+    expect(rendered.subject).toBe('Reset your Acme password');
+    expect(rendered.html).toContain('<img src="https://cdn.example.com/acme.png" alt="Acme"');
+    expect(rendered.html).toContain('background-color:#e11d48');
+    expect(rendered.html).toContain('href="mailto:help@acme.example"');
+    expect(rendered.html).not.toContain('Rekey');
+    expect(rendered.text).toContain('Reset password:\nhttps://example.com/r');
+    expect(rendered.text).toContain('Need help? Contact help@acme.example.');
+    expect(rendered.text).not.toMatch(/<[a-z]/i);
+  });
+
+  it('branding never reaches a customised template, which is sent exactly as saved', async () => {
+    const b = await bootstrap('brand-cus');
+    await emailService.setTemplate({
+      applicationId: b.applicationId,
+      eventKey: 'welcome',
+      subject: 'Custom welcome',
+      designJson: {},
+      bodyHtml: '<p>Custom body for {{userEmail}}</p>',
+    });
+    await prisma.application.update({
+      where: { id: b.applicationId },
+      data: { portalBranding: { displayName: 'Acme', primaryColor: '#e11d48' } },
+    });
+    const rendered = await emailService.renderForEvent(b.applicationId, 'welcome', { userEmail: 'c@example.com' });
+    expect(rendered.customised).toBe(true);
+    expect(rendered.subject).toBe('Custom welcome');
+    expect(rendered.html).toBe('<p>Custom body for c@example.com</p>');
+  });
+
+  it("workspace mail keeps Rekey's name, whatever the Application is called", async () => {
+    const b = await bootstrap('brand-sys');
+    await prisma.application.update({
+      where: { id: b.applicationId },
+      data: { portalBranding: { displayName: 'Acme' } },
+    });
+    const rendered = await emailService.renderForEvent(b.applicationId, 'workspace_invitation', {
+      inviterName: 'Alex',
+      workspaceName: 'Acme Inc',
+      inviteeEmail: 'x@example.com',
+      inviteUrl: 'https://panel.example.com/accept',
+      expiresAtIso: 'later',
+    });
+    expect(rendered.subject).toBe('Alex invited you to Acme Inc on Rekey');
+    expect(rendered.html).not.toContain('>Acme<');
+  });
+
+  describe('Secured by Rekey attribution, from the workspace limits', () => {
+    const vars = { userEmail: 'd@example.com', appUrl: 'https://app.example.com' };
+
+    async function withLimits(slug: string, limits: unknown): Promise<string> {
+      const b = await bootstrap(slug);
+      const { tenantId } = await prisma.application.findUniqueOrThrow({ where: { id: b.applicationId } });
+      await prisma.tenant.update({ where: { id: tenantId }, data: { limits: limits as never } });
+      return b.applicationId;
+    }
+
+    it('appears on an end-user default when the workspace has emailAttribution', async () => {
+      const id = await withLimits('attr-on', { maxProductionApps: 1, emailAttribution: true });
+      const rendered = await emailService.renderForEvent(id, 'welcome', vars);
+      expect(rendered.html).toContain('>Secured by Rekey</a>');
+      expect(rendered.text).toContain('Secured by Rekey: https://rekey.dev');
+    });
+
+    it('is off with no limits, with the flag false, and with limits that fail to parse', async () => {
+      for (const [slug, limits] of [
+        ['attr-none', null],
+        ['attr-false', { emailAttribution: false }],
+        ['attr-bad', { emailAttribution: 'yes' }],
+      ] as const) {
+        const id = await withLimits(slug, limits);
+        const rendered = await emailService.renderForEvent(id, 'welcome', vars);
+        expect(rendered.html, slug).not.toContain('Secured by Rekey');
+        expect(rendered.text, slug).not.toContain('Secured by Rekey');
+      }
+    });
+
+    it('is never added to a customised template', async () => {
+      const id = await withLimits('attr-cus', { emailAttribution: true });
+      await emailService.setTemplate({
+        applicationId: id,
+        eventKey: 'welcome',
+        subject: 'Hi',
+        designJson: {},
+        bodyHtml: '<p>Custom {{userEmail}}</p>',
+        bodyText: 'Custom {{userEmail}}',
+      });
+      const rendered = await emailService.renderForEvent(id, 'welcome', vars);
+      expect(rendered.html).toBe('<p>Custom d@example.com</p>');
+      expect(rendered.text).toBe('Custom d@example.com');
+    });
+
+    it('is not added to workspace mail, which Rekey already signs', async () => {
+      const id = await withLimits('attr-sys', { emailAttribution: true });
+      const rendered = await emailService.renderForEvent(id, 'workspace_invitation', {
+        inviterName: 'Alex',
+        workspaceName: 'W',
+        inviteeEmail: 'x@example.com',
+        inviteUrl: 'https://panel.example.com/accept',
+        expiresAtIso: '2026-09-27T14:50:00.000Z',
+      });
+      expect(rendered.html).not.toContain('Secured by Rekey');
+    });
   });
 
   // ---------- Transport selection ----------
@@ -240,7 +364,43 @@ describe('Email pipeline', () => {
       EMAIL_SAMPLE_VARS,
     );
     expect(after.customised).toBe(false);
-    expect(after.subject).toBe('Reset your password');
+    expect(after.subject).toBe('Reset your App revert password');
+
+    // The editor reopens on the default, not on the reverted override or on
+    // an empty canvas.
+    const tpl = await emailService.getTemplate(b.applicationId, 'password_reset');
+    const application = await prisma.application.findUniqueOrThrow({ where: { id: b.applicationId } });
+    expect(tpl?.designJson).toEqual(defaultTemplate('password_reset', brandFromApplication(application)).design);
+  });
+
+  it('GET /email-templates/:eventKey hands the editor a design for every uncustomised event', async () => {
+    const b = await bootstrap('design');
+    for (const key of Object.keys(EMAIL_EVENTS) as EmailEventKey[]) {
+      const r = await app.inject({
+        method: 'GET',
+        url: `/api/v1/tenant/applications/${b.applicationId}/email-templates/${key}`,
+        headers: { authorization: `Bearer ${b.tenantAccess}` },
+      });
+      expect(r.statusCode).toBe(200);
+      const data = r.json().data as { customised: boolean; designJson: { body?: { rows?: unknown[] } } | null };
+      expect(data.customised).toBe(false);
+      expect(data.designJson?.body?.rows?.length ?? 0).toBeGreaterThan(0);
+    }
+  });
+
+  it('a customised template returns its saved design, not the default', async () => {
+    const b = await bootstrap('saved-design');
+    const saved = { body: { rows: [{ id: 'mine' }] } };
+    await emailService.setTemplate({
+      applicationId: b.applicationId,
+      eventKey: 'welcome',
+      subject: 'hi',
+      designJson: saved,
+      bodyHtml: '<p>hi</p>',
+    });
+    const tpl = await emailService.getTemplate(b.applicationId, 'welcome');
+    expect(tpl?.customised).toBe(true);
+    expect(tpl?.designJson).toEqual(saved);
   });
 
   // ---------- Verify-email flow ----------

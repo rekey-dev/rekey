@@ -24,6 +24,7 @@
 import { type NextRequest, NextResponse } from 'next/server';
 import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE, sessionCookieMaxAges } from '@/lib/api';
 import { cookieSecure } from '@/lib/cookie-secure';
+import { loginErrorCode } from '../error-messages';
 
 type AssertResult =
   | { mfaRequired: true; mfaChallengeToken: string }
@@ -58,7 +59,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // there is nothing to disclose here beyond "that link did not work".
       // `OIDC_ASSERTION_NOT_CONFIGURED` lands here too, which is correct: on a
       // deployment that accepts no assertions this route simply does not work.
-      return seeOther(`/login?error=${encodeURIComponent(err.code)}`);
+      return seeOther(`/login?error=${loginErrorCode(err.code)}`);
     }
     throw err;
   }

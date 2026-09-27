@@ -17,13 +17,15 @@ import type { Application, EndUser } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
+import { generateSecret, generateBackupCodes } from '../../lib/mfa.js';
 import {
-  generateSecret,
-  generateBackupCodes,
-  verifyTotp,
-  consumeBackupCode,
-} from '../../lib/mfa.js';
-import { assertNotLocked, registerFailure, clearFailures, MFA_POLICY } from '../../lib/brute-force.js';
+  acceptTotpCode,
+  matchMfaCode,
+  mfaCodeReusedError,
+  type BackupCodeStore,
+  type MfaMatch,
+  type TotpOutcome,
+} from '../../lib/mfa-replay.js';
 import { emailService } from '../email/email.service.js';
 import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
 
@@ -32,6 +34,25 @@ interface SetupResult {
   otpauthUrl: string;
   /** Plaintext backup codes, show ONCE, then forget. Only hashes are stored. */
   backupCodes: string[];
+}
+
+function backupStore(endUserId: string): BackupCodeStore {
+  return {
+    swap: async (expected, next) => {
+      const { count } = await prisma.mfaCredential.updateMany({
+        where: { endUserId, backupCodesCiphertext: expected },
+        data: { backupCodesCiphertext: next },
+      });
+      return count === 1;
+    },
+    reload: async () =>
+      (
+        await prisma.mfaCredential.findUnique({
+          where: { endUserId },
+          select: { backupCodesCiphertext: true },
+        })
+      )?.backupCodesCiphertext ?? null,
+  };
 }
 
 export const mfaService = {
@@ -95,7 +116,9 @@ export const mfaService = {
       });
     }
     const { base32 } = decryptJson<{ base32: string }>(cred.secretCiphertext);
-    if (!verifyTotp(base32, args.code)) {
+    const outcome = await acceptTotpCode(base32, args.code);
+    if (outcome === 'reused') throw mfaCodeReusedError('enrolment');
+    if (outcome === 'invalid') {
       // 422 (not 401): this is enrollment confirmation, the caller is already
       // authenticated, only the submitted TOTP is wrong. 401 would signal an
       // invalid session/credential and trip client-side "log out" handling.
@@ -148,39 +171,44 @@ export const mfaService = {
   },
 
   /**
-   * Verify a TOTP or backup code at sign-in time. Returns true on success.
-   * Backup codes are single-use, consumed on accept.
+   * Match a TOTP or backup code without spending it; `spend` on the result
+   * consumes it. Sign-in uses the gap to refuse on the device limit only
+   * after the second factor is proven, and without costing the user the code.
+   * The lockout is enforced and counted here (a per-credential Redis limiter,
+   * which bounds distributed multi-IP guessing that a per-IP limit misses).
    */
-  async verify(args: { endUserId: string; code: string }): Promise<boolean> {
+  async match(args: { endUserId: string; code: string }): Promise<MfaMatch> {
     const cred = await prisma.mfaCredential.findUnique({
       where: { endUserId: args.endUserId },
     });
-    if (!cred || !cred.enrolledAt) return false;
-    // Per-credential throttle via the Redis brute-force limiter, throws 429
-    // if too many recent failures. Bounds distributed (multi-IP) TOTP guessing
-    // that a per-IP rate limit alone wouldn't catch.
-    const mfaScope = `eu:mfa:${args.endUserId}`;
-    await assertNotLocked(mfaScope, 'MFA_TOO_MANY_ATTEMPTS');
-
+    if (!cred || !cred.enrolledAt) return { outcome: 'invalid' };
     const { base32 } = decryptJson<{ base32: string }>(cred.secretCiphertext);
-    if (verifyTotp(base32, args.code)) {
-      await clearFailures(mfaScope);
-      return true;
-    }
+    return matchMfaCode(
+      {
+        base32,
+        backupCodesCiphertext: cred.backupCodesCiphertext,
+        backupStore: backupStore(args.endUserId),
+        lockScope: `eu:mfa:${args.endUserId}`,
+      },
+      args.code,
+    );
+  },
 
-    // Try backup code path.
-    const stored = decryptJson<string[]>(cred.backupCodesCiphertext);
-    const remaining = consumeBackupCode(stored, args.code);
-    if (!remaining) {
-      await registerFailure(mfaScope, MFA_POLICY);
-      return false;
-    }
-    await prisma.mfaCredential.update({
-      where: { endUserId: args.endUserId },
-      data: { backupCodesCiphertext: encryptJson(remaining) },
-    });
-    await clearFailures(mfaScope);
-    return true;
+  /**
+   * Check a TOTP or backup code and spend it. Both are single-use: a TOTP
+   * code's time step is recorded on accept, a backup code is removed.
+   * `reused` is a TOTP code that matched but was already accepted. It is
+   * refused but not counted toward the lockout: it is not a guess, and a
+   * double-submitted form must not burn the user's attempts.
+   */
+  async check(args: { endUserId: string; code: string }): Promise<TotpOutcome> {
+    const match = await this.match(args);
+    return match.outcome === 'matched' ? match.spend() : match.outcome;
+  },
+
+  /** `check`, as a yes or no for callers that answer every refusal the same way. */
+  async verify(args: { endUserId: string; code: string }): Promise<boolean> {
+    return (await this.check(args)) === 'accepted';
   },
 
   /**
@@ -217,8 +245,9 @@ export const mfaService = {
       // that is deliberately NOT accepted here. Someone who has stolen a session
       // and knows the password should not be able to strip the factor that exists
       // precisely to survive both.
-      const ok = args.code ? await this.verify({ endUserId: args.endUserId, code: args.code }) : false;
-      if (!ok) {
+      const outcome = args.code ? await this.check({ endUserId: args.endUserId, code: args.code }) : 'invalid';
+      if (outcome === 'reused') throw mfaCodeReusedError('step-up');
+      if (outcome !== 'accepted') {
         throw new RekeyError({
           statusCode: 401,
           code: 'MFA_CODE_INVALID',

@@ -205,9 +205,14 @@ const OverviewSchema: JsonSchema = {
         error: { type: "integer" },
         noTransport: { type: "integer" },
         suppressed: { type: "integer" },
+        pending: { type: "integer", description: "Custom template sends not yet finished." },
+        unknown: {
+          type: "integer",
+          description: "Custom template sends that recorded no outcome within five minutes.",
+        },
         total: { type: "integer" },
       },
-      required: ["sent", "error", "noTransport", "suppressed", "total"],
+      required: ["sent", "error", "noTransport", "suppressed", "pending", "unknown", "total"],
     },
   },
   required: [
@@ -776,9 +781,14 @@ const EmailDeliverabilitySchema: JsonSchema = {
         error: { type: "integer" },
         noTransport: { type: "integer" },
         suppressed: { type: "integer" },
+        pending: { type: "integer", description: "Custom template sends not yet finished." },
+        unknown: {
+          type: "integer",
+          description: "Custom template sends that recorded no outcome within five minutes.",
+        },
         total: { type: "integer" },
       },
-      required: ["sent", "error", "noTransport", "suppressed", "total"],
+      required: ["sent", "error", "noTransport", "suppressed", "pending", "unknown", "total"],
     },
     last7d: {
       type: "object",
@@ -787,9 +797,14 @@ const EmailDeliverabilitySchema: JsonSchema = {
         error: { type: "integer" },
         noTransport: { type: "integer" },
         suppressed: { type: "integer" },
+        pending: { type: "integer", description: "Custom template sends not yet finished." },
+        unknown: {
+          type: "integer",
+          description: "Custom template sends that recorded no outcome within five minutes.",
+        },
         total: { type: "integer" },
       },
-      required: ["sent", "error", "noTransport", "suppressed", "total"],
+      required: ["sent", "error", "noTransport", "suppressed", "pending", "unknown", "total"],
     },
     topErrorApps: {
       type: "array",

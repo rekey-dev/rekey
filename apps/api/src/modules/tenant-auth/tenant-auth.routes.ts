@@ -367,7 +367,9 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
           ...errs({
             401:
               'MFA_CHALLENGE_INVALID — the challenge token is unknown, expired, or malformed; ' +
-              'or MFA_CODE_INVALID — the TOTP/backup code did not verify.',
+              'or MFA_CODE_INVALID: the TOTP/backup code did not verify; ' +
+              'or MFA_CODE_REUSED: the TOTP code was already accepted, wait for the next one; ' +
+              'or MFA_CHALLENGE_USED: the challenge token already completed a sign-in, sign in again.',
             403: 'NO_TENANT_MEMBERSHIPS — the operator has no workspace memberships.',
             429: 'RATE_LIMITED — too many requests. Honour `Retry-After`.',
           }),

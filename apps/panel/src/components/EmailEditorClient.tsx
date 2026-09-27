@@ -3,6 +3,7 @@
 import * as React from 'react';
 import dynamic from 'next/dynamic';
 import { useCommitNudge } from './use-commit-nudge';
+import { hydrateEditor } from '@/lib/email-editor-design';
 
 /**
  * Unlayer wrapper. The editor lives in an iframe and exposes
@@ -11,8 +12,8 @@ import { useCommitNudge } from './use-commit-nudge';
  * design + html and hand them to the server action ourselves, so the Save
  * button's pending state is ours to clear when the write answers.
  *
- * `designJson` hydrates the editor from a previously-saved template
- * (null for built-in defaults, the editor opens blank). `eventKey` and
+ * `designJson` hydrates the editor: the saved design, or the built-in
+ * default as editable blocks when the template was never customised. `eventKey` and
  * `applicationId` are pass-through hidden inputs the server action
  * reads back.
  *
@@ -45,7 +46,7 @@ export interface EmailEditorClientProps {
   applicationId: string;
   eventKey: string;
   initialSubject: string;
-  /** Saved Unlayer design (null when only the built-in default exists). */
+  /** Unlayer design to open: the saved one, or the built-in default's. */
   initialDesignJson: unknown | null;
   /** Server-action handle, receives FormData with subject, designJson, bodyHtml. */
   action: (formData: FormData) => Promise<void>;
@@ -82,10 +83,7 @@ export function EmailEditorClient(props: EmailEditorClientProps): React.JSX.Elem
   // though the saved design existed. Prefer the arg, fall back to the ref.
   const onReady = React.useCallback(
     (unlayer?: EditorInstance) => {
-      const editor = unlayer ?? editorRef.current?.editor;
-      if (props.initialDesignJson && editor?.loadDesign) {
-        editor.loadDesign(props.initialDesignJson);
-      }
+      hydrateEditor(unlayer ?? editorRef.current?.editor, props.initialDesignJson);
       // Unlock Save, before this fires, exportHtml would silently no-op.
       setReady(true);
     },

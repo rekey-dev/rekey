@@ -17,6 +17,9 @@ import jwt from 'jsonwebtoken';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 
+// Requiring a verified email needs a URL the verification link can be built on.
+const VERIFY_BASE = 'https://app.example.com';
+
 function pkce(): { verifier: string; challenge: string } {
   const verifier = randomBytes(32).toString('base64url');
   return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') };
@@ -103,7 +106,7 @@ describe('OIDC provider', () => {
       method: 'PATCH',
       url: `/api/v1/tenant/applications/${appId}/auth-config`,
       headers: { authorization: `Bearer ${operatorToken}` },
-      payload: { oidcEnabled: true, requireEmailVerification: true, ...toggles },
+      payload: { oidcEnabled: true, requireEmailVerification: true, appUrl: VERIFY_BASE, ...toggles },
     });
     expect(patched.statusCode).toBe(200);
     const liveKey = await app

@@ -24,7 +24,6 @@ import { devicesService } from '../src/modules/devices/devices.service.js';
 import {
   makeEndUser as makeEndUserFor,
   setDefaultDeviceLimit as setDefaultDeviceLimitFor,
-  waitForDeliveries,
 } from './device-fixtures.js';
 import { issueRefreshToken } from '../src/lib/refresh-tokens.js';
 
@@ -78,9 +77,29 @@ describe('devices service', () => {
   const makeEndUser = (email: string) => makeEndUserFor(app, token, appId, email);
   const setDefaultDeviceLimit = (limit: number) => setDefaultDeviceLimitFor(app, token, appId, limit);
 
-  /** Event types delivered so far, once at least `expected` have landed. */
+  /**
+   * Device event types delivered so far, once at least `expected` have landed.
+   * Device events only: `makeEndUser` is an operator create, which announces
+   * `user.created` (`via: "operator"`), and that is not what these tests are
+   * about. `userEvents` pins it separately.
+   */
   async function emitted(expected: number): Promise<string[]> {
-    const rows = await waitForDeliveries({ applicationId: appId }, expected);
+    const deadline = Date.now() + 4000;
+    for (;;) {
+      const rows = await prisma.webhookDelivery.findMany({
+        where: { applicationId: appId, eventType: { startsWith: 'device.' } },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (rows.length >= expected || Date.now() > deadline) return rows.map((r) => r.eventType);
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
+
+  /** Every non-device event: the device flows themselves must add none. */
+  async function userEvents(): Promise<string[]> {
+    const rows = await prisma.webhookDelivery.findMany({
+      where: { applicationId: appId, NOT: { eventType: { startsWith: 'device.' } } },
+    });
     return rows.map((r) => r.eventType);
   }
 
@@ -146,6 +165,7 @@ describe('devices service', () => {
     // to createdAt and their order is not a contract. Ordering them was a
     // ~8% flake that became deterministic on a loaded machine.
     expect((await emitted(3)).sort()).toEqual(['device.registered', 'device.registered', 'device.released']);
+    expect(await userEvents()).toEqual(['user.created']);
   });
 
   it('is uncapped when no plan grants max_devices', async () => {
@@ -271,6 +291,7 @@ describe('devices service', () => {
       'device.unblocked',
       'device.registered',
     ]);
+    expect(await userEvents()).toEqual(['user.created']);
   });
 
   it('scopes get/release/block to the (application, end-user) pair', async () => {

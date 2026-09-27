@@ -100,6 +100,14 @@ const ERR: Record<string, string> = {
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can create coupons.',
 };
 
+/**
+ * A fixed-amount coupon created before `currency` was required. The API refuses
+ * it at checkout rather than applying it in whatever currency the plan uses.
+ */
+function refusedForNoCurrency(c: CouponRow): boolean {
+  return c.discountType === 'AMOUNT' && !c.currency;
+}
+
 function formatDiscount(c: CouponRow): string {
   if (c.discountType === 'PERCENT') {
     return `${(c.amountOff / 100).toFixed(c.amountOff % 100 === 0 ? 0 : 2)}%`;
@@ -149,11 +157,20 @@ export default async function CouponsPage({
 
   const active = coupons.filter((c) => c.active);
   const inactive = coupons.filter((c) => !c.active);
+  const refused = active.filter(refusedForNoCurrency);
 
   return (
     <div className="space-y-5">
       <BillingModeBanner applicationId={id} />
       {created && <SavedBanner params={['created']} message={`Coupon ${created} created.`} />}
+      {refused.length > 0 && (
+        <Banner tone="warning">
+          {refused.length === 1
+            ? `Coupon ${refused[0]!.code.toUpperCase()} is a fixed-amount discount with no currency, so checkout refuses it.`
+            : `${refused.length} fixed-amount coupons on this page have no currency, so checkout refuses them.`}{' '}
+          Deactivate {refused.length === 1 ? 'it' : 'them'} and create a replacement that names the currency of the plans it should discount.
+        </Banner>
+      )}
 
       <SectionHeader
         title="Coupons"
@@ -284,7 +301,9 @@ function CouponsTable({
               {c.endsAt ? formatDate(c.endsAt) : '—'}
             </TD>
             <TD>
-              {c.active ? (
+              {c.active && refusedForNoCurrency(c) ? (
+                <Badge tone="warning" dot>No currency, refused at checkout</Badge>
+              ) : c.active ? (
                 <Badge tone="success" dot>active</Badge>
               ) : (
                 <Badge tone="neutral" dot>inactive</Badge>

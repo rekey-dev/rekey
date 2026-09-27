@@ -468,7 +468,7 @@ describe('Cross-tenant billing keys + transactional outbox', () => {
           'paypal-auth-algo': 'SHA256withRSA',
           'paypal-transmission-sig': 'sig',
         },
-        event: { id: 'evt' },
+        rawEvent: '{"id":"evt"}',
       });
       const elapsed = Date.now() - started;
 

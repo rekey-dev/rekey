@@ -30,10 +30,18 @@ declare module 'fastify' {
      * OAuth endpoints, where the spec mandates form encoding.
      */
     acceptsForm?: boolean;
+    /**
+     * Route also accepts `multipart/form-data` and ignores the body. Set only on
+     * the one-click unsubscribe endpoint: RFC 8058 lets a mailbox provider send
+     * `List-Unsubscribe=One-Click` either way, and refusing one would leave the
+     * recipient subscribed.
+     */
+    acceptsMultipartForm?: boolean;
   }
 }
 
 const FORM_MEDIA_TYPE = 'application/x-www-form-urlencoded';
+const MULTIPART_FORM_MEDIA_TYPE = 'multipart/form-data';
 const METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH']);
 
 /** Media type without parameters, lowercased. */
@@ -65,6 +73,7 @@ export async function rejectUnsupportedMediaType(
   if (mediaType === null) return;
   if (mediaType === 'application/json' || mediaType.endsWith('+json')) return;
   if (mediaType === FORM_MEDIA_TYPE && req.routeOptions.config?.acceptsForm === true) return;
+  if (mediaType === MULTIPART_FORM_MEDIA_TYPE && req.routeOptions.config?.acceptsMultipartForm === true) return;
 
   throw new RekeyError({
     statusCode: 415,

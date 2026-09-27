@@ -82,7 +82,7 @@ Routes with their own deduplication are deliberately **not** opted in: provider 
 
 One Rekey deployment often hosts several independent teams — a platform team running Rekey for the whole company, a lab running it for a handful of internal products. **Workspace limits** stop one workspace from consuming the deployment: a super-admin can put a ceiling on a Tenant, and Rekey enforces it.
 
-Ceilings live in `Tenant.limits` (a jsonb column). Today there are two keys:
+Ceilings live in `Tenant.limits` (a jsonb column). The custom-email send caps (`emailSendDailyCap`, `emailSendRecipientHourlyCap`) are covered in [email-templates.md](email-templates.md#caps), and `emailAttribution` (a boolean, not a ceiling) puts a small "Secured by Rekey" line on the workspace's built-in account emails; absent means off. The two capacity keys:
 
 | Key | Meaning |
 |---|---|

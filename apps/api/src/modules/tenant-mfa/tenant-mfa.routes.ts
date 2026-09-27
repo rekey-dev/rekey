@@ -77,7 +77,7 @@ async function stepUpIfEnrolled(
     proof,
     action,
     requireMfaWhenEnrolled: true,
-    verifyMfaCode: (a) => tenantMfaService.verify(a),
+    verifyMfaCode: (a) => tenantMfaService.check(a),
   });
 }
 
@@ -162,7 +162,8 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
             401:
               TENANT_SESSION_ERRORS[401] +
               '; or STEP_UP_REQUIRED — re-enrolling over an existing authenticator requires a ' +
-              'current code or unused backup code (only when already enrolled).',
+              'current code or unused backup code (only when already enrolled); ' +
+              'or MFA_CODE_REUSED: the authenticator code was already accepted, wait for the next one.',
             403: TENANT_SESSION_ERRORS[403],
             429: 'RATE_LIMITED — too many requests. Honour `Retry-After`.',
           }),
@@ -208,7 +209,8 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
             400: 'MFA_NOT_INITIATED — POST /setup was not called first.',
             401: TENANT_SESSION_ERRORS[401],
             403: TENANT_SESSION_ERRORS[403],
-            422: 'MFA_CODE_INVALID — the TOTP code did not verify.',
+            422:
+              'MFA_CODE_INVALID: the TOTP code did not verify; or MFA_CODE_REUSED: the code was already accepted, wait for the next one.',
             429: 'RATE_LIMITED — too many requests. Honour `Retry-After`.',
           }),
         },
@@ -260,7 +262,8 @@ export async function tenantMfaRoutes(app: FastifyInstance): Promise<void> {
             401:
               TENANT_SESSION_ERRORS[401] +
               '; or STEP_UP_REQUIRED — disabling requires a current authenticator code or ' +
-              'unused backup code (only when enrollment is already complete).',
+              'unused backup code (only when enrollment is already complete); ' +
+              'or MFA_CODE_REUSED: the authenticator code was already accepted, wait for the next one.',
             403: TENANT_SESSION_ERRORS[403],
             429: 'RATE_LIMITED — too many requests. Honour `Retry-After`.',
           }),

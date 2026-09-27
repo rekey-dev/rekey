@@ -19,8 +19,11 @@
  * `Application` row that authorises the send.
  */
 
-import type { Application, EmailSuppression, EmailTemplate, Prisma } from '@prisma/client';
+import { Prisma, type Application, type EmailSuppression, type EmailTemplate } from '@prisma/client';
+import { assertFromName, mergeEmailConfig } from './sender-identity.js';
 import { prisma } from '../../lib/prisma.js';
+import { sendableTo } from './send-policy.js';
+import { parseTenantLimits } from '../../lib/tenant-limits.js';
 import { RekeyError } from '../../lib/error.js';
 import {
   recordSuppressedSend,
@@ -34,7 +37,13 @@ import {
   isKnownEvent,
   type EmailEventKey,
 } from './events.js';
-import { DEFAULT_TEMPLATES } from './defaults/index.js';
+import {
+  brandFromApplication,
+  defaultTemplate,
+  SYSTEM_BRAND,
+  type EmailBrand,
+  type UnlayerDesign,
+} from './defaults/index.js';
 import {
   renderTemplate,
   renderHtmlBody,
@@ -50,10 +59,54 @@ export interface ResolvedTemplate {
   customised: boolean;
 }
 
+/**
+ * Events that never pass through `dispatch`, so no per-Application switch can
+ * reach them. Rendering a control for these would let an operator turn
+ * something "off" that keeps arriving. Rekey sends them to operators, so their
+ * defaults wear Rekey's name rather than an Application's.
+ */
+const SYSTEM_SCOPED_EVENTS: ReadonlySet<string> = new Set([
+  'workspace_invitation',
+  'billing_unapplied_payment',
+]);
+
+type BrandSource = Pick<Application, 'name' | 'portalBranding' | 'tenantId' | 'emailConfig'>;
+
+/**
+ * Whether the workspace's built-in mail carries "Secured by Rekey". Off unless
+ * the workspace limits say `emailAttribution: true`, and off when they cannot
+ * be read: an attribution line is never worth failing a password reset over.
+ */
+async function attributionFor(tenantId: string): Promise<boolean> {
+  try {
+    const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { limits: true } });
+    return parseTenantLimits(tenant?.limits).emailAttribution === true;
+  } catch {
+    return false;
+  }
+}
+
+async function brandFor(
+  applicationId: string,
+  eventKey: EmailEventKey,
+  application?: BrandSource,
+): Promise<EmailBrand> {
+  if (SYSTEM_SCOPED_EVENTS.has(eventKey)) return SYSTEM_BRAND;
+  const source =
+    application ??
+    (await prisma.application.findUnique({
+      where: { id: applicationId },
+      select: { name: true, portalBranding: true, tenantId: true, emailConfig: true },
+    }));
+  if (!source) return SYSTEM_BRAND;
+  return brandFromApplication(source, { attribution: await attributionFor(source.tenantId) });
+}
+
 async function resolveTemplate(
   applicationId: string,
   eventKey: EmailEventKey,
-): Promise<ResolvedTemplate> {
+  application?: BrandSource,
+): Promise<ResolvedTemplate & { defaultDesign: UnlayerDesign | null }> {
   const row = await prisma.emailTemplate.findUnique({
     where: { applicationId_eventKey: { applicationId, eventKey } },
   });
@@ -63,14 +116,16 @@ async function resolveTemplate(
       bodyHtml: row.bodyHtml,
       bodyText: row.bodyText,
       customised: true,
+      defaultDesign: null,
     };
   }
-  const def = DEFAULT_TEMPLATES[eventKey];
+  const def = defaultTemplate(eventKey, await brandFor(applicationId, eventKey, application));
   return {
     subject: def.subject,
     bodyHtml: def.html,
-    bodyText: def.text ?? null,
+    bodyText: def.text,
     customised: false,
+    defaultDesign: def.design,
   };
 }
 
@@ -110,11 +165,12 @@ export async function renderForEvent(
   applicationId: string,
   eventKey: string,
   variables: Record<string, unknown>,
+  application?: BrandSource,
 ): Promise<RenderResult> {
   if (!isKnownEvent(eventKey)) {
     throw unknownEmailEvent(eventKey);
   }
-  const tpl = await resolveTemplate(applicationId, eventKey);
+  const tpl = await resolveTemplate(applicationId, eventKey, application);
   const vars = pickEventVariables(eventKey, variables);
   const subject = renderTemplate(tpl.subject, vars, { escape: false });
   const html = renderHtmlBody(tpl.bodyHtml, vars);
@@ -130,28 +186,6 @@ export interface DispatchInput {
   to: string;
   variables: Record<string, unknown>;
 }
-
-/**
- * Why a send did not happen, when the reason is configuration rather than
- * failure. Broadest first; that is also the order they are checked in.
- */
-export type SuppressionReason = 'application_disabled' | 'event_disabled' | 'suppressed_address';
-
-const SUPPRESSION_TEXT: Record<SuppressionReason, string> = {
-  application_disabled: 'All email is switched off for this Application.',
-  event_disabled: 'This email event is switched off for this Application.',
-  suppressed_address: 'This address is on the Application suppression list.',
-};
-
-/**
- * Events that never pass through `dispatch`, so no per-Application switch can
- * reach them. Rendering a control for these would let an operator turn
- * something "off" that keeps arriving.
- */
-const SYSTEM_SCOPED_EVENTS: ReadonlySet<string> = new Set([
-  'workspace_invitation',
-  'billing_unapplied_payment',
-]);
 
 /**
  * The events a live auth method can depend on. `essentialBlocker` decides,
@@ -196,53 +230,6 @@ export async function lockEmailCoupling(
 }
 
 /**
- * Is this send allowed out at all? Cheapest and broadest gate first, so a
- * silenced Application costs one boolean rather than three queries.
- */
-async function suppressionFor(
-  application: Application,
-  eventKey: EmailEventKey,
-  to: string,
-): Promise<SuppressionReason | null> {
-  if (application.emailsEnabled === false) return 'application_disabled';
-
-  const [setting, suppressed] = await Promise.all([
-    prisma.emailEventSetting.findUnique({
-      where: { applicationId_eventKey: { applicationId: application.id, eventKey } },
-      select: { enabled: true },
-    }),
-    prisma.emailSuppression.findUnique({
-      where: { applicationId_address: { applicationId: application.id, address: to.toLowerCase() } },
-      select: { id: true },
-    }),
-  ]);
-  // A MISSING row means enabled: applying this feature must not silence
-  // anything until an operator says so.
-  if (setting !== null && setting.enabled === false) return 'event_disabled';
-  if (suppressed !== null) return 'suppressed_address';
-  return null;
-}
-
-/**
- * Is this address on the Application's suppression list, and why?
- *
- * Separate from `suppressionFor` because the test-send route needs exactly
- * this one gate and deliberately not the other two: it must work while
- * sending is switched off (that is how an operator proves a new transport
- * before turning it back on), but it must not mail an address that
- * hard-bounced or complained.
- */
-export async function addressSuppression(
-  applicationId: string,
-  to: string,
-): Promise<{ reason: string } | null> {
-  return prisma.emailSuppression.findUnique({
-    where: { applicationId_address: { applicationId, address: to.toLowerCase() } },
-    select: { reason: true },
-  });
-}
-
-/**
  * Render + send, unless something says not to.
  *
  * Returns the transport outcome verbatim so callers can branch on "delivered"
@@ -250,7 +237,7 @@ export async function addressSuppression(
  * response, with the one deliberate exception documented at the gate below.
  */
 export async function dispatch(input: DispatchInput): Promise<SendOutcome> {
-  const suppression = await suppressionFor(input.application, input.eventKey, input.to);
+  const suppression = await sendableTo(input.application, input.to, 'auth', { eventKey: input.eventKey });
   if (suppression !== null) {
     // Logged, so the Delivery view can answer "why did they not get it", the
     // whole point of a switch you can see the effect of.
@@ -260,7 +247,7 @@ export async function dispatch(input: DispatchInput): Promise<SendOutcome> {
       to: input.to,
       subject: `[suppressed] ${input.eventKey}`,
       eventKey: input.eventKey,
-      reason: SUPPRESSION_TEXT[suppression],
+      reason: suppression.text,
     });
     // `error`, NOT `no_transport`, and the distinction is load-bearing.
     //
@@ -275,7 +262,7 @@ export async function dispatch(input: DispatchInput): Promise<SendOutcome> {
     // the token", so this is the safe shape without touching 40 branch sites.
     return {
       kind: 'error',
-      message: `Email suppressed: ${SUPPRESSION_TEXT[suppression]}`,
+      message: `Email suppressed: ${suppression.text}`,
       // So the auth paths can tell "the operator switched this off" from "the
       // transport broke" and skip the delivery-failure alarm for the former.
       suppressed: true,
@@ -286,6 +273,7 @@ export async function dispatch(input: DispatchInput): Promise<SendOutcome> {
     input.application.id,
     input.eventKey,
     input.variables,
+    input.application,
   );
   return sendEmail(
     input.application,
@@ -316,13 +304,11 @@ export async function dispatchSystem(input: {
   /** Owning tenant, so the send appears in that workspace's email-log view. */
   tenantId?: string | null;
 }): Promise<SendOutcome> {
-  const def = DEFAULT_TEMPLATES[input.eventKey];
+  const def = defaultTemplate(input.eventKey, SYSTEM_BRAND);
   const vars = pickEventVariables(input.eventKey, input.variables);
   const subject = renderTemplate(def.subject, vars, { escape: false });
   const html = renderHtmlBody(def.html, vars);
-  const text = def.text
-    ? renderTemplate(def.text, vars, { escape: false })
-    : htmlToPlainText(html);
+  const text = renderTemplate(def.text, vars, { escape: false });
   return sendEmailSystem(
     { to: input.to, subject, html, text },
     { eventKey: input.eventKey, tenantId: input.tenantId ?? null },
@@ -366,7 +352,7 @@ export const emailService = {
     | null
   > {
     if (!isKnownEvent(eventKey)) return null;
-    const tpl = await resolveTemplate(applicationId, eventKey);
+    const { defaultDesign, ...tpl } = await resolveTemplate(applicationId, eventKey);
     const row = tpl.customised
       ? await prisma.emailTemplate.findUnique({
           where: { applicationId_eventKey: { applicationId, eventKey } },
@@ -375,7 +361,10 @@ export const emailService = {
       : null;
     return {
       ...tpl,
-      designJson: row?.designJson ?? null,
+      // A template that was never customised still gets a design, built from
+      // the same blocks as the default HTML, so the editor opens on the
+      // default instead of an empty canvas.
+      designJson: tpl.customised ? (row?.designJson ?? null) : defaultDesign,
       variables: EMAIL_EVENTS[eventKey].variables,
     };
   },
@@ -439,6 +428,9 @@ export const emailService = {
    * Configure (or rotate) the Application's BYO transport creds + email
    * config. `credentials` is the discriminated provider union (Resend API
    * key or SMTP host/port/user/pass), stored encrypted at rest.
+   *
+   * Sets `fromAddress`, and `fromName` / `replyTo` only when given. Every
+   * other key in `emailConfig` (the rest of the sender identity) is kept.
    */
   async setCredentials(args: {
     applicationId: string;
@@ -449,18 +441,16 @@ export const emailService = {
   }): Promise<void> {
     const { encryptJson } = await import('../../lib/secrets.js');
     const ciphertext = encryptJson(args.credentials);
-    const emailConfig = {
-      fromAddress: args.fromAddress,
-      ...(args.fromName != null && { fromName: args.fromName }),
-      ...(args.replyTo != null && { replyTo: args.replyTo }),
-    };
-    await prisma.application.update({
-      where: { id: args.applicationId },
-      data: {
-        emailCredentialsCiphertext: ciphertext,
-        emailConfig: emailConfig as never,
+    if (args.fromName != null) assertFromName(args.fromName);
+    await mergeEmailConfig(
+      args.applicationId,
+      {
+        fromAddress: args.fromAddress,
+        ...(args.fromName != null && { fromName: args.fromName }),
+        ...(args.replyTo != null && { replyTo: args.replyTo }),
       },
-    });
+      Prisma.sql`, email_credentials_ciphertext = ${ciphertext}`,
+    );
   },
 
   // ---- Send control: the master switch, per-event switches, suppressions ----
@@ -579,8 +569,6 @@ export const emailService = {
       .filter(([key, want]) => want && off.has(key))
       .map(([eventKey, , message]) => ({ eventKey, message, cause: 'event_switch' as const }));
   },
-
-  addressSuppression,
 
   /** Master switch + every event's state, for the settings screen. */
   async getSendControl(application: Application): Promise<{
@@ -741,8 +729,10 @@ export const emailService = {
         ...(args.note !== undefined && { note: args.note }),
         createdBy: args.createdBy,
       },
+      // An operator's entry stops every email, so it widens an unsubscribe row.
       update: {
         reason: args.reason,
+        category: null,
         ...(args.note !== undefined && { note: args.note }),
       },
     });
@@ -868,7 +858,7 @@ export const emailService = {
   },
 };
 
-export type EmailLogStatus = 'sent' | 'error' | 'no_transport' | 'suppressed';
+export type EmailLogStatus = 'sent' | 'error' | 'no_transport' | 'suppressed' | 'pending' | 'unknown';
 
 export interface EmailLogRow {
   id: string;
@@ -880,6 +870,8 @@ export interface EmailLogRow {
   status: string;
   messageId: string | null;
   error: string | null;
+  customTemplateKey: string | null;
+  customTemplateVersion: number | null;
   createdAt: Date;
 }
 
@@ -893,6 +885,8 @@ function shapeLog(r: {
   status: string;
   messageId: string | null;
   error: string | null;
+  customTemplateKey: string | null;
+  customTemplateVersion: number | null;
   createdAt: Date;
 }): EmailLogRow {
   return {
@@ -905,6 +899,8 @@ function shapeLog(r: {
     status: r.status,
     messageId: r.messageId,
     error: r.error,
+    customTemplateKey: r.customTemplateKey,
+    customTemplateVersion: r.customTemplateVersion,
     createdAt: r.createdAt,
   };
 }

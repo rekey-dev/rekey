@@ -183,6 +183,17 @@ autofix removed `as object` from a Prisma write where the assertion was
 load-bearing for `InputJsonValue` assignability, producing ten typecheck errors
 from a single `--fix` run.
 
+## Testing the SDKs in another app
+
+Build the packages, then pack them with **`pnpm pack`**, not `npm pack`:
+
+```bash
+pnpm build
+cd packages/sdk-node && pnpm pack --pack-destination /tmp/rekey-sdk
+```
+
+The SDKs depend on each other through `workspace:^` (for example `@rekey.dev/nextjs` on `@rekey.dev/node`, and both on `@rekey.dev/shared-types`). `pnpm pack` rewrites that to a real version range; `npm pack` leaves `workspace:^` in the tarball, which no package manager outside this repo can install. Pack every workspace package the one you are testing depends on, and install the tarballs together in the other app so the unpublished versions resolve to each other.
+
 ## Pull requests
 
 1. Fork and branch from `main` (`feat/…`, `fix/…`, `docs/…`).

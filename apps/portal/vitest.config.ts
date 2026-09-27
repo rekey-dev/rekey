@@ -12,9 +12,11 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['test/**/*.test.ts'],
+    include: ['test/**/*.test.{ts,tsx}'],
     css: false,
   },
+  // The checkout page tests render components to static markup.
+  esbuild: { jsx: 'automatic' },
   css: { postcss: { plugins: [] } },
   resolve: {
     // `server-only` throws by design when loaded outside a React Server

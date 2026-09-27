@@ -16,6 +16,8 @@ Rekey has **three** distinct credentials. Confusing them is the #1 cause of inte
 
 **Rule of thumb**: if it starts with `rp_pub_`, it's safe in HTML. If it starts with `rp_live_` or `rp_test_`, it must never reach a browser.
 
+The `rp_` comes from Rekey's earlier name, ReliPay. It stays because the API and the SDKs recognise a key by that prefix, so changing it would invalidate every key already issued.
+
 > The publishable and secret keys are **not interchangeable**. A publishable key sent to a secret-only route is rejected (`401 API_KEY_INVALID`); a secret key in the browser is a credential leak. The split is the security model, not a limitation — see the [can/cannot table](#what-the-publishable-key-can-and-cannot-do) below.
 
 ## Publishable key
@@ -109,6 +111,7 @@ There is no `mode` in the request body. The `rp_live_` / `rp_test_` prefix follo
   - `webhooks:read`
   - `*`: every **standard** scope, which is the five above and nothing else
   - `credits:grant`: **elevated**, see below
+  - `email:send`: **elevated**, see below
 
   A write scope implies its read scope. On the routes a signed-in user calls
   about their own account with a secret key (`/users/me`, its devices,
@@ -122,7 +125,7 @@ There is no `mode` in the request body. The `rp_live_` / `rp_test_` prefix follo
 
 ### Elevated scopes, and why `*` does not include them
 
-An elevated scope is granted only by naming it on the key. `*` does not imply it, and neither does any other scope. Today there is one, `credits:grant`, which lets a key add credits to an end-user or organization with `POST /api/v1/credits/grant`.
+An elevated scope is granted only by naming it on the key. `*` does not imply it, and neither does any other scope. Today there are two: `credits:grant`, which lets a key add credits to an end-user or organization with `POST /api/v1/credits/grant`, and `email:send`, which lets a key send a published custom email template with `POST /api/v1/email/send` (error codes under "Email: custom templates" in [errors.md](errors.md)).
 
 `*` is the default for every key minted without a `scopes` array, so it sits on nearly every key in every deployment. If `*` meant "every scope, including ones added later", adding `credits:grant` would have handed the power to mint credits to all of those keys at once, and no operator would have decided that. So `*` means "every standard scope", and an authority that creates value is held only by a key someone minted with it on purpose. The same reasoning is why it is not folded into `billing:write`, which every default key already holds.
 
@@ -134,7 +137,9 @@ What a `credits:grant` key can do, and what bounds it:
 - `idempotencyKey` is required, per subject, and belongs to this route alone: it is stored as `api-grant:<key>`, so it never matches a consume made under the same string. An exact retry grants nothing and returns the original entry; the same key with a different `amount` or `reason` is `409 CREDITS_IDEMPOTENCY_KEY_REUSED`.
 - Each grant writes `app.credits_granted_by_api_key` to the security log with the key's id, name and prefix, in the same transaction as the ledger entry: a grant that cannot be audited is not made. A leaked key can be traced to exactly what it minted, and revoking it stops it.
 
-Who may mint such a key: the same people who may grant credits from the panel. Minting or creating a key whose scopes include an elevated one needs billing-write access to the Application and the `billing:write` operator scope, on every path that sets key scopes (the panel and tenant API, an operator PAT, the operator MCP `mint_api_key` tool). A member who can mint ordinary keys but not grant credits gets `403 SCOPE_INSUFFICIENT`, and so does a PAT that carries only `keys:mint`. The panel's key list flags elevated scopes, and "Nothing else" in the form mints a key that holds only `credits:grant`.
+Who may mint a `credits:grant` key: the same people who may grant credits from the panel. Minting or creating a key whose scopes include `credits:grant` needs billing-write access to the Application and the `billing:write` operator scope, on every path that sets key scopes (the panel and tenant API, an operator PAT, the operator MCP `mint_api_key` tool). A member who can mint ordinary keys but not grant credits gets `403 SCOPE_INSUFFICIENT`, and so does a PAT that carries only `keys:mint`. The panel's key list flags elevated scopes, and "Nothing else" in the form mints a key that holds only `credits:grant`.
+
+Who may mint an `email:send` key: anyone who may mint a key at all (`developer:write`). Sending mail is developer authority, and the key can only send templates someone with write access already published, through the Application's own mail provider, under the caps in the spec.
 
 The elevated list lives in `@rekey.dev/shared-types` (`ELEVATED_API_KEY_SCOPES`), next to `STANDARD_API_KEY_SCOPES`, which is what `*` expands to.
 

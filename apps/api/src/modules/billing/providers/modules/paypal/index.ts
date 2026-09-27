@@ -23,6 +23,7 @@
  * PaypalCredentials in credentials.service.ts).
  */
 
+import { CHECKOUT_BROWSER_ORIGINS } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../../../../lib/error.js';
 import { paypalScale } from '../../paypal-money.js';
 import { verifyPaypalWebhook } from '../../paypal.js';
@@ -171,7 +172,7 @@ async function verify(
   creds: Record<string, string>,
   ctx: VerifyCtx,
 ): Promise<VerifyResult> {
-  // ONLINE verification: transmission headers + parsed event + our webhook
+  // ONLINE verification: transmission headers + the raw event + our webhook
   // id posted to PayPal's verify-webhook-signature API (sandbox vs live
   // base URL from the credential row's mode). Fail-closed on any network
   // error / non-SUCCESS, but the two are reported differently.
@@ -179,7 +180,7 @@ async function verify(
     creds: creds as unknown as PaypalCredentials,
     mode: ctx.mode,
     headers: req.headers,
-    event: req.payload,
+    rawEvent: req.rawBody,
   });
   if (outcome.ok) return { ok: true };
   if (outcome.reason === 'unreachable') {
@@ -521,7 +522,11 @@ export const paypalModule: ProviderModule = {
     // Doing this properly needs an intro TRIAL cycle minted onto the plan,
     // which is a plan-registration feature, not a checkout one.
     discounts: { oneTime: true, recurring: false },
+    // Subscriptions only: v5 Buttons with a server-created subscription. One-time
+    // purchases on the page need card fields on v6, which is Phase 1b.
+    embeddedCheckout: { recurring: true, oneTime: false },
   },
+  browser: CHECKOUT_BROWSER_ORIGINS.paypal!,
   credentialSchema: [
     {
       key: 'clientId',

@@ -256,8 +256,9 @@ describe('browser-reachable end-user self-service flows', () => {
       const wrongCode = await asBrowser('POST', '/api/v1/auth/mfa/disable', { code: '000000' });
       expect(wrongCode.statusCode).toBe(401);
 
+      // The confirming code spent the current step, so this uses the next one.
       const withCode = await asBrowser('POST', '/api/v1/auth/mfa/disable', {
-        code: totp.generate(),
+        code: totp.generate({ timestamp: Date.now() + 30_000 }),
       });
       expect(withCode.statusCode).toBe(200);
     });

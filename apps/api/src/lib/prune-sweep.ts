@@ -21,6 +21,7 @@ import {
 import { pruneExpiredChallenges } from './webauthn-challenge.js';
 import { pruneWebhookEvents } from '../modules/billing/webhooks/retention.js';
 import { pruneLogs, type LogArchiver } from './log-retention.js';
+import { resolveStalePendingSends } from '../modules/email/custom/custom-send.service.js';
 import { withLease, type LeaseOutcome, type LeaseRedis } from './sweep-lease.js';
 
 export const PRUNE_SWEEP_LEASE_KEY = 'lease:prune-sweep';
@@ -65,6 +66,9 @@ async function sweepOnce(options: PruneSweepOptions): Promise<void> {
   await step(log, 'expired webauthn challenges', () => pruneExpiredChallenges());
   // Generic Idempotency-Key rows (24 h TTL); also clears crash-orphaned reservations.
   await step(log, 'expired idempotency keys', () => pruneExpiredIdempotencyKeys());
+  // Custom email sends that never recorded an outcome: resolved to `unknown`
+  // so a replay stops answering "in flight" (custom-send.service.ts).
+  await step(log, 'stale pending email sends', () => resolveStalePendingSends());
   // Inbound billing-webhook receipts; a provider retries for days, not months.
   const webhookDays = options.webhookEventRetentionDays;
   if (webhookDays !== null) {

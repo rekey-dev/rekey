@@ -35,7 +35,7 @@
  */
 
 import jwt from 'jsonwebtoken';
-import { createHash, createHmac } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import type { Application } from '@prisma/client';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { env } from '../config/env.js';
@@ -205,7 +205,14 @@ function signEndUserToken(
       ...(sessionId && { sid: sessionId }),
     },
     appSigningKey(applicationId, tokenGeneration),
-    { expiresIn: lifetimeSeconds, algorithm: 'HS256' },
+    {
+      expiresIn: lifetimeSeconds,
+      algorithm: 'HS256',
+      // A challenge is spent by recording its hash (lib/mfa-replay.ts). Two
+      // sign-ins in the same second would otherwise mint identical tokens, and
+      // spending one would spend both.
+      ...(typ === 'eu_mfa_challenge' && { jwtid: randomUUID() }),
+    },
   );
   return { token, expiresAt: new Date(Date.now() + lifetimeSeconds * 1000) };
 }

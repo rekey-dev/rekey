@@ -228,6 +228,24 @@ export default async function OAuthPage({
         )}
       </div>
 
+      <p className="text-sm text-[var(--color-muted-fg)]">
+        Your sign-in page does not need its own list of these. It can read the
+        providers saved here, names only, from{' '}
+        <code className="font-mono text-xs text-[var(--color-fg)]">GET /api/v1/auth/oauth/providers</code>
+        {' '}with the publishable key, and{' '}
+        <code className="font-mono text-xs">&lt;SignIn&gt;</code> from{' '}
+        <code className="font-mono text-xs">@rekey.dev/react</code> does it for you. A provider appears
+        there once both its client ID and secret are saved.{' '}
+        <a
+          className="underline"
+          href="https://rekey.dev/docs/api"
+          target="_blank"
+          rel="noreferrer"
+        >
+          API reference
+        </a>
+      </p>
+
       {Object.keys(configured).length === 0 && (
         <p className="text-sm text-[var(--color-muted-fg)]">
           No social logins yet. Add Google, GitHub, and others below so users can sign in with one

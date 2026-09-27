@@ -9,6 +9,7 @@
  *
  *   Settings       is mail on, who is it from, and which transport carries it
  *   Templates      what each email says, and whether it is sent at all
+ *   Custom         the Application's own templates, sent by key from its backend
  *   Delivery       what actually happened to the last N sends
  *   Suppressions   who we must not email, and why
  *
@@ -48,6 +49,7 @@ export default async function EmailLayout({
         segments={[
           { href: base, label: 'Settings', exact: true },
           { href: `${base}/templates`, label: 'Templates' },
+          { href: `${base}/custom`, label: 'Custom templates' },
           { href: `${base}/logs`, label: 'Delivery' },
           { href: `${base}/suppressions`, label: 'Suppressions' },
         ]}

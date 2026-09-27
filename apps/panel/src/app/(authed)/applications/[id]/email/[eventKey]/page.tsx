@@ -200,7 +200,11 @@ export default async function TemplateEditorPage({
         </Banner>
       )}
 
+      {/* Keyed on the customised flag so a revert remounts the editor: the
+          design and subject are only read on mount, and without the remount
+          the editor kept showing the override that was just deleted. */}
       <EmailEditorClient
+        key={template.customised ? 'customised' : 'default'}
         applicationId={id}
         eventKey={eventKey}
         initialSubject={template.subject}

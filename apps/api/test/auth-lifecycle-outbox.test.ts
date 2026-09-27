@@ -125,6 +125,7 @@ describe('Auth lifecycle webhooks are transactional', () => {
         createdAt: user.createdAt.toISOString(),
         metadata: null,
       },
+      via: 'password',
     });
   });
 

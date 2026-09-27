@@ -109,7 +109,7 @@ export async function couponsAdminRoutes(app: FastifyInstance): Promise<void> {
         summary: "Create a coupon",
         description:
           "Discount kinds: PERCENT (amountOff in basis points, so 1500 = 15%) " +
-          "or AMOUNT (amountOff in smallest currency unit). Codes are stored lowercase.",
+          "or AMOUNT (amountOff in smallest currency unit, `currency` required). Codes are stored lowercase.",
         params: {
           type: "object",
           properties: { id: { type: "string" } },
@@ -145,7 +145,9 @@ export async function couponsAdminRoutes(app: FastifyInstance): Promise<void> {
             400:
               "VALIDATION_ERROR — a field failed schema validation; or COUPON_CODE_INVALID — " +
               "the code is not 1-40 alphanumerics/underscores/hyphens; or COUPON_AMOUNT_INVALID " +
-              "— `amountOff` is negative, or a PERCENT discount exceeds 10000 basis points.",
+              "— `amountOff` is negative, or a PERCENT discount exceeds 10000 basis points; or " +
+              "COUPON_CURRENCY_REQUIRED: an AMOUNT coupon was sent without `currency`; or " +
+              "COUPON_CURRENCY_INVALID: `currency` is not an ISO 4217 code.",
             ...SUPER_ADMIN_ERRORS,
             404: "APPLICATION_NOT_FOUND — no application with that id.",
             409: "COUPON_CODE_TAKEN — another coupon on this application already uses that code.",
@@ -273,7 +275,7 @@ export async function couponsPublicRoutes(app: FastifyInstance): Promise<void> {
             400:
               "VALIDATION_ERROR — the body failed schema validation; or COUPON_INACTIVE / " +
               "COUPON_NOT_YET_STARTED / COUPON_EXPIRED / COUPON_NOT_APPLICABLE / " +
-              "COUPON_CURRENCY_MISMATCH / COUPON_REDEMPTION_LIMIT_REACHED / " +
+              "COUPON_CURRENCY_REQUIRED / COUPON_CURRENCY_MISMATCH / COUPON_REDEMPTION_LIMIT_REACHED / " +
               "COUPON_USER_LIMIT_REACHED — the coupon fails validation for this plan/user.",
             401:
               "API_KEY_MISSING / API_KEY_INVALID — the secret key is missing, malformed, or " +

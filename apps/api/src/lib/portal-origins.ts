@@ -19,6 +19,19 @@ export function portalBaseOrigin(): string | null {
 }
 
 /**
+ * Where an Application's end users manage their billing: the shared portal
+ * host plus the slug, or null when the Application has not enabled the hosted
+ * portal or this deployment runs none.
+ *
+ * @example
+ * hostedPortalUrl({ slug: 'acme', hostedPortalEnabled: true }); // 'https://portal.rekey.dev/acme'
+ */
+export function hostedPortalUrl(app: Pick<Application, 'slug' | 'hostedPortalEnabled'>): string | null {
+  const base = portalBaseOrigin();
+  return app.hostedPortalEnabled && base !== null ? `${base}/${encodeURIComponent(app.slug)}` : null;
+}
+
+/**
  * Origins from which the hosted portal may call THIS app's publishable API:
  * the shared portal host (when the app opted in) plus its verified custom
  * domain. Empty when the app hasn't enabled the hosted portal.

@@ -11,7 +11,7 @@ import { requireUserSession } from '../../middleware/user-session.js';
 import { assertStepUp } from '../../lib/step-up.js';
 import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { mfaService } from '../mfa/mfa.service.js';
-import { authRateLimit, signUpRateLimit } from '../../lib/rate-limit.js';
+import { authRateLimit, passkeyStartRateLimit, signUpRateLimit } from '../../lib/rate-limit.js';
 import type { SecurityEventType } from '@rekey.dev/shared-types';
 import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
 import { ok, okPage, okFlag, errs, ref, type JsonSchema } from '../../lib/openapi.js';
@@ -250,6 +250,7 @@ export function shapeAuthResult(result: import('./auth.service.js').AuthResult):
   refreshToken: string;
   refreshTokenExpiresAt: string;
   deviceId: string | null;
+  isNewUser: boolean;
 } {
   return {
     mfaRequired: false,
@@ -259,6 +260,7 @@ export function shapeAuthResult(result: import('./auth.service.js').AuthResult):
     refreshToken: result.refreshToken,
     refreshTokenExpiresAt: result.refreshTokenExpiresAt.toISOString(),
     deviceId: result.deviceId,
+    isNewUser: result.isNewUser,
   };
 }
 
@@ -489,7 +491,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
               BOOTSTRAP_401 +
               ' Or MFA_CHALLENGE_INVALID — the challenge token is invalid or expired; or ' +
               'MFA_CHALLENGE_WRONG_APPLICATION — issued for a different Application; or ' +
-              'MFA_CODE_INVALID — the TOTP/backup code did not verify.',
+              'MFA_CODE_INVALID: the TOTP/backup code did not verify; or ' +
+              'MFA_CODE_REUSED: the TOTP code was already accepted, wait for the next one; or ' +
+              'MFA_CHALLENGE_USED: the challenge token already completed a sign-in, sign in again.',
             403: BOOTSTRAP_403 + DEVICE_ERRORS_403,
           }),
         },
@@ -612,7 +616,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         summary: 'Request a password-reset token for an email',
         description:
           'Always returns 200 with `{ delivered: boolean, emailSent: boolean, resetToken: string|null }`. ' +
-          'Never discloses whether the email exists. When the Application has email transport ' +
+          'A **publishable-key** caller always gets the same body, so it never learns whether the ' +
+          'email exists. A **secret-key** caller is told the truth (`delivered: false` for an unknown ' +
+          'email), because it may need the token and runs on your own server. When the Application has email transport ' +
           'configured (BYO Resend or RESEND_DEFAULT_*), the email is sent and `resetToken` is null. ' +
           'Otherwise the legacy contract applies, caller forwards `resetToken` via their own provider.',
         security: [{ apiKey: [] }, { publishableKey: [] }],
@@ -629,7 +635,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
             {
               type: 'object',
               description:
-                'Never discloses whether the email exists. `resetToken` is non-null only when the ' +
+                'Constant for a publishable-key caller, so it never discloses whether the email exists; ' +
+                'a secret-key caller gets `delivered: false` for an unknown email. `resetToken` is non-null only when the ' +
                 'Application has no email transport configured (legacy contract), a publishable ' +
                 'caller never receives it.',
               properties: {
@@ -784,6 +791,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     '/passkey/authenticate/start',
     {
       bodyLimit: CREDENTIAL_BODY_LIMIT,
+      config: { rateLimit: passkeyStartRateLimit(10) },
       schema: {
         tags: ['Public · Auth'],
         summary: 'Begin a passkey authentication ceremony',
@@ -1251,7 +1259,8 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
               'so there is no second factor to step up with.',
             401:
               USER_SESSION_401 +
-              ' Or STEP_UP_REQUIRED — a publishable caller did not send a valid `password` or `code`.',
+              ' Or STEP_UP_REQUIRED: a publishable caller did not send a valid `password` or `code`.' +
+              ' Or MFA_CODE_REUSED: the authenticator code was already accepted, wait for the next one.',
             403: IMPERSONATION_403,
           }),
         },
@@ -1273,7 +1282,7 @@ export async function authenticatedAuthRoutes(app: FastifyInstance): Promise<voi
             ...(typeof proof.password === 'string' && { password: proof.password }),
             ...(typeof proof.code === 'string' && { code: proof.code }),
           },
-          verifyMfaCode: (a) => mfaService.verify(a),
+          verifyMfaCode: (a) => mfaService.check(a),
         });
       }
       const result = await authService.passkeyRegisterStart({

@@ -25,6 +25,7 @@
 import type { Application, EndUser, Plan, Subscription } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
+import { costsNothing } from './free-plan.js';
 import { providerError, withProviderErrors } from '../../lib/provider-errors.js';
 import { plansService } from '../plans/plans.service.js';
 import { couponsService } from '../coupons/coupons.service.js';
@@ -43,6 +44,9 @@ import {
 import {
   buildCheckoutSessionMetadata,
   CHECKOUT_SESSION_LIFETIME_MS,
+  checkoutBindsUntil,
+  checkoutStillPayable,
+  pendingCheckoutPrefilter,
 } from './checkout-sessions.js';
 import { getProviderForApplication, pickProvider } from './providers/index.js';
 import { getModule } from './providers/registry.js';
@@ -50,6 +54,9 @@ import { billingCredentialsService, type BillingProviderName } from './credentia
 import { BillingConfigSchema, cancelEffect, isEntitlingStatus, ENTITLING_SUBSCRIPTION_STATUSES } from '@rekey.dev/shared-types';
 import { enqueueSubscriptionEvent } from './webhooks/billing-events.js';
 import { kickDeliveries } from '../webhooks/webhook.service.js';
+import { resolveCheckoutPresentation, type CheckoutPresentation } from './checkout/presentation.js';
+import { issueProviderCheckout, recordIssuedCheckout, type IssuedCheckout } from './checkout/issue.js';
+import { assertNoApprovalInFlight } from './checkout/in-flight.js';
 /**
  * "$99.00" for a refusal message, or null when the plan has no flat amount.
  *
@@ -268,6 +275,56 @@ async function expireIfDue(sub: Subscription): Promise<Subscription> {
   return updated;
 }
 
+type SubscriptionSubject = { beneficiaryOrgId: string } | { endUserId: string; beneficiaryOrgId: null };
+
+function subscriptionSubject(endUser: Pick<EndUser, 'id'>, organizationId: string | undefined): SubscriptionSubject {
+  return organizationId
+    ? { beneficiaryOrgId: organizationId }
+    : { endUserId: endUser.id, beneficiaryOrgId: null };
+}
+
+/** Live rows read per subject. A subject holds at most one row per plan. */
+export const LIVE_SUBSCRIPTIONS_CAP = 100;
+
+/**
+ * The subject's ACTIVE, TRIALING and PAST_DUE rows in the order
+ * `getCurrentSubscription` considers them: paid plans before the free
+ * fallback, newest `createdAt` first within each, `id` descending on a tie.
+ * At most the newest {@link LIVE_SUBSCRIPTIONS_CAP} rows are considered.
+ *
+ * Newest rather than dearest: two plans can be priced in different currencies
+ * or intervals, so "highest price" is not a total order, and changing the pick
+ * would move which row an existing integration's cancel call ends.
+ */
+async function rankedLiveSubscriptions(
+  application: Application,
+  subject: SubscriptionSubject,
+): Promise<Subscription[]> {
+  const liveRows = await prisma.subscription.findMany({
+    where: {
+      applicationId: application.id,
+      status: { in: ['ACTIVE', 'TRIALING', 'PAST_DUE'] },
+      ...subject,
+    },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: LIVE_SUBSCRIPTIONS_CAP,
+  });
+  if (liveRows.length === 0) return [];
+  // A row counts as the fallback when its plan costs nothing, whether or not
+  // it is today's `defaultPlanSlug`: renaming or clearing the default must not
+  // bring the shadowing back for buyers still holding the old $0 rows, and a
+  // priced plan stored as the default is still something the buyer pays for.
+  const plans = await prisma.plan.findMany({
+    where: { id: { in: [...new Set(liveRows.map((row) => row.planId))] } },
+    select: { id: true, amount: true, pricePerUnitCents: true },
+  });
+  const fallbackPlanIds = new Set(plans.filter((plan) => costsNothing(plan)).map((plan) => plan.id));
+  return [
+    ...liveRows.filter((row) => !fallbackPlanIds.has(row.planId)),
+    ...liveRows.filter((row) => fallbackPlanIds.has(row.planId)),
+  ];
+}
+
 export const billingService = {
   async listActivePlans(
     application: Application,
@@ -279,6 +336,26 @@ export const billingService = {
   /** Total plans in the public catalogue, ignoring take/skip. */
   async countActivePlans(application: Application): Promise<number> {
     return plansService.countForApplication(application.id, false);
+  },
+
+  /**
+   * Every live subscription of the caller (or of `opts.organizationId`), in the
+   * order `getCurrentSubscription` ranks them, so the first item is what the
+   * singular read returns whenever a live one exists. Rows that lapse on this
+   * read are settled by the same lazy expiry and left out.
+   */
+  async listLiveSubscriptions(
+    application: Application,
+    endUser: Pick<EndUser, 'id'>,
+    opts?: { organizationId?: string },
+  ): Promise<Subscription[]> {
+    const ranked = await rankedLiveSubscriptions(application, subscriptionSubject(endUser, opts?.organizationId));
+    const live: Subscription[] = [];
+    for (const row of ranked) {
+      const read = await expireIfDue(row);
+      if (isEntitlingStatus(read.status)) live.push(read);
+    }
+    return live;
   },
 
   /**
@@ -319,9 +396,7 @@ export const billingService = {
     // newest-first, so the org purchase shadows the buyer's own subscription.
     // Callers that cancel what this returns would then cancel the org's.
     // `createCheckoutSession` has always scoped its own lookup this way.
-    const subject = opts?.organizationId
-      ? { beneficiaryOrgId: opts.organizationId }
-      : { endUserId: endUser.id, beneficiaryOrgId: null };
+    const subject = subscriptionSubject(endUser, opts?.organizationId);
 
     // Entitled rows first, and only then an unpaid checkout. Newest-first
     // across all four statuses let a PENDING row shadow a live plan: a free
@@ -334,7 +409,9 @@ export const billingService = {
     // all, on the page whose whole job is to say what they are on.
     //
     // Among live rows, a free plan is the fallback, never the answer while
-    // anything else is live. Recency cannot
+    // anything else is live, and among several paid ones the newest wins (see
+    // `rankedLiveSubscriptions`; `listLiveSubscriptions` returns them all).
+    // Recency cannot
     // decide it: checkout reuses the (app, end-user, plan) row, so a buyer who
     // opened a paid checkout, backed out, joined the free tier and paid later
     // holds a paid row CREATED before the free one. Newest-first read them as
@@ -344,46 +421,16 @@ export const billingService = {
     // A row that lapses on this very read (`expireIfDue`) does not end the
     // search either, or the first read after a paid term ends would report
     // "ended" while the free tier is still live underneath it.
-    const liveRows = await prisma.subscription.findMany({
-      where: {
-        applicationId: application.id,
-        status: { in: ['ACTIVE', 'TRIALING', 'PAST_DUE'] },
-        ...subject,
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (liveRows.length > 0) {
-      // A row counts as the fallback when its plan costs nothing on both axes,
-      // or is today's `defaultPlanSlug`. The price is a property of the row's
-      // own plan, so renaming or clearing the default does not bring the
-      // shadowing back for buyers still holding the old $0 rows.
-      const freeSlug = BillingConfigSchema.safeParse(application.billingConfig).data?.defaultPlanSlug;
-      const plans = await prisma.plan.findMany({
-        where: { id: { in: [...new Set(liveRows.map((row) => row.planId))] } },
-        select: { id: true, slug: true, amount: true, pricePerUnitCents: true },
-      });
-      const fallbackPlanIds = new Set(
-        plans
-          .filter(
-            (plan) =>
-              (plan.amount === 0 && plan.pricePerUnitCents === null) || plan.slug === freeSlug,
-          )
-          .map((plan) => plan.id),
-      );
-      const ranked = [
-        ...liveRows.filter((row) => !fallbackPlanIds.has(row.planId)),
-        ...liveRows.filter((row) => fallbackPlanIds.has(row.planId)),
-      ];
-      let lapsed: Subscription | undefined;
-      for (const row of ranked) {
-        const read = await expireIfDue(row);
-        if (isEntitlingStatus(read.status)) return read;
-        lapsed ??= read;
-      }
-      // Everything live lapsed on this read. Report the one that mattered
-      // most, as the single-row version of this always did.
-      if (lapsed) return lapsed;
+    const ranked = await rankedLiveSubscriptions(application, subject);
+    let lapsed: Subscription | undefined;
+    for (const row of ranked) {
+      const read = await expireIfDue(row);
+      if (isEntitlingStatus(read.status)) return read;
+      lapsed ??= read;
     }
+    // Everything live lapsed on this read. Report the one that mattered
+    // most, as the single-row version of this always did.
+    if (lapsed) return lapsed;
 
     const pending = await prisma.subscription.findFirst({
       where: { applicationId: application.id, status: 'PENDING', ...subject },
@@ -443,6 +490,8 @@ export const billingService = {
      * `BILLING_TRIAL_ALREADY_USED` rather than silently charged.
      */
     allowWithoutTrial?: boolean;
+    /** `redirect` forces the provider's page; otherwise the Application's setting decides. */
+    mode?: 'redirect' | 'embedded';
   }): Promise<{
     url: string;
     subscription: Subscription;
@@ -450,6 +499,12 @@ export const billingService = {
     discountAmount: number;
     /** Which provider issued this checkout. Stamped on the Subscription row. */
     provider: BillingProviderName;
+    /** True when `url` is the Rekey-hosted checkout page. */
+    embedded: boolean;
+    checkoutSessionId: string;
+    /** The readiness check that sent an EMBEDDED checkout to the provider's page. */
+    fellBack: CheckoutPresentation['fellBack'];
+    paymentMode: CheckoutPresentation['paymentMode'];
   }> {
     // When the Application bills per organization (owner+beneficiary), a
     // checkout MUST name a beneficiary org, an individual can't hold the sub.
@@ -495,7 +550,7 @@ export const billingService = {
         statusCode: 400,
         code: 'PLAN_INACTIVE',
         message: `Plan "${input.planSlug}" is not currently available for new sign-ups.`,
-        fix: 'Pick a different active plan, or have an admin re-enable this one via PATCH /api/v1/admin/applications/:id/plans/:slug.',
+        fix: `Pick a plan from GET /api/v1/billing/plans, which lists the active ones. The operator can reactivate this one in Panel → Application → Plans (/applications/${input.application.id}/plans) or with PATCH /api/v1/tenant/applications/${input.application.id}/plans/${input.planSlug} and \`{ "active": true }\`.`,
       });
     }
 
@@ -557,9 +612,10 @@ export const billingService = {
       input.beneficiaryOrgId !== undefined
         ? { beneficiaryOrgId: input.beneficiaryOrgId }
         : { endUserId: input.endUser.id, beneficiaryOrgId: null };
-    const bound = isOneTime
-      ? null
-      : await prisma.subscription.findFirst({
+    const bindingCheckedAt = new Date();
+    const bindingCandidates = isOneTime
+      ? []
+      : await prisma.subscription.findMany({
           where: {
             applicationId: input.application.id,
             provider: { not: null },
@@ -632,9 +688,13 @@ export const billingService = {
                   // subscriptions and one local row pointing at the last. The
                   // guard is there now. Do not widen this exclusion without
                   // checking it is still there.
+                  //
+                  // The window itself is decided below, in code, because its
+                  // clock lives in `metadata` (see checkoutBindsUntil). The
+                  // prefilter only keeps long-dead rows out of the result.
                   {
                     status: 'PENDING',
-                    updatedAt: { gt: new Date(Date.now() - CHECKOUT_SESSION_LIFETIME_MS) },
+                    ...pendingCheckoutPrefilter(bindingCheckedAt),
                     NOT: { endUserId: input.endUser.id, planId: plan.id },
                   },
                 ],
@@ -663,9 +723,20 @@ export const billingService = {
             // false. The pair is the honest test.
             providerSubId: true,
             plan: { select: { slug: true } },
+            metadata: true,
+            updatedAt: true,
           },
         });
+    const bound =
+      bindingCandidates.find(
+        (row) => row.status !== 'PENDING' || checkoutStillPayable(row, bindingCheckedAt),
+      ) ??
+      null;
     const boundProvider = bound?.provider ?? null;
+    const unpaidBinderReleasesAt =
+      bound !== null && bound.status === 'PENDING' && bound.providerSubId === null
+        ? checkoutBindsUntil(bound).toISOString()
+        : null;
 
     // Whether the bound provider is still REACHABLE is settled before the
     // caller's request is judged, because it is the more fundamental fact and
@@ -732,8 +803,8 @@ export const billingService = {
           message: `This subscriber ${held}, which is ${stillConfigured ? 'disabled' : 'no longer configured'} for this Application. A subscription cannot be moved between payment providers, so no checkout can be issued for them until that is resolved.`,
           fix: unpaidBinder
             ? stillConfigured
-              ? `Re-enable "${boundProvider}" in Panel → Application → Billing so this buyer can open checkouts there again. The one they already started is unaffected either way: completions do not consult whether a provider is enabled, so a payment made at "${boundProvider}" is still recorded while it is disabled. Otherwise leave it until it can no longer be completed, after which a checkout elsewhere is allowed. No completed payment has been recorded here, so there is nothing for Rekey to cancel.`
-              : `Re-add the "${boundProvider}" credentials in Panel → Application → Billing so a payment completed there can still be recorded: without them the completion is refused and the checkout they started stays open. Otherwise leave it until it can no longer be completed, after which a checkout elsewhere is allowed. No completed payment has been recorded here, so there is nothing for Rekey to cancel.`
+              ? `Re-enable "${boundProvider}" in Panel → Application → Billing so this buyer can open checkouts there again. The one they already started is unaffected either way: completions do not consult whether a provider is enabled, so a payment made at "${boundProvider}" is still recorded while it is disabled. Otherwise leave it until ${unpaidBinderReleasesAt}, when it stops reserving "${boundProvider}" and a checkout elsewhere is allowed, unless a checkout for "${bound.plan.slug}" is opened there again first. No completed payment has been recorded here, so there is nothing for Rekey to cancel.`
+              : `Re-add the "${boundProvider}" credentials in Panel → Application → Billing so a payment completed there can still be recorded: without them the completion is refused and the checkout they started stays open. Otherwise leave it until ${unpaidBinderReleasesAt}, when it stops reserving "${boundProvider}" and a checkout elsewhere is allowed, unless a checkout for "${bound.plan.slug}" is opened there again first. No completed payment has been recorded here, so there is nothing for Rekey to cancel.`
             : stillConfigured
               ? `Re-enable "${boundProvider}" in Panel → Application → Billing so existing subscribers can keep buying, or cancel their "${boundProvider}" subscription, let it terminate, and have them buy again through a provider that is still enabled.`
               : `Re-add the "${boundProvider}" credentials in Panel → Application → Billing; that restores both cancellation and checkout, because a re-added credential is enabled unless you say otherwise. While they are deleted this subscriber can neither buy nor cancel here, and cancelling in "${boundProvider}"'s own dashboard leaves this subscription live in Rekey. (An unfinished checkout is different: it has no provider-side subscription, so there is nothing to dial and it can still be cancelled.)`,
@@ -761,14 +832,10 @@ export const billingService = {
         // "nothing has been charged", for the reason given on the sibling
         // refusal above: PENDING is not proof of unpaid.
         //
-        // No duration is quoted, deliberately. The window is 24h, but it is
-        // measured from `updatedAt`, which moves on any write to the row, and
-        // re-opening the same checkout is explicitly allowed (there is a test
-        // named for it). So a buyer who clicks Buy once more restarts their
-        // own clock, and "leave it for 24 hours" becomes false by doing the
-        // obvious thing. It is also counted from now while the window runs
-        // from `updatedAt`, which may already be most of a day old. See #438;
-        // put the number back when that lands and the clock is honest.
+        // The release time is quoted as an instant, not as "24 hours": the
+        // window runs from when the newest session was issued, which may be
+        // most of a day ago. Re-opening that same checkout issues a new
+        // session and legitimately moves it, hence the "unless" clause.
         // TRIALING is grouped with PENDING for the "has not paid" half only.
         // A trial is a live billing relationship that converts into a charge,
         // so it IS cancellable and the remedy stays; what is untrue of it is
@@ -785,7 +852,7 @@ export const billingService = {
               ? `This subscriber is on a trial of "${bound.plan.slug}" that will charge through "${boundProvider}", and a subscription cannot be moved between payment providers. Checking out through "${input.provider}" would create a second subscription and bill them twice.`
               : `This subscriber already pays for "${bound.plan.slug}" through "${boundProvider}", and a subscription cannot be moved between payment providers. Checking out through "${input.provider}" would create a second subscription and bill them twice.`,
           fix: unpaid
-            ? `Finish the checkout at "${boundProvider}", or abandon it: it stops reserving the provider once it can no longer be paid, after which a checkout elsewhere is allowed. No completed payment has been recorded here, so there is nothing for Rekey to cancel.`
+            ? `Finish the checkout at "${boundProvider}", or abandon it: it stops reserving "${boundProvider}" at ${unpaidBinderReleasesAt}, after which a checkout elsewhere is allowed, unless a checkout for "${bound.plan.slug}" is opened there again first. No completed payment has been recorded here, so there is nothing for Rekey to cancel.`
             : `Check out through "${boundProvider}", or cancel the existing subscription and let it terminate before starting a new one elsewhere. Read \`provider\` off the active subscription to know which one to offer.`,
         });
       }
@@ -802,6 +869,24 @@ export const billingService = {
         ? { preferred: boundProvider as BillingProviderName }
         : input.provider !== undefined && { preferred: input.provider }),
     });
+
+    // Decided while refusing is still free: a REFUSE here has reserved no
+    // coupon or trial slot, written no PENDING row and called no processor.
+    const presentation = await resolveCheckoutPresentation({
+      application: input.application,
+      provider: providerName,
+      plan,
+      successUrl: input.successUrl,
+      cancelUrl: input.cancelUrl,
+      endUserId: input.endUser.id,
+      ...(input.mode !== undefined && { requested: input.mode }),
+    });
+
+    // Before anything is reserved: a buyer whose last checkout for this plan
+    // is already paid at PayPal must not be sold a second subscription.
+    if (!isOneTime) {
+      await assertNoApprovalInFlight({ application: input.application, endUserId: input.endUser.id, planId: plan.id });
+    }
 
     // Resolved as soon as the provider is known and BEFORE any row is written:
     // whether the discount can actually be charged depends on the provider and
@@ -1051,7 +1136,8 @@ export const billingService = {
         select: { id: true },
       });
 
-      const raced = await tx.subscription.findFirst({
+      const racedCheckedAt = new Date();
+      const racedCandidates = await tx.subscription.findMany({
         where: {
           applicationId: input.application.id,
           endUserId: input.endUser.id,
@@ -1081,15 +1167,19 @@ export const billingService = {
               // binder read uses, and the same exclusion of the row THIS
               // checkout writes, otherwise a buyer retrying their own
               // checkout would be refused by their own previous attempt.
+              // The window is decided in code below, as in the binder read.
               status: 'PENDING',
-              updatedAt: { gt: new Date(Date.now() - CHECKOUT_SESSION_LIFETIME_MS) },
+              ...pendingCheckoutPrefilter(racedCheckedAt),
               NOT: { planId: plan.id },
             },
           ],
         },
         orderBy: { createdAt: 'asc' },
-        select: { provider: true },
+        select: { provider: true, status: true, metadata: true, updatedAt: true },
       });
+      const raced = racedCandidates.find(
+        (row) => row.status !== 'PENDING' || checkoutStillPayable(row, racedCheckedAt),
+      );
 
       if (raced?.provider) {
         // Retryable on purpose, and worded that way. The buyer double-clicked;
@@ -1153,11 +1243,15 @@ export const billingService = {
       ...(effectiveTrial !== null && { trial: effectiveTrial }),
     };
 
-    let session;
+    let session: IssuedCheckout;
     try {
-      session = isOneTime
-        ? await provider.createOneTimeCheckout(checkoutInput)
-        : await provider.createCheckoutSession(checkoutInput);
+      session = await issueProviderCheckout(provider, checkoutInput, {
+        isOneTime,
+        embedded: presentation.embedded,
+        slug: input.application.slug,
+        paymentMode: presentation.paymentMode,
+        discountAmount: couponContext?.discountAmount ?? 0,
+      });
     } catch (e) {
       // No session means no discount was minted, so the slot goes straight
       // back rather than sitting out its 24-hour expiry, a reservation that
@@ -1231,6 +1325,7 @@ export const billingService = {
       sessionId: session.sessionId,
       isOneTime,
       provider: providerName,
+      openedAt: new Date(),
       coupon: couponContext
         ? { couponId: couponContext.couponId, discountAmount: couponContext.discountAmount }
         : null,
@@ -1289,11 +1384,27 @@ export const billingService = {
     // limit is exhausted for legitimate buyers, which is why the reservation
     // expires on its own. See decisions.md 2026-05-19 and 2026-08-02.
 
+    const checkoutSession = await recordIssuedCheckout(session, {
+      applicationId: input.application.id,
+      endUserId: input.endUser.id,
+      subscriptionId: subscription.id,
+      provider: providerName,
+      embedded: presentation.embedded,
+      paymentMode: presentation.paymentMode,
+      isOneTime,
+      successUrl: input.successUrl,
+      cancelUrl: input.cancelUrl,
+    });
+
     return {
       url: session.url,
       subscription,
       discountAmount: couponContext?.discountAmount ?? 0,
       provider: providerName,
+      embedded: presentation.embedded,
+      checkoutSessionId: checkoutSession.id,
+      fellBack: presentation.fellBack,
+      paymentMode: presentation.paymentMode,
     };
   },
 
@@ -1341,6 +1452,22 @@ export const billingService = {
   },
 
   /**
+   * One subscription of the subject by id, or null when it belongs to anybody
+   * else. A live row goes through the same lazy expiry as every other read.
+   */
+  async findOwnSubscription(
+    application: Application,
+    endUser: Pick<EndUser, 'id'>,
+    subscriptionId: string,
+    organizationId: string | undefined,
+  ): Promise<Subscription | null> {
+    const row = await prisma.subscription.findFirst({
+      where: { id: subscriptionId, applicationId: application.id, ...subscriptionSubject(endUser, organizationId) },
+    });
+    return row && (await expireIfDue(row));
+  },
+
+  /**
    * Cancel the calling end-user's current subscription (self-service portal
    * surface). Semantics:
    *
@@ -1366,19 +1493,37 @@ export const billingService = {
   async cancelCurrentSubscription(
     application: Application,
     endUser: EndUser,
-    opts?: { atPeriodEnd?: boolean; organizationId?: string },
+    opts?: { atPeriodEnd?: boolean; organizationId?: string; subscriptionId?: string },
   ): Promise<Subscription> {
-    const sub = await this.getCurrentSubscription(
-      application,
-      endUser,
-      opts?.organizationId ? { organizationId: opts.organizationId } : undefined,
-    );
+    const sub = opts?.subscriptionId
+      ? await this.findOwnSubscription(application, endUser, opts.subscriptionId, opts.organizationId)
+      : await this.getCurrentSubscription(
+          application,
+          endUser,
+          opts?.organizationId ? { organizationId: opts.organizationId } : undefined,
+        );
+    // A checkout nobody finished is not a subscription: nothing was paid for
+    // it and nothing entitles through it. Cancelling one by id would announce
+    // a cancellation of something that never started. A PENDING row that
+    // carries a provider id (Stripe's `paused`) was paid and stays cancellable.
+    if (opts?.subscriptionId && sub?.status === 'PENDING' && sub.providerSubId === null) {
+      throw new RekeyError({
+        statusCode: 409,
+        code: 'SUBSCRIPTION_CHECKOUT_UNFINISHED',
+        message: `Subscription "${sub.id}" is a checkout that was never completed, so there is nothing to cancel.`,
+        fix: 'Leave it: it bills nothing and grants nothing, and a new checkout for the same plan reuses it. GET /api/v1/billing/subscriptions lists the live subscriptions that can be cancelled.',
+      });
+    }
     if (!sub) {
       throw new RekeyError({
         statusCode: 404,
         code: 'SUBSCRIPTION_NOT_FOUND',
-        message: 'You have no active subscription to cancel.',
-        fix: 'Nothing to do, the user is not subscribed (or the subscription is already canceled).',
+        message: opts?.subscriptionId
+          ? `No subscription "${opts.subscriptionId}" belongs to this billing subject.`
+          : 'You have no active subscription to cancel.',
+        fix: opts?.subscriptionId
+          ? 'List the caller\'s live subscriptions with GET /api/v1/billing/subscriptions (pass the same `organizationId`) and send one of their ids.'
+          : 'Nothing to do, the user is not subscribed (or the subscription is already canceled).',
       });
     }
 

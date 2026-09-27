@@ -39,6 +39,11 @@ export const KNOWN_WEBHOOK_EVENTS = [
   // can never authenticate again, consumers should propagate the erasure to
   // their own copies of the user's PII. Payload: `data.user` (id + erasedAt).
   'user.erased',
+  // One per real sign-in (password, magic link, OAuth, passkey, MFA
+  // completion), written with the session's refresh row. Never for a refresh
+  // or an organization switch, which re-mint a session rather than start one.
+  // `data.firstSignIn` is true for the first session the user ever gets.
+  'session.created',
   'session.revoked',
   'mfa.enabled',
   'mfa.disabled',
@@ -61,6 +66,11 @@ export const KNOWN_WEBHOOK_EVENTS = [
   // no way to hear about a change that never touched `status`, and so enforced
   // a ceiling the customer was no longer sold.
   'subscription.entitlements_updated',
+  // A subscription entered TRIALING, and, a few days before its trial end,
+  // that the trial is about to end (the trial-ending sweep in
+  // modules/billing/trial-events.ts, once per subscription and trial end).
+  'subscription.trial_started',
+  'subscription.trial_will_end',
   'payment.succeeded',
   'payment.failed',
   // Dunning lifecycle, emitted by `modules/billing/dunning.service.ts` when a
@@ -95,6 +105,10 @@ export const KNOWN_WEBHOOK_EVENTS = [
   'credit.granted',
   'credit.consumed',
   'credit.adjusted',
+  // End-user organizations. Written in the transaction that creates or accepts
+  // the invitation. The raw invitation token is never in the payload.
+  'organization.invitation.created',
+  'organization.invitation.accepted',
 ] as const;
 
 /**

@@ -177,7 +177,7 @@ describe('coupon redemption is recorded once per purchase', () => {
 
   describe('one-time purchases (no invoice is ever emitted for them)', () => {
     it('consumes the single redemption a maxRedemptions:1 coupon has, and refuses the next buyer', async () => {
-      await createCoupon({ code: 'onceonly', discountType: 'AMOUNT', amountOff: 1000, maxRedemptions: 1 });
+      await createCoupon({ code: 'onceonly', discountType: 'AMOUNT', currency: 'USD', amountOff: 1000, maxRedemptions: 1 });
 
       const sessionId = await checkoutSessionId({
         planSlug: 'pack',
@@ -235,7 +235,7 @@ describe('coupon redemption is recorded once per purchase', () => {
     });
 
     it('records what the buyer actually paid, not the list price', async () => {
-      await createCoupon({ code: 'fifteen', discountType: 'AMOUNT', amountOff: 1500 });
+      await createCoupon({ code: 'fifteen', discountType: 'AMOUNT', currency: 'USD', amountOff: 1500 });
       const sessionId = await checkoutSessionId({
         planSlug: 'pack',
         couponCode: 'fifteen',
@@ -257,27 +257,33 @@ describe('coupon redemption is recorded once per purchase', () => {
       expect(payment.amount).toBe(PACK_AMOUNT - 1500);
     });
 
-    it('writes nothing for an unpaid session', async () => {
+    it('writes nothing for an unpaid session until its async payment succeeds', async () => {
       // A delayed-notification method completes the session before the money
-      // arrives. `checkout.session.async_payment_succeeded` is what says it
-      // did, and we do not consume it, so record nothing rather than a
-      // payment that may never settle.
+      // arrives. Nothing is activated or recorded until
+      // `checkout.session.async_payment_succeeded` says it did.
       const sessionId = await checkoutSessionId({ planSlug: 'pack', provider: 'stripe' });
-
-      await fireStripe('checkout.session.completed', {
+      const session = {
         id: sessionId,
         mode: 'payment',
-        payment_status: 'unpaid',
         payment_intent: 'pi_pack_unpaid',
         amount_total: PACK_AMOUNT,
         currency: 'usd',
-      });
+      };
 
+      await fireStripe('checkout.session.completed', { ...session, payment_status: 'unpaid' });
       expect(await prisma.payment.count({ where: { applicationId } })).toBe(0);
+      const pending = await prisma.subscription.findFirstOrThrow({ where: { applicationId } });
+      expect(pending.status).toBe('PENDING');
+
+      await fireStripe('checkout.session.async_payment_succeeded', { ...session, payment_status: 'paid' });
+      const payment = await prisma.payment.findFirstOrThrow({ where: { applicationId } });
+      expect(payment).toMatchObject({ providerPaymentId: 'pi_pack_unpaid', amount: PACK_AMOUNT });
+      const settled = await prisma.subscription.findFirstOrThrow({ where: { applicationId } });
+      expect(settled.status).toBe('ACTIVE');
     });
 
     it('replaying the completion does not double the payment or the redemption', async () => {
-      await createCoupon({ code: 'replayme', discountType: 'AMOUNT', amountOff: 500 });
+      await createCoupon({ code: 'replayme', discountType: 'AMOUNT', currency: 'USD', amountOff: 500 });
       const sessionId = await checkoutSessionId({
         planSlug: 'pack',
         couponCode: 'replayme',
@@ -303,7 +309,7 @@ describe('coupon redemption is recorded once per purchase', () => {
     });
 
     it('PayPal: the approval redeems and the capture records the payment — one redemption total', async () => {
-      await createCoupon({ code: 'ppcoupon', discountType: 'AMOUNT', amountOff: 1000, maxRedemptions: 1 });
+      await createCoupon({ code: 'ppcoupon', discountType: 'AMOUNT', currency: 'USD', amountOff: 1000, maxRedemptions: 1 });
       const orderId = await checkoutSessionId({
         planSlug: 'pack',
         couponCode: 'ppcoupon',

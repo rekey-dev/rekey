@@ -100,6 +100,10 @@ manual re-fetch for after a sign-in round-trip your server handled.
 
 Both throw if called outside `<RekeyProvider>`, with a message that says so.
 
+`useOAuthProviders()` → `[{ id, name }]` or `null`: the OAuth providers enabled
+on the Application, for a sign-in page you build yourself. `null` until loaded,
+on the server, without a publishable key, and when the request fails.
+
 ---
 
 ## Control components
@@ -172,6 +176,7 @@ A card with email + password, optional magic-link row, optional OAuth buttons.
 | `action` / `actionUrl` | `FormAction` / `string` | — | Where the password form goes. Reads `email` + `password` from `FormData`. |
 | `magicLinkAction` / `magicLinkUrl` | `FormAction` / `string` | — | Renders the magic-link row when set. Reads `email`. |
 | `oauthProviders` | `OAuthProvider[]` | `[]` | One button each. `{ provider, label?, startAction?, startUrl? }`; the label defaults to `Continue with <Provider>`. |
+| `oauthStartAction` / `oauthStartUrl` | `FormAction` / `string` | none | With `oauthProviders` left out, renders the providers enabled on the Application, each starting here. The action gets the id as the `provider` field; the URL has `{provider}` replaced. See below. |
 | `signUpUrl` | `string` | — | "Create account" link. Omit to hide. |
 | `forgotPasswordUrl` | `string` | — | "Forgot password?" link. Omit to hide. |
 | `error` | `ReactNode` | — | Rendered in an `role="alert"` banner — map it from your `?error=` param. |
@@ -232,6 +237,58 @@ if (outcome.kind === 'mfa_required') {
 `SignInOutcomeDto`, which uses a boolean `mfaRequired` field. Don't mix the two.)
 See [auth.md](auth.md).
 
+#### OAuth buttons from the panel
+
+Leave `oauthProviders` out and give the card a start target instead, and it
+renders a button for every provider enabled on the Application in the panel:
+
+```tsx
+// One Server Action for every provider; it reads the id from the form.
+<SignIn action={signInAction} oauthStartAction={startOAuthAction} />
+
+// Or a route per provider. `{provider}` is replaced with the id.
+<SignIn action={signInAction} oauthStartUrl="/api/auth/oauth/{provider}/start" />
+```
+
+```ts
+// lib/actions.ts
+'use server';
+import { redirect } from 'next/navigation';
+import { Rekey } from '@rekey.dev/node';
+
+const rekey = new Rekey({ apiUrl: process.env.REKEY_URL!, secretKey: process.env.REKEY_SECRET! });
+
+export async function startOAuthAction(formData: FormData) {
+  const provider = String(formData.get('provider'));
+  const state = crypto.randomUUID(); // store it (httpOnly cookie) and check it on the callback
+  const { authorizationUrl } = await rekey.auth.startOAuth(provider, state);
+  redirect(authorizationUrl);
+}
+```
+
+The list comes from `GET /api/v1/auth/oauth/providers` with the publishable key
+on `<RekeyProvider>`, so it needs `publishableKey` set there. It is fetched in
+the browser after hydration, so the buttons appear a moment after the card. To
+have them on the first paint, fetch on the server and pass the result:
+
+```tsx
+const { providers } = await rekey.auth.listOAuthProviders();
+<SignIn
+  action={signInAction}
+  oauthProviders={providers.map((p) => ({ provider: p.id, label: `Continue with ${p.name}`, startAction: startOAuthAction }))}
+/>
+```
+
+The list is fetched once per `<RekeyProvider>` and kept for the life of the
+page, so a card that remounts (a modal, a client-side route change) shows its
+buttons at once. A provider enabled in the panel therefore appears after the
+next full page load. A failed request is not kept, and the next mount retries.
+
+`oauthProviders` always wins. With neither it nor a start target, no request is
+made and no buttons render. A failed request renders the card without buttons,
+and a start URL with no `{provider}` logs a warning outside production.
+`useOAuthProviders()` exposes the same list for a custom sign-in page.
+
 ### `<SignUp>`
 
 Same shape as `<SignIn>`, minus the magic-link row.
@@ -240,6 +297,7 @@ Same shape as `<SignIn>`, minus the magic-link row.
 |---|---|---|
 | `action` / `actionUrl` | `FormAction` / `string` | — |
 | `oauthProviders` | `OAuthProvider[]` | `[]` |
+| `oauthStartAction` / `oauthStartUrl` | `FormAction` / `string` | none (as on `<SignIn>`) |
 | `signInUrl` | `string` | — ("Already have an account?" link) |
 | `error` | `ReactNode` | — |
 | `title` | `string` | `Create your account` |

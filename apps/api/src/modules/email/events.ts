@@ -7,13 +7,19 @@
  * dropped. This keeps the substitution surface small and predictable: no
  * arbitrary expressions, no helper functions, just `{{var}}` lookups.
  *
- * Adding a new event means: (1) add the entry below, (2) drop a default
- * HTML/subject pair in `defaults/`, (3) call `emailService.dispatch(...)` (or
+ * Adding a new event means: (1) add the entry below, (2) write its default
+ * copy in `defaults/index.ts`, (3) call `emailService.dispatch(...)` (or
  * `dispatchSystem(...)` for mail with no Application) from the relevant flow.
  *
  * Variable values are always HTML-escaped at render time (see `render.ts`),
  * never interpolate raw HTML from user-supplied strings.
+ *
+ * An event with an `xAtIso` variable also registers `xAt`, the same instant as
+ * "27 Sep 2026, 14:50 UTC". Call sites pass only the ISO value; the renderer
+ * derives the readable one.
  */
+
+import { formatUtcDateTime } from './format-date.js';
 
 export type EmailEventKey =
   | 'password_reset'
@@ -36,47 +42,68 @@ export interface EmailEventDef {
   sampleValues: Record<string, string>;
 }
 
+/**
+ * A sample instant `ms` from now, as the ISO value and the readable value the
+ * renderer derives from it (see `pickEventVariables`).
+ */
+function sampleAt(ms: number): { iso: string; plain: string } {
+  const iso = new Date(Date.now() + ms).toISOString();
+  return { iso, plain: formatUtcDateTime(iso) };
+}
+
+const HOUR = 60 * 60 * 1000;
+const reset = sampleAt(HOUR);
+const verify = sampleAt(24 * HOUR);
+const magic = sampleAt(15 * 60 * 1000);
+const invite = sampleAt(7 * 24 * HOUR);
+const now = sampleAt(0);
+const grace = sampleAt(14 * 24 * HOUR);
+
 export const EMAIL_EVENTS: Record<EmailEventKey, EmailEventDef> = {
   password_reset: {
     key: 'password_reset',
     label: 'Password reset',
-    variables: ['userEmail', 'resetUrl', 'expiresAtIso'] as const,
+    variables: ['userEmail', 'resetUrl', 'expiresAtIso', 'expiresAt'] as const,
     sampleValues: {
       userEmail: 'sample@example.com',
       resetUrl: 'https://your-app.example.com/reset?token=…',
-      expiresAtIso: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      expiresAtIso: reset.iso,
+      expiresAt: reset.plain,
     },
   },
   email_verification: {
     key: 'email_verification',
     label: 'Email verification',
-    variables: ['userEmail', 'verifyUrl', 'expiresAtIso'] as const,
+    variables: ['userEmail', 'verifyUrl', 'expiresAtIso', 'expiresAt'] as const,
     sampleValues: {
       userEmail: 'sample@example.com',
       verifyUrl: 'https://your-app.example.com/verify?token=…',
-      expiresAtIso: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      expiresAtIso: verify.iso,
+      expiresAt: verify.plain,
     },
   },
   magic_link_signin: {
     key: 'magic_link_signin',
     label: 'Magic-link sign-in',
-    variables: ['userEmail', 'signInUrl', 'expiresAtIso'] as const,
+    variables: ['userEmail', 'signInUrl', 'expiresAtIso', 'expiresAt'] as const,
     sampleValues: {
       userEmail: 'sample@example.com',
       signInUrl: 'https://your-app.example.com/sign-in/magic?token=…',
-      expiresAtIso: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      expiresAtIso: magic.iso,
+      expiresAt: magic.plain,
     },
   },
   workspace_invitation: {
     key: 'workspace_invitation',
     label: 'Workspace invitation',
-    variables: ['inviteeEmail', 'inviterName', 'workspaceName', 'inviteUrl', 'expiresAtIso'] as const,
+    variables: ['inviteeEmail', 'inviterName', 'workspaceName', 'inviteUrl', 'expiresAtIso', 'expiresAt'] as const,
     sampleValues: {
       inviteeEmail: 'newteammate@example.com',
       inviterName: 'Alex',
       workspaceName: 'Acme Inc',
       inviteUrl: 'https://your-app.example.com/accept-invite?token=…',
-      expiresAtIso: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      expiresAtIso: invite.iso,
+      expiresAt: invite.plain,
     },
   },
   welcome: {
@@ -91,31 +118,43 @@ export const EMAIL_EVENTS: Record<EmailEventKey, EmailEventDef> = {
   mfa_enabled: {
     key: 'mfa_enabled',
     label: 'MFA enabled',
-    variables: ['userEmail', 'enabledAtIso'] as const,
+    variables: ['userEmail', 'enabledAtIso', 'enabledAt'] as const,
     sampleValues: {
       userEmail: 'sample@example.com',
-      enabledAtIso: new Date().toISOString(),
+      enabledAtIso: now.iso,
+      enabledAt: now.plain,
     },
   },
   password_changed: {
     key: 'password_changed',
     label: 'Password changed',
-    variables: ['userEmail', 'changedAtIso'] as const,
+    variables: ['userEmail', 'changedAtIso', 'changedAt'] as const,
     sampleValues: {
       userEmail: 'sample@example.com',
-      changedAtIso: new Date().toISOString(),
+      changedAtIso: now.iso,
+      changedAt: now.plain,
     },
   },
   billing_payment_failed_reminder: {
     key: 'billing_payment_failed_reminder',
     label: 'Payment failed (dunning reminder)',
-    variables: ['userEmail', 'planName', 'amountDue', 'attempt', 'graceEndsAtIso'] as const,
+    variables: [
+      'userEmail',
+      'planName',
+      'amountDue',
+      'attempt',
+      'graceEndsAtIso',
+      'graceEndsAt',
+      'portalUrl',
+    ] as const,
     sampleValues: {
       userEmail: 'sample@example.com',
       planName: 'Pro Monthly',
       amountDue: '9.99 USD',
       attempt: '1',
-      graceEndsAtIso: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+      graceEndsAtIso: grace.iso,
+      graceEndsAt: grace.plain,
+      portalUrl: 'https://portal.example.com/your-app',
     },
   },
   // Addressed to the OPERATOR, not to a buyer, the only event here that is.
@@ -130,13 +169,15 @@ export const EMAIL_EVENTS: Record<EmailEventKey, EmailEventDef> = {
       'providerPaymentId',
       'endUserEmail',
       'receivedAtIso',
+      'receivedAt',
     ] as const,
     sampleValues: {
       amount: '9.99 USD',
       provider: 'stripe',
       providerPaymentId: 'pi_3QSampleSample',
       endUserEmail: 'sample@example.com',
-      receivedAtIso: new Date().toISOString(),
+      receivedAtIso: now.iso,
+      receivedAt: now.plain,
     },
   },
 };

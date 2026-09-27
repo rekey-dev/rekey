@@ -118,7 +118,7 @@ describe('second-audit findings', () => {
         method: 'POST',
         url: `/api/v1/tenant/applications/${applicationId}/coupons`,
         headers: { authorization: `Bearer ${token}` },
-        payload: { code: 'OVER', discountType: 'AMOUNT', amountOff: JUST_OVER_INT4 },
+        payload: { code: 'OVER', discountType: 'AMOUNT', currency: 'USD', amountOff: JUST_OVER_INT4 },
       });
 
       expect(res.statusCode).toBe(400);

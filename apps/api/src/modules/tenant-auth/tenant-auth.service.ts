@@ -37,6 +37,12 @@ import {
 } from '../../lib/tenant-jwt.js';
 import { tenantMfaService } from '../tenant-mfa/tenant-mfa.service.js';
 import {
+  claimMfaChallenge,
+  isMfaChallengeSpent,
+  mfaChallengeUsedError,
+  mfaCodeReusedError,
+} from '../../lib/mfa-replay.js';
+import {
   issueTenantRefreshToken,
   lookupTenantRefreshToken,
   rotateTenantRefreshToken,
@@ -827,15 +833,21 @@ export const tenantAuthService = {
         fix: 'Sign in again to obtain a fresh challenge token (they expire after 5 minutes).',
       });
     }
-    const ok = await tenantMfaService.verify({ tenantUserId: claims.sub, code: input.code });
-    if (!ok) {
-      throw new RekeyError({
-        statusCode: 401,
-        code: 'MFA_CODE_INVALID',
-        message: 'TOTP or backup code did not verify.',
-        fix: 'Enter the current 6-digit code from your authenticator, or a backup code.',
-      });
-    }
+    if (await isMfaChallengeSpent(input.mfaChallengeToken)) throw mfaChallengeUsedError();
+    const codeRefused = (outcome: 'invalid' | 'reused'): RekeyError =>
+      outcome === 'reused'
+        ? mfaCodeReusedError('sign-in')
+        : new RekeyError({
+            statusCode: 401,
+            code: 'MFA_CODE_INVALID',
+            message: 'TOTP or backup code did not verify.',
+            fix: 'Enter the current 6-digit code from your authenticator, or a backup code.',
+          });
+    // Same two phases as the end-user flow: match without spending, refuse
+    // on membership only after the second factor is proven and still without
+    // spending, then spend the code and claim the challenge.
+    const match = await tenantMfaService.match({ tenantUserId: claims.sub, code: input.code });
+    if (match.outcome !== 'matched') throw codeRefused(match.outcome);
     const user = await prisma.tenantUser.findUniqueOrThrow({ where: { id: claims.sub } });
     const memberships = await loadMemberships(user.id);
     if (memberships.length === 0) {
@@ -846,6 +858,9 @@ export const tenantAuthService = {
         fix: 'Ask an existing workspace owner for a fresh invitation.',
       });
     }
+    const spent = await match.spend();
+    if (spent !== 'accepted') throw codeRefused(spent);
+    if (!(await claimMfaChallenge(input.mfaChallengeToken, claims.exp))) throw mfaChallengeUsedError();
     const active = memberships[0]!;
     return issueSession(user, active.tenantId, active.role, memberships, input.device);
   },

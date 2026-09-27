@@ -26,6 +26,9 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { __resetAssertionReplayForTests } from '../src/lib/assertion-replay.js';
 
+// Requiring a verified email needs a URL the verification link can be built on.
+const VERIFY_BASE = 'https://app.example.com';
+
 function pkce(): { verifier: string; challenge: string } {
   const verifier = randomBytes(32).toString('base64url');
   return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') };
@@ -98,7 +101,7 @@ describe('operator sign-in by ID Token assertion', () => {
       method: 'PATCH',
       url: `/api/v1/tenant/applications/${appId}/auth-config`,
       headers: { authorization: `Bearer ${operatorToken}` },
-      payload: { oidcEnabled: true, requireEmailVerification: true },
+      payload: { oidcEnabled: true, requireEmailVerification: true, appUrl: VERIFY_BASE },
     });
     const liveKey = await app
       .inject({

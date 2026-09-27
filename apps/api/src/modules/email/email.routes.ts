@@ -11,12 +11,16 @@
  *   DELETE /api/v1/tenant/applications/:id/email-credentials
  *     Revert to the default Resend pool (or no transport if unset).
  *
+ *   PATCH  /api/v1/tenant/applications/:id/email-sender
+ *     Set the sender identity (fromName, replyTo, supportEmail), kept apart
+ *     from the credentials and honoured on the shared pool too.
+ *
  *   GET    /api/v1/tenant/applications/:id/email-templates
  *     List events with customised/default status.
  *
  *   GET    /api/v1/tenant/applications/:id/email-templates/:eventKey
  *     Returns the active template (customised or built-in default), the
- *     opaque `designJson` (when customised), and the registered variable
+ *     opaque `designJson` (the saved one, or the default's), and the registered variable
  *     list for the panel builder to render preview chips.
  *
  *   PUT    /api/v1/tenant/applications/:id/email-templates/:eventKey
@@ -47,6 +51,8 @@ import { RekeyError } from '../../lib/error.js';
 import { requireTenantSession } from '../../middleware/tenant-session.js';
 import { ensureAppAccess } from '../../lib/app-access.js';
 import { emailService } from './email.service.js';
+import { updateSenderIdentity } from './sender-identity.js';
+import { sendableTo } from './send-policy.js';
 import { describeTransport, sendEmail, type EmailCredentials } from '../../lib/email-transport.js';
 import { isKnownEvent } from './events.js';
 import { ok, okArray, okPage, errs, ref } from '../../lib/openapi.js';
@@ -87,6 +93,14 @@ const SetCredsBody = z.discriminatedUnion('provider', [
   }),
 ]);
 
+const SenderBody = z
+  .object({
+    fromName: z.string().nullable().optional(),
+    replyTo: z.string().nullable().optional(),
+    supportEmail: z.string().nullable().optional(),
+  })
+  .strict();
+
 const LogQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
   offset: z.coerce.number().int().min(0).max(1_000_000).optional(),
@@ -94,7 +108,7 @@ const LogQuery = z.object({
   // (application off, event off, or the address on the suppression list). It
   // has to be filterable: the Settings and Templates copy sends an operator
   // here to find out WHY a mail did not go, and without it the query 400s.
-  status: z.enum(['sent', 'error', 'no_transport', 'suppressed']).optional(),
+  status: z.enum(['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown']).optional(),
 });
 
 const UpsertTemplateBody = z.object({
@@ -156,11 +170,20 @@ const EMAIL_SUPPRESSION = {
     applicationId: { type: 'string' },
     address: { type: 'string', format: 'email' },
     reason: { type: 'string', enum: ['manual', 'bounce', 'complaint', 'unsubscribe'] },
+    category: {
+      type: 'string',
+      nullable: true,
+      enum: ['notification', null],
+      description:
+        'Null: every email this Application sends is stopped. `notification`: only notification ' +
+        'custom mail is stopped (a one-click unsubscribe); password resets and other built-in and ' +
+        'critical mail still go out.',
+    },
     note: { type: 'string', nullable: true },
     createdBy: { type: 'string', nullable: true, description: 'Operator id, or null when Rekey added it.' },
     createdAt: { type: 'string', format: 'date-time' },
   },
-  required: ['id', 'applicationId', 'address', 'reason', 'note', 'createdBy', 'createdAt'],
+  required: ['id', 'applicationId', 'address', 'reason', 'category', 'note', 'createdBy', 'createdAt'],
 } as const;
 
 export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
@@ -543,11 +566,14 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
                 emailConfig: {
                   type: 'object',
                   nullable: true,
-                  description: 'The `{fromAddress, fromName?, replyTo?}` sender identity, or null if unset.',
+                  description:
+                    'The BYO `fromAddress` and the sender identity (`fromName`, `replyTo`, ' +
+                    '`supportEmail`), each present only when set.',
                   properties: {
                     fromAddress: { type: 'string', format: 'email' },
                     fromName: { type: 'string' },
                     replyTo: { type: 'string', format: 'email' },
+                    supportEmail: { type: 'string', format: 'email' },
                   },
                 },
                 hasCustomCredentials: {
@@ -706,6 +732,67 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  app.patch(
+    '/:id/email-sender',
+    {
+      config: { access: { scope: 'developer:write' } },
+      schema: {
+        tags: ['Tenant · Email'],
+        security: [{ tenantSession: [] }],
+        summary: "Set the Application's sender identity (display name, reply-to, support address)",
+        description:
+          'Requires **write** access to this Application, OWNER/ADMIN, or a MEMBER with an ' +
+          '`APP_ADMIN` grant on it.\n\n' +
+          'Only the fields you send change; `null` or `""` clears one. Saving email ' +
+          'credentials never overwrites these. On the shared pool the display name keeps a ' +
+          '"(via <deployment>)" suffix, because the address belongs to the deployment; with ' +
+          'BYO credentials it is used verbatim. `replyTo` is honoured on both. ' +
+          '`supportEmail` is stored for templates and never sent as a header.',
+        body: {
+          type: 'object',
+          properties: {
+            fromName: { type: 'string', nullable: true },
+            replyTo: { type: 'string', nullable: true },
+            supportEmail: { type: 'string', nullable: true },
+          },
+        },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: {
+                sender: {
+                  type: 'object',
+                  properties: {
+                    fromName: { type: 'string', nullable: true },
+                    replyTo: { type: 'string', nullable: true },
+                    supportEmail: { type: 'string', nullable: true },
+                  },
+                  required: ['fromName', 'replyTo', 'supportEmail'],
+                },
+              },
+              required: ['sender'],
+            },
+            'The sender identity now stored.',
+          ),
+          ...errs({
+            400:
+              'EMAIL_FROM_NAME_INVALID: fromName is too long or contains a line break or other ' +
+              'control character; EMAIL_REPLY_TO_INVALID or EMAIL_SUPPORT_EMAIL_INVALID: not a ' +
+              'single email address; VALIDATION_ERROR: an unknown field, or nothing to update.',
+            ...APP_WRITE_ERRORS,
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id } = AppParam.parse(req.params);
+      await ensureAppAccess(req, id, 'write');
+      const body = SenderBody.parse(req.body ?? {});
+      return { success: true, data: { sender: await updateSenderIdentity(id, body) } };
+    },
+  );
+
   // ---------- Send logs (read-only) ----------
 
   app.get(
@@ -725,7 +812,7 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
           properties: {
             limit: { type: 'integer', minimum: 1, maximum: 200 },
             offset: { type: 'integer', minimum: 0, maximum: 2147483647 },
-            status: { type: 'string', enum: ['sent', 'error', 'no_transport', 'suppressed'] },
+            status: { type: 'string', enum: ['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown'] },
           },
         },
         response: {
@@ -836,7 +923,9 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
                 },
                 designJson: {
                   nullable: true,
-                  description: 'Opaque Unlayer design document, present only when `customised` is true.',
+                  description:
+                    'Unlayer design document for the active template: the saved design when `customised` is true, ' +
+                    'otherwise the built-in default as editable blocks. Null only for a customised template saved without one.',
                 },
                 variables: {
                   type: 'array',
@@ -1059,12 +1148,12 @@ export async function tenantEmailRoutes(app: FastifyInstance): Promise<void> {
       // that hard-bounced or filed a complaint, and mailing a complainant
       // again is how a sending domain gets blocked. "It was only a test" is
       // not a distinction the receiving mailbox provider makes.
-      const suppressed = await emailService.addressSuppression(id, body.to);
+      const suppressed = await sendableTo(application, body.to, 'auth', { testSend: true });
       if (suppressed !== null) {
         throw new RekeyError({
           statusCode: 409,
           code: 'EMAIL_ADDRESS_SUPPRESSED',
-          message: `${body.to} is on this Application's suppression list (${suppressed.reason}).`,
+          message: `${body.to} is on this Application's suppression list (${suppressed.suppressionReason ?? suppressed.reason}).`,
           fix: 'Test with a different address. Sending to a hard-bounced or complaining address again is how a sending domain gets blocked, remove it from Email → Suppressions only if you know the bounce is resolved.',
         });
       }

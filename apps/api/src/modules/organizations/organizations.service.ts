@@ -56,6 +56,8 @@ import { assertMetadataWithinLimit } from '../../lib/metadata-limit.js';
 import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 import { withSavepoint } from '../../lib/savepoint.js';
+import { recordSecurityEvent } from '../../lib/security-events.js';
+import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const INVITATION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
@@ -122,6 +124,54 @@ export interface InvitationDto {
   acceptedAt: Date | null;
   revokedAt: Date | null;
   createdAt: Date;
+}
+
+/**
+ * Who made an operator membership write, for the security log. Required on
+ * both admin membership writes so no surface (panel, REST, MCP) can skip the
+ * audit trail.
+ */
+export interface OperatorMembershipActor {
+  tenantUserId: string;
+  tenantId: string;
+  ip?: string | null | undefined;
+  userAgent?: string | null | undefined;
+  /** Set by the MCP tools so the trail says an agent did it. */
+  via?: 'operator_mcp' | undefined;
+}
+
+function auditMembershipWrite(
+  type: 'app.organization_member_added' | 'app.organization_member_role_changed',
+  actor: OperatorMembershipActor,
+  m: MembershipDto,
+  applicationId: string,
+): void {
+  void recordSecurityEvent({
+    type,
+    actorType: 'operator',
+    actorId: actor.tenantUserId,
+    tenantId: actor.tenantId,
+    applicationId,
+    ip: actor.ip ?? null,
+    userAgent: actor.userAgent ?? null,
+    metadata: {
+      ...(actor.via !== undefined && { via: actor.via }),
+      organizationId: m.organizationId,
+      endUserId: m.endUserId,
+      role: m.role,
+      baseRole: m.baseRole,
+    },
+  });
+}
+
+/** Operator list filter: case-insensitive substring of the name or slug. */
+function organizationSearch(applicationId: string, query: string | undefined): Prisma.OrganizationWhereInput {
+  const q = query?.trim();
+  if (!q) return { applicationId };
+  return {
+    applicationId,
+    OR: [{ name: { contains: q, mode: 'insensitive' } }, { slug: { contains: q.toLowerCase() } }],
+  };
 }
 
 function shape(o: Organization): OrganizationDto {
@@ -396,16 +446,35 @@ export const organizationsService = {
       });
     }
     const raw = randomBytes(32).toString('base64url');
-    const invitation = await prisma.organizationInvitation.create({
-      data: {
-        organizationId: args.organizationId,
-        email,
-        role: target.name,
-        tokenHash: hashInviteToken(raw),
-        expiresAt: new Date(Date.now() + INVITATION_LIFETIME_MS),
-        invitedById: args.actorEndUserId,
-      },
+    const { invitation, deliveryIds } = await prisma.$transaction(async (tx) => {
+      const row = await tx.organizationInvitation.create({
+        data: {
+          organizationId: args.organizationId,
+          email,
+          role: target.name,
+          tokenHash: hashInviteToken(raw),
+          expiresAt: new Date(Date.now() + INVITATION_LIFETIME_MS),
+          invitedById: args.actorEndUserId,
+        },
+      });
+      const ids = await enqueueEvent(tx, {
+        applicationId: args.application.id,
+        type: 'organization.invitation.created',
+        data: {
+          invitation: {
+            id: row.id,
+            organizationId: row.organizationId,
+            email: row.email,
+            role: row.role,
+            invitedById: row.invitedById,
+            expiresAt: row.expiresAt.toISOString(),
+            createdAt: row.createdAt.toISOString(),
+          },
+        },
+      });
+      return { invitation: row, deliveryIds: ids };
     });
+    kickDeliveries(deliveryIds);
     return { rawToken: raw, invitation: shapeInvitation(invitation) };
   },
 
@@ -442,7 +511,7 @@ export const organizationsService = {
     // Before the transaction: the catalog is read through the global client,
     // which inside the callback would hold a second pool connection.
     const usableRoles = await organizationRolesService.usableNames(args.application.id);
-    return prisma.$transaction(async (tx) => {
+    const { membership: accepted, deliveryIds } = await prisma.$transaction(async (tx) => {
       const inv = await tx.organizationInvitation.findUnique({
         where: { tokenHash },
         include: { organization: true },
@@ -536,15 +605,40 @@ export const organizationsService = {
           }
         }
       }
-      await tx.organizationInvitation.update({
-        where: { id: inv.id },
-        data: { acceptedAt: new Date(), acceptedById: args.actorEndUserId },
+      // Conditional, so of concurrent accepts of one invitation exactly one
+      // records it and announces it; the others return the same membership.
+      const acceptedAt = new Date();
+      const { count } = await tx.organizationInvitation.updateMany({
+        where: { id: inv.id, acceptedAt: null },
+        data: { acceptedAt, acceptedById: args.actorEndUserId },
       });
-      return membership;
-    }).then(async (membership) => shapeMembership(
-      membership,
-      await organizationRolesService.baseRoleOrLeast(args.application.id, membership.role),
-    ));
+      if (count === 0) return { membership, deliveryIds: [] as string[] };
+      const ids = await enqueueEvent(tx, {
+        applicationId: args.application.id,
+        type: 'organization.invitation.accepted',
+        data: {
+          invitation: {
+            id: inv.id,
+            organizationId: inv.organizationId,
+            email: inv.email,
+            role: inv.role,
+            acceptedAt: acceptedAt.toISOString(),
+          },
+          membership: {
+            id: membership.id,
+            organizationId: membership.organizationId,
+            endUserId: membership.endUserId,
+            role: membership.role,
+          },
+        },
+      });
+      return { membership, deliveryIds: ids };
+    });
+    kickDeliveries(deliveryIds);
+    return shapeMembership(
+      accepted,
+      await organizationRolesService.baseRoleOrLeast(args.application.id, accepted.role),
+    );
   },
 
   /** OWNER/ADMIN-only invitation revoke. Idempotent. */
@@ -896,9 +990,11 @@ export const organizationsService = {
     applicationId: string;
     take?: number;
     skip?: number;
+    /** Case-insensitive substring of the name or slug. */
+    query?: string | undefined;
   }): Promise<Array<OrganizationDto & { memberCount: number; pendingInvitationCount: number }>> {
     const rows = await prisma.organization.findMany({
-      where: { applicationId: args.applicationId },
+      where: organizationSearch(args.applicationId, args.query),
       orderBy: { createdAt: 'desc' },
       include: {
         _count: {
@@ -918,9 +1014,9 @@ export const organizationsService = {
     }));
   },
 
-  /** Total organizations in an Application, ignoring take/skip. */
-  async adminCount(args: { applicationId: string }): Promise<number> {
-    return prisma.organization.count({ where: { applicationId: args.applicationId } });
+  /** Total organizations in an Application matching `query`, ignoring take/skip. */
+  async adminCount(args: { applicationId: string; query?: string | undefined }): Promise<number> {
+    return prisma.organization.count({ where: organizationSearch(args.applicationId, args.query) });
   },
 
   /** Full operator view of one org: members (with email) + pending invitations. */
@@ -1071,6 +1167,7 @@ export const organizationsService = {
     endUserId: string;
     /** Omit to use the Application's default organization role. */
     role?: string | undefined;
+    actor: OperatorMembershipActor;
   }): Promise<MembershipDto & { email: string }> {
     await this.adminLoadOrThrow(args);
     const endUser = await this.adminAssertEndUserInApp(args.applicationId, args.endUserId);
@@ -1090,7 +1187,9 @@ export const organizationsService = {
           role: roleDef.name,
         },
       });
-      return { ...shapeMembership(m, roleDef.baseRole), email: endUser.email };
+      const membership = shapeMembership(m, roleDef.baseRole);
+      auditMembershipWrite('app.organization_member_added', args.actor, membership, args.applicationId);
+      return { ...membership, email: endUser.email };
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
         throw new RekeyError({
@@ -1110,6 +1209,7 @@ export const organizationsService = {
     organizationId: string;
     endUserId: string;
     role: string;
+    actor: OperatorMembershipActor;
   }): Promise<MembershipDto> {
     await this.adminLoadOrThrow(args);
     const roleDef = await organizationRolesService.require(args.applicationId, args.role);
@@ -1136,9 +1236,11 @@ export const organizationsService = {
           endUserId: args.endUserId,
         },
       },
-      data: { role: args.role },
+      data: { role: roleDef.name },
     });
-    return shapeMembership(updated, roleDef.baseRole);
+    const membership = shapeMembership(updated, roleDef.baseRole);
+    auditMembershipWrite('app.organization_member_role_changed', args.actor, membership, args.applicationId);
+    return membership;
   },
 
   /** Operator remove a member. Idempotent. */

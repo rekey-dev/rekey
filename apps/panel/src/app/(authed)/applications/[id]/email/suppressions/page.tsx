@@ -22,12 +22,14 @@ import { EmptyState } from '@/components/EmptyState';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
-import { Field } from '@/components/Field';
+import { Field, FieldRowAction, fieldInputCls, fieldRowCls } from '@/components/Field';
 
 interface SuppressionRow {
   id: string;
   address: string;
   reason: 'manual' | 'bounce' | 'complaint' | 'unsubscribe';
+  /** Null: every email stops. `notification`: only notification custom mail (a one-click unsubscribe). */
+  category: 'notification' | null;
   note: string | null;
   createdBy: string | null;
   createdAt: string;
@@ -82,8 +84,7 @@ const ERR: Record<string, string> = {
   TENANT_ROLE_INSUFFICIENT: 'Your role cannot change email settings on this Application.',
 };
 
-const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:border-[var(--color-primary)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)]';
+const inputCls = `${fieldInputCls} text-[var(--color-fg)]`;
 
 export default async function EmailSuppressionsPage({
   params,
@@ -114,7 +115,7 @@ export default async function EmailSuppressionsPage({
       {err && <Banner tone="error">{errorMessage(ERR, err)}</Banner>}
 
       <Card className="space-y-3">
-        <ActionForm action={addSuppression.bind(null, id)} className="grid items-end gap-2 sm:grid-cols-[1fr_10rem_1fr_auto]">
+        <ActionForm action={addSuppression.bind(null, id)} className={`${fieldRowCls} sm:grid-cols-[1fr_10rem_1fr_auto]`}>
           <Field label="Address" required>
             <input type="email" name="address" required maxLength={254} className={inputCls} />
           </Field>
@@ -129,12 +130,16 @@ export default async function EmailSuppressionsPage({
           <Field label="Note" hint="Optional.">
             <input type="text" name="note" maxLength={500} className={inputCls} />
           </Field>
-          <SubmitButton pendingLabel="Adding…">Suppress</SubmitButton>
+          <FieldRowAction>
+            <SubmitButton pendingLabel="Adding…">Suppress</SubmitButton>
+          </FieldRowAction>
         </ActionForm>
         <p className="text-[11px] text-[var(--color-muted-fg)]">
-          Rekey does not add these itself yet. No provider bounce webhooks are consumed, so every
-          row here was added by a person. The reason is carried so that when Rekey does start
-          recording bounces, a bounce and a manual entry stay distinguishable.
+          Rekey adds an address itself, with reason unsubscribe, when a recipient uses the one-click
+          unsubscribe in a custom notification email. That entry stops notification emails only:
+          password resets, sign-in links and critical emails still go out. An address you add here
+          stops all email, and replaces an unsubscribe entry. Every other row was added by a
+          person: no provider bounce webhooks are consumed yet.
         </p>
       </Card>
 
@@ -155,6 +160,7 @@ export default async function EmailSuppressionsPage({
             <TR>
               <TH>Address</TH>
               <TH>Reason</TH>
+              <TH>Stops</TH>
               <TH>Note</TH>
               <TH>Added</TH>
               <TH align="right"> </TH>
@@ -166,6 +172,9 @@ export default async function EmailSuppressionsPage({
                 <TD mono>{s.address}</TD>
                 <TD>
                   <Badge tone={REASON_TONE[s.reason]}>{s.reason}</Badge>
+                </TD>
+                <TD muted className="whitespace-nowrap text-xs">
+                  {s.category === 'notification' ? 'Notification emails only' : 'All email'}
                 </TD>
                 <TD muted className="max-w-[16rem] truncate text-xs">
                   {s.note ?? '—'}

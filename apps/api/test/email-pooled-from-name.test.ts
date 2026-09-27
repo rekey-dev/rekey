@@ -34,12 +34,14 @@ describe('pooledFromName', () => {
     expect(pooledFromName(app('Acme'), DEPLOYMENT)).toBe('Acme (via Rekey)');
   });
 
-  it("uses the operator's own fromName verbatim when they set one", () => {
-    // An operator who configured a name has already decided how they want to
-    // appear; appending to it would override a deliberate choice.
+  it("uses the operator's own fromName in place of the app name, and keeps the suffix", () => {
+    // The address is the deployment's, so a verbatim custom name would let any
+    // customer send from it as anyone, the deployment included.
     expect(pooledFromName(app('Acme', { fromName: 'Acme Support' }), DEPLOYMENT)).toBe(
-      'Acme Support',
+      'Acme Support (via Rekey)',
     );
+    expect(pooledFromName(app('Acme', { fromName: 'Rekey' }), DEPLOYMENT)).toBe('Rekey (via Rekey)');
+    expect(pooledFromName(app('Acme', { fromName: 'Acme Support' }), undefined)).toBe('Acme Support');
   });
 
   it('does not disclose the deployment to itself', () => {

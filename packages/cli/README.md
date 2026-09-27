@@ -9,7 +9,7 @@
 > `SUPER_ADMIN_KEY`, which only whoever runs the deployment holds. A Rekey Cloud
 > workspace has no such key, so on Cloud use the panel (panel.rekey.dev) for
 > what `rekey init` does, and the hosted operator MCP
-> ([docs/mcp.md](../../docs/mcp.md), [rekey.dev/docs/mcp](https://rekey.dev/docs/mcp))
+> ([rekey.dev/docs/mcp](https://rekey.dev/docs/mcp))
 > to give an agent your workspace. The Cloud quickstart is
 > [rekey.dev/docs/quickstart](https://rekey.dev/docs/quickstart).
 

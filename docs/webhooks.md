@@ -169,7 +169,7 @@ implement, not something you receive.
 
 ## Event catalog
 
-Twenty-seven events. The registry lives in
+Thirty-two events. The registry lives in
 `apps/api/src/modules/webhooks/events.ts`, and `@rekey.dev/node` re-exports it
 as `WEBHOOK_EVENTS` (`{ name, description }` pairs), `KNOWN_WEBHOOK_EVENTS`
 (names only) and `isKnownWebhookEvent` — use those to build an event picker
@@ -179,15 +179,80 @@ rather than hardcoding this table.
 
 | Event | When |
 |---|---|
-| `user.created` | An end-user account was created — password sign-up, first OAuth or magic-link sign-in, an import (`data.via: "import"`), or a billing system reporting a sale for an address Rekey had not met (`data.via: "billing:<provider>"`). |
-| `user.updated` | An end-user's profile changed (email, role, metadata). |
+| `user.created` | An end-user account was created. `data.user` describes it and `data.via` says how (see below). |
+| `user.updated` | An end-user's role, metadata or verified flag changed. `data.changed` lists the field names that changed, never their values, and `data.user` is the record after the change. See below. |
 | `user.deleted` | An end-user account was deleted. |
 | `user.erased` | An end-user was erased for GDPR: PII and auth material hard-deleted, financial rows retained anonymized, and they can never authenticate again. **Propagate this to your own copies of their PII.** `data.user` carries `id` + `erasedAt`. See [data-erasure.md](data-erasure.md). |
+| `session.created` | An end-user signed in and a session was minted. See below. |
 | `session.revoked` | A refresh token was revoked — sign-out, per-session revoke, or kill-switch. |
 | `mfa.enabled` | TOTP enrollment confirmed, or a passkey registered. |
 | `mfa.disabled` | The end-user disabled MFA. |
 | `password.changed` | Authenticated change or reset-token flow. All their other sessions are revoked. |
 | `email.verified` | The end-user verified their email address. |
+
+`user.created` carries `data.via`:
+
+| `via` | Created by |
+|---|---|
+| `password` | Password sign-up. |
+| `magic_link` | The first magic-link sign-in for a new address. |
+| `oauth` | The first OAuth sign-in for a new address. `data.provider` names the provider. |
+| `operator` | An operator, from the panel's End-users page or `POST /api/v1/tenant/applications/:id/end-users`. |
+| `import` | `POST /api/v1/users/import`. This payload carries only `data.user.id` and `data.user.email`. |
+| `import:<provider>` | A subscription import from a billing provider. |
+| `billing:<provider>` | A billing provider reporting a sale for an address Rekey had not met. |
+
+`user.updated` carries `data.changed` and `data.via`:
+
+| `via` | Change | Fields |
+|---|---|---|
+| `self` | The end-user's own `PATCH /api/v1/users/me`. | `metadata` |
+| `operator` | An operator's `PATCH /api/v1/tenant/applications/:id/end-users/:euid`. | any of `role`, `emailVerified`, `metadata` |
+| `email_verification` | The first successful `POST /api/v1/auth/verify-email`. | `emailVerified` |
+| `magic_link` | A magic-link sign-in that proved an unverified address. | `emailVerified` |
+
+It is written in the same transaction as the change, and only when a value
+actually changed: a PATCH that stores what was already there, or a second
+verification of a verified address, emits nothing. A password change is
+`password.changed`, and session churn is `session.revoked`; neither emits
+`user.updated`.
+
+`session.created` fires once per real sign-in, in the transaction that writes
+the session, so a sign-in whose event cannot be recorded gets no session:
+
+```json
+{
+  "userId": "eu_...",
+  "sessionId": "clx...",
+  "deviceId": null,
+  "via": "password",
+  "firstSignIn": true
+}
+```
+
+`via` is `password` (sign-in and sign-up), `magic_link`, `oauth`, `passkey`, or
+`mfa` when the session was minted by completing a second factor (the password
+step before it mints nothing, so it emits nothing). A refresh, or switching the
+active organization, re-mints a session and never emits it. `sessionId` is the
+id `session.revoked` carries when that session ends.
+
+`firstSignIn` is true for the first session the user ever gets, exactly once
+even when several first sign-ins race. That is the sign-up session for a
+self-service sign-up, and the first sign-in for an operator-created or imported
+user. Accounts that existed before this event shipped count as already signed
+in. For "this request created the account", read `isNewUser` on the auth result
+instead (see [auth.md](auth.md#routing-new-users-to-onboarding)).
+
+### Organizations
+
+End-user organizations (`authConfig.organizationsEnabled`). Both events are
+written in the transaction that creates or accepts the invitation, and neither
+carries the invitation token.
+
+| Event | When |
+|---|---|
+| `organization.invitation.created` | An invitation was created. `data.invitation`: id, organizationId, email, role, invitedById, expiresAt, createdAt. |
+| `organization.invitation.accepted` | An invitation was accepted, once per invitation however many accepts race. `data.invitation` (id, organizationId, email, role, acceptedAt) and `data.membership` (id, organizationId, endUserId, role). |
 
 ### Devices
 
@@ -211,15 +276,22 @@ actually transitions** — a provider event that changes nothing emits nothing.
 
 | Event | When |
 |---|---|
-| `subscription.activated` | A Subscription became ACTIVE. `data.subscription` carries ids, plan slug/name/kind, amount/currency/interval, the resolved `entitlements` array, and the period end. |
+| `subscription.activated` | A Subscription became ACTIVE. `data.subscription` carries ids, plan slug/name/kind, amount/currency/interval, the resolved `entitlements` array, the period end, and `trialEndsAt`. |
 | `subscription.canceled` | A Subscription became CANCELED (includes `canceledAt`). |
 | `subscription.past_due` | A Subscription became PAST_DUE — payment failed, provider retrying. |
+| `subscription.trial_started` | A Subscription entered TRIALING: a checkout that completed on a trial, a billing system reporting a trial, or a provider moving the subscription onto one. Sent alongside `subscription.activated` when the trial is also the activation. `data.subscription.trialEndsAt` is the trial end. A re-dated trial is not a new start. |
+| `subscription.trial_will_end` | A TRIALING Subscription's trial ends within 3 days. A sweep checks every 10 minutes, and sends it once per subscription and trial end date; a trial re-dated after it was sent is announced again for the new date. Not sent for a trial that already converted or ended. |
 | `payment.succeeded` | A Payment was recorded SUCCEEDED. `data.payment` carries ids, plan slug when subscription-linked, amount/currency/status. |
 | `payment.failed` | A Payment was recorded FAILED. |
 
 Act on `data.subscription.entitlements`, not on the plan slug. Two subscribers
 on the same plan can hold different quantities, and the slug cannot tell you
 so.
+
+The field is **absent** when Rekey could not resolve it while recording the
+event. Absent means unknown, not "grants nothing": leave what you provisioned
+alone and read the current grant from `GET /api/v1/billing/entitlements/for-user` (secret key with `billing:read`) instead. An empty array
+does mean the subscription grants nothing.
 
 ### Dunning
 

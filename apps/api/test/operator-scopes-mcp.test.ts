@@ -17,9 +17,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
-import { TOOL_SCOPES, WORKSPACE_TOOLS } from '../src/modules/tenant-mcp/tenant-mcp-server.js';
-import { operatorTools } from '../src/modules/tenant-mcp/operator-tools.js';
-import { operatorWriteTools } from '../src/modules/tenant-mcp/operator-write-tools.js';
+import { TOOL_SCOPES, WORKSPACE_TOOLS, allOperatorTools } from '../src/modules/tenant-mcp/tenant-mcp-server.js';
 import { isScope } from '../src/lib/operator-scopes.js';
 import { waitForSecurityEvents } from './wait-for-security-events.js';
 import { createHash, randomBytes } from 'node:crypto';
@@ -202,7 +200,7 @@ describe('operator scopes over MCP', () => {
   });
 
   it('every tool is either scoped or an explicit workspace floor', () => {
-    const all = [...operatorTools, ...operatorWriteTools].map((t) => t.name);
+    const all = allOperatorTools.map((t) => t.name);
     const ungoverned = all.filter((name) => TOOL_SCOPES[name] === undefined && !WORKSPACE_TOOLS.has(name));
     expect(ungoverned, 'a tool is neither in TOOL_SCOPES nor WORKSPACE_TOOLS').toEqual([]);
     // And nothing in either table names a tool that no longer exists.

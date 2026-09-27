@@ -15,7 +15,7 @@ import type {
   PlanDto,
   OrganizationWithRoleDto,
   ResolvedEntitlementsDto,
-  SubscriptionDto,
+  SelfSubscriptionDto,
 } from '@rekey.dev/shared-types';
 import type { RekeyBrowserClient } from '../src/client.js';
 
@@ -58,7 +58,7 @@ export async function some(): Promise<void> {
 export async function all(): Promise<void> {
   const me = await client.getMe('token', { include: ['subscription', 'organization'] });
   if (!me) return;
-  expectTypeOf(me.subscription).toEqualTypeOf<SubscriptionDto | null>();
+  expectTypeOf(me.subscription).toEqualTypeOf<SelfSubscriptionDto | null>();
   expectTypeOf(me.organization).toEqualTypeOf<OrganizationWithRoleDto | null>();
 }
 
@@ -85,6 +85,6 @@ export async function asConst(): Promise<void> {
   const wanted = ['subscription'] as const;
   const me = await client.getMe('token', { include: wanted });
   if (!me) return;
-  expectTypeOf(me.subscription).toEqualTypeOf<SubscriptionDto | null>();
+  expectTypeOf(me.subscription).toEqualTypeOf<SelfSubscriptionDto | null>();
   expectTypeOf(me).not.toHaveProperty('device');
 }

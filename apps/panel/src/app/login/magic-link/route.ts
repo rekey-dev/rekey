@@ -11,6 +11,7 @@
 import { type NextRequest, NextResponse } from 'next/server';
 import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE, sessionCookieMaxAges } from '@/lib/api';
 import { cookieSecure } from '@/lib/cookie-secure';
+import { loginErrorCode } from '../error-messages';
 
 type VerifyResult =
   | { mfaRequired: true; mfaChallengeToken: string }
@@ -34,7 +35,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     result = await publicPost<VerifyResult>('/api/v1/tenant/auth/magic-link/verify', { token });
   } catch (err) {
     if (err instanceof PanelApiError) {
-      return seeOther(`/login?error=${encodeURIComponent(err.code)}`);
+      return seeOther(`/login?error=${loginErrorCode(err.code)}`);
     }
     throw err;
   }

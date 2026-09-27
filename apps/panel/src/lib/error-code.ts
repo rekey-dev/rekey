@@ -24,3 +24,14 @@ export function normalizeErrorCode(
 ): string {
   return Object.prototype.hasOwnProperty.call(messages, code) ? code : UNKNOWN_ERROR_CODE;
 }
+
+/**
+ * Copy for the one failure the panel raises before any request leaves it: no
+ * REKEY_URL. Only whoever runs this panel can fix that, and they are the person
+ * reading the unauthenticated forms, so naming the setting is the useful thing
+ * to say. Spread into each of those forms' message maps.
+ */
+export const API_URL_MISSING_MESSAGES: Readonly<Record<'PANEL_API_URL_MISSING', string>> = {
+  PANEL_API_URL_MISSING:
+    'This panel cannot reach its API because REKEY_URL is not set. Set REKEY_URL in the panel environment to the address of your Rekey API, then restart the panel.',
+};

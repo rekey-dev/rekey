@@ -155,6 +155,20 @@ export interface Session {
 }
 
 /**
+ * The session a sign-in or sign-up server action just started.
+ *
+ * @example
+ * ```ts
+ * const session = await signUp({ email, password });
+ * redirect(session.isNewUser ? '/onboarding' : '/dashboard');
+ * ```
+ */
+export interface SignedInSession extends Session {
+  /** True when this request created the account. Route new users to onboarding on it. */
+  isNewUser: boolean;
+}
+
+/**
  * Identify the machine to the API, for an Application that binds sessions to
  * devices (docs/devices.md).
  *
@@ -517,7 +531,7 @@ export async function refreshSession(options?: SessionDeviceOptions): Promise<Se
  * NOT a session and must never land in `rekey_access`.
  */
 export type SignInOutcome =
-  | { kind: 'session'; session: Session }
+  | { kind: 'session'; session: SignedInSession }
   | {
       kind: 'mfa_required';
       mfaChallengeToken: string;
@@ -600,15 +614,16 @@ export async function signIn(
   await setSessionCookies(result);
   return {
     kind: 'session',
-    session: { user: result.endUser, accessToken: result.accessToken },
+    session: { user: result.endUser, accessToken: result.accessToken, isNewUser: result.isNewUser },
   };
 }
 
 /**
  * Server action: complete an MFA-required sign-in. Sets cookies on success.
- * Throws `RekeyError` with code `MFA_CODE_INVALID` /
- * `MFA_CHALLENGE_INVALID` on failure, surface the error message to the
- * user and prompt to retry.
+ * Throws `RekeyError` with code `MFA_CODE_INVALID` / `MFA_CODE_REUSED` /
+ * `MFA_CHALLENGE_INVALID` / `MFA_CHALLENGE_USED` on failure, surface the
+ * error message to the user and prompt to retry. The two challenge codes
+ * mean the token cannot be retried: send the user back to sign in.
  */
 export async function mfaVerify(
   input: {
@@ -617,10 +632,10 @@ export async function mfaVerify(
     device?: DeviceBindingRequest;
   },
   options: VisitorOptions = {},
-): Promise<Session> {
+): Promise<SignedInSession> {
   const result = await (await visitorClient(options.clientIp)).auth.mfaVerify(input);
   await setSessionCookies(result);
-  return { user: result.endUser, accessToken: result.accessToken };
+  return { user: result.endUser, accessToken: result.accessToken, isNewUser: result.isNewUser };
 }
 
 /**
@@ -637,10 +652,10 @@ export async function signUp(
     device?: DeviceBindingRequest;
   },
   options: VisitorOptions = {},
-): Promise<Session> {
+): Promise<SignedInSession> {
   const result = await (await visitorClient(options.clientIp)).auth.signUp(input);
   await setSessionCookies(result);
-  return { user: result.endUser, accessToken: result.accessToken };
+  return { user: result.endUser, accessToken: result.accessToken, isNewUser: result.isNewUser };
 }
 
 /**

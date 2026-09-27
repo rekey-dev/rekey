@@ -925,6 +925,11 @@ export interface ApplicationRow {
     appUrl?: string;
     signupEnabled?: boolean;
     signupMode?: 'public' | 'secret_only' | 'invite_only';
+    signupRestrictions?: {
+      allowedDomains?: string[];
+      blockedDomains?: string[];
+      blockDisposable?: boolean;
+    };
     mfa?: 'off' | 'optional' | 'required';
     mcpEnabled?: boolean;
     /** Application acts as an OpenID Connect provider. Independent of `mcpEnabled`. */
@@ -933,6 +938,8 @@ export interface ApplicationRow {
     passwordBreachCheckEnabled?: boolean;
     sendVerificationEmailOnSignUp?: boolean;
     requireEmailVerification?: boolean;
+    /** When a new account gets the welcome email. Absent on apps saved before it existed: `on_signup`. */
+    welcomeEmail?: 'on_signup' | 'on_verified' | 'off';
     /**
      * Whether a sign-in must carry a device fingerprint. `required` refuses
      * one that does not; `optional` binds the device when a fingerprint is
@@ -1330,7 +1337,7 @@ export interface OrganizationDetail {
   invitations: OrganizationInvitationRow[];
 }
 
-export type EmailLogStatus = 'sent' | 'error' | 'no_transport' | 'suppressed';
+export type EmailLogStatus = 'sent' | 'error' | 'no_transport' | 'suppressed' | 'pending' | 'unknown';
 
 export interface EmailLogRow {
   id: string;
@@ -1343,6 +1350,9 @@ export interface EmailLogRow {
   status: EmailLogStatus | string;
   messageId: string | null;
   error: string | null;
+  /** Set for custom template sends; `eventKey` is null on those. */
+  customTemplateKey?: string | null;
+  customTemplateVersion?: number | null;
   createdAt: string;
 }
 

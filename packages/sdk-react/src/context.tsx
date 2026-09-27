@@ -121,6 +121,11 @@ export function RekeyProvider({
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
+/** Internal. The context when a `<RekeyProvider>` is mounted, else `null`. */
+export function useOptionalRekeyContext(): RekeyContextValue | null {
+  return React.useContext(Ctx);
+}
+
 /** Internal, use the public hooks instead. */
 export function useRekeyContext(): RekeyContextValue {
   const ctx = React.useContext(Ctx);

@@ -35,6 +35,7 @@
 
 import * as React from 'react';
 import { useUser } from './hooks.js';
+import { useOAuthProviders } from './oauth-providers.js';
 import { Themed, useCx, type AppearanceProp } from './theme.js';
 
 /** A Next.js Server Action bound to a `<form>`, `(formData) => void | Promise<void>`. */
@@ -57,6 +58,55 @@ function titleCase(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+const PROVIDER_PLACEHOLDER = '{provider}';
+
+/** Read through `globalThis`: a browser page with no bundler has no `process` at all. */
+function isProductionBuild(): boolean {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  return env?.NODE_ENV === 'production';
+}
+
+/**
+ * Where a fetched provider's button starts the OAuth flow. Only used when
+ * `oauthProviders` is not passed, see `SignInProps.oauthStartUrl`.
+ */
+interface OAuthStartTarget {
+  oauthStartUrl?: string;
+  oauthStartAction?: FormAction;
+}
+
+/**
+ * The buttons to render: the `oauthProviders` prop when given, otherwise the
+ * Application's enabled providers, fetched once a start target says where each
+ * button should go. With neither, no buttons, as before the fetch existed.
+ */
+function useResolvedOAuthProviders(
+  explicit: OAuthProvider[] | undefined,
+  { oauthStartUrl, oauthStartAction }: OAuthStartTarget,
+): OAuthProvider[] {
+  const shouldFetch = explicit === undefined && (oauthStartUrl !== undefined || oauthStartAction !== undefined);
+  const fetched = useOAuthProviders({ enabled: shouldFetch });
+  const startUrlMissesPlaceholder =
+    shouldFetch && oauthStartAction === undefined && !(oauthStartUrl ?? '').includes(PROVIDER_PLACEHOLDER);
+  React.useEffect(() => {
+    if (startUrlMissesPlaceholder && !isProductionBuild()) {
+      console.warn(
+        `@rekey.dev/react: oauthStartUrl "${oauthStartUrl}" has no ${PROVIDER_PLACEHOLDER}, so every ` +
+          `OAuth button would start the same URL. Write it as e.g. "/oauth/${PROVIDER_PLACEHOLDER}/start".`,
+      );
+    }
+  }, [startUrlMissesPlaceholder, oauthStartUrl]);
+  if (explicit !== undefined) return explicit;
+  if (!fetched) return [];
+  return fetched.map((p) => ({
+    provider: p.id,
+    label: `Continue with ${p.name}`,
+    ...(oauthStartAction !== undefined
+      ? { startAction: oauthStartAction }
+      : { startUrl: (oauthStartUrl ?? '').replaceAll(PROVIDER_PLACEHOLDER, encodeURIComponent(p.id)) }),
+  }));
+}
+
 /** Shared OAuth button list. Renders one button per configured provider. */
 function OAuthButtons({ providers }: { providers: OAuthProvider[] }): React.JSX.Element | null {
   const cx = useCx();
@@ -68,6 +118,7 @@ function OAuthButtons({ providers }: { providers: OAuthProvider[] }): React.JSX.
         if (p.startAction) {
           return (
             <form key={p.provider} action={p.startAction}>
+              <input type="hidden" name="provider" value={p.provider} />
               <button
                 type="submit"
                 className={cx('rekey-btn rekey-btn-secondary rekey-btn-block', 'buttonSecondary')}
@@ -122,8 +173,22 @@ export interface SignInProps {
   magicLinkAction?: FormAction;
   /** Or a magic-link route URL. */
   magicLinkUrl?: string;
-  /** OAuth providers to render as buttons (configure on your app). */
+  /**
+   * OAuth providers to render as buttons. Omit it and set `oauthStartUrl` or
+   * `oauthStartAction` to render the providers enabled on the Application
+   * instead, fetched with the publishable key from `<RekeyProvider>`.
+   */
   oauthProviders?: OAuthProvider[];
+  /**
+   * Start URL for each fetched provider, with `{provider}` replaced by its id,
+   * e.g. `"/api/auth/oauth/{provider}/start"`. Ignored when `oauthProviders` is set.
+   */
+  oauthStartUrl?: string;
+  /**
+   * Server Action that starts OAuth for a fetched provider. It receives the
+   * provider id as the `provider` form field. Ignored when `oauthProviders` is set.
+   */
+  oauthStartAction?: FormAction;
   /** Link target for "Create account". Omit to hide. */
   signUpUrl?: string;
   /** Link target for "Forgot password?". Omit to hide. */
@@ -141,9 +206,10 @@ function SignInBody(props: SignInProps): React.JSX.Element {
   const cx = useCx();
   const {
     action, actionUrl, magicLinkAction, magicLinkUrl,
-    oauthProviders = [], signUpUrl, forgotPasswordUrl, error,
+    signUpUrl, forgotPasswordUrl, error,
     title = 'Sign in', subtitle,
   } = props;
+  const oauthProviders = useResolvedOAuthProviders(props.oauthProviders, props);
   return (
     <div className={cx('rekey-card', 'card')}>
       <div className={cx('rekey-header', 'header')}>
@@ -209,6 +275,10 @@ function SignInBody(props: SignInProps): React.JSX.Element {
  * Drop-in sign-in card: email + password, optional magic-link, optional OAuth.
  * Delegates the actual sign-in to your server (`action` / `actionUrl`).
  *
+ * OAuth buttons come from `oauthProviders` when you pass it. Otherwise, with
+ * `oauthStartUrl` or `oauthStartAction` set, the card shows whichever providers
+ * the Application has enabled in the panel, so enabling one there is enough.
+ *
  * @example (Next.js App Router)
  * ```tsx
  * import { signInAction, magicLinkAction } from "@/lib/actions";
@@ -219,6 +289,10 @@ function SignInBody(props: SignInProps): React.JSX.Element {
  *   signUpUrl="/signup"
  *   forgotPasswordUrl="/forgot-password"
  * />
+ *
+ * // Buttons for every provider enabled on the Application, each starting
+ * // `startOAuth` in one Server Action that reads `formData.get("provider")`.
+ * <SignIn action={signInAction} oauthStartAction={startOAuthAction} />
  * ```
  */
 export function SignIn(props: SignInProps): React.JSX.Element {
@@ -238,8 +312,12 @@ export interface SignUpProps {
   action?: FormAction;
   /** Or a route URL the form POSTs to. */
   actionUrl?: string;
-  /** OAuth providers to render as buttons. */
+  /** OAuth providers to render as buttons. See `SignInProps.oauthProviders`. */
   oauthProviders?: OAuthProvider[];
+  /** See `SignInProps.oauthStartUrl`. */
+  oauthStartUrl?: string;
+  /** See `SignInProps.oauthStartAction`. */
+  oauthStartAction?: FormAction;
   /** Link target for "Already have an account?". Omit to hide. */
   signInUrl?: string;
   /** Error message to surface. */
@@ -253,9 +331,10 @@ export interface SignUpProps {
 function SignUpBody(props: SignUpProps): React.JSX.Element {
   const cx = useCx();
   const {
-    action, actionUrl, oauthProviders = [], signInUrl, error,
+    action, actionUrl, signInUrl, error,
     title = 'Create your account', subtitle,
   } = props;
+  const oauthProviders = useResolvedOAuthProviders(props.oauthProviders, props);
   return (
     <div className={cx('rekey-card', 'card')}>
       <div className={cx('rekey-header', 'header')}>

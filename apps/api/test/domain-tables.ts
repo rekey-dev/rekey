@@ -20,6 +20,8 @@ export const DOMAIN_TABLES = [
   'api_request_logs',
   'email_logs',
   'email_templates',
+  'custom_email_template_versions',
+  'custom_email_templates',
   'webhook_events',
   'coupon_redemptions',
   'coupons',
@@ -35,6 +37,7 @@ export const DOMAIN_TABLES = [
   // reach it anyway, an explicit entry keeps the list a readable inventory of
   // what a test starts with rather than something to be derived.
   'unapplied_payments',
+  'checkout_sessions',
   'payments',
   'subscriptions',
   'plans',
@@ -73,6 +76,7 @@ export const DOMAIN_TABLES = [
  *                      the end-user it refers to and hits the next test that
  *                      recycles the address. In test this is an in-MEMORY
  *                      store, never Redis (`getRedis()` returns null).
+ *   mfa-replay         accepted TOTP steps and spent MFA challenge tokens.
  *   cors-origins       the union of every Application's registered origins,
  *                      on a 30s TTL.
  *   signing-keys       active JWT signing key + JWKS snapshot, on a 60s TTL,
@@ -86,9 +90,13 @@ export const DOMAIN_TABLES = [
  *   operator-auth      operator session / membership / grant snapshots and
  *                      the application-to-workspace map, keyed on ids the
  *                      TRUNCATE removes.
+ *   send-caps          custom email send counters per Application and
+ *                      recipient, which would carry one test's sends into
+ *                      the next test's cap.
  */
 const RESET_MODULES = [
   '../src/lib/brute-force.js',
+  '../src/lib/mfa-replay.js',
   '../src/lib/cors-origins.js',
   '../src/lib/signing-keys.js',
   '../src/lib/request-log.js',
@@ -96,6 +104,10 @@ const RESET_MODULES = [
   '../src/modules/oauth/providers/oidc.js',
   '../src/lib/operator-auth-cache.js',
   '../src/modules/webhooks/endpoint-gate.js',
+  '../src/modules/email/custom/send-caps.js',
+  '../src/modules/billing/checkout/creation-limit.js',
+  '../src/modules/billing/checkout/portal-probe.js',
+  '../src/modules/billing/checkout/readiness.js',
 ] as const;
 
 let resetFns: Array<() => void> | null = null;

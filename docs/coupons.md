@@ -31,7 +31,7 @@ Body (identical for both):
 - Codes are stored **lowercase**. `LAUNCH50` and `launch50` are the same coupon.
 - Per-`(applicationId, code)` uniqueness; multi-tenant by design.
 - `planSlugs` is optional — empty array = applies to any plan.
-- `currency` is optional — only meaningful for AMOUNT coupons that should reject mismatched currencies.
+- `currency` is required for AMOUNT coupons and ignored for PERCENT ones. An AMOUNT coupon only applies to plans in its currency: `amountOff` is in that currency's smallest unit, so the same number means a different discount anywhere else. A request without one is refused with `COUPON_CURRENCY_REQUIRED`, and a `currency` that is not an ISO 4217 code with `COUPON_CURRENCY_INVALID`. AMOUNT coupons created before this rule may have no currency; they are refused at checkout with the same code rather than applied, so deactivate them and create replacements that name a currency.
 
 ## Validating (without applying)
 
@@ -106,7 +106,8 @@ It used to be recorded at apply-time on the theory that slight overcounting was 
 | `now >= startsAt` (if set) | `COUPON_NOT_YET_STARTED` (400) |
 | `now <= endsAt` (if set) | `COUPON_EXPIRED` (400) |
 | `planSlugs` contains target plan (if set) | `COUPON_NOT_APPLICABLE` (400) |
-| AMOUNT coupon currency matches plan currency (if `currency` set) | `COUPON_CURRENCY_MISMATCH` (400) |
+| AMOUNT coupon has a `currency` (only coupons created before it was required can lack one) | `COUPON_CURRENCY_REQUIRED` (400) |
+| AMOUNT coupon currency matches plan currency | `COUPON_CURRENCY_MISMATCH` (400) |
 | Total redemptions < `maxRedemptions` (if set) | `COUPON_REDEMPTION_LIMIT_REACHED` (400) |
 | User redemptions < `maxRedemptionsPerUser` (if set) | `COUPON_USER_LIMIT_REACHED` (400) |
 

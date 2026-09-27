@@ -93,6 +93,13 @@ async function receiver(): Promise<Receiver> {
   return r;
 }
 
+/** Poll until `done()` holds or `withinMs` passes, and return how long it took. */
+async function waitFor(done: () => boolean, withinMs: number): Promise<number> {
+  const started = Date.now();
+  while (!done() && Date.now() - started < withinMs) await new Promise((r) => setTimeout(r, 10));
+  return Date.now() - started;
+}
+
 const ok = (_req: IncomingMessage, res: ServerResponse): void => {
   res.statusCode = 200;
   res.end('{}');
@@ -169,17 +176,20 @@ describe('webhook endpoint isolation (delivery path)', () => {
       // The hung endpoint's rows are OLDER, so they come first in the poll's
       // order, the worst case for the healthy tenant.
       await dueRows(appA, epA.id, 20, 120_000);
-      const healthyIds = await dueRows(appB, epB.id, 5, 60_000);
+      // No more than the healthy endpoint's own cap. One row over it can reach
+      // the gate while the others are still being sent, be put off by that
+      // cap, and never be retried here because the scheduler is a no-op.
+      const healthyRows = ENDPOINT_MAX_IN_FLIGHT;
+      const healthyIds = await dueRows(appB, epB.id, healthyRows, 60_000);
 
       const started = Date.now();
       const poll = processDueWebhookDeliveries();
-      const until = Date.now() + 4_000;
-      while (healthy.hits < 5 && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
-      const healthyDoneMs = Date.now() - started;
+      const healthyDoneMs = await waitFor(() => healthy.hits === healthyRows, 4_000);
+      await waitFor(() => hung.open === ENDPOINT_MAX_IN_FLIGHT, 2_000);
 
       // Delivered well inside ONE hung timeout (10s). Without the cap, the ten
       // poll lanes are all waiting on the hung endpoint at this point.
-      expect(healthy.hits).toBe(5);
+      expect(healthy.hits).toBe(healthyRows);
       expect(healthyDoneMs).toBeLessThan(2_000);
       expect(hung.open).toBe(ENDPOINT_MAX_IN_FLIGHT);
 
@@ -289,8 +299,7 @@ describe('webhook endpoint isolation (delivery path)', () => {
 
       // The first sweep takes one row and hangs on it.
       const first = processDueWebhookDeliveries(1);
-      const until = Date.now() + 3_000;
-      while (hung.hits < 1 && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+      await waitFor(() => hung.hits === 1, 3_000);
       expect(hung.hits).toBe(1);
 
       // Without the guard this would find and send the second due row.
@@ -329,11 +338,11 @@ describe('webhook endpoint isolation (delivery path)', () => {
 
       const started = Date.now();
       const poll = processDueWebhookDeliveries();
-      const until = Date.now() + 4_000;
-      while (healthy.hits < 3 && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+      const healthyDoneMs = await waitFor(() => healthy.hits === 3, 4_000);
+      await waitFor(() => hung.open === APP_MAX_IN_FLIGHT, 2_000);
 
       expect(healthy.hits).toBe(3);
-      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(healthyDoneMs).toBeLessThan(2_000);
       expect(hung.open).toBe(APP_MAX_IN_FLIGHT);
 
       await hung.close();

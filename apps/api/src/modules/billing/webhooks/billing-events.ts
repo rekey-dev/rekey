@@ -41,7 +41,8 @@
  * change it is announcing.
  */
 
-import { entitlementsService } from '../entitlements.service.js';
+import type { Subscription } from '@prisma/client';
+import { entitlementsService, type ResolvedEntitlement } from '../entitlements.service.js';
 import { enqueueEvent, type WebhookDbClient } from '../../webhooks/webhook.service.js';
 
 export type SubscriptionEventType =
@@ -52,7 +53,11 @@ export type SubscriptionEventType =
   // needs no branch for it: the payload it builds already carries entitlements
   // resolved through `resolveForSubscription`, which already applies overrides,
   // so this event is the existing shape with different news in it.
-  | 'subscription.entitlements_updated';
+  | 'subscription.entitlements_updated'
+  // The trial pair. `trial_started` is written with the write that puts the
+  // row into TRIALING; `trial_will_end` by the sweep in trial-events.ts.
+  | 'subscription.trial_started'
+  | 'subscription.trial_will_end';
 
 export type PaymentEventType = 'payment.succeeded' | 'payment.failed';
 
@@ -71,7 +76,8 @@ export type DunningEventType =
  * via `entitlementOverrides`, so a consumer acting on the grant (provisioning
  * seats, sizing a quota) would otherwise have to follow up with an API call it
  * has no user token for. Shape matches `GET /billing/entitlements`'
- * `entitlements` array so the same parsing works on both.
+ * `entitlements` array so the same parsing works on both. The field is absent
+ * when resolution failed; see `resolveEntitlementsOrOmit`.
  *
  * Deliberately no `features` map here. The one on `/billing/entitlements` is a
  * union across every subscription the subject holds (booleans OR-true, numbers
@@ -93,12 +99,11 @@ export async function enqueueSubscriptionEvent(
     },
   });
   if (!sub) return []; // Deleted out from under us, nothing to announce.
-  // A plan whose entitlements cannot be resolved (deleted out from under us)
-  // must not swallow the whole event: the status transition is the news, and
-  // an empty list is honest about what we could establish.
-  const entitlements = await entitlementsService
-    .resolveForSubscription(sub, client)
-    .catch(() => []);
+  const entitlements = await resolveEntitlementsOrOmit(client, sub, type);
+  // For this event the grant IS the news, so without it there is nothing true
+  // to send. Skipped rather than sent empty or bare; the next change to the
+  // grant announces it again.
+  if (entitlements === undefined && type === 'subscription.entitlements_updated') return [];
   return enqueueEvent(client, {
     applicationId: sub.applicationId,
     type,
@@ -115,13 +120,49 @@ export async function enqueueSubscriptionEvent(
         amount: sub.plan.amount,
         currency: sub.plan.currency,
         interval: sub.plan.interval,
-        entitlements,
+        ...(entitlements !== undefined && { entitlements }),
         currentPeriodEnd: sub.currentPeriodEnd?.toISOString() ?? null,
+        trialEndsAt: sub.trialEndsAt?.toISOString() ?? null,
         canceledAt: sub.canceledAt?.toISOString() ?? null,
         createdAt: sub.createdAt.toISOString(),
       },
     },
   });
+}
+
+/**
+ * The subscription's resolved entitlements, or `undefined` when they could not
+ * be resolved, in which case the payload omits the field.
+ *
+ * Omitted, never `[]`. For `subscription.entitlements_updated` the whole
+ * event is skipped instead, since the grant is its only news. Consumers provision against this array, and an empty one
+ * means "grants nothing", so a failed lookup used to tell them to take a paying
+ * customer's access away.
+ *
+ * Omitted rather than failing the enqueue, because the caller's transaction is
+ * also recording the payment or status change this event announces. Throwing
+ * would roll that back, and a failure that repeats on every retry (a malformed
+ * override, say) would stop the payment from ever being recorded. A database
+ * error is different: it aborts the transaction whatever happens here, so the
+ * provider retries the whole delivery and nothing is emitted half-built.
+ */
+async function resolveEntitlementsOrOmit(
+  client: WebhookDbClient,
+  sub: Subscription,
+  type: SubscriptionEventType,
+): Promise<ResolvedEntitlement[] | undefined> {
+  try {
+    return await entitlementsService.resolveForSubscription(sub, client);
+  } catch (err) {
+    console.error(
+      `[webhooks] could not resolve entitlements for subscription ${sub.id}; ` +
+        (type === 'subscription.entitlements_updated'
+          ? `"${type}" is not sent`
+          : `"${type}" is sent without the \`entitlements\` field`),
+      err instanceof Error ? err.message : String(err),
+    );
+    return undefined;
+  }
 }
 
 /**

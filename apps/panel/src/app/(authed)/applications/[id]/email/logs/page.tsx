@@ -4,7 +4,7 @@ import { EmailLogsTable, EmailLogStatusFilter } from '@/components/EmailLogsTabl
 import { Pager, readPageSize, readOffset } from '@/components/Pager';
 import type { Page } from '@/lib/paginate';
 
-const STATUSES = new Set(['sent', 'error', 'no_transport', 'suppressed']);
+const STATUSES = new Set(['sent', 'error', 'no_transport', 'suppressed', 'pending', 'unknown']);
 
 export default async function ApplicationEmailLogsPage({
   params,

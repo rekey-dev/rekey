@@ -271,10 +271,10 @@ describe('Outbound webhooks', () => {
         payload: { token: send.verificationToken },
       });
 
-      const deliveries = await sink.waitFor(2);
+      // Sign-up: user.created + session.created. Verification: email.verified + user.updated.
+      const deliveries = await sink.waitFor(4);
       const types = deliveries.map((d) => d.headers['x-rekey-event-type']);
-      expect(types).toContain('user.created');
-      expect(types).toContain('email.verified');
+      expect([...types].sort()).toEqual(['email.verified', 'session.created', 'user.created', 'user.updated']);
     } finally {
       await sink.close();
     }

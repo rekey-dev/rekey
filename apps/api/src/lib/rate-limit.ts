@@ -801,6 +801,32 @@ export function signUpRateLimit(maxPerMinute: number): AuthRateLimitConfig {
   return { ...authRateLimit(maxPerMinute), keyGenerator: signUpRateLimitKey, allowList: skipUnvouchedIp };
 }
 
+/**
+ * Per-route config for the passkey sign-in starts: 10 per (Application, end
+ * user's address), or per address on the operator route, which has no
+ * Application.
+ *
+ * Not the identity key the other auth routes use: the email is optional and
+ * chosen by the caller, so a new email per request got a new bucket. The
+ * address is the one `attributedAuthClientIp` vouches for (a secret key's
+ * declared visitor, never its backend's own address); traffic with none
+ * skips this bucket and stays bounded by the per-Application ceiling, since
+ * keying it on the Application alone would let anyone lock out passkey
+ * sign-in for everyone.
+ */
+export function passkeyStartRateLimit(maxPerMinute: number): AuthRateLimitConfig {
+  return {
+    ...authRateLimit(maxPerMinute),
+    keyGenerator: passkeyStartRateLimitKey,
+    allowList: (req) => attributedAuthClientIp(req) === null,
+  };
+}
+
+export function passkeyStartRateLimitKey(req: FastifyRequest): string {
+  const app = req.application?.id ?? 'operator';
+  return `passkeystart:${app}:${attributedAuthClientIp(req) ?? '-'}`;
+}
+
 export function signUpRateLimitKey(req: FastifyRequest): string {
   const app = req.application?.id ?? 'anon';
   return `signup:${app}:${req.ip}`;

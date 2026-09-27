@@ -277,6 +277,7 @@ Mounted at `/api/v1/tenant/mcp`. JSON-RPC over HTTP POST. Bearer-authed by
 | MCP server (initialize / tools/list / tools/call / ping) | `apps/api/src/modules/tenant-mcp/tenant-mcp-server.ts` |
 | Operator tool definitions | `apps/api/src/modules/tenant-mcp/operator-tools.ts` |
 | Operator tool definitions (writes) | `apps/api/src/modules/tenant-mcp/operator-write-tools.ts` |
+| Operator tool definitions (organization membership) | `apps/api/src/modules/tenant-mcp/operator-organization-tools.ts` |
 | Hybrid bearer guard (PAT **or** OAuth JWT) | `apps/api/src/modules/tenant-mcp/bearer-auth.ts` |
 | PAT resolution (shared with `/api/v1/tenant/operator/*`) | `apps/api/src/middleware/operator-token-auth.ts` |
 | Panel UI — connection guide | `apps/panel/src/app/(authed)/account/mcp/page.tsx` |
@@ -324,6 +325,7 @@ being handed a long-lived secret to paste.
 | `get_end_user` | one end-user: verification state, app environment, current subscription |
 | `list_devices` | an end-user's devices, newest activity first, optionally filtered by `status` |
 | `list_organization_roles` | an application's organization-role catalog + each role's `baseRole` tier. Also reports `organizationsEnabled`, and when it is false returns a note naming `update_auth_config`, so an agent asking about roles on an app without organizations gets the next step rather than an empty list |
+| `list_organizations` | an application's organizations, newest first, with member and pending-invitation counts. `query` matches name or slug; `limit` (max 100) and `offset` page, with `total` and `hasMore`. Lives in `operator-organization-tools.ts` and needs `organizations:read` |
 
 No read tool returns refresh tokens, password hashes, license keys, or provider
 credentials.
@@ -337,7 +339,8 @@ and re-checked on `tools/call`:
 `set_plan_active`, `create_webhook_endpoint`, `update_webhook_endpoint`,
 `invite_member`, `revoke_invitation`, `change_member_role`, `remove_member`,
 `create_organization_role`, `update_organization_role`,
-`delete_organization_role`.
+`delete_organization_role`, `add_organization_member`,
+`set_organization_member_role`.
 
 The three `*_organization_role` tools author an application's **organization**
 role vocabulary: the names a member can hold inside one organization, each
@@ -346,10 +349,38 @@ mapped to an OWNER/ADMIN/MEMBER tier that Rekey enforces on. They refuse with
 off, and the `fix` names `update_auth_config` so the agent can offer to turn
 the feature on rather than dead-ending.
 
+`add_organization_member` and `set_organization_member_role` assign from that
+vocabulary: they put an existing end-user into an organization with a role, or
+change the role of someone already in it. They reuse the operator REST routes'
+service (`POST` / `PATCH /tenant/applications/:id/organizations/:orgId/members`),
+so the rules match the panel's:
+
+- The role must be a name in `list_organization_roles` and not disabled
+  (`ORGANIZATION_ROLE_UNKNOWN`, `ORGANIZATION_ROLE_DISABLED`). Omitting `role`
+  on add uses the catalog's default role.
+- Operator authority skips the organization's own hierarchy, so there is no
+  "only an OWNER may make an OWNER" check and no last-owner guard. Demoting an
+  organization's only OWNER-tier member leaves it without an owner until one is
+  assigned.
+- Both need `organizations:write`, write capability and at least the ADMIN
+  workspace role, and refuse with `ORGANIZATIONS_NOT_ENABLED` while the
+  application has organizations switched off.
+- An Application, organization or end-user outside the caller's workspace
+  reads as not found.
+- Each refusal names the tool that repairs it in `fix` (for example
+  `ORGANIZATION_ALREADY_MEMBER` points at `set_organization_member_role`).
+- Arguments are validated against the advertised bounds before anything runs
+  (`VALIDATION_ERROR`), and the three tools carry MCP annotations:
+  `list_organizations` is `readOnlyHint`, `set_organization_member_role` is
+  `idempotentHint`, neither write is `destructiveHint`.
+- The security events (`app.organization_member_added`,
+  `app.organization_member_role_changed`) are recorded by the service, so the
+  panel and REST routes log the same writes; MCP ones carry `via: operator_mcp`.
+
 Note the axis: `change_member_role` above is a **workspace** (operator) role.
-Assigning an *organization* role to an end-user is not an operator action at
-all. An org OWNER/ADMIN does it from your app with their own end-user session.
-There is deliberately no MCP tool for it.
+The organization tools act on an end-user's role inside one organization. An
+org OWNER/ADMIN can still do the same from your app with their own end-user
+session, without an operator.
 
 Three write tools act on an end-user's devices: `release_device` (gives the
 slot back and revokes the device's sessions), `block_device` (refuses sign-in
@@ -368,6 +399,10 @@ rotation.
 Each goes through the same service the panel uses — no MCP-only write path — and
 emits a security event on success, so an agent's writes are as auditable as a
 human's.
+
+A tool that fails with a Rekey error returns `{ error, code, fix }` in its
+result (`isError: true`), the same code and remediation the REST route sends.
+Other failures return `{ error }` alone.
 
 ### OAuth 2.1 AS (Phase 2 — shipped)
 

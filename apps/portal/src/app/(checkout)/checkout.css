@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* The checkout page's neutral default: white surface, near-black text, one
+   accent. An operator's colours override --ck-accent, --ck-bg and
+   --ck-surface only after a contrast check (components/checkout). */
+:root {
+  color-scheme: light;
+  --ck-bg: #ffffff;
+  --ck-surface: #ffffff;
+  --ck-fg: #171717;
+  --ck-muted-fg: #525252;
+  --ck-muted: #f5f5f5;
+  --ck-border: #e5e5e5;
+  --ck-accent: #171717;
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.ck-link {
+  color: var(--ck-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+a:focus-visible,
+summary:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--ck-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse {
+    animation: none;
+  }
+}

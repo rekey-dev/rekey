@@ -95,24 +95,30 @@ PUT /api/v1/tenant/applications/<accountAppId>/oauth-config/discord
 The secret is encrypted at rest (`oauthCredentialsCiphertext`); only the client
 id and redirect URI live in the readable `oauthConfig` column.
 
-## 4. Turn the buttons on
+## 4. The buttons turn on by themselves
 
-On the marketing Dokploy unit:
+Nothing else to set. The sign-in and sign-up pages ask the `account`
+Application which providers it has (`GET /api/v1/auth/oauth/providers`, cached
+for a minute) and render a button for each one configured in step 3 with both a
+client id and a client secret. A provider with no secret yet gets no button.
+
+That lookup needs an API that serves the route. Against an older API it fails,
+the pages render no social buttons, and the failure is logged, so keep the
+override below set until api.rekey.dev runs a build that has it.
+
+`CLOUD_OAUTH_PROVIDERS` on the marketing Dokploy unit is now an **override**,
+not the switch. Leave it unset to follow the Application. Set it only when the
+page must differ from the Application config:
 
 ```
-CLOUD_OAUTH_PROVIDERS=google,discord
+CLOUD_OAUTH_PROVIDERS=google
 ```
 
-Then redeploy marketing.
-
-**Order matters.** This variable is what renders the buttons, and it is empty by
-default precisely so a button never appears before the credentials exist. If it
-is set first, the button renders and clicking it produces
-"Google sign-in is not set up yet. Use your email and password." — civil, but a
-control on a public auth page that does nothing. Do step 3, then step 4.
-
-To offer only one provider, name only that one. To take a provider down in a
-hurry, remove it from this list and redeploy — no Application change needed.
+While it is set, it is used as-is, so a provider named there before step 3 is
+done renders a button that answers "Google sign-in is not set up yet. Use your
+email and password." To take a provider down in a hurry, set the override to
+the providers you want to keep and redeploy, or remove the provider's config
+from the Application.
 
 ---
 

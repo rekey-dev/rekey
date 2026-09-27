@@ -26,7 +26,10 @@ import type {
   CancelSubscriptionInput,
   CheckoutSessionInput,
   CheckoutSessionResult,
+  EmbeddedCheckoutInput,
+  EmbeddedCheckoutResult,
   ProviderPlanRef,
+  ProviderSubscriptionSnapshot,
 } from '../../src/modules/billing/providers/types.js';
 
 function deterministicId(prefix: string, ...parts: string[]): string {
@@ -117,6 +120,29 @@ export class FakePaypalProvider implements BillingProvider {
     const sessionId = `ORDER-stub-${randomUUID()}`;
     const url = `${input.successUrl}${input.successUrl.includes('?') ? '&' : '?'}stub_provider=paypal&stub_order=${sessionId}`;
     return { url, sessionId };
+  }
+  lastEmbedded: EmbeddedCheckoutInput | null = null;
+  /** PayPal's side of each subscription this fake created, for approval checks. Tests edit it. */
+  readonly subscriptions = new Map<string, ProviderSubscriptionSnapshot>();
+  async getSubscription(id: string): Promise<ProviderSubscriptionSnapshot | null> {
+    return this.subscriptions.get(id) ?? null;
+  }
+  async createEmbeddedCheckout(input: EmbeddedCheckoutInput): Promise<EmbeddedCheckoutResult> {
+    if (input.discount) throw discountUnsupported(this.name, 'recurring');
+    this.lastEmbedded = input;
+    const sessionId = `I-EMBED${randomUUID().replace(/-/g, '').slice(0, 12).toUpperCase()}`;
+    this.subscriptions.set(sessionId, {
+      id: sessionId,
+      status: 'APPROVAL_PENDING',
+      planId: `P-stub-${input.plan.slug}`,
+      customId: `${input.application.id}:${input.endUser.id}`,
+    });
+    return {
+      sessionId,
+      client: { provider: 'paypal', clientId: 'client_ci_only', subscriptionId: sessionId, sdk: 'v5-subscription' },
+      fallbackUrl: `https://www.sandbox.paypal.com/checkoutnow?ba_token=BA-${sessionId}`,
+      providerPlanId: `P-stub-${input.plan.slug}`,
+    };
   }
   async captureOneTime(_orderId: string): Promise<{ captured: boolean }> {
     return { captured: true };

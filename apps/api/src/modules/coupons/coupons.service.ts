@@ -11,7 +11,9 @@
  *   - `maxRedemptions` not yet reached across the application
  *   - this end-user hasn't redeemed past `maxRedemptionsPerUser`
  *   - if `planSlugs` is set, the target plan slug is in it
- *   - if `currency` is set on an AMOUNT coupon, plan currency must match
+ *   - an AMOUNT coupon's `currency` must match the plan's. It is required at
+ *     create; a row created before that rule has none and is refused rather
+ *     than applied at face value in whatever currency the plan uses
  *
  * `code` is case-insensitive, stored and matched lowercase.
  *
@@ -60,6 +62,9 @@ import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 
 const CODE_RE = /^[A-Za-z0-9_-]{1,40}$/;
+
+/** ISO 4217 codes, as the runtime's ICU data knows them. */
+const ISO_CURRENCIES = new Set(Intl.supportedValuesOf('currency'));
 
 /**
  * How long a checkout reservation holds its slot against the coupon's limits.
@@ -354,6 +359,22 @@ export const couponsService = {
         fix: 'PERCENT discounts use basis points (1500 = 15%); AMOUNT discounts use cents.',
       });
     }
+    if (input.discountType === 'AMOUNT' && input.currency === undefined) {
+      throw new RekeyError({
+        statusCode: 400,
+        code: 'COUPON_CURRENCY_REQUIRED',
+        message: 'An AMOUNT coupon needs a `currency`: its amountOff is in that currency\'s smallest unit, and without one it would apply the same number to a plan in any currency.',
+        fix: 'Send `currency` as the 3-letter ISO 4217 code of the plans it should discount, e.g. "USD". It can only apply to plans in that currency.',
+      });
+    }
+    if (input.currency !== undefined && !ISO_CURRENCIES.has(input.currency.toUpperCase())) {
+      throw new RekeyError({
+        statusCode: 400,
+        code: 'COUPON_CURRENCY_INVALID',
+        message: `Coupon currency "${input.currency}" is not an ISO 4217 currency code.`,
+        fix: 'Send the 3-letter ISO 4217 code of the plans it should discount, e.g. "USD" or "EUR".',
+      });
+    }
     if (input.discountType === 'PERCENT' && input.amountOff > 10000) {
       throw new RekeyError({
         statusCode: 400,
@@ -461,17 +482,23 @@ export const couponsService = {
         fix: `This coupon is only valid for: ${coupon.planSlugs.join(', ')}.`,
       });
     }
-    if (
-      coupon.discountType === 'AMOUNT' &&
-      coupon.currency &&
-      coupon.currency.toUpperCase() !== input.currency.toUpperCase()
-    ) {
-      throw new RekeyError({
-        statusCode: 400,
-        code: 'COUPON_CURRENCY_MISMATCH',
-        message: `Coupon "${input.code}" is denominated in ${coupon.currency} but the plan is in ${input.currency}.`,
-        fix: 'Pick a coupon in the matching currency, or one without a currency restriction.',
-      });
+    if (coupon.discountType === 'AMOUNT') {
+      if (!coupon.currency) {
+        throw new RekeyError({
+          statusCode: 400,
+          code: 'COUPON_CURRENCY_REQUIRED',
+          message: `Coupon "${input.code}" is a fixed-amount discount with no currency, so it cannot be applied to a plan priced in ${input.currency}.`,
+          fix: 'Use a different coupon. The operator can deactivate this one and create a replacement that names the plan\'s currency.',
+        });
+      }
+      if (coupon.currency.toUpperCase() !== input.currency.toUpperCase()) {
+        throw new RekeyError({
+          statusCode: 400,
+          code: 'COUPON_CURRENCY_MISMATCH',
+          message: `Coupon "${input.code}" is denominated in ${coupon.currency} but the plan is in ${input.currency}.`,
+          fix: 'Pick a coupon in the plan\'s currency, or a PERCENT coupon, which applies in any currency.',
+        });
+      }
     }
     // Limits, counted the same way `reserveForCheckout` counts them, a
     // pricing page that quotes a discount checkout is about to refuse is worse

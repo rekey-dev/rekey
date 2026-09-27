@@ -71,6 +71,7 @@ import type {
   SubscriptionStatusEvent,
 } from '../providers/module-types.js';
 import type { BillingProviderName } from '../credentials.service.js';
+import { completionModeAllowed, markCheckoutSessionComplete } from '../checkout/sessions.service.js';
 
 export interface ApplyContext {
   log: FastifyBaseLogger;
@@ -84,6 +85,14 @@ export interface ApplyContext {
    * dashboard.
    */
   provider?: string;
+  /**
+   * The mode of the credentials the event was verified with. A completion for
+   * a checkout recorded in the other mode is not applied. Absent on hand-built
+   * test contexts, which skips that check.
+   */
+  mode?: 'test' | 'live';
+  /** Record why an event was acknowledged without being applied, on its webhook receipt. */
+  note?: (text: string) => void;
 }
 
 /**
@@ -346,9 +355,10 @@ export async function applyBillingEvent(ev: DomainBillingEvent, ctx: ApplyContex
  *     the plan's entitlements and announces `subscription.activated`, with the
  *     sender's provider and subscription id bound onto the row so the status
  *     mirror finds it later.
- *   - an entitled row and a LATER `currentPeriodEnd`: a renewal. The period
- *     moves forward and entitlements are provisioned for it (idempotent per
- *     period anchor: credits refill once, a timed licence rolls once).
+ *   - an entitled row and a `currentPeriodEnd` at least a day later: a
+ *     renewal. The period moves forward and entitlements are provisioned for
+ *     it (idempotent per period anchor: credits refill once, a timed licence
+ *     rolls once). A smaller move is the same period restated and is ignored.
  *   - a PAST_DUE row: recovery. Status returns to ACTIVE, the dunning case
  *     closes as recovered, and `subscription.activated` is announced, exactly
  *     as the status mirror does for a hosted provider.
@@ -357,6 +367,12 @@ export async function applyBillingEvent(ev: DomainBillingEvent, ctx: ApplyContex
  *     hosted status mirror does for a provider's trialing → active.
  *   - an entitled row and nothing new: a replay. The binding is refreshed and
  *     nothing else is written or announced.
+ *
+ * Two refusals come first, each recorded on the receipt and changing
+ * nothing: a live row for this subscriber and plan billed to a DIFFERENT
+ * subject (another organization, or their personal account), and an
+ * activation whose `occurredAt` is at or before the cancellation already
+ * applied to the same subscription id.
  *
  * A future `trialEndsAt` on the grant path is judged by the trial ledger
  * (`GrantSubscriptionInput.trialEndsAt`), so a sender cannot hand one buyer a
@@ -455,14 +471,53 @@ export async function applySubscriptionGranted(
     await recordRefusedGrant(holder, ev, now);
     return;
   }
-  if (holder && (holder.planId !== plan.id || holder.endUserId !== subscriber.id)) {
-    await retireReplacedSubscription(holder, ev, ctx);
-  }
-
   const key = { applicationId: application.id, endUserId: subscriber.id, planId: plan.id };
   const existing = await prisma.subscription.findUnique({
     where: { applicationId_endUserId_planId: key },
   });
+
+  // Both refusals run before the retire below, so an event that is going to
+  // be refused cannot first cancel the row its subscription id was bound to.
+  if (existing && holdsAnotherSubject(existing, ev)) {
+    ctx.log.error(
+      {
+        subscriptionId: existing.id,
+        beneficiaryOrgId: existing.beneficiaryOrgId,
+        organizationId: ev.organizationId ?? null,
+        providerSubscriptionId: ev.providerSubscriptionId,
+        providerEventId: ev.providerEventId,
+      },
+      'subscription.granted names a subscriber whose live subscription to this plan is billed to another subject; refused',
+    );
+    await recordRefusedGrant(existing, ev, now);
+    ctx.note?.(
+      `BILLING_SUBSCRIPTION_SUBJECT_CONFLICT: this subscriber already holds a live "${plan.slug}" ` +
+        `subscription billed to ${existing.beneficiaryOrgId === null ? 'their personal account' : 'a different organization'}, ` +
+        'and a subscription to one plan is stored once per subscriber. Nothing was applied. Post ' +
+        'subscription.canceled for the subscription that holds it first, or sell the other subject a separate plan.',
+    );
+    return;
+  }
+  if (existing && predatesCancellation(existing, ev)) {
+    ctx.log.warn(
+      {
+        subscriptionId: existing.id,
+        canceledAt: existing.canceledAt,
+        occurredAt: ev.occurredAt,
+        providerEventId: ev.providerEventId,
+      },
+      'subscription.granted occurred before the cancellation already applied to it; ignored',
+    );
+    ctx.note?.(
+      `Stale activation: it occurred at ${ev.occurredAt!.toISOString()}, at or before this subscription was ` +
+        `cancelled (${existing.canceledAt!.toISOString()}), so it does not reopen it.`,
+    );
+    return;
+  }
+
+  if (holder && (holder.planId !== plan.id || holder.endUserId !== subscriber.id)) {
+    await retireReplacedSubscription(holder, ev, ctx);
+  }
 
   if (!existing || !isEntitlingStatus(existing.status)) {
     const result = await subscriptionGrantsService.grantSubscription({
@@ -528,7 +583,15 @@ export async function applySubscriptionGranted(
   }
   const periodAdvanced =
     ev.currentPeriodEnd instanceof Date &&
-    (existing.currentPeriodEnd === null || ev.currentPeriodEnd > existing.currentPeriodEnd);
+    (existing.currentPeriodEnd === null ||
+      ev.currentPeriodEnd.getTime() - existing.currentPeriodEnd.getTime() >= MIN_RENEWAL_ADVANCE_MS);
+  if (ignoredSubjectChange(existing, ev)) {
+    ctx.note?.(
+      `subject change ignored: the event names organization "${ev.organizationId}", but subscription ` +
+        `"${ev.providerSubscriptionId}" is billed to ${existing.beneficiaryOrgId === null ? 'the personal account' : `organization "${existing.beneficiaryOrgId}"`}. ` +
+        'The event was applied to it unchanged. To move it, cancel it and activate a new subscription id for the new subject.',
+    );
+  }
   const recovering = existing.status === 'PAST_DUE';
   // The trial the sender was running has ended: the row converts to ACTIVE,
   // which is when its revenue starts counting, the transition the hosted
@@ -601,6 +664,80 @@ export async function applySubscriptionGranted(
     },
     'subscription.granted — already entitled',
   );
+}
+
+/**
+ * How far a period end must move forward to count as a new period.
+ *
+ * Provisioning anchors credits and a timed licence on `currentPeriodEnd`, so
+ * any forward move is a refill. A sender restating the same period with an end
+ * a few seconds later is not a renewal, and minted a second period's credits.
+ * The shortest plan interval is a month, so a day separates a restatement from
+ * a renewal with room on both sides. A smaller move leaves the period as it is.
+ */
+const MIN_RENEWAL_ADVANCE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a live row for this subscriber and plan is billed to a different
+ * subject than the event names.
+ *
+ * The row is unique on (application, end-user, plan), so the same buyer
+ * holding one plan for two organizations is one row. Writing the second
+ * activation onto it moved the first organization's subscription and its id,
+ * after which the first organization's cancellation matched nothing. Hosted
+ * checkout refuses the same move with BILLING_SUBSCRIPTION_SUBJECT_CONFLICT.
+ *
+ * Never on the row's own subscription id. That event is a renewal or recovery
+ * of the subscription the row already is; refusing it is acknowledged with a
+ * 200 and lost for good, leaving a paid subscription unrefilled and in
+ * dunning. It applies and keeps the row's beneficiary (see
+ * `ignoredSubjectChange`). A different subscription id is a second sale, so
+ * its subject is compared as given, an omitted organization counting as the
+ * personal account.
+ */
+function holdsAnotherSubject(existing: Subscription, ev: SubscriptionGrantedEvent): boolean {
+  if (!isEntitlingStatus(existing.status)) return false;
+  if (existing.providerSubId === ev.providerSubscriptionId) return false;
+  return existing.beneficiaryOrgId !== (ev.organizationId ?? null);
+}
+
+/** A same-id event naming an organization the live row is not billed to. */
+function ignoredSubjectChange(existing: Subscription, ev: SubscriptionGrantedEvent): boolean {
+  return (
+    existing.providerSubId === ev.providerSubscriptionId &&
+    ev.organizationId !== undefined &&
+    existing.beneficiaryOrgId !== ev.organizationId
+  );
+}
+
+/**
+ * Whether this activation is older news than the cancellation already applied
+ * to the same subscription id. `transitionAllowed` keeps a stale status event
+ * from reopening a terminal row; an activation reaches the grant path instead,
+ * which does reopen, so it needs its own clock check.
+ *
+ * Only against a cancellation the SENDER dated (`metadata.senderCanceledAt`,
+ * still equal to `canceledAt`, so it is this cancellation and not an earlier
+ * one). A `canceledAt` from Rekey's own clock is not comparable with the
+ * sender's `occurredAt`: a sender a few seconds behind would have its genuine
+ * reactivation refused.
+ */
+function predatesCancellation(existing: Subscription, ev: SubscriptionGrantedEvent): boolean {
+  const senderCanceledAt = metadataObject(existing.metadata).senderCanceledAt;
+  return (
+    TERMINAL_STATUSES.has(existing.status) &&
+    existing.providerSubId === ev.providerSubscriptionId &&
+    ev.occurredAt !== undefined &&
+    existing.canceledAt !== null &&
+    senderCanceledAt === existing.canceledAt.toISOString() &&
+    ev.occurredAt <= existing.canceledAt
+  );
+}
+
+function metadataObject(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 /** Keep the last twenty refused activations on the row for the operator. */
@@ -712,6 +849,16 @@ export async function applyCheckoutCompleted(
     ctx.log.warn(
       { applicationId: ev.applicationId, type: ev.type },
       'checkout event carries no session id — ignored',
+    );
+    return;
+  }
+  if (!(await completionModeAllowed(ev.applicationId, ev.checkoutSessionId, ctx.mode))) {
+    ctx.log.error(
+      { applicationId: ev.applicationId, sessionId: ev.checkoutSessionId, verifiedMode: ctx.mode, code: 'CHECKOUT_MODE_MISMATCH' },
+      'checkout completion verified in a different payment mode than its checkout was started in — not applied',
+    );
+    ctx.note?.(
+      `CHECKOUT_MODE_MISMATCH: not applied, the checkout for ${ev.checkoutSessionId} was started in the other payment mode`,
     );
     return;
   }
@@ -898,6 +1045,10 @@ export async function applyCheckoutCompleted(
       result.count > 0 && activatedFrom
         ? await enqueueSubscriptionEvent(tx, 'subscription.activated', activatedFrom.id)
         : [];
+    // A replay that finds the row already TRIALING started nothing new.
+    if (result.count > 0 && trialEndsAt !== null && activatedFrom && activatedFrom.status !== 'TRIALING') {
+      ids.push(...(await enqueueSubscriptionEvent(tx, 'subscription.trial_started', activatedFrom.id)));
+    }
     return { updated: result, deliveryIds: ids };
   });
 
@@ -943,6 +1094,7 @@ export async function applyCheckoutCompleted(
   // Idempotent, and covers both legacy single-kind plans (via synthesizeLegacy)
   // and bundled PlanEntitlement rows.
   if (updated.count > 0) {
+    await markCheckoutSessionComplete(ev.applicationId, ev.checkoutSessionId);
     const sub = await prisma.subscription.findFirst({ where });
     if (sub) {
       // Checkout provisions the subscription's FIRST period by default,
@@ -1532,45 +1684,123 @@ export async function applyPaymentFailed(ev: PaymentFailedEvent, ctx: ApplyConte
   }
 }
 
+/** Payment statuses a refund can be recorded against. */
+const REFUNDABLE_STATUSES = ['SUCCEEDED', 'PARTIALLY_REFUNDED', 'REFUNDED'] as const;
+
+/** How many applied refund event ids a payment remembers, for replay safety. */
+const REMEMBERED_REFUND_EVENTS = 50;
+
+type RefundOutcome =
+  | { kind: 'recorded'; total: number; amount: number }
+  | { kind: 'replay' | 'unchanged' | 'unknown' }
+  | { kind: 'not-refundable'; status: string }
+  | { kind: 'currency'; currency: string }
+  | { kind: 'over'; total: number; amount: number; current: number };
+
 /**
- * Refund applier: marks a matching SUCCEEDED payment REFUNDED. It does not
- * revoke what the payment bought, see the note in the body for why, so a
- * plan can be split later into "record the reversal" and "claw back what it
- * funded" without re-deriving either half.
+ * Refund applier: adds the refund to the payment's cumulative
+ * `refundedAmount` and sets PARTIALLY_REFUNDED or REFUNDED from the total.
+ *
+ * `amount` is this refund, added to what is already recorded. A provider that
+ * reports its own running total (`refundedTotal`, Stripe) sets the total
+ * instead, so a refund Rekey itself issued and then hears about is not
+ * counted twice. A refund that would take the total past the payment is
+ * refused and noted on the receipt, as is one in another currency or for a
+ * payment Rekey never recorded.
+ *
+ * It does not revoke what the payment bought. Clawing back credits, licences
+ * and subscriptions is #413, and needs a dispute policy, a negative-balance
+ * primitive and a restore path for a dispute the operator wins. Until then the
+ * operator reverses credits with `credits.grant({ reason: 'ADJUST', amount:
+ * -n })`, which is audited.
  */
 export async function applyPaymentRefunded(
   ev: PaymentRefundedEvent,
   ctx: ApplyContext,
 ): Promise<void> {
-  // Records the reversal on the books. It does NOT revoke what the payment
-  // bought, clawing back credits, licences and subscriptions is #413, and
-  // needs a dispute policy, a negative-balance primitive and a restore path
-  // for a dispute the operator wins. Until then the operator reverses credits
-  // with `credits.grant({ reason: 'ADJUST', amount: -n })`, which is audited.
-  //
-  // Writing the status is still worth doing on its own: without it the
-  // operator's payment list and revenue figures disagree with the provider,
-  // and `PaymentStatus.REFUNDED` was a value three routes could filter on and
-  // nothing ever wrote.
-  const { count } = await prisma.payment.updateMany({
-    where: {
-      applicationId: ev.applicationId,
-      providerPaymentId: ev.providerPaymentId,
-      status: 'SUCCEEDED',
-    },
-    data: { status: 'REFUNDED' },
+  const refund = safeAmount(ev.refundedTotal ?? ev.amount, ctx.log, {
+    providerPaymentId: ev.providerPaymentId,
+    field: ev.refundedTotal !== undefined ? 'refunded_total' : 'refund_amount',
+  });
+  if (refund === null) {
+    ctx.note?.(`payment.refunded for "${ev.providerPaymentId}" carried an unusable amount; nothing changed.`);
+    return;
+  }
+
+  const outcome = await prisma.$transaction(async (tx): Promise<RefundOutcome> => {
+    // Locked so two refunds for one payment cannot both read the old total.
+    const [payment] = await tx.$queryRaw<
+      Array<{ id: string; amount: number; refunded_amount: number; status: string; currency: string; metadata: unknown }>
+    >`SELECT id, amount, refunded_amount, status::text AS status, currency, metadata
+        FROM payments
+       WHERE application_id = ${ev.applicationId} AND provider_payment_id = ${ev.providerPaymentId}
+       FOR UPDATE`;
+    if (!payment) return { kind: 'unknown' };
+    if (!(REFUNDABLE_STATUSES as readonly string[]).includes(payment.status)) {
+      return { kind: 'not-refundable', status: payment.status };
+    }
+    if (ev.currency && ev.currency.toUpperCase() !== payment.currency.toUpperCase()) {
+      return { kind: 'currency', currency: payment.currency };
+    }
+    const metadata =
+      typeof payment.metadata === 'object' && payment.metadata !== null && !Array.isArray(payment.metadata)
+        ? (payment.metadata as Record<string, unknown>)
+        : {};
+    const applied = Array.isArray(metadata.refundEvents) ? (metadata.refundEvents as unknown[]) : [];
+    if (applied.includes(ev.providerEventId)) return { kind: 'replay' };
+
+    // A payment the previous applier marked REFUNDED recorded no amount, and
+    // it only ever did so for a full refund.
+    const current =
+      payment.status === 'REFUNDED' ? Math.max(payment.refunded_amount, payment.amount) : payment.refunded_amount;
+    const total = ev.refundedTotal !== undefined ? refund : current + refund;
+    if (total <= current) return { kind: 'unchanged' };
+    if (total > payment.amount) return { kind: 'over', total, amount: payment.amount, current };
+    await tx.payment.update({
+      where: { id: payment.id },
+      data: {
+        refundedAmount: total,
+        status: total >= payment.amount ? 'REFUNDED' : 'PARTIALLY_REFUNDED',
+        metadata: {
+          ...metadata,
+          refundEvents: [...applied.slice(-(REMEMBERED_REFUND_EVENTS - 1)), ev.providerEventId],
+        } as never,
+      },
+    });
+    return { kind: 'recorded', total, amount: payment.amount };
   });
 
-  ctx.log.info(
-    {
-      providerPaymentId: ev.providerPaymentId,
-      applicationId: ev.applicationId,
-      marked: count,
-    },
-    count > 0
-      ? 'payment.refunded — payment marked REFUNDED; entitlements NOT revoked (see #413)'
-      : 'payment.refunded — no matching succeeded payment; recorded only',
-  );
+  const logContext = { providerPaymentId: ev.providerPaymentId, applicationId: ev.applicationId, outcome };
+  switch (outcome.kind) {
+    case 'recorded':
+      ctx.log.info(logContext, 'payment.refunded: refund recorded; entitlements NOT revoked (see #413)');
+      return;
+    case 'replay':
+    case 'unchanged':
+      ctx.log.info(logContext, 'payment.refunded: already recorded');
+      return;
+    case 'unknown':
+      ctx.log.warn(logContext, 'payment.refunded: no recorded payment matches');
+      ctx.note?.(`payment.refunded: no recorded payment "${ev.providerPaymentId}" in this Application; nothing changed.`);
+      return;
+    case 'not-refundable':
+      ctx.log.warn(logContext, 'payment.refunded: payment is not in a refundable status');
+      ctx.note?.(`payment.refunded: payment "${ev.providerPaymentId}" is ${outcome.status}, so no refund was recorded.`);
+      return;
+    case 'currency':
+      ctx.log.error(logContext, 'payment.refunded: currency does not match the payment');
+      ctx.note?.(
+        `payment.refunded: the refund currency does not match payment "${ev.providerPaymentId}" (${outcome.currency}); nothing changed.`,
+      );
+      return;
+    case 'over':
+      ctx.log.error(logContext, 'payment.refunded: refund exceeds the payment, refused');
+      ctx.note?.(
+        `BILLING_REFUND_EXCEEDS_PAYMENT: payment "${ev.providerPaymentId}" is ${outcome.amount} and ${outcome.current} ` +
+          `is already refunded, so a refunded total of ${outcome.total} was refused; nothing changed.`,
+      );
+      return;
+  }
 }
 
 export async function applySubscriptionActivated(
@@ -1740,12 +1970,19 @@ async function applySubscriptionStatusMirror(
         ...(ev.canceledAt !== undefined && { canceledAt: ev.canceledAt }),
       },
     });
+    // Merged in SQL so a concurrent metadata write on the row is not lost.
+    if (existing && ev.canceledAt instanceof Date && ev.canceledAtFromSender === true) {
+      await tx.$executeRaw`UPDATE subscriptions
+         SET metadata = metadata || jsonb_build_object('senderCanceledAt', ${ev.canceledAt.toISOString()}::text)
+       WHERE id = ${existing.id}`;
+    }
     if (!transitioned || !existing) return [];
     // No outbound event for EXPIRED, a natural end, not a cancellation
     // (consumers read the terminal state off the record).
     if (ev.status === 'ACTIVE') return enqueueSubscriptionEvent(tx, 'subscription.activated', existing.id);
     if (ev.status === 'CANCELED') return enqueueSubscriptionEvent(tx, 'subscription.canceled', existing.id);
     if (ev.status === 'PAST_DUE') return enqueueSubscriptionEvent(tx, 'subscription.past_due', existing.id);
+    if (ev.status === 'TRIALING') return enqueueSubscriptionEvent(tx, 'subscription.trial_started', existing.id);
     return [];
   });
   kickDeliveries(deliveryIds);

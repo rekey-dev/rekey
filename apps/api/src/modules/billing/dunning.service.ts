@@ -37,6 +37,7 @@ import type { DunningCase, Subscription } from '@prisma/client';
 import { BillingConfigSchema } from '@rekey.dev/shared-types';
 import { prisma } from '../../lib/prisma.js';
 import { emailService } from '../email/email.service.js';
+import { hostedPortalUrl } from '../../lib/portal-origins.js';
 import { enqueueDunningEvent, enqueueSubscriptionEvent } from './webhooks/billing-events.js';
 import { kickDeliveries } from '../webhooks/webhook.service.js';
 
@@ -105,6 +106,7 @@ async function sendReminder(dunningCaseId: string, attempt: number): Promise<voi
         graceEndsAtIso: new Date(
           dunningCase.openedAt.getTime() + DUNNING_EXHAUST_AFTER_DAYS * DAY_MS,
         ).toISOString(),
+        portalUrl: hostedPortalUrl(dunningCase.application) ?? '',
       },
     });
     outcomeKind = outcome.kind;

@@ -3,6 +3,7 @@ import type { Metadata } from 'next';
 import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { errorQuery, publicPost, PanelApiError } from '@/lib/api';
+import { API_URL_MISSING_MESSAGES } from '@/lib/error-code';
 import { SubmitButton } from '@/components/SubmitButton';
 import { AuthCard } from '@/components/AuthCard';
 import { Banner } from '@/components/Banner';
@@ -35,6 +36,7 @@ async function request(formData: FormData): Promise<void> {
 }
 
 const ERR: Record<string, string> = {
+  ...API_URL_MISSING_MESSAGES,
   missing: 'Enter the email address on your account.',
   RATE_LIMITED: 'Too many attempts. Please wait a minute and try again.',
   INTERNAL_ERROR: 'Something went wrong sending the link. Please try again.',

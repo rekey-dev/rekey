@@ -103,14 +103,54 @@ const PROBES: Probe[] = [
     suffix: '/billing-credentials/stripe',
   },
   { subResource: 'billing', method: 'GET', suffix: '/billing/providers' },
+  // The checkout page setting decides where another operator's buyers pay,
+  // and readiness probes their portal: both must refuse a stranger.
+  { subResource: 'checkout', method: 'GET', suffix: '/checkout' },
+  { subResource: 'checkout', method: 'GET', suffix: '/checkout/readiness' },
+  { subResource: 'checkout', method: 'GET', suffix: '/checkout/status' },
+  {
+    subResource: 'checkout',
+    method: 'PATCH',
+    suffix: '/checkout',
+    payload: { paymentMode: 'test', checkoutMode: 'REDIRECT' },
+  },
   { subResource: 'billing', method: 'GET', suffix: '/billing/stats' },
   { subResource: 'coupons', method: 'GET', suffix: '/coupons' },
   { subResource: 'dunning', method: 'GET', suffix: '/dunning' },
   { subResource: 'email-config', method: 'GET', suffix: '/email-config' },
   // The SMTP password.
   { subResource: 'email-credentials', method: 'DELETE', suffix: '/email-credentials' },
+  {
+    subResource: 'email-sender',
+    method: 'PATCH',
+    suffix: '/email-sender',
+    payload: { fromName: 'Probe' },
+  },
   { subResource: 'email-logs', method: 'GET', suffix: '/email-logs' },
   { subResource: 'email-templates', method: 'GET', suffix: '/email-templates' },
+  // Custom templates: the send settings, and the templates themselves. The
+  // test-send writes to a provider on the owner's behalf, the publish makes a
+  // template sendable, and the delete stops a backend's mail.
+  { subResource: 'custom-email-settings', method: 'GET', suffix: '/custom-email-settings' },
+  {
+    subResource: 'custom-email-settings',
+    method: 'PATCH',
+    suffix: '/custom-email-settings',
+    payload: { recipientsMustBeEndUsers: true },
+  },
+  { subResource: 'custom-email-templates', method: 'GET', suffix: '/custom-email-templates' },
+  { subResource: 'custom-email-templates', method: 'GET', suffix: '/custom-email-templates/some_key' },
+  {
+    subResource: 'custom-email-templates',
+    method: 'POST',
+    suffix: '/custom-email-templates/some_key/publish',
+  },
+  {
+    subResource: 'custom-email-templates',
+    method: 'POST',
+    suffix: '/custom-email-templates/some_key/test-send',
+  },
+  { subResource: 'custom-email-templates', method: 'DELETE', suffix: '/custom-email-templates/some_key' },
   // Was `end-user-roles`, which is still served as a hidden alias and so no
   // longer appears in the route table this test reads.
   { subResource: 'application-roles', method: 'GET', suffix: '/application-roles' },

@@ -7,7 +7,7 @@ import { SubmitButton } from '@/components/SubmitButton';
 import { AuthCard } from '@/components/AuthCard';
 import { Banner } from '@/components/Banner';
 import { PasswordConfirmFields } from '@/components/PasswordConfirmFields';
-import { normalizeErrorCode } from '@/lib/error-code';
+import { API_URL_MISSING_MESSAGES, normalizeErrorCode } from '@/lib/error-code';
 
 export const metadata: Metadata = { title: 'Set a new password · Rekey' };
 
@@ -35,6 +35,7 @@ async function reset(formData: FormData): Promise<void> {
 }
 
 const ERR: Record<string, string> = {
+  ...API_URL_MISSING_MESSAGES,
   missing: 'Enter a new password to continue.',
   mismatch: 'Those two passwords don’t match. Type the same one in both fields.',
   PASSWORD_RESET_TOKEN_INVALID: 'This reset link is invalid. Request a fresh one.',

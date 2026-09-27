@@ -61,7 +61,7 @@ export function registerPlansCommand(program: Command): void {
       const ctx = readGlobalOpts(this);
       const qs = listQuery({
         ...(opts.includeInactive ? { includeInactive: 'true' } : {}),
-        ...readListOpts(opts),
+        ...readListOpts(ctx, opts),
       });
       const path = `/api/v1/admin/applications/${encodeURIComponent(opts.app)}/plans${qs}`;
       // `{items, page}` since 2.0.0-rc.3, see `apps list` for why the page is

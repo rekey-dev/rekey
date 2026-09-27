@@ -124,6 +124,8 @@ function Profile() {
 }
 ```
 
+`useOAuthProviders()` returns the Application's enabled OAuth providers (`[{ id, name }]`, or `null` until loaded) for a sign-in page you build yourself.
+
 ---
 
 ## Control components
@@ -210,6 +212,15 @@ export async function signInAction(formData: FormData) {
 ```
 
 Not on the App Router? Use `actionUrl="/api/sign-in"` (the form does a plain `POST`) and call `useRekey().refresh()` after.
+
+**OAuth buttons without listing them.** Leave `oauthProviders` out and pass a start target, and the card shows every provider enabled on the Application in the panel (fetched with the publishable key, so set `publishableKey` on `<RekeyProvider>`):
+
+```tsx
+<SignIn action={signInAction} oauthStartAction={startOAuthAction} />       // action gets formData.get('provider')
+<SignIn action={signInAction} oauthStartUrl="/oauth/{provider}/start" />   // {provider} is replaced
+```
+
+The buttons appear just after hydration. The list is fetched once per `<RekeyProvider>` and kept for the life of the page, so a provider enabled in the panel shows up after the next full page load. For the first paint, fetch on your server with `rekey.auth.listOAuthProviders()` from `@rekey.dev/node` and pass `oauthProviders`, which always wins. See [docs/react-components.md](../../docs/react-components.md#oauth-buttons-from-the-panel).
 
 ### `<UserButton>`
 

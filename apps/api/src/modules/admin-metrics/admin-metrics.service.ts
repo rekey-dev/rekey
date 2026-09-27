@@ -107,6 +107,7 @@ export interface OverviewMetrics {
     expired: number;
     total: number;
   };
+  /** Succeeded and partly refunded payments; volume is net of refunds. */
   payments: {
     lifetime: { count: number; volumeCents: number };
     last30d: { count: number; volumeCents: number };
@@ -282,13 +283,13 @@ export const adminMetricsService = {
                FROM "end_users") eu,
             (SELECT count(*) AS total, count(*) FILTER (WHERE "created_at" >= ${since30d}) AS new_30d
                FROM "organizations") o,
-            (SELECT count(*) FILTER (WHERE "status" = 'SUCCEEDED') AS lifetime_count,
-                    sum("amount") FILTER (WHERE "status" = 'SUCCEEDED') AS lifetime_sum,
-                    count(*) FILTER (WHERE "status" = 'SUCCEEDED' AND "created_at" >= ${since30d}) AS last30_count,
-                    sum("amount") FILTER (WHERE "status" = 'SUCCEEDED' AND "created_at" >= ${since30d}) AS last30_sum,
-                    count(*) FILTER (WHERE "status" = 'SUCCEEDED' AND "created_at" >= ${since24h}) AS succeeded_24h,
+            (SELECT count(*) FILTER (WHERE "status" <> 'FAILED') AS lifetime_count,
+                    sum("amount" - "refunded_amount") FILTER (WHERE "status" <> 'FAILED') AS lifetime_sum,
+                    count(*) FILTER (WHERE "status" <> 'FAILED' AND "created_at" >= ${since30d}) AS last30_count,
+                    sum("amount" - "refunded_amount") FILTER (WHERE "status" <> 'FAILED' AND "created_at" >= ${since30d}) AS last30_sum,
+                    count(*) FILTER (WHERE "status" <> 'FAILED' AND "created_at" >= ${since24h}) AS succeeded_24h,
                     count(*) FILTER (WHERE "status" = 'FAILED' AND "created_at" >= ${since24h}) AS failed_24h
-               FROM "payments" WHERE "status" IN ('SUCCEEDED', 'FAILED')) p,
+               FROM "payments" WHERE "status" IN ('SUCCEEDED', 'PARTIALLY_REFUNDED', 'FAILED')) p,
             (SELECT count(*) AS total, count(*) FILTER (WHERE "status" = 'FAILED') AS failed
                FROM "webhook_deliveries" WHERE "created_at" >= ${since24h}) wd,
             (SELECT count(*) AS total,
@@ -327,11 +328,17 @@ export const adminMetricsService = {
       // The fourth outcome. Left out of the total, a workspace that switches
       // email off reports a shrinking volume rather than a redirected one.
       suppressed: emailMap.suppressed ?? 0,
+      // Custom sends still in flight, and ones that never recorded an outcome.
+      // A rising `unknown` means sends are dying between reservation and result.
+      pending: emailMap.pending ?? 0,
+      unknown: emailMap.unknown ?? 0,
       total:
         (emailMap.sent ?? 0) +
         (emailMap.error ?? 0) +
         (emailMap.no_transport ?? 0) +
-        (emailMap.suppressed ?? 0),
+        (emailMap.suppressed ?? 0) +
+        (emailMap.pending ?? 0) +
+        (emailMap.unknown ?? 0),
     };
 
     const subsByStatus = Object.fromEntries(subsGrouped.map((g) => [g.status, g._count._all])) as Record<string, number>;
@@ -1462,6 +1469,8 @@ export const adminMetricsService = {
       error: number;
       noTransport: number;
       suppressed: number;
+      pending: number;
+      unknown: number;
       total: number;
     } {
       const m = Object.fromEntries(rows.map((r) => [r.status, r._count._all])) as Record<string, number>;
@@ -1469,7 +1478,17 @@ export const adminMetricsService = {
       const error = m.error ?? 0;
       const noTransport = m.no_transport ?? 0;
       const suppressed = m.suppressed ?? 0;
-      return { sent, error, noTransport, suppressed, total: sent + error + noTransport + suppressed };
+      const pending = m.pending ?? 0;
+      const unknown = m.unknown ?? 0;
+      return {
+        sent,
+        error,
+        noTransport,
+        suppressed,
+        pending,
+        unknown,
+        total: sent + error + noTransport + suppressed + pending + unknown,
+      };
     }
 
     const appIds = errorByApp.map((r) => r.applicationId).filter((id): id is string => !!id);
@@ -1575,18 +1594,20 @@ export const adminMetricsService = {
       }),
       prisma.payment.groupBy({
         by: ['applicationId'],
-        where: { createdAt: { gte: since30d }, status: 'SUCCEEDED' },
-        _sum: { amount: true },
+        where: { createdAt: { gte: since30d }, status: { in: ['SUCCEEDED', 'PARTIALLY_REFUNDED'] } },
+        _sum: { amount: true, refundedAmount: true },
       }),
     ]);
-    const volumeByApp = new Map(groupedVolume.map((g) => [g.applicationId, g._sum.amount ?? 0]));
+    const volumeByApp = new Map(
+      groupedVolume.map((g) => [g.applicationId, (g._sum.amount ?? 0) - (g._sum.refundedAmount ?? 0)]),
+    );
     const byApp = new Map<
       string,
       { succeeded: number; failed: number; pending: number; refunded: number }
     >();
     for (const g of groupedStatus) {
       const a = byApp.get(g.applicationId) ?? { succeeded: 0, failed: 0, pending: 0, refunded: 0 };
-      if (g.status === 'SUCCEEDED') a.succeeded = g._count._all;
+      if (g.status === 'SUCCEEDED' || g.status === 'PARTIALLY_REFUNDED') a.succeeded += g._count._all;
       else if (g.status === 'FAILED') a.failed = g._count._all;
       else if (g.status === 'PENDING') a.pending = g._count._all;
       else if (g.status === 'REFUNDED') a.refunded = g._count._all;

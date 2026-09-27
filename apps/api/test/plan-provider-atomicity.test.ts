@@ -240,6 +240,38 @@ describe('plan provider registration is atomic and repairable', () => {
     expect(row.active).toBe(false);
   });
 
+  it('a refused create says the plan exists and names its register route, not "retry"', async () => {
+    // The SDK's own error, not a RekeyError: this is what reaches the mapper
+    // from a real Stripe call, and it answered 502 with "then retry". A retry
+    // of the create can only ever answer PLAN_SLUG_TAKEN, because the row was
+    // committed before the provider call.
+    vi.mocked(getProviderForApplication).mockImplementationOnce(async () => ({
+      ...fakeStripe,
+      name: 'stripe' as const,
+      getWebhookSecret: () => null,
+      ensurePlanRegistered: async () => {
+        throw Object.assign(new Error('Invalid API Key provided: sk_test_****0001'), {
+          type: 'StripeAuthenticationError',
+        });
+      },
+      createCheckoutSession: fakeStripe.createCheckoutSession.bind(fakeStripe),
+      createOneTimeCheckout: fakeStripe.createOneTimeCheckout.bind(fakeStripe),
+      cancelSubscription: fakeStripe.cancelSubscription.bind(fakeStripe),
+    }));
+    const created = await createPlan({ slug: 'brokenplan' });
+    expect(created.statusCode).toBe(502);
+    const error = created.json().error as { code: string; fix: string; details?: Record<string, unknown> };
+    expect(error.code).toBe('BILLING_PROVIDER_ERROR');
+
+    const row = await prisma.plan.findUniqueOrThrow({
+      where: { applicationId_slug: { applicationId: ctx.appId, slug: 'brokenplan' } },
+    });
+    expect(error.fix).toContain(`POST /api/v1/tenant/applications/${ctx.appId}/plans/brokenplan/register`);
+    expect(error.fix).toContain('was created');
+    expect(error.fix).not.toMatch(/then retry\.?$/);
+    expect(error.details).toMatchObject({ planId: row.id, planSlug: 'brokenplan', registrationStatus: 'FAILED' });
+  });
+
   // ---------- 2. repairability ----------
 
   it('the operator repairs a refused plan in place, keeping the slug, and it sells', async () => {

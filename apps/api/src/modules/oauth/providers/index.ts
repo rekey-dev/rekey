@@ -50,6 +50,30 @@ export function listOAuthProviderNames(): string[] {
   return Array.from(registry.keys());
 }
 
+const DISPLAY_NAMES: Readonly<Record<string, string>> = {
+  google: 'Google',
+  github: 'GitHub',
+  microsoft: 'Microsoft',
+  discord: 'Discord',
+  gitlab: 'GitLab',
+  slack: 'Slack',
+  // The generic provider fronts whatever issuer the operator pointed it at, so
+  // it cannot name the brand. "SSO" is what a user expects on that button.
+  oidc: 'SSO',
+};
+
+/**
+ * The name a sign-in button shows for a provider, e.g. `"GitHub"`.
+ *
+ * @example
+ * ```ts
+ * oauthProviderDisplayName('github'); // "GitHub"
+ * ```
+ */
+export function oauthProviderDisplayName(name: string): string {
+  return DISPLAY_NAMES[name] ?? name.charAt(0).toUpperCase() + name.slice(1);
+}
+
 /**
  * Async-aware auth URL builder. The `oidc` provider needs to fetch its
  * issuer's discovery doc to compute the auth URL; static providers don't.

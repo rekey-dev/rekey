@@ -16,6 +16,7 @@
 
 import type { Plan } from '@prisma/client';
 import type { FastifyBaseLogger } from 'fastify';
+import type { CheckoutBrowserOrigins } from '@rekey.dev/shared-types';
 
 /**
  * A named reason a plan cannot currently be bought through one provider.
@@ -235,8 +236,15 @@ export interface PaymentFailedEvent extends PaymentEventBase {
   type: 'payment.failed';
 }
 
+/**
+ * Money returned against a recorded payment. `amount` is THIS refund; a
+ * provider that reports a running total instead (Stripe's
+ * `charge.amount_refunded`) sets `refundedTotal`, which the applier takes as
+ * the new cumulative figure rather than adding to it.
+ */
 export interface PaymentRefundedEvent extends PaymentEventBase {
   type: 'payment.refunded';
+  refundedTotal?: number;
 }
 
 /**
@@ -278,6 +286,13 @@ export interface SubscriptionStatusEvent extends DomainEventBase {
   trialEndsAt?: Date | null;
   cancelAt?: Date | null;
   canceledAt?: Date | null;
+  /**
+   * True when `canceledAt` is the SENDER's clock (an external event's
+   * `occurredAt` or `effectiveAt`) rather than Rekey's receipt time. Only a
+   * sender-dated cancellation can be ordered against a sender-dated
+   * activation; comparing two different clocks could refuse a genuine one.
+   */
+  canceledAtFromSender?: boolean;
 }
 
 /**
@@ -338,6 +353,12 @@ export interface SubscriptionGrantedEvent extends DomainEventBase {
    */
   currentPeriodEnd?: Date | null;
   trialEndsAt?: Date | null;
+  /**
+   * When the sender says the activation happened. An activation at or before
+   * a cancellation already applied to the same subscription id is stale and
+   * does not reopen it. Absent = no ordering information.
+   */
+  occurredAt?: Date;
 }
 
 /**
@@ -492,7 +513,27 @@ export interface ProviderModule {
        */
       windowDays: number | null;
     };
+    /**
+     * Whether the Rekey-hosted checkout page can take payment through this
+     * provider, per flow. A module that declares it MUST implement
+     * `createEmbeddedCheckout` on its provider.
+     *
+     * OPTIONAL, and absent means **cannot**: the checkout is served on the
+     * provider's own page (or refused, per the Application's failure
+     * behaviour), never on a page that cannot take the payment.
+     */
+    embeddedCheckout?: {
+      recurring: boolean;
+      oneTime: boolean;
+    };
   };
+  /**
+   * Browser origins the provider's embedded component needs, per payment
+   * mode. The checkout page's Content-Security-Policy is built from this, so
+   * the page loads scripts and frames from this provider and nobody else.
+   * Required whenever `capabilities.embeddedCheckout` is declared.
+   */
+  browser?: Readonly<Record<'test' | 'live', CheckoutBrowserOrigins>>;
   /**
    * Why a buyer cannot be sent to this provider's checkout for this plan, or
    * `null` when they can.
@@ -568,6 +609,13 @@ export interface ProviderModule {
      * it for the idempotency insert but didn't name it.)
      */
     extractEventType(payload: unknown): string;
+    /**
+     * The mode the provider says this event was produced in, for providers
+     * whose payload states it (Stripe `livemode`). The pipeline refuses an
+     * event whose mode contradicts the credential that verified it. Omitted,
+     * or null for a payload that does not say, and nothing is compared.
+     */
+    eventMode?(payload: unknown): 'test' | 'live' | null;
     /** null = unhandled event type (logged + acked, receipt marked). */
     translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | null;
   };

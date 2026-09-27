@@ -15,7 +15,13 @@ export interface OutputContext {
   adminKey: string | undefined;
 }
 
-/** Read globals (`--json`, `--api-url`, `--admin-key`) from any subcommand. */
+/**
+ * Read globals (`--json`, `--api-url`, `--admin-key`) from any subcommand.
+ * A flag wins over its environment variable (`REKEY_URL`, `SUPER_ADMIN_KEY`).
+ *
+ * @example
+ * const ctx = readGlobalOpts(this);
+ */
 export function readGlobalOpts(cmd: Command): OutputContext {
   // commander attaches global opts to the root program; walk parents.
   let root: Command = cmd;
@@ -23,8 +29,8 @@ export function readGlobalOpts(cmd: Command): OutputContext {
   const opts = root.opts<{ json?: boolean; apiUrl?: string; adminKey?: string }>();
   return {
     json: Boolean(opts.json),
-    apiUrl: opts.apiUrl,
-    adminKey: opts.adminKey,
+    apiUrl: opts.apiUrl ?? process.env.REKEY_URL,
+    adminKey: opts.adminKey ?? process.env.SUPER_ADMIN_KEY,
   };
 }
 

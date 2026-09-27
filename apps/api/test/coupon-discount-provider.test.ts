@@ -154,7 +154,7 @@ describe('coupon discounts reach the provider', () => {
   });
 
   it('hands a one-time checkout the discount too', async () => {
-    await createCoupon({ code: 'tenoff', discountType: 'AMOUNT', amountOff: 1000 });
+    await createCoupon({ code: 'tenoff', discountType: 'AMOUNT', currency: 'USD', amountOff: 1000 });
 
     const res = await checkout({ planSlug: 'pack', couponCode: 'tenoff', provider: 'stripe' });
 
@@ -171,7 +171,7 @@ describe('coupon discounts reach the provider', () => {
   });
 
   it('carries the coupon id so the provider-side record points back at ours', async () => {
-    await createCoupon({ code: 'traceable', discountType: 'AMOUNT', amountOff: 250 });
+    await createCoupon({ code: 'traceable', discountType: 'AMOUNT', currency: 'USD', amountOff: 250 });
 
     await checkout({ planSlug: 'pro', couponCode: 'traceable', provider: 'stripe' });
 
@@ -202,7 +202,7 @@ describe('coupon discounts reach the provider', () => {
     });
 
     it('PayPal takes the coupon on a one-time purchase (Orders v2 has a discount line)', async () => {
-      await createCoupon({ code: 'packoff', discountType: 'AMOUNT', amountOff: 1500 });
+      await createCoupon({ code: 'packoff', discountType: 'AMOUNT', currency: 'USD', amountOff: 1500 });
 
       const res = await checkout({ planSlug: 'pack', couponCode: 'packoff', provider: 'paypal' });
 

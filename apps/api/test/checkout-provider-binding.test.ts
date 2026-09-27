@@ -33,7 +33,11 @@ import type { LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
-import { CHECKOUT_SESSION_LIFETIME_MS } from '../src/modules/billing/checkout-sessions.js';
+import {
+  CHECKOUT_SESSION_LIFETIME_MS,
+  checkoutStillPayable,
+  pendingCheckoutPrefilter,
+} from '../src/modules/billing/checkout-sessions.js';
 import { configureSandboxPaypal, configureSandboxStripe } from './fakes/billing-credentials.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
@@ -656,6 +660,148 @@ describe('a subscription binds its buyer to one payment provider', () => {
 
     expect(res.statusCode, JSON.stringify(res.json())).toBe(200);
     expect(issuedProvider(res)).toBe('stripe');
+  });
+
+  /** The newest checkout clock a PENDING row carries, as the checkout wrote it. */
+  async function pendingRow(endUserId: string, planSlug: string) {
+    return prisma.subscription.findFirstOrThrow({
+      where: { applicationId, endUserId, plan: { slug: planSlug }, status: 'PENDING' },
+    });
+  }
+
+  it('does not re-arm an abandoned checkout when something unrelated writes to its row (#438)', async () => {
+    // The window used to run from `updatedAt`, which every write moves, so a
+    // touch to a long-dead checkout pinned its buyer for another day, and
+    // repeated touches pinned them indefinitely. Both reads are covered: the
+    // worded binder read would refuse with BILLING_PROVIDER_SWITCH_BLOCKED,
+    // and the locked re-check with BILLING_CHECKOUT_RACE.
+    await boundProviderAlsoEnabled();
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    const opened = await checkout(user.token, basic, 'stripe');
+    expect(opened.statusCode, JSON.stringify(opened.json())).toBe(200);
+
+    const row = await pendingRow(user.id, basic);
+    const metadata = row.metadata as Record<string, unknown>;
+    // Aged a day and a minute, and the same write stands in for the unrelated
+    // touch: it moves `updatedAt` to now.
+    await prisma.subscription.update({
+      where: { id: row.id },
+      data: {
+        metadata: {
+          ...metadata,
+          checkoutOpenedAt: new Date(Date.now() - CHECKOUT_SESSION_LIFETIME_MS - 60_000).toISOString(),
+          operatorNote: 'touched for an unrelated reason',
+        },
+      },
+    });
+    expect((await pendingRow(user.id, basic)).updatedAt.getTime()).toBeGreaterThan(
+      Date.now() - 60_000,
+    );
+
+    const res = await checkout(user.token, pro, 'paypal');
+
+    expect(res.statusCode, JSON.stringify(res.json())).toBe(200);
+    expect(issuedProvider(res)).toBe('paypal');
+  });
+
+  /** Rewrite a real checkout's clocks: the stamp, and the row's last write. */
+  async function setClocks(
+    rowId: string,
+    metadata: unknown,
+    clocks: { openedAt: Date; updatedAt: Date },
+  ): Promise<void> {
+    // Explicit `updatedAt` overrides `@updatedAt`; see the stale-PENDING test
+    // above for why this is written through the model.
+    await prisma.subscription.update({
+      where: { id: rowId },
+      data: {
+        metadata: {
+          ...(metadata as Record<string, unknown>),
+          checkoutOpenedAt: clocks.openedAt.toISOString(),
+        },
+        updatedAt: clocks.updatedAt,
+      },
+    });
+  }
+
+  it('measures the window from the checkout, not from a later write to the row', async () => {
+    // Opened 23 hours ago, touched an hour ago. The pin lifts 24 hours after
+    // the checkout was opened, and the refusal names that instant.
+    await boundProviderAlsoEnabled();
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    const opened = await checkout(user.token, basic, 'stripe');
+    expect(opened.statusCode, JSON.stringify(opened.json())).toBe(200);
+
+    const row = await pendingRow(user.id, basic);
+    expect(typeof (row.metadata as { checkoutOpenedAt?: unknown }).checkoutOpenedAt).toBe('string');
+    const openedAt = new Date(Date.now() - 23 * 60 * 60 * 1000);
+    await setClocks(row.id, row.metadata, {
+      openedAt,
+      updatedAt: new Date(Date.now() - 60 * 60 * 1000),
+    });
+
+    const res = await checkout(user.token, pro, 'paypal');
+
+    expect(res.statusCode, JSON.stringify(res.json())).toBe(409);
+    const err = errorOf(res);
+    expect(err.code).toBe('BILLING_PROVIDER_SWITCH_BLOCKED');
+    expect(err.fix).toContain(
+      new Date(openedAt.getTime() + CHECKOUT_SESSION_LIFETIME_MS).toISOString(),
+    );
+  });
+
+  it('still binds on a checkout a minute from expiry, so the database prefilter drops nothing payable', async () => {
+    // The query narrows PENDING rows by `updatedAt` before the stamp is read.
+    // That is only sound because the stamp is never later than `updatedAt`,
+    // so this is the tightest real case: opened and last written together,
+    // with a minute left.
+    await boundProviderAlsoEnabled();
+    const { basic, pro } = await twoPlans();
+    const user = await signUp();
+    const opened = await checkout(user.token, basic, 'stripe');
+    expect(opened.statusCode, JSON.stringify(opened.json())).toBe(200);
+
+    const row = await pendingRow(user.id, basic);
+    const openedAt = new Date(Date.now() - CHECKOUT_SESSION_LIFETIME_MS + 60_000);
+    await setClocks(row.id, row.metadata, { openedAt, updatedAt: new Date(openedAt.getTime() + 1) });
+
+    const res = await checkout(user.token, pro, 'paypal');
+
+    expect(res.statusCode, JSON.stringify(res.json())).toBe(409);
+    expect(errorOf(res).code).toBe('BILLING_PROVIDER_SWITCH_BLOCKED');
+  });
+
+  it('selects exactly the payable rows with the prefilter as without it', () => {
+    // Every (stamp, last write) pair a real row can hold, stamp never after
+    // the write, plus unstamped rows. The prefilter must change no answer.
+    const now = new Date();
+    const H = 60 * 60 * 1000;
+    const ages = [0, 1, 12 * H, 23 * H, CHECKOUT_SESSION_LIFETIME_MS - 1, CHECKOUT_SESSION_LIFETIME_MS, CHECKOUT_SESSION_LIFETIME_MS + 1, 48 * H];
+    const bound = pendingCheckoutPrefilter(now).updatedAt.gt.getTime();
+    for (const writeAge of ages) {
+      const updatedAt = new Date(now.getTime() - writeAge);
+      const stamps = [null, ...ages.filter((a) => a >= writeAge)];
+      for (const stampAge of stamps) {
+        const metadata =
+          stampAge === null ? {} : { checkoutOpenedAt: new Date(now.getTime() - stampAge).toISOString() };
+        const row = { metadata, updatedAt };
+        const withPrefilter = updatedAt.getTime() > bound && checkoutStillPayable(row, now);
+        expect(withPrefilter, `write ${writeAge}, stamp ${stampAge}`).toBe(checkoutStillPayable(row, now));
+      }
+    }
+  });
+
+  it('never stamps a checkout later than the row was written, which the prefilter relies on', async () => {
+    const { basic } = await twoPlans();
+    const user = await signUp();
+    const opened = await checkout(user.token, basic, 'stripe');
+    expect(opened.statusCode, JSON.stringify(opened.json())).toBe(200);
+
+    const row = await pendingRow(user.id, basic);
+    const stamp = new Date((row.metadata as { checkoutOpenedAt: string }).checkoutOpenedAt);
+    expect(stamp.getTime()).toBeLessThanOrEqual(row.updatedAt.getTime());
   });
 
   it('binds to the OLDEST provider when a buyer already holds two, so the answer is stable', async () => {

@@ -10,6 +10,8 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createServer, type Server } from 'node:http';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -31,9 +33,13 @@ interface RunResult {
   stderr: string;
 }
 
-function runCli(args: string[], env: Record<string, string> = {}): Promise<RunResult> {
+function runCli(
+  args: string[],
+  env: Record<string, string> = {},
+  entry: string = cliEntry,
+): Promise<RunResult> {
   return new Promise((resolve) => {
-    const proc = spawn('node', [cliEntry, ...args], {
+    const proc = spawn('node', [entry, ...args], {
       env: { ...process.env, ...env, REKEY_URL: '', SUPER_ADMIN_KEY: '', ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -211,6 +217,119 @@ describe('rekey CLI', () => {
     expect(parsed.success).toBe(false);
     expect(parsed.error.code).toBe('ADMIN_AUTH_INVALID');
     expect(parsed.error.fix).toBeTruthy();
+  });
+
+  // ---------- secrets never reach --help ----------
+  //
+  // The global options used the environment as their commander DEFAULT, and
+  // commander prints defaults in help, so `rekey --help` showed the live
+  // SUPER_ADMIN_KEY to anyone who could read the terminal or a CI log.
+
+  const SENTINEL = 'sentinel-xyz';
+
+  it.each([[['--help']], [['apps', 'list', '--help']], [['plans', 'create', '--help']]])(
+    '%j does not print the super-admin key or API URL from the environment',
+    async (args) => {
+      const r = await runCli(args, { SUPER_ADMIN_KEY: SENTINEL, REKEY_URL: 'https://sentinel-url.example' });
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain('Usage: rekey');
+      expect(r.stdout + r.stderr).not.toContain(SENTINEL);
+      expect(r.stdout + r.stderr).not.toContain('sentinel-url');
+    },
+  );
+
+  it('commands still read the admin key and API URL from the environment', async () => {
+    stub.reset();
+    const r = await runCli(['apps', 'list', '--json'], { REKEY_URL: stub.url, SUPER_ADMIN_KEY: SENTINEL });
+    expect(r.code).toBe(0);
+    expect(stub.requests.map((q) => q.key)).toEqual(['GET /api/v1/admin/applications']);
+  });
+
+  it('a flag still wins over the environment', async () => {
+    stub.reset();
+    const r = await runCli(['--api-url', stub.url, 'apps', 'list', '--json'], {
+      REKEY_URL: 'http://127.0.0.1:1',
+      SUPER_ADMIN_KEY: SENTINEL,
+    });
+    expect(r.code).toBe(0);
+    expect(stub.requests).toHaveLength(1);
+  });
+
+  // ---------- commander usage errors under --json ----------
+
+  it.each([
+    [['apps', 'list', '--bogus', '--json'], 'unknown option'],
+    [['nope', '--json'], 'unknown command'],
+    [['plans', 'create', '--json'], 'required option'],
+    [['--json'], 'No command given'],
+  ])('%j reports a usage error as the JSON envelope', async (args, fragment) => {
+    const r = await runCli(args);
+    expect(r.code).toBe(1);
+    expect(r.stdout).toBe('');
+    const parsed = JSON.parse(r.stderr) as {
+      success: boolean;
+      error: { code: string; message: string; fix: string };
+    };
+    expect(parsed.success).toBe(false);
+    expect(parsed.error.code).toBe('CLI_USAGE_ERROR');
+    expect(parsed.error.message).toContain(fragment);
+    expect(parsed.error.fix).toContain('--help');
+  });
+
+  it('usage errors without --json stay plain text', async () => {
+    const r = await runCli(['apps', 'list', '--bogus']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("unknown option '--bogus'");
+    expect(r.stderr).not.toContain('CLI_USAGE_ERROR');
+  });
+
+  it.each([[['--help', '--json']], [['--version', '--json']]])('%j still exits 0', async (args) => {
+    const r = await runCli(args);
+    expect(r.code).toBe(0);
+    expect(r.stdout.trim()).not.toBe('');
+  });
+
+  // ---------- --limit / --offset validation ----------
+
+  it.each([
+    ['--limit', '0', 'CLI_LIST_LIMIT_INVALID'],
+    ['--limit', '101', 'CLI_LIST_LIMIT_INVALID'],
+    ['--limit', '2.5', 'CLI_LIST_LIMIT_INVALID'],
+    ['--limit', 'ten', 'CLI_LIST_LIMIT_INVALID'],
+    ['--offset', '-1', 'CLI_LIST_OFFSET_INVALID'],
+    ['--offset', '1.5', 'CLI_LIST_OFFSET_INVALID'],
+  ])('apps list %s %s is refused before any request', async (flag, value, code) => {
+    stub.reset();
+    const r = await runCli(['apps', 'list', flag, value, '--json'], {
+      REKEY_URL: stub.url,
+      SUPER_ADMIN_KEY: 'x'.repeat(40),
+    });
+    expect(r.code).toBe(1);
+    const parsed = JSON.parse(r.stderr) as { error: { code: string; fix: string } };
+    expect(parsed.error.code).toBe(code);
+    expect(parsed.error.fix).toBeTruthy();
+    expect(stub.requests).toEqual([]);
+  });
+
+  it('plans list validates --limit too', async () => {
+    stub.reset();
+    const r = await runCli(['plans', 'list', '--app', 'app_1', '--limit', '500', '--json'], {
+      REKEY_URL: stub.url,
+      SUPER_ADMIN_KEY: 'x'.repeat(40),
+    });
+    expect(r.code).toBe(1);
+    expect((JSON.parse(r.stderr) as { error: { code: string } }).error.code).toBe('CLI_LIST_LIMIT_INVALID');
+    expect(stub.requests).toEqual([]);
+  });
+
+  it('apps list forwards valid --limit and --offset', async () => {
+    stub.reset();
+    const r = await runCli(['apps', 'list', '--limit', '100', '--offset', '0', '--json'], {
+      REKEY_URL: stub.url,
+      SUPER_ADMIN_KEY: 'x'.repeat(40),
+    });
+    expect(r.code).toBe(0);
+    expect(stub.requests.map((q) => q.key)).toEqual(['GET /api/v1/admin/applications?limit=100&offset=0']);
   });
 
   // ---------- plans create input validation ----------
@@ -420,6 +539,22 @@ describe('importing the package is inert', () => {
     `);
     expect(r.stdout.trim()).toContain('apps');
     expect(r.stdout.trim()).toContain('plans');
+  });
+
+  // npx and node_modules/.bin start the bin through a symlink. The old gate
+  // compared argv[1] (the link) with import.meta.url (the real file), never
+  // matched, and the CLI exited 0 having done nothing.
+  it('runs when started through a symlink, as npx and node_modules/.bin do', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'rekey-cli-bin-'));
+    try {
+      const link = path.join(dir, 'rekey');
+      symlinkSync(cliEntry, link);
+      const r = await runCli(['--help'], {}, link);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain('Usage: rekey');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('still runs normally when invoked as the binary', async () => {

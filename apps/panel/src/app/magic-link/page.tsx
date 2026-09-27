@@ -2,7 +2,8 @@ import * as React from 'react';
 import type { Metadata } from 'next';
 import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
-import { errorQuery, publicPost, PanelApiError } from '@/lib/api';
+import { publicPost, PanelApiError } from '@/lib/api';
+import { API_URL_MISSING_MESSAGES, normalizeErrorCode, UNKNOWN_ERROR_CODE } from '@/lib/error-code';
 import { SubmitButton } from '@/components/SubmitButton';
 import { AuthCard } from '@/components/AuthCard';
 import { Banner } from '@/components/Banner';
@@ -24,7 +25,7 @@ async function request(formData: FormData): Promise<void> {
     );
   } catch (err) {
     if (err instanceof PanelApiError) {
-      redirect(`/magic-link?${await errorQuery(err)}`);
+      redirect(`/magic-link?error=${encodeURIComponent(normalizeErrorCode(err.code, ERR))}`);
     }
     throw err;
   }
@@ -35,9 +36,14 @@ async function request(formData: FormData): Promise<void> {
 }
 
 const ERR: Record<string, string> = {
+  ...API_URL_MISSING_MESSAGES,
   missing: 'Enter the email address on your account.',
   RATE_LIMITED: 'Too many attempts. Please wait a minute and try again.',
   INTERNAL_ERROR: 'Something went wrong sending the link. Please try again.',
+  DEPENDENCY_UNAVAILABLE:
+    'Sign-in links are temporarily unavailable because a service this deployment depends on is not responding. Wait a minute and try again.',
+  [UNKNOWN_ERROR_CODE]:
+    'The sign-in link could not be sent. Try again, and if it keeps failing, contact whoever runs this deployment.',
 };
 
 export default async function MagicLinkPage({

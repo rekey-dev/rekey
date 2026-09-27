@@ -15,6 +15,7 @@
  */
 
 import { isKnownEvent, EMAIL_EVENTS } from './events.js';
+import { formatUtcDateTime } from './format-date.js';
 
 const TOKEN_RE = /\{\{(\w+)\}\}/g;
 
@@ -129,6 +130,8 @@ export function renderHtmlBody(
  * declares. Extra names are dropped silently, the registry is the
  * source of truth. Missing names render as empty strings (no throw),
  * which is the right call for "compatible with older templates."
+ *
+ * A readable `xAt` the caller did not pass is derived from its `xAtIso`.
  */
 export function pickEventVariables(
   eventKey: string,
@@ -136,10 +139,16 @@ export function pickEventVariables(
 ): Record<string, string> {
   if (!isKnownEvent(eventKey)) return {};
   const allowed = EMAIL_EVENTS[eventKey].variables;
+  const asString = (v: unknown): string => (typeof v === 'string' ? v : v == null ? '' : String(v));
   const out: Record<string, string> = {};
   for (const name of allowed) {
-    const v = supplied[name];
-    out[name] = typeof v === 'string' ? v : v == null ? '' : String(v);
+    out[name] = asString(supplied[name]);
+  }
+  for (const name of allowed) {
+    const iso = `${name}Iso`;
+    if (supplied[name] == null && allowed.includes(iso)) {
+      out[name] = formatUtcDateTime(out[iso] ?? '');
+    }
   }
   return out;
 }

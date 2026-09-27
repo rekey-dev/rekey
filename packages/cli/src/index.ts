@@ -15,14 +15,15 @@
  *      always go to stderr; exit code matches success.
  */
 
-import { pathToFileURL } from 'node:url';
-import { Command } from 'commander';
+import { Command, CommanderError } from 'commander';
 import { registerInitCommand } from './commands/init.js';
 import { registerDoctorCommand } from './commands/doctor.js';
 import { registerAppsCommand } from './commands/apps.js';
 import { registerPlansCommand } from './commands/plans.js';
 import { registerVersionCommand } from './commands/version.js';
 import { VERSION } from './lib/version.js';
+import { isEntryPoint } from './lib/entry-point.js';
+import { fail } from './lib/output.js';
 
 export { VERSION } from './lib/version.js';
 
@@ -41,8 +42,11 @@ export function buildProgram(): Command {
     // what everyone tries first, answered "unknown option". Both work now; the
     // subcommand stays because it is the one that honours --json.
     .version(VERSION, '-V, --version', 'Print the CLI version')
-    .option('--api-url <url>', 'Override REKEY_URL', process.env.REKEY_URL)
-    .option('--admin-key <key>', 'Override SUPER_ADMIN_KEY', process.env.SUPER_ADMIN_KEY)
+    // No option defaults from the environment: commander prints a default in
+    // --help, so the live SUPER_ADMIN_KEY ended up in the help text.
+    // readGlobalOpts falls back to the environment instead.
+    .option('--api-url <url>', 'Rekey API URL (env: REKEY_URL)')
+    .option('--admin-key <key>', 'Super-admin key (env: SUPER_ADMIN_KEY)')
     .option('--json', 'Emit machine-readable JSON on stdout (errors still go to stderr).')
     .showHelpAfterError();
 
@@ -55,25 +59,50 @@ export function buildProgram(): Command {
   return program;
 }
 
+const USAGE_ERROR_FIX = 'Run `rekey --help`, or `rekey <command> --help`, for the accepted commands and options.';
+
+/**
+ * Send commander's own parse errors (unknown option, missing required option,
+ * unknown command) through the `--json` error envelope instead of plain text.
+ * Commander copies these settings onto subcommands only at creation time, so
+ * the whole tree is walked.
+ */
+function routeUsageErrorsToJson(cmd: Command): void {
+  cmd.exitOverride().configureOutput({ writeErr: () => {}, outputError: () => {} });
+  for (const sub of cmd.commands) routeUsageErrorsToJson(sub);
+}
+
+function usageErrorMessage(err: CommanderError): string {
+  if (err.code === 'commander.help') return 'No command given.';
+  return err.message.replace(/^error: /, '');
+}
+
 /** Parse `process.argv` and run. Called only when this file IS the entry point. */
 export async function main(argv: string[] = process.argv): Promise<void> {
-  await buildProgram()
-    .parseAsync(argv)
-    .catch((err: unknown) => {
-      // Top-level safety net. Individual commands handle their own errors and
-      // call process.exit(1); we only get here if a command throws something
-      // unhandled.
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    });
+  const program = buildProgram();
+  const json = argv.includes('--json');
+  if (json) routeUsageErrorsToJson(program);
+
+  await program.parseAsync(argv).catch((err: unknown) => {
+    if (err instanceof CommanderError) {
+      if (err.exitCode === 0) process.exit(0);
+      fail(
+        { json, apiUrl: undefined, adminKey: undefined },
+        { code: 'CLI_USAGE_ERROR', message: usageErrorMessage(err), fix: USAGE_ERROR_FIX },
+      );
+    }
+    // Top-level safety net. Individual commands handle their own errors and
+    // call process.exit(1); we only get here if a command throws something
+    // unhandled.
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
 }
 
 // This package declares `main` / `types` / `exports`, so `import '@rekey.dev/cli'`
 // resolves, and it used to PARSE `process.argv` and `process.exit(1)` while the
-// module was still evaluating, hijacking the importing program's arguments. Same
-// defect as @rekey.dev/mcp's env check. Running is now gated on actually being
-// the process entry point.
-const entry = process.argv[1];
-if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
+// module was still evaluating, hijacking the importing program's arguments.
+// Running is gated on actually being the process entry point.
+if (isEntryPoint(import.meta.url)) {
   void main();
 }

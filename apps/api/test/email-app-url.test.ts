@@ -387,6 +387,7 @@ describe('Email app URL resolution', () => {
       userEmail: 'signup-appurl@example.com',
       appUrl: resolveAppUrl(application as never) ?? '',
     });
-    expect(hrefs(rendered.html)).toEqual(['https://signup-app.example.com']);
+    // The button, its Outlook fallback and the raw link under it all point here.
+    expect([...new Set(hrefs(rendered.html))]).toEqual(['https://signup-app.example.com']);
   });
 });

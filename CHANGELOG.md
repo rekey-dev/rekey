@@ -4,6 +4,390 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.2.0-rc.4
+
+A release candidate on the 2.2.0 line. It adds a Rekey-hosted checkout page
+(beta, PayPal subscriptions first), custom transactional email templates sent
+by key, lifecycle webhooks for sign-in, invitations and trials, and sign-up
+email domain rules. The default transactional emails are redesigned and carry
+the sending Application's brand. It also makes MFA codes and sign-in challenge
+tokens single-use, tightens how billing webhooks apply to subscriptions and
+payments, and stops `rekey --help` printing the super-admin key.
+
+**Upgrading an existing deployment:** six migrations run on boot, all additive
+(new tables, nullable or defaulted columns, one index, one backfill). Before
+deploying, check your Stripe credential rows for a key whose mode contradicts
+the stored mode, or every Stripe event on that Application answers 409. See
+**Upgrade notes** at the end of this section.
+
+### Changed
+
+Every item here changes a behaviour an existing 2.2.0-rc.3 deployment or
+integration can see. Read this list before you upgrade.
+
+- **MFA codes and sign-in challenge tokens are single-use** (end-user and
+  operator). A TOTP code is accepted once per factor; a code at or below the
+  last accepted time step answers `MFA_CODE_REUSED` (401 at sign-in verify and
+  on step-up, 422 at setup-confirm). A `mfaChallengeToken` that already
+  completed a sign-in answers `401 MFA_CHALLENGE_USED`, so an integration that
+  retries `mfa-verify` after a success must sign in again. Consequences a user
+  will notice: the code that confirms enrolment cannot also complete the
+  first sign-in, and a code used for step-up cannot be used again for another
+  action in the same window. A reused code does not count toward the MFA
+  lockout. Step-up routes that answered `STEP_UP_REQUIRED` or
+  `MFA_CODE_INVALID` for a spent but correct code now answer
+  `MFA_CODE_REUSED`; `/auth/mfa/challenge` keeps its `200 { ok: false }`.
+  Replay state lives in Redis and fails closed with `503
+  DEPENDENCY_UNAVAILABLE`. Challenge tokens issued before the deploy stay
+  valid until they expire (5 minutes at most).
+
+- **Checkout creation is limited for every checkout**, on the provider's page
+  as well as the new Rekey page, for every provider: 10 an hour and 30 a day
+  per end-user, 20 an hour per client IP (`CHECKOUT_LIMIT_PER_IP_HOUR`) and
+  1000 an hour per Application (`CHECKOUT_LIMIT_PER_APP_HOUR`). Over a limit
+  answers `429 CHECKOUT_RATE_LIMITED`. An unvouched client address skips the
+  IP ceiling, so a backend starting checkouts for many buyers from one server
+  IP is held only by the per-end-user and per-Application limits.
+
+- **Checkout return URLs are checked.** A `successUrl` or `cancelUrl` that is
+  not http(s) (`javascript:`, `data:`, `ftp:`) is refused with `400
+  CHECKOUT_RETURN_URL_INVALID` before anything is created. An http(s) URL
+  whose origin is not the Application's App URL, one of its redirect URLs, or
+  (when enabled) its hosted portal still succeeds, and the response carries
+  `warnings: [{ code: "CHECKOUT_RETURN_URL_UNREGISTERED", ... }]` plus an
+  `app.checkout_return_url_unregistered` security event. A later minor release
+  refuses these; register your origins now.
+
+- **A second checkout while the first is being paid is refused.** `POST
+  /billing/checkout` answers `409 CHECKOUT_PAYMENT_IN_PROGRESS` when a session
+  for the same end-user and plan is confirming, or PayPal reports its
+  subscription approved. A failed PayPal read answers `503
+  CHECKOUT_PAYMENT_STATUS_UNAVAILABLE`.
+
+- **Stripe Checkout no longer forces card-only.** Stripe shows Link, wallets
+  and whatever the account enables. A `checkout.session.completed` with
+  `payment_status: "unpaid"` activates nothing, and
+  `checkout.session.async_payment_succeeded` completes it. Endpoints
+  registered before this release do not receive that event, so a buyer paying
+  by a delayed method stays PENDING until the endpoint is re-registered
+  (Auto-configure). Newly registered Stripe endpoints are pinned to the API
+  version the client uses (`2024-11-20.acacia`), and the translator reads the
+  `2025-03-31.basil` shapes for period end and invoice subscription too.
+
+- **Stripe events whose `livemode` contradicts the verifying credential's
+  mode are answered `409 WEBHOOK_MODE_MISMATCH`** and not applied. They stay
+  unprocessed, so Stripe retries, and a retry after the credential is fixed
+  applies. A cross-Application Stripe event now answers the documented `400
+  WEBHOOK_APPLICATION_MISMATCH`, not 500.
+
+- **Billing webhooks and grants refuse a second subject on the same plan.**
+  An operator or super-admin grant for a different organization (or the
+  personal account) on a plan the end-user already holds answers `409
+  BILLING_SUBSCRIPTION_SUBJECT_CONFLICT`, where it answered `200
+  {"activated":false}`. Subscription imports report it as a per-row error. An
+  external `subscription.activated` for a different subscription id and
+  another subject is acknowledged with 200 but not applied, and the reason is
+  on the webhook event receipt. External activations dated (`occurredAt`) at
+  or before a sender-dated cancellation of the same subscription are ignored,
+  and a live row's period moves only when the new `currentPeriodEnd` is at
+  least 24 hours later. Senders should include `occurredAt`.
+
+- **Refunds are accumulated.** `payment.refunded` adds to `refundedAmount` and
+  sets `PARTIALLY_REFUNDED` or `REFUNDED` from the total. A refund past the
+  payment (`BILLING_REFUND_EXCEEDS_PAYMENT`), in another currency, or for an
+  unrecorded payment is refused and noted on the receipt. Stripe
+  `charge.refunded` is now translated and subscribed on newly registered
+  endpoints. Tenant billing stats and super-admin payment volume count
+  `amount - refundedAmount`. The operator payments list gains
+  `refundedAmount`, and its status filters (and the operator MCP
+  `recent_payments`) accept `PARTIALLY_REFUNDED`.
+
+- **The free-tier default plan must cost nothing.** Setting
+  `billingConfig.defaultPlanSlug` to a plan with a nonzero `amount` or any
+  `pricePerUnitCents` answers `409 BILLING_FREE_PLAN_NOT_FREE`, the code
+  `POST /billing/subscribe` already used. An Application
+  that already has a priced default stops granting its entitlements to
+  non-subscribers and records an `app.default_plan_ignored` security event.
+
+- **End-user subscription responses are an allowlist.** `GET
+  /billing/subscription`, cancel, subscribe, checkout's `subscription` and
+  `include=subscription` now return `SelfSubscriptionDto`. `metadata` keeps
+  only `checkoutSessionId` and `oneTime`, and `entitlementOverrides` is
+  dropped. Code that read operator notes or provenance keys through a
+  publishable key or user token must move to the secret-key operator routes.
+  `@rekey.dev/node` and `@rekey.dev/react` return the new type.
+
+- **Coupons.** Creating an `AMOUNT` coupon without `currency` answers `400
+  COUPON_CURRENCY_REQUIRED`, and a currency outside ISO 4217 answers `400
+  COUPON_CURRENCY_INVALID`. An existing `AMOUNT` coupon with no currency is
+  refused at validate and checkout with `COUPON_CURRENCY_REQUIRED`; the panel
+  flags it. A checkout already open with one still records its redemption
+  when paid.
+
+- **Subscription webhooks omit `entitlements` when the grant cannot be
+  resolved**, where they sent `[]`. Absent means unknown, not zero; do not
+  downgrade on it. `subscription.entitlements_updated` is not sent in that
+  case. Every subscription event payload now carries `trialEndsAt`.
+
+- **Billing refusals name the right provider.** On an Application whose only
+  enabled provider is inbound-only (`external`), checkout and
+  `GET /billing/trial-eligibility` answer `BILLING_PROVIDER_INBOUND_ONLY`
+  instead of `BILLING_CREDENTIALS_NOT_CONFIGURED`. A plan create whose
+  provider registration fails now says the plan exists and names the
+  `/register` route, with `details.planId`, `planSlug` and
+  `registrationStatus: "FAILED"`.
+
+- **Cancelling a checkout that was never completed by `subscriptionId`
+  answers `409 SUBSCRIPTION_CHECKOUT_UNFINISHED`.**
+
+- **`user.updated` is emitted**, and operator-created end-users emit
+  `user.created`. `user.updated` fires on the self and operator end-user
+  PATCH, the first email verification and a magic link that proves an
+  unverified address, only when a value changed, with `data.changed` (field
+  names) and `data.via`. Operator-created users emit `user.created` with
+  `via: "operator"`, and password sign-up's `user.created` now carries
+  `via: "password"`. Subscribers to `*` receive both.
+
+- **Welcome email timing.** OAuth-first sign-up now sends the welcome email
+  once. With `requireEmailVerification` on, an unverified sign-up gets the
+  welcome after its first verification instead of at sign-up.
+
+- **Default transactional emails are redesigned and branded.** The nine
+  built-in emails use the Application's portal branding (`displayName`,
+  `logoUrl`, `primaryColor`, support contact) with the Application name as the
+  fallback, get a hand-built plain-text part and dark-mode styles, and
+  subjects name the app ("Reset your Acme password"). The "Sent via Rekey"
+  line is gone. Timestamps gain readable UTC variables (`expiresAt`,
+  `changedAt`, `enabledAt`, `graceEndsAt`, `receivedAt`) beside the existing
+  `*Iso` ones, and the payment-failed reminder gains `portalUrl` and an
+  "Update payment method" button when the hosted portal is on. Customised
+  templates are unchanged.
+
+- **Email sender identity is separate from credentials.** Saving email
+  credentials without `fromName` or `replyTo` now keeps the stored values
+  instead of clearing them. On the shared pool a stored `fromName` shows as
+  `<name> (via <deployment>)` and Reply-To is now sent. A `fromName` with a
+  control character answers `400 EMAIL_FROM_NAME_INVALID` at write time. From
+  display names are quoted per RFC 5322 on every send.
+
+- **`requireEmailVerification` cannot be switched on without a verification
+  URL.** The auth-config PATCH (and the operator MCP `update_auth_config`)
+  answers `409 EMAIL_VERIFICATION_URL_REQUIRED` when the Application has no
+  `appUrl`, no http(s) redirect URL and no `DEFAULT_APP_URL`.
+
+- **`API_KEY_INVALID` and `PUBLISHABLE_KEY_INVALID` name the public API
+  origin**, not an in-cluster host, and the OpenAPI `servers` entry uses it.
+
+- **`@rekey.dev/cli`: usage errors under `--json` are JSON.** Unknown options
+  and commands, and missing arguments, go to stderr as `CLI_USAGE_ERROR`, exit
+  1. `--limit` (1 to 100) and `--offset` (0 or more) are checked before any
+  request (`CLI_LIST_LIMIT_INVALID`, `CLI_LIST_OFFSET_INVALID`).
+
+- **Rekey Cloud Standard includes three production applications per
+  workspace;** Free keeps one.
+
+### Added
+
+- **Rekey checkout page (beta, PayPal subscriptions).** `POST
+  /billing/checkout` can return a Rekey-hosted page on the portal
+  (`/<slug>/checkout/chk_live_...`) with the Application's branding, the order
+  summary, an auto-renewal disclosure and PayPal's own buttons. It is switched
+  on per Application and per payment mode in Panel, Billing, Checkout page,
+  with a failure behaviour of falling back to the provider's page (default)
+  or refusing. The body accepts `mode: "redirect" | "embedded"`, and the
+  response gains `mode` and `checkoutSessionId`. Card data stays in PayPal's
+  windows, and activation stays webhook-only: a PayPal approval only moves the
+  session to confirming after Rekey checks the subscription with PayPal.
+  - Public routes under `/api/v1/checkout-sessions/:token` (view, status,
+    fallback, `paypal/approved`) and `GET /api/v1/checkout/probe/:nonce`.
+  - Tenant routes `GET`/`PATCH /tenant/applications/:id/checkout`,
+    `GET .../checkout/readiness` (eight checks per mode, Test and Live) and
+    `GET .../checkout/status`.
+  - Kill switch `CHECKOUT_EMBEDDED_ENABLED=false` on the API.
+  - Portal branding gains Terms, Privacy and Refund policy URLs, shown in the
+    checkout page footer.
+  - Webhook events record the mode of the credential that verified them
+    (`WebhookEvent.mode`); readiness counts only live events received since
+    the credentials were last saved.
+  - New security events `app.checkout_embedded_fallback`,
+    `app.checkout_embedded_refused`, `app.checkout_mode_mismatch`,
+    `app.checkout_confirmation_refused` and `app.checkout_settings_updated`.
+- **Custom transactional email templates.** Register a template in Panel,
+  Email, Custom templates (draft, preview, test send to yourself, publish as
+  an immutable version), then send it by key with `POST /api/v1/email/send`
+  and a secret key holding the new elevated scope `email:send`. The call
+  carries only `template`, `to`, `variables`, `version` and `idempotencyKey`,
+  never a subject or HTML. Custom templates send only through the
+  Application's own Resend or SMTP, never the shared pool. Variables are typed
+  and validated, an idempotency key names one attempt, and sends are capped
+  per workspace (`EMAIL_SEND_DAILY_CAP`, `EMAIL_SEND_RECIPIENT_HOURLY_CAP`,
+  overridable in `Tenant.limits`). `notification` templates carry RFC 8058
+  one-click unsubscribe, which stops notification mail only; password resets,
+  sign-in links and `critical` templates keep arriving. The suppressions list
+  shows what each entry stops. The preview returns and highlights undeclared
+  variables. See docs/email-templates.md.
+- **`@rekey.dev/node`: `rekey.email.send()`**, with `isEmailSendError()`,
+  `emailVariableIssues()` and `EMAIL_SEND_ERROR_CODES`.
+- **Email sender identity.** `PATCH
+  /api/v1/tenant/applications/:id/email-sender` sets `fromName`, `replyTo` and
+  `supportEmail`, and the panel's Email settings gain a Sender section.
+  `supportEmail` feeds the "Need help?" footer of the default emails and is
+  returned as `ApplicationDto.supportEmail`.
+- **Lifecycle webhooks:** `session.created` (once per real sign-in, with
+  `via` and `firstSignIn`, never on refresh or organization switch),
+  `organization.invitation.created`, `organization.invitation.accepted`,
+  `subscription.trial_started` and `subscription.trial_will_end` (3 days
+  before `trialEndsAt`, once per trial end). Subscribers to `*` receive them.
+- **`isNewUser` on the auth result**, true when the sign-in created the user
+  (password sign-up, magic link, OAuth), and `SignedInSession` from
+  `@rekey.dev/nextjs`'s `signIn`, `signUp` and `mfaVerify`.
+- **`authConfig.welcomeEmail`**: `on_signup` (default, unchanged timing),
+  `on_verified` or `off`, on the panel Auth page, the auth-config PATCH and
+  the operator MCP.
+- **Sign-up email domain rules**, `authConfig.signupRestrictions`:
+  `allowedDomains`, `blockedDomains` (exact or `*.` subdomains) and
+  `blockDisposable` (a vendored list). Self sign-up from a refused domain
+  answers `403 SIGNUP_EMAIL_DOMAIN_NOT_ALLOWED`; operator create and import
+  skip the rules, and existing users keep signing in. Panel: Auth, Sign-up
+  email rules.
+- **`GET /api/v1/auth/oauth/providers`** lists an Application's usable OAuth
+  providers (id and name only) for the publishable key.
+  `rekey.auth.listOAuthProviders()` in `@rekey.dev/node`; in
+  `@rekey.dev/react`, `useOAuthProviders()` and `<SignIn>` / `<SignUp>` fetch
+  them when given `oauthStartUrl` or `oauthStartAction`.
+- **`GET /api/v1/billing/subscriptions`** returns every live subscription of
+  the user or organization, and cancel accepts `subscriptionId`.
+  `listSubscriptions` and the `subscriptionId` option in `@rekey.dev/node` and
+  `@rekey.dev/react`. The portal lists each live subscription with its own
+  Cancel button and never offers a plan the buyer already holds.
+- **Operator MCP:** `list_organizations`, `add_organization_member` and
+  `set_organization_member_role`, with MCP annotations on tools and the
+  `fix` of every `RekeyError` returned. Member adds and role changes from the
+  panel and MCP record `app.organization_member_added` and
+  `app.organization_member_role_changed`.
+- **`licenses.listMine` (`@rekey.dev/node`) and `listMyLicenses`
+  (`@rekey.dev/react`) take `{ organizationId }`.**
+- **"Secured by Rekey" attribution** for workspaces whose `Tenant.limits`
+  sets `emailAttribution: true` (Rekey Cloud Free). Off everywhere else,
+  including every self-hosted install.
+- **Panel:** the email template editor opens uncustomised templates with the
+  default loaded as editable blocks, and the API returns the default's
+  `designJson`.
+
+### Fixed
+
+- **`npx @rekey.dev/cli` and `npx @rekey.dev/mcp` did nothing.** The entry
+  check compared a symlinked bin path with the real file, so both exited 0
+  without running. They now run under npx and `node_modules/.bin`.
+- **Portal sign-in errors say what happened.** A locked-out or throttled
+  customer is told to wait (with the minutes when known), service failures
+  say the account is fine, and forgot-password no longer claims a link is on
+  its way after a failed request. Error pages outside the billing dashboard
+  no longer say nothing was charged.
+- **A fresh clone reaches its API.** The root `.env.example` sets `REKEY_URL`
+  and `PORTAL_BASE_URL`, and the panel says so when `REKEY_URL` is missing.
+- **The panel login shows a message for every error code**, including
+  `DEPENDENCY_UNAVAILABLE`.
+- **The `SIGNUP_DISABLED` fix** names ways in that exist.
+- **A pending checkout's binding window** is measured from when its session
+  was opened, not from the row's last write.
+- **Panel:** form rows stay aligned when a field shows a hint or an error, and
+  the plan Amount hint no longer shows two amounts.
+- **Documentation:** docs/portal.md describes what the portal serves, the
+  forgot-password route states when a secret-key caller learns an address is
+  unknown, and docs/billing.md, the SDK READMEs and CONTRIBUTING.md are
+  corrected against the code.
+
+### Security
+
+- **`rekey --help` printed the super-admin key.** The CLI's global options
+  took `SUPER_ADMIN_KEY` and `REKEY_URL` as commander defaults, which help
+  prints. Anyone with the key exported who ran `--help` put it on screen and in
+  any captured log. Help now reads `(env: SUPER_ADMIN_KEY)`; the values are
+  read from the environment only when the flag is absent. Rotate
+  `SUPER_ADMIN_KEY` if help output may have been captured.
+- **MFA replay.** One TOTP code verified several times, one challenge token
+  plus one code minted two sessions, and 8 concurrent requests could all spend
+  one backup code. All three are closed; see **Changed**.
+- **Passkey sign-in starts are rate limited** to 10 a minute per Application
+  and visitor address, on the end-user and operator routes.
+- **Tokens in query strings stay out of the API's logs.** Values of `code`,
+  `key`, `invite` and names ending in `token`, `secret`, `password`,
+  `signature`, `ticket` or `challenge` are redacted, as are checkout tokens in
+  paths.
+- **PayPal webhook verification uses the raw body**, not a re-serialised one.
+- **SMTP connects to the address it checked**, closing a DNS rebinding gap,
+  with SNI and certificate checks still on the hostname.
+- **`.gitignore` covers every `.env.*`** except the examples.
+
+### Upgrade notes
+
+Migrations, applied on boot or with `pnpm db:migrate:deploy`:
+
+- `20260926120000_custom_email_templates` and
+  `20260926180000_email_unsubscribe_category`: new template tables, new
+  `EmailLog` columns and status `pending`, `EmailSuppression.category`.
+- `20260927000510_hosted_checkout_sessions`: `checkout_sessions` table and
+  checkout columns on `applications` (default: provider's page).
+- `20260927013324_webhook_event_mode`: nullable `webhook_events.mode`.
+- `20260927135137_end_user_welcome_email_pending`: a defaulted boolean.
+- `20260927141304_lifecycle_first_sign_in_and_trial_will_end`: two nullable
+  columns, an index on `subscriptions (status, trial_ends_at)`, and a backfill
+  that marks every existing end-user as already signed in, so none reads as a
+  first sign-in.
+
+New environment variables for the API, all optional:
+
+- `CHECKOUT_EMBEDDED_ENABLED`, unset means on.
+- `CHECKOUT_LIMIT_PER_IP_HOUR`, default `20`, and
+  `CHECKOUT_LIMIT_PER_APP_HOUR`, default `1000`.
+- `EMAIL_SEND_DAILY_CAP`, default `1000`, and
+  `EMAIL_SEND_RECIPIENT_HOURLY_CAP`, default `10`.
+- `EMAIL_UNSUBSCRIBE_SECRET` (32+ characters), `EMAIL_UNSUBSCRIBE_SECRET_ID`
+  (default `k1`) and `EMAIL_UNSUBSCRIBE_PREVIOUS_SECRETS`. Unset, unsubscribe
+  links are signed with a key derived from `JWT_SECRET` and stop working if it
+  changes.
+
+New error codes (each is listed in docs/errors.md):
+
+- Checkout: `CHECKOUT_RATE_LIMITED`, `CHECKOUT_RETURN_URL_INVALID`,
+  `CHECKOUT_PAYMENT_IN_PROGRESS`, `CHECKOUT_PAYMENT_STATUS_UNAVAILABLE`,
+  `CHECKOUT_EMBEDDED_NOT_READY`, `CHECKOUT_READINESS_FAILED`,
+  `CHECKOUT_MODE_MISMATCH`, `CHECKOUT_SESSION_NOT_FOUND`,
+  `CHECKOUT_SESSION_EXPIRED`, `CHECKOUT_SESSION_COMPLETE`,
+  `CHECKOUT_CONFIRMATION_REFUSED`, `CHECKOUT_CONFIRMATION_LIMIT`,
+  `CHECKOUT_FALLBACK_UNAVAILABLE`, `CHECKOUT_EMBEDDED_UNSUPPORTED`; warnings
+  `CHECKOUT_RETURN_URL_UNREGISTERED` and `CHECKOUT_EMBEDDED_FELL_BACK`.
+- Billing: `BILLING_SUBSCRIPTION_SUBJECT_CONFLICT` (409),
+  `BILLING_REFUND_EXCEEDS_PAYMENT`, `SUBSCRIPTION_CHECKOUT_UNFINISHED`,
+  `COUPON_CURRENCY_REQUIRED`, `COUPON_CURRENCY_INVALID`,
+  `WEBHOOK_MODE_MISMATCH`.
+- Auth: `MFA_CODE_REUSED`, `MFA_CHALLENGE_USED`,
+  `SIGNUP_EMAIL_DOMAIN_NOT_ALLOWED`, `EMAIL_VERIFICATION_URL_REQUIRED`.
+- Email: `EMAIL_TEMPLATE_NOT_FOUND`, `EMAIL_TEMPLATE_NOT_PUBLISHED`,
+  `EMAIL_TEMPLATE_INVALID`, `EMAIL_TEMPLATE_KEY_TAKEN`,
+  `EMAIL_TEMPLATE_LIMIT_REACHED`, `EMAIL_VARIABLES_INVALID`,
+  `EMAIL_TRANSPORT_NOT_CUSTOM`, `EMAIL_SENDER_DOMAIN_MISMATCH`,
+  `EMAIL_RECIPIENT_NOT_END_USER`, `EMAIL_IDEMPOTENCY_KEY_REUSED`,
+  `EMAIL_SEND_IN_FLIGHT`, `EMAIL_SEND_OUTCOME_UNKNOWN`, `EMAIL_RATE_LIMITED`,
+  `EMAIL_DELIVERY_FAILED`, `EMAIL_FROM_NAME_INVALID`,
+  `EMAIL_REPLY_TO_INVALID`, `EMAIL_SUPPORT_EMAIL_INVALID`.
+- CLI: `CLI_USAGE_ERROR`, `CLI_LIST_LIMIT_INVALID`, `CLI_LIST_OFFSET_INVALID`.
+
+Also:
+
+- Before deploying, find Stripe credential rows whose key contradicts the
+  stored mode (an `sk_live_` key on a `test` row, or the reverse). Older rows
+  defaulted to `test`. Keys are encrypted, so compare them through
+  `billingCredentialsService.loadDecryptedWithMode`, not SQL.
+- Re-register Stripe webhook endpoints (Auto-configure) to receive
+  `checkout.session.async_payment_succeeded` and `charge.refunded` and to pin
+  the API version.
+- Register every origin your checkout `successUrl` and `cancelUrl` use as the
+  App URL or a redirect URL.
+- A root `.env` for local development needs `REKEY_URL` and
+  `PORTAL_BASE_URL`; copy them from `.env.example`.
+
 ## 2.2.0-rc.3
 
 A release candidate on the 2.2.0 line. Most of it is about sessions: the

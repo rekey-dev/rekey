@@ -591,7 +591,7 @@ describe('email send control', () => {
       method: 'PATCH',
       url: `${base(w)}/auth-config`,
       headers: auth(w),
-      payload: { requireEmailVerification: true },
+      payload: { requireEmailVerification: true, appUrl: 'https://app.example.com' },
     });
     expect(verify.statusCode).toBe(200);
     const both = await inject({

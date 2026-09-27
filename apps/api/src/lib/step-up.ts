@@ -50,6 +50,7 @@ import {
   operatorLoginLockScope,
   registerFailure,
 } from './brute-force.js';
+import { mfaCodeReusedError, type TotpOutcome } from './mfa-replay.js';
 
 /** Proof material a caller may supply. Both optional; any ONE that verifies passes. */
 export interface StepUpProof {
@@ -59,8 +60,8 @@ export interface StepUpProof {
   code?: string | undefined;
 }
 
-/** Verifies a TOTP or backup code for this user. Injected to avoid a cycle with mfa.service. */
-export type MfaCodeVerifier = (args: { endUserId: string; code: string }) => Promise<boolean>;
+/** Checks and spends a TOTP or backup code for this user. Injected to avoid a cycle with mfa.service. */
+export type MfaCodeVerifier = (args: { endUserId: string; code: string }) => Promise<TotpOutcome>;
 
 /**
  * Throw unless the caller has re-proved identity.
@@ -105,8 +106,10 @@ export async function assertStepUp(args: {
     });
   }
 
+  let codeOutcome: TotpOutcome | null = null;
   if (proof.code !== undefined && proof.code !== '' && hasMfa) {
-    if (await verifyMfaCode({ endUserId, code: proof.code })) return;
+    codeOutcome = await verifyMfaCode({ endUserId, code: proof.code });
+    if (codeOutcome === 'accepted') return;
   }
 
   if (proof.password !== undefined && proof.password !== '' && hasPassword) {
@@ -121,6 +124,9 @@ export async function assertStepUp(args: {
     await registerFailure(lockScope, LOGIN_POLICY);
   }
 
+  // A reused code is only reachable by sending the RIGHT code, so naming it
+  // reveals nothing a guesser could use, and it tells the user to wait.
+  if (codeOutcome === 'reused') throw mfaCodeReusedError('step-up');
   // One message for "you sent nothing" and "what you sent was wrong". Splitting
   // them would report whether a given code or password was valid, which is a
   // guessing oracle on a route that is not otherwise rate-limited per attempt.
@@ -134,11 +140,11 @@ export async function assertStepUp(args: {
   });
 }
 
-/** Verifies a TOTP or backup code for an OPERATOR. Injected to avoid a cycle with tenant-mfa.service. */
+/** Checks and spends a TOTP or backup code for an OPERATOR. Injected to avoid a cycle with tenant-mfa.service. */
 export type TenantMfaCodeVerifier = (args: {
   tenantUserId: string;
   code: string;
-}) => Promise<boolean>;
+}) => Promise<TotpOutcome>;
 
 /**
  * The operator twin of `assertStepUp`, for the panel's own privileged
@@ -196,8 +202,10 @@ export async function assertTenantStepUp(args: {
     });
   }
 
+  let codeOutcome: TotpOutcome | null = null;
   if (proof.code !== undefined && proof.code !== '' && hasMfa) {
-    if (await verifyMfaCode({ tenantUserId, code: proof.code })) return;
+    codeOutcome = await verifyMfaCode({ tenantUserId, code: proof.code });
+    if (codeOutcome === 'accepted') return;
   }
 
   if (!mfaOnly && proof.password !== undefined && proof.password !== '' && hasPassword) {
@@ -211,6 +219,7 @@ export async function assertTenantStepUp(args: {
     await registerFailure(lockScope, LOGIN_POLICY);
   }
 
+  if (codeOutcome === 'reused') throw mfaCodeReusedError('step-up');
   throw new RekeyError({
     statusCode: 401,
     code: 'STEP_UP_REQUIRED',

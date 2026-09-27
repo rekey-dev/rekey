@@ -29,6 +29,7 @@
 export { RekeyProvider } from './context.js';
 export type { RekeyContextValue, RekeyProviderProps } from './context.js';
 export { useUser, useRekey } from './hooks.js';
+export { useOAuthProviders } from './oauth-providers.js';
 export { SignedIn, SignedOut, Loading } from './components.js';
 export { RekeyBrowserClient, RekeyError } from './client.js';
 export type {
@@ -39,6 +40,7 @@ export type {
   FeatureCheckDto,
   PublicPlanDto,
   PublicPlanCheckoutDto,
+  SelfSubscriptionDto,
   EntitlementsDto,
   MeInclude,
   MeIncluded,
@@ -46,6 +48,8 @@ export type {
   MeIncludedFields,
   PortalPaymentDto,
   ProvidersListDto,
+  OAuthProvidersListDto,
+  OAuthProviderSummaryDto,
   BillingProviderInfoDto,
   BillingProviderCapabilities,
   BillingProvider,

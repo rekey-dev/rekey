@@ -481,6 +481,7 @@ describe('WEBHOOK_EVENTS registry', () => {
       'user.updated',
       'user.deleted',
       'user.erased',
+      'session.created',
       'session.revoked',
       'mfa.enabled',
       'mfa.disabled',
@@ -490,6 +491,8 @@ describe('WEBHOOK_EVENTS registry', () => {
       'subscription.canceled',
       'subscription.past_due',
       'subscription.entitlements_updated',
+      'subscription.trial_started',
+      'subscription.trial_will_end',
       'payment.succeeded',
       'payment.failed',
       'dunning.case_opened',
@@ -504,6 +507,8 @@ describe('WEBHOOK_EVENTS registry', () => {
       'credit.granted',
       'credit.consumed',
       'credit.adjusted',
+      'organization.invitation.created',
+      'organization.invitation.accepted',
     ]);
     expect(WEBHOOK_EVENTS.map((e) => e.name)).toEqual(KNOWN_WEBHOOK_EVENTS);
     // Every entry carries a non-empty description for picker/autocomplete UIs.
@@ -566,5 +571,21 @@ describe('usage + credits self-serve methods', () => {
     const [url, init] = call(spy);
     expect(url).toBe('https://api.example.com/api/v1/credits/me/ledger?limit=5');
     expect((init.headers as Record<string, string>)['X-Rekey-User-Token']).toBe('user.tok');
+  });
+});
+
+describe('auth.listOAuthProviders()', () => {
+  it('GETs the public provider list with the Application key and returns the data', async () => {
+    const providers = [{ id: 'google', name: 'Google' }];
+    const spy = vi.fn().mockResolvedValue(jsonResponse(200, { success: true, data: { providers } }));
+    const client = new Rekey({ apiUrl: 'https://api.example.com', secretKey: 'rp_live_token', fetch: spy });
+
+    await expect(client.auth.listOAuthProviders()).resolves.toEqual({ providers });
+
+    const [url, init] = spy.mock.calls[0]! as [string, RequestInit];
+    expect(url).toBe('https://api.example.com/api/v1/auth/oauth/providers');
+    expect(init.method).toBe('GET');
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer rp_live_token');
+    expect(init.body).toBeUndefined();
   });
 });

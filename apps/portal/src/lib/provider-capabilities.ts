@@ -46,6 +46,21 @@ export type CheckoutProviderChoice =
   | { kind: 'refused'; code: 'BILLING_PROVIDER_INBOUND_ONLY' | 'BILLING_PROVIDER_NOT_AVAILABLE' };
 
 /**
+ * The error code the dashboard should show for a refused checkout.
+ *
+ * BILLING_PROVIDER_INBOUND_ONLY reads "choose another payment option", which
+ * only helps a buyer who picked one. Without a pick the router found no
+ * provider that can take a buyer, so the honest answer is that checkout is not
+ * available here.
+ *
+ * @example
+ * checkoutRefusalCode('BILLING_PROVIDER_INBOUND_ONLY', false); // 'CHECKOUT_UNAVAILABLE'
+ */
+export function checkoutRefusalCode(code: string, providerPicked: boolean): string {
+  return code === 'BILLING_PROVIDER_INBOUND_ONLY' && !providerPicked ? 'CHECKOUT_UNAVAILABLE' : code;
+}
+
+/**
  * Judge the provider a buyer picked against the Application's provider list.
  * A pick the list does not offer, or one that cannot host a checkout, is
  * refused, never dropped: dropping it sends the buyer to a processor they did

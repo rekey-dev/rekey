@@ -38,6 +38,8 @@ import { prisma } from '../../lib/prisma.js';
 import { isOneTimePlan } from './plan-kind.js';
 import { assertTrialMaterialisesNothing } from '../plans/plans.service.js';
 import { RekeyError } from '../../lib/error.js';
+import { recordSecurityEvent } from '../../lib/security-events.js';
+import { costsNothing } from './free-plan.js';
 import { BillingConfigSchema, ENTITLING_SUBSCRIPTION_STATUSES } from '@rekey.dev/shared-types';
 import { creditsService } from '../credits/credits.service.js';
 import { licensesService } from '../licenses/licenses.service.js';
@@ -50,17 +52,50 @@ import { licensesService } from '../licenses/licenses.service.js';
  * per-subscription override names, and otherwise able only to raise a value.
  * Read-only, only FEATURE flags + included USAGE quota are honoured by callers
  * (CREDIT/LICENSE are stateful and require a real subscription).
+ *
+ * A default that charges money is ignored. The write path refuses one, but a
+ * row nominated before that check, or a plan repriced after nomination, would
+ * otherwise give every signed-in user a paid plan's entitlements for nothing.
  */
 async function loadDefaultPlan(applicationId: string): Promise<Plan | null> {
   const app = await prisma.application.findUnique({
     where: { id: applicationId },
-    select: { billingConfig: true },
+    select: { billingConfig: true, tenantId: true },
   });
   if (!app) return null;
   const parsed = BillingConfigSchema.safeParse(app.billingConfig);
   const slug = parsed.success ? parsed.data.defaultPlanSlug : undefined;
   if (!slug) return null;
-  return prisma.plan.findFirst({ where: { applicationId, slug, active: true } });
+  const plan = await prisma.plan.findFirst({ where: { applicationId, slug, active: true } });
+  if (plan && !costsNothing(plan)) {
+    reportIgnoredDefaultPlan(app.tenantId, plan);
+    return null;
+  }
+  return plan;
+}
+
+const IGNORED_DEFAULT_REPORT_INTERVAL_MS = 60 * 60 * 1000;
+const ignoredDefaultReportedAt = new Map<string, number>();
+
+/** Rate-limited: this runs on every entitlement read and every recorded usage event. */
+function reportIgnoredDefaultPlan(tenantId: string, plan: Plan): void {
+  const key = `${plan.id}:${plan.amount}:${plan.pricePerUnitCents}`;
+  const now = Date.now();
+  const last = ignoredDefaultReportedAt.get(key);
+  if (last !== undefined && now - last < IGNORED_DEFAULT_REPORT_INTERVAL_MS) return;
+  ignoredDefaultReportedAt.set(key, now);
+  const price = { amount: plan.amount, currency: plan.currency, pricePerUnitCents: plan.pricePerUnitCents };
+  console.warn(
+    `[billing] free-tier default plan "${plan.slug}" in application ${plan.applicationId} charges money, so it is not applied`,
+    price,
+  );
+  void recordSecurityEvent({
+    type: 'app.default_plan_ignored',
+    actorType: 'system',
+    tenantId,
+    applicationId: plan.applicationId,
+    metadata: { defaultPlanSlug: plan.slug, planId: plan.id, ...price },
+  });
 }
 
 /**

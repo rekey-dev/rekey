@@ -29,6 +29,7 @@
 
 import type { Application } from '@prisma/client';
 import { Resend } from 'resend';
+import { isIP } from 'node:net';
 import nodemailer from 'nodemailer';
 import { assertSafeHost } from './ssrf-guard.js';
 import { env } from '../config/env.js';
@@ -38,10 +39,17 @@ import { recordSecurityEvent } from './security-events.js';
 
 export type EmailProvider = 'resend' | 'smtp';
 
+/**
+ * `Application.emailConfig`. `fromAddress` belongs to the BYO credentials and
+ * is written with them; the other three are the sender identity, written by
+ * `PATCH .../email-sender` and honoured on the shared pool too.
+ */
 export interface EmailConfig {
   fromAddress?: string;
   fromName?: string;
   replyTo?: string;
+  /** Where recipients should write for help. Stored for templates, never a header. */
+  supportEmail?: string;
 }
 
 /**
@@ -119,6 +127,10 @@ export interface SendInput {
   subject: string;
   html: string;
   text?: string;
+  /** Extra headers, e.g. List-Unsubscribe. Only the BYO transports carry them. */
+  headers?: Record<string, string>;
+  /** Display name for this message, over `emailConfig.fromName`. BYO transports only. */
+  fromName?: string;
 }
 
 /**
@@ -171,6 +183,20 @@ export async function recordAuthEmailDeliveryFailure(input: {
 export interface SendLogMeta {
   /** Email event key (e.g. "verify_email"); null/omitted for ad-hoc sends. */
   eventKey?: string | null;
+  customTemplateKey?: string;
+  customTemplateVersion?: number;
+  /**
+   * Write the outcome into this existing row instead of creating one. The
+   * custom send route inserts a `pending` row first, as its idempotency lock.
+   */
+  logId?: string;
+  /**
+   * Refuse rather than fall back to the shared pool when the Application has
+   * no credentials of its own. Custom templates set it: the route checks the
+   * transport first, and this closes the window where credentials are removed
+   * between that check and the send.
+   */
+  requireCustomTransport?: boolean;
 }
 
 /**
@@ -236,9 +262,89 @@ function emailConfig(application: Application): EmailConfig {
   return (application.emailConfig ?? {}) as EmailConfig;
 }
 
-function fromHeader(address: string, name: string | undefined): string {
-  if (!name) return address;
-  return `${name} <${address}>`;
+/**
+ * The Application's sender identity, for anything that renders mail about it.
+ *
+ * @example
+ * ```ts
+ * const { supportEmail } = emailSenderIdentity(application);
+ * ```
+ */
+export function emailSenderIdentity(application: Application): {
+  fromName: string | null;
+  replyTo: string | null;
+  supportEmail: string | null;
+} {
+  const cfg = emailConfig(application);
+  return {
+    fromName: cfg.fromName ?? null,
+    replyTo: cfg.replyTo ?? null,
+    supportEmail: cfg.supportEmail ?? null,
+  };
+}
+
+/**
+ * Connect to an address the SSRF guard approved rather than to the hostname,
+ * which nodemailer would resolve again and a rebinding record could answer
+ * with an internal address. `servername` keeps SNI and certificate checks on
+ * the hostname the operator configured.
+ *
+ * IPv4 first: the lookup returns addresses in resolver order, and an AAAA
+ * record listed first would break sending from a host with no IPv6 route.
+ */
+export function pinnedSmtpHost(
+  host: string,
+  approvedAddresses: readonly string[],
+): { host: string; servername?: string } {
+  const pinned = approvedAddresses.find((a) => isIP(a) === 4) ?? approvedAddresses[0];
+  if (pinned === undefined) return { host };
+  return isIP(host) === 0 ? { host: pinned, servername: host } : { host: pinned };
+}
+
+/** RFC 5322 `specials`: a display name containing one must be a quoted string. */
+const DISPLAY_NAME_SPECIALS = /[()<>[\]:;@\\,."]/;
+
+/**
+ * Control characters, CR and LF among them. In a header value they end the
+ * header and let the rest of the value be read as new headers (`Bcc:` and the
+ * like), so a stored value containing one is refused and a sent one stripped.
+ */
+function isControlChar(ch: string): boolean {
+  const code = ch.charCodeAt(0);
+  return code < 0x20 || code === 0x7f;
+}
+
+/** True when `value` can go into a mail header without starting a new one. */
+export function isHeaderSafe(value: string): boolean {
+  return ![...value].some(isControlChar);
+}
+
+/** Each run of control characters becomes one space. */
+function stripHeaderControls(value: string): string {
+  let out = '';
+  let inRun = false;
+  for (const ch of value) {
+    if (isControlChar(ch)) {
+      if (!inRun) out += ' ';
+      inRun = true;
+    } else {
+      out += ch;
+      inRun = false;
+    }
+  }
+  return out;
+}
+
+/**
+ * `Name <address>`, quoting the name when it contains a special. Unquoted,
+ * `Acme, Inc. <a@x>` parses as two mailboxes, and a name with `<` or `@` can
+ * make a client show a different sender.
+ */
+export function fromHeader(address: string, name: string | undefined): string {
+  const clean = name === undefined ? undefined : stripHeaderControls(name).trim();
+  if (!clean) return address;
+  const display = DISPLAY_NAME_SPECIALS.test(clean) ? `"${clean.replace(/["\\]/g, '\\$&')}"` : clean;
+  return `${display} <${address}>`;
 }
 
 interface FromIdentity {
@@ -264,6 +370,7 @@ async function sendVia(
           html: input.html,
           ...(input.text !== undefined && { text: input.text }),
           ...(from.replyTo !== undefined && { replyTo: from.replyTo }),
+          ...(input.headers !== undefined && { headers: input.headers }),
         }),
       );
       if (res.error) return { kind: 'error', message: res.error.message };
@@ -282,8 +389,9 @@ async function sendVia(
   // connection outcome from the API response: an internal port scanner over
   // the public API. Apply the guard here too, not just next to the webhook
   // code where it originally lived.
+  let approvedAddresses: string[];
   try {
-    await assertSafeHost(creds.host);
+    approvedAddresses = await assertSafeHost(creds.host);
   } catch {
     return {
       kind: 'error',
@@ -295,7 +403,7 @@ async function sendVia(
   }
   try {
     const transport = nodemailer.createTransport({
-      host: creds.host,
+      ...pinnedSmtpHost(creds.host, approvedAddresses),
       port: creds.port,
       secure: creds.secure,
       auth: { user: creds.user, pass: creds.pass },
@@ -323,6 +431,7 @@ async function sendVia(
           html: input.html,
           ...(input.text !== undefined && { text: input.text }),
           ...(from.replyTo !== undefined && { replyTo: from.replyTo }),
+          ...(input.headers !== undefined && { headers: input.headers }),
         }),
       );
     } catch (e) {
@@ -374,9 +483,11 @@ function classifySmtpError(e: unknown): string {
  * `Acme (via Rekey)` is the convention Google Groups and GitHub use for the
  * same situation.
  *
- * An operator who sets their own `fromName` gets it verbatim; this is only
- * the default. An Application with BYO credentials never reaches here: that
- * mail leaves their own domain, so there is nothing to disclose.
+ * An operator's own `fromName` replaces the Application name but keeps the
+ * suffix: the shared address is the deployment's, and a bare custom name there
+ * would let any customer send as anyone, the deployment included. An
+ * Application with BYO credentials never reaches here: that mail leaves its
+ * own domain, so it goes out under its `fromName` verbatim.
  *
  * The suffix is the deployment's own name, never a hardcoded "Rekey". A
  * self-hoster's shared pool is theirs, not ours.
@@ -386,11 +497,11 @@ export function pooledFromName(
   /** Injectable so the rule is testable without a deployment-wide env var. */
   deploymentName: string | undefined = env.RESEND_DEFAULT_FROM_NAME,
 ): string | undefined {
-  const configured = emailConfig(application).fromName;
-  if (configured) return configured;
+  const deployment = deploymentName?.trim();
+  const configured = emailConfig(application).fromName?.trim();
+  if (configured) return deployment ? `${configured} (via ${deployment})` : configured;
   const appName = application.name?.trim();
   if (!appName) return deploymentName;
-  const deployment = deploymentName?.trim();
   // Nothing to disclose if the Application IS the deployment brand.
   if (!deployment || deployment.toLowerCase() === appName.toLowerCase()) return appName;
   return `${appName} (via ${deployment})`;
@@ -400,6 +511,7 @@ export function pooledFromName(
 async function sendDefaultResend(
   input: SendInput,
   fromName: string | undefined = env.RESEND_DEFAULT_FROM_NAME,
+  replyTo?: string,
 ): Promise<SendOutcome> {
   if (!env.RESEND_DEFAULT_API_KEY || !env.RESEND_DEFAULT_FROM) {
     return { kind: 'no_transport' };
@@ -415,6 +527,7 @@ async function sendDefaultResend(
         subject: input.subject,
         html: input.html,
         ...(input.text !== undefined && { text: input.text }),
+        ...(replyTo !== undefined && { replyTo }),
       }),
     );
     if (res.error) return { kind: 'error', message: res.error.message };
@@ -472,23 +585,27 @@ async function recordLog(args: {
   subject: string;
   eventKey: string | null;
   outcome: SendOutcome;
+  meta?: SendLogMeta | undefined;
 }): Promise<void> {
   const via = args.outcome.kind === 'sent' ? args.outcome.via : 'none';
   const status = args.outcome.kind; // 'sent' | 'no_transport' | 'error'
   const messageId = args.outcome.kind === 'sent' ? args.outcome.messageId : null;
   const error = args.outcome.kind === 'error' ? args.outcome.message : null;
+  const result = { subject: args.subject, via, status, messageId, error };
   try {
+    if (args.meta?.logId !== undefined) {
+      await prisma.emailLog.update({ where: { id: args.meta.logId }, data: result });
+      return;
+    }
     await prisma.emailLog.create({
       data: {
         tenantId: args.tenantId,
         applicationId: args.applicationId,
         toAddress: args.to.toLowerCase(),
-        subject: args.subject,
         eventKey: args.eventKey,
-        via,
-        status,
-        messageId,
-        error,
+        customTemplateKey: args.meta?.customTemplateKey ?? null,
+        customTemplateVersion: args.meta?.customTemplateVersion ?? null,
+        ...result,
       },
     });
   } catch {
@@ -574,6 +691,7 @@ export async function sendEmail(
       subject: input.subject,
       eventKey: meta?.eventKey ?? null,
       outcome,
+      meta,
     });
     return outcome;
   }
@@ -582,7 +700,13 @@ export async function sendEmail(
   const cfg = emailConfig(application);
 
   let outcome: SendOutcome;
-  if (creds) {
+  if (!creds && meta?.requireCustomTransport === true) {
+    outcome = {
+      kind: 'error',
+      message:
+        'Not sent: this application has no email credentials of its own, and custom templates never use the shared pool.',
+    };
+  } else if (creds) {
     if (!cfg.fromAddress) {
       outcome = {
         kind: 'error',
@@ -590,16 +714,19 @@ export async function sendEmail(
           'Application has BYO email credentials but no `fromAddress` in emailConfig. Set it via Panel → Application → Email.',
       };
     } else {
+      const name = input.fromName ?? cfg.fromName;
       outcome = await sendVia(creds, input, {
         address: cfg.fromAddress,
-        ...(cfg.fromName !== undefined && { name: cfg.fromName }),
+        ...(name !== undefined && { name }),
         ...(cfg.replyTo !== undefined && { replyTo: cfg.replyTo }),
       });
     }
   } else {
     // Shared pool: the recipient is told which Application this is about, and
     // that it left the deployment's domain rather than that Application's.
-    outcome = await sendDefaultResend(input, pooledFromName(application));
+    // Reply-To is safe to honour here: it only decides where a reply goes, and
+    // the From line above still names the deployment that sent it.
+    outcome = await sendDefaultResend(input, pooledFromName(application), cfg.replyTo);
   }
 
   await recordLog({
@@ -609,6 +736,7 @@ export async function sendEmail(
     subject: input.subject,
     eventKey: meta?.eventKey ?? null,
     outcome,
+    meta,
   });
   return outcome;
 }

@@ -6,8 +6,12 @@
  * and the dedicated routes cannot drift apart.
  */
 
-import type { Application } from '@prisma/client';
-import { BillingConfigSchema } from '@rekey.dev/shared-types';
+import type { Application, Subscription } from '@prisma/client';
+import {
+  BillingConfigSchema,
+  type BillingProviderCapabilities,
+  type SelfSubscriptionMetadata,
+} from '@rekey.dev/shared-types';
 import { billingService } from './billing.service.js';
 import { getModule } from './providers/registry.js';
 import { organizationsService } from '../organizations/organizations.service.js';
@@ -55,9 +59,62 @@ export async function billingSubjectOrganization(
 }
 
 /**
+ * A subscription as its holder may see it, field by field.
+ *
+ * Picked rather than spread, down to the metadata keys, so neither the rest of
+ * `metadata` (the operator's grant note, retired checkout sessions, the
+ * provider a row moved from) nor a column added to `Subscription` later
+ * reaches a browser by default.
+ * `providerCapabilities` lets a portal ask what the provider holding this row
+ * can do (an inbound-only one cannot be cancelled here) instead of matching on
+ * the provider's name.
+ */
+export function toSelfSubscription(sub: Subscription): {
+  id: string;
+  applicationId: string;
+  endUserId: string;
+  beneficiaryOrgId: string | null;
+  planId: string;
+  status: Subscription['status'];
+  trialEndsAt: Date | null;
+  currentPeriodEnd: Date | null;
+  cancelAt: Date | null;
+  canceledAt: Date | null;
+  provider: string | null;
+  providerCapabilities: BillingProviderCapabilities | null;
+  providerSubId: string | null;
+  metadata: SelfSubscriptionMetadata;
+  createdAt: Date;
+  updatedAt: Date;
+} {
+  const meta = (sub.metadata ?? {}) as Record<string, unknown>;
+  return {
+    id: sub.id,
+    applicationId: sub.applicationId,
+    endUserId: sub.endUserId,
+    beneficiaryOrgId: sub.beneficiaryOrgId,
+    planId: sub.planId,
+    status: sub.status,
+    trialEndsAt: sub.trialEndsAt,
+    currentPeriodEnd: sub.currentPeriodEnd,
+    cancelAt: sub.cancelAt,
+    canceledAt: sub.canceledAt,
+    provider: sub.provider,
+    providerCapabilities: (sub.provider !== null && getModule(sub.provider)?.capabilities) || null,
+    providerSubId: sub.providerSubId,
+    metadata: {
+      ...(typeof meta.checkoutSessionId === 'string' && { checkoutSessionId: meta.checkoutSessionId }),
+      ...(meta.oneTime === true && { oneTime: true }),
+    },
+    createdAt: sub.createdAt,
+    updatedAt: sub.updatedAt,
+  };
+}
+
+/**
  * The current subscription exactly as `GET /billing/subscription` serves it:
  * `billingService.getCurrentSubscription` (live rows ranked, the free plan
- * only as a fallback) plus `providerCapabilities`.
+ * only as a fallback) through {@link toSelfSubscription}.
  */
 export async function readCurrentSubscription(
   application: Application,
@@ -71,15 +128,7 @@ export async function readCurrentSubscription(
     { ...endUser, passwordHash: null } as never,
     opts,
   );
-  // `providerCapabilities` lets a portal ask what the provider holding this
-  // row can do (an inbound-only one cannot be cancelled here) instead of
-  // matching on the provider's name.
-  return (
-    sub && {
-      ...sub,
-      providerCapabilities: (sub.provider !== null && getModule(sub.provider)?.capabilities) || null,
-    }
-  );
+  return sub && toSelfSubscription(sub);
 }
 
 /** `data` of `GET /billing/entitlements`: the resolved union of the caller's benefits. */
@@ -121,4 +170,4 @@ export const RESOLVED_ENTITLEMENTS_SCHEMA: JsonSchema = {
 };
 
 /** `data` of `GET /billing/subscription`: the current Subscription, or `null`. */
-export const NULLABLE_SUBSCRIPTION_SCHEMA: JsonSchema = { nullable: true, allOf: [ref('Subscription')] };
+export const NULLABLE_SUBSCRIPTION_SCHEMA: JsonSchema = { nullable: true, allOf: [ref('SelfSubscription')] };

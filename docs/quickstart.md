@@ -239,7 +239,7 @@ covers the drop-in `<SignIn />` / `<SignUp />` / `<UserButton />` family.
 
 ## 6 — Password reset & magic links: branch on `emailSent`
 
-`auth.requestPasswordReset` and `auth.requestMagicLink` (and `auth.sendVerificationEmail`) return **different shapes depending on whether Rekey could send the email itself** (BYO Resend credentials on the Application, or `RESEND_DEFAULT_*` env). They never throw for an unknown email — enumeration-safe by design.
+`auth.requestPasswordReset` and `auth.requestMagicLink` (and `auth.sendVerificationEmail`) return **different shapes depending on whether Rekey could send the email itself** (BYO Resend credentials on the Application, or `RESEND_DEFAULT_*` env). They never throw for an unknown email. A secret-key caller (your server) is told, with `delivered: false` on password reset; a publishable-key browser caller always gets the same body. Keep that difference out of what you render.
 
 | Case | `delivered` | `emailSent` | token field (`resetToken` / `magicLinkToken`) | Your job |
 |---|---|---|---|---|

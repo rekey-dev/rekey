@@ -11,7 +11,7 @@
  * change (already-ACTIVE row, duplicate providerPaymentId) must NOT re-emit.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Prisma } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
 import Stripe from 'stripe';
@@ -20,6 +20,8 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
 import { webhookService } from '../src/modules/webhooks/webhook.service.js';
+import { entitlementsService } from '../src/modules/billing/entitlements.service.js';
+import { enqueueSubscriptionEvent } from '../src/modules/billing/webhooks/billing-events.js';
 import type { WebhookDelivery } from '@prisma/client';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
@@ -43,7 +45,7 @@ async function waitForDeliveries(
   timeoutMs = 4000,
 ): Promise<WebhookDelivery[]> {
   const deadline = Date.now() + timeoutMs;
-  let rows: WebhookDelivery[] = [];
+  let rows: WebhookDelivery[];
   for (;;) {
     rows = await prisma.webhookDelivery.findMany({ where: { endpointId, eventType } });
     if (rows.length >= count || Date.now() > deadline) return rows;
@@ -576,6 +578,64 @@ describe('Outbound billing webhook events', () => {
       expect(envelope.data.subscription.entitlements).toContainEqual(
         expect.objectContaining({ key: 'max_widgets', value: '5' }),
       );
+    });
+
+    it('omits the field when the grant cannot be resolved, instead of announcing an empty one (#290)', async () => {
+      // An empty array means "grants nothing", and a consumer provisioning
+      // against it would take a paying customer's access away over a failed
+      // lookup. The activation itself still commits and is still announced.
+      const spy = vi
+        .spyOn(entitlementsService, 'resolveForSubscription')
+        .mockRejectedValue(new Error('simulated resolution failure'));
+      const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let envelope: WithEntitlements;
+      try {
+        envelope = await activate('obe-ent-unresolved');
+      } finally {
+        spy.mockRestore();
+        quiet.mockRestore();
+      }
+
+      expect(envelope.data.subscription).not.toHaveProperty('entitlements');
+      const sub = await prisma.subscription.findFirstOrThrow({
+        where: { metadata: { path: ['checkoutSessionId'], equals: 'cs_obe-ent-unresolved' } },
+      });
+      expect(sub.status).toBe('ACTIVE');
+    });
+
+    it('does not send entitlements_updated at all when the grant cannot be resolved', async () => {
+      // The grant is that event's only news. Sent without it, it says nothing;
+      // sent with `[]`, it says the customer lost everything.
+      const b = await bootstrap('obe-ent-upd-unresolved', 'stripe');
+      const sub = await prisma.subscription.create({
+        data: { applicationId: b.applicationId, endUserId: b.endUserId, planId: b.planId, status: 'ACTIVE' },
+      });
+      const spy = vi
+        .spyOn(entitlementsService, 'resolveForSubscription')
+        .mockRejectedValue(new Error('simulated resolution failure'));
+      const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let updatedIds: string[];
+      let activatedIds: string[];
+      try {
+        updatedIds = await prisma.$transaction((tx) =>
+          enqueueSubscriptionEvent(tx, 'subscription.entitlements_updated', sub.id),
+        );
+        activatedIds = await prisma.$transaction((tx) =>
+          enqueueSubscriptionEvent(tx, 'subscription.activated', sub.id),
+        );
+      } finally {
+        spy.mockRestore();
+        quiet.mockRestore();
+      }
+
+      expect(updatedIds).toEqual([]);
+      expect(
+        await prisma.webhookDelivery.count({
+          where: { endpointId: b.endpointId, eventType: 'subscription.entitlements_updated' },
+        }),
+      ).toBe(0);
+      // A status event still goes out, without the field.
+      expect(activatedIds).toHaveLength(1);
     });
   });
 });

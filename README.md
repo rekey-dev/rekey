@@ -2,9 +2,9 @@
 
 Self-hostable, multi-tenant auth and billing for the apps you run. User auth and provider-agnostic billing share one tenant model, behind one API, in one `docker compose --profile full up`.
 
-> **Status:** Public beta. [MIT licensed](LICENSE).
+> **Status:** 2.1.0 is the latest stable release. 2.2.0 is in release candidates, with its stable release to follow. [MIT licensed](LICENSE).
 >
-> **ReliPay is now Rekey.** Packages moved to `@rekey.dev/*` (the old `@relipay/*` packages are deprecated), environment variables renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read — set `REKEY_*`), and relipay.dev (the old domain) will redirect to rekey.dev once the domain migration completes.
+> **ReliPay is now Rekey.** Packages moved to `@rekey.dev/*` (the old `@relipay/*` packages are deprecated), environment variables renamed `RELIPAY_*` → `REKEY_*` (as of 2.0.0 the old names are no longer read, so set `REKEY_*`), and relipay.dev (the old domain) will redirect to rekey.dev once the domain migration completes.
 
 ## For AI agents
 
@@ -112,6 +112,7 @@ Docs (`docs/`):
 | [react-components.md](docs/react-components.md) | The drop-in React component library |
 | [billing.md](docs/billing.md) · [billing-providers.md](docs/billing-providers.md) · [coupons.md](docs/coupons.md) | Plans, checkout, providers, discounts |
 | [webhooks.md](docs/webhooks.md) | Outbound events, signature verification, retries |
+| [email-templates.md](docs/email-templates.md) | Custom transactional email: register, publish, preview, send by key from your backend |
 | [devices.md](docs/devices.md) | Device-bound sessions, the `max_devices` entitlement, licence seats |
 | [external-billing.md](docs/external-billing.md) | Bring your own billing: an inbound-only provider fed by your own system's events |
 | [portal.md](docs/portal.md) | Hosted customer self-service billing portal |
@@ -131,6 +132,7 @@ Billing is **off** on a new Application (`billingConfig.enabled` defaults to
 `false`) — every billing endpoint answers `403 BILLING_DISABLED` until an
 operator turns it on in Panel → Application → Billing.
 
+The core modules under `apps/api/src/modules/` (including `auth`, `billing`, `plans`, `api-keys` and `applications`) ship their own `AGENTS.md` describing what the module is for and what an agent should not do there. If a module has none, start from its `*.routes.ts` file.
 
 ## Known dev-only behaviours
 

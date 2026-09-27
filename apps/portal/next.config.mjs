@@ -3,7 +3,10 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Conservative on purpose. `frame-ancestors 'none'` plus `X-Frame-Options`
+// Conservative on purpose. The Content-Security-Policy header is set by
+// src/middleware.ts, not here, so the checkout page's own policy is not
+// joined by a second one from this file.
+// `frame-ancestors 'none'` plus `X-Frame-Options`
 // closes the clickjacking hole (this console was framable); `Referrer-Policy:
 // no-referrer` stops a token-bearing URL leaking to a third party through the
 // Referer header, which matters because reset / invite / MFA links arrive with
@@ -23,7 +26,6 @@ const securityHeaders = [
     key: 'Permissions-Policy',
     value: 'camera=(), microphone=(), geolocation=(), interest-cohort=()',
   },
-  { key: 'Content-Security-Policy', value: "frame-ancestors 'none'" },
 ];
 
 /** @type {import('next').NextConfig} */
@@ -37,6 +39,9 @@ const nextConfig = {
   transpilePackages: ['@rekey.dev/shared-types', '@rekey.dev/node', '@rekey.dev/nextjs'],
   reactStrictMode: true,
   poweredByHeader: false,
+  // The portal and the checkout page have separate root layouts, so an
+  // unmatched URL needs a 404 that brings its own document.
+  experimental: { globalNotFound: true },
   async headers() {
     return [{ source: '/:path*', headers: securityHeaders }];
   },

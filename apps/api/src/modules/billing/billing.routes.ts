@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { billingService } from './billing.service.js';
 import { subscriptionGrantsService } from './grant.service.js';
@@ -13,16 +13,27 @@ import {
   RESOLVED_ENTITLEMENTS_SCHEMA,
   billingSubjectOrganization,
   readCurrentSubscription,
+  toSelfSubscription,
 } from './session-reads.js';
 import { entitlementsService } from './entitlements.service.js';
 import { serializePlans } from '../plans/plan-dto.js';
 import { resolveTrialEligibility, trialSubjectKey } from './trial-eligibility.service.js';
 import { RekeyError } from '../../lib/error.js';
 import { prisma } from '../../lib/prisma.js';
-import { BillingConfigSchema } from '@rekey.dev/shared-types';
+import {
+  BillingConfigSchema,
+  type CheckoutFellBackWarning,
+  type CheckoutReadinessCheck,
+  type CheckoutReturnUrlWarning,
+  type CheckoutWarning,
+} from '@rekey.dev/shared-types';
+import { getRedis } from '../../lib/redis.js';
+import { admitCheckout, releaseCheckout } from './checkout/creation-limit.js';
 import { organizationsService } from '../organizations/organizations.service.js';
 import { ok, okPage, errs, ref } from '../../lib/openapi.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
+import { recordSecurityEvent, requestContext } from '../../lib/security-events.js';
+import { checkReturnUrls } from './checkout-return-url.js';
 
 /**
  * The auth/gate failure modes shared by every route behind
@@ -85,7 +96,65 @@ const CheckoutBody = z.object({
    * A per-request acknowledgement from the call site that rendered the price.
    */
   allowWithoutTrial: z.boolean().optional(),
+  mode: z.enum(['redirect', 'embedded']).optional(),
 });
+
+/**
+ * An EMBEDDED checkout served on the provider's page because a readiness
+ * check failed. The security event is what the panel's fallback count reads.
+ */
+function reportEmbeddedFallback(
+  req: FastifyRequest,
+  failed: CheckoutReadinessCheck,
+  context: { provider: string; paymentMode: string; checkoutSessionId: string },
+): CheckoutFellBackWarning {
+  const app = req.application!;
+  req.log.warn(
+    { applicationId: app.id, check: failed.id, ...context, code: 'CHECKOUT_EMBEDDED_FELL_BACK' },
+    'Rekey checkout page unavailable for this checkout, served on the provider page',
+  );
+  void recordSecurityEvent({
+    type: 'app.checkout_embedded_fallback',
+    actorType: 'end_user',
+    actorId: req.endUser!.id,
+    tenantId: app.tenantId,
+    applicationId: app.id,
+    ...requestContext(req),
+    metadata: { check: failed.id, message: failed.message, fix: failed.fix, ...context },
+  });
+  // The check's own message and fix stay in the audit log above: this warning
+  // can reach a browser, and they name internal URLs, plan slugs and dates.
+  return {
+    code: 'CHECKOUT_EMBEDDED_FELL_BACK',
+    check: failed.id,
+    message: "The Rekey checkout page could not take this checkout, so `url` is the provider's page.",
+    fix: `The Application's operator can see why ("${failed.id}") in Panel → Application → Billing → Checkout page.`,
+  };
+}
+
+/**
+ * Log an unregistered checkout return URL and leave a security event the
+ * panel's Billing page reads, so the operator hears about it before the
+ * release that refuses it.
+ */
+function reportUnregisteredReturnUrls(req: FastifyRequest, warnings: CheckoutReturnUrlWarning[]): void {
+  const app = req.application!;
+  const origins = [...new Set(warnings.map((w) => w.origin))];
+  const fields = warnings.map((w) => w.field);
+  req.log.warn(
+    { applicationId: app.id, origins, fields, code: 'CHECKOUT_RETURN_URL_UNREGISTERED' },
+    'checkout return URL on an unregistered origin (allowed for now, refused from the next minor)',
+  );
+  void recordSecurityEvent({
+    type: 'app.checkout_return_url_unregistered',
+    actorType: 'end_user',
+    actorId: req.endUser!.id,
+    tenantId: app.tenantId,
+    applicationId: app.id,
+    ...requestContext(req),
+    metadata: { origins, fields },
+  });
+}
 
 const EntitlementsQuery = z.object({ organizationId: z.string().min(1).optional() });
 
@@ -143,7 +212,11 @@ const PaymentsQuery = z.object({
 });
 
 const CancelBody = z
-  .object({ atPeriodEnd: z.boolean().optional(), organizationId: z.string().min(1).optional() })
+  .object({
+    atPeriodEnd: z.boolean().optional(),
+    organizationId: z.string().min(1).optional(),
+    subscriptionId: z.string().min(1).max(64).optional(),
+  })
   .default({});
 
 /** Public billing surface, Application API key auth, optionally + user session. */
@@ -455,7 +528,10 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           'what a customer used to be on and when it ended, instead of showing a former ' +
           'subscriber the same empty state as someone who never subscribed. The flag can only ' +
           'turn a null into a row: when a live subscription exists it is still the one ' +
-          'returned. Requires the user JWT in X-Rekey-User-Token.',
+          'returned. A caller holding several live subscriptions gets one: a paid plan before ' +
+          'the free tier, then the most recently created (ties broken by id). ' +
+          "`GET /billing/subscriptions` lists them all. The response never carries the row's " +
+          '`metadata`. Requires the user JWT in X-Rekey-User-Token.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         querystring: {
           type: 'object',
@@ -503,6 +579,59 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.get(
+    '/subscriptions',
+    {
+      onRequest: [requirePublishableOrSecretKey, requireBillingEnabled, requireScope('billing:read'), requireUserSession],
+      schema: {
+        tags: ['Public · Billing'],
+        summary: 'List every live subscription of the caller (or of an org)',
+        description:
+          'Every ACTIVE, TRIALING and PAST_DUE subscription of the calling end-user, or of ' +
+          '`?organizationId=` (member-only) on an org-billed app. A buyer can hold several at ' +
+          'once, for instance two plans bought separately, and `GET /billing/subscription` ' +
+          'returns only one of them. Items are in the order that route ranks them: paid plans ' +
+          'before the free tier, newest first within each, so `items[0]` is what it returns. ' +
+          'At most 100 rows, the newest; a subject holds at most one row per plan. ' +
+          'Read this before offering a checkout, so a buyer is never offered a plan they already ' +
+          'hold. Requires the user JWT in X-Rekey-User-Token.',
+        security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
+        querystring: { type: 'object', properties: { organizationId: { type: 'string' } } },
+        response: {
+          200: ok(
+            {
+              type: 'object',
+              properties: { items: { type: 'array', items: ref('SelfSubscription') } },
+              required: ['items'],
+            },
+            'The live subscriptions, current one first. At most 100.',
+          ),
+          ...errs({
+            ...USER_READ_GATE_ERRORS,
+            403:
+              USER_READ_GATE_ERRORS[403] +
+              ' ORGANIZATION_NOT_MEMBER: `organizationId` was passed but the caller is not a ' +
+              'member of that organization.',
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { organizationId } = z.object({ organizationId: z.string().min(1).optional() }).parse(req.query);
+      if (organizationId) {
+        await organizationsService.requireMembership({
+          application: req.application!,
+          actorEndUserId: req.endUser!.id,
+          organizationId,
+        });
+      }
+      const rows = await billingService.listLiveSubscriptions(req.application!, req.endUser!, {
+        ...(organizationId && { organizationId }),
+      });
+      return { success: true, data: { items: rows.map(toSelfSubscription) } };
+    },
+  );
+
+  app.get(
     '/payments',
     {
       onRequest: [requirePublishableOrSecretKey, requireBillingEnabled, requireScope('billing:read'), requireUserSession],
@@ -533,7 +662,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
                 id: { type: 'string' },
                 amount: { type: 'integer', description: 'Smallest currency unit.' },
                 currency: { type: 'string' },
-                status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED'] },
+                status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED', 'PARTIALLY_REFUNDED'] },
                 description: { type: 'string', nullable: true },
                 createdAt: { type: 'string', format: 'date-time' },
                 subscriptionId: { type: 'string', nullable: true },
@@ -575,8 +704,11 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
       config: { idempotency: true },
       schema: {
         tags: ['Public · Billing'],
-        summary: "Cancel the calling end-user's current subscription",
+        summary: "Cancel the calling end-user's current subscription, or a named one",
         description:
+          'Cancels the subscription `GET /billing/subscription` returns, or the one ' +
+          '`subscriptionId` names when the caller holds several (list them with ' +
+          '`GET /billing/subscriptions`). ' +
           'Default = cancel at period end (provider-backed ACTIVE subscriptions stay ACTIVE ' +
           'with `cancelAt` set until the provider webhook terminates them). Pass ' +
           '`{"atPeriodEnd": false}` to cancel immediately. PENDING checkouts and ' +
@@ -590,13 +722,24 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
               type: 'boolean',
               description: 'true (default) = stop at period end; false = stop immediately.',
             },
+            organizationId: {
+              type: 'string',
+              description: "Cancel an organization's subscription. Requires OWNER or ADMIN of it.",
+            },
+            subscriptionId: {
+              type: 'string',
+              description:
+                'Cancel this subscription of the billing subject instead of the current one. An ' +
+                'id belonging to anyone else answers 404.',
+            },
           },
         },
         response: {
-          200: ok(ref('Subscription'), 'The (now canceling or canceled) subscription.'),
+          200: ok(ref('SelfSubscription'), 'The (now canceling or canceled) subscription.'),
           ...errs({
             400:
-              'VALIDATION_ERROR — the body failed schema validation; or IDEMPOTENCY_KEY_INVALID ' +
+              'VALIDATION_ERROR — the body failed schema validation; or CHECKOUT_RETURN_URL_INVALID, ' +
+              'meaning `successUrl` or `cancelUrl` is not an http(s) URL; or IDEMPOTENCY_KEY_INVALID ' +
               '— the Idempotency-Key header is empty or exceeds 200 characters.',
             ...USER_WRITE_GATE_ERRORS,
             403:
@@ -604,11 +747,14 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
               ' ORGANIZATION_NOT_MEMBER — `organizationId` was passed but the caller is not a ' +
               'member of it; or ORGANIZATION_ROLE_INSUFFICIENT — canceling an organization\'s ' +
               'subscription requires OWNER or ADMIN.',
-            404: 'SUBSCRIPTION_NOT_FOUND — the caller has no active/pending/past-due subscription to cancel.',
+            404:
+              'SUBSCRIPTION_NOT_FOUND: the caller has no active/pending/past-due subscription to ' +
+              "cancel, or `subscriptionId` is not one of the billing subject's subscriptions.",
             409:
               'IDEMPOTENCY_KEY_IN_FLIGHT — a request with this Idempotency-Key is still being ' +
               'processed; or IDEMPOTENCY_KEY_REUSED — the key was already used for a different ' +
-              'method, path, or body.',
+              'method, path, or body; or SUBSCRIPTION_CHECKOUT_UNFINISHED: `subscriptionId` ' +
+              'names a checkout that was never completed.',
           }),
         },
       },
@@ -632,9 +778,10 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         {
           ...(body.atPeriodEnd !== undefined && { atPeriodEnd: body.atPeriodEnd }),
           ...(body.organizationId && { organizationId: body.organizationId }),
+          ...(body.subscriptionId && { subscriptionId: body.subscriptionId }),
         },
       );
-      return { success: true, data: subscription };
+      return { success: true, data: toSelfSubscription(subscription) };
     },
   );
 
@@ -649,7 +796,17 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         summary: 'Start a checkout session for the current end-user',
         description:
           'Creates (or reuses) a PENDING Subscription locally and returns a provider-hosted ' +
-          'checkout URL. Activation happens via the provider\'s webhook, not synchronously here.',
+          'checkout URL. Activation happens via the provider\'s webhook, not synchronously here.\n\n' +
+          '`successUrl` and `cancelUrl` should be on an origin the Application has registered ' +
+          '(its App URL, a redirect URL, or its hosted portal). An unregistered origin is allowed ' +
+          'for now and reported in `warnings` as `CHECKOUT_RETURN_URL_UNREGISTERED`; the next ' +
+          'minor release refuses it. A non-http(s) URL is refused with `CHECKOUT_RETURN_URL_INVALID`.\n\n' +
+          'When the Application has the Rekey checkout page switched on for this checkout\'s payment ' +
+          'mode (the mode of the chosen provider\'s credentials), `url` is that page and `mode` is ' +
+          '`embedded`. If a readiness check fails, the checkout falls back to the provider\'s page ' +
+          'with a `CHECKOUT_EMBEDDED_FELL_BACK` warning, or is refused, per the Application\'s ' +
+          'failure behaviour. On the Rekey page an unregistered return URL is always a fallback or ' +
+          'a refusal, never a warning.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         body: {
           type: 'object',
@@ -676,18 +833,27 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
                 'for a plan they were shown as free. Send it only once the buyer has been told ' +
                 'they will be charged today, and with a NEW Idempotency-Key.',
             },
+            mode: {
+              type: 'string',
+              enum: ['redirect', 'embedded'],
+              description:
+                '`redirect` sends this checkout to the provider\'s own page even when the Application ' +
+                'has the Rekey checkout page switched on. `embedded`, or omitting it, follows the ' +
+                "Application's setting for this checkout's payment mode.",
+            },
           },
         },
         response: {
           200: ok(ref('CheckoutResult'), 'The provider checkout session.'),
           ...errs({
             400:
-              'VALIDATION_ERROR — the body failed schema validation; or IDEMPOTENCY_KEY_INVALID ' +
+              'VALIDATION_ERROR — the body failed schema validation; or CHECKOUT_RETURN_URL_INVALID, ' +
+              'meaning `successUrl` or `cancelUrl` is not an http(s) URL; or IDEMPOTENCY_KEY_INVALID ' +
               '— the Idempotency-Key header is empty or exceeds 200 characters; or ' +
               'BILLING_ORGANIZATION_REQUIRED — this Application bills per organization and no ' +
               '`organizationId` was given; or PLAN_INACTIVE — the plan is not open for new ' +
               'sign-ups; or COUPON_INACTIVE / COUPON_NOT_YET_STARTED / COUPON_EXPIRED / ' +
-              'COUPON_NOT_APPLICABLE / COUPON_CURRENCY_MISMATCH / COUPON_REDEMPTION_LIMIT_REACHED ' +
+              'COUPON_NOT_APPLICABLE / COUPON_CURRENCY_REQUIRED / COUPON_CURRENCY_MISMATCH / COUPON_REDEMPTION_LIMIT_REACHED ' +
               '/ COUPON_USER_LIMIT_REACHED / COUPON_NO_DISCOUNT / COUPON_FULL_DISCOUNT_UNSUPPORTED ' +
               '— the coupon failed validation for this plan/user; or BILLING_CREDENTIALS_NOT_CONFIGURED ' +
               '— no provider is configured for this Application; or BILLING_PROVIDER_NOT_AVAILABLE ' +
@@ -717,13 +883,22 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
               'vs an organization), and one buyer holds a plan once — the checkout would move ' +
               'that subscription rather than start a second one; or ' +
               'COUPON_CHECKOUT_ALREADY_OPEN, meaning the caller already has an open checkout ' +
-              'holding this coupon.',
+              'holding this coupon; or CHECKOUT_EMBEDDED_NOT_READY, meaning the Application has ' +
+              'the Rekey checkout page switched on with the failure behaviour "refuse", and a ' +
+              'readiness check failed for this checkout (`fix` is that check\'s repair).',
+            429:
+              'RATE_LIMITED — too many requests; honour Retry-After. Or CHECKOUT_RATE_LIMITED — this ' +
+              'end-user has started 10 checkouts in the last hour or 30 in the last day; `fix` says when to retry.',
           }),
         },
       },
     },
     async (req) => {
       const body = CheckoutBody.parse(req.body);
+      const warnings = checkReturnUrls(req.application!, {
+        successUrl: body.successUrl,
+        cancelUrl: body.cancelUrl,
+      });
       const country = body.country ?? countryFromRequest(req.headers);
       if (body.organizationId) {
         // Only an OWNER/ADMIN of the org may spend on its behalf.
@@ -732,27 +907,60 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           ['OWNER', 'ADMIN'],
         );
       }
-      const result = await billingService.createCheckoutSession({
-        application: req.application!,
-        endUser: { ...req.endUser!, passwordHash: null } as never,
-        planSlug: body.planSlug,
-        successUrl: body.successUrl,
-        cancelUrl: body.cancelUrl,
-        ...(body.couponCode !== undefined && { couponCode: body.couponCode }),
-        // providerNameSchema guarantees a REGISTERED name; the credentials
-        // service's literal union is exactly the registered set today.
-        ...(body.provider !== undefined && { provider: body.provider as BillingProviderName }),
-        ...(country !== undefined && { country }),
-        ...(body.organizationId !== undefined && { beneficiaryOrgId: body.organizationId }),
-        ...(body.allowWithoutTrial !== undefined && { allowWithoutTrial: body.allowWithoutTrial }),
-      });
+      // Card testing needs a processor session per batch of attempts, so the
+      // number of checkouts one account may start is the brake. A checkout
+      // that fails creates no session, so its slot is given back.
+      const slot = await admitCheckout(
+        getRedis(),
+        {
+          applicationId: req.application!.id,
+          endUserId: req.endUser!.id,
+          clientIp: req.clientIpVouched ? req.ip : null,
+        },
+        req.log,
+      );
+      let result: Awaited<ReturnType<typeof billingService.createCheckoutSession>>;
+      try {
+        result = await billingService.createCheckoutSession({
+          application: req.application!,
+          endUser: { ...req.endUser!, passwordHash: null } as never,
+          planSlug: body.planSlug,
+          successUrl: body.successUrl,
+          cancelUrl: body.cancelUrl,
+          ...(body.couponCode !== undefined && { couponCode: body.couponCode }),
+          // providerNameSchema guarantees a REGISTERED name; the credentials
+          // service's literal union is exactly the registered set today.
+          ...(body.provider !== undefined && { provider: body.provider as BillingProviderName }),
+          ...(country !== undefined && { country }),
+          ...(body.organizationId !== undefined && { beneficiaryOrgId: body.organizationId }),
+          ...(body.allowWithoutTrial !== undefined && { allowWithoutTrial: body.allowWithoutTrial }),
+          ...(body.mode !== undefined && { mode: body.mode }),
+        });
+      } catch (e) {
+        await releaseCheckout(getRedis(), slot);
+        throw e;
+      }
+      if (warnings.length > 0) reportUnregisteredReturnUrls(req, warnings);
+      const allWarnings: CheckoutWarning[] = [...warnings];
+      if (result.fellBack !== null) {
+        allWarnings.push(
+          reportEmbeddedFallback(req, result.fellBack, {
+            provider: result.provider,
+            paymentMode: result.paymentMode,
+            checkoutSessionId: result.checkoutSessionId,
+          }),
+        );
+      }
       return {
         success: true,
         data: {
           url: result.url,
-          subscription: result.subscription,
+          subscription: toSelfSubscription(result.subscription),
           discountAmount: result.discountAmount,
           provider: result.provider,
+          warnings: allWarnings,
+          mode: result.embedded ? 'embedded' : 'redirect',
+          checkoutSessionId: result.checkoutSessionId,
         },
       };
     },
@@ -983,8 +1191,12 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           'LICENSE entitlement can be claimed once per calling end-user, across their personal ' +
           'account and every organization they administer. Activating it again for the ' +
           'beneficiary that holds the claim, after a cancellation, is allowed and issues nothing ' +
-          'new. Any other beneficiary is refused with `409 BILLING_FREE_TIER_ALREADY_CLAIMED`. A ' +
-          'free plan with only FEATURE or USAGE entitlements has no such limit.',
+          'new. Any other beneficiary is refused with `409 BILLING_FREE_TIER_ALREADY_CLAIMED`, or ' +
+          'with `409 BILLING_SUBSCRIPTION_SUBJECT_CONFLICT` when no claim was recorded but the ' +
+          "caller's live subscription to the plan is billed to another beneficiary. A free plan " +
+          'with only FEATURE or USAGE entitlements has no such limit: while the caller holds it ' +
+          'live for any beneficiary, activating it for another answers `200` and ' +
+          '`activated: false` with the existing subscription, unchanged.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         body: {
           type: 'object',
@@ -999,8 +1211,8 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           },
         },
         response: {
-          200: ok(ref('Subscription'), 'Already on the free tier; nothing changed.'),
-          201: ok(ref('Subscription'), 'Now on the free tier.'),
+          200: ok(ref('SelfSubscription'), 'Already on the free tier; nothing changed.'),
+          201: ok(ref('SelfSubscription'), 'Now on the free tier.'),
           ...errs({
             400:
               'BILLING_ORGANIZATION_REQUIRED — the Application bills per organization and none ' +
@@ -1013,7 +1225,10 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
               'BILLING_FREE_PLAN_NOT_FREE — the nominated default plan charges money, on its ' +
               'amount or per metered unit, so it cannot be self-activated. Use POST ' +
               '/api/v1/billing/checkout. Or BILLING_FREE_TIER_ALREADY_CLAIMED: the plan grants ' +
-              'credits or a licence and the caller already claimed it for another beneficiary.',
+              'credits or a licence and the caller already claimed it for another beneficiary. ' +
+              'Or BILLING_SUBSCRIPTION_SUBJECT_CONFLICT: the plan grants credits or a licence and ' +
+              'the caller already holds it live for a different billing subject (another ' +
+              'organization, or their personal account).',
           }),
         },
       },
@@ -1040,7 +1255,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
       });
       return reply.status(result.activated ? 201 : 200).send({
         success: true,
-        data: result.subscription,
+        data: toSelfSubscription(result.subscription),
       });
     },
   );

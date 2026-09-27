@@ -239,7 +239,7 @@ function localhostRefused(): TypeError {
 
 describe('GET /<slug>/session/refresh', () => {
   it('rotates once, sets both cookies scoped to the app, and returns to next', async () => {
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
     const res = await GET(refreshRequest('/acme?tab=billing'), ctx);
 
@@ -264,7 +264,7 @@ describe('GET /<slug>/session/refresh', () => {
     ['/acme-lookalike/x'],
     ['/acme/session/refresh?next=/acme'],
   ])('keeps an off-app or looping next (%j) inside /acme', async (next) => {
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
     const res = await GET(refreshRequest(next), ctx);
 
@@ -276,7 +276,7 @@ describe('GET /<slug>/session/refresh', () => {
   });
 
   it('a browser request that arrives after the rotation asks the API, and is never handed the new pair', async () => {
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
     await GET(refreshRequest('/acme'), ctx);
     // What the API says for a token it rotated moments ago.
@@ -294,7 +294,7 @@ describe('GET /<slug>/session/refresh', () => {
   });
 
   it('concurrent requests with the same cookie share one exchange', async () => {
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
     const [a, b] = await Promise.all([GET(refreshRequest('/acme'), ctx), GET(refreshRequest('/acme'), ctx)]);
 
@@ -306,7 +306,7 @@ describe('GET /<slug>/session/refresh', () => {
 
   it.each([502, 503, 504])('a proxy %i with no Rekey body keeps the cookies and answers 503', async (status) => {
     vi.stubGlobal('fetch', async () => new Response('<html>Bad Gateway</html>', { status }));
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
     const res = await GET(refreshRequest('/acme'), ctx);
 
@@ -317,7 +317,7 @@ describe('GET /<slug>/session/refresh', () => {
 
   it('a failed config lookup answers the 503 retry page and keeps the cookies', async () => {
     configDown = true;
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
     const res = await GET(refreshRequest('/acme'), ctx);
 
@@ -337,7 +337,7 @@ describe('GET /<slug>/session/refresh', () => {
     vi.stubGlobal('fetch', async () => {
       throw failure;
     });
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
     const res = await GET(refreshRequest('/acme'), ctx);
 
@@ -350,7 +350,7 @@ describe('GET /<slug>/session/refresh', () => {
     vi.stubGlobal('fetch', async () => {
       throw connectFailure('ECONNRESET');
     });
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
     const res = await GET(refreshRequest('/acme'), ctx);
 
@@ -362,7 +362,7 @@ describe('GET /<slug>/session/refresh', () => {
     vi.stubGlobal('fetch', async () =>
       jsonResponse(503, { success: false, error: { code: 'DEPENDENCY_UNAVAILABLE', message: 'down' } }),
     );
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
     const res = await GET(refreshRequest('/acme'), ctx);
 
@@ -371,7 +371,7 @@ describe('GET /<slug>/session/refresh', () => {
   });
 
   it.each(['cross-site', 'same-site'])('a %s request gets the interstitial: no API call, no cookie', async (site) => {
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
     const req = new NextRequest('https://portal.test/acme/session/refresh?next=%2Facme', {
       headers: { cookie: 'rekey_portal_refresh=refresh-1', 'sec-fetch-site': site },
     });
@@ -387,7 +387,7 @@ describe('GET /<slug>/session/refresh', () => {
   });
 
   it.each(['same-origin', 'none'])('a %s request rotates', async (site) => {
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
     const req = new NextRequest('https://portal.test/acme/session/refresh?next=%2Facme', {
       headers: { cookie: 'rekey_portal_refresh=refresh-1', 'sec-fetch-site': site },
     });
@@ -400,7 +400,7 @@ describe('GET /<slug>/session/refresh', () => {
 
   it('clears the session and signs in again when the API refuses the token', async () => {
     spent.add('refresh-1');
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
     const res = await GET(refreshRequest('/acme'), ctx);
 
@@ -409,7 +409,7 @@ describe('GET /<slug>/session/refresh', () => {
   });
 
   it('touches nothing when the request carried no session', async () => {
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
     const res = await GET(refreshRequest('/acme', ''), ctx);
 
@@ -430,7 +430,7 @@ describe('a raced refresh (REFRESH_TOKEN_RACED)', () => {
 
   it('route: goes back to next with the session cookies untouched, setting only the loop guard', async () => {
     raced.add('refresh-1');
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
     const res = await GET(refreshRequest('/acme?tab=billing'), ctx);
 
@@ -446,7 +446,7 @@ describe('a raced refresh (REFRESH_TOKEN_RACED)', () => {
 
   it('route: the same token racing a second time signs in again instead of looping', async () => {
     raced.add('refresh-1');
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
     const first = await GET(refreshRequest('/acme'), ctx);
     const mark = /^rekey_portal_refresh_raced=([^;]+);/.exec(first.headers.getSetCookie()[0] ?? '')?.[1] ?? '';
 
@@ -460,7 +460,7 @@ describe('a raced refresh (REFRESH_TOKEN_RACED)', () => {
   it('route: a mark left by a different token does not count as a repeat', async () => {
     raced.add('refresh-1');
     const { racedMark } = await import('@/lib/session-refresh');
-    const { GET } = await import('@/app/[slug]/session/refresh/route');
+    const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
     const res = await GET(
       refreshRequest('/acme', `rekey_portal_refresh=refresh-1; rekey_portal_refresh_raced=${await racedMark('older')}`),
@@ -475,7 +475,7 @@ describe('a raced refresh (REFRESH_TOKEN_RACED)', () => {
     for (const code of ['REFRESH_TOKEN_REUSED', 'REFRESH_TOKEN_REVOKED', 'REFRESH_TOKEN_EXPIRED', 'REFRESH_TOKEN_SOMETHING_NEW']) {
       vi.stubGlobal('fetch', async () => jsonResponse(401, { success: false, error: { code, message: 'no' } }));
       vi.resetModules();
-      const { GET } = await import('@/app/[slug]/session/refresh/route');
+      const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
       const res = await GET(refreshRequest('/acme'), ctx);
 
@@ -593,7 +593,7 @@ describe('redirect targets after URL normalisation', () => {
   it.each([['/evil.com'], ['\\evil.com'], ['..'], ['.']])(
     'the refresh route refuses a slug that is not one plain segment (%j)',
     async (slug) => {
-      const { GET } = await import('@/app/[slug]/session/refresh/route');
+      const { GET } = await import('@/app/(portal)/[slug]/session/refresh/route');
 
       const res = await GET(refreshRequest('/x', ''), { params: Promise.resolve({ slug }) });
 

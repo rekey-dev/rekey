@@ -132,7 +132,7 @@ describe('passkey enrollment step-up', () => {
         endUserId: passwordless.id,
         action: 'enroll a passkey',
         proof: { password: 'anything' },
-        verifyMfaCode: async () => false,
+        verifyMfaCode: async () => 'invalid' as const,
       }),
     ).rejects.toMatchObject({ statusCode: 400, code: 'STEP_UP_UNAVAILABLE' });
   });
@@ -164,7 +164,7 @@ describe('passkey enrollment step-up', () => {
         endUserId: user.id,
         action: 'enroll a passkey',
         proof: { code: '123456' },
-        verifyMfaCode: async () => true,
+        verifyMfaCode: async () => 'accepted' as const,
       }),
     ).resolves.toBeUndefined();
 
@@ -174,8 +174,33 @@ describe('passkey enrollment step-up', () => {
         endUserId: user.id,
         action: 'enroll a passkey',
         proof: { code: '000000' },
-        verifyMfaCode: async () => false,
+        verifyMfaCode: async () => 'invalid' as const,
       }),
     ).rejects.toMatchObject({ statusCode: 401, code: 'STEP_UP_REQUIRED' });
+
+    // A right but already-accepted code says so, so the user waits for the next.
+    await expect(
+      assertStepUp({
+        endUserId: user.id,
+        action: 'enroll a passkey',
+        proof: { code: '123456' },
+        verifyMfaCode: async () => 'reused' as const,
+      }),
+    ).rejects.toMatchObject({ statusCode: 401, code: 'MFA_CODE_REUSED' });
+
+    // The password is still a valid proof alongside a reused code.
+    const { hashPassword } = await import('../src/lib/passwords.js');
+    await prisma.endUser.update({
+      where: { id: user.id },
+      data: { passwordHash: await hashPassword('pw-one-two-three') },
+    });
+    await expect(
+      assertStepUp({
+        endUserId: user.id,
+        action: 'enroll a passkey',
+        proof: { code: '123456', password: 'pw-one-two-three' },
+        verifyMfaCode: async () => 'reused' as const,
+      }),
+    ).resolves.toBeUndefined();
   });
 });

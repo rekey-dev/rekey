@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { errorQuery, readErrorFlash, api, PanelApiError, type PlanRow, type BillingCredentialRow, type BillingProviderDescriptor, type BillingProviderName, getApplication, unlessBusy } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, type PlanRow, type BillingCredentialRow, type BillingProviderDescriptor, type BillingProviderName, type SecurityEventRow, getApplication, unlessBusy } from '@/lib/api';
 import { CopyButton } from '@/components/CopyButton';
 import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -19,6 +19,8 @@ import { Card, SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
+import { Banner } from '@/components/Banner';
+import { CheckoutPageSection } from './checkout-page-section';
 
 interface WebhookEventRow {
   id: string;
@@ -29,6 +31,20 @@ interface WebhookEventRow {
   receivedAt: string;
   processedAt: string | null;
   processingError: string | null;
+}
+
+/** How far back the unregistered-return-URL notice looks. */
+const RETURN_URL_NOTICE_DAYS = 7;
+
+/** Distinct origins named by the unregistered-return-URL events in view. */
+function unregisteredOrigins(events: SecurityEventRow[]): string[] {
+  const origins = new Set<string>();
+  for (const e of events) {
+    const listed = e.metadata.origins;
+    if (!Array.isArray(listed)) continue;
+    for (const o of listed) if (typeof o === 'string') origins.add(o);
+  }
+  return [...origins];
 }
 
 const WEBHOOK_STATUS_TONE: Record<WebhookEventRow['status'], BadgeTone> = {
@@ -226,6 +242,8 @@ const ERR: Record<string, string> = {
   BILLING_WEBHOOK_REGISTRATION_FAILED:
     'The provider rejected webhook setup, usually wrong credentials or the wrong mode (live keys with mode=test). Re-check the API key/secret + mode, then retry.',
   INTERNAL_ERROR: 'Something went wrong. Check the API logs for the request id.',
+  CHECKOUT_READINESS_FAILED:
+    'The Rekey checkout page is not ready for that mode. Fix each FAIL in the Checkout page section, then switch again.',
 };
 
 /**
@@ -263,7 +281,8 @@ export default async function BillingPage({
   const edit = typeof sp.edit === 'string' ? sp.edit : undefined;
   const webhook = typeof sp.webhook === 'string' ? sp.webhook : undefined;
 
-  const [app, discovery, webhookEventPage, planPage] = await Promise.all([
+  const returnUrlSince = new Date(Date.now() - RETURN_URL_NOTICE_DAYS * 24 * 60 * 60 * 1000);
+  const [app, discovery, webhookEventPage, planPage, returnUrlEventPage] = await Promise.all([
     getApplication(id),
     // P4 discovery: every registered provider module + this app's configured
     // status in one call, drives the provider table, labels, and the
@@ -284,7 +303,22 @@ export default async function BillingPage({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/plans`,
     }).catch(unlessBusy(() => emptyPage<PlanRow>())),
+    // Checkouts that sent buyers to an origin this Application never
+    // registered. Allowed today, refused from the next minor, so this is the
+    // operator's warning. The security log is OWNER/ADMIN only; anyone else
+    // simply sees no notice.
+    api<Page<SecurityEventRow>>({
+      method: 'GET',
+      path: `/api/v1/tenant/security-events?${new URLSearchParams({
+        applicationId: id,
+        type: 'app.checkout_return_url_unregistered',
+        from: returnUrlSince.toISOString(),
+        limit: '50',
+      }).toString()}`,
+    }).catch(() => emptyPage<SecurityEventRow>(50)),
   ]);
+  const returnUrlWarnings = returnUrlEventPage.page.total;
+  const returnUrlOrigins = unregisteredOrigins(returnUrlEventPage.items);
 
   // Active plans no configured provider will honour. PENDING and FAILED are
   // excluded: those already have their own state and their own repair on the
@@ -344,6 +378,26 @@ export default async function BillingPage({
   return (
     <div className="space-y-5">
       {billingEnabled && <BillingModeNotice rows={list} />}
+      {returnUrlWarnings > 0 && (
+        <Banner tone="warning">
+          <p className="font-medium">
+            {returnUrlWarnings === 1
+              ? `One checkout in the last ${RETURN_URL_NOTICE_DAYS} days returned the buyer to an origin this Application has not registered.`
+              : `${returnUrlWarnings} checkouts in the last ${RETURN_URL_NOTICE_DAYS} days returned buyers to origins this Application has not registered.`}
+          </p>
+          <p className="mt-1 text-xs">
+            They still work today. The next minor release refuses a checkout whose success or cancel
+            URL is on an unregistered origin, so{' '}
+            <a className="underline" href={`/applications/${encodeURIComponent(id)}/auth`}>
+              add these to the redirect URLs or set the Application URL
+            </a>{' '}
+            before upgrading.
+          </p>
+          {returnUrlOrigins.length > 0 && (
+            <p className="mt-1.5 font-mono text-[11px]">{returnUrlOrigins.join(', ')}</p>
+          )}
+        </Banner>
+      )}
       {soldExternally && (
         <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-2.5 text-sm text-[var(--color-fg)]">
           <p className="font-medium">Plans are sold through your external billing system.</p>
@@ -387,7 +441,9 @@ export default async function BillingPage({
       {saved === 'dunning' && (
         <SavedBanner message={`Failed-payment recovery ${dunningEnabled ? 'enabled' : 'disabled'} for this application.`} />
       )}
-      {saved && saved !== 'billing' && saved !== 'subject' && saved !== 'dunning' && (
+      {saved === 'checkout' && <SavedBanner message="Checkout page setting saved." />}
+      {saved === 'checkout_checks' && <SavedBanner message="Checkout page checks ran. Results are in the Checkout page section." />}
+      {saved && !['billing', 'subject', 'dunning', 'checkout', 'checkout_checks'].includes(saved) && (
         <SavedBanner
           message={`${labelOf(saved)} credentials saved. Encrypted at rest.`}
         />
@@ -508,6 +564,8 @@ export default async function BillingPage({
           </div>
         </Card>
       )}
+
+      {billingEnabled && <CheckoutPageSection applicationId={id} />}
 
       {/* Providers, configurable any time; only effective while billing is enabled. */}
       <div className={billingEnabled ? '' : 'opacity-60'}>
@@ -740,6 +798,7 @@ const WEBHOOK_META: Record<string, WebhookMeta> = {
     dashboardPath: 'Stripe Dashboard → Developers → Webhooks → Add endpoint',
     events: [
       'checkout.session.completed',
+      'checkout.session.async_payment_succeeded',
       'customer.subscription.updated',
       'customer.subscription.deleted',
       'invoice.paid',

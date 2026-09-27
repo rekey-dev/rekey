@@ -29,6 +29,9 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** Payments that still carry revenue; `refunded_amount` is netted off each. */
+const REVENUE_STATUSES = ['SUCCEEDED', 'PARTIALLY_REFUNDED'] as const;
+
 /** Months in the monthlyRevenue series (current month inclusive). */
 const REVENUE_MONTHS = 12;
 
@@ -45,8 +48,14 @@ export interface BillingStats {
   mrrCurrency: string | null;
   /** True when active SUBSCRIPTION plans span more than one currency. */
   mixedCurrencies: boolean;
-  /** SUM(amount) of SUCCEEDED payments in the last 30 days. */
+  /**
+   * Net revenue of the last 30 days: payment amounts less what has been
+   * refunded on them. A fully refunded payment counts nothing; a partly
+   * refunded one counts what the buyer kept. Refunds net against the month
+   * the payment was made in, not the month of the refund.
+   */
   revenueLast30dCents: number;
+  /** `succeeded` includes partly refunded payments. */
   paymentsLast30d: { succeeded: number; failed: number };
   /**
    * Last 12 UTC calendar months (oldest first, current month last),
@@ -92,24 +101,24 @@ export const billingStatsService = {
         _count: { _all: true },
       }),
       prisma.payment.aggregate({
-        _sum: { amount: true },
-        where: { applicationId, status: 'SUCCEEDED', createdAt: { gte: since30d } },
+        _sum: { amount: true, refundedAmount: true },
+        where: { applicationId, status: { in: [...REVENUE_STATUSES] }, createdAt: { gte: since30d } },
       }),
       prisma.payment.groupBy({
         by: ['status'],
         where: { applicationId, createdAt: { gte: since30d } },
         _count: { _all: true },
       }),
-      // Monthly SUCCEEDED revenue, bucketed by UTC calendar month in SQL,
+      // Monthly net revenue, bucketed by UTC calendar month in SQL,
       // one round-trip, no row loading (same shape as the signup-trend query
       // in applications.service.ts). `created_at` is a naive timestamp stored
       // as UTC, so date_trunc buckets by UTC month directly.
       prisma.$queryRaw<Array<{ month: Date; total: bigint }>>(Prisma.sql`
         SELECT date_trunc('month', "created_at") AS month,
-               SUM(amount)::bigint AS total
+               SUM(amount - refunded_amount)::bigint AS total
         FROM "payments"
         WHERE "application_id" = ${applicationId}
-          AND status = 'SUCCEEDED'
+          AND status IN ('SUCCEEDED', 'PARTIALLY_REFUNDED')
           AND "created_at" >= ${seriesStart}
         GROUP BY month
         ORDER BY month ASC
@@ -173,9 +182,9 @@ export const billingStatsService = {
       mrrCents,
       mrrCurrency,
       mixedCurrencies,
-      revenueLast30dCents: revenueAgg._sum.amount ?? 0,
+      revenueLast30dCents: (revenueAgg._sum.amount ?? 0) - (revenueAgg._sum.refundedAmount ?? 0),
       paymentsLast30d: {
-        succeeded: statusMap.SUCCEEDED ?? 0,
+        succeeded: (statusMap.SUCCEEDED ?? 0) + (statusMap.PARTIALLY_REFUNDED ?? 0),
         failed: statusMap.FAILED ?? 0,
       },
       monthlyRevenue,

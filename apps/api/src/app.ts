@@ -60,6 +60,7 @@ import {
   type ClientIpPolicy,
 } from "./lib/client-ip.js";
 import { recordApiRequest, flushApiRequestLogs } from "./lib/request-log.js";
+import { apiLoggerOptions } from "./lib/log-redaction.js";
 import {
   idempotencyPreHandler,
   idempotencyOnSend,
@@ -69,6 +70,7 @@ import {
   stopScheduledDeliveries,
 } from "./modules/webhooks/webhook.service.js";
 import { processDueDunningCases } from "./modules/billing/dunning.service.js";
+import { processTrialsEndingSoon } from "./modules/billing/trial-events.js";
 import { runPruneSweep } from "./lib/prune-sweep.js";
 import {
   createS3LogArchiver,
@@ -110,7 +112,11 @@ import {
   tenantInvitationAuthRoutes,
 } from "./modules/tenant-workspaces/index.js";
 import { tenantApplicationsRoutes } from "./modules/tenant-applications/index.js";
-import { oauthRoutes, oauthLinkRoutes } from "./modules/oauth/index.js";
+import {
+  oauthRoutes,
+  oauthLinkRoutes,
+  oauthProviderListRoutes,
+} from "./modules/oauth/index.js";
 import { mfaRoutes } from "./modules/mfa/index.js";
 import { tenantMfaRoutes } from "./modules/tenant-mfa/index.js";
 import {
@@ -129,9 +135,19 @@ import {
   tenantDevicesRoutes,
 } from "./modules/devices/index.js";
 import { portalConfigRoutes } from "./modules/portal/index.js";
+import {
+  checkoutProbeRoutes,
+  checkoutSessionRoutes,
+} from "./modules/billing/checkout/checkout-sessions.routes.js";
+import { tenantCheckoutRoutes } from "./modules/billing/checkout/tenant-checkout.routes.js";
 import { usagePublicRoutes, usageSelfRoutes } from "./modules/usage/index.js";
 import { creditsPublicRoutes, creditsSelfRoutes } from "./modules/credits/index.js";
-import { tenantEmailRoutes } from "./modules/email/index.js";
+import {
+  customEmailTemplateRoutes,
+  emailSendRoutes,
+  emailUnsubscribeRoutes,
+  tenantEmailRoutes,
+} from "./modules/email/index.js";
 import {
   tenantWebhookRoutes,
   startWebhookWorker,
@@ -270,19 +286,7 @@ export async function buildApp(
   const app = Fastify({
     logger:
       options.logger ??
-      ({
-        level: env.NODE_ENV === "production" ? "info" : "debug",
-        redact: {
-          paths: [
-            "headers.authorization",
-            "req.headers.authorization",
-            "body.rawKey",
-            "body.password",
-            "*.rawKey",
-          ],
-          censor: "[REDACTED]",
-        },
-      } as Record<string, unknown>),
+      apiLoggerOptions(env.NODE_ENV === "production" ? "info" : "debug"),
     bodyLimit: 1024 * 1024,
     // Trusting X-Forwarded-For means trusting whoever set it. Keyed off
     // NODE_ENV this was `true` in production for ANY peer, so a client could
@@ -925,6 +929,16 @@ export async function buildApp(
     }, DUNNING_POLL_INTERVAL_MS);
     dunningTimer.unref();
 
+    // `subscription.trial_will_end`, a few days before each trial ends. Same
+    // interval as dunning for the same reason: the lead time is days, and the
+    // per-row claim in processTrialsEndingSoon makes replicas safe.
+    const trialTimer = setInterval(() => {
+      void processTrialsEndingSoon(100, app.log).catch((err) =>
+        app.log.warn({ err }, "trial ending sweep failed"),
+      );
+    }, DUNNING_POLL_INTERVAL_MS);
+    trialTimer.unref();
+
     // BullMQ webhook-delivery worker, REQUIRED outside test. Installs the
     // Redis-backed scheduler so delayed retries survive a crash and distribute
     // across replicas (microservice-compatible). startWebhookWorker THROWS if
@@ -939,6 +953,7 @@ export async function buildApp(
       clearInterval(pruneTimer);
       clearInterval(webhookRetryTimer);
       clearInterval(dunningTimer);
+      clearInterval(trialTimer);
       await stopWebhookWorker();
     });
   }
@@ -959,6 +974,7 @@ export async function buildApp(
   await app.register(userTokenMeRoutes, { prefix: "/api/v1/auth" });
   await app.register(oauthRoutes, { prefix: "/api/v1/auth/oauth" });
   await app.register(oauthLinkRoutes, { prefix: "/api/v1/auth/oauth" });
+  await app.register(oauthProviderListRoutes, { prefix: "/api/v1/auth/oauth" });
   await app.register(usersMeRoutes, { prefix: "/api/v1/users/me" });
   // The end-user's own devices (docs/devices.md), same credential tier as
   // /users/me: publishable key + user JWT.
@@ -989,12 +1005,20 @@ export async function buildApp(
   await app.register(licensesPublicRoutes, { prefix: "/api/v1/licenses" });
   await app.register(usagePublicRoutes, { prefix: "/api/v1/usage" });
   await app.register(creditsPublicRoutes, { prefix: "/api/v1/credits" });
+  // Custom email templates: the secret-key send, and the public unsubscribe
+  // endpoint its List-Unsubscribe header points at. Separate plugins because
+  // the send route's requireApiKey hook must not reach unsubscribe.
+  await app.register(emailSendRoutes, { prefix: "/api/v1/email" });
+  await app.register(emailUnsubscribeRoutes, { prefix: "/api/v1/email" });
   // The signed-in end-user's own usage and credit reads: same prefixes, a
   // separate plugin each, because the two above are secret-key only as a whole.
   await app.register(usageSelfRoutes, { prefix: "/api/v1/usage" });
   await app.register(creditsSelfRoutes, { prefix: "/api/v1/credits" });
   // Hosted customer portal, public config lookup by slug (Portal V2).
   await app.register(portalConfigRoutes, { prefix: "/api/v1/portal" });
+  // The Rekey-hosted checkout page's reads, and the portal's readiness callback.
+  await app.register(checkoutSessionRoutes, { prefix: "/api/v1/checkout-sessions" });
+  await app.register(checkoutProbeRoutes, { prefix: "/api/v1/checkout" });
   // Per-Application MCP server + OAuth 2.1 AS (gated per-app by authConfig.mcpEnabled).
   await app.register(mcpRoutes, { prefix: "/api/v1/mcp" });
   // Root-level "path-insertion" OAuth metadata discovery (RFC 8414 / 9728). A
@@ -1075,6 +1099,9 @@ export async function buildApp(
   await app.register(tenantEmailRoutes, {
     prefix: "/api/v1/tenant/applications",
   });
+  await app.register(customEmailTemplateRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
   await app.register(tenantWebhookRoutes, {
     prefix: "/api/v1/tenant/applications",
   });
@@ -1082,6 +1109,9 @@ export async function buildApp(
     prefix: "/api/v1/tenant/applications",
   });
   await app.register(tenantLicenseActivationRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(tenantCheckoutRoutes, {
     prefix: "/api/v1/tenant/applications",
   });
   await app.register(tenantMfaRoutes, { prefix: "/api/v1/tenant/auth/mfa" });

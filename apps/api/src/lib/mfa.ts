@@ -2,7 +2,7 @@
  * TOTP (RFC 6238) helpers + backup codes.
  *
  * - `generateSecret`: build a random base32 secret + the otpauth:// URI for QR.
- * - `verifyTotp`: check a 6-digit code against the secret with ±1 step drift.
+ * - `matchTotpStep`: match a 6-digit code (±1 step drift) to its time step.
  * - `generateBackupCodes`: 10 random short codes (5-char alphanumeric pairs)
  *   for the user to print/save. We store SHA-256 hashes; consume by removing
  *   the matching hash from the array.
@@ -51,29 +51,41 @@ export function generateSecret(issuer: string, label: string): GeneratedSecret {
   };
 }
 
+const TOTP_PERIOD_SECONDS = 30;
+
 /**
- * Verify a 6-digit TOTP code with ±1 time-step drift (covers clock skew
- * + the moment when a code rolls over).
+ * Match a 6-digit TOTP code against the secret with one step of drift either
+ * way, and return the time step it belongs to, or null when it does not match.
  *
- * Returns true / false. Never throws.
+ * The step is what makes a code single-use: `acceptTotpCode` in
+ * `mfa-replay.ts` refuses any step at or below the last one it accepted.
+ * Never throws.
+ *
+ * @example
+ * const step = matchTotpStep(secret.base32, '123456');
+ * if (step === null) refuse();
  */
-export function verifyTotp(secretBase32: string, code: string): boolean {
-  if (!/^\d{6}$/.test(code)) return false;
+export function matchTotpStep(
+  secretBase32: string,
+  code: string,
+  timestamp: number = Date.now(),
+): number | null {
+  if (!/^\d{6}$/.test(code)) return null;
   try {
     const totp = new OTPAuth.TOTP({
       algorithm: 'SHA1',
       digits: 6,
-      period: 30,
+      period: TOTP_PERIOD_SECONDS,
       secret: OTPAuth.Secret.fromBase32(secretBase32),
     });
-    const delta = totp.validate({ token: code, window: 1 });
-    return delta !== null;
+    const delta = totp.validate({ token: code, timestamp, window: 1 });
+    return delta === null ? null : totp.counter({ timestamp }) + delta;
   } catch {
-    return false;
+    return null;
   }
 }
 
-const BACKUP_CODE_COUNT = 10;
+export const BACKUP_CODE_COUNT = 10;
 const BACKUP_CODE_BYTES = 5; // 5 bytes -> 8 base32-ish chars, formatted as XXXX-XXXX
 
 function generateBackupCode(): string {

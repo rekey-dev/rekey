@@ -157,6 +157,28 @@ const KIND_CARDS: Array<{
   },
 ];
 
+/**
+ * The Amount field's hint: a static example while the field is empty, and
+ * only the typed value converted to dollars once there is one.
+ *
+ * @example
+ * amountHint('SUBSCRIPTION', '');     // { example: '999 = $9.99', live: null }
+ * amountHint('SUBSCRIPTION', '1999'); // { example: null, live: '1999 = $19.99' }
+ */
+export function amountHint(kind: Kind, amount: string): { example: string | null; live: string | null } {
+  const cents = Number(amount);
+  if (amount.trim() !== '' && Number.isFinite(cents) && cents > 0) {
+    return { example: null, live: `${cents} = $${(cents / 100).toFixed(2)}` };
+  }
+  const example =
+    kind === 'USAGE'
+      ? '0 = pure pay-as-you-go.'
+      : kind === 'CREDIT'
+        ? 'One-time charge for the pack. 4999 = $49.99'
+        : '999 = $9.99';
+  return { example, live: null };
+}
+
 export function PlanCreateForm({
   action,
   meters,
@@ -172,9 +194,7 @@ export function PlanCreateForm({
   // Live cents → dollars preview for the Amount field (same pattern as
   // CouponAmountPreview), removes the cents-vs-dollars ambiguity as you type.
   const [amount, setAmount] = React.useState('');
-  const amountNum = Number(amount);
-  const amountPreview =
-    Number.isFinite(amountNum) && amountNum > 0 ? `= $${(amountNum / 100).toFixed(2)}` : null;
+  const hint = amountHint(kind, amount);
 
   // Bundle builder state. The list is serialized into a hidden `entitlements`
   // input and applied (one PUT each) by the server action after the plan is
@@ -304,9 +324,9 @@ export function PlanCreateForm({
           required
           hint={
             <>
-              {kind === 'USAGE' ? '0 = pure pay-as-you-go.' : kind === 'CREDIT' ? 'One-time charge for the pack. 4999 = $49.99' : '999 = $9.99'}
-              <span aria-live="polite" className="ml-1 font-medium text-[var(--color-fg)]">
-                {amountPreview}
+              {hint.example}
+              <span aria-live="polite" className="font-medium text-[var(--color-fg)]">
+                {hint.live}
               </span>
             </>
           }

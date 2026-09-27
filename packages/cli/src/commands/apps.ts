@@ -42,7 +42,7 @@ export function registerAppsCommand(program: Command): void {
       const ctx = readGlobalOpts(this);
       const qs = listQuery({
         ...(opts.tenant ? { tenantId: opts.tenant } : {}),
-        ...readListOpts(opts),
+        ...readListOpts(ctx, opts),
       });
       const path = `/api/v1/admin/applications${qs}`;
       // `{items, page}` since 2.0.0-rc.3. The page is reported rather than

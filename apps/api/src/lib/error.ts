@@ -24,6 +24,7 @@ import {
   type PostgresBusyReason,
 } from './dependency-outage.js';
 import { recordSecurityEvent } from './security-events.js';
+import { redactUrlSecrets } from './log-redaction.js';
 
 export interface RekeyErrorPayload {
   code: string;
@@ -304,7 +305,7 @@ export function rekeyErrorHandler(
     // `info`, not `error`: a rejected request is normal traffic. Logging it at
     // error level is how a route that 400s on a typo ends up in an alert.
     req.log.info(
-      { requestId, issues: payload.issues, route: req.routeOptions?.url ?? req.url },
+      { requestId, issues: payload.issues, route: req.routeOptions?.url ?? redactUrlSecrets(req.url) },
       'request failed schema validation',
     );
     return reply.status(400).send({
@@ -376,7 +377,7 @@ export function rekeyErrorHandler(
         metadata: {
           subsystem: outage,
           ...(busy !== null && { reason: busy }),
-          route: req.routeOptions?.url ?? req.url,
+          route: req.routeOptions?.url ?? redactUrlSecrets(req.url),
         },
       });
     }

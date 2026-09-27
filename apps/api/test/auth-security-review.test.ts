@@ -82,12 +82,14 @@ describe('auth security review (2.0.0-rc.1)', () => {
         payload: { name: 'Sec App', slug },
       })
       .then((r) => (r.json().data as { id: string }).id);
-    if (Object.keys(authConfig).length > 0) {
+    // Every fixture gets an App URL: requiring a verified email is refused
+    // without one, because no verification link could be built.
+    {
       const patched = await app.inject({
         method: 'PATCH',
         url: `/api/v1/tenant/applications/${appId}/auth-config`,
         headers: { authorization: `Bearer ${operatorToken}` },
-        payload: authConfig,
+        payload: { appUrl: 'https://app.example.com', ...authConfig },
       });
       expect(patched.statusCode).toBe(200);
     }

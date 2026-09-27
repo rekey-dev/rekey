@@ -347,6 +347,9 @@ describe('discovery projection (P4)', () => {
           // refund is one an operator presses after promising a customer their
           // money back.
           ...(name === 'external' ? [] : ['refunds']),
+          // Which providers the Rekey checkout page can take payment through,
+          // so the panel's Checkout page setting can say so per provider.
+          ...(name === 'paypal' ? ['embeddedCheckout'] : []),
           'trials',
         ].sort(),
       );

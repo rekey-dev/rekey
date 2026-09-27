@@ -430,8 +430,8 @@ describe('operator panel features', () => {
       return res.json().data as { id: string; code: string };
     };
     const percent = await createCoupon({ code: 'pct15', discountType: 'PERCENT', amountOff: 1500 });
-    const amount = await createCoupon({ code: 'flat5', discountType: 'AMOUNT', amountOff: 500 });
-    await createCoupon({ code: 'unused', discountType: 'AMOUNT', amountOff: 100 });
+    const amount = await createCoupon({ code: 'flat5', discountType: 'AMOUNT', currency: 'USD', amountOff: 500 });
+    await createCoupon({ code: 'unused', discountType: 'AMOUNT', currency: 'USD', amountOff: 100 });
 
     // PERCENT redemption: the discount is stamped on the REDEMPTION row when
     // it is recorded. It used to be read back off the linked subscription's

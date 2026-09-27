@@ -30,6 +30,7 @@ before you had a catalog resolving to the authority they always had.
 |---|---|---|
 | Define a role | operator, tenant session | Panel → Application → Users → Roles, `POST /tenant/applications/:id/organization-roles`, or the `create_organization_role` MCP tool |
 | Assign a role | an org OWNER/ADMIN, **their own end-user token** | `PATCH /users/me/organizations/:id/members/:euid` |
+| Assign a role as the operator | operator, tenant session | Panel → Application → Organizations, `POST` / `PATCH /tenant/applications/:id/organizations/:orgId/members`, or the `add_organization_member` / `set_organization_member_role` MCP tools |
 | Read the catalog | any signed-in end-user | `GET /users/me/organizations/roles` |
 
 End-users can read the catalog but never write it, so no organization member can

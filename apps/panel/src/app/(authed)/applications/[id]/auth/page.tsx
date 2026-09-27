@@ -41,6 +41,10 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
   const passwordBreachCheckEnabled = formData.get('passwordBreachCheckEnabled') === 'on';
   const sendVerificationEmailOnSignUp = formData.get('sendVerificationEmailOnSignUp') === 'on';
   const requireEmailVerification = formData.get('requireEmailVerification') === 'on';
+  const welcomeEmailRaw = String(formData.get('welcomeEmail') ?? 'on_signup');
+  const welcomeEmail = (
+    ['on_signup', 'on_verified', 'off'].includes(welcomeEmailRaw) ? welcomeEmailRaw : 'on_signup'
+  ) as 'on_signup' | 'on_verified' | 'off';
   const oidcEnabled = formData.get('oidcEnabled') === 'on';
   // Same shape as `mfa` and `tokenAlg` above: a closed set, defaulted rather
   // than trusted, because the value arrives from a form post.
@@ -61,6 +65,15 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
   // '' and null identically.
   const appUrl = String(formData.get('appUrl') ?? '').trim();
   const hostedAuthorizeUrl = String(formData.get('hostedAuthorizeUrl') ?? '').trim();
+  const allowedDomains = domainLines(formData.get('allowedDomains'));
+  const blockedDomains = domainLines(formData.get('blockedDomains'));
+  const blockDisposable = formData.get('blockDisposable') === 'on';
+  // Nothing set means no rules at all, so clear them rather than store an
+  // empty object that reads back as "configured".
+  const signupRestrictions =
+    allowedDomains.length === 0 && blockedDomains.length === 0 && !blockDisposable
+      ? null
+      : { allowedDomains, blockedDomains, blockDisposable };
 
   try {
     await api({
@@ -75,12 +88,14 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
         passwordBreachCheckEnabled,
         sendVerificationEmailOnSignUp,
         requireEmailVerification,
+        welcomeEmail,
         oidcEnabled,
         deviceBinding,
         tokenAlg,
         redirectUrls,
         appUrl,
         hostedAuthorizeUrl,
+        signupRestrictions,
       },
     });
   } catch (err) {
@@ -90,6 +105,14 @@ async function saveAuth(applicationId: string, formData: FormData): Promise<void
     throw err;
   }
   redirect(`/applications/${applicationId}/auth?saved=1`);
+}
+
+/** One domain per line (commas also split), blanks dropped. The API normalises and validates. */
+function domainLines(value: FormDataEntryValue | null): string[] {
+  return String(value ?? '')
+    .split(/[\n,]/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
 
 const ERR: Record<string, string> = {
@@ -138,6 +161,7 @@ export default async function AuthMethodsPage({
     false;
   const requireEmailVerification =
     (app.authConfig as { requireEmailVerification?: boolean }).requireEmailVerification === true;
+  const welcomeEmail = app.authConfig.welcomeEmail ?? 'on_signup';
   // Off by default, same as `requireEmailVerification`, an app saved before
   // the field existed must read back as OFF, never as "we're already an IdP".
   const oidcEnabled = app.authConfig.oidcEnabled === true;
@@ -149,6 +173,7 @@ export default async function AuthMethodsPage({
   const appUrl = (app.authConfig as { appUrl?: string }).appUrl ?? '';
   const hostedAuthorizeUrl =
     (app.authConfig as { hostedAuthorizeUrl?: string }).hostedAuthorizeUrl ?? '';
+  const signupRestrictions = app.authConfig.signupRestrictions;
   // What emails would actually link to today if the operator saves nothing:
   // the origin of the first redirect URL. Shown as the placeholder so the
   // inferred fallback is visible rather than a surprise.
@@ -267,6 +292,32 @@ export default async function AuthMethodsPage({
                 </>
               }
             />
+            <div className="px-5 py-4">
+              <Field
+                label="Welcome email"
+                hint={
+                  <>
+                    When a new account gets the welcome email. <strong>On sign-up</strong> sends it
+                    as the account is created, except that while <strong>Require a verified
+                    email</strong> is on, an unverified address gets it once it is confirmed.{' '}
+                    <strong>After verification</strong> always waits for a confirmed address.
+                    Magic-link sign-ups, and OAuth sign-ups whose provider vouches for the address,
+                    get it straight away in both. Users you create or import never get one. The
+                    Email tab can still switch the welcome email off.
+                  </>
+                }
+              >
+                <select
+                  name="welcomeEmail"
+                  defaultValue={welcomeEmail}
+                  className={`${inputCls} w-full sm:w-80`}
+                >
+                  <option value="on_signup">On sign-up</option>
+                  <option value="on_verified">After email verification</option>
+                  <option value="off">Never</option>
+                </select>
+              </Field>
+            </div>
             <ToggleRow
               name="organizationsEnabled"
               label="Organizations (teams)"
@@ -277,6 +328,63 @@ export default async function AuthMethodsPage({
                   your product has team workspaces; leave it off for purely individual accounts.
                   View existing orgs on the Organizations tab. While off, organization API calls
                   return <code className="text-xs">ORGANIZATIONS_NOT_ENABLED</code>.
+                </>
+              }
+            />
+          </Card>
+        </section>
+
+        {/* 2b, Sign-up email rules: which addresses may create an account. */}
+        <section className="space-y-3">
+          <SectionHeader
+            title="Sign-up email rules"
+            description="Which email addresses may create an account. Existing users always sign in, and users you create or import here are never checked."
+          />
+          <Card className="space-y-5">
+            <Field
+              label="Allowed domains"
+              hint={
+                <>
+                  One per line. When any are listed, only these domains can sign up.{' '}
+                  <code className="text-xs">acme.com</code> matches that domain only;{' '}
+                  <code className="text-xs">*.acme.com</code> matches its subdomains, so list both
+                  for both. Leave empty to allow every domain. The person refused sees{' '}
+                  <code className="text-xs">SIGNUP_EMAIL_DOMAIN_NOT_ALLOWED</code>, never this
+                  list.
+                </>
+              }
+            >
+              <textarea
+                name="allowedDomains"
+                rows={3}
+                defaultValue={(signupRestrictions?.allowedDomains ?? []).join('\n')}
+                placeholder={'acme.com\n*.acme.com'}
+                className={`${inputCls} w-full font-mono`}
+              />
+            </Field>
+            <Field
+              label="Blocked domains"
+              hint="One per line, same matching. A blocked domain wins over an allowed one. Up to 500 in each list."
+            >
+              <textarea
+                name="blockedDomains"
+                rows={3}
+                defaultValue={(signupRestrictions?.blockedDomains ?? []).join('\n')}
+                placeholder="competitor.com"
+                className={`${inputCls} w-full font-mono`}
+              />
+            </Field>
+            <ToggleRow
+              padded={false}
+              name="blockDisposable"
+              label="Block disposable email addresses"
+              defaultChecked={signupRestrictions?.blockDisposable === true}
+              hint={
+                <>
+                  Refuses throwaway-inbox services such as mailinator.com, and their subdomains,
+                  using a list that ships with Rekey and updates with each release. A magic-link
+                  request for a refused address answers as if it sent, so the rules cannot be
+                  probed.
                 </>
               }
             />
@@ -312,8 +420,9 @@ export default async function AuthMethodsPage({
                       With this blank and no redirect URLs set we can&apos;t build a link, so the
                       welcome email <strong>goes out without its button</strong> and the{' '}
                       <strong>verification email isn&apos;t sent at all</strong>: its whole body is
-                      a button, and a confirmation nobody can click is worse than none. Set this
-                      before turning on <strong>Require a verified email</strong>.
+                      a button, and a confirmation nobody can click is worse than none.{' '}
+                      <strong>Require a verified email</strong> cannot be turned on until this, or
+                      a redirect URL, is set.
                     </>
                   )}
                 </>

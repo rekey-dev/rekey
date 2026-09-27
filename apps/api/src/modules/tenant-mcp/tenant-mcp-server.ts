@@ -11,14 +11,16 @@ import type { TenantRole } from '@prisma/client';
 import { type Scope } from '../../lib/operator-scopes.js';
 import { isWorkspaceAdmin } from '../../lib/access-context.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
+import { RekeyError } from '../../lib/error.js';
 import { effectiveToolScopes, operatorTools, type OperatorTool, type OperatorToolContext } from './operator-tools.js';
 import { operatorWriteTools } from './operator-write-tools.js';
+import { operatorOrganizationTools } from './operator-organization-tools.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const SERVER_INFO = { name: 'rekey-operator', version: '1.0.0' };
 
-/** All operator tools, read tools first, then the phase-1 write tools. */
-const allTools: OperatorTool[] = [...operatorTools, ...operatorWriteTools];
+/** All operator tools, read tools first, then the write tools. */
+export const allOperatorTools: readonly OperatorTool[] = [...operatorTools, ...operatorWriteTools, ...operatorOrganizationTools];
 
 /**
  * Scope each application-scoped tool needs. The REST twin of every tool
@@ -60,6 +62,9 @@ export const TOOL_SCOPES: Readonly<Record<string, Scope>> = {
   create_organization_role: 'organizations:write',
   update_organization_role: 'organizations:write',
   delete_organization_role: 'organizations:write',
+  list_organizations: 'organizations:read',
+  add_organization_member: 'organizations:write',
+  set_organization_member_role: 'organizations:write',
   update_auth_config: 'auth-config:write',
 };
 
@@ -165,18 +170,19 @@ export async function handleOperatorMcpMessage(
       // Surface only the tools this token+role can actually call, a read-only
       // token never sees the write tools, so the client won't offer them.
       return result(id, {
-        tools: allTools
+        tools: allOperatorTools
           .filter((t) => toolAllowed(ctx, t))
           .map((t) => ({
             name: t.name,
             description: t.description,
             inputSchema: t.inputSchema,
+            ...(t.annotations !== undefined && { annotations: t.annotations }),
           })),
       });
 
     case 'tools/call': {
       const name = msg.params?.name;
-      const tool = allTools.find((t) => t.name === name);
+      const tool = allOperatorTools.find((t) => t.name === name);
       if (!tool) return error(id, -32602, `Unknown tool: ${String(name)}`);
       // Re-gate at call time. A client that calls a write tool without write
       // scope (or with an insufficient role) gets an explicit, non-leaky
@@ -234,8 +240,14 @@ export async function handleOperatorMcpMessage(
         const data = await tool.handler(ctx, args);
         return result(id, { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
       } catch (e) {
+        // A RekeyError keeps its code and fix, so an agent gets the same
+        // remediation a REST caller does instead of the prose alone.
+        const body =
+          e instanceof RekeyError
+            ? { error: e.message, code: e.code, ...(e.fix !== undefined && { fix: e.fix }) }
+            : { error: (e as Error).message };
         return result(id, {
-          content: [{ type: 'text', text: JSON.stringify({ error: (e as Error).message }) }],
+          content: [{ type: 'text', text: JSON.stringify(body) }],
           isError: true,
         });
       }

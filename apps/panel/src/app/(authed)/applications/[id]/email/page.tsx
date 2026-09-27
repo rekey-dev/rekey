@@ -13,7 +13,7 @@ import { Banner } from '@/components/Banner';
 type Transport = 'byo_resend' | 'byo_smtp' | 'default_resend' | 'none';
 
 interface EmailConfigRow {
-  emailConfig: { fromAddress?: string; fromName?: string; replyTo?: string };
+  emailConfig: { fromAddress?: string; fromName?: string; replyTo?: string; supportEmail?: string };
   hasCustomCredentials: boolean;
   transport: Transport;
   provider: 'resend' | 'smtp' | 'default' | 'none';
@@ -55,8 +55,6 @@ async function saveCreds(applicationId: string, formData: FormData): Promise<voi
   'use server';
   const provider = String(formData.get('provider') ?? 'resend');
   const fromAddress = String(formData.get('fromAddress') ?? '').trim();
-  const fromName = String(formData.get('fromName') ?? '').trim();
-  const replyTo = String(formData.get('replyTo') ?? '').trim();
   if (!fromAddress) redirect(`/applications/${applicationId}/email?error=missing`);
 
   let body: Record<string, unknown>;
@@ -77,8 +75,6 @@ async function saveCreds(applicationId: string, formData: FormData): Promise<voi
       user,
       pass,
       fromAddress,
-      ...(fromName ? { fromName } : {}),
-      ...(replyTo ? { replyTo } : {}),
     };
   } else {
     const apiKey = String(formData.get('apiKey') ?? '').trim();
@@ -87,8 +83,6 @@ async function saveCreds(applicationId: string, formData: FormData): Promise<voi
       provider: 'resend',
       apiKey,
       fromAddress,
-      ...(fromName ? { fromName } : {}),
-      ...(replyTo ? { replyTo } : {}),
     };
   }
 
@@ -97,6 +91,29 @@ async function saveCreds(applicationId: string, formData: FormData): Promise<voi
       method: 'PUT',
       path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/email-credentials`,
       body,
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`/applications/${applicationId}/email?${await errorQuery(err)}`);
+    }
+    throw err;
+  }
+  redirect(`/applications/${applicationId}/email?saved=1`);
+}
+
+async function saveSender(applicationId: string, formData: FormData): Promise<void> {
+  'use server';
+  // An empty field clears that value; the API treats '' and null alike.
+  const field = (name: string): string => String(formData.get(name) ?? '').trim();
+  try {
+    await api({
+      method: 'PATCH',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/email-sender`,
+      body: {
+        fromName: field('fromName'),
+        replyTo: field('replyTo'),
+        supportEmail: field('supportEmail'),
+      },
     });
   } catch (err) {
     if (err instanceof PanelApiError) {
@@ -134,6 +151,9 @@ const TRANSPORT_LABEL: Record<Transport, string> = {
 
 const ERR: Record<string, string> = {
   missing: 'Required fields are empty.',
+  EMAIL_FROM_NAME_INVALID: 'The sender name must be a single line of at most 120 characters.',
+  EMAIL_REPLY_TO_INVALID: 'Reply-To must be a single email address.',
+  EMAIL_SUPPORT_EMAIL_INVALID: 'The support address must be a single email address.',
   smtp_missing: 'SMTP needs host, a valid port (1–65535), username, and password.',
   BILLING_CREDENTIALS_INVALID: 'Credentials were rejected. Check the values and try again.',
 };
@@ -173,6 +193,7 @@ export default async function EmailPage({
 
   const saveCredsBound = saveCreds.bind(null, id);
   const removeCredsBound = removeCreds.bind(null, id);
+  const onSharedPool = config.transport === 'default_resend';
 
   return (
     <div className="space-y-6">
@@ -223,6 +244,63 @@ export default async function EmailPage({
       </section>
 
       <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 space-y-3">
+        <div>
+          <h2 className="text-base font-semibold">Sender</h2>
+          <p className="text-xs text-[var(--color-muted-fg)]">
+            How your mail introduces itself, on whichever transport sends it. Leave a field empty
+            to clear it. Saving credentials below never changes these.
+          </p>
+        </div>
+        <ActionForm action={saveSender.bind(null, id)} className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <label className="block space-y-1.5">
+              <span className="text-sm font-medium">From name</span>
+              <input
+                type="text"
+                name="fromName"
+                maxLength={120}
+                defaultValue={config.emailConfig.fromName ?? ''}
+                placeholder="Acme Support"
+                className={senderInputCls}
+              />
+              <span className="block text-xs text-[var(--color-muted-fg)]">
+                {onSharedPool
+                  ? 'On the shared pool it shows as “Acme Support (via …)”: the address is the pool’s, so the name says so.'
+                  : 'Shown as the sender. With no name set, mail shows the bare address.'}
+              </span>
+            </label>
+            <label className="block space-y-1.5">
+              <span className="text-sm font-medium">Reply-To</span>
+              <input
+                type="email"
+                name="replyTo"
+                defaultValue={config.emailConfig.replyTo ?? ''}
+                placeholder="help@yourdomain.com"
+                className={senderInputCls}
+              />
+              <span className="block text-xs text-[var(--color-muted-fg)]">
+                Where replies go, on the shared pool too.
+              </span>
+            </label>
+            <label className="block space-y-1.5">
+              <span className="text-sm font-medium">Support email</span>
+              <input
+                type="email"
+                name="supportEmail"
+                defaultValue={config.emailConfig.supportEmail ?? ''}
+                placeholder="support@yourdomain.com"
+                className={senderInputCls}
+              />
+              <span className="block text-xs text-[var(--color-muted-fg)]">
+                Where your users can ask for help. Available to templates; never a mail header.
+              </span>
+            </label>
+          </div>
+          <SubmitButton pendingLabel="Saving sender…">Save sender</SubmitButton>
+        </ActionForm>
+      </section>
+
+      <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 space-y-3">
         <header className="flex items-baseline justify-between gap-2">
           <div>
             <h2 className="text-base font-semibold">BYO email transport</h2>
@@ -242,11 +320,7 @@ export default async function EmailPage({
         </header>
         <EmailCredentialsForm
           action={saveCredsBound}
-          defaults={{
-            fromAddress: config.emailConfig.fromAddress ?? '',
-            fromName: config.emailConfig.fromName ?? '',
-            replyTo: config.emailConfig.replyTo ?? '',
-          }}
+          defaults={{ fromAddress: config.emailConfig.fromAddress ?? '' }}
           hasCustomCredentials={config.hasCustomCredentials}
           currentProvider={
             config.provider === 'smtp' ? 'smtp' : config.provider === 'resend' ? 'resend' : null
@@ -318,6 +392,9 @@ export default async function EmailPage({
     </div>
   );
 }
+
+const senderInputCls =
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 function Stat({
   label,

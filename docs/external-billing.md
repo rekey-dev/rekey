@@ -111,7 +111,7 @@ curl -X POST "$REKEY_URL/api/v1/webhooks/billing/external/$APP_SLUG" \
 |---|---|---|
 | `eventId` | yes | Your unique id for this delivery. Rekey deduplicates on it per Application: a replay is acknowledged with `{"processed": false, "reason": "duplicate"}` and applies nothing. |
 | `type` | yes | One of the event types below. Unknown types are acknowledged, logged and ignored, so you may post your whole catalogue. |
-| `occurredAt` | no | ISO 8601. Used as the cancellation time when `subscription.canceled` carries no `effectiveAt`. |
+| `occurredAt` | no | ISO 8601. Used as the cancellation time when `subscription.canceled` carries no `effectiveAt`, and to order a `subscription.activated` against a cancellation already applied: an activation that occurred at or before a cancellation you dated does not reopen the subscription. Send it on both; without it Rekey has no clock of yours to order your events by. |
 | `data` | per type | See below. |
 
 The Application is always the one the URL names. The slug selected the secret
@@ -152,21 +152,38 @@ recovery; Rekey works out which it is.
 |---|---|
 | `subscription.id` | Your id for the subscription. Stored as `providerSubId` and used to find the row for every later event. |
 | `subscription.plan` | A plan slug in this Application. An unknown slug fails the event and stays retryable. |
-| `subscription.currentPeriodEnd` | When the paid period ends. Omit or `null` for an open-ended subscription. A later value than the one stored is a renewal; a value already in the past is stale news and the event is ignored. |
+| `subscription.currentPeriodEnd` | When the paid period ends. Omit or `null` for an open-ended subscription. A value at least a day later than the one stored is a renewal; a smaller move is the same period restated and changes nothing; a value already in the past is stale news and the event is ignored. |
 | `subscription.trialEndsAt` | When the trial your system is running ends. A future value is judged by Rekey's trial ledger under the Application's `trialPolicy`, the same one-per-buyer rule hosted checkout applies: honoured, the row is `TRIALING` until you post an activation with `trialEndsAt` null or past, which converts it to `ACTIVE`; refused, the subscription is still activated, `ACTIVE` and without the trial, and the refusal is kept under the row's `metadata.refusedTrials`. Re-delivering an event never spends a second slot. |
 | `subscriber.email` or `subscriber.endUserId` | Exactly one. An email Rekey does not know creates the end-user (no password, the default role); an unknown `endUserId` fails the event. |
 | `subscriber.emailVerified` | Default `true`. Send `false` if your system has not confirmed the address; an OIDC sign-in will then not auto-link to it. |
-| `subscriber.organizationId` | The beneficiary organization, required for Applications that bill per organization. |
+| `subscriber.organizationId` | The beneficiary organization, required for Applications that bill per organization. On an activation for a subscription id Rekey already holds, the beneficiary never changes: omitted or the same, it is simply kept; a different organization is recorded on the receipt as `subject change ignored` and the event still applies to the existing subscription. To move a subscription to another subject, cancel it and activate a new subscription id. |
 
 What happens:
 
+- **A live subscription to this plan billed to a different subject.** The
+  subscriber already holds it for another organization (or for their personal
+  account), and this event is a different `subscription.id` for a different
+  subject (an omitted organization counts as the personal account). An event
+  for the subscription id the row already holds is never refused on these
+  grounds; see `subscriber.organizationId` above. A subscription to one plan is
+  stored once per subscriber, so applying this would move it. It is refused:
+  nothing changes, the attempt is kept under the row's
+  `metadata.refusedGrants`, and the receipt records
+  `BILLING_SUBSCRIPTION_SUBJECT_CONFLICT`. Cancel the existing subscription
+  first, or sell the second subject a separate plan.
+- **A cancelled subscription and an `occurredAt` at or before the
+  cancellation**, for the same `subscription.id`, when that cancellation was
+  dated by you (its `occurredAt` or `effectiveAt`). A late delivery of older
+  news: ignored and noted on the receipt. It does not reopen the row or grant
+  anything. A cancellation that carried neither date is dated by Rekey's
+  clock, and is not compared against yours.
 - **No subscription, or one that has ended.** The row is created or reopened
   `ACTIVE`, bound to your `subscription.id`, the plan's entitlements are
   provisioned, and `subscription.activated` is emitted to your webhook
   endpoints. If the subscriber was created, `user.created` is emitted too,
   with `via: "billing:external"`, and a security event
   `end_user.created_by_billing_webhook` is recorded.
-- **A live subscription and a later `currentPeriodEnd`.** A renewal: the
+- **A live subscription and a `currentPeriodEnd` at least a day later.** A renewal: the
   period moves forward and entitlements are provisioned for the new period
   (credits refill once, a timed licence rolls once). Nothing is announced;
   `subscription.activated` is for transitions. A period end beyond a
@@ -226,8 +243,16 @@ for a `subscriptionId` Rekey does not hold is still recorded, unlinked, and
 appears in the operator's unapplied-payments queue so that money never goes
 unseen; resolve it there once the matching `subscription.activated` has
 landed. A failed payment for an unknown subscription is skipped.
-`payment.succeeded` emits `payment.succeeded` outbound; `payment.refunded`
-marks the payment refunded and does not revoke entitlements.
+`payment.succeeded` emits `payment.succeeded` outbound.
+
+`payment.refunded` carries the amount of THAT refund, not a running total.
+Rekey adds it to the payment's `refundedAmount` and sets the status to
+`PARTIALLY_REFUNDED`, or `REFUNDED` once the whole amount is back; revenue
+figures count what the buyer kept. A refund that would take the total past
+the payment is refused and recorded on the receipt as
+`BILLING_REFUND_EXCEEDS_PAYMENT`, as is one in another currency or for a
+payment Rekey never recorded. Refunds do not revoke entitlements, and
+disputes are not modelled.
 
 ### `ping`
 
@@ -250,9 +275,12 @@ Stripe sale produces. Each subscription reports `provider: "external"`.
   intend to apply once. Posting the same activation with a new id is safe;
   posting two different events with one id loses the second.
 - **Ordering.** Rekey applies events in the order they arrive. A stale
-  activation cannot resurrect a cancelled subscription (a period end in the
-  past is ignored, and a live row's scheduled cancellation is only cleared by a
-  period end beyond it), but post events promptly rather than in batches.
+  activation cannot resurrect a cancelled subscription: one whose `occurredAt`
+  is at or before a cancellation you dated is ignored, a period end in the
+  past is ignored, and a live row's scheduled cancellation is only cleared by
+  a period end beyond it. The first of those needs `occurredAt` on both the
+  cancellation and the activation, so send it, and post events promptly
+  rather than in batches.
 - **Rate limits.** The endpoint shares the API's per-IP limit. A nightly
   reconcile that re-posts every active subscription is fine at a few requests
   per second; spread larger volumes.
@@ -266,11 +294,13 @@ Stripe sale produces. Each subscription reports `provider: "external"`.
   Razorpay, your activation is recorded on that row (`metadata.refusedGrants`)
   and otherwise ignored, because taking the hosted id away would orphan that
   provider's events while it keeps charging. Cancel it there first.
-- **One-time plans.** A credit pack or a perpetual licence has no period, so
-  a second purchase of the same plan by the same subscriber looks like a
-  replay unless something moved. Send `currentPeriodEnd` set to the time of
-  each purchase (any value later than the previous one) and Rekey provisions
-  the plan again for that anchor: the credits are granted once per purchase.
+- **One-time plans.** A credit pack or a perpetual licence has no period.
+  Rekey credits a one-time plan once per purchase reference, and an external
+  activation carries none, so a subscriber's first activation of a one-time
+  plan grants it and a later activation of the same plan grants nothing more,
+  whatever `currentPeriodEnd` says. To sell the same pack again through this
+  provider, use a separate plan per pack size, or record the top-up through
+  operator credits route (`POST /api/v1/tenant/applications/:id/end-users/:euid/credits/grant`).
 - **Only your rows.** Events from your system act only on subscriptions your
   system created. An id that happens to match a subscription Stripe, PayPal
   or Razorpay created is logged and ignored, on activation as well as on

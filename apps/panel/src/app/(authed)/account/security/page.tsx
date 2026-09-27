@@ -149,6 +149,7 @@ async function signOutEverywhere(): Promise<void> {
 
 const ERR: Record<string, string> = {
   MFA_CODE_INVALID: 'That code did not verify. Make sure your authenticator clock is in sync, then enter the current 6-digit code.',
+  MFA_CODE_REUSED: 'That code was already used. Wait for your authenticator to show the next code, then enter it.',
   MFA_NOT_INITIATED: 'Click "Set up MFA" first.',
   INVALID_CREDENTIALS: 'Current password is incorrect.',
   PASSWORD_TOO_SHORT: 'New password must be at least 8 characters.',

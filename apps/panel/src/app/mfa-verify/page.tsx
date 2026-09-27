@@ -3,6 +3,7 @@ import type { Metadata } from 'next';
 import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { publicPost, setSessionCookies, PanelApiError, type AuthResponse } from '@/lib/api';
+import { API_URL_MISSING_MESSAGES } from '@/lib/error-code';
 import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
@@ -50,10 +51,13 @@ async function verify(formData: FormData): Promise<void> {
 }
 
 const ERROR_MESSAGES: Record<string, string> = {
+  ...API_URL_MISSING_MESSAGES,
   missing: 'Authenticator code is required.',
   MFA_CODE_INVALID: 'That code didn\'t verify. Try the current 6-digit code or a backup code.',
-  MFA_CHALLENGE_INVALID:
-    'The challenge expired or was already used. Sign in again to start over.',
+  MFA_CODE_REUSED:
+    'That code was already used. Wait for your authenticator to show the next code, then enter it.',
+  MFA_CHALLENGE_INVALID: 'The challenge expired. Sign in again to start over.',
+  MFA_CHALLENGE_USED: 'This sign-in was already completed. Sign in again to start over.',
   RATE_LIMITED: 'Too many attempts. Please wait a minute and try again.',
   INTERNAL_ERROR: 'Something went wrong verifying that code. Please try again.',
 };

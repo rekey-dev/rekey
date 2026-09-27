@@ -315,6 +315,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
             currentPeriodEnd: d.subscription.currentPeriodEnd,
           }),
           ...(d.subscription.trialEndsAt !== undefined && { trialEndsAt: d.subscription.trialEndsAt }),
+          ...(env.occurredAt !== undefined && { occurredAt: env.occurredAt }),
           raw,
         },
       ];
@@ -341,7 +342,8 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           },
         ];
       }
-      const at = effectiveAt ?? env.occurredAt ?? now;
+      const senderAt = effectiveAt ?? env.occurredAt;
+      const at = senderAt ?? now;
       return [
         {
           type: 'subscription.canceled',
@@ -351,6 +353,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           status: 'CANCELED',
           cancelAt: at,
           canceledAt: at,
+          canceledAtFromSender: senderAt !== undefined,
           raw,
         },
       ];

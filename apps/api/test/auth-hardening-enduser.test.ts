@@ -132,7 +132,8 @@ describe('end-user auth hardening', () => {
       payload: { code: totp.generate() },
     });
     expect(confirm.statusCode).toBe(200);
-    return () => totp.generate();
+    // The confirming code spent this step (lib/mfa-replay.ts), so later proofs use the next one.
+    return () => totp.generate({ timestamp: Date.now() + 30_000 });
   }
 
   // ── Finding 2 ────────────────────────────────────────────────────────────

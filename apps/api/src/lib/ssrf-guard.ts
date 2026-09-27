@@ -176,10 +176,14 @@ function blocked(reason: string): RekeyError {
  * back out of the API response. That is an internal port scanner reachable
  * over the public API, and it existed because the guard lived next to the
  * webhook code rather than next to *outbound connections*.
+ *
+ * Returns the approved addresses, empty when private targets are allowed and
+ * nothing was resolved. Connect to one of them, not to the hostname: a second
+ * lookup at connect time can answer differently (DNS rebinding).
  */
-export async function assertSafeHost(host: string, options: SafeUrlOptions = {}): Promise<void> {
+export async function assertSafeHost(host: string, options: SafeUrlOptions = {}): Promise<string[]> {
   const allowPrivate = options.allowPrivate ?? env.WEBHOOK_ALLOW_PRIVATE_TARGETS;
-  if (allowPrivate) return;
+  if (allowPrivate) return [];
 
   const bare = host.trim().toLowerCase().replace(/^\[|\]$/g, '');
   if (!bare) throw blocked('host is empty.');
@@ -199,6 +203,7 @@ export async function assertSafeHost(host: string, options: SafeUrlOptions = {})
       throw blocked(`"${bare}" resolves to a private/loopback address.`);
     }
   }
+  return results.map((r) => r.address);
 }
 
 /**

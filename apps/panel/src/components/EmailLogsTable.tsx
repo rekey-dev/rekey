@@ -30,6 +30,15 @@ function StatusBadge({ status }: { status: string }): React.JSX.Element {
   return <Badge tone={tone}>{status}</Badge>;
 }
 
+/** The built-in event, or the custom template and version, that produced a row. */
+function emailSource(r: EmailLogWithApp): string {
+  if (r.eventKey) return r.eventKey;
+  if (r.customTemplateKey) {
+    return r.customTemplateVersion ? `${r.customTemplateKey} v${r.customTemplateVersion}` : r.customTemplateKey;
+  }
+  return '—';
+}
+
 /**
  * Read-only email send-log table. Used by both the per-application and the
  * workspace-wide (per-tenant) views; set `showApp` to render the owning-app
@@ -84,7 +93,7 @@ export function EmailLogsTable({
             <TD className="max-w-[18rem] truncate" >
               <span title={r.subject}>{r.subject}</span>
             </TD>
-            <TD mono muted>{r.eventKey ?? '—'}</TD>
+            <TD mono muted>{emailSource(r)}</TD>
             <TD muted className="whitespace-nowrap text-xs">
               {VIA_LABEL[r.via] ?? r.via}
             </TD>
@@ -139,6 +148,7 @@ export function EmailLogStatusFilter({
     { value: 'error', label: 'Errors' },
     { value: 'no_transport', label: 'No transport' },
     { value: 'suppressed', label: 'Suppressed' },
+    { value: 'unknown', label: 'Unknown' },
   ];
   const buildHref = (value: string | undefined): string => {
     const p = new URLSearchParams();

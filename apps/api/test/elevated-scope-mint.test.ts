@@ -156,6 +156,15 @@ describe('minting a key with an elevated scope', () => {
       expect(minted.some((k) => k.scopes.includes('credits:grant'))).toBe(false);
     });
 
+    it('lets the same MEMBER mint email:send, which needs developer authority only', async () => {
+      const w = await world();
+      expect((await restrict(w, NO_BILLING_WRITE)).statusCode).toBe(200);
+      const res = await mint(w, w.memberToken, ['email:send']);
+      expect(res.statusCode, res.body).toBe(201);
+      // Paired with credits:grant, the billing gate still applies.
+      expect((await mint(w, w.memberToken, ['email:send', 'credits:grant'])).statusCode).toBe(403);
+    });
+
     it('allows a MEMBER who holds billing:write, and the owner', async () => {
       const w = await world();
       expect((await mint(w, w.memberToken, ['credits:grant'])).statusCode).toBe(201);

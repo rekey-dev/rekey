@@ -19,7 +19,6 @@
  * enable the global read/introspection tools.
  */
 
-import { pathToFileURL } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -27,6 +26,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { zodToJsonSchema } from './lib/zod-to-json-schema.js';
+import { isEntryPoint } from './lib/entry-point.js';
 import { AdminClient, AdminApiError } from './client.js';
 import { tools } from './tools.js';
 import { VERSION } from './version.js';
@@ -194,10 +194,9 @@ export async function main(): Promise<void> {
   await built.server.connect(new StdioServerTransport());
 }
 
-// Run ONLY when this file is the process entry point (`rekey-mcp`, or
-// `node dist/index.js`). `import '@rekey.dev/mcp'` from another program takes
-// neither branch and has no side effects.
-const entry = process.argv[1];
-if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
+// Run ONLY when this file is the process entry point (`rekey-mcp`, `npx
+// @rekey.dev/mcp`, or `node dist/index.js`). `import '@rekey.dev/mcp'` from
+// another program has no side effects.
+if (isEntryPoint(import.meta.url)) {
   void main();
 }

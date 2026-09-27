@@ -23,6 +23,7 @@
  */
 
 import jwt from 'jsonwebtoken';
+import { randomUUID } from 'node:crypto';
 import { env } from '../config/env.js';
 import type { TenantRole } from '@prisma/client';
 
@@ -86,7 +87,9 @@ export function issueTenantMfaChallengeToken(
   const token = jwt.sign(
     { typ: 'to_mfa_challenge' as const, sub: tenantUserId },
     env.JWT_SECRET,
-    { expiresIn: lifetime, algorithm: 'HS256' },
+    // The jti keeps two challenges minted in the same second distinct, so
+    // spending one (lib/mfa-replay.ts) never spends the other.
+    { expiresIn: lifetime, algorithm: 'HS256', jwtid: randomUUID() },
   );
   return { token, expiresAt: new Date(Date.now() + lifetime * 1000) };
 }

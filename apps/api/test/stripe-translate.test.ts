@@ -222,6 +222,118 @@ describe('stripe module translate', () => {
     ).toBeNull();
   });
 
+  // From 2025-03-31.basil the period end lives on the subscription's items.
+  // An endpoint registered without a pinned version delivers in the account's
+  // default, so both shapes reach this translator.
+  it('customer.subscription.updated reads the period end off the first item (basil shape)', () => {
+    const events = translate(
+      {
+        id: 'evt_basil',
+        type: 'customer.subscription.updated',
+        data: {
+          object: {
+            id: 'sub_b',
+            status: 'active',
+            items: { data: [{ id: 'si_1', current_period_end: 1_795_000_000 }] },
+            metadata: { applicationId: APP_ID },
+          },
+        },
+      },
+      ctx(),
+    );
+    expect(events?.[0]).toMatchObject({ currentPeriodEnd: new Date(1_795_000_000 * 1000) });
+  });
+
+  it('customer.subscription.updated prefers the subscription-level period end when both exist', () => {
+    const events = translate(
+      {
+        id: 'evt_both',
+        type: 'customer.subscription.updated',
+        data: {
+          object: {
+            id: 'sub_both',
+            status: 'active',
+            current_period_end: 1_790_000_000,
+            items: { data: [{ id: 'si_1', current_period_end: 1_795_000_000 }] },
+            metadata: { applicationId: APP_ID },
+          },
+        },
+      },
+      ctx(),
+    );
+    expect(events?.[0]).toMatchObject({ currentPeriodEnd: new Date(1_790_000_000 * 1000) });
+  });
+
+  it('invoice.paid reads the subscription id from parent.subscription_details (basil shape)', () => {
+    const events = translate(
+      {
+        id: 'evt_inv_basil',
+        type: 'invoice.paid',
+        data: {
+          object: {
+            id: 'in_b',
+            amount_paid: 1000,
+            currency: 'usd',
+            billing_reason: 'subscription_cycle',
+            parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_b' } },
+            metadata: { applicationId: APP_ID },
+          },
+        },
+      },
+      ctx(),
+    );
+    expect(events?.[0]).toMatchObject({ type: 'payment.succeeded', providerSubscriptionId: 'sub_b' });
+  });
+
+  it('checkout.session.completed with payment_status unpaid activates nothing', () => {
+    const c = ctx();
+    const events = translate(
+      {
+        id: 'evt_unpaid',
+        type: 'checkout.session.completed',
+        data: {
+          object: {
+            id: 'cs_unpaid',
+            mode: 'payment',
+            payment_status: 'unpaid',
+            metadata: { applicationId: APP_ID },
+          },
+        },
+      },
+      c,
+    );
+    expect(events).toEqual([]);
+  });
+
+  it('checkout.session.async_payment_succeeded completes the session, with its charge', () => {
+    const events = translate(
+      {
+        id: 'evt_async',
+        type: 'checkout.session.async_payment_succeeded',
+        data: {
+          object: {
+            id: 'cs_async',
+            mode: 'payment',
+            payment_status: 'paid',
+            payment_intent: 'pi_async',
+            amount_total: 4200,
+            currency: 'eur',
+            metadata: { applicationId: APP_ID },
+          },
+        },
+      },
+      ctx(),
+    );
+    expect(events).toMatchObject([
+      {
+        type: 'checkout.completed',
+        providerEventId: 'evt_async',
+        checkoutSessionId: 'cs_async',
+        payment: { providerPaymentId: 'pi_async', amount: 4200, currency: 'eur' },
+      },
+    ]);
+  });
+
   it('extractEventId / extractEventType read the Stripe envelope', () => {
     const payload = { id: 'evt_env', type: 'invoice.paid' };
     expect(stripeModule.webhook.extractEventId(payload)).toBe('evt_env');

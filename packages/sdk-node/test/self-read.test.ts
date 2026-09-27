@@ -35,6 +35,24 @@ describe('licenses.listMine', () => {
     await client(paged).licenses.listMine('jwt.user', { limit: 10, offset: 20 });
     expect(sent(paged).url).toBe('https://api.example.com/api/v1/users/me/licenses/?limit=10&offset=20');
   });
+
+  it('passes organizationId, alone or after the page, encoded', async () => {
+    const page = { items: [], page: { total: 0, limit: 50, offset: 0, hasMore: false } };
+    const orgOnly = answer(page);
+    await client(orgOnly).licenses.listMine('jwt.user', undefined, { organizationId: 'org 1' });
+    expect(sent(orgOnly)).toEqual({
+      url: 'https://api.example.com/api/v1/users/me/licenses/?organizationId=org+1',
+      token: 'jwt.user',
+    });
+
+    const both = answer(page);
+    await client(both).licenses.listMine('jwt.user', { limit: 10 }, { organizationId: 'org_1' });
+    expect(sent(both).url).toBe('https://api.example.com/api/v1/users/me/licenses/?limit=10&organizationId=org_1');
+
+    const empty = answer(page);
+    await client(empty).licenses.listMine('jwt.user', {}, {});
+    expect(sent(empty).url).toBe('https://api.example.com/api/v1/users/me/licenses/');
+  });
 });
 
 describe('billing feature checks', () => {

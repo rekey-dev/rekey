@@ -65,9 +65,10 @@
 import type { Application, Prisma, Subscription } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
+import { costsNothing, freePlanNotFree } from './free-plan.js';
 import { plansService } from '../plans/plans.service.js';
 import { entitlementsService } from './entitlements.service.js';
-import { enqueueSubscriptionEvent } from './webhooks/billing-events.js';
+import { enqueueActivation } from './trial-events.js';
 import { kickDeliveries } from '../webhooks/webhook.service.js';
 import { BillingConfigSchema } from '@rekey.dev/shared-types';
 import { isOneTimePlan } from './plan-kind.js';
@@ -163,6 +164,16 @@ export interface GrantSubscriptionInput {
    * set it: an operator handing out value is a deliberate act, not a tap.
    */
   freeTierClaim?: boolean;
+  /**
+   * Answer a live row billed to a different subject with the idempotent no-op
+   * instead of BILLING_SUBSCRIPTION_SUBJECT_CONFLICT.
+   *
+   * Set only by `activateFreePlan` for a free plan that materialises nothing
+   * (FEATURE / USAGE only): those resolve at read time, nothing is issued per
+   * subject, and the route has always promised that a caller already on the
+   * plan gets `200 activated: false`.
+   */
+  otherSubjectIsNoop?: boolean;
 }
 
 export interface GrantSubscriptionResult {
@@ -344,14 +355,7 @@ export const subscriptionGrantsService = {
     }
 
     const plan = await plansService.getBySlug(input.application.id, slug);
-    if (plan.amount !== 0 || plan.pricePerUnitCents !== null) {
-      throw new RekeyError({
-        statusCode: 409,
-        code: 'BILLING_FREE_PLAN_NOT_FREE',
-        message: `The Application's default plan "${plan.slug}" is not free, so it cannot be self-activated.`,
-        fix: 'A self-activated plan must cost nothing on both axes: `amount` 0 and no `pricePerUnitCents`. Send buyers of a priced plan through POST /api/v1/billing/checkout instead.',
-      });
-    }
+    if (!costsNothing(plan)) throw freePlanNotFree(plan.slug, 'activate');
 
     // Mirrors the conditions under which `entitlementsService.provision`
     // actually writes something, so the claim is required exactly when an
@@ -366,7 +370,7 @@ export const subscriptionGrantsService = {
       endUserId: input.endUserId,
       ...(input.organizationId !== undefined && { organizationId: input.organizationId }),
       note: 'self-serve free tier',
-      ...(materialises && { freeTierClaim: true }),
+      ...(materialises ? { freeTierClaim: true } : { otherSubjectIsNoop: true }),
     });
   },
 
@@ -382,6 +386,9 @@ export const subscriptionGrantsService = {
    * returned unchanged with `activated: false`: nothing is written, no
    * entitlement is materialised a second time, and no event is emitted. That
    * bound is the contract, granting twice must cost the same as granting once.
+   * It holds for the SAME billing subject: a live row billed to a different
+   * one (another organization, or the personal account) is refused with 409
+   * BILLING_SUBSCRIPTION_SUBJECT_CONFLICT rather than reported as a no-op.
    *
    * Concurrently, too. Two simultaneous grants both read the pre-transaction
    * state, so the read alone settles nothing: the create path is separated by
@@ -503,6 +510,12 @@ export const subscriptionGrantsService = {
           where: { applicationId_endUserId_planId: key },
         });
         if (existing && ENTITLED.has(existing.status)) {
+          // The no-op is for the SAME subject only. Answering "already
+          // entitled" with another organization's row told the caller their
+          // organization was covered when nothing had been granted to it.
+          if (existing.beneficiaryOrgId !== (input.organizationId ?? null) && input.otherSubjectIsNoop !== true) {
+            throw subjectConflict(plan.slug, existing.beneficiaryOrgId, input.organizationId);
+          }
           return { subscription: existing, activated: false, deliveryIds: [] as string[] };
         }
 
@@ -594,7 +607,7 @@ export const subscriptionGrantsService = {
           return {
             subscription: created,
             activated: true,
-            deliveryIds: await enqueueSubscriptionEvent(tx, 'subscription.activated', created.id),
+            deliveryIds: await enqueueActivation(tx, created),
             ...(trialRefused && { trialRefused }),
           };
         }
@@ -626,7 +639,7 @@ export const subscriptionGrantsService = {
         return {
           subscription: row,
           activated: true,
-          deliveryIds: await enqueueSubscriptionEvent(tx, 'subscription.activated', row.id),
+          deliveryIds: await enqueueActivation(tx, row),
           ...(trialRefused && { trialRefused }),
         };
       });
@@ -733,6 +746,27 @@ async function settleFreeTierClaim(
       },
     });
   };
+}
+
+/**
+ * The subscriber's live subscription to this plan is billed to a different
+ * subject. A subscription to one plan is one row per subscriber (#431), so
+ * granting it for another subject would move it, the refusal hosted checkout
+ * makes with the same code.
+ */
+function subjectConflict(
+  planSlug: string,
+  heldOrgId: string | null,
+  wantedOrgId: string | undefined,
+): RekeyError {
+  const held = heldOrgId === null ? 'their personal account' : 'a different organization';
+  const wanted = wantedOrgId === undefined ? 'their personal account' : 'this organization';
+  return new RekeyError({
+    statusCode: 409,
+    code: 'BILLING_SUBSCRIPTION_SUBJECT_CONFLICT',
+    message: `This subscriber already holds a live subscription to "${planSlug}" billed to ${held}, and a subscription to one plan is stored once per subscriber. Granting "${planSlug}" to ${wanted} would move that subscription instead of adding a second one.`,
+    fix: `Cancel the existing "${planSlug}" subscription and let it end before granting it to a different billing subject, or use a separate plan for each subject.`,
+  });
 }
 
 /** Resolve the subscriber by id or email, always scoped to the Application. */

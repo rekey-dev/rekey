@@ -82,13 +82,14 @@ export async function issueRefreshToken(
   applicationId: string,
   endUserId: string,
   options: IssueRefreshTokenOptions = {},
+  client: Prisma.TransactionClient = prisma,
 ): Promise<IssuedRefreshToken> {
   const raw = generateRawToken();
   // Truncate UA at 512 chars, some clients send egregious strings (especially
   // mobile WebViews). 512 is generous for any real-world UA.
   const ua = options.userAgent ? options.userAgent.slice(0, 512) : null;
   const ip = options.ip ? options.ip.slice(0, 64) : null;
-  const record = await prisma.refreshToken.create({
+  const record = await client.refreshToken.create({
     data: {
       applicationId,
       endUserId,

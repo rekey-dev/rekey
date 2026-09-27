@@ -76,6 +76,48 @@ export interface CheckoutSessionResult {
   sessionId: string;
 }
 
+/**
+ * A checkout presented on the Rekey-hosted page instead of the provider's.
+ *
+ * `returnUrl` is the Rekey page itself, never the integrator's URL: the
+ * processor sends the buyer back to our page, which sends them on to
+ * `successUrl` once the webhook has been applied.
+ */
+export interface EmbeddedCheckoutInput extends CheckoutSessionInput {
+  kind: 'recurring' | 'one_time';
+  returnUrl: string;
+}
+
+/** Browser configuration the page needs for PayPal's subscription Buttons. */
+export interface PaypalEmbeddedClient {
+  provider: 'paypal';
+  /** Public by design: PayPal's JS SDK takes it in the script URL. */
+  clientId: string;
+  subscriptionId: string;
+  sdk: 'v5-subscription';
+}
+
+export interface EmbeddedCheckoutResult {
+  /** Same meaning as `CheckoutSessionResult.sessionId`, persisted to the Subscription. */
+  sessionId: string;
+  /** Everything here is sent to the buyer's browser, so it must never hold a secret. */
+  client: PaypalEmbeddedClient;
+  /** The provider's own hosted page for this same session, for the page's fallback link. */
+  fallbackUrl: string;
+  /** Provider-side plan id the session was created against, checked again on confirmation. */
+  providerPlanId: string;
+}
+
+/** A provider's own account of one subscription, for checking a browser's "approved". */
+export interface ProviderSubscriptionSnapshot {
+  id: string;
+  /** The provider's status string, e.g. PayPal `APPROVAL_PENDING`, `APPROVED`, `ACTIVE`. */
+  status: string;
+  planId: string | null;
+  /** What Rekey stamped at creation: `${applicationId}:${endUserId}`. */
+  customId: string | null;
+}
+
 export interface CancelSubscriptionInput {
   subscription: Subscription;
   /** True = stop at period end (default). False = stop immediately. */
@@ -237,6 +279,20 @@ export interface BillingProvider {
    * Same rule for `input.discount`: apply it to the single charge, or throw.
    */
   createOneTimeCheckout(input: CheckoutSessionInput): Promise<CheckoutSessionResult>;
+
+  /**
+   * Create the provider-side session for the Rekey-hosted page. Present only
+   * when the module declares `capabilities.embeddedCheckout`. Same discount
+   * and trial rules as `createCheckoutSession`.
+   */
+  createEmbeddedCheckout?(input: EmbeddedCheckoutInput): Promise<EmbeddedCheckoutResult>;
+
+  /**
+   * Read one subscription back from the provider, so the page's "approved"
+   * can be checked against what the provider actually holds. Read-only, and
+   * null when the provider has no such subscription.
+   */
+  getSubscription?(providerSubscriptionId: string): Promise<ProviderSubscriptionSnapshot | null>;
 
   /**
    * Capture an approved one-time order (PayPal Orders v2 only, Stripe/Razorpay

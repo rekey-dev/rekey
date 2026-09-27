@@ -16,6 +16,7 @@
 
 import Stripe from 'stripe';
 import { RekeyError } from '../../../../../lib/error.js';
+import { STRIPE_API_VERSION } from '../../stripe-api-version.js';
 import type {
   AppRef,
   CheckoutCompletedEvent,
@@ -36,7 +37,7 @@ import type {
 // uses each Application's own BYO credentials, and a deployment-wide key would
 // be a cross-tenant trust boundary.
 const stripeForVerification = new Stripe('sk_signature_verification_only', {
-  apiVersion: '2024-11-20.acacia' as Stripe.LatestApiVersion,
+  apiVersion: STRIPE_API_VERSION as Stripe.LatestApiVersion,
 });
 
 /** Payload objects that may carry our app-scoping metadata. */
@@ -202,22 +203,66 @@ function oneTimeCharge(
 }
 
 /**
- * Port of the stripe.handler.ts dispatch switch: the same 5 handled event
- * types, translated to normalized domain events. Everything else → null
- * (logged + acked upstream). Application scoping stays payload-metadata
- * based, missing metadata means "cannot route", warn + no events, never
- * guess (see webhooks/AGENTS.md).
+ * The subscription's current period end, from whichever shape the event's API
+ * version uses. From `2025-03-31.basil` Stripe moved `current_period_end` off
+ * the subscription onto each item, and an endpoint registered without a pinned
+ * version delivers in the account's default. Items share one period on the
+ * subscriptions Rekey creates, so the first is the subscription's.
+ */
+export function periodEndOf(sub: Stripe.Subscription): Date | null {
+  const onItem = (sub.items?.data?.[0] as { current_period_end?: number } | undefined)
+    ?.current_period_end;
+  const seconds = sub.current_period_end ?? onItem;
+  return typeof seconds === 'number' && seconds > 0 ? new Date(seconds * 1000) : null;
+}
+
+/**
+ * The invoice's subscription id, from either API shape: `invoice.subscription`
+ * before `2025-03-31.basil`, `invoice.parent.subscription_details.subscription`
+ * from it on.
+ */
+function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
+  if (typeof invoice.subscription === 'string') return invoice.subscription;
+  if (invoice.subscription?.id) return invoice.subscription.id;
+  const parent = (invoice as { parent?: { subscription_details?: { subscription?: unknown } | null } | null })
+    .parent;
+  const fromParent = parent?.subscription_details?.subscription;
+  if (typeof fromParent === 'string') return fromParent;
+  if (fromParent && typeof fromParent === 'object' && 'id' in fromParent && typeof fromParent.id === 'string') {
+    return fromParent.id;
+  }
+  return null;
+}
+
+/**
+ * Translate the Stripe event types Rekey consumes into normalized domain
+ * events. Everything else → null (logged + acked upstream). Application
+ * scoping is payload-metadata based: missing metadata means "cannot route",
+ * warn + no events, never guess (see webhooks/AGENTS.md). The one exception
+ * is `charge.refunded`, whose renewal charges carry no metadata and fall back
+ * to the Application whose secret verified the request.
  */
 function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | null {
   const event = payload as Stripe.Event;
   switch (event.type) {
-    case 'checkout.session.completed': {
+    case 'checkout.session.completed':
+    case 'checkout.session.async_payment_succeeded': {
       const session = event.data.object as Stripe.Checkout.Session;
       const applicationId = extractApplicationId(session);
       if (!applicationId) {
         ctx.log.warn(
           { sessionId: session.id },
-          'checkout.session.completed without applicationId metadata — cannot route',
+          `${event.type} without applicationId metadata, cannot route`,
+        );
+        return [];
+      }
+      // A delayed payment method (bank debit, voucher) completes the session
+      // before any money moves. Activating here would provision a buyer whose
+      // payment can still fail; `async_payment_succeeded` completes it instead.
+      if (session.payment_status === 'unpaid') {
+        ctx.log.info(
+          { sessionId: session.id },
+          'checkout completed unpaid (delayed payment method), waiting for async_payment_succeeded',
         );
         return [];
       }
@@ -252,7 +297,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           providerSubscriptionId: sub.id,
           status,
           // Absolute mirror, null clears, matching the pre-module handler.
-          currentPeriodEnd: sub.current_period_end ? new Date(sub.current_period_end * 1000) : null,
+          currentPeriodEnd: periodEndOf(sub),
           trialEndsAt: sub.trial_end ? new Date(sub.trial_end * 1000) : null,
           cancelAt: sub.cancel_at ? new Date(sub.cancel_at * 1000) : null,
           canceledAt: sub.canceled_at ? new Date(sub.canceled_at * 1000) : null,
@@ -295,8 +340,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           providerEventId: event.id,
           applicationId,
           providerPaymentId: invoice.id,
-          providerSubscriptionId:
-            typeof invoice.subscription === 'string' ? invoice.subscription : null,
+          providerSubscriptionId: invoiceSubscriptionId(invoice),
           amount: invoice.amount_paid,
           currency: invoice.currency ?? null,
           description: invoice.description ?? null,
@@ -324,8 +368,7 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
           providerEventId: event.id,
           applicationId,
           providerPaymentId: invoice.id,
-          providerSubscriptionId:
-            typeof invoice.subscription === 'string' ? invoice.subscription : null,
+          providerSubscriptionId: invoiceSubscriptionId(invoice),
           amount: invoice.amount_due,
           currency: invoice.currency ?? null,
           description: invoice.description ?? null,
@@ -333,9 +376,50 @@ function translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | 
         },
       ];
     }
+    case 'charge.refunded': {
+      const charge = event.data.object as Stripe.Charge;
+      // A renewal's charge is created by its invoice and carries none of our
+      // metadata, so the route's Application is the fallback. The slug
+      // selected the secret that verified this body, which is what makes it
+      // trustworthy.
+      const applicationId = extractApplicationId(charge) ?? ctx.applicationId;
+      if (!applicationId) {
+        ctx.log.warn({ chargeId: charge.id }, 'charge.refunded without applicationId, cannot route');
+        return [];
+      }
+      return [
+        {
+          type: 'payment.refunded',
+          providerEventId: event.id,
+          applicationId,
+          providerPaymentId: chargePaymentId(charge),
+          providerSubscriptionId: null,
+          amount: charge.amount_refunded,
+          refundedTotal: charge.amount_refunded,
+          currency: charge.currency ?? null,
+          description: null,
+          raw: payload,
+        },
+      ];
+    }
     default:
       return null;
   }
+}
+
+/**
+ * The id a refunded charge's Payment row was recorded under: the invoice for
+ * a subscription charge (`invoice.paid`), the payment intent for a one-time
+ * checkout (`oneTimeCharge`), the charge itself when neither is present.
+ */
+function chargePaymentId(charge: Stripe.Charge): string {
+  const invoice = (charge as { invoice?: string | { id?: string } | null }).invoice;
+  if (typeof invoice === 'string') return invoice;
+  if (invoice?.id) return invoice.id;
+  const intent = charge.payment_intent;
+  if (typeof intent === 'string') return intent;
+  if (intent?.id) return intent.id;
+  return charge.id;
 }
 
 export const stripeModule: ProviderModule = {
@@ -433,6 +517,12 @@ export const stripeModule: ProviderModule = {
     },
     extractEventType(payload: unknown): string {
       return (payload as { type?: string }).type ?? 'unknown';
+    },
+    eventMode(payload: unknown): 'test' | 'live' | null {
+      const livemode = (payload as { livemode?: unknown }).livemode;
+      if (livemode === true) return 'live';
+      if (livemode === false) return 'test';
+      return null;
     },
     translate,
   },

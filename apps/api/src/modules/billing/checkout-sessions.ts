@@ -45,9 +45,50 @@ export const CHECKOUT_SESSION_HISTORY = 10;
  *
  * Read by the provider-binding guard in billing.service.ts, which counts a
  * PENDING row as a live billing relationship only while it is inside this
- * window.
+ * window, measured by `checkoutBindsUntil`.
  */
 export const CHECKOUT_SESSION_LIFETIME_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * When a PENDING row's newest checkout session stops counting as payable.
+ *
+ * The clock is `metadata.checkoutOpenedAt`, which only issuing a session
+ * writes. It used to be `updatedAt`, which any write to the row moves, so an
+ * unrelated touch restarted a long-dead checkout's window and kept pinning the
+ * buyer to its processor (#438).
+ *
+ * A row written before the stamp existed falls back to `updatedAt`. That keeps
+ * the old over-pinning for those rows only, which refuses a checkout rather
+ * than letting one buyer pay at two processors, and it dies out: the next
+ * session issued on the row writes the stamp.
+ */
+export function checkoutBindsUntil(row: { metadata: unknown; updatedAt: Date }): Date {
+  const stamped = asRecord(row.metadata).checkoutOpenedAt;
+  const openedAt = typeof stamped === 'string' ? new Date(stamped) : null;
+  const clock = openedAt !== null && !Number.isNaN(openedAt.getTime()) ? openedAt : row.updatedAt;
+  return new Date(clock.getTime() + CHECKOUT_SESSION_LIFETIME_MS);
+}
+
+/**
+ * A `where` fragment that narrows PENDING candidates in the database before
+ * `checkoutStillPayable` decides in code.
+ *
+ * It never drops a row that is still payable: stamping `checkoutOpenedAt` is
+ * itself a write to the row, so `updatedAt` is never earlier than the stamp,
+ * and a row without a stamp is judged by `updatedAt` anyway. Without it every
+ * abandoned PENDING row a buyer ever left would be loaded on every checkout.
+ */
+export function pendingCheckoutPrefilter(now: Date): { updatedAt: { gt: Date } } {
+  return { updatedAt: { gt: new Date(now.getTime() - CHECKOUT_SESSION_LIFETIME_MS) } };
+}
+
+/** Whether a PENDING row's newest checkout session could still be paid at `now`. */
+export function checkoutStillPayable(
+  row: { metadata: unknown; updatedAt: Date },
+  now: Date = new Date(),
+): boolean {
+  return checkoutBindsUntil(row).getTime() > now.getTime();
+}
 
 /** The coupon a single checkout session carried, if any. */
 export interface SessionCoupon {
@@ -71,6 +112,8 @@ const UNAPPLIED_COMPLETION_HISTORY = 10;
 /** Shape of the subscription metadata this module owns. */
 interface CheckoutMetadata extends Record<string, unknown> {
   checkoutSessionId: string;
+  /** ISO time the newest session was issued. See `checkoutBindsUntil`. */
+  checkoutOpenedAt: string;
   checkoutSessionIds: string[];
   couponBySession: Record<string, SessionCoupon>;
   providerBySession: Record<string, string>;
@@ -123,6 +166,7 @@ export function buildCheckoutSessionMetadata(input: {
    * actually completed.
    */
   provider: string;
+  openedAt: Date;
 }): Record<string, unknown> {
   const previous = asRecord(input.previous);
   const previousIds = stringArray(previous.checkoutSessionIds);
@@ -159,6 +203,7 @@ export function buildCheckoutSessionMetadata(input: {
   const metadata: CheckoutMetadata = {
     ...previous,
     checkoutSessionId: input.sessionId,
+    checkoutOpenedAt: input.openedAt.toISOString(),
     checkoutSessionIds: ids,
     couponBySession,
     providerBySession,

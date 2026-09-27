@@ -17,7 +17,7 @@ import { tenantPasskeysService } from './tenant-passkeys.service.js';
 import { requireTenantSession } from '../../middleware/tenant-session.js';
 import { assertTenantStepUp } from '../../lib/step-up.js';
 import { tenantMfaService } from '../tenant-mfa/tenant-mfa.service.js';
-import { authRateLimit } from '../../lib/rate-limit.js';
+import { authRateLimit, passkeyStartRateLimit } from '../../lib/rate-limit.js';
 import { ok, errs, ref } from '../../lib/openapi.js';
 import { CREDENTIAL_BODY_LIMIT, WEBAUTHN_BODY_LIMIT } from '../../lib/body-limits.js';
 
@@ -169,7 +169,8 @@ export async function tenantPasskeysAuthenticatedRoutes(app: FastifyInstance): P
             401:
               TENANT_SESSION_ERRORS[401] +
               '; or STEP_UP_REQUIRED — enrolling a passkey requires the account password or a ' +
-              'current authenticator/backup code.',
+              'current authenticator/backup code; ' +
+              'or MFA_CODE_REUSED: the authenticator code was already accepted, wait for the next one.',
             403: TENANT_SESSION_ERRORS[403],
             429: 'RATE_LIMITED — too many requests. Honour `Retry-After`.',
           }),
@@ -182,7 +183,7 @@ export async function tenantPasskeysAuthenticatedRoutes(app: FastifyInstance): P
         tenantUserId: req.tenantUser!.id,
         proof,
         action: 'enroll a passkey',
-        verifyMfaCode: (a) => tenantMfaService.verify(a),
+        verifyMfaCode: (a) => tenantMfaService.check(a),
       });
       const result = await tenantPasskeysService.registerStart(req.tenantUser!.id);
       return { success: true, data: result };
@@ -287,6 +288,7 @@ export async function tenantPasskeysPublicRoutes(app: FastifyInstance): Promise<
     '/passkeys/authenticate/start',
     {
       bodyLimit: CREDENTIAL_BODY_LIMIT,
+      config: { rateLimit: passkeyStartRateLimit(10) },
       schema: {
         tags: ['Tenant · Passkeys'],
         security: [],

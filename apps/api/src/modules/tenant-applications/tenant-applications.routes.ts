@@ -11,6 +11,7 @@
  * route layer. We deliberately don't duplicate service logic.
  */
 
+import { isDeepStrictEqual } from 'node:util';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { applicationsService } from '../applications/applications.service.js';
@@ -41,7 +42,7 @@ import { prisma } from '../../lib/prisma.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
 import { listApiRequests } from '../../lib/request-log.js';
 import { CouponDiscountType, type LicenseKind } from '@prisma/client';
-import { AppEnvironmentSchema, AuthConfigSchema, BillingConfigSchema, BillingProviderSchema, GrantCreditsRequestSchema } from '@rekey.dev/shared-types';
+import { AppEnvironmentSchema, AuthConfigSchema, BillingConfigSchema, BillingProviderSchema, GrantCreditsRequestSchema, SIGNUP_DOMAIN_LIST_MAX, SignupRestrictionsSchema } from '@rekey.dev/shared-types';
 import { RekeyError } from '../../lib/error.js';
 import { hashPassword } from '../../lib/passwords.js';
 import { assertMetadataWithinLimit } from '../../lib/metadata-limit.js';
@@ -49,6 +50,7 @@ import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { entitlementOverridesService } from '../billing/entitlement-overrides.service.js';
 import { reconcileSeatsForSubscription } from '../billing/seat-reconciler.js';
 import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
+import { enqueueUserUpdated, userSnapshot } from '../auth/user-lifecycle.js';
 import { applicationRolesService } from '../application-roles/application-roles.service.js';
 import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 import { organizationsService } from '../organizations/organizations.service.js';
@@ -309,12 +311,50 @@ export const AUTH_CONFIG_PATCH_BODY_JSON_SCHEMA = {
       description:
         'Refuse password sign-in with 403 EMAIL_NOT_VERIFIED until the end-user confirms their address. Default false; turning it on applies to existing unverified accounts immediately.',
     },
+    welcomeEmail: {
+      type: 'string',
+      enum: ['on_signup', 'on_verified', 'off'],
+      description:
+        'When a new account gets the welcome mail. on_signup (default): at creation, except that with requireEmailVerification on an unverified address waits for its first verification. on_verified: always waits for a verified address. off: never.',
+    },
     signupEnabled: { type: 'boolean', description: 'Legacy alias for signupMode (false ⇔ invite_only). Prefer signupMode.' },
     signupMode: {
       type: 'string',
       enum: ['public', 'secret_only', 'invite_only'],
       description:
         'Who may create end-users: public (any key), secret_only (server-side secret key only, publishable key refused with SIGNUP_REQUIRES_SECRET_KEY), or invite_only (no public sign-up).',
+    },
+    signupRestrictions: {
+      type: 'object',
+      nullable: true,
+      description:
+        'Which email domains may self sign-up (password sign-up, a magic link for a new ' +
+        'address, a first OAuth sign-in). Replaces the stored rules as a whole; null removes ' +
+        'them. A refused address gets 403 SIGNUP_EMAIL_DOMAIN_NOT_ALLOWED, and the magic-link ' +
+        'request answers as if it sent. Operator-created and imported users are not checked. ' +
+        'Entries are lowercased and internationalised names stored as punycode.',
+      properties: {
+        allowedDomains: {
+          type: 'array',
+          maxItems: SIGNUP_DOMAIN_LIST_MAX,
+          items: { type: 'string', maxLength: 260 },
+          description:
+            'When non-empty, only these domains may sign up. `example.com` matches that domain ' +
+            'only; `*.example.com` matches its subdomains and not the domain itself.',
+        },
+        blockedDomains: {
+          type: 'array',
+          maxItems: SIGNUP_DOMAIN_LIST_MAX,
+          items: { type: 'string', maxLength: 260 },
+          description: 'Domains that may never sign up, same matching rules. Wins over allowedDomains.',
+        },
+        blockDisposable: {
+          type: 'boolean',
+          description:
+            'Refuse throwaway-inbox domains (and their subdomains) from the list vendored with ' +
+            'this release.',
+        },
+      },
     },
     mfa: { type: 'string', enum: ['off', 'optional', 'required'], description: 'End-user 2FA policy.' },
     mcpEnabled: { type: 'boolean', description: 'Expose a hosted MCP server + OAuth AS for this app.' },
@@ -394,8 +434,10 @@ export const AUTH_CONFIG_PATCH_BODY = z
     passwordBreachCheckEnabled: z.boolean().optional(),
     sendVerificationEmailOnSignUp: z.boolean().optional(),
     requireEmailVerification: z.boolean().optional(),
+    welcomeEmail: z.enum(['on_signup', 'on_verified', 'off']).optional(),
     signupEnabled: z.boolean().optional(),
     signupMode: z.enum(['public', 'secret_only', 'invite_only']).optional(),
+    signupRestrictions: SignupRestrictionsSchema.nullable().optional(),
     mfa: z.enum(['off', 'optional', 'required']).optional(),
     mcpEnabled: z.boolean().optional(),
     oidcEnabled: z.boolean().optional(),
@@ -1471,7 +1513,14 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             { type: 'object', properties: { authConfig: ref('AuthConfig') }, required: ['authConfig'] },
             'The Application, patched auth configuration.',
           ),
-          ...errs({ 400: 'VALIDATION_ERROR — a field failed schema validation.', ...APP_WRITE_ERRORS }),
+          ...errs({
+            400: 'VALIDATION_ERROR: a field failed schema validation.',
+            ...APP_WRITE_ERRORS,
+            409:
+              'EMAIL_EVENT_REQUIRED_BY_AUTH_CONFIG: the change needs an email that is switched ' +
+              'off; or EMAIL_VERIFICATION_URL_REQUIRED: a verified email would be required with ' +
+              'no Application URL or http(s) redirect URL to build the verification link on.',
+          }),
         },
       },
     },
@@ -1538,7 +1587,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               type: 'string',
               nullable: true,
               description:
-                'Free-tier fallback. Slug of an active plan whose FEATURE flags and included ' +
+                'Free-tier fallback. Slug of an active plan costing nothing (`amount` 0, no ' +
+                '`pricePerUnitCents`) whose FEATURE flags and included ' +
                 'usage quota apply on top of what a subscription grants: withheld for a key a ' +
                 'per-subscription entitlement override names, and otherwise able only to raise ' +
                 'a value, never to replace one. A SUBSCRIPTION or USAGE plan suppresses it ' +
@@ -1556,6 +1606,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               'VALIDATION_ERROR — an unknown key or a field failed schema validation; or ' +
               'DEFAULT_PLAN_NOT_FOUND — `defaultPlanSlug` does not match an active plan on this Application.',
             ...APP_WRITE_ERRORS,
+            409:
+              'BILLING_SUBJECT_CHANGE_BLOCKED: live subscriptions would be stranded by the new ' +
+              '`billingSubject`; or BILLING_FREE_PLAN_NOT_FREE: `defaultPlanSlug` names a plan ' +
+              'with a nonzero `amount` or a `pricePerUnitCents`.',
           }),
         },
       },
@@ -1580,21 +1634,6 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         })
         .strict()
         .parse(req.body ?? {});
-      // Reject a typo'd free-tier slug so it can't silently disable the tier.
-      if (typeof body.defaultPlanSlug === 'string') {
-        const plan = await prisma.plan.findFirst({
-          where: { applicationId: id, slug: body.defaultPlanSlug, active: true },
-          select: { id: true },
-        });
-        if (!plan) {
-          throw new RekeyError({
-            statusCode: 400,
-            code: 'DEFAULT_PLAN_NOT_FOUND',
-            message: `No active plan "${body.defaultPlanSlug}" in this Application.`,
-            fix: 'Pass the slug of an existing active plan to use as the free tier, or null to clear it.',
-          });
-        }
-      }
       // Changing the billing subject under live subscriptions strands every
       // one of them on the wrong side of the setting (#431).
       //
@@ -2403,7 +2442,8 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             400:
               'COUPON_CODE_INVALID — the code is not 1-40 alphanumerics/underscores/hyphens; or ' +
               'COUPON_AMOUNT_INVALID — `amountOff` is negative, or a PERCENT discount exceeds ' +
-              '10000 basis points (100%); or VALIDATION_ERROR — a field failed schema validation.',
+              '10000 basis points (100%); or COUPON_CURRENCY_REQUIRED: an AMOUNT coupon was ' +
+              'sent without `currency`; or COUPON_CURRENCY_INVALID: `currency` is not an ISO 4217 code; or VALIDATION_ERROR — a field failed schema validation.',
             ...APP_BILLING_WRITE_ERRORS,
             409: 'COUPON_CODE_TAKEN — another coupon on this Application already uses that code.',
           }),
@@ -3129,7 +3169,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         querystring: {
           type: 'object',
           properties: {
-            status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED'] },
+            status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED', 'PARTIALLY_REFUNDED'] },
             from: { type: 'string', format: 'date-time' },
             to: { type: 'string', format: 'date-time' },
             sort: { type: 'string', enum: ['createdAt', 'amount', 'status'] },
@@ -3147,7 +3187,11 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                 subscriptionId: { type: 'string', nullable: true },
                 amount: { type: 'integer' },
                 currency: { type: 'string' },
-                status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED'] },
+                status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED', 'PARTIALLY_REFUNDED'] },
+                refundedAmount: {
+                  type: 'integer',
+                  description: 'Cumulative amount refunded so far, smallest currency unit.',
+                },
                 providerPaymentId: { type: 'string', nullable: true },
                 description: { type: 'string', nullable: true },
                 createdAt: { type: 'string', format: 'date-time' },
@@ -3170,7 +3214,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       await ensureAppAccess(req, id, 'read');
       const q = z
         .object({
-          status: z.enum(['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED']).optional(),
+          status: z.enum(['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED', 'PARTIALLY_REFUNDED']).optional(),
           from: z.coerce.date().optional(),
           to: z.coerce.date().optional(),
           sort: z.enum(['createdAt', 'amount', 'status']).optional(),
@@ -3205,6 +3249,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
             subscriptionId: true,
             amount: true,
             currency: true,
+            refundedAmount: true,
             status: true,
             providerPaymentId: true,
             description: true,
@@ -3966,20 +4011,36 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         ? (await applicationRolesService.assertExists(id, body.role), body.role)
         : (await applicationRolesService.getDefault(id)).name;
       try {
-        const created = await prisma.endUser.create({
-          data: {
+        const { created, deliveryIds } = await prisma.$transaction(async (tx) => {
+          const row = await tx.endUser.create({
+            data: {
+              applicationId: id,
+              email: body.email.toLowerCase(),
+              passwordHash,
+              role: roleName,
+              emailVerified: body.emailVerified ?? true,
+              ...(body.metadata !== undefined && { metadata: body.metadata as never }),
+            },
+          });
+          const ids = await enqueueEvent(tx, {
             applicationId: id,
-            email: body.email.toLowerCase(),
-            passwordHash,
-            role: roleName,
-            emailVerified: body.emailVerified ?? true,
-            ...(body.metadata !== undefined && { metadata: body.metadata as never }),
-          },
-          select: {
-            id: true, email: true, emailVerified: true, role: true, metadata: true, createdAt: true,
+            type: 'user.created',
+            data: { user: userSnapshot(row), via: 'operator' },
+          });
+          return { created: row, deliveryIds: ids };
+        });
+        kickDeliveries(deliveryIds);
+        return reply.status(201).send({
+          success: true,
+          data: {
+            id: created.id,
+            email: created.email,
+            emailVerified: created.emailVerified,
+            role: created.role,
+            metadata: created.metadata,
+            createdAt: created.createdAt,
           },
         });
-        return reply.status(201).send({ success: true, data: created });
       } catch (e) {
         if ((e as { code?: string }).code === 'P2002') {
           // Same reason as the licenses 404 below: hand-building the envelope
@@ -4226,7 +4287,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
                       id: { type: 'string' },
                       amount: { type: 'integer' },
                       currency: { type: 'string' },
-                      status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED'] },
+                      status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED', 'PARTIALLY_REFUNDED'] },
                       description: { type: 'string', nullable: true },
                       providerPaymentId: { type: 'string', nullable: true },
                       subscriptionId: { type: 'string', nullable: true },
@@ -4442,18 +4503,39 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
       if (body.role !== undefined) {
         await applicationRolesService.assertExists(params.id, body.role);
       }
-      const updated = await prisma.endUser.update({
-        where: { id: params.euid },
-        data: {
-          ...(body.role !== undefined && { role: body.role }),
-          ...(body.emailVerified !== undefined && { emailVerified: body.emailVerified }),
-          ...(body.metadata !== undefined && { metadata: body.metadata as never }),
-        },
-        select: {
-          id: true, email: true, emailVerified: true, role: true, metadata: true, createdAt: true,
-        },
+      const changed = [
+        ...(body.role !== undefined && body.role !== existing.role ? ['role'] : []),
+        ...(body.emailVerified !== undefined && body.emailVerified !== existing.emailVerified
+          ? ['emailVerified']
+          : []),
+        ...(body.metadata !== undefined && !isDeepStrictEqual(body.metadata, existing.metadata)
+          ? ['metadata']
+          : []),
+      ];
+      const { updated, deliveryIds } = await prisma.$transaction(async (tx) => {
+        const row = await tx.endUser.update({
+          where: { id: params.euid },
+          data: {
+            ...(body.role !== undefined && { role: body.role }),
+            ...(body.emailVerified !== undefined && { emailVerified: body.emailVerified }),
+            ...(body.metadata !== undefined && { metadata: body.metadata as never }),
+          },
+        });
+        const ids = await enqueueUserUpdated(tx, { user: row, changed, via: 'operator' });
+        return { updated: row, deliveryIds: ids };
       });
-      return { success: true, data: updated };
+      kickDeliveries(deliveryIds);
+      return {
+        success: true,
+        data: {
+          id: updated.id,
+          email: updated.email,
+          emailVerified: updated.emailVerified,
+          role: updated.role,
+          metadata: updated.metadata,
+          createdAt: updated.createdAt,
+        },
+      };
     },
   );
 
@@ -5667,8 +5749,9 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
           "path a provider activation takes: the plan's entitlements are materialised onto the " +
           'beneficiary and `subscription.activated` is emitted through the same outbox, so ' +
           'anything already listening for a sale hears this one too.\n\n' +
-          '**Idempotent.** A subscriber already ACTIVE or PAST_DUE on the plan comes back ' +
-          'unchanged with `activated: false`, and `200` rather than `201`, nothing written, ' +
+          '**Idempotent.** A subscriber already ACTIVE or PAST_DUE on the plan, for the same ' +
+          'organization (or none), comes back unchanged with `activated: false`, and `200` ' +
+          'rather than `201`, nothing written, ' +
           'nothing re-provisioned, nothing re-announced, and no second audit entry. It does not ' +
           'extend a live period; to move a grant to a new term, cancel it and grant again.\n\n' +
           'The subscription carries no provider, which is what lets it be cancelled locally.\n\n' +
@@ -5726,6 +5809,10 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
               'PLAN_NOT_FOUND — no plan with that slug; or ORGANIZATION_NOT_FOUND — `organizationId` ' +
               'names no organization in this Application; or TENANT_SUBSCRIPTION_GRANTS_DISABLED — ' +
               'this deployment does not offer operator grants.',
+            409:
+              'BILLING_SUBSCRIPTION_SUBJECT_CONFLICT: the end-user already holds this plan live ' +
+              'for a different billing subject (another organization, or their personal ' +
+              'account). A subscription to one plan is stored once per subscriber.',
             410:
               'END_USER_ERASED — that end-user is a GDPR tombstone. Nothing can be granted to it, ' +
               'and an erasure cannot be undone.',
@@ -8512,6 +8599,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         organizationId: params.orgId,
         endUserId: body.endUserId,
         ...(body.role !== undefined && { role: body.role }),
+        actor: { tenantUserId: req.tenantUser!.id, tenantId: req.tenantId!, ...requestContext(req) },
       });
       return reply.status(201).send({
         success: true,
@@ -8585,6 +8673,7 @@ export async function tenantApplicationsRoutes(app: FastifyInstance): Promise<vo
         organizationId: params.orgId,
         endUserId: params.euid,
         role: body.role,
+        actor: { tenantUserId: req.tenantUser!.id, tenantId: req.tenantId!, ...requestContext(req) },
       });
       return {
         success: true,

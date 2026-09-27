@@ -23,6 +23,16 @@ export {
   type SecurityEventType,
 } from './security-events.js';
 
+export {
+  CHECKOUT_TOKEN_PATTERN,
+  CHECKOUT_BROWSER_ORIGINS,
+  CHECKOUT_READINESS_CHECK_IDS,
+  checkoutTokenMode,
+  type CheckoutBrowserOrigins,
+  type CheckoutPaymentMode,
+  type CheckoutReadinessCheckId,
+} from './checkout.js';
+
 // ============================================================================
 // Errors
 // ============================================================================
@@ -43,9 +53,22 @@ import { type RekeyErrorShape } from './error.js';
 export { cookieSecureFor } from './cookie-security.js';
 export type { CookieSecurityInput } from './cookie-security.js';
 
+export {
+  SIGNUP_DOMAIN_LIST_MAX,
+  SignupRestrictionsSchema,
+  domainMatchesRule,
+  normalizeDomain,
+  normalizeDomainRule,
+  type SignupRestrictions,
+} from './signup-restrictions.js';
+import { SignupRestrictionsSchema } from './signup-restrictions.js';
+
 // Whether a failed request ever reached the server. Zero-import for the same
 // reason, and shared so every refresh client keeps one list of codes.
 export { NEVER_CONNECTED_CODES, neverConnected } from './transport.js';
+
+// Custom transactional email templates and the send route.
+export * from './custom-email.js';
 
 /**
  * The error envelope every Rekey API response uses on failure. The runtime
@@ -240,6 +263,27 @@ export const TenantLimitsSchema = z.object({
    * it later.
    */
   maxProductionApps: z.number().int().min(0).max(2_147_483_647).nullable().optional(),
+
+  /**
+   * Custom template sends (`POST /api/v1/email/send`) per UTC day, across every
+   * Application in the workspace. Unlike the limits above, absent or null does
+   * NOT mean unlimited: it means the deployment default `EMAIL_SEND_DAILY_CAP`.
+   */
+  emailSendDailyCap: z.number().int().min(1).max(100_000_000).nullable().optional(),
+
+  /**
+   * Custom template sends to one recipient per hour, across the workspace.
+   * Absent or null means `EMAIL_SEND_RECIPIENT_HOURLY_CAP`.
+   */
+  emailSendRecipientHourlyCap: z.number().int().min(1).max(1_000_000).nullable().optional(),
+
+  /**
+   * Not a ceiling: when true, the built-in account emails of every Application
+   * in the workspace end with a small "Secured by Rekey" line. Customised
+   * templates and workspace mail never carry it. Absent, null or false means
+   * off, which is every self-host install.
+   */
+  emailAttribution: z.boolean().nullable().optional(),
 });
 export type TenantLimits = z.infer<typeof TenantLimitsSchema>;
 
@@ -289,9 +333,8 @@ export const AuthConfigSchema = z.object({
    * domain, a button pointing somewhere wrong is worse than no button.
    *
    * Lives in `authConfig` (a jsonb column) rather than `emailConfig` because
-   * `emailConfig` is rewritten wholesale whenever transport credentials are
-   * saved, and because the inference fallback reads `redirectUrls`, its
-   * neighbour here. No migration needed.
+   * it is not about sending mail, and because the inference fallback reads
+   * `redirectUrls`, its neighbour here. No migration needed.
    */
   appUrl: z.string().url().optional(),
   /**
@@ -358,6 +401,14 @@ export const AuthConfigSchema = z.object({
    */
   signupMode: z.enum(['public', 'secret_only', 'invite_only']).optional(),
   /**
+   * Which email domains may self sign-up. Checked after `signupMode`, on every
+   * path that creates an end-user from a sign-up (password, a magic link for a
+   * new address, a first OAuth sign-in), with 403
+   * `SIGNUP_EMAIL_DOMAIN_NOT_ALLOWED`. Operator-created and imported users are
+   * not checked. See `SignupRestrictionsSchema`.
+   */
+  signupRestrictions: SignupRestrictionsSchema.optional(),
+  /**
    * End-user two-factor (TOTP) policy for this Application:
    *   - `off`     , MFA endpoints are refused (`MFA_NOT_ENABLED`).
    *   - `optional`, end-users may enroll; enrolled users are challenged at
@@ -423,6 +474,21 @@ export const AuthConfigSchema = z.object({
    * this switch on, a verification path is required infrastructure.
    */
   requireEmailVerification: z.boolean().default(false),
+  /**
+   * When a new account gets the `welcome` mail. Password, magic-link and
+   * OAuth-first sign-up only; operator-created and imported users never get
+   * one. The per-event email switch still applies on top.
+   *
+   *   - `on_signup` (default): at creation, unless the account cannot sign in
+   *     yet. With `requireEmailVerification` on, an unverified address waits
+   *     for its first verification, since welcoming an account that is being
+   *     refused a session greets an address nobody has proven.
+   *   - `on_verified`: always waits until the address is verified, whether or
+   *     not sessions are gated. An address verified at creation (magic link,
+   *     a vouching OAuth provider) is welcomed straight away.
+   *   - `off`: never sent. A welcome already held for verification is dropped.
+   */
+  welcomeEmail: z.enum(['on_signup', 'on_verified', 'off']).default('on_signup'),
   /**
    * If true, this Application exposes a hosted MCP (Model Context Protocol)
    * server at `/api/v1/mcp/<slug>`, fronted by a per-app OAuth 2.1
@@ -674,6 +740,12 @@ export const ApplicationDtoSchema = z.object({
   publicKey: z.string(),
   authConfig: AuthConfigSchema,
   billingConfig: BillingConfigSchema,
+  /**
+   * Where this Application's end-users should write for help, as the operator
+   * set it with `PATCH .../email-sender`. Null when unset. Optional because
+   * older deployments do not return it.
+   */
+  supportEmail: z.string().email().nullable().optional(),
   createdAt: z.string().datetime(),
 });
 export type ApplicationDto = z.infer<typeof ApplicationDtoSchema>;
@@ -724,8 +796,11 @@ export const STANDARD_API_KEY_SCOPES = [
  * - `credits:grant`: add credits to an end-user or organization with
  *   `POST /api/v1/credits/grant`. It mints value, so it is not folded into
  *   `billing:write`, which every default key already holds.
+ * - `email:send`: send a published custom template with
+ *   `POST /api/v1/email/send`. It mails any address from the operator's own
+ *   domain, so a key already deployed must not gain it without anyone choosing.
  */
-export const ELEVATED_API_KEY_SCOPES = ['credits:grant'] as const;
+export const ELEVATED_API_KEY_SCOPES = ['credits:grant', 'email:send'] as const;
 
 export type StandardApiKeyScope = (typeof STANDARD_API_KEY_SCOPES)[number];
 export type ElevatedApiKeyScope = (typeof ELEVATED_API_KEY_SCOPES)[number];
@@ -796,6 +871,13 @@ export const AuthResultDtoSchema = z.object({
    * one version ahead still parses a response from an older deployment.
    */
   deviceId: z.string().nullable().optional(),
+  /**
+   * True when this request created the account: password sign-up, a magic
+   * link or an OAuth callback that made a new user. False for every other
+   * sign-in, MFA completion, refresh and organization switch. Route new users
+   * to onboarding on it. Defaults to false when an older deployment omits it.
+   */
+  isNewUser: z.boolean().default(false),
 });
 export type AuthResultDto = z.infer<typeof AuthResultDtoSchema>;
 
@@ -1293,6 +1375,43 @@ export type SubscriptionDto = Omit<z.infer<typeof SubscriptionDtoSchema>, 'statu
 };
 
 /**
+ * The keys of a subscription's `metadata` its holder may see. Both are written
+ * by Rekey at checkout and describe the buyer's own purchase.
+ */
+export const SelfSubscriptionMetadataSchema = z.object({
+  /** The provider's id for the checkout (or PayPal subscription) that created this row. */
+  checkoutSessionId: z.string().optional(),
+  /** True for a one-off purchase rather than a recurring subscription. */
+  oneTime: z.boolean().optional(),
+});
+export type SelfSubscriptionMetadata = z.infer<typeof SelfSubscriptionMetadataSchema>;
+
+/**
+ * A subscription as its holder sees it: every end-user billing route
+ * (`GET /billing/subscription`, `GET /billing/subscriptions`, cancel, subscribe,
+ * checkout and `include=subscription`).
+ *
+ * {@link SubscriptionDtoSchema} with `metadata` cut down to
+ * {@link SelfSubscriptionMetadataSchema}. Those routes are reachable from a
+ * browser with the publishable key, and the rest of a subscription's metadata
+ * is what the operator and the providers wrote for themselves: a grant's
+ * private note, retired checkout sessions, the provider the row moved from.
+ * The secret-key operator routes still return all of it.
+ */
+export const SelfSubscriptionDtoSchema = SubscriptionDtoSchema.extend({
+  metadata: SelfSubscriptionMetadataSchema,
+  /** The organization this subscription is for, or null for the buyer's own. */
+  beneficiaryOrgId: z.string().nullable(),
+  /** When a TRIALING subscription's free trial ends; null when there is none. */
+  trialEndsAt: z.string().datetime().nullable(),
+});
+export type SelfSubscriptionDto = Omit<SubscriptionDto, 'metadata'> & {
+  metadata: SelfSubscriptionMetadata;
+  beneficiaryOrgId: string | null;
+  trialEndsAt: string | null;
+};
+
+/**
  * The fields that decide whether a cancellation can be SCHEDULED. Accepts a
  * `Date` as well as an ISO string so the API (Prisma rows) and a client (the
  * serialized DTO) can ask the same question of the same subscription.
@@ -1444,6 +1563,14 @@ export const CreateCheckoutRequestSchema = z.object({
    * checkout was about to grant.
    */
   allowWithoutTrial: z.boolean().optional(),
+  /**
+   * `redirect` sends this checkout to the provider's own page even when the
+   * Application has the Rekey checkout page switched on. `embedded` asks for
+   * the Rekey page, which is served only when the Application has it switched
+   * on for this checkout's payment mode and every readiness check passes.
+   * Omit to follow the Application's setting.
+   */
+  mode: z.enum(['redirect', 'embedded']).optional(),
 });
 export type CreateCheckoutRequest = z.infer<typeof CreateCheckoutRequestSchema>;
 
@@ -1451,15 +1578,193 @@ export const CreateCheckoutRequestWithCouponSchema = CreateCheckoutRequestSchema
   couponCode: z.string().min(1).max(40).optional(),
 });
 
+/**
+ * A checkout that went through but will be refused by a later release.
+ *
+ * `CHECKOUT_RETURN_URL_UNREGISTERED`: `successUrl` or `cancelUrl` points at an
+ * origin the Application has not registered (its App URL, its redirect URLs,
+ * or its hosted portal). The buyer is still sent there today; the next minor
+ * release refuses the checkout instead.
+ *
+ * @example
+ * { code: 'CHECKOUT_RETURN_URL_UNREGISTERED', field: 'successUrl',
+ *   origin: 'https://shop.example', message: '…', fix: '…' }
+ */
+export const CheckoutReturnUrlWarningSchema = z.object({
+  code: z.literal('CHECKOUT_RETURN_URL_UNREGISTERED'),
+  field: z.enum(['successUrl', 'cancelUrl']),
+  origin: z.string(),
+  message: z.string(),
+  fix: z.string(),
+});
+export type CheckoutReturnUrlWarning = z.infer<typeof CheckoutReturnUrlWarningSchema>;
+
+/**
+ * `CHECKOUT_EMBEDDED_FELL_BACK`: the Application has the Rekey checkout page
+ * switched on, a readiness check failed for this checkout, and the failure
+ * behaviour is "fall back", so `url` is the provider's own page. `check` names
+ * the failed check and `fix` is that check's repair.
+ */
+export const CheckoutFellBackWarningSchema = z.object({
+  code: z.literal('CHECKOUT_EMBEDDED_FELL_BACK'),
+  check: z.string(),
+  message: z.string(),
+  fix: z.string(),
+});
+export type CheckoutFellBackWarning = z.infer<typeof CheckoutFellBackWarningSchema>;
+
+export const CheckoutWarningSchema = z.discriminatedUnion('code', [
+  CheckoutReturnUrlWarningSchema,
+  CheckoutFellBackWarningSchema,
+]);
+export type CheckoutWarning = z.infer<typeof CheckoutWarningSchema>;
+
 export const CheckoutResultDtoSchema = z.object({
   url: z.string().url(),
-  subscription: SubscriptionDtoSchema,
+  subscription: SelfSubscriptionDtoSchema,
   /** Discount applied (smallest currency unit). 0 if no coupon. */
   discountAmount: z.number().int().min(0),
   /** Which provider issued this checkout. Stamped on Subscription.provider. */
   provider: BillingProviderSchema,
+  /**
+   * Problems that did not stop this checkout, or changed how it is presented.
+   * Empty when there are none. Optional only so an older API still parses.
+   */
+  warnings: z.array(CheckoutWarningSchema).optional(),
+  /**
+   * `embedded` when `url` is the Rekey-hosted checkout page, `redirect` when it
+   * is the provider's own page. Optional only so an older API still parses.
+   */
+  mode: z.enum(['redirect', 'embedded']).optional(),
+  /** Rekey's id for this checkout. Not a credential, so it is safe to log. */
+  checkoutSessionId: z.string().optional(),
 });
 export type CheckoutResultDto = z.infer<typeof CheckoutResultDtoSchema>;
+
+/**
+ * What the Rekey-hosted checkout page may show for one session, as
+ * `GET /api/v1/checkout-sessions/:token` returns it.
+ *
+ * `order` is present only while the session can still be paid (`open`) or is
+ * waiting for the processor's webhook (`confirming`). A `complete` or
+ * `expired` session carries no order details and no email, only where to send
+ * the buyer back to.
+ */
+export const CheckoutPageClientSchema = z.object({
+  provider: z.literal('paypal'),
+  /** The PayPal REST app's client id for this session's mode. Public by design. */
+  clientId: z.string(),
+  /** The subscription Rekey created server-side, handed to the Buttons. */
+  subscriptionId: z.string(),
+  sdk: z.literal('v5-subscription'),
+});
+export type CheckoutPageClient = z.infer<typeof CheckoutPageClientSchema>;
+
+export const CheckoutPageOrderSchema = z.object({
+  merchant: z.object({
+    displayName: z.string(),
+    logoUrl: z.string().nullable(),
+    primaryColor: z.string().nullable(),
+    backgroundColor: z.string().nullable(),
+    surfaceColor: z.string().nullable(),
+    supportEmail: z.string().nullable(),
+    supportUrl: z.string().nullable(),
+    termsUrl: z.string().nullable(),
+    privacyUrl: z.string().nullable(),
+    refundUrl: z.string().nullable(),
+  }),
+  plan: z.object({
+    name: z.string(),
+    /** Smallest currency unit. */
+    amount: z.number().int(),
+    currency: z.string(),
+    interval: z.enum(['MONTH', 'YEAR']).nullable(),
+    kind: z.enum(['recurring', 'one_time']),
+  }),
+  /** Smallest currency unit. */
+  discountAmount: z.number().int(),
+  /** Smallest currency unit. */
+  totalDueToday: z.number().int(),
+  /** The signed-in buyer the checkout was created for. */
+  buyerEmail: z.string(),
+  successUrl: z.string(),
+  cancelUrl: z.string(),
+  /** The hosted portal URL for this Application, when it has one, for the cancel sentence. */
+  manageUrl: z.string().nullable(),
+  expiresAt: z.string(),
+  client: CheckoutPageClientSchema,
+});
+export type CheckoutPageOrder = z.infer<typeof CheckoutPageOrderSchema>;
+
+export const CheckoutPageViewSchema = z.object({
+  status: z.enum(['open', 'confirming', 'complete', 'expired']),
+  slug: z.string(),
+  paymentMode: z.enum(['test', 'live']),
+  provider: z.string(),
+  /** Where the buyer goes from a complete or expired page. */
+  returnUrl: z.string(),
+  order: CheckoutPageOrderSchema.nullable(),
+});
+export type CheckoutPageView = z.infer<typeof CheckoutPageViewSchema>;
+
+export const CheckoutReadinessCheckSchema = z.object({
+  id: z.enum([
+    'portal',
+    'provider',
+    'webhook',
+    'plans',
+    'return_urls',
+    'browser_credential',
+    'branding',
+    'csp_reports',
+  ]),
+  provider: z.string().nullable(),
+  status: z.enum(['PASS', 'WARN', 'FAIL', 'N/A']),
+  message: z.string(),
+  /** A concrete repair, or null for a PASS. */
+  fix: z.string().nullable(),
+});
+export type CheckoutReadinessCheck = z.infer<typeof CheckoutReadinessCheckSchema>;
+
+/** Readiness for both payment modes, as the panel's Test and Live columns show it. */
+export const CheckoutReadinessSchema = z.object({
+  test: z.array(CheckoutReadinessCheckSchema),
+  live: z.array(CheckoutReadinessCheckSchema),
+  ranAt: z.string(),
+});
+export type CheckoutReadiness = z.infer<typeof CheckoutReadinessSchema>;
+
+export const CheckoutSettingsSchema = z.object({
+  checkoutModeTest: z.enum(['REDIRECT', 'EMBEDDED']),
+  checkoutModeLive: z.enum(['REDIRECT', 'EMBEDDED']),
+  checkoutFailureMode: z.enum(['FALLBACK_TO_REDIRECT', 'REFUSE']),
+});
+export type CheckoutSettings = z.infer<typeof CheckoutSettingsSchema>;
+
+const ReadinessCountsSchema = z.object({
+  PASS: z.number().int(),
+  WARN: z.number().int(),
+  FAIL: z.number().int(),
+  'N/A': z.number().int(),
+});
+
+/** The Billing page's status panel for the Rekey checkout page. */
+export const CheckoutStatusPanelSchema = z.object({
+  settings: CheckoutSettingsSchema,
+  readiness: z
+    .object({ ranAt: z.string(), test: ReadinessCountsSchema, live: ReadinessCountsSchema })
+    .nullable(),
+  /** Last verified webhook, per provider, labelled with the provider's current credential mode. */
+  lastWebhooks: z.array(z.object({ provider: z.string(), mode: z.enum(['test', 'live']), receivedAt: z.string() })),
+  /** Last Rekey-page checkout completed, per payment mode. */
+  lastEmbeddedCompleted: z.object({ test: z.string().nullable(), live: z.string().nullable() }),
+  /** Checkouts served on the provider's page because a check failed, last 7 days, newest first. */
+  recentFallbacks: z.array(
+    z.object({ at: z.string(), check: z.string(), provider: z.string(), paymentMode: z.string() }),
+  ),
+  fallbackCount: z.number().int(),
+});
+export type CheckoutStatusPanel = z.infer<typeof CheckoutStatusPanelSchema>;
 
 /**
  * One plan's answer to "may THIS buyer start its trial".
@@ -1532,6 +1837,27 @@ export const ProvidersListDtoSchema = z.object({
   providers: z.array(BillingProviderInfoDtoSchema),
 });
 export type ProvidersListDto = z.infer<typeof ProvidersListDtoSchema>;
+
+/**
+ * One OAuth provider a sign-in page can offer, as `GET /api/v1/auth/oauth/providers`
+ * returns it. Deliberately just the two fields a button needs: the client id,
+ * redirect URI, scopes and issuer stay operator-only.
+ */
+export const OAuthProviderSummaryDtoSchema = z
+  .object({
+    /** The `:provider` path segment for `/api/v1/auth/oauth/:provider/start`, e.g. `"google"`. */
+    id: z.string().min(1),
+    /** Display name for the button, e.g. `"Google"`. */
+    name: z.string().min(1),
+  })
+  .strict();
+export type OAuthProviderSummaryDto = z.infer<typeof OAuthProviderSummaryDtoSchema>;
+
+/** The body of `GET /api/v1/auth/oauth/providers`. */
+export const OAuthProvidersListDtoSchema = z.object({
+  providers: z.array(OAuthProviderSummaryDtoSchema),
+});
+export type OAuthProvidersListDto = z.infer<typeof OAuthProvidersListDtoSchema>;
 
 // ============================================================================
 // Coupons
@@ -1899,7 +2225,7 @@ export interface MeIncludedFields {
    */
   device: EndUserDeviceDto | null;
   /** Same value as `GET /billing/subscription` for the same billing subject as `entitlements`. */
-  subscription: SubscriptionDto | null;
+  subscription: SelfSubscriptionDto | null;
   /** The session's active organization with the caller's role, or null. */
   organization: OrganizationWithRoleDto | null;
   /**
@@ -2175,11 +2501,12 @@ export const WEBHOOK_EVENTS = [
   {
     name: 'user.created',
     description:
-      'An end-user account was created, password sign-up or first OAuth sign-in.',
+      'An end-user account was created: sign-up, first OAuth or magic-link sign-in, an operator, an import, or a billing sale. `data.via` says which.',
   },
   {
     name: 'user.updated',
-    description: "An end-user's profile changed (email, role, metadata).",
+    description:
+      "An end-user's role, metadata or verified flag changed. `data.changed` names the fields.",
   },
   {
     name: 'user.deleted',
@@ -2189,6 +2516,11 @@ export const WEBHOOK_EVENTS = [
     name: 'user.erased',
     description:
       'An end-user was erased for GDPR (tombstoned): their PII/auth material was hard-deleted while financial records are retained anonymized, and they can never authenticate again. Propagate the erasure to your own copies of their PII. Payload: `data.user` with `id` + `erasedAt`.',
+  },
+  {
+    name: 'session.created',
+    description:
+      'An end-user signed in and a session was minted: password (including sign-up), magic link, OAuth, passkey, or MFA completion. Never sent for a refresh or an organization switch. Payload: `data.userId`, `sessionId`, `deviceId`, `via`, and `firstSignIn` (true for the first session the user ever gets).',
   },
   {
     name: 'session.revoked',
@@ -2221,11 +2553,13 @@ export const WEBHOOK_EVENTS = [
   // Every `subscription.*` payload carries `data.subscription.entitlements`,
   // what THAT subscription grants, with its per-subscription overrides applied.
   // Act on it rather than on the plan slug: two subscribers on one plan can
-  // hold different quantities, and the slug cannot tell you so.
+  // hold different quantities, and the slug cannot tell you so. The field is
+  // ABSENT when Rekey could not resolve it; that is "unknown", never "grants
+  // nothing", so leave your provisioning as it is and re-read it later.
   {
     name: 'subscription.activated',
     description:
-      'A provider webhook transitioned a Subscription to ACTIVE. Payload: `data.subscription` with ids, plan slug/name/kind, amount/currency/interval, the resolved `entitlements` array, and period end.',
+      'A provider webhook transitioned a Subscription to ACTIVE. Payload: `data.subscription` with ids, plan slug/name/kind, amount/currency/interval, the resolved `entitlements` array (absent if it could not be resolved, which does not mean empty), and period end.',
   },
   {
     name: 'subscription.canceled',
@@ -2242,10 +2576,21 @@ export const WEBHOOK_EVENTS = [
     description:
       'What a Subscription GRANTS changed without its status changing, an operator wrote ' +
       '`entitlementOverrides` on it. Emitted only when the resolved entitlements actually ' +
-      'differ, so a no-op write announces nothing. Payload: `data.subscription`, identical in ' +
+      'differ, so a no-op write announces nothing, and never sent when they could not be ' +
+      'resolved, since the grant is the whole message. Payload: `data.subscription`, identical in ' +
       'shape to `subscription.activated`, with `entitlements` already merged. Subscribe to this ' +
       'if you project entitlements onto state of your own: a status-only subscription will ' +
       'never hear about a bespoke deal being adjusted.',
+  },
+  {
+    name: 'subscription.trial_started',
+    description:
+      'A Subscription entered TRIALING. Payload: `data.subscription`, the `subscription.activated` shape, with `trialEndsAt`.',
+  },
+  {
+    name: 'subscription.trial_will_end',
+    description:
+      'A TRIALING Subscription reaches its trial end within 3 days. Sent once per subscription and trial end date (again if the trial is re-dated). Payload: `data.subscription` with `trialEndsAt`.',
   },
   {
     name: 'payment.succeeded',
@@ -2328,6 +2673,16 @@ export const WEBHOOK_EVENTS = [
     name: 'credit.adjusted',
     description:
       'An operator corrected a balance: reason ADJUST in either direction, or any other operator entry that removes credits (`data.credit.delta` carries the sign). Separate from `credit.consumed` so a correction is never read as usage. Payload: `data.credit`.',
+  },
+  {
+    name: 'organization.invitation.created',
+    description:
+      'An end-user organization invitation was created. Payload: `data.invitation` with id, organizationId, email, role, invitedById, expiresAt, createdAt. Never the invitation token.',
+  },
+  {
+    name: 'organization.invitation.accepted',
+    description:
+      'An organization invitation was accepted, once per invitation. Payload: `data.invitation` (id, organizationId, email, role, acceptedAt) and `data.membership` (id, organizationId, endUserId, role).',
   },
 ] as const;
 

@@ -114,6 +114,36 @@ export function buildTokenUrl(base: string | null, path: string, token: string):
 }
 
 /**
+ * The origins an Application has declared as its own: `authConfig.appUrl` plus
+ * every `authConfig.redirectUrls` entry, each reduced to its origin so
+ * per-environment paths need no separate registration.
+ *
+ * @example
+ * registeredOrigins({ authConfig: { appUrl: 'https://app.acme.com/home' } });
+ * // Set { 'https://app.acme.com' }
+ */
+export function registeredOrigins(application: { authConfig?: unknown }): Set<string> {
+  const authConfig = (application.authConfig ?? {}) as {
+    appUrl?: unknown;
+    redirectUrls?: unknown;
+  };
+  const declared = [
+    typeof authConfig.appUrl === 'string' ? authConfig.appUrl : null,
+    ...(Array.isArray(authConfig.redirectUrls) ? authConfig.redirectUrls : []),
+  ].filter((v): v is string => typeof v === 'string' && v.length > 0);
+
+  const allowed = new Set<string>();
+  for (const d of declared) {
+    try {
+      allowed.add(new URL(d).origin);
+    } catch {
+      // A malformed stored value allows nothing rather than everything.
+    }
+  }
+  return allowed;
+}
+
+/**
  * Refuse a caller-supplied email link that points somewhere this Application
  * has not declared.
  *
@@ -169,25 +199,7 @@ export function assertAllowedTokenUrl(
     });
   }
 
-  const authConfig = (application.authConfig ?? {}) as {
-    appUrl?: unknown;
-    redirectUrls?: unknown;
-  };
-  const declared = [
-    typeof authConfig.appUrl === 'string' ? authConfig.appUrl : null,
-    ...(Array.isArray(authConfig.redirectUrls) ? authConfig.redirectUrls : []),
-  ].filter((v): v is string => typeof v === 'string' && v.length > 0);
-
-  const allowed = new Set<string>();
-  for (const d of declared) {
-    try {
-      allowed.add(new URL(d).origin);
-    } catch {
-      // A malformed stored value allows nothing rather than everything.
-    }
-  }
-
-  if (!allowed.has(candidate.origin)) {
+  if (!registeredOrigins(application).has(candidate.origin)) {
     throw new RekeyError({
       statusCode: 400,
       code: 'AUTH_URL_NOT_ALLOWED',

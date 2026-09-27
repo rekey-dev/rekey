@@ -4,7 +4,7 @@ import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { publicPost, publicGet, setSessionCookies, PanelApiError, type AuthResponse } from '@/lib/api';
 import { SubmitButton } from '@/components/SubmitButton';
-import { normalizeErrorCode } from '@/lib/error-code';
+import { SIGN_UP_ERROR_MESSAGES as ERROR_MESSAGES, signUpErrorCode } from './error-messages';
 import { AuthCard } from '@/components/AuthCard';
 import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
@@ -50,36 +50,13 @@ async function signUp(formData: FormData): Promise<void> {
     await setSessionCookies(auth);
   } catch (err) {
     if (err instanceof PanelApiError) {
-      const code = normalizeErrorCode(err.code, ERROR_MESSAGES);
-      redirect(`/sign-up?error=${encodeURIComponent(code)}${keep}`);
+      redirect(`/sign-up?error=${signUpErrorCode(err.code)}${keep}`);
     }
     throw err;
   }
   if (next) redirect(`${next}${next.includes('?') ? '&' : '?'}e=signup`);
   redirect('/applications?e=signup');
 }
-
-const ERROR_MESSAGES: Record<string, string> = {
-  missing: 'All fields are required.',
-  EMAIL_ALREADY_EXISTS: 'That email is already registered. Sign in instead.',
-  PASSWORD_TOO_SHORT: 'Password must be at least 8 characters.',
-  RATE_LIMITED: 'Too many attempts. Please wait a minute and try again.',
-  OPERATOR_SIGNUP_CLOSED: 'New operator registration is currently closed on this deployment.',
-  OPERATOR_INVITE_REQUIRED: 'An invite key is required to sign up on this deployment.',
-  OPERATOR_INVITE_INVALID: 'That invite key is not valid. Check it with whoever invited you.',
-  OPERATOR_INVITE_USED: 'That invite key has already been used. Ask for a fresh one.',
-  OPERATOR_INVITE_EXPIRED: 'That invite key has expired. Ask for a fresh one.',
-  INTERNAL_ERROR: 'Something went wrong creating your workspace. Please try again.',
-  BAD_REQUEST:
-    'Check the details above. The workspace name, email, or password was rejected. Passwords need at least 8 characters.',
-  VALIDATION_ERROR:
-    'Check the details above. The workspace name, email, or password was rejected. Passwords need at least 8 characters.',
-  // Catch-all the server action maps unrecognised API codes to, so a failure
-  // never renders as a blank form. `?error=` is in the URL, so a value that
-  // isn't in this map still renders nothing, a hand-crafted link can't paint
-  // a fake error on a healthy form.
-  unknown: 'Could not create your workspace. Please try again.',
-};
 
 const INPUT_BASE =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';

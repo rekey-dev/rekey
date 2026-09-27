@@ -47,6 +47,25 @@ export function credentialsNotConfigured(
   });
 }
 
+function isCheckoutCapable(provider: BillingProviderName): boolean {
+  return getModule(provider)?.capabilities.checkout !== false;
+}
+
+function inboundOnly(
+  application: { id: string },
+  provider: BillingProviderName,
+  hostedProviderEnabled: boolean,
+): RekeyError {
+  return new RekeyError({
+    statusCode: 400,
+    code: 'BILLING_PROVIDER_INBOUND_ONLY',
+    message: `Provider "${provider}" only receives events from an external billing system; it cannot host a checkout.`,
+    fix: hostedProviderEnabled
+      ? 'Omit `provider` to let the router pick a hosted provider, or sell through the external system.'
+      : `Sell through the external billing system, which posts subscription events to Rekey, or connect a hosted payment provider in Panel → Application → Billing (/applications/${application.id}/billing).`,
+  });
+}
+
 export async function getProviderForApplication(
   application: Application,
   provider: BillingProviderName,
@@ -127,32 +146,37 @@ export async function pickProvider(args: {
   // Checkout-capable only. An inbound-only provider is enabled so that its
   // webhooks verify, not so that buyers are sent to it.
   const enabled = await billingCredentialsService.listCheckoutEnabled(args.application.id);
-  if (enabled.length === 0) {
-    // No enabled credentials at all. This used to fall through to the legacy
-    // `billingConfig.provider` hint and land on the Stripe stub, which made an
-    // unconfigured app look like a working one. Refuse instead.
-    const cfg = args.application.billingConfig as { provider?: BillingProviderName } | null;
-    throw credentialsNotConfigured(args.application, cfg?.provider ?? 'stripe');
-  }
 
-  // Explicit user pick wins, if it's actually configured + enabled.
+  // Explicit user pick wins, if it's actually configured + enabled. Decided
+  // before the "nothing enabled" refusal, so a caller who named a provider is
+  // told about that provider and not about the Application's default.
   if (args.preferred) {
     const match = enabled.find((p) => p.provider === args.preferred);
     if (match) return match.provider;
-    if (getModule(args.preferred)?.capabilities.checkout === false) {
-      throw new RekeyError({
-        statusCode: 400,
-        code: 'BILLING_PROVIDER_INBOUND_ONLY',
-        message: `Provider "${args.preferred}" only receives events from an external billing system; it cannot host a checkout.`,
-        fix: 'Omit `provider` to let the router pick a hosted provider, or sell through the external system.',
-      });
+    if (!isCheckoutCapable(args.preferred)) {
+      throw inboundOnly(args.application, args.preferred, enabled.length > 0);
     }
+    if (enabled.length === 0) throw credentialsNotConfigured(args.application, args.preferred);
     throw new RekeyError({
       statusCode: 400,
       code: 'BILLING_PROVIDER_NOT_AVAILABLE',
       message: `Requested provider "${args.preferred}" is not configured or is disabled for this Application.`,
       fix: 'Pass a different provider, or omit `provider` to let the system pick.',
     });
+  }
+
+  if (enabled.length === 0) {
+    // An inbound-only provider has credentials; it just cannot take a buyer.
+    // Saying it has none sent operators to re-enter keys that were fine.
+    const inbound = (await billingCredentialsService.listEnabled(args.application.id)).find(
+      (p) => !isCheckoutCapable(p.provider),
+    );
+    if (inbound) throw inboundOnly(args.application, inbound.provider, false);
+    // No enabled credentials at all. This used to fall through to the legacy
+    // `billingConfig.provider` hint and land on the Stripe stub, which made an
+    // unconfigured app look like a working one. Refuse instead.
+    const cfg = args.application.billingConfig as { provider?: BillingProviderName } | null;
+    throw credentialsNotConfigured(args.application, cfg?.provider ?? 'stripe');
   }
 
   const country = args.country?.toUpperCase();

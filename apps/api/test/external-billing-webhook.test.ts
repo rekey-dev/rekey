@@ -322,7 +322,10 @@ describe('External billing provider webhook', () => {
     expect((await subscriptionOf('sub_known')).endUserId).toBe(euId);
     expect(await prisma.endUser.count({ where: { applicationId: appId } })).toBe(1);
     await settle();
-    expect(await waitForDeliveries(endpointId, 'user.created', 1, 200)).toHaveLength(0);
+    // The one `user.created` is the operator create above; the billing event
+    // named an existing user and must not announce another.
+    const created = await waitForDeliveries(endpointId, 'user.created', 2, 200);
+    expect(created.map((d) => (d.payload as { data: { via: string } }).data.via)).toEqual(['operator']);
 
     // Unknown id: refused loudly, left unprocessed so the sender retries.
     const bad = await post(activated('sub_unknown', 'pro', { endUserId: 'eu_does_not_exist' }));
@@ -540,8 +543,10 @@ describe('External billing provider webhook', () => {
     // Configured and enabled, yet not a place to send a buyer.
     expect((await billingCredentialsService.listEnabled(appId)).map((p) => p.provider)).toEqual(['external']);
     expect(await billingCredentialsService.listCheckoutEnabled(appId)).toEqual([]);
+    // It has credentials, it just cannot take a buyer: said as that, not as
+    // "no credentials configured".
     await expect(pickProvider({ application })).rejects.toMatchObject({
-      code: 'BILLING_CREDENTIALS_NOT_CONFIGURED',
+      code: 'BILLING_PROVIDER_INBOUND_ONLY',
     });
 
     // The plan list says why a Buy button would be refused.

@@ -23,8 +23,40 @@ export function withListOptions(command: Command): Command {
     .option('--offset <n>', 'Rows to skip (0-based)');
 }
 
-/** Pull the `--limit` / `--offset` values off a parsed options object. */
-export function readListOpts(opts: { limit?: string; offset?: string }): Record<string, string> {
+/** The admin list routes' page-size ceiling (`MAX_LIMIT` in the API). */
+export const MAX_LIST_LIMIT = 100;
+
+/**
+ * Pull the `--limit` / `--offset` values off a parsed options object, refusing
+ * values the API would reject before any request is made.
+ *
+ * @example
+ * const qs = listQuery(readListOpts(ctx, opts));
+ */
+export function readListOpts(
+  ctx: OutputContext,
+  opts: { limit?: string; offset?: string },
+): Record<string, string> {
+  if (opts.limit !== undefined) {
+    const limit = Number(opts.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIST_LIMIT) {
+      fail(ctx, {
+        code: 'CLI_LIST_LIMIT_INVALID',
+        message: `--limit must be an integer from 1 to ${MAX_LIST_LIMIT}. Got "${opts.limit}".`,
+        fix: `Pass a whole number between 1 and ${MAX_LIST_LIMIT}, and page further with --offset.`,
+      });
+    }
+  }
+  if (opts.offset !== undefined) {
+    const offset = Number(opts.offset);
+    if (!Number.isInteger(offset) || offset < 0) {
+      fail(ctx, {
+        code: 'CLI_LIST_OFFSET_INVALID',
+        message: `--offset must be a non-negative integer. Got "${opts.offset}".`,
+        fix: 'Pass a whole number such as 0 or 50.',
+      });
+    }
+  }
   return {
     ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
     ...(opts.offset !== undefined ? { offset: opts.offset } : {}),

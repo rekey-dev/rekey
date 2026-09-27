@@ -15,9 +15,11 @@
 import { prisma } from '../../lib/prisma.js';
 import { cachedDashboard, forgetDashboard } from '../../lib/dashboard-cache.js';
 import { RekeyError } from '../../lib/error.js';
+import { resolveAppUrl } from '../../lib/app-url.js';
 import { emailService, lockEmailCoupling } from '../email/email.service.js';
 import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
 import { generatePublicKey } from '../../lib/keys.js';
+import { assertNominatableFreePlan } from '../billing/free-plan.js';
 import { assertProductionAppQuota } from '../../lib/tenant-limits.js';
 import {
   AuthConfigSchema,
@@ -25,6 +27,7 @@ import {
   type AuthConfig,
   type BillingConfig,
   type BillingProvider,
+  type SignupRestrictions,
 } from '@rekey.dev/shared-types';
 import { Prisma, type AppEnvironment, type Application } from '@prisma/client';
 
@@ -83,6 +86,7 @@ const DEFAULT_AUTH_CONFIG: AuthConfig = {
   // they click it is a separate, opt-in decision.
   sendVerificationEmailOnSignUp: true,
   requireEmailVerification: false,
+  welcomeEmail: 'on_signup',
   // MCP server + OAuth AS off by default, operators opt in per app.
   mcpEnabled: false,
   // OpenID Provider off by default. Turning an Application into an IdP puts a
@@ -388,6 +392,11 @@ export const applicationsService = {
       organizationsEnabled?: boolean | undefined;
       signupEnabled?: boolean | undefined;
       signupMode?: 'public' | 'secret_only' | 'invite_only' | undefined;
+      /**
+       * Email domain rules for self sign-up. Replaces the stored rules as a
+       * whole; `null` removes them.
+       */
+      signupRestrictions?: SignupRestrictions | null | undefined;
       mfa?: 'off' | 'optional' | 'required' | undefined;
       mcpEnabled?: boolean | undefined;
       /**
@@ -404,6 +413,8 @@ export const applicationsService = {
        * never confirmed their address is locked out until they do.
        */
       requireEmailVerification?: boolean | undefined;
+      /** When a new account gets the welcome mail. See `AuthConfigSchema.welcomeEmail`. */
+      welcomeEmail?: 'on_signup' | 'on_verified' | 'off' | undefined;
       /**
        * Access-token signature alg. `RS256` makes NEW access tokens
        * offline-verifiable against /.well-known/jwks.json; outstanding HS256
@@ -492,10 +503,15 @@ export const applicationsService = {
       const clearHostedAuthorize =
         cleaned.hostedAuthorizeUrl === null || cleaned.hostedAuthorizeUrl === '';
       if (clearHostedAuthorize) delete cleaned.hostedAuthorizeUrl;
+      const clearSignupRestrictions = cleaned.signupRestrictions === null;
       const merged: Record<string, unknown> = { ...current, ...cleaned };
+      if (clearSignupRestrictions) delete merged.signupRestrictions;
       if (clearAppUrl) delete merged.appUrl;
       if (clearHostedAuthorize) delete merged.hostedAuthorizeUrl;
       const next = AuthConfigSchema.parse(merged);
+      if (strandsNewSignUps(next) && !strandsNewSignUps(current)) {
+        throw verificationLinkUnavailable();
+      }
       return tx.application.update({
         where: { id: args.applicationId },
         data: { authConfig: next as object },
@@ -506,7 +522,8 @@ export const applicationsService = {
   /**
    * Patch the application's billingConfig, currently the `enabled` master
    * switch. Off (default for new apps) gates the public billing API + hides the
-   * Billing group in the panel.
+   * Billing group in the panel. A `defaultPlanSlug` must name an active plan
+   * that costs nothing (DEFAULT_PLAN_NOT_FOUND, BILLING_FREE_PLAN_NOT_FREE).
    */
   async updateBillingConfig(args: {
     applicationId: string;
@@ -519,6 +536,9 @@ export const applicationsService = {
     };
   }): Promise<Application> {
     const app = await this.get(args.applicationId);
+    if (typeof args.patch.defaultPlanSlug === 'string') {
+      await assertNominatableFreePlan(args.applicationId, args.patch.defaultPlanSlug);
+    }
     const current = BillingConfigSchema.parse(app.billingConfig);
     const cleaned = Object.fromEntries(
       Object.entries(args.patch).filter(([, v]) => v !== undefined),
@@ -986,4 +1006,38 @@ export interface ApplicationStats {
     creditsOutstanding: number;
     usageLast30d: number;
   };
+}
+
+/**
+ * True when the config requires a verified email but no verification link can
+ * be built. Sign-up then sends nothing and the gate refuses every new user, so
+ * the account is unreachable (#357). A caller-supplied `verifyUrl` cannot save
+ * it either: `assertAllowedTokenUrl` needs the same appUrl or redirect URLs
+ * that make a link resolvable here.
+ */
+function strandsNewSignUps(config: AuthConfig): boolean {
+  return (
+    config.requireEmailVerification &&
+    resolveAppUrl({ authConfig: config as Prisma.JsonObject }) === null
+  );
+}
+
+/**
+ * Refuses a change that turns on `requireEmailVerification` (or removes the
+ * last URL under it) while no verification link resolves. Only the transition
+ * is refused, so an Application already in that state can still be edited
+ * and repaired.
+ */
+function verificationLinkUnavailable(): RekeyError {
+  return new RekeyError({
+    statusCode: 409,
+    code: 'EMAIL_VERIFICATION_URL_REQUIRED',
+    message:
+      'A verified email cannot be required yet: this Application has no Application URL or http(s) ' +
+      'redirect URL, so no verification link can be built and new users could never confirm their address.',
+    fix:
+      'Set the Application URL or add an http(s) redirect URL (Panel → Application → Authentication → Methods, ' +
+      'or `appUrl` / `redirectUrls` in the same auth-config update), then require a verified email. ' +
+      'Setting DEFAULT_APP_URL on the API also works, for every Application on this deployment.',
+  });
 }

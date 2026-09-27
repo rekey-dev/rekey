@@ -182,6 +182,12 @@ services:
       # Hosted customer portal origin — auto-allowed for publishable-key calls
       # from portal-enabled apps (CORS + per-app origin check).
       PUBLIC_PORTAL_URL: ${PUBLIC_PORTAL_URL:-https://${PORTAL_HOST}}
+      # Kill switch for the Rekey-hosted checkout page: `false` sends every
+      # checkout to the provider's page (or refuses it, per Application).
+      CHECKOUT_EMBEDDED_ENABLED: ${CHECKOUT_EMBEDDED_ENABLED:-}
+      # Checkout creation ceilings per client IP and per Application, per hour.
+      CHECKOUT_LIMIT_PER_IP_HOUR: ${CHECKOUT_LIMIT_PER_IP_HOUR:-}
+      CHECKOUT_LIMIT_PER_APP_HOUR: ${CHECKOUT_LIMIT_PER_APP_HOUR:-}
       # Operator-facing links: the MCP OAuth consent redirect and emailed
       # workspace invites are built from this.
       PANEL_URL: ${PANEL_URL:-https://${PANEL_HOST}}
@@ -231,6 +237,11 @@ services:
       RESEND_DEFAULT_API_KEY: ${RESEND_DEFAULT_API_KEY:-}
       RESEND_DEFAULT_FROM: ${RESEND_DEFAULT_FROM:-}
       RESEND_DEFAULT_FROM_NAME: ${RESEND_DEFAULT_FROM_NAME:-}
+      EMAIL_SEND_DAILY_CAP: ${EMAIL_SEND_DAILY_CAP:-}
+      EMAIL_SEND_RECIPIENT_HOURLY_CAP: ${EMAIL_SEND_RECIPIENT_HOURLY_CAP:-}
+      EMAIL_UNSUBSCRIBE_SECRET: ${EMAIL_UNSUBSCRIBE_SECRET:-}
+      EMAIL_UNSUBSCRIBE_SECRET_ID: ${EMAIL_UNSUBSCRIBE_SECRET_ID:-}
+      EMAIL_UNSUBSCRIBE_PREVIOUS_SECRETS: ${EMAIL_UNSUBSCRIBE_PREVIOUS_SECRETS:-}
 
       # ── Registration + tenancy policy ────────────────────────────────────
       # Who may create an OPERATOR account: open | invite | closed. Empty =

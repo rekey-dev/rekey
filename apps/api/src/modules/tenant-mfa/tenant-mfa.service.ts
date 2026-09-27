@@ -7,13 +7,34 @@
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
+import { generateSecret, generateBackupCodes } from '../../lib/mfa.js';
 import {
-  generateSecret,
-  generateBackupCodes,
-  verifyTotp,
-  consumeBackupCode,
-} from '../../lib/mfa.js';
-import { assertNotLocked, registerFailure, clearFailures, MFA_POLICY } from '../../lib/brute-force.js';
+  acceptTotpCode,
+  matchMfaCode,
+  mfaCodeReusedError,
+  type BackupCodeStore,
+  type MfaMatch,
+  type TotpOutcome,
+} from '../../lib/mfa-replay.js';
+
+function backupStore(tenantUserId: string): BackupCodeStore {
+  return {
+    swap: async (expected, next) => {
+      const { count } = await prisma.tenantMfaCredential.updateMany({
+        where: { tenantUserId, backupCodesCiphertext: expected },
+        data: { backupCodesCiphertext: next },
+      });
+      return count === 1;
+    },
+    reload: async () =>
+      (
+        await prisma.tenantMfaCredential.findUnique({
+          where: { tenantUserId },
+          select: { backupCodesCiphertext: true },
+        })
+      )?.backupCodesCiphertext ?? null,
+  };
+}
 
 export const tenantMfaService = {
   /**
@@ -63,7 +84,9 @@ export const tenantMfaService = {
       });
     }
     const { base32 } = decryptJson<{ base32: string }>(cred.secretCiphertext);
-    if (!verifyTotp(base32, args.code)) {
+    const outcome = await acceptTotpCode(base32, args.code);
+    if (outcome === 'reused') throw mfaCodeReusedError('enrolment');
+    if (outcome === 'invalid') {
       // 422 (not 401): the operator's *session* is valid, only the submitted
       // code is wrong. A 401 here makes the panel's api() client treat the
       // session as expired and log the operator out mid-enrollment.
@@ -81,32 +104,32 @@ export const tenantMfaService = {
     return { ok: true };
   },
 
-  async verify(args: { tenantUserId: string; code: string }): Promise<boolean> {
+  /** Match a code without spending it. Mirrors `mfaService.match`. */
+  async match(args: { tenantUserId: string; code: string }): Promise<MfaMatch> {
     const cred = await prisma.tenantMfaCredential.findUnique({
       where: { tenantUserId: args.tenantUserId },
     });
-    if (!cred || !cred.enrolledAt) return false;
-    // Per-credential throttle via the Redis brute-force limiter (see mfa.service).
-    const mfaScope = `op:mfa:${args.tenantUserId}`;
-    await assertNotLocked(mfaScope, 'MFA_TOO_MANY_ATTEMPTS');
-
+    if (!cred || !cred.enrolledAt) return { outcome: 'invalid' };
     const { base32 } = decryptJson<{ base32: string }>(cred.secretCiphertext);
-    if (verifyTotp(base32, args.code)) {
-      await clearFailures(mfaScope);
-      return true;
-    }
-    const stored = decryptJson<string[]>(cred.backupCodesCiphertext);
-    const remaining = consumeBackupCode(stored, args.code);
-    if (!remaining) {
-      await registerFailure(mfaScope, MFA_POLICY);
-      return false;
-    }
-    await prisma.tenantMfaCredential.update({
-      where: { tenantUserId: args.tenantUserId },
-      data: { backupCodesCiphertext: encryptJson(remaining) },
-    });
-    await clearFailures(mfaScope);
-    return true;
+    return matchMfaCode(
+      {
+        base32,
+        backupCodesCiphertext: cred.backupCodesCiphertext,
+        backupStore: backupStore(args.tenantUserId),
+        lockScope: `op:mfa:${args.tenantUserId}`,
+      },
+      args.code,
+    );
+  },
+
+  /** Check a TOTP or backup code and spend it. Mirrors `mfaService.check`. */
+  async check(args: { tenantUserId: string; code: string }): Promise<TotpOutcome> {
+    const match = await this.match(args);
+    return match.outcome === 'matched' ? match.spend() : match.outcome;
+  },
+
+  async verify(args: { tenantUserId: string; code: string }): Promise<boolean> {
+    return (await this.check(args)) === 'accepted';
   },
 
   /**

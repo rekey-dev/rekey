@@ -72,6 +72,10 @@ export const SECURITY_EVENT_LABEL = {
   'app.organization_role_created': 'Organization role created',
   'app.organization_role_updated': 'Organization role updated',
   'app.organization_role_deleted': 'Organization role deleted',
+  // Membership writes by an operator. The organization's own hierarchy does
+  // not apply to them, so the trail is the only record of who granted a tier.
+  'app.organization_member_added': 'Organization member added by operator',
+  'app.organization_member_role_changed': 'Organization member role changed by operator',
   'app.ip_blocked': 'Request blocked by IP allowlist',
   'app.origin_blocked': 'Request blocked by CORS origin allowlist',
 
@@ -80,6 +84,30 @@ export const SECURITY_EVENT_LABEL = {
   'app.billing_credentials_updated': 'Billing provider credentials updated',
   'app.billing_credentials_configured': 'Billing provider configured (via MCP)',
   'app.billing_credentials_deleted': 'Billing provider credentials deleted',
+  // The free-tier default plan charges money, so it was not applied. Written at
+  // most once an hour per plan price. Metadata carries the slug and the price.
+  'app.default_plan_ignored': 'Free-tier plan ignored because it charges money',
+  // A checkout whose successUrl or cancelUrl is on an origin the Application
+  // has not registered. Allowed for now and refused from the next minor, so
+  // this is the operator's notice to register the origin first. Metadata
+  // carries `origins` and `fields`.
+  'app.checkout_return_url_unregistered': 'Checkout return URL on an unregistered origin',
+  // An EMBEDDED checkout that failed a readiness check and was served on the
+  // provider's page instead. Metadata carries `check`, `paymentMode` and
+  // `provider`.
+  'app.checkout_embedded_fallback': 'Rekey checkout page unavailable, provider page used',
+  // An operator changed the checkout page setting or the failure behaviour.
+  // An EMBEDDED checkout refused (failure behaviour "refuse") because a
+  // readiness check failed. Metadata carries the check, its message and fix.
+  'app.checkout_embedded_refused': 'Rekey checkout page unavailable, checkout refused',
+  'app.checkout_settings_updated': 'Checkout page setting changed',
+  // A hosted checkout refused because its payment mode no longer matches the
+  // provider's credentials (sandbox switched to live, or back).
+  'app.checkout_mode_mismatch': 'Checkout refused after a test/live credential switch',
+  // The checkout page reported a PayPal approval that PayPal did not confirm
+  // for that checkout: a different subscription, plan or buyer, or not yet
+  // approved. Metadata carries `reason` and the presented id.
+  'app.checkout_confirmation_refused': 'Checkout approval refused after checking with the provider',
   'app.plan_created': 'Plan created',
   'app.plan_updated': 'Plan updated',
   'app.plan_active_changed': 'Plan activated or deactivated',

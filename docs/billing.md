@@ -17,9 +17,9 @@ Application
            └── many Payment
 ```
 
-- **Plan** — pricing entry. `{ slug, name, amount, currency, interval, active }`. `amount` is the **smallest currency unit** (cents/paise/sen) — never a float.
+- **Plan** — pricing entry. `{ slug, name, amount, currency, interval, active }`. `amount` is the **smallest currency unit** (cents/paise/sen) — never a float. `interval` is `"MONTH"` (the default) or `"YEAR"`, uppercase exactly; `"month"` or `"monthly"` is refused.
 - **Subscription** — links an `EndUser` to a `Plan` with a status: `PENDING → ACTIVE → (PAST_DUE | CANCELED | EXPIRED)`. `currentPeriodEnd`, `cancelAt`, `canceledAt` track the lifecycle.
-- **Payment** — every charge attempt. Status: `PENDING → SUCCEEDED | FAILED | REFUNDED`.
+- **Payment** — every charge attempt. Status: `PENDING → SUCCEEDED | FAILED`, then `PARTIALLY_REFUNDED | REFUNDED` as refunds arrive. `refundedAmount` is the cumulative refunded total; revenue figures count `amount - refundedAmount`.
 
 ## Money rule
 
@@ -91,11 +91,150 @@ Publishable **or** secret key (`Authorization: Bearer rp_pub_…` / `rp_live_…
 ```
 GET   /api/v1/billing/plans                                  — Application key only (pricing pages)
 GET   /api/v1/billing/subscription                           — Application key + user JWT
+GET   /api/v1/billing/subscriptions                          (Application key + user JWT)
+POST  /api/v1/billing/subscription/cancel { atPeriodEnd?, organizationId?, subscriptionId? }
 GET   /api/v1/billing/entitlements/features/:key             (Application key + user JWT)
 GET   /api/v1/users/me/licenses                              (Application key + user JWT)
 POST  /api/v1/billing/checkout    { planSlug, successUrl, cancelUrl }
 POST  /api/v1/billing/subscribe   { organizationId? }            — Application key + user JWT
 ```
+
+### What a buyer sees of their subscriptions
+
+Every end-user subscription response (the two reads above, cancel, subscribe,
+checkout's `subscription`, and `include=subscription`) is an explicit allowlist of
+fields. `metadata` carries only `checkoutSessionId` and `oneTime`; the rest of it is
+what the operator and the providers wrote for themselves (a grant's note, retired
+checkout sessions, the provider a row moved from) and stays on the secret-key
+operator routes. `entitlementOverrides` is not on this surface either; the effect of
+an override shows in `GET /billing/entitlements`.
+
+A buyer can hold several live subscriptions, for instance two plans bought
+separately. `GET /billing/subscription` returns one: a paid plan before a plan that costs
+nothing, then the most recently created, ties broken by id. `GET /billing/subscriptions`
+returns all live ones in that order (at most 100, the newest), so `items[0]` is the same row. Read the list
+before offering a checkout, so nobody is offered a plan they already pay for, and
+pass `subscriptionId` to cancel to end one of several. A `subscriptionId` naming an unfinished checkout answers `409 SUBSCRIPTION_CHECKOUT_UNFINISHED`.
+
+### Where checkout sends the buyer afterwards
+
+`successUrl` and `cancelUrl` are where the processor sends the buyer once they
+have paid or given up. They should be on an origin the Application has
+registered: its **Application URL** or one of its **redirect URLs** (Panel →
+Application → Auth), compared by origin, so any path on a registered origin
+passes. The hosted portal's own origin is allowed without registration for an
+Application that uses it, because Rekey chose it rather than the caller.
+
+| Return URL | Today | Next minor release |
+|---|---|---|
+| `javascript:`, `data:`, or any other non-http(s) scheme | **400** `CHECKOUT_RETURN_URL_INVALID` | same |
+| http(s) on a registered origin (or the hosted portal) | allowed | allowed |
+| http(s) on an unregistered origin | allowed, with a warning | **400** `CHECKOUT_RETURN_URL_NOT_ALLOWED` |
+
+A warning rides on the checkout response and does not stop it:
+
+```json
+{ "url": "https://checkout.stripe.com/…", "subscription": { … }, "discountAmount": 0, "provider": "stripe",
+  "warnings": [{ "code": "CHECKOUT_RETURN_URL_UNREGISTERED", "field": "successUrl",
+                 "origin": "https://shop.example", "message": "…", "fix": "…" }] }
+```
+
+`warnings` is always present on this API and empty when there is nothing to
+report. Each unregistered checkout is also logged and recorded as the
+security event `app.checkout_return_url_unregistered`, and the Application's
+Billing page in the panel shows a notice with the origins and a count for the
+last 7 days. An Application that has registered **no** origin at all gets the
+warning on every checkout, and its message says so: set the Application URL
+before upgrading. `http://localhost` is judged like any other origin, so add
+your dev origin to the redirect URLs too.
+
+**Razorpay subscriptions do not return the buyer.** Razorpay's subscription
+checkout takes no return or cancel URL, so a buyer who pays for a recurring
+Razorpay plan finishes on Razorpay's page and is not sent back to your app;
+`successUrl` and `cancelUrl` are unused for them. Show the buyer how to get
+back (the activation still arrives by webhook). One-time Razorpay purchases do
+return to `successUrl`. The planned fix is the Rekey checkout page (below)
+opening Razorpay's modal on our page and so keeping the buyer there.
+
+**Stripe payment methods.** Stripe Checkout offers whatever payment methods the
+operator's Stripe account has enabled (cards, Link, Apple Pay and Google Pay,
+and local methods), not cards only. A delayed method such as a bank debit
+completes the session before the money arrives; Rekey activates such a
+checkout on `checkout.session.async_payment_succeeded`, not on
+`checkout.session.completed`. To offer cards only, turn the other methods off
+in the Stripe Dashboard (Settings → Payment methods).
+
+### The Rekey checkout page (beta)
+
+Instead of sending the buyer to the processor's own page, a checkout can land
+on a Rekey-hosted page at `<portal>/<slug>/checkout/chk_…` that carries your
+name, logo and colours, the order summary and the renewal terms, with the
+processor's own payment buttons in it. Today that is **PayPal subscriptions**;
+other processors and one-time purchases stay on the processor's page.
+
+Nothing changes in your code. `POST /billing/checkout` still answers with a
+`url` to redirect to; when the page is on, `url` is the Rekey page and the
+response says `"mode": "embedded"`. Pass `"mode": "redirect"` on a checkout to
+force the processor's page for that one checkout.
+
+**Switching it on.** Panel → Application → Billing → **Checkout page**. It is
+set separately for **Test** and **Live**: a checkout uses the setting for the
+mode of the credentials its provider runs on, so you can run the Rekey page on
+sandbox credentials while live checkouts stay on PayPal's page. Switching a
+mode to "Rekey page" runs that mode's readiness checks first and is refused on
+any FAIL; switching back is never refused. The same settings are on the API:
+`GET` / `PATCH /api/v1/tenant/applications/:id/checkout`,
+`GET …/checkout/readiness` and `GET …/checkout/status`.
+
+**Readiness checks**, shown as a Test and a Live column:
+
+| Check | FAIL when | WARN when |
+|---|---|---|
+| Portal reachable | no hosted portal on this deployment (`PUBLIC_PORTAL_URL` unset), or the portal did not answer a round-trip probe | the probe took over 2 s |
+| Provider supports the page | the provider cannot take a flow this Application sells on the page | sandbox credentials on a PRODUCTION Application, or live ones on a DEVELOPMENT/STAGING one |
+| Webhook registered and delivering | no webhook registered; in live mode, no webhook verified with the live credentials in the last 30 days and since they were last saved (a sandbox delivery never counts) | the last verified webhook is over 7 days old; in test mode, none yet |
+| Plans ready in this mode | a live paid plan cannot be bought through the provider, or was registered in the other mode | a registration predates mode recording |
+| Return URL origin registered | the Application has no Application URL and no redirect URLs | |
+| Browser credential | PayPal has no Client ID | |
+| Branding | | no display name or no logo (Panel → Application → Portal → Branding) |
+| CSP reports | | the portal does not receive the page's CSP reports |
+
+A PayPal account that has never sent a verified live webhook fails the live
+webhook check, so take the first live payment on PayPal's page (the default),
+then switch.
+
+**If a check fails at checkout time.** Every checkout re-runs the critical
+checks. "Fall back to the provider's page" (the default) serves that checkout
+on PayPal's page and adds a `CHECKOUT_EMBEDDED_FELL_BACK` warning naming the
+check; "Refuse the checkout" answers `409 CHECKOUT_EMBEDDED_NOT_READY` and
+creates nothing. Neither tells the buyer why beyond the check's name: the
+detail is in the Checkout page section and the security log. On the Rekey page an unregistered `successUrl` or `cancelUrl`
+is always a failed check, never a warning. `CHECKOUT_EMBEDDED_ENABLED=false`
+on the API switches the page off for the whole deployment under the same rules.
+
+**What the buyer sees.** The page shows the email the checkout was created
+for while it can still be paid, and never after it is paid or expired. In test
+mode a banner says "Test mode: no real money moves." It is never shown in live
+mode. The buyer approves in PayPal's own window (the PayPal wallet, or "Debit
+or Credit Card"), and the page waits for PayPal's webhook, then sends the buyer
+to `successUrl`. The browser's word activates nothing: the subscription
+activates only from PayPal's verified webhook, as it does on PayPal's page. If
+PayPal's script does not load, the page offers "Continue on PayPal", the same
+PayPal page as before.
+
+**Links on the page.** Set Terms, Privacy and Refund policy URLs in Panel →
+Application → Portal → Branding to show them in the page's footer. The hosted
+customer portal itself does not need to be switched on for the checkout page
+to work.
+
+**Limits.** On either page and for every provider: one end-user may start
+10 checkouts an hour and 30 a day, one client address
+`CHECKOUT_LIMIT_PER_IP_HOUR` (default 20) an hour, and one Application
+`CHECKOUT_LIMIT_PER_APP_HOUR` (default 1000) an hour. The next answers
+`429 CHECKOUT_RATE_LIMITED` with the time to retry. While a buyer's earlier
+PayPal checkout for the same plan is approved and waiting for its webhook, a
+new one answers `409 CHECKOUT_PAYMENT_IN_PROGRESS` instead of starting a
+second subscription. A checkout page link expires with its checkout, after 24 hours.
 
 ### Hiding a plan that would fail at checkout
 
@@ -191,6 +330,8 @@ const { value: projectLimit } = await rekey.billing.getFeature(userAccessToken, 
 
 // The signed-in user's licences (no raw keys, just keyPrefix)
 const { items: licences } = await rekey.licenses.listMine(userAccessToken);
+// ...plus one organization's pooled licences (member-only, else 403 ORGANIZATION_NOT_MEMBER)
+const { items: teamLicences } = await rekey.licenses.listMine(userAccessToken, undefined, { organizationId });
 
 // User clicks "Subscribe"
 const { url } = await rekey.billing.createCheckout(userAccessToken, {
@@ -254,7 +395,7 @@ GET   /api/v1/credits/me/ledger            Application key + user JWT      the c
 }
 ```
 
-It is computed by the same code `POST /usage/record` enforces with: the calendar month in UTC, the plan quota from the subject's live subscriptions (plus the free-tier default plan for a personal subject), and the same sum over recorded units. So a record dated now of more than `remaining` units is exactly the one that comes back `402 USAGE_QUOTA_EXCEEDED`, or, when `creditsPerUnit` is set, the one whose excess is charged in credits. `included: null` means the subject has no quota for the meter, and records are neither capped nor charged. A backdated record (`occurredAt` in an earlier month) is measured against its own month, and a record on an inactive meter is refused with `USAGE_METER_INACTIVE` whatever `remaining` says; an unknown `?meter=` is `404 USAGE_METER_NOT_FOUND`. The read takes no lock, so under concurrent records it is a snapshot. Without `?meter=` it reports up to 200 meters, oldest first; `totalMeters` and `truncated: true` say when the catalogue is larger, and the rest are read one at a time.
+It is computed by the same code `POST /usage/record` enforces with: the calendar month in UTC, the plan quota from the subject's live subscriptions (plus the free-tier default plan for a personal subject), and the same sum over recorded units. So a record dated now of more than `remaining` units is exactly the one that comes back `402 USAGE_QUOTA_EXCEEDED`, or, when `creditsPerUnit` is set, the one whose excess is charged in credits. `included: null` means the subject has no quota for the meter, and records are neither capped nor charged. `occurredAt` may only fall within the current UTC calendar month, up to one minute ahead of the server clock: an earlier month is refused with `400 USAGE_OCCURRED_AT_TOO_OLD` and a later time with `400 USAGE_OCCURRED_AT_IN_FUTURE`, so a record always lands in the period `remaining` describes. A record on an inactive meter is refused with `USAGE_METER_INACTIVE` whatever `remaining` says; an unknown `?meter=` is `404 USAGE_METER_NOT_FOUND`. The read takes no lock, so under concurrent records it is a snapshot. Without `?meter=` it reports up to 200 meters, oldest first; `totalMeters` and `truncated: true` say when the catalogue is larger, and the rest are read one at a time.
 
 Whose quota: the personal one; in an Application that bills organizations (`billingSubject: "org"`), the session's active organization while the caller is still a member; or `?organizationId=` (member-only). A backend with no user token uses `/remaining/for-user?endUserId=` (or `organizationId=`, or both to read the organization as that member).
 
@@ -458,10 +599,13 @@ The canonical event list ships in code as `WEBHOOK_EVENTS` (an array of `{ name,
 >
 > `data.subscription.entitlements` carries what that subscription grants — the same array shape `GET /api/v1/billing/entitlements` returns, with the subscription's `entitlementOverrides` already applied. Provision against it rather than against `planSlug`: an override is how a bespoke quantity is sold without minting a private plan, so two subscribers on the same plan can be entitled to different amounts and the slug cannot tell you which.
 >
+> The field is **absent** when Rekey could not resolve it while recording the event. Absent is not empty: do not provision `0` from it, keep what the customer has and read the current grant instead. An empty array does mean the subscription grants nothing.
+>
 > ```ts
 > // "How many widgets did this customer buy?" — plan default, or their override.
-> const seats = event.data.subscription.entitlements
->   .find((e) => e.kind === 'FEATURE' && e.key === 'max_widgets');
+> const { entitlements } = event.data.subscription;
+> if (entitlements === undefined) return; // unknown, not zero: leave provisioning as it is
+> const seats = entitlements.find((e) => e.kind === 'FEATURE' && e.key === 'max_widgets');
 > const allowance = seats?.valueType === 'INT' ? Number(seats.value) : 0;
 > ```
 
@@ -491,12 +635,36 @@ The signature is the auth — no `Authorization` header on this route. The raw b
 
 | Event | Effect |
 |---|---|
-| `checkout.session.completed` | Local PENDING Subscription matched on `metadata.checkoutSessionId` → ACTIVE; persists `providerSubId` |
+| `checkout.session.completed` | Local PENDING Subscription matched on `metadata.checkoutSessionId` → ACTIVE; persists `providerSubId`. Skipped when `payment_status` is `unpaid` (a delayed payment method) |
+| `checkout.session.async_payment_succeeded` | The same activation, for a delayed payment method once its money arrives |
 | `customer.subscription.updated` | Mirrors status, currentPeriodEnd, cancelAt, canceledAt |
 | `customer.subscription.deleted` | → CANCELED |
 | `invoice.paid` / `invoice.payment_succeeded` | Inserts SUCCEEDED Payment + ensures Subscription ACTIVE |
 | `invoice.payment_failed` | Inserts FAILED Payment + sets Subscription PAST_DUE |
+| `charge.refunded` | Sets the matching Payment's `refundedAmount` to the charge's cumulative `amount_refunded` and its status to PARTIALLY_REFUNDED or REFUNDED. Matched by the charge's invoice (a subscription charge) or payment intent (a one-time checkout). Entitlements are not revoked. Disputes are not consumed |
 | anything else | Logged + recorded as processed (no-op) |
+
+**Mode.** A Stripe event carries `livemode`. One that contradicts the mode of
+the credential that verified it (a live event under test keys, or the reverse)
+is recorded on its receipt, answered `409 WEBHOOK_MODE_MISMATCH`, and not
+applied. It means the saved signing secret belongs to the other mode's
+endpoint. The receipt stays unprocessed, so once the credential is corrected,
+Stripe's next retry of the event applies it.
+
+**Stripe API version.** Rekey registers its Stripe endpoint pinned to the
+API version its client uses (`STRIPE_API_VERSION` in
+`providers/stripe-api-version.ts`), so events arrive in the shape Rekey reads.
+An endpoint registered before that pin, or created by hand without choosing a
+version, delivers in the Stripe account's default version. Accounts created
+from 2025-03-31 default to `basil` or later, where the subscription's
+`current_period_end` lives on its items and an invoice's subscription on
+`parent.subscription_details`; Rekey reads both shapes, so those endpoints
+keep working. Re-register anyway (Panel → Application → Billing, **Auto-configure** on the Stripe
+row) to pin the version and to subscribe
+`checkout.session.async_payment_succeeded`, without which a buyer who pays by
+a delayed method is never activated, and `charge.refunded`, without which a
+refund made in the Stripe dashboard never reaches Rekey's books. A hand-made endpoint should pick
+`2024-11-20.acacia` and subscribe the events in the table above.
 
 See `apps/api/src/modules/billing/webhooks/` for the full module rules.
 

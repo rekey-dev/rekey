@@ -143,7 +143,20 @@ export interface OperatorTool {
    * answered 403.
    */
   minRole?: TenantRole;
+  /**
+   * MCP tool annotations (spec 2025-06-18), hints a client uses to decide
+   * whether to ask before calling. Hints only: authorization is `write`,
+   * `admin` and `minRole`, never these.
+   */
+  annotations?: OperatorToolAnnotations;
   handler: (ctx: OperatorToolContext, args: Record<string, unknown>) => Promise<unknown>;
+}
+
+export interface OperatorToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
 }
 
 const NO_ARGS = {
@@ -353,12 +366,12 @@ export const operatorTools: OperatorTool[] = [
     description:
       'Recent Payment rows across the Applications the operator can read, by default ' +
       'the last 25, max 200. Filter optionally by `status` (SUCCEEDED / FAILED / ' +
-      "PENDING / REFUNDED). Each row reports its Application's environment.",
+      "PENDING / REFUNDED / PARTIALLY_REFUNDED). Each row reports its Application's environment.",
     inputSchema: {
       type: 'object',
       properties: {
         limit: { type: 'integer', minimum: 1, maximum: 200, default: 25 },
-        status: { type: 'string', enum: ['SUCCEEDED', 'FAILED', 'PENDING', 'REFUNDED'] },
+        status: { type: 'string', enum: ['SUCCEEDED', 'FAILED', 'PENDING', 'REFUNDED', 'PARTIALLY_REFUNDED'] },
       },
       additionalProperties: false,
     },
@@ -371,7 +384,7 @@ export const operatorTools: OperatorTool[] = [
       const rows = await prisma.payment.findMany({
         where: {
           applicationId: { in: appIds },
-          ...(status ? { status: status as 'SUCCEEDED' | 'FAILED' | 'PENDING' | 'REFUNDED' } : {}),
+          ...(status ? { status: status as 'SUCCEEDED' | 'FAILED' | 'PENDING' | 'REFUNDED' | 'PARTIALLY_REFUNDED' } : {}),
         },
         orderBy: { createdAt: 'desc' },
         take: limit,

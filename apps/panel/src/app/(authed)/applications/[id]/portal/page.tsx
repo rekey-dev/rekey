@@ -50,7 +50,13 @@ async function saveBranding(applicationId: string, formData: FormData): Promise<
   if (str('supportUrl') && !supportUrl) {
     redirect(`/applications/${applicationId}/portal?error=INVALID_SUPPORT_URL`);
   }
+  const policyLinks: Record<'termsUrl' | 'privacyUrl' | 'refundUrl', string> = { termsUrl: '', privacyUrl: '', refundUrl: '' };
+  for (const key of ['termsUrl', 'privacyUrl', 'refundUrl'] as const) {
+    policyLinks[key] = httpUrlOrEmpty(str(key));
+    if (str(key) && !policyLinks[key]) redirect(`/applications/${applicationId}/portal?error=INVALID_POLICY_URL`);
+  }
   const branding = {
+    ...policyLinks,
     displayName: str('displayName'),
     tagline: str('tagline'),
     primaryColor: str('primaryColor'),
@@ -83,6 +89,7 @@ const ERR: Record<string, string> = {
   PORTAL_DOMAIN_TAKEN: 'That domain is already used by another application.',
   INVALID_LOGO_URL: 'Logo URL must be a full http(s) link (e.g. https://…/logo.png).',
   INVALID_SUPPORT_URL: 'Support URL must be a full http(s) link.',
+  INVALID_POLICY_URL: 'Terms, privacy and refund links must be full http(s) links.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can configure the hosted portal.',
   APPLICATION_NOT_FOUND: 'Application not found.',
 };
@@ -114,6 +121,9 @@ export default async function PortalPage({
     logoUrl?: string;
     supportEmail?: string;
     supportUrl?: string;
+    termsUrl?: string;
+    privacyUrl?: string;
+    refundUrl?: string;
   };
   const domain = app.portalDomain ?? '';
   const domainVerified = Boolean(app.portalDomainVerifiedAt);
@@ -202,6 +212,21 @@ export default async function PortalPage({
           </label>
           <p className="text-xs text-[var(--color-muted-fg)] sm:col-span-2">
             When set, the portal shows a &ldquo;Contact support&rdquo; link (URL wins over email).
+          </p>
+          <label className="space-y-1">
+            <span className="text-xs font-medium">Terms URL</span>
+            <input name="termsUrl" type="url" defaultValue={b.termsUrl ?? ''} placeholder="https://yourapp.com/terms" className={inputCls} />
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs font-medium">Privacy URL</span>
+            <input name="privacyUrl" type="url" defaultValue={b.privacyUrl ?? ''} placeholder="https://yourapp.com/privacy" className={inputCls} />
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs font-medium">Refund policy URL</span>
+            <input name="refundUrl" type="url" defaultValue={b.refundUrl ?? ''} placeholder="https://yourapp.com/refunds" className={inputCls} />
+          </label>
+          <p className="text-xs text-[var(--color-muted-fg)] sm:col-span-2 self-end">
+            Linked from the footer of the Rekey checkout page.
           </p>
           <div className="sm:col-span-2">
             <SubmitButton pendingLabel="Saving…">Save branding</SubmitButton>

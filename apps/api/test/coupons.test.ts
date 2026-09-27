@@ -114,17 +114,17 @@ describe('coupons', () => {
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/coupons`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { code: 'bad code', discountType: 'AMOUNT', amountOff: 100 },
+      payload: { code: 'bad code', discountType: 'AMOUNT', currency: 'USD', amountOff: 100 },
     });
     expect(bad.statusCode).toBe(400);
     expect(bad.json().error.code).toBe('COUPON_CODE_INVALID');
 
-    await createCoupon({ code: 'dup', discountType: 'AMOUNT', amountOff: 100 });
+    await createCoupon({ code: 'dup', discountType: 'AMOUNT', currency: 'USD', amountOff: 100 });
     const dup = await app.inject({
       method: 'POST',
       url: `/api/v1/admin/applications/${applicationId}/coupons`,
       headers: { authorization: `Bearer ${ADMIN_KEY}` },
-      payload: { code: 'DUP', discountType: 'AMOUNT', amountOff: 100 },
+      payload: { code: 'DUP', discountType: 'AMOUNT', currency: 'USD', amountOff: 100 },
     });
     expect(dup.statusCode).toBe(409);
     expect(dup.json().error.code).toBe('COUPON_CODE_TAKEN');
@@ -148,7 +148,7 @@ describe('coupons', () => {
   });
 
   it('validates an AMOUNT coupon, clamps if discount > price', async () => {
-    await createCoupon({ code: 'huge', discountType: 'AMOUNT', amountOff: 5000 });
+    await createCoupon({ code: 'huge', discountType: 'AMOUNT', currency: 'USD', amountOff: 5000 });
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/billing/coupons/validate',
@@ -225,9 +225,13 @@ describe('coupons', () => {
       };
     };
     expect(data.discountAmount).toBe(499); // 50% of 999 floor
-    // The couponId rides on subscription metadata so the webhook can find
-    // it at payment-success time.
-    expect(data.subscription.metadata.couponId).toBeTruthy();
+    // The couponId rides on the stored subscription's metadata so the webhook
+    // can find it at payment-success time. It is internal bookkeeping, so it is
+    // read off the row: the buyer's response carries the discount as
+    // `discountAmount` and no coupon id.
+    const stored = await prisma.subscription.findUniqueOrThrow({ where: { id: data.subscription.id } });
+    expect((stored.metadata as { couponId?: string }).couponId).toBeTruthy();
+    expect(data.subscription.metadata).not.toHaveProperty('couponId');
 
     // A reservation exists, bound to the session the provider just minted the
     // discount on, and it expires on its own so an abandoned checkout gives the
@@ -333,6 +337,7 @@ describe('coupons', () => {
     const coupon = await createCoupon({
       code: 'twice',
       discountType: 'AMOUNT',
+      currency: 'USD',
       amountOff: 500,
       maxRedemptions: 1,
     });

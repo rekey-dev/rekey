@@ -14,7 +14,11 @@
  *   → idempotency insert UNIQUE(provider, providerEventId), same
  *     webhook_events storage/constraint as always; conflict = 200 replay-ack
  *     (unless the earlier dispatch failed, then re-attempt)
+ *   → module.webhook.eventMode vs the credential's mode: a contradiction is
+ *     recorded on the receipt and refused 409, left unprocessed so a retry
+ *     after the credential is fixed applies it
  *   → module.webhook.translate → null = 200 ignored (receipt still marked)
+ *   → any event naming another Application = 400 WEBHOOK_APPLICATION_MISMATCH
  *   → per event: applyBillingEvent, appliers own atomicity + post-commit
  *   → 200; applier throw = processing_error persisted + 5xx so the provider
  *     retries (the retry takes the re-attempt path, not the duplicate skip)
@@ -117,6 +121,10 @@ const WEBHOOK_ERRORS = {
   404:
     'WEBHOOK_PROVIDER_UNKNOWN — the `:provider` segment is not a registered billing provider; or ' +
     'APPLICATION_NOT_FOUND — no Application matches the resolved slug/id.',
+  409:
+    'WEBHOOK_MODE_MISMATCH: the event states a test/live mode (Stripe `livemode`) that ' +
+    "contradicts the mode of the credential that verified it. Recorded on the receipt and " +
+    'left unprocessed, so a retry after the credential is corrected applies it.',
   429: 'RATE_LIMITED — too many requests. Honour the `Retry-After` header.',
   503:
     'BILLING_CREDENTIALS_NOT_CONFIGURED — this Application has no BYO webhook secret/id set for ' +
@@ -252,6 +260,7 @@ export async function handleBillingProviderWebhook(
         providerEventId,
         eventType,
         payload: req.payload as never,
+        mode: credsRow!.mode,
       },
     });
   } catch (e) {
@@ -288,11 +297,41 @@ export async function handleBillingProviderWebhook(
     // is applied below is THIS body, so the receipt records this body.
     webhookRow = await prisma.webhookEvent.update({
       where: { id: existing.id },
-      data: { eventType, payload: req.payload as never },
+      data: { eventType, payload: req.payload as never, mode: credsRow!.mode },
     });
   }
 
+  // --- Mode ---------------------------------------------------------------
+  // A live event verified by a test credential (or the reverse) means the
+  // stored secret belongs to the other mode's endpoint. Applying it would put
+  // real money into a sandbox's books, or sandbox money into real revenue.
+  // Recorded and refused with 409, never applied. Not acknowledged: once the
+  // operator corrects the credential, the provider's next retry of this same
+  // event takes the re-attempt path below (processedAt stays null) and
+  // applies. A 2xx here would have lost the event for good.
+  const eventMode = module.webhook.eventMode?.(req.payload) ?? null;
+  if (eventMode !== null && eventMode !== credsRow!.mode) {
+    request.log.error(
+      { provider: module.name, eventId: providerEventId, eventMode, credentialMode: credsRow!.mode },
+      'billing webhook event mode contradicts the credential that verified it',
+    );
+    const mismatch = new RekeyError({
+      statusCode: 409,
+      code: 'WEBHOOK_MODE_MISMATCH',
+      message: `A ${eventMode}-mode event was verified by this Application's ${credsRow!.mode}-mode ${module.display.label} credential and was not applied.`,
+      fix: `Save ${eventMode}-mode ${module.display.label} credentials for this Application, or save the signing secret of the ${credsRow!.mode}-mode endpoint. The provider's retry of this event then applies it.`,
+    });
+    await prisma.webhookEvent.update({
+      where: { id: webhookRow.id },
+      data: { processingError: `${mismatch.code}: ${mismatch.message}` },
+    });
+    throw mismatch;
+  }
+
   // --- Translate + apply -------------------------------------------------
+  // Appliers that deliberately apply nothing say why here; it lands on the
+  // receipt so an operator reading the event log sees it.
+  const notes: string[] = [];
   try {
     const events = module.webhook.translate(req.payload, {
       log: request.log,
@@ -307,41 +346,55 @@ export async function handleBillingProviderWebhook(
         'unhandled billing provider event',
       );
     }
+    // The event's Application MUST be the one whose secret verified this
+    // request. Stripe's translator reads the id from `payload.metadata`,
+    // which is attacker-controlled: a tenant signing with THEIR OWN webhook
+    // secret could name another tenant's application and write payments
+    // into it, cancel its subscriptions, or pre-poison a provider payment id
+    // so the victim's genuine `invoice.paid` was later swallowed as a
+    // duplicate. No shared provider account required.
+    //
+    // Checked for every event before any is applied, and refused with 400
+    // rather than the 500 an applier failure gets: a mismatch is either an
+    // attack or a translator bug, retrying cannot fix either, and both
+    // deserve to be loud.
+    const foreign = (events ?? []).find((ev) => ev.applicationId !== application.id);
+    if (foreign) {
+      request.log.error(
+        {
+          provider: module.name,
+          eventId: providerEventId,
+          routeApplicationId: application.id,
+          payloadApplicationId: foreign.applicationId,
+        },
+        'billing webhook event named a different Application than the one that signed it',
+      );
+      const mismatch = new RekeyError({
+        statusCode: 400,
+        code: 'WEBHOOK_APPLICATION_MISMATCH',
+        message: 'Event names a different Application than the credential that signed it.',
+        fix: 'Send the event to the route for the Application whose webhook secret signed it.',
+      });
+      await prisma.webhookEvent.update({
+        where: { id: webhookRow.id },
+        data: { processingError: `${mismatch.code}: ${mismatch.message}` },
+      });
+      throw mismatch;
+    }
     for (const ev of events ?? []) {
-      // The event's Application MUST be the one whose secret verified this
-      // request. Stripe's translator reads the id from `payload.metadata`,
-      // which is attacker-controlled: a tenant signing with THEIR OWN webhook
-      // secret could name another tenant's application and write payments
-      // into it, cancel its subscriptions, or pre-poison a provider payment id
-      // so the victim's genuine `invoice.paid` was later swallowed as a
-      // duplicate. No shared provider account required.
-      //
-      // Refuse rather than skip: a mismatch is either an attack or a
-      // translator bug, and both deserve to be loud.
-      if (ev.applicationId !== application.id) {
-        request.log.error(
-          {
-            provider: module.name,
-            eventId: providerEventId,
-            routeApplicationId: application.id,
-            payloadApplicationId: ev.applicationId,
-          },
-          'billing webhook event named a different Application than the one that signed it',
-        );
-        throw new RekeyError({
-          statusCode: 400,
-          code: 'WEBHOOK_APPLICATION_MISMATCH',
-          message: 'Event names a different Application than the credential that signed it.',
-          fix: 'Send the event to the route for the Application whose webhook secret signed it.',
-        });
-      }
-      await applyBillingEvent(ev, { log: request.log, provider: module.name });
+      await applyBillingEvent(ev, {
+        log: request.log,
+        provider: module.name,
+        mode: credsRow!.mode,
+        note: (text) => notes.push(text),
+      });
     }
     await prisma.webhookEvent.update({
       where: { id: webhookRow.id },
-      data: { processedAt: new Date(), processingError: null },
+      data: { processedAt: new Date(), processingError: notes.length > 0 ? notes.join('; ') : null },
     });
   } catch (err) {
+    if (err instanceof RekeyError && err.code === 'WEBHOOK_APPLICATION_MISMATCH') throw err;
     request.log.error(
       { err, provider: module.name, eventId: providerEventId },
       'billing webhook dispatch failed',

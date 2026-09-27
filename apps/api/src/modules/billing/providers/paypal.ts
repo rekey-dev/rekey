@@ -20,7 +20,10 @@ import type {
   CancelSubscriptionInput,
   CheckoutSessionInput,
   CheckoutSessionResult,
+  EmbeddedCheckoutInput,
+  EmbeddedCheckoutResult,
   ProviderPlanRef,
+  ProviderSubscriptionSnapshot,
   RefundPaymentInput,
   RefundPaymentResult,
 } from './types.js';
@@ -242,6 +245,65 @@ export class RealPaypalProvider implements BillingProvider {
       // backstop for any caller that reaches the class directly.
       throw discountUnsupported(this.name, 'recurring');
     }
+    const created = await this.createSubscription(input, input.successUrl, input.cancelUrl);
+    return { url: created.approveUrl, sessionId: created.id };
+  }
+
+  /**
+   * The Rekey-hosted page's subscription: created here, server-side, exactly
+   * as for the redirect, but PayPal returns the buyer to the Rekey page, which
+   * is also where a cancelled approval lands. The page's Buttons only hand
+   * this id back through `createSubscription`, so the browser cannot change
+   * the plan, the price or `custom_id`.
+   */
+  async createEmbeddedCheckout(input: EmbeddedCheckoutInput): Promise<EmbeddedCheckoutResult> {
+    if (input.discount) throw discountUnsupported(this.name, 'recurring');
+    if (input.kind !== 'recurring') {
+      throw new RekeyError({
+        statusCode: 400,
+        code: 'CHECKOUT_EMBEDDED_UNSUPPORTED',
+        message: 'The Rekey checkout page takes PayPal subscriptions only; one-time PayPal purchases use the PayPal page.',
+        fix: "Keep the provider's page for one-time purchases, or pass `mode: 'redirect'` for this checkout.",
+      });
+    }
+    const created = await this.createSubscription(input, input.returnUrl, input.returnUrl);
+    return {
+      sessionId: created.id,
+      client: { provider: 'paypal', clientId: this.creds.clientId, subscriptionId: created.id, sdk: 'v5-subscription' },
+      fallbackUrl: created.approveUrl,
+      providerPlanId: created.planId,
+    };
+  }
+
+  /**
+   * PayPal's own record of one subscription, from this credential set's REST
+   * base, so a sandbox id is never read from the live API or the reverse.
+   */
+  async getSubscription(providerSubscriptionId: string): Promise<ProviderSubscriptionSnapshot | null> {
+    const token = await this.accessToken();
+    const res = await paypalFetch(`${this.base}/v1/billing/subscriptions/${encodeURIComponent(providerSubscriptionId)}`, {
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      const body = await res.text();
+      console.error('paypal subscription read failed', res.status, body);
+      throw paypalError('subscription read', res.status, body);
+    }
+    const sub = (await res.json()) as { id?: unknown; status?: unknown; plan_id?: unknown; custom_id?: unknown };
+    return {
+      id: typeof sub.id === 'string' ? sub.id : '',
+      status: typeof sub.status === 'string' ? sub.status : '',
+      planId: typeof sub.plan_id === 'string' ? sub.plan_id : null,
+      customId: typeof sub.custom_id === 'string' ? sub.custom_id : null,
+    };
+  }
+
+  private async createSubscription(
+    input: CheckoutSessionInput,
+    returnUrl: string,
+    cancelUrl: string,
+  ): Promise<{ id: string; approveUrl: string; planId: string }> {
     const token = await this.accessToken();
     // Lookup or create the PayPal plan id.
     const meta = (input.plan.metadata as Record<string, unknown> | null) ?? {};
@@ -269,8 +331,8 @@ export class RealPaypalProvider implements BillingProvider {
         // support.
         custom_id: `${input.application.id}:${input.endUser.id}`,
         application_context: {
-          return_url: input.successUrl,
-          cancel_url: input.cancelUrl,
+          return_url: returnUrl,
+          cancel_url: cancelUrl,
           user_action: 'SUBSCRIBE_NOW',
           shipping_preference: 'NO_SHIPPING',
         },
@@ -294,7 +356,7 @@ export class RealPaypalProvider implements BillingProvider {
     if (!approve) {
       throw new Error('PayPal subscription response missing approve link');
     }
-    return { url: approve.href, sessionId: sub.id };
+    return { id: sub.id, approveUrl: approve.href, planId: paypalPlanId };
   }
 
   /**
@@ -680,10 +742,29 @@ export type PaypalVerifyOutcome =
   | { ok: false; reason: 'unreachable' };
 
 /**
+ * The verify-webhook-signature request with the event spliced in as the bytes
+ * PayPal signed. PayPal's signature covers a CRC32 of the body, so a
+ * re-serialised event (reordered keys, `1.0` becoming `1`, dropped
+ * whitespace) is not what was signed, and the check no longer binds to the
+ * exact bytes we act on.
+ */
+function verificationRequestBody(fields: Record<string, string>, rawEvent: string): string | null {
+  // Only a single JSON value may be spliced: raw text such as
+  // `{},"webhook_id":"..."` would otherwise add or override request fields.
+  try {
+    JSON.parse(rawEvent);
+  } catch {
+    return null;
+  }
+  const withoutEvent = JSON.stringify(fields);
+  return `${withoutEvent.slice(0, -1)},"webhook_event":${rawEvent}}`;
+}
+
+/**
  * Verify an inbound PayPal webhook signature.
  *
  * PayPal verification is ONLINE (unlike Stripe's offline HMAC): we POST the
- * transmission headers + the parsed event body + our webhook id to
+ * transmission headers + the event body as received + our webhook id to
  * `/v1/notifications/verify-webhook-signature` and trust the
  * `verification_status`. Requires a fresh access token minted from the
  * Application's PayPal client credentials.
@@ -699,8 +780,11 @@ export async function verifyPaypalWebhook(args: {
   creds: PaypalCredentials;
   mode: BillingMode;
   headers: Record<string, string | string[] | undefined>;
-  /** The parsed webhook event object (PayPal re-canonicalises server-side). */
-  event: unknown;
+  /**
+   * The webhook body exactly as received. Must already have parsed as one
+   * JSON value: it is embedded verbatim in the verification request.
+   */
+  rawEvent: string;
 }): Promise<PaypalVerifyOutcome> {
   const base = args.mode === 'live' ? LIVE_BASE : SANDBOX_BASE;
 
@@ -718,6 +802,18 @@ export async function verifyPaypalWebhook(args: {
     // PayPal's availability.
     return { ok: false, reason: 'invalid' };
   }
+  const verifyBody = verificationRequestBody(
+    {
+      transmission_id: transmissionId,
+      transmission_time: transmissionTime,
+      cert_url: certUrl,
+      auth_algo: authAlgo,
+      transmission_sig: transmissionSig,
+      webhook_id: args.creds.webhookId,
+    },
+    args.rawEvent,
+  );
+  if (verifyBody === null) return { ok: false, reason: 'invalid' };
 
   // Mint an access token (basic-auth client_credentials).
   const auth = Buffer.from(`${args.creds.clientId}:${args.creds.clientSecret}`).toString('base64');
@@ -755,15 +851,7 @@ export async function verifyPaypalWebhook(args: {
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          transmission_id: transmissionId,
-          transmission_time: transmissionTime,
-          cert_url: certUrl,
-          auth_algo: authAlgo,
-          transmission_sig: transmissionSig,
-          webhook_id: args.creds.webhookId,
-          webhook_event: args.event,
-        }),
+        body: verifyBody,
       },
       PAYPAL_WEBHOOK_TIMEOUT_MS,
     );

@@ -26,6 +26,7 @@
 import { Prisma } from '@prisma/client';
 import type { Application, EndUser, RefreshToken } from '@prisma/client';
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { sessionEnded } from '../../lib/session-stamp.js';
@@ -86,6 +87,12 @@ import { assertSignupAllowed, signupAllowed, type AuthKind } from '../../lib/sig
 import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { applicationRolesService } from '../application-roles/application-roles.service.js';
 import { mfaService } from '../mfa/mfa.service.js';
+import {
+  claimMfaChallenge,
+  isMfaChallengeSpent,
+  mfaChallengeUsedError,
+  mfaCodeReusedError,
+} from '../../lib/mfa-replay.js';
 import { emailService } from '../email/email.service.js';
 import { resolveAppUrl, buildTokenUrl , assertAllowedTokenUrl } from '../../lib/app-url.js';
 import { recordAuthEmailDeliveryFailure } from '../../lib/email-transport.js';
@@ -93,6 +100,14 @@ import { recordSecurityEvent } from '../../lib/security-events.js';
 import { judgeReplay, REFRESH_REUSE_WINDOW_MS, type ReuseReason } from '../../lib/refresh-reuse-window.js';
 import { withSavepoint } from '../../lib/savepoint.js';
 import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
+import {
+  claimPendingWelcome,
+  enqueueSessionCreated,
+  enqueueUserUpdated,
+  sendWelcomeEmail,
+  userSnapshot,
+  welcomeTiming,
+} from './user-lifecycle.js';
 
 export interface SignUpInput {
   application: Application;
@@ -158,11 +173,14 @@ const PUBLISHABLE_MAGIC_LINK_RESPONSE = {
   magicLinkToken: null,
 } as const;
 
-/** Public-safe shape of an EndUser, `passwordHash` stripped. */
-export type PublicEndUser = Omit<EndUser, 'passwordHash' | 'sessionsInvalidBefore'>;
+/** Public-safe shape of an EndUser, `passwordHash` and internal bookkeeping stripped. */
+export type PublicEndUser = Omit<
+  EndUser,
+  'passwordHash' | 'sessionsInvalidBefore' | 'welcomeEmailPending' | 'firstSignedInAt'
+>;
 
 function redact(user: EndUser): PublicEndUser {
-  const { passwordHash, sessionsInvalidBefore, ...rest } = user;
+  const { passwordHash, sessionsInvalidBefore, welcomeEmailPending, firstSignedInAt, ...rest } = user;
   return rest;
 }
 
@@ -233,6 +251,8 @@ export interface AuthResult {
    * null when the client sent no fingerprint.
    */
   deviceId: string | null;
+  /** True when the request that minted this session also created the account. */
+  isNewUser: boolean;
 }
 
 /**
@@ -585,13 +605,28 @@ async function commitDeviceBinding(
   return outcome.device.id;
 }
 
+/** The sign-in method a new session is announced with, `session.created`'s `data.via`. */
+export type SignInVia = 'password' | 'magic_link' | 'oauth' | 'passkey' | 'mfa';
+
+/**
+ * A sign-in that just verified a factor. `isNewUser` when the same request
+ * created the account.
+ */
+export interface SignInCredential {
+  via: SignInVia;
+  isNewUser?: boolean;
+}
+
 /**
  * Where a new session pair comes from. Required on every `issuePair` call so
- * a caller has to say it: `'credential'` when a sign-in factor was just
- * verified (password, MFA code, passkey, magic link, OAuth), or the session
- * the request is acting from, carrying its impersonation context if any.
+ * a caller has to say it: a `credential` when a sign-in factor was just
+ * verified, which is a real sign-in and announced with `session.created`, or
+ * the session the request is acting from, carrying its impersonation context
+ * if any, which re-mints a session and announces nothing.
  */
-type PairOrigin = 'credential' | { session: { impersonation: ImpersonationContext | undefined } };
+type PairOrigin =
+  | { credential: SignInCredential }
+  | { session: { impersonation: ImpersonationContext | undefined } };
 
 async function issuePair(
   application: Application,
@@ -607,7 +642,7 @@ async function issuePair(
   // end-user, which is what the org switch routes did before they refused.
   // The routes refuse first with the same error; this is the backstop, so a
   // future route that re-mints from a session cannot reopen it.
-  if (origin !== 'credential' && origin.session.impersonation) {
+  if ('session' in origin && origin.session.impersonation) {
     throw impersonationForbidden('mint a new session');
   }
   // Email-verification chokepoint. THE place a session comes into existence in
@@ -624,13 +659,29 @@ async function issuePair(
   // an unconfirmed address does not register devices it cannot use.
   const deviceId = await bindDevice(application, endUser, device);
   // The refresh row first: it mints the session id the access token carries
-  // as `sid`, which is what lets a single-session revoke end this pair.
-  const refresh = await issueRefreshToken(application.id, endUser.id, {
+  // as `sid`, which is what lets a single-session revoke end this pair. A
+  // sign-in writes it with its `session.created` in one transaction, so the
+  // session and its announcement commit together.
+  const refreshOptions = {
     userAgent: device?.userAgent ?? null,
     ip: device?.ip ?? null,
     activeOrganizationId: activeOrganizationId ?? null,
     deviceId,
-  });
+  };
+  const { refresh, deliveryIds } =
+    'credential' in origin
+      ? await prisma.$transaction(async (tx) => {
+          const issued = await issueRefreshToken(application.id, endUser.id, refreshOptions, tx);
+          const ids = await enqueueSessionCreated(tx, {
+            endUser,
+            sessionId: issued.record.sessionId,
+            deviceId,
+            via: origin.credential.via,
+          });
+          return { refresh: issued, deliveryIds: ids };
+        })
+      : { refresh: await issueRefreshToken(application.id, endUser.id, refreshOptions), deliveryIds: [] };
+  kickDeliveries(deliveryIds);
   // Honours the app's `authConfig.tokenAlg` (HS256 default, RS256 = JWKS).
   const access = await issueUserAccessTokenForApp(application, endUser.id, {
     ...(activeOrganizationId && { activeOrganizationId }),
@@ -644,6 +695,7 @@ async function issuePair(
     refreshToken: refresh.raw,
     refreshTokenExpiresAt: refresh.record.expiresAt,
     deviceId,
+    isNewUser: 'credential' in origin && origin.credential.isNewUser === true,
   };
 }
 
@@ -658,6 +710,7 @@ async function issuePair(
 export async function issueSessionOrMfaChallenge(
   application: Application,
   endUser: EndUser,
+  credential: SignInCredential,
   device?: DeviceContext,
 ): Promise<SignInOutcome> {
   // GDPR erasure chokepoint: every primary-factor success (password,
@@ -679,7 +732,7 @@ export async function issueSessionOrMfaChallenge(
       mfaChallengeExpiresAt: challenge.expiresAt,
     };
   }
-  const result = await issuePair(application, endUser, 'credential', device);
+  const result = await issuePair(application, endUser, { credential }, device);
   // When the app requires MFA but the user hasn't enrolled, still issue the
   // session but flag it so the customer app can force enrollment.
   const policy = AuthConfigSchema.parse(application.authConfig).mfa;
@@ -886,7 +939,7 @@ export const authService = {
     ensurePasswordMethodEnabled(input.application);
 
     const config = AuthConfigSchema.parse(input.application.authConfig);
-    assertSignupAllowed(config, input.authKind);
+    assertSignupAllowed(config, input.authKind, input.email);
     assertDeviceBindingSatisfiable(input.application, input.device);
     if (input.password.length < config.passwordMinLength) {
       throw new RekeyError({
@@ -918,6 +971,8 @@ export const authService = {
     // tenant PATCH endpoint.
     const defaultRole = await applicationRolesService.getDefault(input.application.id);
 
+    // A new password account is never verified yet.
+    const welcome = welcomeTiming(input.application, false);
     let endUser: EndUser;
     let deliveryIds: string[];
     try {
@@ -931,6 +986,7 @@ export const authService = {
             email: input.email.toLowerCase(),
             passwordHash,
             role: defaultRole.name,
+            welcomeEmailPending: welcome === 'pending',
             ...(input.metadata !== undefined && {
               metadata: input.metadata as never,
             }),
@@ -939,16 +995,7 @@ export const authService = {
         const ids = await enqueueEvent(tx, {
           applicationId: input.application.id,
           type: 'user.created',
-          data: {
-            user: {
-              id: created.id,
-              email: created.email,
-              emailVerified: created.emailVerified,
-              role: created.role,
-              createdAt: created.createdAt.toISOString(),
-              metadata: created.metadata ?? null,
-            },
-          },
+          data: { user: userSnapshot(created), via: 'password' },
         });
         return { endUser: created, deliveryIds: ids };
       }));
@@ -964,24 +1011,8 @@ export const authService = {
       throw e;
     }
 
-    // Welcome email, fire-and-forget. A delivery failure must not break
-    // sign-up (the account was created successfully and the user has a
-    // session; the email is best-effort).
-    void emailService
-      .dispatch({
-        application: input.application,
-        eventKey: 'welcome',
-        to: endUser.email,
-        variables: {
-          userEmail: endUser.email,
-          // Resolution chain (caller → per-app setting → redirect-URL origin
-          // → DEFAULT_APP_URL). Empty when nothing resolves, which makes the
-          // template drop the "Get started" button entirely rather than ship
-          // a dead one. See lib/app-url.ts.
-          appUrl: resolveAppUrl(input.application, input.appUrl) ?? '',
-        },
-      })
-      .catch(() => undefined);
+    // A held welcome goes out on the first verification (`claimPendingWelcome`).
+    if (welcome === 'now') sendWelcomeEmail(input.application, endUser.email, input.appUrl);
 
     // Verification email, same fire-and-forget contract as the welcome mail
     // it rides alongside (it does not replace it). On by default: a new
@@ -1022,7 +1053,12 @@ export const authService = {
     // published type across four SDKs, and making the tokens nullable to
     // describe a state only one Application in a hundred is in would push the
     // branch into every integrator's code.
-    return issuePair(input.application, endUser, 'credential', input.device);
+    return issuePair(
+      input.application,
+      endUser,
+      { credential: { via: 'password', isNewUser: true } },
+      input.device,
+    );
   },
 
   async signIn(input: SignInInput): Promise<SignInOutcome> {
@@ -1137,7 +1173,7 @@ export const authService = {
     // not a failed attempt and must not push the account toward a lockout. A
     // user waiting on their confirmation link would otherwise lock themselves
     // out by retrying.
-    return issueSessionOrMfaChallenge(input.application, endUser, input.device);
+    return issueSessionOrMfaChallenge(input.application, endUser, { via: 'password' }, input.device);
   },
 
   /**
@@ -1179,17 +1215,40 @@ export const authService = {
         fix: 'Sign in under the Application the calling secret key represents.',
       });
     }
-    const ok = await mfaService.verify({ endUserId: claims.sub, code: input.code });
-    if (!ok) {
-      throw new RekeyError({
-        statusCode: 401,
-        code: 'MFA_CODE_INVALID',
-        message: 'TOTP or backup code did not verify.',
-        fix: 'Enter the current 6-digit code from your authenticator app, or one of the backup codes shown at MFA enrollment.',
-      });
-    }
     const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: claims.sub } });
-    return issuePair(input.application, endUser, 'credential', input.device);
+    ensureEmailVerified(input.application, endUser);
+    if (await isMfaChallengeSpent(input.mfaChallengeToken)) throw mfaChallengeUsedError();
+    const codeRefused = (outcome: 'invalid' | 'reused'): RekeyError =>
+      outcome === 'reused'
+        ? mfaCodeReusedError('sign-in')
+        : new RekeyError({
+            statusCode: 401,
+            code: 'MFA_CODE_INVALID',
+            message: 'TOTP or backup code did not verify.',
+            fix: 'Enter the current 6-digit code from your authenticator app, or one of the backup codes shown at MFA enrollment.',
+          });
+    // Two phases. Match first, spending nothing: the device answers below
+    // name the user's devices and fire a webhook, so they wait for a proven
+    // second factor. Then refuse on the device, still spending nothing, so a
+    // user at the limit can release a device and resubmit the same challenge
+    // and code. Only then spend the code and claim the challenge.
+    const match = await mfaService.match({ endUserId: claims.sub, code: input.code });
+    if (match.outcome !== 'matched') throw codeRefused(match.outcome);
+    const plan = await planDeviceBinding(input.application, endUser, input.device);
+    if (plan) {
+      const check = await devicesService.preflight({
+        applicationId: input.application.id,
+        endUserId: endUser.id,
+        fingerprint: plan.fingerprint,
+        ip: plan.ip,
+        via: plan.via,
+      });
+      if (check.kind !== 'ok') throw deviceRefusal(check);
+    }
+    const spent = await match.spend();
+    if (spent !== 'accepted') throw codeRefused(spent);
+    if (!(await claimMfaChallenge(input.mfaChallengeToken, claims.exp))) throw mfaChallengeUsedError();
+    return issuePair(input.application, endUser, { credential: { via: 'mfa' } }, input.device);
   },
 
   /**
@@ -1428,6 +1487,7 @@ export const authService = {
       refreshToken: replacement.raw,
       refreshTokenExpiresAt: replacement.record.expiresAt,
       deviceId,
+      isNewUser: false,
     };
   },
 
@@ -1837,19 +1897,18 @@ export const authService = {
     });
 
     // Refuse to mint a magic link that would auto-create a user when this
-    // caller isn't allowed to create one (invite_only, or secret_only reached
-    // with a publishable key), preserves the invite-only / secret-only posture.
-    // Existing users still get a sign-in link.
+    // caller isn't allowed to create one (invite_only, secret_only reached with
+    // a publishable key, or an email domain the sign-up rules refuse). Existing
+    // users still get a sign-in link.
     //
-    // Under the default `public` signup mode this branch is unreachable, so a
-    // known and an unknown address are genuinely indistinguishable. Under
-    // invite_only / secret_only it is reachable, and then `delivered` differs on
-    // existence, the same caveat as requestPasswordReset. Silent refusal and
-    // padded timing narrow it; they do not close it.
-    if (!endUser && !signupAllowed(config, input.authKind)) {
+    // With `public` sign-up and no domain rules this branch is unreachable, so a
+    // known and an unknown address are genuinely indistinguishable. Otherwise
+    // it is reachable, and for a SECRET key `delivered` differs on existence,
+    // the same caveat as requestPasswordReset. Silent refusal and padded timing
+    // narrow it; they do not close it.
+    if (!endUser && !signupAllowed(config, input.authKind, email)) {
       // Sleep to flatten the timing side channel. A publishable caller gets the
-      // constant response so this refusal is indistinguishable from a real send;
-      // under the default `public` signup mode the branch is unreachable anyway.
+      // constant response so this refusal is indistinguishable from a real send.
       await new Promise((r) => setTimeout(r, 50));
       if (input.authKind === 'publishable') return PUBLISHABLE_MAGIC_LINK_RESPONSE;
       return { delivered: false, emailSent: false, magicLinkToken: null };
@@ -1981,9 +2040,10 @@ export const authService = {
     // Atomic: consume the token + (when needed) create the user. If
     // anything fails, the token stays unconsumed and the user isn't
     // created, operator retry is safe.
-    const { endUser, deliveryIds, createdHere } = await prisma.$transaction(async (tx): Promise<{
+    const { endUser, deliveryIds, welcomeNow, createdHere } = await prisma.$transaction(async (tx): Promise<{
       endUser: EndUser;
       deliveryIds: string[];
+      welcomeNow: boolean;
       createdHere: boolean;
     }> => {
       const consumed = await tx.magicLinkToken.updateMany({
@@ -2023,12 +2083,21 @@ export const authService = {
         // create branch below always set the flag, so only the account that
         // already existed threw the evidence away, and it kept shipping
         // `email_verified: false` to relying parties forever afterwards.
-        if (existing.emailVerified) return { endUser: existing, deliveryIds: [], createdHere: false };
-        const verified = await tx.endUser.update({
-          where: { id: existing.id },
+        const flipped = await tx.endUser.updateMany({
+          where: { id: existing.id, emailVerified: false },
           data: { emailVerified: true },
         });
-        return { endUser: verified, deliveryIds: [], createdHere: false };
+        if (flipped.count === 0) {
+          return { endUser: existing, deliveryIds: [], welcomeNow: false, createdHere: false };
+        }
+        const verified = await tx.endUser.findUniqueOrThrow({ where: { id: existing.id } });
+        const ids = await enqueueUserUpdated(tx, {
+          user: verified,
+          changed: ['emailVerified'],
+          via: 'magic_link',
+        });
+        const welcome = await claimPendingWelcome(tx, input.application, verified.id);
+        return { endUser: verified, deliveryIds: ids, welcomeNow: welcome, createdHere: false };
       }
 
       // New user: create with verified email + default role. Re-check the
@@ -2037,6 +2106,7 @@ export const authService = {
       assertSignupAllowed(
         AuthConfigSchema.parse(input.application.authConfig),
         input.authKind,
+        outcome.token.email,
       );
       assertDeviceBindingSatisfiable(input.application, input.device);
       // Workspace ceiling, checked inside the same transaction as the create.
@@ -2072,51 +2142,33 @@ export const authService = {
               },
             },
           });
-          return { endUser: winner, deliveryIds: [], createdHere: false };
+          return { endUser: winner, deliveryIds: [], welcomeNow: false, createdHere: false };
         }
         throw e;
       }
+      const welcomeAtCreation = welcomeTiming(input.application, created.emailVerified) === 'now';
       // Written with the row and the token consume, so the three commit or
       // roll back together.
       const ids = await enqueueEvent(tx, {
         applicationId: input.application.id,
         type: 'user.created',
-        data: {
-          user: {
-            id: created.id,
-            email: created.email,
-            emailVerified: created.emailVerified,
-            role: created.role,
-            createdAt: created.createdAt.toISOString(),
-            metadata: created.metadata ?? null,
-          },
-          via: 'magic_link',
-        },
+        data: { user: userSnapshot(created), via: 'magic_link' },
       });
-      return { endUser: created, deliveryIds: ids, createdHere: true };
+      return { endUser: created, deliveryIds: ids, welcomeNow: welcomeAtCreation, createdHere: true };
     });
     kickDeliveries(deliveryIds);
 
-    // Lifecycle side-effects only when THIS consume created the user. A token
-    // issued with no endUserId is not enough: a consume that lost the create
-    // race to another link signs in to a user it did not create.
-    if (createdHere) {
-      void emailService
-        .dispatch({
-          application: input.application,
-          eventKey: 'welcome',
-          to: endUser.email,
-          variables: {
-            userEmail: endUser.email,
-            // Magic-link sign-up has no caller-supplied appUrl to pass, so
-            // this leans entirely on the per-app / inferred / env chain.
-            appUrl: resolveAppUrl(input.application) ?? '',
-          },
-        })
-        .catch(() => undefined);
-    }
+    // Only when THIS consume created the user, or verified an account whose
+    // welcome sign-up held back. A consume that lost the create race to
+    // another link signs in to a user it did not create.
+    if (welcomeNow) sendWelcomeEmail(input.application, endUser.email);
 
-    return issueSessionOrMfaChallenge(input.application, endUser, input.device);
+    return issueSessionOrMfaChallenge(
+      input.application,
+      endUser,
+      { via: 'magic_link', isNewUser: createdHere },
+      input.device,
+    );
   },
 
   /**
@@ -2317,19 +2369,33 @@ export const authService = {
         fix: 'No further action needed.',
       });
     }
-    const { updated, deliveryIds } = await prisma.$transaction(async (tx) => {
-      const user = await tx.endUser.update({
-        where: { id: endUser.id },
+    const { updated, deliveryIds, welcome } = await prisma.$transaction(async (tx) => {
+      // Conditional, so of several tokens redeemed at once only one sees the
+      // transition, announces it and takes the held-back welcome.
+      const flipped = await tx.endUser.updateMany({
+        where: { id: endUser.id, emailVerified: false },
         data: { emailVerified: true },
       });
+      const user = await tx.endUser.findUniqueOrThrow({ where: { id: endUser.id } });
       const ids = await enqueueEvent(tx, {
         applicationId: input.application.id,
         type: 'email.verified',
         data: { userId: user.id, email: user.email },
       });
-      return { updated: user, deliveryIds: ids };
+      if (flipped.count === 0) return { updated: user, deliveryIds: ids, welcome: false };
+      const updatedIds = await enqueueUserUpdated(tx, {
+        user,
+        changed: ['emailVerified'],
+        via: 'email_verification',
+      });
+      return {
+        updated: user,
+        deliveryIds: [...ids, ...updatedIds],
+        welcome: await claimPendingWelcome(tx, input.application, user.id),
+      };
     });
     kickDeliveries(deliveryIds);
+    if (welcome) sendWelcomeEmail(input.application, updated.email);
     return { ok: true, endUser: redact(updated) };
   },
 
@@ -2617,7 +2683,7 @@ export const authService = {
     //
     // Customers who want passkey + TOTP belt-and-braces can opt in by not
     // bypassing here in their own flow; we make the simpler trade.
-    const result = await issuePair(input.application, endUser, 'credential', input.device);
+    const result = await issuePair(input.application, endUser, { credential: { via: 'passkey' } }, input.device);
     return { mfaRequired: false, ...result };
   },
 
@@ -2779,7 +2845,7 @@ export const authService = {
       // Clearing the whole object drops the reserved namespace with it, which
       // is a self-inflicted loss of the user's own claims, not an escalation,
       // they cannot write different ones.
-      data.metadata = Prisma.DbNull;
+      if (current.metadata !== null) data.metadata = Prisma.DbNull;
     } else if (args.metadata !== undefined) {
       assertNoReservedMetadataKey(args.metadata);
       const base =
@@ -2792,29 +2858,36 @@ export const authService = {
         else merged[key] = value;
       }
       assertMetadataWithinLimit(merged);
-      data.metadata = merged as Prisma.InputJsonValue;
+      if (!isDeepStrictEqual(merged, current.metadata)) {
+        data.metadata = merged as Prisma.InputJsonValue;
+      }
     }
 
     // Nothing to write, return the current record rather than bumping
-    // `updatedAt` for a no-op request.
+    // `updatedAt` or announcing a change for a no-op request.
     if (Object.keys(data).length === 0) return current;
 
     // The WHERE is scoped to (id, applicationId) so that even if a token from
     // another Application somehow reached here, it matches zero rows instead of
     // writing across the tenant boundary. `updateMany` (not `update`) because
     // only it accepts a compound WHERE on non-unique columns.
-    const result = await prisma.endUser.updateMany({
-      where: { id: args.endUserId, applicationId: args.applicationId },
-      data,
-    });
-    if (result.count !== 1) {
-      throw new RekeyError({
-        statusCode: 404,
-        code: 'END_USER_NOT_FOUND',
-        message: `EndUser "${args.endUserId}" not found in this application.`,
-        fix: 'Verify the user id and that the presented user token belongs to this Application.',
+    const deliveryIds = await prisma.$transaction(async (tx) => {
+      const result = await tx.endUser.updateMany({
+        where: { id: args.endUserId, applicationId: args.applicationId },
+        data,
       });
-    }
+      if (result.count !== 1) {
+        throw new RekeyError({
+          statusCode: 404,
+          code: 'END_USER_NOT_FOUND',
+          message: `EndUser "${args.endUserId}" not found in this application.`,
+          fix: 'Verify the user id and that the presented user token belongs to this Application.',
+        });
+      }
+      const user = await tx.endUser.findUniqueOrThrow({ where: { id: args.endUserId } });
+      return enqueueUserUpdated(tx, { user, changed: ['metadata'], via: 'self' });
+    });
+    kickDeliveries(deliveryIds);
 
     return authService.getById(args.applicationId, args.endUserId);
   },

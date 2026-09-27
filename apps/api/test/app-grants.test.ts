@@ -410,7 +410,7 @@ describe('per-application grants (ApplicationGrant)', () => {
       method: 'POST',
       url: `/api/v1/tenant/applications/${appA}/coupons`,
       headers: auth(memberToken),
-      payload: { code: 'ADM', discountType: 'AMOUNT', amountOff: 100 },
+      payload: { code: 'ADM', discountType: 'AMOUNT', currency: 'USD', amountOff: 100 },
     });
     expect(coupon.statusCode).toBe(201);
 

@@ -196,6 +196,21 @@ See [Device binding](#device-binding) for `deviceBinding: 'required'` Applicatio
 
 For everything `@rekey.dev/nextjs` doesn't cover (billing, credits, usage, orgs, password reset, sessions), construct a [`@rekey.dev/node`](https://www.npmjs.com/package/@rekey.dev/node) client in a server-only module and call it from server actions / route handlers — passing `session.accessToken` for per-user reads.
 
+Keep `new Rekey(...)` out of the `'use server'` file itself: Next.js lets a `'use server'` file export only async functions, so exporting the client from one fails the build. Put it in its own module and import it:
+
+```ts
+// lib/rekey.ts
+import { Rekey } from '@rekey.dev/node';
+export const rekey = new Rekey({ apiUrl: process.env.REKEY_URL!, secretKey: process.env.REKEY_SECRET! });
+
+// app/actions.ts
+'use server';
+import { rekey } from '@/lib/rekey';
+export async function listPlans() {
+  return rekey.billing.getPlans();
+}
+```
+
 ## Publishable login → secret-key API routes
 
 The browser logs the user in with the **publishable** key; the resulting tokens are handed to a route handler that sets the httpOnly session cookies; everything server-side (`auth()`, your API routes) keeps using the **secret** key. No `'use server'` action needed for login.

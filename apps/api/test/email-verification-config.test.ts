@@ -359,6 +359,51 @@ describe('email-verification configuration', () => {
       expect(metadata.reason).toMatch(/appUrl/);
     });
 
+    // #357.2: turning the gate on here would strand every new sign-up, so the
+    // switch itself refuses, whichever field the patch touches.
+    it('refuses to require a verified email when no link can be built', async () => {
+      await clearAppUrl();
+      const refused = await setAuthConfig({ requireEmailVerification: true });
+      expect(refused.statusCode).toBe(409);
+      const error = refused.json().error as { code: string; fix: string };
+      expect(error.code).toBe('EMAIL_VERIFICATION_URL_REQUIRED');
+      expect(error.fix).toMatch(/Application URL/);
+      const row = await prisma.application.findUniqueOrThrow({ where: { id: applicationId } });
+      expect((row.authConfig as { requireEmailVerification: boolean }).requireEmailVerification).toBe(false);
+    });
+
+    it('refuses to clear the last URL while a verified email is required', async () => {
+      expect((await setAuthConfig({ requireEmailVerification: true })).statusCode).toBe(200);
+      const refused = await clearAppUrl();
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().error.code).toBe('EMAIL_VERIFICATION_URL_REQUIRED');
+    });
+
+    it('accepts the URL and the switch in one save, the way the panel form sends them', async () => {
+      await clearAppUrl();
+      const res = await setAuthConfig({
+        requireEmailVerification: true,
+        appUrl: 'https://app.example.com',
+      });
+      expect(res.statusCode).toBe(200);
+    });
+
+    it('still lets an Application already in that state be edited and repaired', async () => {
+      await clearAppUrl();
+      const before = await prisma.application.findUniqueOrThrow({ where: { id: applicationId } });
+      await prisma.application.update({
+        where: { id: applicationId },
+        data: {
+          authConfig: {
+            ...(before.authConfig as Prisma.JsonObject),
+            requireEmailVerification: true,
+          } as Prisma.InputJsonObject,
+        },
+      });
+      expect((await setAuthConfig({ passwordBreachCheckEnabled: false })).statusCode).toBe(200);
+      expect((await setAuthConfig({ requireEmailVerification: false })).statusCode).toBe(200);
+    });
+
     it('an allowlisted redirect URL is enough to bring the send back', async () => {
       await clearAppUrl();
       expect(

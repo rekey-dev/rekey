@@ -178,8 +178,8 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
       // old session spends the code that session was priced with. Reading the
       // row-level `couponId` would have redeemed whichever code was typed
       // most recently, or, worse, a code the completed checkout never used.
-      await createCoupon({ code: 'oldcode', discountType: 'AMOUNT', amountOff: 1000 });
-      await createCoupon({ code: 'newcode', discountType: 'AMOUNT', amountOff: 2000 });
+      await createCoupon({ code: 'oldcode', discountType: 'AMOUNT', currency: 'USD', amountOff: 1000 });
+      await createCoupon({ code: 'newcode', discountType: 'AMOUNT', currency: 'USD', amountOff: 2000 });
       const oldCoupon = await prisma.coupon.findFirstOrThrow({ where: { applicationId, code: 'oldcode' } });
 
       const first = await checkout({ planSlug: 'pack', couponCode: 'oldcode' });
@@ -212,7 +212,7 @@ describe('re-opening checkout for a plan the buyer already has open', () => {
       // The row-level mirror used to be sticky: a coupon-less second checkout
       // left the previous code's id on the subscription, so completing it
       // redeemed a code that purchase never used.
-      await createCoupon({ code: 'sticky', discountType: 'AMOUNT', amountOff: 1000 });
+      await createCoupon({ code: 'sticky', discountType: 'AMOUNT', currency: 'USD', amountOff: 1000 });
       await checkout({ planSlug: 'pack', couponCode: 'sticky' });
       const plain = await checkout({ planSlug: 'pack' });
 

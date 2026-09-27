@@ -46,6 +46,7 @@ import {
 } from '@rekey.dev/shared-types';
 import { requireApiKey, requireScope } from '../middleware/api-key-auth.js';
 import { ok, errs, ref } from '../lib/openapi.js';
+import { emailSenderIdentity } from '../lib/email-transport.js';
 
 function toApplicationDto(app: Application): ApplicationDto {
   return {
@@ -63,6 +64,7 @@ function toApplicationDto(app: Application): ApplicationDto {
     // is what applies defaults to rows written before a field existed.
     authConfig: AuthConfigSchema.parse(app.authConfig),
     billingConfig: BillingConfigSchema.parse(app.billingConfig),
+    supportEmail: emailSenderIdentity(app).supportEmail,
     createdAt: app.createdAt.toISOString(),
   };
 }
