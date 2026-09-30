@@ -25,6 +25,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { ok, okPage, errs, ref } from '../../lib/openapi.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
+import { keyIpProjection, operatorIpProjection } from '../../lib/ip-mask.js';
 import { ensureAppAccess } from '../../lib/app-access.js';
 import {
   requireApiKey,
@@ -171,7 +172,9 @@ export async function devicesServerRoutes(app: FastifyInstance): Promise<void> {
         description:
           'For your own backend, which holds a secret key but not the user\'s token. ' +
           'Requires `?endUserId=`; filter with `?status=`. Includes `lastSeenIp` and ' +
-          '`blockedReason`, so treat the response as operator-grade data.',
+          '`blockedReason`, so treat the response as operator-grade data. `lastSeenIp` is in full when the key ' +
+          'was minted by an OWNER or ADMIN holding `activity:read` (or before 2.2, or by the super-admin key), and ' +
+          'masked to its /24 or /48 network otherwise.',
         security: [{ apiKey: [] }],
         querystring: {
           type: 'object',
@@ -202,7 +205,8 @@ export async function devicesServerRoutes(app: FastifyInstance): Promise<void> {
         take,
         skip,
       });
-      return { success: true, data: paged(items, total, take, skip) };
+      const ip = keyIpProjection(req.apiKey);
+      return { success: true, data: paged(items.map((d) => withIp(d, ip)), total, take, skip) };
     },
   );
 
@@ -249,7 +253,7 @@ export async function devicesServerRoutes(app: FastifyInstance): Promise<void> {
         deviceId: id,
         actor: { type: 'server', id: req.apiKey?.id ?? null },
       });
-      return { success: true, data: result };
+      return { success: true, data: { ...result, device: withIp(result.device, keyIpProjection(req.apiKey)) } };
     },
   );
 }
@@ -291,6 +295,11 @@ const DEVICE_WITH_SESSIONS = {
   required: ['device', 'sessionsRevoked'],
 } as const;
 
+/** A device with its last-seen address run through the caller's IP projection. */
+function withIp<T extends { lastSeenIp?: string | null }>(device: T, ip: (v: string | null | undefined) => string | null): T {
+  return { ...device, lastSeenIp: ip(device.lastSeenIp) };
+}
+
 export async function tenantDevicesRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('onRequest', requireTenantSession);
 
@@ -304,7 +313,8 @@ export async function tenantDevicesRoutes(app: FastifyInstance): Promise<void> {
         summary: "List an end-user's devices",
         description:
           'Requires **read** access to this Application. Every device the end-user has signed in ' +
-          'from, newest activity first, including released and blocked ones; filter with `?status=`.',
+          'from, newest activity first, including released and blocked ones; filter with `?status=`. ' +
+          '`lastSeenIp`: In full only for OWNER or ADMIN holding `activity:read`; otherwise masked to the /24 (IPv4) or /48 (IPv6) network, for example `203.0.113.0/24`.',
         params: TENANT_PARAMS_SCHEMA,
         querystring: { type: 'object', properties: { ...STATUS_QUERY_SCHEMA, ...paginationJsonSchema } },
         response: {
@@ -320,7 +330,8 @@ export async function tenantDevicesRoutes(app: FastifyInstance): Promise<void> {
       const { status } = StatusQuery.parse(req.query);
       const { take, skip } = parsePagination(PaginationQuery.parse(req.query));
       const { items, total } = await devicesService.listForEndUser(id, euid, { status, take, skip });
-      return { success: true, data: paged(items, total, take, skip) };
+      const ip = await operatorIpProjection(req);
+      return { success: true, data: paged(items.map((d) => withIp(d, ip)), total, take, skip) };
     },
   );
 
@@ -354,7 +365,7 @@ export async function tenantDevicesRoutes(app: FastifyInstance): Promise<void> {
         deviceId,
         actor: { type: 'operator', id: req.tenantUser?.id ?? null },
       });
-      return { success: true, data: result };
+      return { success: true, data: { ...result, device: withIp(result.device, await operatorIpProjection(req)) } };
     },
   );
 
@@ -520,7 +531,7 @@ export async function tenantDevicesRoutes(app: FastifyInstance): Promise<void> {
         reason: body.reason,
         operatorUserId: req.tenantUser?.id ?? null,
       });
-      return { success: true, data: result };
+      return { success: true, data: { ...result, device: withIp(result.device, await operatorIpProjection(req)) } };
     },
   );
 
@@ -552,7 +563,7 @@ export async function tenantDevicesRoutes(app: FastifyInstance): Promise<void> {
         deviceId,
         operatorUserId: req.tenantUser?.id ?? null,
       });
-      return { success: true, data: device };
+      return { success: true, data: withIp(device, await operatorIpProjection(req)) };
     },
   );
 

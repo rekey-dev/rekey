@@ -173,6 +173,12 @@ slow one password tried against many accounts.
   a visitor gives it nothing new. It must be the address your backend itself
   saw, or read from a proxy you run, never a value copied from a
   client-supplied `X-Forwarded-For`, or the attacker picks their own bucket.
+- **Send the visitor User-Agent too.** `X-Rekey-Client-User-Agent` on a
+  secret-key call names the visitor's browser, so the session records their
+  platform instead of your server's runtime (see [analytics.md](analytics.md)).
+  Read only from a secret key, or from the hosted portal proven by
+  `INTERNAL_CALLER_SECRET`; ignored from a publishable one. `@rekey.dev/nextjs` and `@rekey.dev/astro`'s
+  `visitorClient` send both headers.
 - **Without it,** failed sign-ins and MFA codes (`INVALID_CREDENTIALS`,
   `MFA_CODE_INVALID`) from that unattributed traffic are counted per
   Application. After 300 in a window (`RATE_LIMIT_AUTH_UNATTRIBUTED_FAILURE_MAX`),

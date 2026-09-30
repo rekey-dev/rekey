@@ -3,25 +3,36 @@ import { AuthConfigSchema } from '@rekey.dev/shared-types';
 import { resolveAppUrl } from '../../lib/app-url.js';
 import { emailService } from '../email/email.service.js';
 import { enqueueEvent } from '../webhooks/webhook.service.js';
+import { recordSignIn, type SignInClient } from '../end-users/sign-in-stats.js';
+import { claimDailyActivity } from '../end-users/daily-activity.js';
 
 /**
  * Write `session.created` for a session a sign-in just minted, through the
  * transaction that wrote its refresh row. Also claims the user's first
  * sign-in: a conditional update on `firstSignedInAt`, so of several first
  * sign-ins racing exactly one reports `firstSignIn: true`, and one that rolls
- * back leaves the claim for the next.
+ * back leaves the claim for the next. Counts the sign-in and the day's
+ * activity in the same transaction.
  *
  * @example
  *   const ids = await enqueueSessionCreated(tx, { endUser, sessionId, deviceId, via: 'password' });
  */
 export async function enqueueSessionCreated(
   tx: Prisma.TransactionClient,
-  args: { endUser: EndUser; sessionId: string; deviceId: string | null; via: string },
+  args: {
+    endUser: EndUser;
+    sessionId: string;
+    deviceId: string | null;
+    via: string;
+    client?: SignInClient | null;
+  },
 ): Promise<string[]> {
   const first = await tx.endUser.updateMany({
     where: { id: args.endUser.id, firstSignedInAt: null },
     data: { firstSignedInAt: new Date() },
   });
+  await recordSignIn(tx, args.endUser.id, args.via, args.client ?? null);
+  await claimDailyActivity(tx, args.endUser.id, { lastActiveOn: args.endUser.lastActiveOn });
   return enqueueEvent(tx, {
     applicationId: args.endUser.applicationId,
     type: 'session.created',
@@ -31,12 +42,14 @@ export async function enqueueSessionCreated(
       deviceId: args.deviceId,
       via: args.via,
       firstSignIn: first.count === 1,
+      platform: args.client?.platform ?? null,
+      country: args.client?.country ?? null,
     },
   });
 }
 
 /** Where a `user.updated` change came from, carried as `data.via`. */
-export type UserUpdateSource = 'self' | 'operator' | 'email_verification' | 'magic_link';
+export type UserUpdateSource = 'self' | 'server' | 'operator' | 'email_verification' | 'magic_link';
 
 /** The fields an end-user webhook describes, the same shape `user.created` has always carried. */
 export function userSnapshot(user: EndUser): Record<string, unknown> {

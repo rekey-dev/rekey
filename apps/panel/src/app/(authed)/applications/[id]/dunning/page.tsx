@@ -118,10 +118,10 @@ export default async function DunningPage({
           {cases.length > 0 &&
             'The cases below opened while it was on and finish on their existing schedule. '}
           <Link
-            href={`/applications/${id}/billing`}
+            href={`/applications/${id}/billing/settings`}
             className="underline hover:text-[var(--color-fg)]"
           >
-            Turn it on in billing settings
+            Turn it on in Billing, Setup, Settings
           </Link>
           .
         </div>
@@ -137,10 +137,10 @@ export default async function DunningPage({
           description="Turn on failed-payment recovery to have Rekey chase failed payments with reminder emails and auto-cancel unpaid subscriptions after 14 days."
           action={
             <Link
-              href={`/applications/${id}/billing`}
+              href={`/applications/${id}/billing/settings`}
               className="rounded-md bg-[var(--color-primary)] px-3 py-2 text-sm font-medium text-[var(--color-primary-fg)] hover:opacity-90"
             >
-              Go to billing settings
+              Go to Billing, Setup, Settings
             </Link>
           }
         />

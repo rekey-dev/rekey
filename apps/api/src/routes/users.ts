@@ -79,7 +79,7 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
         select: { id: true },
       });
       if (!row) throw notFound(`with email "${email}"`);
-      return { success: true, data: await authService.getById(req.application!.id, row.id) };
+      return { success: true, data: await authService.getByIdForServer(req.application!.id, row.id) };
     },
   );
 
@@ -105,7 +105,7 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
         id,
         'Confirm the id belongs to the Application this secret key represents.',
       );
-      return { success: true, data: await authService.getById(req.application!.id, id) };
+      return { success: true, data: await authService.getByIdForServer(req.application!.id, id) };
     },
   );
 }

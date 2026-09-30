@@ -23,6 +23,9 @@ import { CopyButton } from '@/components/CopyButton';
 import { PageHeader } from '@/components/PageHeader';
 import { Card } from '@/components/Card';
 import { Badge } from '@/components/Badge';
+import { Banner } from '@/components/Banner';
+import { getOperatorMcpUrl } from '@/lib/api';
+import { publicHttpUrl } from '@/lib/public-url';
 
 /**
  * Single labelled URL + copy button row for the OAuth endpoints card.
@@ -56,19 +59,22 @@ function DefRow({
   );
 }
 
-// Mirror of `app/applications/[id]/mcp/page.tsx`'s fallback, never display the
-// in-cluster REKEY_URL; the public API origin is the operator-facing one.
-function publicApiBase(): string {
-  // Sentinel rather than '': an empty base makes the snippet below a relative
-  // path that fails confusingly instead of obviously.
-  const base = process.env.NEXT_PUBLIC_API_URL;
-  if (!base) return '<set NEXT_PUBLIC_API_URL>';
-  return base.replace(/\/$/, '');
+/**
+ * Where the operator MCP server answers. The API's own metadata first, since
+ * it knows its public address; then NEXT_PUBLIC_API_URL. Never REKEY_URL,
+ * which can be an in-cluster host. Null when neither is known.
+ */
+async function operatorMcpUrl(): Promise<string | null> {
+  const fromApi = await getOperatorMcpUrl();
+  if (fromApi) return fromApi;
+  const base = publicHttpUrl(process.env.NEXT_PUBLIC_API_URL);
+  return base ? `${base}/api/v1/tenant/mcp` : null;
 }
 
-export default function OperatorMcpPage(): React.JSX.Element {
-  const apiBase = publicApiBase();
-  const mcpUrl = `${apiBase}/api/v1/tenant/mcp`;
+export default async function OperatorMcpPage(): Promise<React.JSX.Element> {
+  const known = await operatorMcpUrl();
+  // A visible placeholder rather than '', so a copied snippet fails obviously.
+  const mcpUrl = known ?? '<your Rekey API URL>/api/v1/tenant/mcp';
 
   // OAuth-flow mcp.json, auto-discovers via /.well-known. Preferred path now
   // that Phase 2 is live: the operator runs the browser flow + workspace pick,
@@ -180,6 +186,13 @@ export default function OperatorMcpPage(): React.JSX.Element {
         description="Connect Claude Desktop, Claude Code, or Cursor to a workspace via a hosted MCP server. The agent reads applications, end-users, payments, and webhook health (write and admin tools exist but need explicitly granted scopes) and never sees any customer's individual data."
       />
 
+      {known === null && (
+        <Banner tone="warning">
+          The panel could not read this deployment&apos;s public API address, so the snippets below show a
+          placeholder. Operator MCP may be turned off on the API; otherwise set NEXT_PUBLIC_API_URL on the panel.
+        </Banner>
+      )}
+
       <Card>
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold">Endpoint</h2>
@@ -193,6 +206,10 @@ export default function OperatorMcpPage(): React.JSX.Element {
           <strong>personal-access-token</strong> minted on{' '}
           <Link href="/account/api-tokens" className="underline">
             Account → API tokens
+          </Link>
+          . Each workspace decides whether agents may act in it, under{' '}
+          <Link href="/workspace#operator-mcp" className="underline">
+            Workspace settings
           </Link>
           .
         </p>
@@ -208,16 +225,16 @@ export default function OperatorMcpPage(): React.JSX.Element {
           <p className="text-xs text-[var(--color-muted-fg)]">
             MCP clients walk these automatically. Paste them only if your client doesn&apos;t do discovery.
           </p>
-          <DefRow label="Authorization-server metadata (RFC 8414)" value={discoveryAs} />
-          <DefRow label="Protected-resource metadata (RFC 9728)" value={discoveryPr} />
+          <DefRow label="Sign-in server details" value={discoveryAs} />
+          <DefRow label="Resource details" value={discoveryPr} />
         </div>
         <div className="space-y-3 p-5">
           <div className="text-sm font-medium text-[var(--color-fg)]">OAuth endpoints</div>
           <p className="text-xs text-[var(--color-muted-fg)]">Resolved by discovery. Copy for curl-level debugging.</p>
-          <DefRow label="Dynamic client registration (RFC 7591)" value={registerUrl} method="POST" />
+          <DefRow label="Client self-registration" value={registerUrl} method="POST" />
           <DefRow label="Authorization (login + workspace pick + consent)" value={authorizeUrl} method="GET / POST" />
           <DefRow label="Token (auth-code + refresh)" value={tokenUrl} method="POST" />
-          <DefRow label="Introspection (RFC 7662)" value={introspectUrl} method="POST" />
+          <DefRow label="Token check" value={introspectUrl} method="POST" />
         </div>
         <div className="space-y-2 p-5">
           <div className="text-sm font-medium text-[var(--color-fg)]">Required parameters</div>
@@ -334,8 +351,8 @@ export default function OperatorMcpPage(): React.JSX.Element {
         <h2 className="text-sm font-semibold">Security model</h2>
         <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[var(--color-muted-fg)]">
           <li>
-            Token verification is a SHA-256 hash lookup against the unique{' '}
-            <code className="font-mono">token_hash</code> index. No scan, no timing oracle.
+            Rekey stores only a one-way fingerprint of each token and looks tokens up by it, so a
+            copy of the database holds no working token.
           </li>
           <li>
             Membership is re-checked against the DB on every request. Removing the operator from

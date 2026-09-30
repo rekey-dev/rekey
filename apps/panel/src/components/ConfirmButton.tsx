@@ -19,6 +19,7 @@
 
 import * as React from 'react';
 import { useActionPending } from './ActionForm';
+import { dangerButtonClass } from './Button';
 
 export function ConfirmButton({
   confirm,
@@ -26,6 +27,7 @@ export function ConfirmButton({
   title = 'Are you sure?',
   confirmLabel,
   variant = 'danger',
+  triggerClassName,
 }: {
   /** Body text explaining what will happen. */
   confirm: string;
@@ -36,6 +38,8 @@ export function ConfirmButton({
   /** Confirm-button label. Defaults to `children`. */
   confirmLabel?: React.ReactNode;
   variant?: 'danger' | 'subtle';
+  /** Replaces the trigger's text-link style, for a trigger that should read as a button. */
+  triggerClassName?: string;
 }): React.JSX.Element {
   const dialogRef = React.useRef<HTMLDialogElement | null>(null);
   const baseId = React.useId();
@@ -43,9 +47,10 @@ export function ConfirmButton({
   const descId = `${baseId}-desc`;
 
   const triggerCls =
-    variant === 'danger'
-      ? 'text-xs text-red-600 dark:text-red-400 hover:underline'
-      : 'text-xs text-[var(--color-muted-fg)] hover:underline';
+    triggerClassName ??
+    (variant === 'danger'
+      ? dangerButtonClass('xs')
+      : 'text-xs text-[var(--color-muted-fg)] hover:underline');
 
   const confirmCls =
     variant === 'danger'

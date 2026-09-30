@@ -35,7 +35,7 @@ export function assertBillingEnabled(application: { billingConfig: unknown }): v
       statusCode: 403,
       code: 'BILLING_DISABLED',
       message: 'Billing is not enabled for this application.',
-      fix: 'Enable billing in Panel → Application → Billing, then retry.',
+      fix: 'Enable billing in Panel → Application → Billing → Setup → Status, then retry.',
     });
   }
 }

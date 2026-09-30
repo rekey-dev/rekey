@@ -229,6 +229,17 @@ describe('minting a key with an elevated scope', () => {
       expect(elevated.json().error.code).toBe('SCOPE_INSUFFICIENT');
     });
 
+    it('a keys:mint-only PAT cannot mint contacts:read; one with read access to lists can', async () => {
+      const w = await world();
+      const narrow = await mintPat(w, ['keys:mint']);
+      const refused = await patMint(w, narrow, ['contacts:read']);
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json().error.code).toBe('SCOPE_INSUFFICIENT');
+      expect(refused.json().error.message).toContain('audience:read');
+      const reader = await mintPat(w, ['keys:mint', 'read']);
+      expect((await patMint(w, reader, ['contacts:read'])).statusCode).toBe(201);
+    });
+
     it('a PAT that also carries applications:write (billing:write) can', async () => {
       const w = await world();
       const pat = await mintPat(w, ['keys:mint', 'applications:write']);

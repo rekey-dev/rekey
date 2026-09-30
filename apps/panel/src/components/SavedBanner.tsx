@@ -7,15 +7,17 @@
  * library, no client state store), but the banner itself is now a small
  * client island that:
  *
- *   1. strips the query param right after mount, so refresh / back /
- *      copy-paste of the URL doesn't re-show stale success;
+ *   1. strips the query param once the post-action refresh has landed (not
+ *      on mount, see `lib/flag-strip.ts`), so refresh / back / copy-paste of
+ *      the URL doesn't re-show stale success;
  *   2. offers an explicit dismiss (×) button;
  *   3. auto-fades after ~5s (visual fade then unmount). Hovering pauses
  *      nothing, 5s is long enough to read a one-liner.
  */
 
 import * as React from 'react';
-import { usePathname, useSearchParams } from 'next/navigation';
+import { stripAfterNextRender, withoutParams } from '@/lib/flag-strip';
+import { committedRender, subscribeCommittedRender } from '@/lib/render-stamp';
 
 export function SavedBanner({
   message,
@@ -25,8 +27,6 @@ export function SavedBanner({
   message: string;
   params?: string[];
 }): React.JSX.Element | null {
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
   const [visible, setVisible] = React.useState(true);
   const [fading, setFading] = React.useState(false);
 
@@ -37,22 +37,35 @@ export function SavedBanner({
   // start a second navigation on top of the one the server action's redirect
   // is already running, and the RedirectBoundary renders nothing while a
   // redirect is in flight, so racing it is what made pages go blank.
-  React.useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const next = new URLSearchParams(searchParams.toString());
-    let changed = false;
-    for (const p of params) {
-      if (next.has(p)) {
-        next.delete(p);
-        changed = true;
-      }
-    }
-    if (changed) {
-      const qs = next.toString();
-      window.history.replaceState(null, '', qs ? `${pathname}?${qs}` : pathname);
-    }
+  // Reads the live location, not the one at mount: other params may have
+  // changed while the refresh was in flight.
+  const strip = React.useCallback(() => {
+    const search = withoutParams(window.location.search, params);
+    if (search === null) return;
+    const { pathname, hash } = window.location;
+    window.history.replaceState(null, '', `${pathname}${search}${hash}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  React.useEffect(() => {
+    let deferred: ReturnType<typeof setTimeout> | undefined;
+    const cancel = stripAfterNextRender({
+      committedRender,
+      subscribe: subscribeCommittedRender,
+      // The listener runs inside React's commit; write history after it.
+      strip: () => {
+        deferred = setTimeout(strip, 0);
+      },
+    });
+    return () => {
+      cancel();
+      clearTimeout(deferred);
+    };
+  }, [strip]);
+
+  React.useEffect(() => {
+    if (!visible) strip();
+  }, [visible, strip]);
 
   // Auto-fade after ~5s.
   React.useEffect(() => {

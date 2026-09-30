@@ -85,3 +85,15 @@ describe('getMe', () => {
     });
   });
 });
+
+describe('a banned or erased account reads as signed out', () => {
+  it.each([
+    [403, 'END_USER_BANNED'],
+    [410, 'END_USER_ERASED'],
+  ])('%i %s is null from getCurrentUser and getMe, not a throw', async (status, code) => {
+    const refuse = () =>
+      vi.fn().mockResolvedValue(jsonResponse(status, { success: false, error: { code, message: 'x', fix: 'y' } }));
+    expect(await makeClient(refuse()).getCurrentUser('jwt.user')).toBeNull();
+    expect(await makeClient(refuse()).getMe('jwt.user')).toBeNull();
+  });
+});

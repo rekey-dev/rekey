@@ -479,8 +479,12 @@ describe('WEBHOOK_EVENTS registry', () => {
     expect(KNOWN_WEBHOOK_EVENTS).toEqual([
       'user.created',
       'user.updated',
+      'user.onboarding_completed',
+      'user.onboarding_skipped',
       'user.deleted',
       'user.erased',
+      'user.banned',
+      'user.unbanned',
       'session.created',
       'session.revoked',
       'mfa.enabled',
@@ -509,6 +513,9 @@ describe('WEBHOOK_EVENTS registry', () => {
       'credit.adjusted',
       'organization.invitation.created',
       'organization.invitation.accepted',
+      'contact.subscribed',
+      'contact.unsubscribed',
+      'contact.submission.created',
     ]);
     expect(WEBHOOK_EVENTS.map((e) => e.name)).toEqual(KNOWN_WEBHOOK_EVENTS);
     // Every entry carries a non-empty description for picker/autocomplete UIs.

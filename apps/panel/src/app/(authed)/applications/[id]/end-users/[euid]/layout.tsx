@@ -34,6 +34,8 @@ import { RecordHeader } from '@/components/RecordHeader';
 import { getEndUserDetail } from './shared';
 import { getApplication } from '@/lib/api';
 import { hasScope } from '@/lib/operator-scopes';
+import { formatDateTime } from '@/lib/date';
+import Link from '@/components/Link';
 
 export default async function EndUserLayout({
   children,
@@ -47,7 +49,10 @@ export default async function EndUserLayout({
   const [detail, application] = await Promise.all([getEndUserDetail(id, euid), getApplication(id)]);
   const scopes = application.access?.scopes ?? null;
   const canBilling = hasScope(scopes, 'billing:read');
+  const canWrite = hasScope(scopes, 'end-users:write');
   const isErased = detail.endUser.erasedAt !== null;
+  const bannedAt = detail.endUser.bannedAt ?? null;
+  const isBanned = bannedAt !== null && !isErased;
   const base = `/applications/${id}/end-users/${euid}`;
 
   return (
@@ -69,6 +74,11 @@ export default async function EndUserLayout({
                 erased
               </Badge>
             )}
+            {isBanned && (
+              <Badge tone="danger" dot>
+                banned
+              </Badge>
+            )}
           </>
         }
         meta={<span className="font-mono">{detail.endUser.id}</span>}
@@ -82,6 +92,7 @@ export default async function EndUserLayout({
           { href: `${base}/devices`, label: 'Devices' },
           ...(canBilling ? [{ href: `${base}/credits`, label: 'Credits' }] : []),
           { href: `${base}/security`, label: 'Security' },
+          { href: `${base}/access`, label: 'Access' },
           { href: `${base}/data`, label: 'Data & privacy' },
         ]}
       />
@@ -94,6 +105,18 @@ export default async function EndUserLayout({
         <Banner tone="warning">
           This end-user has been erased (GDPR). Their PII and credentials are gone and they can no
           longer sign in. Financial records are retained but anonymized.
+        </Banner>
+      )}
+
+      {/* Here for the erased banner's reason: every tab looks ordinary while
+          the person is locked out. */}
+      {isBanned && (
+        <Banner tone="warning">
+          This end-user is banned and cannot sign in. Banned {formatDateTime(bannedAt)}
+          {detail.endUser.banReason ? `: ${detail.endUser.banReason}` : '.'}{' '}
+          <Link href={`${base}/access`}>
+            {canWrite ? 'Lift the ban on the Access tab.' : 'See the Access tab for its history.'}
+          </Link>
         </Banner>
       )}
 

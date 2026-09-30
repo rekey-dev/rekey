@@ -11,6 +11,7 @@
 import { type NextRequest, NextResponse } from 'next/server';
 import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE, sessionCookieMaxAges } from '@/lib/api';
 import { cookieSecure } from '@/lib/cookie-secure';
+import { clearMfaChallenge, mfaVerifyPath, writeMfaChallenge } from '@/lib/mfa-challenge';
 import { loginErrorCode } from '../error-messages';
 
 type VerifyResult =
@@ -40,13 +41,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     throw err;
   }
 
-  // MFA-enrolled operator → hand off to the verify page with the challenge.
   if (result.mfaRequired) {
-    return seeOther(`/mfa-verify?challenge=${encodeURIComponent(result.mfaChallengeToken)}`);
+    const mfa = seeOther(mfaVerifyPath({}));
+    await writeMfaChallenge(mfa.cookies, result.mfaChallengeToken);
+    return mfa;
   }
 
   const secure = await cookieSecure();
   const res = seeOther('/applications');
+  clearMfaChallenge(res.cookies);
   const maxAges = sessionCookieMaxAges(result);
   res.cookies.set(ACCESS_COOKIE, result.accessToken, {
     httpOnly: true, sameSite: 'strict', secure, path: '/', maxAge: maxAges.access,

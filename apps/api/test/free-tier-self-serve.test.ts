@@ -23,6 +23,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { entitlementsService } from '../src/modules/billing/entitlements.service.js';
+import { usageService } from '../src/modules/usage/usage.service.js';
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -407,6 +408,304 @@ describe('self-serve free tier', () => {
         prevOrg = orgId;
       }
       expect(await prisma.freeTierClaim.count({ where: { applicationId: appId } })).toBe(0);
+    });
+
+    async function billPerOrganization(): Promise<void> {
+      const cur = await prisma.application.findUniqueOrThrow({ where: { id: appId }, select: { billingConfig: true } });
+      await prisma.application.update({
+        where: { id: appId },
+        data: {
+          billingConfig: { ...(cur.billingConfig as object), billingSubject: 'org' } as Prisma.InputJsonValue,
+        },
+      });
+    }
+
+    async function orgFeatures(userToken: string, organizationId: string): Promise<Record<string, unknown>> {
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/billing/entitlements?organizationId=${organizationId}`,
+        headers: userHeaders(userToken),
+      });
+      expect(res.statusCode).toBe(200);
+      return (res.json().data as { features: Record<string, unknown> }).features;
+    }
+
+    it('puts a second organization on a FEATURE-only free tier without answering with the first one\'s subscription', async () => {
+      await nominate(
+        await makePlan(
+          { slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' },
+          { kind: 'FEATURE', key: 'basic', valueType: 'BOOL', value: 'true' },
+        ),
+      );
+      await enableOrgs();
+      await billPerOrganization();
+      const userToken = await signUp();
+      const org1 = await createOrg(userToken);
+      const org2 = await createOrg(userToken);
+
+      const first = await subscribe(userToken, { organizationId: org1 });
+      expect(first.statusCode, first.body).toBe(201);
+      expect(first.json().data).toMatchObject({ beneficiaryOrgId: org1, activated: true });
+
+      const second = await subscribe(userToken, { organizationId: org2 });
+      expect(second.statusCode, second.body).toBe(200);
+      expect(second.json().data).toBeNull();
+      expect((await orgFeatures(userToken, org2)).basic).toBe(true);
+
+      const again = await subscribe(userToken, { organizationId: org1 });
+      expect(again.statusCode).toBe(200);
+      expect(again.json().data).toMatchObject({ beneficiaryOrgId: org1, activated: false });
+      expect(await prisma.subscription.count({ where: { applicationId: appId } })).toBe(1);
+    });
+
+    it('never hands one of eight concurrent FEATURE-only activations another organization\'s subscription', async () => {
+      await nominate(
+        await makePlan(
+          { slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' },
+          { kind: 'FEATURE', key: 'basic', valueType: 'BOOL', value: 'true' },
+        ),
+      );
+      await enableOrgs();
+      await billPerOrganization();
+      const userToken = await signUp();
+      const orgs: string[] = [];
+      for (let i = 0; i < 8; i++) orgs.push(await createOrg(userToken));
+
+      const results = await Promise.all(orgs.map((organizationId) => subscribe(userToken, { organizationId })));
+      const created = results.filter((r) => r.statusCode === 201);
+      expect(created).toHaveLength(1);
+      const others = results.filter((r) => r.statusCode !== 201);
+      expect(others.map((r) => r.statusCode)).toEqual(Array(7).fill(200));
+      for (const r of others) expect(r.json().data).toBeNull();
+      for (const organizationId of orgs) expect((await orgFeatures(userToken, organizationId)).basic).toBe(true);
+    });
+
+    describe('the organization free-tier claim', () => {
+      async function freeWithQuota(): Promise<void> {
+        await nominate(
+          await makePlan(
+            { slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' },
+            { kind: 'FEATURE', key: 'basic', valueType: 'BOOL', value: 'true' },
+          ),
+        );
+        await prisma.usageMeter.create({ data: { applicationId: appId, slug: 'calls', name: 'Calls', unit: 'calls' } });
+        const r = await app.inject({
+          method: 'PUT',
+          url: `/api/v1/tenant/applications/${appId}/plans/free/entitlements`,
+          headers: auth(),
+          payload: { kind: 'USAGE', key: 'calls', quantity: 100, creditsPerUnit: 2 },
+        });
+        expect(r.statusCode, r.body).toBe(200);
+      }
+
+      const quota = (organizationId: string) =>
+        entitlementsService.includedQuotaFor(appId, { organizationId }, 'calls');
+
+      it('gives an unclaimed organization nothing, as before claims existed', async () => {
+        await freeWithQuota();
+        await enableOrgs();
+        await billPerOrganization();
+        const userToken = await signUp();
+        const orgs = [await createOrg(userToken), await createOrg(userToken), await createOrg(userToken)];
+        for (const organizationId of orgs) {
+          expect((await orgFeatures(userToken, organizationId)).basic).toBeUndefined();
+          expect(await quota(organizationId)).toBeNull();
+        }
+      });
+
+      it('gives a claimed organization the features and included quantity, but never the per-unit rate', async () => {
+        await freeWithQuota();
+        await enableOrgs();
+        await billPerOrganization();
+        const userToken = await signUp();
+        const holder = await createOrg(userToken);
+        const claimed = await createOrg(userToken);
+        const unclaimed = await createOrg(userToken);
+        // The first organization holds the free plan's subscription row; the
+        // second is on it through its claim alone, which is the fallback path.
+        expect((await subscribe(userToken, { organizationId: holder })).statusCode).toBe(201);
+        expect((await subscribe(userToken, { organizationId: claimed })).statusCode).toBe(200);
+
+        expect((await orgFeatures(userToken, claimed)).basic).toBe(true);
+        expect(await quota(claimed)).toEqual({ included: 100, creditsPerUnit: null });
+        expect((await orgFeatures(userToken, unclaimed)).basic).toBeUndefined();
+        expect(await quota(unclaimed)).toBeNull();
+
+        // Past the allowance an organization is capped, not charged from the
+        // free tier's rate.
+        const over = await usageService
+          .record({ applicationId: appId, meterSlug: 'calls', quantity: 150, organizationId: claimed })
+          .catch((e: { code?: string }) => e);
+        expect((over as { code?: string }).code).toBe('USAGE_QUOTA_EXCEEDED');
+        expect(await prisma.creditLedger.count({ where: { applicationId: appId, delta: { lt: 0 } } })).toBe(0);
+      });
+
+      it('gives an organization on a per-user Application nothing, even after a subscribe naming it', async () => {
+        await freeWithQuota();
+        await enableOrgs();
+        const userToken = await signUp();
+        expect((await subscribe(userToken)).statusCode).toBe(201);
+        const orgId = await createOrg(userToken);
+        const res = await subscribe(userToken, { organizationId: orgId });
+        expect(res.statusCode).toBe(200);
+        expect(res.json().data).toBeNull();
+        expect((await orgFeatures(userToken, orgId)).basic).toBeUndefined();
+        expect(await quota(orgId)).toBeNull();
+        expect(await prisma.organizationFreeTierClaim.count()).toBe(0);
+
+        // A claim left over from when the Application billed per organization
+        // does not apply once it bills per user.
+        const plan = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'free' } });
+        const eu = await prisma.endUser.findFirstOrThrow({ where: { applicationId: appId } });
+        await prisma.organizationFreeTierClaim.create({
+          data: { applicationId: appId, organizationId: orgId, planId: plan.id, claimedByEndUserId: eu.id },
+        });
+        expect((await orgFeatures(userToken, orgId)).basic).toBeUndefined();
+        expect(await quota(orgId)).toBeNull();
+      });
+
+      it('is idempotent: eight racing claims and a second admin leave one claim and one subscription', async () => {
+        await freeWithQuota();
+        await enableOrgs();
+        await billPerOrganization();
+        const owner = await signUp();
+        const orgId = await createOrg(owner);
+        const results = await Promise.all(Array.from({ length: 8 }, () => subscribe(owner, { organizationId: orgId })));
+        expect(results.filter((r) => r.statusCode === 201)).toHaveLength(1);
+        expect(results.filter((r) => r.statusCode === 200)).toHaveLength(7);
+
+        const adminToken = await signUp();
+        const admin = await prisma.endUser.findFirstOrThrow({
+          where: { applicationId: appId },
+          orderBy: { createdAt: 'desc' },
+        });
+        await prisma.organizationMembership.create({ data: { organizationId: orgId, endUserId: admin.id, role: 'ADMIN' } });
+        const second = await subscribe(adminToken, { organizationId: orgId });
+        expect(second.statusCode, second.body).toBe(200);
+        expect(second.json().data).toMatchObject({ beneficiaryOrgId: orgId, activated: false });
+        expect((second.json().data as { id: string }).id).toBe((results.find((r) => r.statusCode === 201)!.json().data as { id: string }).id);
+
+        expect(await prisma.organizationFreeTierClaim.count({ where: { organizationId: orgId } })).toBe(1);
+        expect(await prisma.subscription.count({ where: { applicationId: appId, beneficiaryOrgId: orgId } })).toBe(1);
+      });
+
+      for (const kind of ['FEATURE', 'CREDIT'] as const) {
+        it(`eight different admins racing for one organization (${kind} plan): one row, one claim, one grant`, async () => {
+          if (kind === 'FEATURE') await freeWithQuota();
+          else {
+            await nominate(
+              await makePlan({ slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' }, { kind: 'CREDIT', quantity: 500 }),
+            );
+          }
+          await enableOrgs();
+          await billPerOrganization();
+          const owner = await signUp();
+          const orgId = await createOrg(owner);
+          const tokens: string[] = [owner];
+          for (let i = 1; i < 8; i++) {
+            tokens.push(await signUp());
+            const admin = await prisma.endUser.findFirstOrThrow({ where: { applicationId: appId }, orderBy: { createdAt: 'desc' } });
+            await prisma.organizationMembership.create({ data: { organizationId: orgId, endUserId: admin.id, role: 'ADMIN' } });
+          }
+
+          const results = await Promise.all(tokens.map((t) => subscribe(t, { organizationId: orgId })));
+          expect(results.filter((r) => r.statusCode === 201), results.map((r) => r.body).join('\n')).toHaveLength(1);
+          expect(results.filter((r) => r.statusCode === 200)).toHaveLength(7);
+          expect(await prisma.subscription.count({ where: { applicationId: appId, beneficiaryOrgId: orgId } })).toBe(1);
+          expect(await prisma.organizationFreeTierClaim.count({ where: { organizationId: orgId } })).toBe(1);
+          if (kind === 'CREDIT') {
+            expect(await prisma.creditLedger.count({ where: { applicationId: appId, delta: { gt: 0 } } })).toBe(1);
+          }
+        });
+      }
+
+      it('caps a claimed organization at zero on a priced free row with no included units, never unmetered', async () => {
+        await nominate(
+          await makePlan(
+            { slug: 'free', name: 'Free', amount: 0, kind: 'SUBSCRIPTION' },
+            { kind: 'FEATURE', key: 'basic', valueType: 'BOOL', value: 'true' },
+          ),
+        );
+        await prisma.usageMeter.create({ data: { applicationId: appId, slug: 'calls', name: 'Calls', unit: 'calls' } });
+        const r = await app.inject({
+          method: 'PUT',
+          url: `/api/v1/tenant/applications/${appId}/plans/free/entitlements`,
+          headers: auth(),
+          payload: { kind: 'USAGE', key: 'calls', quantity: 0, creditsPerUnit: 3 },
+        });
+        expect(r.statusCode, r.body).toBe(200);
+        await enableOrgs();
+        await billPerOrganization();
+        const userToken = await signUp();
+        const holder = await createOrg(userToken);
+        const claimed = await createOrg(userToken);
+        expect((await subscribe(userToken, { organizationId: holder })).statusCode).toBe(201);
+        expect((await subscribe(userToken, { organizationId: claimed })).statusCode).toBe(200);
+        expect(await quota(claimed)).toEqual({ included: 0, creditsPerUnit: null });
+      });
+
+      it('keeps the claim when the claimed plan is deleted, so it follows the new default', async () => {
+        await freeWithQuota();
+        await enableOrgs();
+        await billPerOrganization();
+        const userToken = await signUp();
+        const orgId = await createOrg(userToken);
+        expect((await subscribe(userToken, { organizationId: orgId })).statusCode).toBe(201);
+        await makePlan(
+          { slug: 'free2', name: 'Free 2', amount: 0, kind: 'SUBSCRIPTION' },
+          { kind: 'FEATURE', key: 'second', valueType: 'BOOL', value: 'true' },
+        );
+        await nominate('free2');
+        await prisma.subscription.deleteMany({ where: { applicationId: appId } });
+        await prisma.plan.delete({ where: { applicationId_slug: { applicationId: appId, slug: 'free' } } });
+
+        expect(await prisma.organizationFreeTierClaim.count({ where: { organizationId: orgId } })).toBe(1);
+        expect(await orgFeatures(userToken, orgId)).toMatchObject({ second: true });
+      });
+
+      it('follows the current default plan, and clearing it removes the fallback', async () => {
+        await freeWithQuota();
+        await enableOrgs();
+        await billPerOrganization();
+        const userToken = await signUp();
+        const orgId = await createOrg(userToken);
+        expect((await subscribe(userToken, { organizationId: orgId })).statusCode).toBe(201);
+        await makePlan(
+          { slug: 'free2', name: 'Free 2', amount: 0, kind: 'SUBSCRIPTION' },
+          { kind: 'FEATURE', key: 'second', valueType: 'BOOL', value: 'true' },
+        );
+        await prisma.subscription.updateMany({ where: { applicationId: appId }, data: { status: 'CANCELED' } });
+        await nominate('free2');
+        expect(await orgFeatures(userToken, orgId)).toMatchObject({ second: true });
+        await nominate(null);
+        expect((await orgFeatures(userToken, orgId)).second).toBeUndefined();
+      });
+
+      it('still ranks a paid subscription over the free one for a claimed organization', async () => {
+        await freeWithQuota();
+        await makePlan({ slug: 'pro', name: 'Pro', amount: 0, kind: 'SUBSCRIPTION' });
+        await prisma.plan.update({ where: { applicationId_slug: { applicationId: appId, slug: 'pro' } }, data: { amount: 2900 } });
+        await enableOrgs();
+        await billPerOrganization();
+        const userToken = await signUp();
+        const orgId = await createOrg(userToken);
+        expect((await subscribe(userToken, { organizationId: orgId })).statusCode).toBe(201);
+        const euId = (await prisma.endUser.findFirstOrThrow({ where: { applicationId: appId } })).id;
+        const grant = await app.inject({
+          method: 'POST',
+          url: `/api/v1/tenant/applications/${appId}/end-users/${euId}/subscriptions`,
+          headers: auth(),
+          payload: { planSlug: 'pro', organizationId: orgId },
+        });
+        expect(grant.statusCode, grant.body).toBe(201);
+        const current = await app.inject({
+          method: 'GET',
+          url: `/api/v1/billing/subscription?organizationId=${orgId}`,
+          headers: userHeaders(userToken),
+        });
+        const pro = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'pro' } });
+        expect((current.json().data as { planId: string }).planId).toBe(pro.id);
+      });
     });
 
     it('lets exactly one of eight concurrent claims for different organizations through', async () => {

@@ -10,7 +10,7 @@ import { Modal } from '@/components/Modal';
 import { Banner } from '@/components/Banner';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
-import { EmptyState } from '@/components/EmptyState';
+import { EmptyState, EmptyStateCreate } from '@/components/EmptyState';
 import { ActionForm } from '@/components/ActionForm';
 import { RevealActionForm, type RevealResult } from '@/components/RevealActionForm';
 import { WhileUrlHas } from '@/components/WhileUrlHas';
@@ -22,10 +22,9 @@ import { keyScopesFromForm } from '@/lib/api-key-scopes';
 
 /**
  * Scopes an API key can carry, mirroring `SCOPE_IMPLICATIONS` in the API's
- * `middleware/api-key-auth.ts`. The API validates `scopes` as a bare
- * `z.array(z.string())`, any string is accepted and persisted, and simply
- * never matches at enforcement time, so this list is the only thing stopping
- * a typo from becoming a permanently inert permission.
+ * `middleware/api-key-auth.ts`. The API refuses any scope outside
+ * `API_KEY_SCOPES` with `API_KEY_SCOPE_UNKNOWN`, so a value here that the API
+ * does not know fails the mint rather than storing an inert permission.
  *
  * `webhooks:read` is declared in the API's implication table but has no
  * `requireScope('webhooks:read')` call site anywhere, so it grants nothing
@@ -61,6 +60,11 @@ const KEY_SCOPES = [
     label: 'webhooks:read',
     help: 'Reserved. No endpoint enforces this scope yet.',
   },
+  {
+    value: 'contacts:write',
+    label: 'contacts:write',
+    help: 'Add people to lists with POST /lists/:key/subscribe and read a list form.',
+  },
 ] as const;
 
 /**
@@ -81,6 +85,11 @@ const ELEVATED_KEY_SCOPES = [
     label: 'email:send',
     help: "Send published custom email templates with POST /email/send, through this Application's own email provider and within its send limits. Not part of Full access.",
   },
+  {
+    value: 'contacts:read',
+    label: 'contacts:read',
+    help: 'Read every address on a list with GET /lists/:key/members, to sync it to your email tool. Minting it needs the Lists and contacts scope. Not part of Full access.',
+  },
 ] as const satisfies ReadonlyArray<{ value: ElevatedApiKeyScope; label: string; help: string }>;
 
 const ERR: Record<string, string> = {
@@ -89,6 +98,7 @@ const ERR: Record<string, string> = {
   API_KEY_LIMIT_REACHED:
     'This application has reached its API key limit. Revoke an unused key first.',
   API_KEY_EXPIRY_IN_PAST: 'The expiry date must be in the future.',
+  API_KEY_SCOPE_UNKNOWN: 'One of the selected scopes is not recognised. Reload the page and pick again.',
   PUBLIC_KEY_ROTATION_IN_GRACE:
     'A previous publishable key is still in its grace window. Confirm the forced rotation to drop it.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can manage API keys.',
@@ -427,7 +437,7 @@ export default async function ApiKeysPage({
 
               <SubmitButton pendingLabel="Minting key…">Mint key</SubmitButton>
               <p className="text-xs text-[var(--color-muted-fg)]">
-                You'll see the raw key once after creation, so copy it then. Only the SHA-256 hash is stored.
+                You'll see the key once, right after you mint it, so copy it then. Rekey keeps only a one-way fingerprint of it.
               </p>
             </RevealActionForm>
           </Modal>
@@ -435,7 +445,11 @@ export default async function ApiKeysPage({
       />
 
       {keys.length === 0 ? (
-        <EmptyState title="No active keys yet" description="Mint your first one with the button above." />
+        <EmptyState
+          title="No active keys yet"
+          description="Your backend uses a secret key to call Rekey."
+          action={<EmptyStateCreate modalKey="newKey">Mint API key</EmptyStateCreate>}
+        />
       ) : (
         <Table minWidth="min-w-[52rem]">
           <THead>

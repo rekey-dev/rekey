@@ -42,6 +42,7 @@
 
 import { NextResponse, type NextRequest } from 'next/server';
 import { ACCESS_COOKIE, REFRESH_COOKIE, publicPost } from '@/lib/api';
+import { clearMfaChallenge } from '@/lib/mfa-challenge';
 
 /** True when the browser says another site initiated this request. */
 function isCrossSite(req: NextRequest): boolean {
@@ -67,6 +68,7 @@ async function signOut(req: NextRequest): Promise<Response> {
   const res = new NextResponse(null, { status: 303, headers: { Location: target } });
   res.cookies.delete(ACCESS_COOKIE);
   res.cookies.delete(REFRESH_COOKIE);
+  clearMfaChallenge(res.cookies);
   return res;
 }
 

@@ -1,5 +1,6 @@
 import * as React from 'react';
 import Link from '@/components/Link';
+import { TableScroller } from '@/components/TableScroller';
 
 /**
  * Table primitives for operator list views. Replaces the hand-rolled
@@ -47,11 +48,11 @@ export function Table({
   minWidth?: string;
 }): React.JSX.Element {
   return (
-    <div className="overflow-x-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
+    <TableScroller className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
       <table className={['w-full border-collapse text-sm', minWidth ?? '', className].filter(Boolean).join(' ')}>
         {children}
       </table>
-    </div>
+    </TableScroller>
   );
 }
 

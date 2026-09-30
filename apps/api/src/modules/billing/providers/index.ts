@@ -43,7 +43,7 @@ export function credentialsNotConfigured(
     statusCode: 400,
     code: 'BILLING_CREDENTIALS_NOT_CONFIGURED',
     message: `Billing provider "${provider}" has no credentials configured for this Application.`,
-    fix: `Store the ${provider} API keys in Panel → Application → Billing (/applications/${application.id}/billing). A non-production Application takes the provider's sandbox/test keys; a PRODUCTION one takes live keys.`,
+    fix: `Store the ${provider} API keys in Panel → Application → Billing → Setup → Providers (/applications/${application.id}/billing/providers). A non-production Application takes the provider's sandbox/test keys; a PRODUCTION one takes live keys.`,
   });
 }
 
@@ -59,10 +59,11 @@ function inboundOnly(
   return new RekeyError({
     statusCode: 400,
     code: 'BILLING_PROVIDER_INBOUND_ONLY',
+    details: { provider },
     message: `Provider "${provider}" only receives events from an external billing system; it cannot host a checkout.`,
     fix: hostedProviderEnabled
       ? 'Omit `provider` to let the router pick a hosted provider, or sell through the external system.'
-      : `Sell through the external billing system, which posts subscription events to Rekey, or connect a hosted payment provider in Panel → Application → Billing (/applications/${application.id}/billing).`,
+      : `Sell through the external billing system, which posts subscription events to Rekey, or connect a hosted payment provider in Panel → Application → Billing → Setup → Providers (/applications/${application.id}/billing/providers).`,
   });
 }
 

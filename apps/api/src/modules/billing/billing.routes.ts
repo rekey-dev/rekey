@@ -128,7 +128,7 @@ function reportEmbeddedFallback(
     code: 'CHECKOUT_EMBEDDED_FELL_BACK',
     check: failed.id,
     message: "The Rekey checkout page could not take this checkout, so `url` is the provider's page.",
-    fix: `The Application's operator can see why ("${failed.id}") in Panel → Application → Billing → Checkout page.`,
+    fix: `The Application's operator can see why ("${failed.id}") in Panel → Application → Billing → Setup → Checkout page.`,
   };
 }
 
@@ -155,6 +155,32 @@ function reportUnregisteredReturnUrls(req: FastifyRequest, warnings: CheckoutRet
     metadata: { origins, fields },
   });
 }
+
+/**
+ * BILLING_PROVIDER_INBOUND_ONLY worded for trial eligibility: the question is
+ * whether a trial can start here, not whether a checkout can be hosted.
+ */
+function inboundOnlyForTrials(applicationId: string, cause: RekeyError): RekeyError {
+  const provider = String(cause.details?.provider ?? 'external');
+  return new RekeyError({
+    statusCode: cause.statusCode,
+    code: cause.code,
+    message: `Provider "${provider}" only receives events from an external billing system, so no trial can be started through Rekey for this Application and there is no trial eligibility to report.`,
+    fix: `Trials run by the external billing system are recorded when it posts subscription.activated with \`trialEndsAt\`, and judged by the same one-per-buyer rule. To offer trials through Rekey, connect a hosted payment provider in Panel → Application → Billing → Setup → Providers (/applications/${applicationId}/billing/providers).`,
+  });
+}
+
+/** `POST /billing/subscribe` adds whether THIS call activated the free tier. */
+const FREE_TIER_ACTIVATED = {
+  type: 'object',
+  properties: {
+    activated: {
+      type: 'boolean',
+      description: 'True when this call activated the free tier (201), false when it was already on it (200).',
+    },
+  },
+  required: ['activated'],
+};
 
 const EntitlementsQuery = z.object({ organizationId: z.string().min(1).optional() });
 
@@ -663,13 +689,17 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
                 amount: { type: 'integer', description: 'Smallest currency unit.' },
                 currency: { type: 'string' },
                 status: { type: 'string', enum: ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED', 'PARTIALLY_REFUNDED'] },
+                refundedAmount: {
+                  type: 'integer',
+                  description: 'How much of `amount` has been refunded, smallest currency unit. 0 when nothing has.',
+                },
                 description: { type: 'string', nullable: true },
                 createdAt: { type: 'string', format: 'date-time' },
                 subscriptionId: { type: 'string', nullable: true },
                 planSlug: { type: 'string', nullable: true },
                 receiptUrl: { type: 'string', format: 'uri', nullable: true },
               },
-              required: ['id', 'amount', 'currency', 'status', 'createdAt'],
+              required: ['id', 'amount', 'currency', 'status', 'refundedAmount', 'createdAt'],
             },
             "A page of the calling end-user's own payments, newest first.",
           ),
@@ -1125,6 +1155,10 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         ...(countryFromRequest(req.headers) !== undefined && {
           country: countryFromRequest(req.headers)!,
         }),
+      }).catch((e: unknown) => {
+        throw e instanceof RekeyError && e.code === 'BILLING_PROVIDER_INBOUND_ONLY'
+          ? inboundOnlyForTrials(req.application!.id, e)
+          : e;
       });
       const items = await resolveTrialEligibility({
         applicationId: req.application!.id,
@@ -1193,10 +1227,16 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           'beneficiary that holds the claim, after a cancellation, is allowed and issues nothing ' +
           'new. Any other beneficiary is refused with `409 BILLING_FREE_TIER_ALREADY_CLAIMED`, or ' +
           'with `409 BILLING_SUBSCRIPTION_SUBJECT_CONFLICT` when no claim was recorded but the ' +
-          "caller's live subscription to the plan is billed to another beneficiary. A free plan " +
-          'with only FEATURE or USAGE entitlements has no such limit: while the caller holds it ' +
-          'live for any beneficiary, activating it for another answers `200` and ' +
-          '`activated: false` with the existing subscription, unchanged.',
+          "caller's live subscription to the plan is billed to another beneficiary.\n\n" +
+          '**FEATURE and USAGE only: every organization that asks.** On an Application that bills ' +
+          'per organization, each call naming an organization records that organization\'s claim ' +
+          'on the free tier (idempotent), and the org view of entitlements then applies the free ' +
+          "plan's FEATURE flags and included USAGE quantity to it at read time. Its per-unit USAGE " +
+          'price is not applied to organizations. A subscription is stored once per end-user and ' +
+          'plan, so while the caller holds it live for one beneficiary, activating it for another ' +
+          'answers `200` with `data: null`: nothing is stored for it beyond the claim. Another ' +
+          "beneficiary's subscription is never returned. Organizations that never claimed the free " +
+          'tier, and organizations on an Application that bills per user, get no free-tier fallback.',
         security: [{ apiKey: [], userToken: [] }, { publishableKey: [], userToken: [] }],
         body: {
           type: 'object',
@@ -1211,8 +1251,12 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
           },
         },
         response: {
-          200: ok(ref('SelfSubscription'), 'Already on the free tier; nothing changed.'),
-          201: ok(ref('SelfSubscription'), 'Now on the free tier.'),
+          200: ok(
+            { nullable: true, allOf: [ref('SelfSubscription'), FREE_TIER_ACTIVATED] },
+            'Already on the free tier; nothing changed. `null` when the organization is on a ' +
+              'FEATURE or USAGE free tier through its claim, with no subscription row of its own.',
+          ),
+          201: ok({ allOf: [ref('SelfSubscription'), FREE_TIER_ACTIVATED] }, 'Now on the free tier.'),
           ...errs({
             400:
               'BILLING_ORGANIZATION_REQUIRED — the Application bills per organization and none ' +
@@ -1255,7 +1299,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
       });
       return reply.status(result.activated ? 201 : 200).send({
         success: true,
-        data: toSelfSubscription(result.subscription),
+        data: result.subscription && { ...toSelfSubscription(result.subscription), activated: result.activated },
       });
     },
   );

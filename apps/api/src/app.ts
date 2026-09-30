@@ -54,6 +54,8 @@ import {
 import { rejectUnsupportedMediaType } from "./middleware/media-type.js";
 import {
   CLIENT_IP_VOUCHED,
+  INTERNAL_CALLER,
+  VISITOR_COUNTRY,
   DECLARED_CLIENT_IP,
   createClientIpResolver,
   proxySecretWarning,
@@ -135,6 +137,7 @@ import {
   tenantDevicesRoutes,
 } from "./modules/devices/index.js";
 import { portalConfigRoutes } from "./modules/portal/index.js";
+import { tenantEndUserBanRoutes } from "./modules/end-user-bans/index.js";
 import {
   checkoutProbeRoutes,
   checkoutSessionRoutes,
@@ -148,6 +151,13 @@ import {
   emailUnsubscribeRoutes,
   tenantEmailRoutes,
 } from "./modules/email/index.js";
+import {
+  publicListsRoutes,
+  serverListsRoutes,
+  tenantContactsRoutes,
+  tenantListMembersRoutes,
+  tenantListsRoutes,
+} from "./modules/contacts/index.js";
 import {
   tenantWebhookRoutes,
   startWebhookWorker,
@@ -172,6 +182,12 @@ import {
 } from "./middleware/admin-auth.js";
 import { assertDefaultTenantLimitsValid } from "./lib/tenant-limits.js";
 import { shutdownBcryptPool } from "./lib/bcrypt-pool.js";
+import { profileSchemaPublicRoutes, profileSelfRoutes, profileServerRoutes } from "./modules/end-users/profile.routes.js";
+import { profileTenantRoutes } from "./modules/end-users/profile-tenant.routes.js";
+import { insightsTenantRoutes } from "./modules/end-users/insights.routes.js";
+import { applicationSettingsRoutes } from "./modules/analytics/settings.routes.js";
+import { analyticsTenantRoutes } from "./modules/analytics/analytics.routes.js";
+import { ROLLUP_TICK_MS, runAnalyticsRollup } from "./modules/analytics/rollup/job.js";
 
 export interface BuildAppOptions {
   /** Override the default logger config (e.g. silence in tests). */
@@ -184,6 +200,8 @@ export interface BuildAppOptions {
   rateLimitOverrides?: Partial<GlobalRateLimitBudgets>;
   /** Override API_PROXY_SECRET / API_PROXY_HOPS for this instance (tests; env is parsed once). */
   apiProxy?: { secret?: string; hops?: number; callerSecret?: string };
+  /** Overrides TRUST_CF_IPCOUNTRY (tests). */
+  trustCfIpCountry?: boolean;
   /** Replace the client-address resolver (tests: forcing a failure). */
   clientIpResolver?: (raw: import("node:http").IncomingMessage) => boolean;
 }
@@ -269,6 +287,7 @@ export async function buildApp(
     proxyHops: options.apiProxy?.hops ?? env.API_PROXY_HOPS,
     internalCallerSecret:
       options.apiProxy?.callerSecret ?? env.INTERNAL_CALLER_SECRET,
+    trustCfIpCountry: options.trustCfIpCountry ?? env.TRUST_CF_IPCOUNTRY,
     // At most one warning per 10 minutes: it can fire on every request.
     onUnprovenProxy: (peer) => {
       const now = Date.now();
@@ -365,11 +384,16 @@ export async function buildApp(
     );
   app.decorateRequest("clientIpVouched", false);
   app.decorateRequest("declaredClientIp", null);
+  app.decorateRequest("visitorCountry", null);
+  app.decorateRequest("internalCaller", false);
   app.addHook("onRequest", async (req) => {
     const raw = req.raw as unknown as Record<symbol, unknown>;
     req.clientIpVouched = raw[CLIENT_IP_VOUCHED] === true;
     const declared = raw[DECLARED_CLIENT_IP];
     req.declaredClientIp = typeof declared === "string" ? declared : null;
+    const country = raw[VISITOR_COUNTRY];
+    req.visitorCountry = typeof country === "string" ? country : null;
+    req.internalCaller = raw[INTERNAL_CALLER] === true;
   });
   const proxyWarning = proxySecretWarning(clientIpPolicy);
   if (proxyWarning && env.NODE_ENV !== "test") app.log.warn(proxyWarning);
@@ -903,6 +927,22 @@ export async function buildApp(
     }, PRUNE_INTERVAL_MS);
     pruneTimer.unref();
 
+    // Analytics rollup: a five-minute tick that does its work once per UTC
+    // hour, on one replica (lease plus an hour marker, modules/analytics/rollup/job.ts).
+    let rollupRunning = false;
+    const rollupTimer = env.ANALYTICS_ROLLUP_ENABLED
+      ? setInterval(() => {
+          if (rollupRunning) return;
+          rollupRunning = true;
+          void runAnalyticsRollup(getRedis(), { log: app.log })
+            .catch((err) => app.log.warn({ err }, "analytics rollup failed"))
+            .finally(() => {
+              rollupRunning = false;
+            });
+        }, ROLLUP_TICK_MS)
+      : null;
+    rollupTimer?.unref();
+
     // Outbound-webhook retry poller. Primary scheduling is BullMQ when Redis is
     // configured (delayed jobs survive a crash), or in-process setTimeout
     // otherwise (webhook.service.ts). Either way this poller re-attempts PENDING
@@ -951,6 +991,7 @@ export async function buildApp(
     app.addHook("onClose", async () => {
       clearInterval(flushTimer);
       clearInterval(pruneTimer);
+      if (rollupTimer) clearInterval(rollupTimer);
       clearInterval(webhookRetryTimer);
       clearInterval(dunningTimer);
       clearInterval(trialTimer);
@@ -986,6 +1027,9 @@ export async function buildApp(
   // Secret-key end-user lookup by id / exact email (routes/users.ts). Mounted
   // AFTER /users/me so the literal segment wins over the :id parameter.
   await app.register(usersRoutes, { prefix: "/api/v1/users" });
+  await app.register(profileServerRoutes, { prefix: "/api/v1/users" });
+  await app.register(profileSelfRoutes, { prefix: "/api/v1/users/me" });
+  await app.register(profileSchemaPublicRoutes, { prefix: "/api/v1" });
   // Bulk import from another auth system (routes/users-import.ts).
   await app.register(usersImportRoutes, { prefix: "/api/v1/users" });
   // End-user organizations, gated by `authConfig.organizationsEnabled`
@@ -1010,6 +1054,8 @@ export async function buildApp(
   // the send route's requireApiKey hook must not reach unsubscribe.
   await app.register(emailSendRoutes, { prefix: "/api/v1/email" });
   await app.register(emailUnsubscribeRoutes, { prefix: "/api/v1/email" });
+  await app.register(publicListsRoutes, { prefix: "/api/v1/lists" });
+  await app.register(serverListsRoutes, { prefix: "/api/v1/lists" });
   // The signed-in end-user's own usage and credit reads: same prefixes, a
   // separate plugin each, because the two above are secret-key only as a whole.
   await app.register(usageSelfRoutes, { prefix: "/api/v1/usage" });
@@ -1102,10 +1148,34 @@ export async function buildApp(
   await app.register(customEmailTemplateRoutes, {
     prefix: "/api/v1/tenant/applications",
   });
+  await app.register(tenantListsRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(tenantContactsRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(tenantListMembersRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
   await app.register(tenantWebhookRoutes, {
     prefix: "/api/v1/tenant/applications",
   });
   await app.register(tenantDevicesRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(tenantEndUserBanRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(profileTenantRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(insightsTenantRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(applicationSettingsRoutes, {
+    prefix: "/api/v1/tenant/applications",
+  });
+  await app.register(analyticsTenantRoutes, {
     prefix: "/api/v1/tenant/applications",
   });
   await app.register(tenantLicenseActivationRoutes, {

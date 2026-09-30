@@ -186,7 +186,8 @@ export async function tenantOAuthPublicRoutes(app: FastifyInstance): Promise<voi
               'login would create a new operator); or OPERATOR_INVITE_REQUIRED — invite mode ' +
               'requires `inviteKey`; or OPERATOR_INVITE_INVALID — the invite key does not ' +
               'match a pending invite; or OPERATOR_INVITE_EXPIRED — the invite has expired; ' +
-              'or NO_TENANT_MEMBERSHIPS — the operator has no workspace memberships.',
+              'or OPERATOR_INVITE_EMAIL_MISMATCH: the key is bound to a workspace for a ' +
+              'different email; or NO_TENANT_MEMBERSHIPS: the operator has no workspace memberships.',
             409: 'OPERATOR_INVITE_USED — the invite was already consumed (race lost).',
           }),
         },

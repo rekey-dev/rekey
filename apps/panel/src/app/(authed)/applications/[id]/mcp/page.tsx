@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
+import Link from '@/components/Link';
 import { errorQuery, readErrorFlash, api, PanelApiError, getApplication } from '@/lib/api';
 import { CopyButton } from '@/components/CopyButton';
 import { ApiErrorText } from '@/components/api-error';
@@ -100,7 +101,7 @@ export default async function McpPage({
     <div className="space-y-6">
       <PageHeader
         level={2}
-        title="MCP server"
+        title="MCP"
         description="Expose a hosted Model Context Protocol server for this application. End-users authenticate with their account (OAuth 2.1 + PKCE) and connect MCP clients like Claude Code, Claude Desktop, and Cursor to read their own data."
       />
 
@@ -151,11 +152,14 @@ export default async function McpPage({
           <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[var(--color-muted-fg)]">
             <li>Mounts the MCP JSON-RPC endpoint at <code>{mcpUrl}</code>.</li>
             <li>Mounts the OAuth 2.1 + PKCE authorization server alongside it.</li>
-            <li>Publishes RFC 8414 + RFC 9728 discovery metadata so clients auto-discover.</li>
+            <li>Publishes discovery documents, so clients find the sign-in endpoints on their own.</li>
             <li>
-              Accepts RFC 7591 dynamic client registration (public clients, PKCE, no secret). MCP
-              clients register themselves, so this stays open by default; close it with{' '}
-              <code>authConfig.dynamicClientRegistration = false</code> once your clients exist. Worth
+              Lets clients register themselves, with no secret to hand out. MCP
+              clients do this on first connect, so this stays open by default; close it with{' '}
+              <Link href={`/applications/${id}/oauth-clients`} className="underline">
+                Close registration under OAuth clients
+              </Link>{' '}
+              once your clients exist. Worth
               doing if this Application is also an OpenID Provider.
             </li>
           </ul>
@@ -196,8 +200,8 @@ export default async function McpPage({
                 Standard well-known URLs. MCP clients walk these automatically; you only need to paste
                 them if your client doesn&apos;t do discovery.
               </p>
-              <DefRow label="Authorization-server metadata (RFC 8414)" value={discoveryAs} />
-              <DefRow label="Protected-resource metadata (RFC 9728)" value={discoveryPr} />
+              <DefRow label="Sign-in server details" value={discoveryAs} />
+              <DefRow label="Resource details" value={discoveryPr} />
             </div>
 
             <div className="space-y-3 p-5">
@@ -205,10 +209,10 @@ export default async function McpPage({
               <p className="text-xs text-[var(--color-muted-fg)]">
                 Resolved by discovery. Listed here for hand-rolled clients or curl-level debugging.
               </p>
-              <DefRow label={<>Dynamic client registration (<a className="underline" href="https://datatracker.ietf.org/doc/html/rfc7591" target="_blank" rel="noopener noreferrer">RFC 7591</a>)</>} value={registerUrl} method="POST" />
+              <DefRow label="Client self-registration" value={registerUrl} method="POST" />
               <DefRow label="Authorization (login + consent)" value={authorizeUrl} method="GET / POST" />
               <DefRow label="Token (auth-code + refresh)" value={tokenUrl} method="POST" />
-              <DefRow label={<>Introspection (<a className="underline" href="https://datatracker.ietf.org/doc/html/rfc7662" target="_blank" rel="noopener noreferrer">RFC 7662</a>)</>} value={introspectUrl} method="POST" />
+              <DefRow label="Token check" value={introspectUrl} method="POST" />
             </div>
 
             <div className="space-y-2 p-5">
@@ -404,7 +408,10 @@ export default async function McpPage({
                 </a>,{' '}
                 <a className="text-[var(--color-primary)] underline" href="https://datatracker.ietf.org/doc/html/rfc7591" target="_blank" rel="noopener noreferrer">
                   RFC 7591
-                </a>{': '}what Rekey implements.
+                </a>,{' '}
+                <a className="text-[var(--color-primary)] underline" href="https://datatracker.ietf.org/doc/html/rfc7662" target="_blank" rel="noopener noreferrer">
+                  RFC 7662
+                </a>{': '}the standards behind discovery, self-registration and the token check.
               </li>
             </ul>
           </Card>

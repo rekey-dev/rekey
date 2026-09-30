@@ -124,3 +124,46 @@ export async function adminRequest<T>(args: RequestArgs): Promise<T> {
   }
   return (json as { success: true; data: T }).data;
 }
+
+/**
+ * A request to an operator route (`/api/v1/tenant/*`) with an operator
+ * personal access token.
+ *
+ * @example
+ * const data = await operatorRequest<T>({ ctx, method: 'GET', path: '/api/v1/tenant/applications' });
+ */
+export async function operatorRequest<T>(args: RequestArgs): Promise<T> {
+  if (!args.ctx.apiUrl) {
+    fail(args.ctx, {
+      code: 'CLI_API_URL_MISSING',
+      message: 'No Rekey API URL configured.',
+      fix: 'Set REKEY_URL in your environment, or pass --api-url=https://your-rekey.example.',
+    });
+  }
+  if (!args.ctx.operatorToken) {
+    fail(args.ctx, {
+      code: 'CLI_OPERATOR_TOKEN_MISSING',
+      message: 'This command reads as a workspace member and needs an operator personal access token.',
+      fix: 'Create one in the panel under Account, API tokens (read scope is enough), then set REKEY_OPERATOR_TOKEN or pass --operator-token.',
+    });
+  }
+  const url = `${args.ctx.apiUrl.replace(/\/$/, '')}${args.path}`;
+  const res = await fetch(url, {
+    method: args.method,
+    headers: {
+      Authorization: `Bearer ${args.ctx.operatorToken}`,
+      ...(args.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(args.body !== undefined ? { body: JSON.stringify(args.body) } : {}),
+  });
+  const json = (await res.json().catch(() => ({}))) as { success: true; data: T } | ErrorEnvelope;
+  if (!res.ok || ('success' in json && json.success === false)) {
+    if ('error' in json) fail(args.ctx, json.error);
+    fail(args.ctx, {
+      code: 'CLI_HTTP_ERROR',
+      message: `Request failed with HTTP ${res.status}.`,
+      fix: 'Check the Rekey API logs for details.',
+    });
+  }
+  return (json as { success: true; data: T }).data;
+}

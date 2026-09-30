@@ -17,6 +17,9 @@ const EMAIL_NOT_VERIFIED =
 const DEVICE_REFUSED =
   'This account cannot be signed in from this device. Contact the business that runs this account for help.';
 
+const ACCOUNT_SUSPENDED =
+  'This account cannot sign in. Contact the business that runs this account for help.';
+
 /** Longest wait a `?retry=` value may claim. Anything above is ignored as forged or garbled. */
 const MAX_RETRY_SECONDS = 24 * 60 * 60;
 
@@ -68,8 +71,33 @@ function throttleCopy(code: string, retryAfterSeconds: number | undefined): stri
 function afterCredentialCopy(code: string): string | undefined {
   if (code === 'EMAIL_NOT_VERIFIED') return EMAIL_NOT_VERIFIED;
   if (code === 'DEVICE_BLOCKED' || code === 'DEVICE_LIMIT_REACHED') return DEVICE_REFUSED;
+  if (code === 'END_USER_BANNED') return ACCOUNT_SUSPENDED;
   return undefined;
 }
+
+const MFA_RESTART_COPY: Readonly<Record<string, string>> = {
+  MFA_CHALLENGE_INVALID: 'This sign-in attempt expired. Start over and sign in again.',
+  MFA_CHALLENGE_WRONG_APPLICATION: 'This sign-in attempt expired. Start over and sign in again.',
+  MFA_CHALLENGE_USED: 'This sign-in attempt was already completed. Start over and sign in again.',
+};
+
+/**
+ * Codes after which the MFA challenge is dead, so the customer goes back to
+ * the password step instead of retrying the code.
+ *
+ * @example
+ * isMfaRestartCode('MFA_CHALLENGE_USED'); // true
+ */
+export function isMfaRestartCode(code: string): boolean {
+  return Object.prototype.hasOwnProperty.call(MFA_RESTART_COPY, code);
+}
+
+function mfaRestartCopy(code: string): string | undefined {
+  return isMfaRestartCode(code) ? MFA_RESTART_COPY[code] : undefined;
+}
+
+/** Shown on the sign-in page when the code step was reached with no live challenge. */
+export const MFA_EXPIRED_COPY = 'Your sign-in attempt timed out. Sign in again to get a new code prompt.';
 
 /**
  * @example
@@ -78,6 +106,8 @@ function afterCredentialCopy(code: string): string | undefined {
  */
 export function signInErrorCopy(code: string, retryAfterSeconds?: number): string {
   if (code === 'INVALID_CREDENTIALS') return CREDENTIALS;
+  const restart = mfaRestartCopy(code);
+  if (restart) return restart;
   if (isThrottle(code)) return throttleCopy(code, retryAfterSeconds);
   if (isServiceFailure(code)) return UNAVAILABLE;
   return afterCredentialCopy(code) ?? UNKNOWN;
@@ -92,12 +122,11 @@ export function mfaErrorCopy(code: string, retryAfterSeconds?: number): string {
   if (code === 'MFA_CODE_REUSED') {
     return 'That code was already used. Wait for the next code from your app, then enter it.';
   }
-  if (code === 'MFA_CHALLENGE_INVALID' || code === 'MFA_CHALLENGE_WRONG_APPLICATION') {
-    return 'This sign-in attempt expired. Start over and sign in again.';
+  if (code === 'MFA_BACKUP_CODE_USED') {
+    return 'That backup code was already used. Each backup code works once, so enter a different backup code.';
   }
-  if (code === 'MFA_CHALLENGE_USED') {
-    return 'This sign-in attempt was already completed. Start over and sign in again.';
-  }
+  const restart = mfaRestartCopy(code);
+  if (restart) return restart;
   if (isThrottle(code)) return throttleCopy(code, retryAfterSeconds);
   if (isServiceFailure(code)) return UNAVAILABLE;
   return afterCredentialCopy(code) ?? UNKNOWN;

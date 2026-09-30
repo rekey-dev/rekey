@@ -65,6 +65,8 @@ describe('route access declarations', () => {
     const mustBeFloor = [
       /\/impersonate(\/end)?$/,
       /\/end-users\/:euid\/export$/,
+      /\/contacts\/:contactId$/,
+      /\/lists\/:listId\/export\.csv$/,
       /\/promote$/,
       /\/disable$/,
       /^\/api\/v1\/tenant\/workspace\/members\/:id(\/grants(\/:applicationId)?)?$/,
@@ -82,7 +84,7 @@ describe('route access declarations', () => {
   });
 
   it('the registry is internally consistent', () => {
-    expect(ALL_SCOPES.length).toBe(14);
+    expect(ALL_SCOPES.length).toBe(16);
     for (const s of ALL_SCOPES) expect(isScope(s)).toBe(true);
     expect(isScope('team:write')).toBe(false);
     expect(isScope('billing:both')).toBe(false);
@@ -92,10 +94,12 @@ describe('route access declarations', () => {
     expect(expandScopes(['nope:write', 'billing:read']).size).toBe(1);
     // presets
     expect(presetScopes('APP_VIEWER').size).toBe(7);
-    expect(presetScopes('APP_ADMIN').size).toBe(14);
+    expect(presetScopes('APP_ADMIN').size).toBe(16);
+    expect(presetScopes('APP_VIEWER').has('audience:read')).toBe(false);
     const billing = presetScopes('APP_BILLING');
     expect(billing.has('billing:write')).toBe(true);
     expect(billing.has('auth-config:read')).toBe(false);
     expect(billing.has('end-users:write')).toBe(false);
+    expect(billing.has('audience:read')).toBe(false);
   });
 });

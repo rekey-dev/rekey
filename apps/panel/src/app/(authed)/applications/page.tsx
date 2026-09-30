@@ -1,230 +1,118 @@
 import * as React from 'react';
-import Link from '@/components/Link';
-import { redirect } from 'next/navigation';
-import { api, errorQuery, readErrorFlash, PanelApiError, type ApplicationRow, type MemberRow, type InvitationRow, type PlanRow, type ApiKeyRow, type BillingCredentialRow, getMe } from '@/lib/api';
-import { Modal } from '@/components/Modal';
-import { ApiErrorText } from '@/components/api-error';
-import { SlugAvailabilityField } from '@/components/SlugAvailabilityField';
-import { ActionForm } from '@/components/ActionForm';
-import { SubmitButton } from '@/components/SubmitButton';
+import { api, getMe, readErrorFlash, unlessBusy, type ApplicationRow } from '@/lib/api';
 import { Pager, readPageSize } from '@/components/Pager';
-import { emptyPage, type Page } from '@/lib/paginate';
+import type { Page } from '@/lib/paginate';
 import { PageHeader } from '@/components/PageHeader';
 import { EmptyState } from '@/components/EmptyState';
-import { OnboardingChecklist, type OnboardingStep } from '@/components/OnboardingChecklist';
+import { OnboardingChecklist } from '@/components/OnboardingChecklist';
 import { ReadyToGoLive } from '@/components/ReadyToGoLive';
-import { Banner } from '@/components/Banner';
-import { EnvironmentBadge } from '@/components/EnvironmentBadge';
-import { ApplicationStatusBadges } from '@/components/ApplicationStatusBadges';
-import { authConfigVisible, signInReachable } from '@/lib/auth-config';
+import { FilterChips } from '@/components/FilterChips';
+import { NewAppModal } from './new-app';
+import { buildOnboardingSteps } from './onboarding-steps';
+import { AppList } from './app-list';
+import { SubmitOnChangeSelect } from './submit-on-change';
+import {
+  APP_SORTS,
+  SORT_LABEL,
+  appListApiQuery,
+  appListHref,
+  appListParams,
+  isFiltered,
+  readAppListFilters,
+  type AppListFilters,
+} from './filters';
 
-/**
- * `environment` is chosen at create and afterwards moves in ONE direction only,
- * once, via `POST /:id/promote` (#475), no config route accepts the field.
- * Anything we don't recognise falls back to the API's own default rather than
- * being forwarded, so a tampered form can't 400 the create.
- */
-function parseEnvironment(raw: FormDataEntryValue | null): ApplicationRow['environment'] {
-  return raw === 'PRODUCTION' || raw === 'STAGING' ? raw : 'DEVELOPMENT';
+const LIST_PATH = '/api/v1/tenant/applications/';
+
+/** Past this many running applications the list is the job, and the checklist moves below it. */
+const CHECKLIST_ON_TOP_UP_TO = 2;
+
+const controlCls =
+  'rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
+
+function Toolbar({ filters, disabledCount }: { filters: AppListFilters; disabledCount: number | null }): React.JSX.Element {
+  const hidden = appListParams({ ...filters, q: '', sort: 'created' });
+  return (
+    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+      <form
+        key={JSON.stringify(filters)}
+        action="/applications"
+        role="search"
+        className="flex flex-col gap-2 sm:flex-row sm:items-center"
+      >
+        {Object.entries(hidden).map(([k, v]) => (
+          <input key={k} type="hidden" name={k} value={v} />
+        ))}
+        <label htmlFor="app-search" className="sr-only">
+          Search applications
+        </label>
+        <input
+          id="app-search"
+          type="search"
+          name="q"
+          defaultValue={filters.q}
+          maxLength={80}
+          placeholder="Search by name or slug"
+          className={`${controlCls} w-full sm:w-64`}
+        />
+        <label className="flex items-center gap-2 text-xs text-[var(--color-muted-fg)]">
+          <span className="shrink-0">Sort</span>
+          <SubmitOnChangeSelect name="sort" defaultValue={filters.sort} className={`${controlCls} w-full sm:w-auto`}>
+            {APP_SORTS.map((s) => (
+              <option key={s} value={s}>
+                {SORT_LABEL[s]}
+              </option>
+            ))}
+          </SubmitOnChangeSelect>
+        </label>
+        <button type="submit" className="sr-only">
+          Apply
+        </button>
+      </form>
+
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <FilterChips
+          label="Environment"
+          active={filters.environment}
+          hrefFor={(v) => appListHref(filters, { environment: v as AppListFilters['environment'] })}
+          chips={[
+            { value: undefined, label: 'All' },
+            { value: 'PRODUCTION', label: 'Production' },
+            { value: 'STAGING', label: 'Staging' },
+            { value: 'DEVELOPMENT', label: 'Development' },
+          ]}
+        />
+        {(filters.showDisabled || disabledCount !== 0) && (
+          <a
+            href={appListHref(filters, { showDisabled: !filters.showDisabled })}
+            aria-current={filters.showDisabled ? 'true' : undefined}
+            className={`inline-flex items-center gap-2 rounded-md border px-2.5 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)] ${
+              filters.showDisabled
+                ? 'border-[var(--color-primary)] bg-[color-mix(in_srgb,var(--color-primary)_8%,transparent)] font-medium text-[var(--color-fg)]'
+                : 'border-[var(--color-border)] text-[var(--color-muted-fg)] hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-fg)]'
+            }`}
+          >
+            <span
+              aria-hidden="true"
+              className={`grid size-3.5 place-items-center rounded-[3px] border text-[9px] leading-none ${
+                filters.showDisabled
+                  ? 'border-[var(--color-primary)] bg-[var(--color-primary)] text-[var(--color-primary-fg)]'
+                  : 'border-[var(--color-border)]'
+              }`}
+            >
+              {filters.showDisabled ? '✓' : ''}
+            </span>
+            Show disabled{disabledCount !== null && <span className="tabular-nums">({disabledCount})</span>}
+          </a>
+        )}
+      </div>
+    </div>
+  );
 }
 
-// No revalidatePath before the redirect, see `(authed)/layout.tsx` for why.
-// Worth noting this one revalidated the *destination* (`/applications/<newId>`)
-// rather than the list it was submitted from, so it was invalidating a route
-// that was about to be rendered fresh anyway.
-async function createApp(formData: FormData): Promise<void> {
-  'use server';
-  const name = String(formData.get('name') ?? '').trim();
-  const slug = String(formData.get('slug') ?? '').trim();
-  const environment = parseEnvironment(formData.get('environment'));
-  if (!name || !slug) redirect('/applications?error=missing&newApp=1');
-  try {
-    const app = await api<ApplicationRow>({
-      method: 'POST',
-      path: '/api/v1/tenant/applications/',
-      body: { name, slug, environment },
-    });
-    redirect(`/applications/${app.id}?saved=created&e=app_created`);
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(`/applications?${await errorQuery(err, { newApp: '1' })}`);
-    }
-    throw err;
-  }
-}
-
-const ERR: Record<string, string> = {
-  missing: 'Name and slug are required.',
-  APPLICATION_SLUG_INVALID: 'Slug must be lowercase letters, digits, and hyphens (max 40 chars).',
-  APPLICATION_SLUG_TAKEN: 'That slug is already taken (slugs are globally unique).',
-  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can create applications.',
-};
-
-/**
- * Derive the "Get started" checklist from real workspace state, no new API
- * endpoints, everything comes from data this page already has (the app list,
- * which carries authConfig.methods + billingConfig.enabled) or from cheap
- * existing reads (team members/invitations, plans of the first billing-enabled
- * app). Steps whose state can't be determined (a fetch failed, e.g. member-role
- * restrictions) are omitted rather than shown with a guess.
- *
- * `allDone` flips when every derivable step is complete, the caller then
- * swaps the checklist for the dismissible "ready to go live" card (WP10).
- */
-async function buildOnboardingSteps(apps: ApplicationRow[]): Promise<{
-  steps: OnboardingStep[];
-  tenantId: string;
-  allDone: boolean;
-}> {
-  const firstApp = apps[0];
-  const [me, memberPage, invitationPage, firstAppKeys] = await Promise.all([
-    getMe().catch(() => null),
-    api<Page<MemberRow>>({ method: 'GET', path: '/api/v1/tenant/workspace/members' }).catch(
-      () => null,
-    ),
-    api<Page<InvitationRow>>({
-      method: 'GET',
-      path: '/api/v1/tenant/workspace/invitations',
-    }).catch(() => null),
-    // API keys of the first app, drives the "mint your first key" step.
-    // (One cheap read; omitted-on-failure like the other derived steps. Not a
-    // paginated endpoint: this one still answers with a bare array.)
-    firstApp
-      ? api<ApiKeyRow[]>({
-          method: 'GET',
-          path: `/api/v1/tenant/applications/${encodeURIComponent(firstApp.id)}/api-keys`,
-        }).catch(() => null)
-      : Promise.resolve([] as ApiKeyRow[]),
-  ]);
-  // null is load-bearing below: "the read failed, omit the step" is a different
-  // answer from "the list is empty, the step is not done".
-  const members = memberPage === null ? null : memberPage.items;
-  const invitations = invitationPage === null ? null : invitationPage.items;
-
-  const billingApp = apps.find((a) => a.billingConfig.enabled);
-  // Two extra reads, only when an app actually has billing enabled, the list
-  // payload carries neither plans nor provider credentials.
-  //
-  // The credentials read is what makes the billing step honest. `billingConfig
-  // .enabled` alone ticked "Enable billing and add a provider" for an
-  // application with ZERO providers configured, which is a checkout that fails
-  // with BILLING_CREDENTIALS_NOT_CONFIGURED, the checklist was reporting
-  // production-ready on a state that cannot take a payment. The step says "and
-  // add a provider", so it needs both halves.
-  const [planPage, billingCredentials] = billingApp
-    ? await Promise.all([
-        api<Page<PlanRow>>({
-          method: 'GET',
-          path: `/api/v1/tenant/applications/${encodeURIComponent(billingApp.id)}/plans`,
-        }).catch(() => null),
-        // Not paginated, one row per configured provider, still a bare array.
-        api<BillingCredentialRow[]>({
-          method: 'GET',
-          path: `/api/v1/tenant/applications/${encodeURIComponent(billingApp.id)}/billing-credentials`,
-        }).catch(() => null),
-      ])
-    : [emptyPage<PlanRow>(), [] as BillingCredentialRow[]];
-  const plans = planPage === null ? null : planPage.items;
-  // The endpoint returns one row per CONFIGURED provider, so a non-empty list
-  // is the signal. Null means the read failed, fall back to the old
-  // enabled-only answer rather than claiming the step is incomplete.
-  const providerConfigured =
-    billingCredentials === null ? true : billingCredentials.length > 0;
-
-  const createHref = '/applications?newApp=1'; // reopens the create modal via modalKey
-  // Four of the steps below (key, auth, billing, plan) operate on an
-  // application, so they can't be acted on until one exists. We *don't* disable
-  // them (greying out most of the card reads as broken and gives no affordance)
-  //, instead the entry step gets a "Start here" pill and the dependent steps
-  // get a muted "Requires an application" hint. Their hrefs already fall back to
-  // the create-app modal, so an early click guides the user forward rather than
-  // dead-ending. The hint/pill clear themselves once an app exists.
-  const noApp = apps.length === 0;
-  const requiresAppHint = noApp ? 'Requires an application' : undefined;
-  const steps: OnboardingStep[] = [
-    {
-      key: 'create-app',
-      label: 'Create your first application',
-      description: 'An isolated pool of end-users with its own auth, API keys, and billing.',
-      href: createHref,
-      done: apps.length > 0,
-      pill: noApp ? 'Start here' : undefined,
-    },
-    ...(firstAppKeys !== null
-      ? [
-          {
-            key: 'api-key',
-            label: 'Mint your first API key',
-            description: 'The server-side credential your backend uses to call Rekey.',
-            href: firstApp ? `/applications/${firstApp.id}/api-keys` : createHref,
-            done: (firstAppKeys ?? []).some((k) => k.revokedAt === null),
-            hint: requiresAppHint,
-          },
-        ]
-      : []),
-    {
-      key: 'auth-method',
-      label: 'Configure an auth method',
-      description: 'Pick how end-users sign in, password, OAuth, passkeys.',
-      href: firstApp ? `/applications/${firstApp.id}/auth` : createHref,
-      // `signInReachable`, not a methods count: an OAuth-only application has
-      // no primary method and is fully configured. Counting methods called it
-      // unconfigured while the row's badges called it healthy, on one screen.
-      done: apps.some((a) => authConfigVisible(a) && signInReachable(a)),
-      hint: requiresAppHint,
-    },
-    {
-      key: 'billing',
-      label: 'Enable billing and add a provider',
-      description: 'Turn on the billing surface and connect Stripe, PayPal, or Razorpay.',
-      href: billingApp
-        ? `/applications/${billingApp.id}/billing`
-        : firstApp
-          ? `/applications/${firstApp.id}/billing`
-          : createHref,
-      done: billingApp !== undefined && providerConfigured,
-      hint:
-        requiresAppHint ??
-        (billingApp !== undefined && !providerConfigured
-          ? 'Billing is on, but no provider is configured, so checkout would fail'
-          : undefined),
-    },
-    ...(plans !== null
-      ? [
-          {
-            key: 'plan',
-            label: 'Create a plan',
-            description: 'Subscription, license, usage, or credit pricing your end-users can buy.',
-            href: billingApp
-              ? `/applications/${billingApp.id}/plans`
-              : firstApp
-                ? `/applications/${firstApp.id}/billing`
-                : createHref,
-            done: (plans ?? []).length > 0,
-            hint: requiresAppHint,
-          },
-        ]
-      : []),
-    ...(members !== null || invitations !== null
-      ? [
-          {
-            key: 'invite',
-            label: 'Invite a teammate',
-            description: 'Bring a colleague into this workspace.',
-            href: '/team',
-            done:
-              (members?.length ?? 0) > 1 ||
-              (invitations ?? []).some((i) => i.status === 'pending'),
-          },
-        ]
-      : []),
-  ];
-
-  return {
-    steps,
-    tenantId: me?.activeTenantId ?? 'unknown',
-    allDone: steps.every((s) => s.done),
-  };
+function describeFilters(f: AppListFilters): string {
+  const env = f.environment ? `${f.environment.toLowerCase()} ` : '';
+  return f.q ? `No ${env}application has “${f.q}” in its name or slug.` : `There are no ${env}applications.`;
 }
 
 export default async function ApplicationsPage({
@@ -234,259 +122,222 @@ export default async function ApplicationsPage({
 }): Promise<React.JSX.Element> {
   const sp = await searchParams;
   const error = typeof sp.error === 'string' ? sp.error : undefined;
-  // The API's own message and fix for this failure, left by `errorQuery`
-  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
-  // written by whoever composes the link, and this text renders inside the
-  // panel's own error banner.
+  // The API's own message and fix for a failed create, left by `errorQuery`
+  // in a short-lived httpOnly cookie rather than the URL.
   const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
-  // Only owners and admins may create an Application, the API answers
-  // TENANT_ROLE_INSUFFICIENT for a MEMBER. Since #326 a MEMBER also starts with
-  // access to NO Application, which is exactly the state accepting an
-  // invitation produces. So the default view for an invited teammate was the
-  // owner's first-run page: a "Create your first application" button that can
-  // only 403, and a six-step "get this workspace production-ready" checklist
-  // where five steps are owner-only. Branch on the role instead.
+  // Only owners and admins may create an Application. A MEMBER starts with
+  // access to none, so their empty list means "nothing shared yet", and the
+  // create button and the setup checklist would only lead them to a 403.
   const me = await getMe().catch(() => null);
   const canManageApps = me === null || me.activeRole === 'OWNER' || me.activeRole === 'ADMIN';
-  const PAGE_SIZE = readPageSize(sp);
+
+  const filters = readAppListFilters(sp);
+  const filtered = isFiltered(filters);
+  const pageSize = readPageSize(sp);
   const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
-  const { items: apps, page } = await api<Page<ApplicationRow>>({
-    method: 'GET',
-    path: `/api/v1/tenant/applications/?limit=${PAGE_SIZE}&offset=${offset}`,
-  });
+  const [list, disabledCount] = await Promise.all([
+    api<Page<ApplicationRow>>({
+      method: 'GET',
+      path: `${LIST_PATH}?${appListApiQuery(filters, { limit: pageSize, offset }, filters.showDisabled ? undefined : 'active')}&include=summary`,
+    }),
+    // The count behind "Show disabled (N)", under the same search and
+    // environment. A failure hides the number, never the toggle once it is on.
+    api<Page<ApplicationRow>>({
+      method: 'GET',
+      path: `${LIST_PATH}?${appListApiQuery(filters, { limit: 1, offset: 0 }, 'disabled')}`,
+    })
+      .then((p) => p.page.total)
+      .catch(unlessBusy(() => null)),
+  ]);
+  const apps = list.items;
+  const total = list.page.total;
+  const running = apps.filter((a) => !a.disabledAt);
+  // An unread disabled count is not a zero: in a workspace whose every
+  // application is disabled, reading it as zero would offer to create a first
+  // application to someone who has several.
+  const workspaceHasApps = total > 0 || disabledCount !== 0 || filtered;
 
-  // Onboarding state only matters on the first page, paginating past page
-  // one means this is not a new workspace, so skip the extra reads entirely.
-  // Members can act on none of the steps, so they skip it too.
-  const onboarding = offset === 0 && canManageApps ? await buildOnboardingSteps(apps) : null;
-
-  return (
-    <section className="mx-auto max-w-7xl space-y-6 px-6 py-8 lg:px-8">
-      <PageHeader
-        title="Applications"
-        description="Each application has its own end-users, API keys, OAuth providers, and (optionally) billing."
-        /* Hide the header trigger on the empty state, the prominent CTA in
-           the empty state is the right entry point, and rendering both
-           here used to collide on modalKey="newApp" (HIGH #7 fix). */
-        action={
-          apps.length > 0 && canManageApps ? <NewAppModal error={error} errorDetail={errorDetail} errorFix={errorFix} modalKey="newApp" /> : undefined
-        }
-      />
-
-      {onboarding && !onboarding.allDone && (
-        <OnboardingChecklist
-          steps={onboarding.steps}
-          storageKey={`rekey.onboarding.dismissed.${onboarding.tenantId}`}
-        />
-      )}
-
-      {/* Every onboarding step done, swap the checklist for a dismissible
-          "go live" pointer card (WP10). */}
-      {onboarding && onboarding.allDone && apps[0] && (
+  // The checklist describes the whole workspace, so it only appears on the
+  // unfiltered first page, where the rows it reads are the workspace's own.
+  // A workspace whose every application is disabled has nothing to set up.
+  const onboarding =
+    offset === 0 && canManageApps && !filtered && (running.length > 0 || !workspaceHasApps)
+      ? await buildOnboardingSteps(running)
+      : null;
+  const firstRunning = running[0];
+  const setup = onboarding ? (
+    onboarding.allDone ? (
+      firstRunning && (
         <ReadyToGoLive
           storageKey={`rekey.ready.dismissed.${onboarding.tenantId}`}
           links={[
             {
               label: 'Quick start',
               description: 'The app overview walks through wiring the SDK into your backend.',
-              href: `/applications/${apps[0].id}`,
+              href: `/applications/${firstRunning.id}`,
             },
             {
               label: 'API keys',
               description: 'Keys inherit the application’s environment, check you are on the right one.',
-              href: `/applications/${apps[0].id}/api-keys`,
+              href: `/applications/${firstRunning.id}/api-keys`,
             },
             {
               label: 'Billing providers',
               description: 'A production application needs your provider’s live credentials.',
-              href: `/applications/${apps[0].id}/billing`,
+              href: `/applications/${firstRunning.id}/billing`,
             },
           ]}
         />
+      )
+    ) : (
+      <OnboardingChecklist steps={onboarding.steps} storageKey={`rekey.onboarding.dismissed.${onboarding.tenantId}`} />
+    )
+  ) : null;
+  const setupOnTop = total <= CHECKLIST_ON_TOP_UP_TO;
+
+  const newApp = (props: { triggerLabel?: string; triggerSize?: 'sm' | 'md' }): React.JSX.Element => (
+    <NewAppModal error={error} errorDetail={errorDetail} errorFix={errorFix} modalKey="newApp" {...props} />
+  );
+
+  let body: React.ReactNode;
+  if (!workspaceHasApps && !canManageApps) {
+    body = (
+      <EmptyState
+        title="No applications shared with you yet"
+        description={
+          <>
+            You&apos;re a <strong>member</strong> of this workspace. Members only see the applications they have been
+            granted access to, and you don&apos;t have any yet. Ask an owner or admin to grant you access under{' '}
+            <strong>Team → Application access</strong>.
+          </>
+        }
+      />
+    );
+  } else if (!workspaceHasApps) {
+    body = (
+      <EmptyState
+        title="No applications yet"
+        description={
+          <>
+            An application is one product&apos;s end-users, sign-in settings, API keys and, if you want it, billing.
+            Most teams make one per environment, such as <code>acme-prod</code> and <code>acme-dev</code>.
+          </>
+        }
+        action={newApp({ triggerLabel: 'Create your first application', triggerSize: 'md' })}
+      />
+    );
+  } else if (apps.length === 0 && total === 0 && !filtered && !filters.showDisabled) {
+    body = (
+      <EmptyState
+        title={disabledCount === null
+            ? 'No running applications to show'
+            : disabledCount === 1
+              ? 'Your only application is disabled'
+              : `All ${disabledCount} applications are disabled`}
+        description={
+          disabledCount === null
+            ? 'The number of disabled applications could not be read. Show them to check.'
+            : 'A disabled application refuses end-user traffic but keeps all its data. Show them to review or re-enable one.'
+        }
+        action={
+          <a
+            href={appListHref(filters, { showDisabled: true })}
+            className="inline-block rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-surface-muted)]"
+          >
+            Show disabled applications
+          </a>
+        }
+      />
+    );
+  } else if (total === 0) {
+    const hiddenMatches = !filters.showDisabled && (disabledCount ?? 0) > 0;
+    body = (
+      <EmptyState
+        title="No applications match these filters"
+        description={
+          <>
+            {describeFilters(filters)}
+            {hiddenMatches && (
+              <>
+                {' '}
+                {disabledCount} disabled {disabledCount === 1 ? 'one matches' : 'ones match'}, and they are hidden.
+              </>
+            )}
+          </>
+        }
+        action={
+          <div className="flex flex-wrap justify-center gap-2">
+            <a
+              href={appListHref({ q: '', environment: undefined, sort: filters.sort, showDisabled: filters.showDisabled })}
+              className="inline-block rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-surface-muted)]"
+            >
+              Clear filters
+            </a>
+            {hiddenMatches && (
+              <a
+                href={appListHref(filters, { showDisabled: true })}
+                className="inline-block rounded-md px-3 py-1.5 text-sm text-[var(--color-primary)] hover:underline"
+              >
+                Show disabled
+              </a>
+            )}
+          </div>
+        }
+      />
+    );
+  } else {
+    body = <AppList apps={apps} />;
+  }
+
+  return (
+    <section className="mx-auto max-w-7xl space-y-6 px-4 py-8 sm:px-6 lg:px-8">
+      <PageHeader
+        title="Applications"
+        description="Each application has its own end-users, API keys, sign-in settings and, optionally, billing."
+        // The empty state carries its own create button; two triggers on one
+        // modalKey would open the dialog twice.
+        action={workspaceHasApps && canManageApps ? newApp({}) : undefined}
+      />
+
+      {setupOnTop && setup}
+
+      {workspaceHasApps && (
+        <div className="space-y-3">
+          <Toolbar filters={filters} disabledCount={disabledCount} />
+          {total > 0 && (
+            <p className="text-xs text-[var(--color-muted-fg)]" aria-live="polite">
+              <span className="tabular-nums">{total}</span> {filtered ? (total === 1 ? 'match' : 'matches') : total === 1 ? 'application' : 'applications'}
+              {!filters.showDisabled && (disabledCount ?? 0) > 0 && !filtered && (
+                <>, {disabledCount} disabled hidden</>
+              )}
+              {filtered && (
+                <>
+                  {' · '}
+                  <a
+                    href={appListHref({ q: '', environment: undefined, sort: filters.sort, showDisabled: filters.showDisabled })}
+                    className="underline hover:text-[var(--color-fg)]"
+                  >
+                    Clear filters
+                  </a>
+                </>
+              )}
+            </p>
+          )}
+        </div>
       )}
 
-      {apps.length === 0 && !canManageApps ? (
-        // A member sees an empty list because nothing has been shared with
-        // them, NOT because the workspace is empty, telling them "no
-        // applications yet" and offering a create button they cannot use sent
-        // every invited teammate to a 403. Name the real cause and the fix.
-        <EmptyState
-          title="No applications shared with you yet"
-          description={
-            <>
-              You&apos;re a <strong>member</strong> of this workspace. Members only see the
-              applications they have been granted access to, and you don&apos;t have any yet. Ask an
-              owner or admin to grant you access under <strong>Team → Application access</strong>.
-            </>
-          }
-        />
-      ) : apps.length === 0 ? (
-        <EmptyState
-          title="No applications yet"
-          description={
-            <>
-              An application is a self-contained pool of end-users with its own auth configuration,
-              OAuth providers, and (optionally) billing. Most teams start with one per environment
-              (e.g. <code>acme-prod</code>, <code>acme-staging</code>).
-            </>
-          }
-          action={
-            <NewAppModal
-              error={error}
-              errorDetail={errorDetail}
-              errorFix={errorFix}
-              triggerLabel="Create your first application"
-              triggerSize="md"
-              modalKey="newApp"
-            />
-          }
-        />
-      ) : (
-        <ul className="space-y-2.5">
-          {apps.map((a) => {
-            // Three states, and they are different answers. Redacted for an
-            // APP_BILLING operator (absent `methods` is the only signal) means
-            // say nothing. Zero methods with OAuth configured is an OAuth-only
-            // application, which is configured, not broken, reporting "0 auth
-            // methods" beside a badge component calling it healthy was the same
-            // contradiction in the other direction.
-            const methodSummary = !authConfigVisible(a)
-              ? null
-              : a.authConfig.methods.length > 0
-                ? `${a.authConfig.methods.length} auth method${a.authConfig.methods.length === 1 ? '' : 's'}`
-                : signInReachable(a)
-                  ? 'OAuth only'
-                  : 'No auth method';
-            return (
-              <li key={a.id}>
-                <Link
-                  href={`/applications/${a.id}`}
-                  className="group flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4 transition-colors hover:border-[color-mix(in_srgb,var(--color-primary)_40%,transparent)] hover:bg-[color-mix(in_srgb,var(--color-surface-muted)_40%,transparent)]"
-                >
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <span className="font-medium text-[var(--color-fg)]">{a.name}</span>
-                      <EnvironmentBadge environment={a.environment} />
-                      <ApplicationStatusBadges app={a} />
-                    </div>
-                    <div className="mt-0.5 truncate font-mono text-xs text-[var(--color-muted-fg)]">{a.slug}</div>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-3 text-xs text-[var(--color-muted-fg)]">
-                    {methodSummary !== null && <span>{methodSummary}</span>}
-                    <span
-                      aria-hidden="true"
-                      className="text-[var(--color-faint-fg)] transition-transform group-hover:translate-x-0.5"
-                    >
-                      →
-                    </span>
-                  </div>
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+      {body}
 
       <Pager
         basePath="/applications"
         offset={offset}
-        pageSize={PAGE_SIZE}
+        pageSize={pageSize}
         count={apps.length}
-        hasMore={page.hasMore}
+        hasMore={list.page.hasMore}
+        extraParams={appListParams(filters)}
       />
-    </section>
-  );
-}
 
-function NewAppModal({
-  error,
-  errorDetail,
-  errorFix,
-  triggerLabel = '+ New application',
-  triggerSize = 'sm',
-  modalKey,
-}: {
-  error?: string;
-  /** The API's own message + fix, shown when `ERR` has no entry for `error`. */
-  errorDetail?: string;
-  errorFix?: string;
-  triggerLabel?: string;
-  triggerSize?: 'sm' | 'md';
-  modalKey: string;
-}): React.JSX.Element {
-  const triggerCls =
-    triggerSize === 'md'
-      ? 'inline-block rounded-md bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] cursor-pointer'
-      : 'inline-block rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] cursor-pointer whitespace-nowrap';
-  return (
-    <Modal
-      modalKey={modalKey}
-      title="Create application"
-      description="An application is a self-contained set of end-users, auth, and (optional) billing. The slug is baked into API keys and webhook URLs, and the environment sets their prefix. Neither can be changed later."
-      trigger={triggerLabel}
-      triggerClassName={triggerCls}
-    >
-      <ActionForm action={createApp} className="space-y-3">
-        {error && (
-          <Banner tone="error">
-            {/* The local map first, a page often has better words than the
-                API. Then the API's own message, which for a quota refusal
-                names the limit and the current count. "Something went wrong"
-                only when there is genuinely nothing to say. */}
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} />
-          </Banner>
-        )}
-        <label className="block space-y-1">
-          <span className="text-xs font-medium">Application name</span>
-          <input
-            type="text"
-            name="name"
-            required
-            autoFocus
-            placeholder="Acme Production"
-            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
-          />
-          <span className="block text-xs text-[var(--color-muted-fg)]">Shown to your team in the panel.</span>
-        </label>
-        <label className="block space-y-1">
-          <span className="text-xs font-medium">Slug</span>
-          <SlugAvailabilityField
-            placeholder="acme-prod"
-            inputClassName="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
-          />
-        </label>
-        <label className="block space-y-1">
-          <span className="text-xs font-medium">Environment</span>
-          <select
-            name="environment"
-            defaultValue="DEVELOPMENT"
-            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
-          >
-            <option value="DEVELOPMENT">Development</option>
-            <option value="STAGING">Staging</option>
-            <option value="PRODUCTION">Production</option>
-          </select>
-          <span className="block text-xs text-[var(--color-muted-fg)]">
-            What this application is. <strong>Cannot be changed later</strong>: to go live you
-            create a new production application, so pick it now.
-          </span>
-        </label>
-        <div className="rounded-md bg-[var(--color-surface-muted)] border border-[var(--color-border)] p-3 text-xs text-[var(--color-muted-fg)] space-y-1">
-          <p className="font-medium text-[var(--color-fg)]">What you get</p>
-          <ul className="list-disc pl-5 space-y-0.5">
-            <li>Email + password sign-up / sign-in</li>
-            <li>Empty OAuth slot (add Google / Microsoft / OIDC / … later)</li>
-            <li>Mintable API keys: <code className="font-mono">rp_live_…</code> for production, <code className="font-mono">rp_test_…</code> otherwise</li>
-            <li><strong>No billing</strong>: opt in on the Billing tab when you're ready</li>
-          </ul>
-          <p>
-            The environment sets that key prefix and nothing else. It does not restrict which
-            provider credentials the application may hold, so a development application can point
-            at a live processor if that is deliberately what you want to test against.
-          </p>
-        </div>
-        <SubmitButton pendingLabel="Creating application…">Create application</SubmitButton>
-      </ActionForm>
-    </Modal>
+      {!setupOnTop && setup}
+    </section>
   );
 }

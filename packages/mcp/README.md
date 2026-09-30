@@ -4,7 +4,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server for [Rekey](https://rekey.dev). Lets Claude Desktop, Cursor, and Claude Code introspect a deployment — and mint API keys — directly, without screenshots or copy-paste from the panel.
 
-**This is the small server.** It has 9 tools: 8 reads against the deployment-wide admin API, plus `mint_api_key`. The hosted operator MCP that every deployment runs at `/api/v1/tenant/mcp` is a different, larger server with 41 tools (11 read, 30 write), including devices, plan entitlements, subscription cancel and billing provider config. This package does not reach that server and is not a client for it. If the hosted one is available to you, it is usually the one to connect.
+**This is the small server.** It has 9 tools: 8 reads against the deployment-wide admin API, plus `mint_api_key`. The hosted operator MCP that every deployment runs at `/api/v1/tenant/mcp` is a different, larger server with 44 tools, including organizations, devices, plan entitlements, subscription cancel and billing provider config. This package does not reach that server and is not a client for it. If the hosted one is available to you, it is usually the one to connect.
 
 > **For AI agents connected through this server:** see [AGENTS.md](../../AGENTS.md) for what's safe to call and the write-tool safety model.
 

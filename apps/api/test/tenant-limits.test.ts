@@ -299,12 +299,17 @@ describe('Tenant limits — maxActiveEndUsers', () => {
     // Both helper applications default to DEVELOPMENT, so productionApps is 0.
     expect(unset.json().data).toEqual({
       limits: {},
-      usage: { activeEndUsers: 0, productionApps: 0 },
+      usage: { activeEndUsers: 0, productionApps: 0, contacts: 0, contactLists: 0 },
     });
 
     await signUp(appA, 'r1@example.com');
     await signUp(appB, 'r2@example.com');
     await setLimits(tenantId, { maxActiveEndUsers: 10 });
+    await prisma.contactList.create({ data: { applicationId: appA.applicationId, key: 'news', name: 'News' } });
+    await prisma.contactList.create({
+      data: { applicationId: appB.applicationId, key: 'old', name: 'Old', archivedAt: new Date() },
+    });
+    await prisma.contact.create({ data: { applicationId: appB.applicationId, email: 'c@example.com' } });
 
     const set = await app.inject({
       method: 'GET',
@@ -313,7 +318,7 @@ describe('Tenant limits — maxActiveEndUsers', () => {
     });
     expect(set.json().data).toEqual({
       limits: { maxActiveEndUsers: 10 },
-      usage: { activeEndUsers: 2, productionApps: 0 },
+      usage: { activeEndUsers: 2, productionApps: 0, contacts: 1, contactLists: 1 },
     });
   });
 

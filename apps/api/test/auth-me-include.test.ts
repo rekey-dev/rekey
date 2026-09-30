@@ -29,7 +29,7 @@ import { countQueries } from './query-counter.js';
 
 const PASSWORD = 'pw-one-two-three';
 
-/** The keys GET /auth/me and GET /users/me returned before `include` existed, in order. */
+/** The keys GET /auth/me and GET /users/me return without `include`, in order. */
 const BASELINE_KEYS = [
   'id',
   'applicationId',
@@ -39,8 +39,20 @@ const BASELINE_KEYS = [
   'metadata',
   'erasedAt',
   'erasedBy',
+  'lastSignedInAt',
+  'lastSignInVia',
+  'signInCount',
+  'lastActiveOn',
+  'lastPlatform',
+  'platformsSeen',
+  'lastCountry',
+  'profile',
+  'onboardingCompletedAt',
+  'onboardingSkippedAt',
   'createdAt',
   'updatedAt',
+  'onboardingStatus',
+  'createdVia',
   'activeOrganizationId',
   'activeOrganizationRole',
   'activeOrganizationBaseRole',

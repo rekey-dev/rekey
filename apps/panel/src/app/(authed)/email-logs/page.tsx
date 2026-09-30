@@ -31,13 +31,13 @@ export default async function WorkspaceEmailLogsPage({
       <PageHeader
         title={
           <>
-            System email logs{' '}
+            Workspace email delivery{' '}
             <span className="text-base font-normal text-[var(--color-muted-fg)]">
               ({rows.length === 0 ? 0 : `${offset + 1}–${offset + rows.length}`})
             </span>
           </>
         }
-        description="Workspace SYSTEM mail only: operator magic-link / password-reset and member invitations (sends not tied to an Application). Per-application email lives inside each Application → Email. Metadata only; bodies are never stored."
+        description="What happened to mail sent to your team: operator sign-in links, password resets and invitations. Mail an Application sends to its end-users is under that Application's Email, Delivery. Only the metadata is kept, never the message body."
         action={<EmailLogStatusFilter basePath="/email-logs" active={status} pageSize={PAGE_SIZE} />}
       />
 

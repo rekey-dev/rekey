@@ -93,15 +93,18 @@ describe('billing refusals name the right thing', () => {
     });
 
   describe('an Application whose only provider is inbound-only', () => {
-    it('trial-eligibility says the provider cannot host a checkout', async () => {
+    it('trial-eligibility says the provider cannot start a trial, in trial terms', async () => {
       await externalOnly();
       const res = await app.inject({ method: 'GET', url: '/api/v1/billing/trial-eligibility', headers: self() });
       expect(res.statusCode).toBe(400);
       const { code, message, fix } = res.json().error as { code: string; message: string; fix: string };
       expect(code).toBe('BILLING_PROVIDER_INBOUND_ONLY');
       expect(message).toContain('"external"');
+      expect(message).toMatch(/trial/);
+      expect(message).not.toContain('host a checkout');
       expect(message).not.toContain('no credentials');
-      expect(fix).toContain(`/applications/${appId}/billing`);
+      expect(fix).toContain('trialEndsAt');
+      expect(fix).toContain(`Billing → Setup → Providers (/applications/${appId}/billing/providers)`);
     });
 
     it('a checkout naming no provider answers the same', async () => {
@@ -172,6 +175,28 @@ describe('billing refusals name the right thing', () => {
       expect(code).toBe('PLAN_INACTIVE');
       expect(fix).not.toContain('/api/v1/admin/');
       expect(fix).toContain(`PATCH /api/v1/tenant/applications/${appId}/plans/pro`);
+    });
+
+    it('PLAN_INACTIVE on a plan whose registration failed says to register it, not to flip `active`', async () => {
+      await prisma.plan.update({
+        where: { applicationId_slug: { applicationId: appId, slug: 'pro' } },
+        data: { active: false, registrationStatus: 'FAILED' },
+      });
+      const res = await checkout();
+      expect(res.statusCode).toBe(400);
+      const { code, message, fix } = res.json().error as { code: string; message: string; fix: string };
+      expect(code).toBe('PLAN_INACTIVE');
+      expect(message).toMatch(/not registered/);
+      expect(fix).toContain(`POST /api/v1/tenant/applications/${appId}/plans/pro/register`);
+      expect(fix).not.toContain('"active": true');
+
+      const flip = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/tenant/applications/${appId}/plans/pro`,
+        headers: auth(),
+        payload: { active: true },
+      });
+      expect(flip.json().error.code).toBe('PLAN_NOT_REGISTERED_WITH_PROVIDER');
     });
   });
 });

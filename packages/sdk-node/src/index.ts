@@ -42,6 +42,8 @@ import type {
   EndUserDto,
   EndUserLicenseDto,
   FeatureCheckDto,
+  ProfileValue,
+  ProfileStateDto,
   ForgotPasswordRequest,
   ForgotPasswordResultDto,
   LicenseVerifyResultDto,
@@ -86,12 +88,24 @@ import type {
 // `/error` subpath is the zod-free module the class actually lives in, same
 // class object the barrel re-exports, so `instanceof` is identical.
 import { RekeyError } from '@rekey.dev/shared-types/error';
+import { ListsClient } from './lists.js';
 
 export type {
   EmailSendRequest,
   EmailSendResult,
+  ContactListPublicDto,
+  ContactListSummaryDto,
+  ListMemberDto,
+  ListMembersPage,
+  ListSubscribeOutcome,
+  ListSubscribeReceived,
+  ListSubscribeRequest,
   ApplicationDto,
   EndUserDto,
+  ProfileField,
+  ProfileValue,
+  ProfileStateDto,
+  OnboardingStatus,
   CurrentUserDto,
   EndUserLicenseDto,
   FeatureCheckDto,
@@ -239,6 +253,14 @@ export interface RekeyConfig {
    * IPv4 or IPv6; anything else is not sent.
    */
   clientIp?: string | undefined;
+  /**
+   * The User-Agent of the visitor this server is acting for, sent as
+   * `X-Rekey-Client-User-Agent` so the session a sign-in mints records the
+   * visitor's browser and platform rather than your server's runtime. The API
+   * believes it only from a secret key. Set it per visitor with
+   * {@link Rekey.with}: `rekey.with({ clientIp, clientUserAgent }).auth.signIn(...)`.
+   */
+  clientUserAgent?: string | undefined;
 }
 
 /**
@@ -246,6 +268,9 @@ export interface RekeyConfig {
  * secret-key caller as the visitor's address; it is never the caller's own.
  */
 export const CLIENT_IP_HEADER = 'X-Rekey-Client-Ip';
+
+/** The header {@link RekeyConfig.clientUserAgent} travels in. Believed only from a secret-key caller. */
+export const CLIENT_USER_AGENT_HEADER = 'X-Rekey-Client-User-Agent';
 
 /**
  * `value` as a single IP address, or null. Deliberately strict: a list
@@ -291,11 +316,14 @@ export interface RekeyCallOptions {
   signal?: AbortSignal | undefined;
   /** The visitor's address for this call. See {@link RekeyConfig.clientIp}. */
   clientIp?: string | undefined;
+  /** The visitor's User-Agent for this call. See {@link RekeyConfig.clientUserAgent}. */
+  clientUserAgent?: string | undefined;
 }
 
 // RekeyError is the shared class (imported above), re-exported so the public
 // API name is preserved and `instanceof` is consistent with @rekey.dev/react.
 export { RekeyError };
+export { ListsClient, type ListMembersOptions, type ListSubscribeOptions } from './lists.js';
 
 /**
  * Outbound webhook event registry, the events Rekey can POST to your app
@@ -372,6 +400,8 @@ export class Rekey {
   public readonly mcp: McpClient;
   /** Custom email, send a template registered and published in the panel. */
   public readonly email: EmailClient;
+  /** Lists, subscribe people to a waitlist or newsletter and read them out. */
+  public readonly lists: ListsClient;
 
   constructor(config: RekeyConfig) {
     if (!config.apiUrl) {
@@ -412,6 +442,7 @@ export class Rekey {
     this.credits = new CreditsClient(this);
     this.mcp = new McpClient(this);
     this.email = new EmailClient(this);
+    this.lists = new ListsClient(this);
   }
 
   /**
@@ -444,11 +475,13 @@ export class Rekey {
         ? AbortSignal.any([this.signal, options.signal])
         : (options.signal ?? this.signal);
     const clientIp = options.clientIp ?? this.config.clientIp;
+    const clientUserAgent = options.clientUserAgent ?? this.config.clientUserAgent;
     return new Rekey({
       ...this.config,
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       ...(signal !== undefined && { signal }),
       ...(clientIp !== undefined && { clientIp }),
+      ...(clientUserAgent !== undefined && { clientUserAgent }),
     });
   }
 
@@ -596,10 +629,14 @@ export class Rekey {
     return json as T;
   }
 
-  /** @internal The visitor-address header for one call, or nothing. */
+  /** @internal The visitor headers for one call: address and User-Agent, each when known. */
   private clientIpHeader(options?: RekeyCallOptions): Record<string, string> {
     const ip = normalizeClientIp(options?.clientIp ?? this.config.clientIp);
-    return ip ? { [CLIENT_IP_HEADER]: ip } : {};
+    const ua = (options?.clientUserAgent ?? this.config.clientUserAgent)?.trim().slice(0, 512);
+    return {
+      ...(ip ? { [CLIENT_IP_HEADER]: ip } : {}),
+      ...(ua ? { [CLIENT_USER_AGENT_HEADER]: ua } : {}),
+    };
   }
 
   /**
@@ -1927,6 +1964,53 @@ class UsersClient {
   import(users: ImportUserInput[]): Promise<ImportUsersResult> {
     return this.client.send('POST', '/api/v1/users/import', { users });
   }
+
+  /**
+   * Set profile answers for an end user. Any field may be set from the server,
+   * including `writableBy: "server"` ones. `null` clears an answer; keys you
+   * omit are kept. Throws PROFILE_FIELD_UNKNOWN, PROFILE_FIELD_INVALID or
+   * PROFILE_TOO_LARGE. See docs/profile-fields.md.
+   *
+   * @example
+   * ```ts
+   * await rekey.users.updateProfile(userId, { plan_tier: 'enterprise', company: null });
+   * ```
+   */
+  updateProfile(endUserId: string, patch: Record<string, ProfileValue | null>): Promise<ProfileStateDto> {
+    return this.client.send('PATCH', `/api/v1/users/${encodeURIComponent(endUserId)}/profile`, patch);
+  }
+
+  /**
+   * Mark an end user's onboarding complete. Every `requiredForOnboarding`
+   * field must be answered, or this throws PROFILE_INCOMPLETE with
+   * `details.missing`. Completing after a skip is allowed. Idempotent: the
+   * first call emits `user.onboarding_completed`, later calls return the same
+   * state. See docs/profile-fields.md.
+   *
+   * @example
+   * ```ts
+   * const { onboardingStatus } = await rekey.users.completeOnboarding(userId); // 'completed'
+   * ```
+   */
+  completeOnboarding(endUserId: string): Promise<ProfileStateDto> {
+    return this.client.send('POST', `/api/v1/users/${encodeURIComponent(endUserId)}/onboarding/complete`);
+  }
+
+  /**
+   * Record that an end user skipped onboarding. Nothing is validated and
+   * nothing is gated on it: Rekey only records the skip, and your app decides
+   * where a skipped user goes. Idempotent: the first call emits
+   * `user.onboarding_skipped`; a repeat, or a skip after completion, changes
+   * nothing and returns the current state. See docs/profile-fields.md.
+   *
+   * @example
+   * ```ts
+   * const { onboardingStatus, onboardingSkippedAt } = await rekey.users.skipOnboarding(userId);
+   * ```
+   */
+  skipOnboarding(endUserId: string): Promise<ProfileStateDto> {
+    return this.client.send('POST', `/api/v1/users/${encodeURIComponent(endUserId)}/onboarding/skip`);
+  }
 }
 
 export interface ImportUserInput {
@@ -1955,9 +2039,20 @@ class UsageClient {
   constructor(private readonly client: Rekey) {}
 
   /**
-   * Record a usage event against a named meter. `quantity` can be
-   * negative to credit back (e.g. refunds). `occurredAt` defaults to
-   * server time; pass an ISO string when ingesting historical events.
+   * Record a usage event against a named meter. `quantity` is a positive
+   * integer. `occurredAt` defaults to server time and must fall in the
+   * current UTC month.
+   *
+   * Pass `idempotencyKey` so a retry never counts twice: a repeat with the
+   * same quantity in the same month returns the original record, even with a
+   * regenerated `occurredAt`. The same key with a different quantity, or in
+   * another month, throws `IDEMPOTENCY_KEY_REUSED` (409). Keys are scoped per
+   * meter and subject.
+   *
+   * @example
+   * ```ts
+   * await rekey.usage.record({ meterSlug: 'api_calls', quantity: 1, endUserId, idempotencyKey: requestId });
+   * ```
    */
   record(input: {
     meterSlug: string;
@@ -1968,6 +2063,7 @@ class UsageClient {
     organizationId?: string;
     occurredAt?: string;
     metadata?: Record<string, unknown>;
+    idempotencyKey?: string;
   }): Promise<UsageRecordDto> {
     return this.client.send('POST', '/api/v1/usage/record', input);
   }
@@ -2762,7 +2858,7 @@ class BillingClient {
    * the trial the next checkout was about to grant.
    *
    * If the Application's billing subject is **org** (Panel → Application →
-   * Billing → Subject), an individual can't hold a subscription, you MUST
+   * Billing → Setup → Settings), an individual can't hold a subscription, you MUST
    * pass `organizationId` of a team the user owns/admins. Omitting it throws
    * `RekeyError` `code: "BILLING_ORGANIZATION_REQUIRED"`.
    *
@@ -2806,6 +2902,10 @@ class BillingClient {
    * false` means they were already entitled and nothing was written,
    * re-provisioned or re-announced.
    *
+   * `subscription` is null when the plan carries only FEATURE or USAGE
+   * entitlements and this user already holds it for another beneficiary: the
+   * requested one is on the free tier at read time, with no row of its own.
+   *
    * Pass `organizationId` on an org-billed Application; the caller must be an
    * OWNER or ADMIN of it. Omit it and the session's active organization is used.
    *
@@ -2818,14 +2918,14 @@ class BillingClient {
    * @example
    * ```ts
    * const { subscription, activated } = await rekey.billing.subscribe(accessToken);
-   * if (activated) welcomeWithStarterCredits(subscription);
+   * if (activated && subscription) welcomeWithStarterCredits(subscription);
    * ```
    */
   async subscribe(
     accessToken: string,
     input: { organizationId?: string } = {},
-  ): Promise<{ subscription: SelfSubscriptionDto; activated: boolean }> {
-    const { data, status } = await this.client.sendWithStatus<SelfSubscriptionDto>(
+  ): Promise<{ subscription: SelfSubscriptionDto | null; activated: boolean }> {
+    const { data, status } = await this.client.sendWithStatus<SelfSubscriptionDto | null>(
       'POST',
       '/api/v1/billing/subscribe',
       { ...(input.organizationId !== undefined && { organizationId: input.organizationId }) },

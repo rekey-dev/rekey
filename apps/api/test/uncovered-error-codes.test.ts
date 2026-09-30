@@ -19,6 +19,7 @@ import { prisma } from '../src/lib/prisma.js';
 import { registerOAuthProvider } from '../src/modules/oauth/providers/index.js';
 import { GoogleProvider } from '../src/modules/oauth/providers/google.js';
 import { operatorTokensService } from '../src/modules/tenant-auth/operator-tokens.service.js';
+import { OPERATOR_TOKEN_SCOPES } from '../src/lib/operator-token.js';
 import { configureSandboxStripe } from './fakes/billing-credentials.js';
 
 const ADMIN_KEY = process.env.SUPER_ADMIN_KEY!;
@@ -442,14 +443,13 @@ describe('uncovered error codes', () => {
       payload: { name: 'typo', scopes: ['keys:mints'] },
     });
     expect(res.statusCode).toBe(400);
-    // NOTE: this is `BAD_REQUEST`, not `OPERATOR_SCOPE_UNKNOWN`. The route's
-    // JSON schema pins `scopes.items` to the OPERATOR_TOKEN_SCOPES enum, so
-    // Fastify rejects the body before the handler runs and the service-level
-    // code is unreachable over HTTP. It is defence in depth for any non-HTTP
-    // caller of `operatorTokensService.mint`, covered directly below. Pinned
-    // here so nobody "fixes" this to the service code without first removing
-    // the schema enum.
-    expect(res.json().error.code).toBe('BAD_REQUEST');
+    // The named code with the valid scopes, not the schema's generic
+    // BAD_REQUEST, so a typo tells the caller what to send instead.
+    const error = res.json().error as { code: string; message: string; fix: string; details: { unknown: string[]; valid: string[] } };
+    expect(error.code).toBe('OPERATOR_SCOPE_UNKNOWN');
+    expect(error.message).toContain('keys:mints');
+    for (const scope of OPERATOR_TOKEN_SCOPES) expect(error.fix).toContain(scope);
+    expect(error.details).toEqual({ unknown: ['keys:mints'], valid: [...OPERATOR_TOKEN_SCOPES] });
     // Fail CLOSED either way: a typo must not silently mint a token.
     expect(await prisma.tenantApiToken.count({ where: { tenantId: b.tenantId } })).toBe(0);
   });

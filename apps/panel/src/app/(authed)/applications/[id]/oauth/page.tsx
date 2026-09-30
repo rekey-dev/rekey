@@ -193,8 +193,8 @@ export default async function OAuthPage({
     <div className="space-y-6">
       <PageHeader
         level={2}
-        title="OAuth providers"
-        description="Optional: let end-users sign in with their existing accounts. Each provider needs a client ID + secret from the provider's developer console plus a matching redirect URI. Secrets are AES-256-GCM encrypted at rest; never returned in any API response."
+        title="Sign-in providers"
+        description="Optional: let end-users sign in with their existing accounts. Each provider needs a client ID + secret from the provider's developer console plus a matching redirect URI. Secrets are stored encrypted and never shown again, in the panel or by the API."
       />
 
       {saved && <SavedBanner message={`${saved} configuration saved.`} />}

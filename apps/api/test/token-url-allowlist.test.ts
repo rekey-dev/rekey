@@ -45,6 +45,19 @@ describe('an email link may only point at an origin the Application declared', (
     ).toThrow(/has not registered/);
   });
 
+  it('refuses credentials in the URL, even on a registered origin', () => {
+    // `https://x@app.example.com` has the registered origin, but a link that
+    // reads as another host before the `@` is a phishing shape, and nothing
+    // legitimate puts a login in a token link.
+    for (const u of [
+      'https://attacker.tld@app.example.com/reset?t={token}',
+      'https://user:pass@app.example.com/reset',
+      'https://:pass@app.example.com/reset',
+    ]) {
+      expect(() => assertAllowedTokenUrl(registered, u, 'resetUrl'), u).toThrow(/credentials/);
+    }
+  });
+
   it('refuses a non-http scheme', () => {
     for (const u of ['javascript:alert(1)', 'data:text/html,x']) {
       expect(() => assertAllowedTokenUrl(registered, u, 'signInUrl')).toThrow(/http\(s\)/);

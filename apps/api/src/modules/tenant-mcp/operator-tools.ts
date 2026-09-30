@@ -48,6 +48,7 @@ import type { TenantRole } from '@prisma/client';
 import { NO_SCOPES, UNRESTRICTED, type Scope } from '../../lib/operator-scopes.js';
 import { isWorkspaceAdmin } from '../../lib/access-context.js';
 import { prisma } from '../../lib/prisma.js';
+import { mrrByCurrency } from '../billing/mrr.js';
 import { withActorEmails } from '../../lib/security-events.js';
 import {
   accessContextFromTool,
@@ -190,6 +191,58 @@ export async function accessibleApplicationIds(ctx: OperatorToolContext): Promis
   return sharedAccessibleApplicationIds(accessContextFromTool({ ...ctx, scopes: ctx.scopes }));
 }
 
+/**
+ * Per-Application counts for `list_applications` in a fixed number of
+ * statements, whatever the number of Applications. End users come from the
+ * latest hourly analytics snapshot where there is one (`endUserCountAsOf`
+ * says when) and from one grouped live count otherwise; DAU and MAU from the
+ * latest rollup day, in the zone it was counted in.
+ */
+async function applicationCounts(ids: string[], since24h: Date): Promise<Map<string, Record<string, unknown>>> {
+  const out = new Map<string, Record<string, unknown>>();
+  if (ids.length === 0) return out;
+  const snapshots = await prisma.$queryRaw<Array<{ application_id: string; total: number; computed_at: Date }>>`
+    SELECT DISTINCT ON ("application_id") "application_id", "total", "computed_at"
+      FROM "application_population_snapshots" WHERE "application_id" = ANY(${ids}::text[])
+     ORDER BY "application_id", "taken_on" DESC`;
+  const snap = new Map(snapshots.map((s) => [s.application_id, s]));
+  const unsnapshotted = ids.filter((id) => !snap.has(id));
+  const [days, liveUsers, subs, requests] = await Promise.all([
+    prisma.$queryRaw<Array<{ application_id: string; dau: number | null; mau: number | null; day: Date; timezone: string }>>`
+      SELECT DISTINCT ON ("application_id") "application_id", "dau", "mau", "day", "timezone"
+        FROM "application_activity_days" WHERE "application_id" = ANY(${ids}::text[])
+       ORDER BY "application_id", "day" DESC`,
+    unsnapshotted.length
+      ? prisma.endUser.groupBy({ by: ['applicationId'], where: { applicationId: { in: unsnapshotted } }, _count: { _all: true } })
+      : Promise.resolve([]),
+    prisma.subscription.groupBy({
+      by: ['applicationId'],
+      where: { applicationId: { in: ids }, status: 'ACTIVE' },
+      _count: { _all: true },
+    }),
+    prisma.apiRequestLog.groupBy({
+      by: ['applicationId'],
+      where: { applicationId: { in: ids }, createdAt: { gte: since24h } },
+      _count: { _all: true },
+    }),
+  ]);
+  const day = new Map(days.map((d) => [d.application_id, d]));
+  const count = (rows: Array<{ applicationId: string | null; _count: { _all: number } }>, id: string): number =>
+    rows.find((r) => r.applicationId === id)?._count._all ?? 0;
+  for (const id of ids) {
+    const s = snap.get(id);
+    const d = day.get(id);
+    out.set(id, {
+      endUserCount: s ? s.total : count(liveUsers, id),
+      endUserCountAsOf: (s ? s.computed_at : new Date()).toISOString(),
+      activeSubscriptions: count(subs, id),
+      apiRequestsLast24h: count(requests, id),
+      ...(d ? { dau: d.dau, mau: d.mau, activityDay: d.day.toISOString().slice(0, 10), activityTimezone: d.timezone } : {}),
+    });
+  }
+  return out;
+}
+
 export const operatorTools: OperatorTool[] = [
   {
     name: 'get_workspace_overview',
@@ -197,7 +250,8 @@ export const operatorTools: OperatorTool[] = [
       "Top-level rollup for the Applications the authenticated operator can " +
       'read in their active workspace: application count, end-user count, ' +
       'organization count, active subscriptions and, with billing:read, MRR (in minor currency ' +
-      'units, e.g. cents).',
+      'units, e.g. cents) per currency: ACTIVE subscriptions on recurring plans, yearly plans divided by 12, ' +
+      'the same figure as each Billing Overview.',
     inputSchema: NO_ARGS,
     handler: async (ctx) => {
       // Grant-scoped: a MEMBER with one APP_VIEWER grant used to get counts and
@@ -219,39 +273,26 @@ export const operatorTools: OperatorTool[] = [
           ...(held.has('billing:read') ? { mrrMinor: 0, currencies: [] } : {}),
         };
       }
-      const [endUserCount, orgCount, activeSubsRows] = await Promise.all([
+      const [endUserCount, orgCount, activeSubscriptions, perCurrency] = await Promise.all([
         prisma.endUser.count({ where: { applicationId: { in: appIds } } }),
         prisma.organization.count({ where: { applicationId: { in: appIds } } }),
-        prisma.subscription.findMany({
-          where: { applicationId: { in: appIds }, status: 'ACTIVE' },
-          select: {
-            plan: { select: { amount: true, interval: true, currency: true } },
-          },
-          take: 10000,
-        }),
+        prisma.subscription.count({ where: { applicationId: { in: appIds }, status: 'ACTIVE' } }),
+        held.has('billing:read') ? mrrByCurrency(appIds) : Promise.resolve([]),
       ]);
-      // MRR aggregated per currency, workspaces may have multi-currency plans.
-      const mrrByCurrency = new Map<string, number>();
-      for (const s of activeSubsRows) {
-        if (!s.plan) continue;
-        const monthly = s.plan.interval === 'YEAR' ? Math.floor(s.plan.amount / 12) : s.plan.amount;
-        mrrByCurrency.set(s.plan.currency, (mrrByCurrency.get(s.plan.currency) ?? 0) + monthly);
-      }
-      // For backward-friendly clients, sum all currencies' minor values into a
-      // single number too, only meaningful when the workspace is single-currency.
-      const mrrMinor = [...mrrByCurrency.values()].reduce((a, b) => a + b, 0);
+      // Summed across currencies for single-currency clients; `currencies` is the honest split.
+      const mrrMinor = perCurrency.reduce((a, c) => a + c.mrrMinor, 0);
       return {
         tenantId: ctx.tenantId,
         applicationCount: apps.length,
         endUserCount,
         organizationCount: orgCount,
-        activeSubscriptions: activeSubsRows.length,
+        activeSubscriptions,
         // Counts are the overview; MRR is money. `overview:read` gets the
         // tool, `billing:read` gets the amounts, omitted, never zeroed.
         ...(held.has('billing:read')
           ? {
               mrrMinor,
-              currencies: [...mrrByCurrency.entries()].map(([currency, mrr]) => ({ currency, mrrMinor: mrr })),
+              currencies: perCurrency.map((c) => ({ currency: c.currency, mrrMinor: c.mrrMinor })),
             }
           : {}),
       };
@@ -261,8 +302,9 @@ export const operatorTools: OperatorTool[] = [
     name: 'list_applications',
     description:
       "List the Applications the operator can read in their active workspace, " +
-      'id, slug, name, end-user count, active-subscription count, request volume ' +
-      'in last 24h. A MEMBER with per-application grants sees only the granted ones.',
+      'id, slug, name, end-user count (from the hourly analytics snapshot when there is one; ' +
+      '`endUserCountAsOf` says when), active-subscription count, request volume in the last 24h, and the ' +
+      'latest rollup day\'s DAU and MAU. A MEMBER with per-application grants sees only the granted ones.',
     inputSchema: NO_ARGS,
     handler: async (ctx) => {
       const since24h = new Date(Date.now() - DAY_MS);
@@ -277,31 +319,15 @@ export const operatorTools: OperatorTool[] = [
       // overview, money is billing): omitted, never zeroed, without
       // overview:read.
       const wantCounts = effectiveToolScopes(ctx).has('overview:read');
-      const wantUsers = wantCounts;
-      const wantSubs = wantCounts;
-      const wantRequests = wantCounts;
-      const enriched = await Promise.all(
-        apps.map(async (a) => {
-          const [endUserCount, activeSubs, requests24h] = await Promise.all([
-            wantUsers ? prisma.endUser.count({ where: { applicationId: a.id } }) : null,
-            wantSubs ? prisma.subscription.count({ where: { applicationId: a.id, status: 'ACTIVE' } }) : null,
-            wantRequests
-              ? prisma.apiRequestLog.count({
-                  where: { applicationId: a.id, createdAt: { gte: since24h } },
-                })
-              : null,
-          ]);
-          return {
-            id: a.id,
-            slug: a.slug,
-            name: a.name,
-            ...(endUserCount !== null ? { endUserCount } : {}),
-            ...(activeSubs !== null ? { activeSubscriptions: activeSubs } : {}),
-            ...(requests24h !== null ? { apiRequestsLast24h: requests24h } : {}),
-            createdAt: a.createdAt.toISOString(),
-          };
-        }),
-      );
+      const ids = apps.map((a) => a.id);
+      const counts = wantCounts ? await applicationCounts(ids, since24h) : null;
+      const enriched = apps.map((a) => ({
+        id: a.id,
+        slug: a.slug,
+        name: a.name,
+        ...(counts ? counts.get(a.id) : {}),
+        createdAt: a.createdAt.toISOString(),
+      }));
       return { applications: enriched };
     },
   },
@@ -717,6 +743,9 @@ export const operatorTools: OperatorTool[] = [
           role: user.role,
           emailVerified: user.emailVerified,
           environment: app.environment,
+          // Without it an agent reads a banned user as healthy and goes looking
+          // for why their sign-ins fail. The reason stays in the panel.
+          bannedAt: user.bannedAt?.toISOString() ?? null,
           createdAt: user.createdAt.toISOString(),
         },
         ...(wantSubscription

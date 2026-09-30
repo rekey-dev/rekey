@@ -4,7 +4,7 @@
  * Entrypoints:
  *
  *   `@rekey.dev/nextjs/middleware` , rekeyMiddleware() and rejectMalformedActionOrigin() for middleware.ts
- *   `@rekey.dev/nextjs/server`     , auth() / signIn() / signOut() / createSession() / rekeyRefreshHandler() server-side (secret key)
+ *   `@rekey.dev/nextjs/server`     , auth() / signIn() / signOut() / createSession() / rekeyRefreshHandler() / subscribeToList() server-side (secret key)
  *   `@rekey.dev/nextjs/client`     , rekeyBrowser() for client-component login/register (publishable key)
  *   `@rekey.dev/nextjs/cookies`    , ACCESS_COOKIE / REFRESH_COOKIE names + options, dependency-free
  *
@@ -33,6 +33,7 @@ export {
   createSession,
   refreshSession,
   rekeyRefreshHandler,
+  subscribeToList,
 } from './server.js';
 export { DEFAULT_REFRESH_PATH, DEFAULT_SIGN_IN_PATH } from './paths.js';
 export type {

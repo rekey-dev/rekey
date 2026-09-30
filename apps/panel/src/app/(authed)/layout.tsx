@@ -13,6 +13,7 @@ import { CommandPalette } from '@/components/CommandPalette';
 import { DependencyBanner } from '@/components/DependencyBanner';
 import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
+import { BuildVersion, BuildVersionPlaceholder } from '@/components/BuildVersion';
 
 // ─── Why a server action that redirects never calls revalidatePath ───────
 //
@@ -191,6 +192,11 @@ export default async function AuthedLayout({
             switchAction={switchWorkspace}
             {...(canCreateWorkspace && { createWorkspaceAction: createWorkspace })}
             signOutAction={signOut}
+            buildVersion={
+              <Suspense fallback={<BuildVersionPlaceholder />}>
+                <BuildVersion />
+              </Suspense>
+            }
           />
         }
       />

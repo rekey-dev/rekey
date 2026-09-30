@@ -17,7 +17,7 @@ export async function generateMetadata({
   const config = await getPortalConfigOrRefresh(slug);
   if (!config) return {};
   const appName = config.branding.displayName || config.name;
-  return { title: `${appName} — customer portal` };
+  return { title: `${appName} customer portal` };
 }
 
 export default async function SlugLayout({

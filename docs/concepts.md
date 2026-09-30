@@ -82,12 +82,20 @@ Routes with their own deduplication are deliberately **not** opted in: provider 
 
 One Rekey deployment often hosts several independent teams — a platform team running Rekey for the whole company, a lab running it for a handful of internal products. **Workspace limits** stop one workspace from consuming the deployment: a super-admin can put a ceiling on a Tenant, and Rekey enforces it.
 
-Ceilings live in `Tenant.limits` (a jsonb column). The custom-email send caps (`emailSendDailyCap`, `emailSendRecipientHourlyCap`) are covered in [email-templates.md](email-templates.md#caps), and `emailAttribution` (a boolean, not a ceiling) puts a small "Secured by Rekey" line on the workspace's built-in account emails; absent means off. The two capacity keys:
+Ceilings live in `Tenant.limits` (a jsonb column). The custom-email send caps (`emailSendDailyCap`, `emailSendRecipientHourlyCap`) are covered in [email-templates.md](email-templates.md#caps), and `emailAttribution` (a boolean, not a ceiling) puts a small "Secured by Rekey" line on the workspace's built-in account emails; absent means off. The capacity keys:
 
 | Key | Meaning |
 |---|---|
 | `maxActiveEndUsers` | Maximum non-erased EndUsers across **all** Applications in the workspace. |
 | `maxProductionApps` | Maximum Applications the workspace may **run** in production: `environment` is `PRODUCTION` **and** the Application is not disabled. STAGING and DEVELOPMENT Applications are never counted, so a workspace at its ceiling can still create as many non-production Applications as it likes. Nor are *disabled* production Applications — see [Application lifecycle](#application-lifecycle). |
+| `maxContacts` | Maximum contacts (people on any list, one per address per Application) across every Application. Only a subscribe that would add a **new** contact is refused (`CONTACT_QUOTA_EXCEEDED`); existing contacts still join and leave lists. |
+| `maxContactLists` | Maximum lists that are not archived, across every Application (`CONTACT_LIST_QUOTA_EXCEEDED`). |
+| `contactCaptureDailyCap` | Browser subscribes (a publishable key, or a secret key naming the visitor with `X-Rekey-Client-Ip`) per UTC day across the workspace. Over it, subscribes answer `429 CONTACTS_RATE_LIMITED`. |
+
+On Rekey Cloud, `maxProductionApps` and the three contact keys are set from the
+workspace's plan and rewritten whenever the plan changes, so a key the plan
+does not carry is removed. [rekey.dev/pricing](https://rekey.dev/pricing) lists
+what each plan includes.
 
 A deployment can stamp defaults onto every workspace it creates with the
 `DEFAULT_TENANT_LIMITS` env var (JSON matching the same shape). Unset — the
@@ -100,7 +108,7 @@ Managed through two super-admin routes:
 curl -H "Authorization: Bearer $SUPER_ADMIN_KEY" \
   https://your-rekey/api/v1/admin/tenants/$TENANT_ID/limits
 # → { "limits": { "maxActiveEndUsers": 500, "maxProductionApps": 3 },
-#     "usage":  { "activeEndUsers": 312, "productionApps": 2 } }
+#     "usage":  { "activeEndUsers": 312, "productionApps": 2, "contacts": 0, "contactLists": 0 } }
 
 # Set them (PUT semantics — an omitted key becomes unlimited; `{}` clears all)
 curl -X PUT -H "Authorization: Bearer $SUPER_ADMIN_KEY" \
@@ -108,6 +116,8 @@ curl -X PUT -H "Authorization: Bearer $SUPER_ADMIN_KEY" \
   -d '{"maxActiveEndUsers":500,"maxProductionApps":3}' \
   https://your-rekey/api/v1/admin/tenants/$TENANT_ID/limits
 ```
+
+Every PUT records a `workspace.limits_set_by_admin` security event on the workspace, with the previous and new limits in its metadata.
 
 The rules that matter:
 
@@ -170,7 +180,7 @@ is, and whether it is switched on.
 **Promotion.** `environment` is `DEVELOPMENT` by default and can be raised to
 `PRODUCTION` exactly once, via
 `POST /api/v1/tenant/applications/:id/promote` (Panel → Application →
-Lifecycle). **Workspace OWNER only** — an ADMIN cannot, and no application grant
+Settings). **Workspace OWNER only**: an ADMIN cannot, and no application grant
 unlocks it, because a production slot is a workspace-level commitment made
 through a single application. It is one-way: there is no demote, and no other route writes the
 field. Promotion asserts `maxProductionApps`, takes a slot, and leaves existing
@@ -218,7 +228,7 @@ it is shown on Panel → Workspace settings:
 curl -H "Authorization: Bearer $OPERATOR_TOKEN" \
   https://your-rekey/api/v1/tenant/workspace/limits
 # → { "limits": { "maxProductionApps": 3 },
-#     "usage":  { "productionApps": 2, "activeEndUsers": 312 } }
+#     "usage":  { "productionApps": 2, "activeEndUsers": 312, "contacts": 0, "contactLists": 0 } }
 ```
 
 MEMBERs are excluded: both figures are workspace-wide, and the application list

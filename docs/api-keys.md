@@ -109,9 +109,11 @@ There is no `mode` in the request body. The `rp_live_` / `rp_test_` prefix follo
   - `auth:read`, `auth:write`
   - `billing:read`, `billing:write`
   - `webhooks:read`
-  - `*`: every **standard** scope, which is the five above and nothing else
+  - `contacts:write`: subscribe people to lists (`POST /api/v1/lists/:key/subscribe`)
+  - `*`: every **standard** scope, which is the six above and nothing else
   - `credits:grant`: **elevated**, see below
   - `email:send`: **elevated**, see below
+  - `contacts:read`: **elevated**, see below
 
   A write scope implies its read scope. On the routes a signed-in user calls
   about their own account with a secret key (`/users/me`, its devices,
@@ -125,7 +127,7 @@ There is no `mode` in the request body. The `rp_live_` / `rp_test_` prefix follo
 
 ### Elevated scopes, and why `*` does not include them
 
-An elevated scope is granted only by naming it on the key. `*` does not imply it, and neither does any other scope. Today there are two: `credits:grant`, which lets a key add credits to an end-user or organization with `POST /api/v1/credits/grant`, and `email:send`, which lets a key send a published custom email template with `POST /api/v1/email/send` (error codes under "Email: custom templates" in [errors.md](errors.md)).
+An elevated scope is granted only by naming it on the key. `*` does not imply it, and neither does any other scope. Today there are three: `credits:grant`, which lets a key add credits to an end-user or organization with `POST /api/v1/credits/grant`; `email:send`, which lets a key send a published custom email template with `POST /api/v1/email/send` (error codes under "Email: custom templates" in [errors.md](errors.md)); and `contacts:read`, which lets a key read every address on a list with `GET /api/v1/lists/:key/members` (see [lists.md](lists.md)). Minting a key with `contacts:read` needs the `audience:read` operator scope, the one lists themselves need in the panel.
 
 `*` is the default for every key minted without a `scopes` array, so it sits on nearly every key in every deployment. If `*` meant "every scope, including ones added later", adding `credits:grant` would have handed the power to mint credits to all of those keys at once, and no operator would have decided that. So `*` means "every standard scope", and an authority that creates value is held only by a key someone minted with it on purpose. The same reasoning is why it is not folded into `billing:write`, which every default key already holds.
 

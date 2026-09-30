@@ -8,20 +8,21 @@
  * staging/prod or a holding company with several SaaS products).
  *
  * This is the bootstrap super-admin surface, but it is no longer the only
- * creation path. There are four `tenant.create` sites: here, operator password
- * sign-up and operator OAuth first-login (both `tenant-auth.service.ts`, gated by
- * `OPERATOR_SIGNUP_MODE`), and workspace-create
+ * creation path. There are three `tenant.create` sites: here, operator sign-up
+ * (`tenant-auth/workspace-join.ts`, shared by password sign-up and OAuth first
+ * login, gated by `OPERATOR_SIGNUP_MODE`), and workspace-create
  * (`tenant-workspaces.service.ts`, gated by `WORKSPACE_CREATION`). Anything that
- * must hold for every workspace has to be enforced in all four, not just here.
+ * must hold for every workspace has to be enforced in all three, not just here.
  *
  * That is what `resolveNewTenantLimits` (lib/tenant-limits.ts) is for: it
  * resolves the deployment's `DEFAULT_TENANT_LIMITS` against any explicitly
  * passed limits and returns the `limits` fragment to spread into the create.
- * All four sites spread it. If you add a fifth `tenant.create`, spread it there
+ * All three sites spread it. If you add a fourth `tenant.create`, spread it there
  * too, a workspace created without it starts unlimited, which is precisely the
  * hole the variable exists to close.
  */
 
+import { countContacts, countLiveContactLists } from '../contacts/quota.js';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import {
@@ -53,6 +54,10 @@ export interface TenantLimitsView {
     activeEndUsers: number;
     /** Applications in this workspace whose environment is PRODUCTION. */
     productionApps: number;
+    /** Contacts across every Application, one per address per Application. */
+    contacts: number;
+    /** Lists that are not archived, across every Application. */
+    contactLists: number;
   };
 }
 
@@ -101,6 +106,8 @@ export const tenantsService = {
       usage: {
         activeEndUsers: await countActiveEndUsers(id),
         productionApps: await countProductionApps(id),
+        contacts: await countContacts(id, prisma),
+        contactLists: await countLiveContactLists(id, prisma),
       },
     };
   },

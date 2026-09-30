@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { DeviceBindingRequestSchema } from '@rekey.dev/shared-types';
+import { ClientHintSchema, CLIENT_PLATFORMS, DeviceBindingRequestSchema, type ClientHint } from '@rekey.dev/shared-types';
+import { requestClient, type ClientContext } from '../../lib/client-platform.js';
 import { authService } from './auth.service.js';
 import {
   requirePublishableOrSecretKey,
@@ -80,15 +81,35 @@ const WEBAUTHN_OPTIONS: JsonSchema = {
 function deviceContext(
   req: FastifyRequest,
   binding?: { fingerprint: string; label?: string | undefined },
-): { userAgent: string | null; ip: string | null; fingerprint: string | null; label: string | null } {
-  const ua = req.headers['user-agent'];
+  hint?: ClientHint,
+): {
+  userAgent: string | null;
+  ip: string | null;
+  fingerprint: string | null;
+  label: string | null;
+  client: ClientContext;
+} {
+  const client = requestClient(req, hint);
   return {
-    userAgent: typeof ua === 'string' && ua.length > 0 ? ua : null,
+    userAgent: client.userAgent,
     ip: req.ip || null,
     fingerprint: binding?.fingerprint ?? null,
     label: binding?.label ?? null,
+    client,
   };
 }
+
+/** JSON-schema twin of `ClientHintSchema`, for the OpenAPI document. */
+const CLIENT_BODY_SCHEMA = {
+  type: 'object',
+  description:
+    'What the client is, recorded on the session. A native app should send its platform, since its ' +
+    'User-Agent rarely says. See docs/analytics.md.',
+  properties: {
+    platform: { type: 'string', enum: [...CLIENT_PLATFORMS] },
+    appVersion: { type: 'string', pattern: '^[\\w.+-]{1,32}$' },
+  },
+} as const;
 
 /** JSON-schema twin of `DeviceBindingRequestSchema`, for the OpenAPI document. */
 const DEVICE_BODY_SCHEMA = {
@@ -144,12 +165,14 @@ const SignUpBody = z.object({
   password: z.string().min(1).max(256),
   metadata: z.record(z.unknown()).optional(),
   device: DeviceBindingRequestSchema.optional(),
+  client: ClientHintSchema.optional(),
 });
 
 const SignInBody = z.object({
   email: z.string().email().max(254),
   password: z.string().min(1).max(256),
   device: DeviceBindingRequestSchema.optional(),
+  client: ClientHintSchema.optional(),
 });
 
 const RefreshBody = z.object({
@@ -206,6 +229,7 @@ const MagicLinkRequestBody = z.object({
 const MagicLinkVerifyBody = z.object({
   token: z.string().min(1).max(512),
   device: DeviceBindingRequestSchema.optional(),
+  client: ClientHintSchema.optional(),
 });
 
 const PasskeyAuthStartBody = z.object({
@@ -218,6 +242,7 @@ const PasskeyAuthCompleteBody = z.object({
   response: z.record(z.unknown()),
   expectedChallenge: z.string().min(1).max(1024),
   device: DeviceBindingRequestSchema.optional(),
+  client: ClientHintSchema.optional(),
 });
 
 const PasskeyRegisterCompleteBody = z.object({
@@ -240,6 +265,7 @@ const MfaVerifyBody = z.object({
   mfaChallengeToken: z.string().min(1).max(2048),
   code: z.string().min(1).max(64),
   device: DeviceBindingRequestSchema.optional(),
+  client: ClientHintSchema.optional(),
 });
 
 export function shapeAuthResult(result: import('./auth.service.js').AuthResult): {
@@ -351,6 +377,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
               description: 'Free-form per-app metadata (display name, avatar, custom fields).',
             },
             device: DEVICE_BODY_SCHEMA,
+            client: CLIENT_BODY_SCHEMA,
           },
         },
         response: {
@@ -384,7 +411,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         email: body.email,
         password: body.password,
         ...(body.metadata !== undefined && { metadata: body.metadata }),
-        device: deviceContext(req, body.device),
+        device: deviceContext(req, body.device, body.client),
         // Signup policy: a `secret_only` app refuses creation via a pub key.
         ...(req.authKind !== undefined && { authKind: req.authKind }),
       });
@@ -416,6 +443,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
             email: { type: 'string', format: 'email', maxLength: 254 },
             password: { type: 'string', minLength: 1, maxLength: 256 },
             device: DEVICE_BODY_SCHEMA,
+            client: CLIENT_BODY_SCHEMA,
           },
         },
         response: {
@@ -453,7 +481,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         application: req.application!,
         email: body.email,
         password: body.password,
-        device: deviceContext(req, body.device),
+        device: deviceContext(req, body.device, body.client),
       });
       if (!outcome.mfaRequired) {
         recordEndUserEvent(req, 'user.signed_in', outcome.endUser.id, { via: 'password' });
@@ -480,6 +508,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
             mfaChallengeToken: { type: 'string', minLength: 1, maxLength: 2048 },
             code: { type: 'string', minLength: 1, maxLength: 64 },
             device: DEVICE_BODY_SCHEMA,
+            client: CLIENT_BODY_SCHEMA,
           },
         },
         response: {
@@ -493,6 +522,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
               'MFA_CHALLENGE_WRONG_APPLICATION — issued for a different Application; or ' +
               'MFA_CODE_INVALID: the TOTP/backup code did not verify; or ' +
               'MFA_CODE_REUSED: the TOTP code was already accepted, wait for the next one; or ' +
+              'MFA_BACKUP_CODE_USED: that backup code was already spent, use another one; or ' +
               'MFA_CHALLENGE_USED: the challenge token already completed a sign-in, sign in again.',
             403: BOOTSTRAP_403 + DEVICE_ERRORS_403,
           }),
@@ -505,7 +535,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         application: req.application!,
         mfaChallengeToken: body.mfaChallengeToken,
         code: body.code,
-        device: deviceContext(req, body.device),
+        device: deviceContext(req, body.device, body.client),
       });
       recordEndUserEvent(req, 'user.signed_in', result.endUser.id, { via: 'mfa' });
       return { success: true, data: shapeAuthResult(result) };
@@ -748,6 +778,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           properties: {
             token: { type: 'string', minLength: 1, maxLength: 512 },
             device: DEVICE_BODY_SCHEMA,
+            client: CLIENT_BODY_SCHEMA,
           },
         },
         response: {
@@ -775,7 +806,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       const outcome = await authService.verifyMagicLink({
         application: req.application!,
         token: body.token,
-        device: deviceContext(req, body.device),
+        device: deviceContext(req, body.device, body.client),
         // Signup policy: refuse creation via a pub key in `secret_only` apps.
         ...(req.authKind !== undefined && { authKind: req.authKind }),
       });
@@ -848,6 +879,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
             response: { type: 'object' },
             expectedChallenge: { type: 'string', minLength: 1, maxLength: 1024 },
             device: DEVICE_BODY_SCHEMA,
+            client: CLIENT_BODY_SCHEMA,
           },
         },
         response: {
@@ -870,7 +902,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         application: req.application!,
         expectedChallenge: body.expectedChallenge,
         response: body.response as never,
-        device: deviceContext(req, body.device),
+        device: deviceContext(req, body.device, body.client),
       });
       if (!outcome.mfaRequired) {
         recordEndUserEvent(req, 'user.signed_in', outcome.endUser.id, { via: 'passkey' });

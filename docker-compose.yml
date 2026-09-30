@@ -128,7 +128,9 @@ services:
       # Public, internet-reachable API origin for provider webhook URLs. Set in
       # a real deploy (e.g. https://api.yourdomain.com); empty falls back to API_URL.
       PUBLIC_WEBHOOK_BASE_URL: ${PUBLIC_WEBHOOK_BASE_URL:-}
-      # Local hosted-portal origin — auto-allowed for publishable-key calls.
+      # Local hosted-portal origin, auto-allowed for publishable-key calls and
+      # for portal password-reset links. Same origin as the portal's
+      # PORTAL_BASE_URL below, or portal resets fail with AUTH_URL_NOT_ALLOWED.
       PUBLIC_PORTAL_URL: ${PUBLIC_PORTAL_URL:-http://localhost:3050}
       # Who can create operator (admin) accounts: open | invite | closed.
       #
@@ -252,6 +254,7 @@ services:
     environment:
       NODE_ENV: production
       REKEY_URL: http://api:3030
+      # Same origin as the api's PUBLIC_PORTAL_URL above.
       PORTAL_BASE_URL: http://localhost:3050
       # Unset here: nothing sits in front of this portal, so any
       # X-Forwarded-For it receives was written by the client. Set it to the

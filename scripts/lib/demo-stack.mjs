@@ -229,13 +229,13 @@ export function apiEnv({ databaseUrl, redisUrl, port }) {
  * ~600 KB; the content is flat UI and text, which x264 compresses extremely
  * well at a low frame rate.
  */
-export function encode({ webmPath, mp4Path, posterPath, posterAtSeconds, log }) {
+export function encode({ webmPath, mp4Path, posterPath, posterAtSeconds, startSeconds = 0, log }) {
   mkdirSync(path.dirname(mp4Path), { recursive: true });
   log('encoding mp4');
   execFileSync(
     'ffmpeg',
     [
-      '-y', '-i', webmPath,
+      '-y', ...(startSeconds > 0 ? ['-ss', startSeconds.toFixed(2)] : []), '-i', webmPath,
       '-vf', 'fps=24,scale=1280:-2:flags=lanczos',
       '-c:v', 'libx264', '-profile:v', 'high', '-level', '4.0',
       '-pix_fmt', 'yuv420p', '-crf', '31', '-preset', 'veryslow',

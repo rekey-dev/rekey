@@ -39,6 +39,10 @@ export interface EndUserDetailDto {
     /** GDPR tombstone, set once the user has been erased. */
     erasedAt: string | null;
     erasedBy: string | null;
+    /** Operator ban. Absent from an older API, so read with `?? null`. */
+    bannedAt?: string | null;
+    bannedBy?: string | null;
+    banReason?: string | null;
     createdAt: string;
     updatedAt: string;
   };
@@ -158,6 +162,33 @@ function base(applicationId: string, euid: string): string {
  */
 export function getEndUserDetail(applicationId: string, euid: string): Promise<EndUserDetailDto> {
   return apiGet<EndUserDetailDto>(base(applicationId, euid));
+}
+
+export interface BanStateDto {
+  banned: boolean;
+  bannedAt: string | null;
+  bannedBy: string | null;
+  bannedByEmail: string | null;
+  banReason: string | null;
+}
+
+export interface BanHistoryRow {
+  id: string;
+  type: 'end_user.banned' | 'end_user.unbanned';
+  actorId: string | null;
+  actorEmail: string | null;
+  reason: string | null;
+  createdAt: string;
+}
+
+/** Null on failure, like the fetchers below and for the reason they document. */
+export function getEndUserBan(
+  applicationId: string,
+  euid: string,
+): Promise<{ state: BanStateDto; history: BanHistoryRow[] } | null> {
+  return apiGet<{ state: BanStateDto; history: BanHistoryRow[] }>(`${base(applicationId, euid)}/ban`, {
+    interruptOnAccessError: false,
+  }).catch(unlessBusy(() => null));
 }
 
 /**

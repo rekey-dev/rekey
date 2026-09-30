@@ -1,119 +1,20 @@
 import * as React from 'react';
 import Link from '@/components/Link';
-import { redirect } from 'next/navigation';
-import { errorQuery, readErrorFlash, api, PanelApiError, getApplication } from '@/lib/api';
+import { readErrorFlash, getApplication } from '@/lib/api';
 import { ActionForm } from '@/components/ActionForm';
 import { PageHeader } from '@/components/PageHeader';
 import { ApiErrorText } from '@/components/api-error';
 import { Card, SectionHeader } from '@/components/Card';
 import { SavedBanner } from '@/components/SavedBanner';
 import { StickyFormFooter } from '@/components/StickyFormFooter';
+import { saveAuth } from './actions';
+import { PRIMARY_METHODS } from './methods';
+import { JumpList } from '@/components/JumpList';
+import { BlockedDomainsInput } from '@/components/BlockedDomainsInput';
+import { savedStateKey } from '@/lib/saved-state-key';
 
-const PRIMARY_METHODS: Array<{ key: string; label: string; hint: string }> = [
-  {
-    key: 'password',
-    label: 'Email + password',
-    hint: 'Standard sign-up / sign-in. Argon2id-hashed at rest. Toggle off for OAuth-only apps.',
-  },
-  {
-    key: 'magic_link',
-    label: 'Magic link',
-    hint: "One-click sign-in via email, using the SDK's auth.requestMagicLink() + verifyMagicLink(). Delivered through this app's configured email transport (set one on the Email tab; otherwise the raw token is returned to your server to send).",
-  },
-];
 
-async function saveAuth(applicationId: string, formData: FormData): Promise<void> {
-  'use server';
-  const methods = PRIMARY_METHODS.filter((m) => formData.get(`method_${m.key}`) === 'on').map(
-    (m) => m.key,
-  );
-  const signupModeRaw = String(formData.get('signupMode') ?? 'public');
-  const signupMode = (
-    ['public', 'secret_only', 'invite_only'].includes(signupModeRaw) ? signupModeRaw : 'public'
-  ) as 'public' | 'secret_only' | 'invite_only';
-  const passwordMinLength = Math.max(8, Number(formData.get('passwordMinLength') ?? 8) || 8);
-  const mfaRaw = String(formData.get('mfa') ?? 'optional');
-  const mfa = (['off', 'optional', 'required'].includes(mfaRaw) ? mfaRaw : 'optional') as
-    | 'off'
-    | 'optional'
-    | 'required';
-  const organizationsEnabled = formData.get('organizationsEnabled') === 'on';
-  const passwordBreachCheckEnabled = formData.get('passwordBreachCheckEnabled') === 'on';
-  const sendVerificationEmailOnSignUp = formData.get('sendVerificationEmailOnSignUp') === 'on';
-  const requireEmailVerification = formData.get('requireEmailVerification') === 'on';
-  const welcomeEmailRaw = String(formData.get('welcomeEmail') ?? 'on_signup');
-  const welcomeEmail = (
-    ['on_signup', 'on_verified', 'off'].includes(welcomeEmailRaw) ? welcomeEmailRaw : 'on_signup'
-  ) as 'on_signup' | 'on_verified' | 'off';
-  const oidcEnabled = formData.get('oidcEnabled') === 'on';
-  // Same shape as `mfa` and `tokenAlg` above: a closed set, defaulted rather
-  // than trusted, because the value arrives from a form post.
-  const deviceBindingRaw = String(formData.get('deviceBinding') ?? 'optional');
-  const deviceBinding = (deviceBindingRaw === 'required' ? 'required' : 'optional') as
-    | 'optional'
-    | 'required';
-  // Only ever HS256 or RS256, anything else is a crafted form post, and the
-  // API would reject it anyway. Falling back to HS256 keeps the default.
-  const rawAlg = String(formData.get('tokenAlg') ?? '');
-  const tokenAlg = rawAlg === 'RS256' ? 'RS256' : 'HS256';
-  const redirectUrls = String(formData.get('redirectUrls') ?? '')
-    .split('\n')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  // Empty string is meaningful, it CLEARS the stored URL. Sending it through
-  // unchanged is what lets an operator remove a stale value; the API treats
-  // '' and null identically.
-  const appUrl = String(formData.get('appUrl') ?? '').trim();
-  const hostedAuthorizeUrl = String(formData.get('hostedAuthorizeUrl') ?? '').trim();
-  const allowedDomains = domainLines(formData.get('allowedDomains'));
-  const blockedDomains = domainLines(formData.get('blockedDomains'));
-  const blockDisposable = formData.get('blockDisposable') === 'on';
-  // Nothing set means no rules at all, so clear them rather than store an
-  // empty object that reads back as "configured".
-  const signupRestrictions =
-    allowedDomains.length === 0 && blockedDomains.length === 0 && !blockDisposable
-      ? null
-      : { allowedDomains, blockedDomains, blockDisposable };
 
-  try {
-    await api({
-      method: 'PATCH',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/auth-config`,
-      body: {
-        methods,
-        signupMode,
-        passwordMinLength,
-        mfa,
-        organizationsEnabled,
-        passwordBreachCheckEnabled,
-        sendVerificationEmailOnSignUp,
-        requireEmailVerification,
-        welcomeEmail,
-        oidcEnabled,
-        deviceBinding,
-        tokenAlg,
-        redirectUrls,
-        appUrl,
-        hostedAuthorizeUrl,
-        signupRestrictions,
-      },
-    });
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/auth?${await errorQuery(err)}`);
-    }
-    throw err;
-  }
-  redirect(`/applications/${applicationId}/auth?saved=1`);
-}
-
-/** One domain per line (commas also split), blanks dropped. The API normalises and validates. */
-function domainLines(value: FormDataEntryValue | null): string[] {
-  return String(value ?? '')
-    .split(/[\n,]/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
 
 const ERR: Record<string, string> = {
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can change auth settings.',
@@ -162,17 +63,12 @@ export default async function AuthMethodsPage({
   const requireEmailVerification =
     (app.authConfig as { requireEmailVerification?: boolean }).requireEmailVerification === true;
   const welcomeEmail = app.authConfig.welcomeEmail ?? 'on_signup';
-  // Off by default, same as `requireEmailVerification`, an app saved before
-  // the field existed must read back as OFF, never as "we're already an IdP".
-  const oidcEnabled = app.authConfig.oidcEnabled === true;
   // HS256 unless explicitly RS256, matches the schema default, so an app
   // saved before the field existed reads back what the API actually applies.
   const tokenAlg =
     (app.authConfig as { tokenAlg?: string }).tokenAlg === 'RS256' ? 'RS256' : 'HS256';
   const redirectUrls = app.authConfig.redirectUrls ?? [];
   const appUrl = (app.authConfig as { appUrl?: string }).appUrl ?? '';
-  const hostedAuthorizeUrl =
-    (app.authConfig as { hostedAuthorizeUrl?: string }).hostedAuthorizeUrl ?? '';
   const signupRestrictions = app.authConfig.signupRestrictions;
   // What emails would actually link to today if the operator saves nothing:
   // the origin of the first redirect URL. Shown as the placeholder so the
@@ -192,8 +88,28 @@ export default async function AuthMethodsPage({
     <div className="space-y-6">
       <PageHeader
         level={2}
-        title="Auth methods"
-        description="How end-users sign up and sign in to this application, and the security policy enforced on their accounts."
+        title="Methods"
+        description={
+          <>
+            How end-users sign up and sign in to this application, and the rules their accounts
+            follow. Acting as an OpenID Connect provider is set up under{' '}
+            <Link href={`/applications/${id}/oauth-clients#oidc-provider`} className="underline underline-offset-2">
+              OAuth clients
+            </Link>
+            .
+          </>
+        }
+      />
+
+      <JumpList
+        items={[
+          { href: '#sign-in', label: 'Sign-in methods' },
+          { href: '#sign-up', label: 'Sign-up & access' },
+          { href: '#email-rules', label: 'Email rules' },
+          { href: '#app-urls', label: 'Your application' },
+          { href: '#passwords', label: 'Passwords & 2FA' },
+          { href: '#sessions', label: 'Verification & sessions' },
+        ]}
       />
 
       {saved && <SavedBanner message="Auth settings saved." />}
@@ -206,9 +122,13 @@ export default async function AuthMethodsPage({
         </p>
       )}
 
-      <ActionForm action={saveAuth.bind(null, id)} className="space-y-6">
+      <ActionForm
+        key={savedStateKey(app.authConfig)}
+        action={saveAuth.bind(null, id)}
+        className="space-y-6"
+      >
         {/* 1, Sign-in methods: credential toggles + read-only OAuth summary. */}
-        <section className="space-y-3">
+        <section id="sign-in" className="scroll-mt-28 md:scroll-mt-20 space-y-3">
           <SectionHeader
             title="Sign-in methods"
             description="What end-users can authenticate with. OAuth providers are managed on their own tab. A provider counts as on once it's configured."
@@ -230,7 +150,7 @@ export default async function AuthMethodsPage({
                   {oauthCount === 0
                     ? 'No providers configured yet.'
                     : `${oauthCount} provider${oauthCount === 1 ? '' : 's'} configured.`}{' '}
-                  Add or remove them on the OAuth tab.
+                  Add or remove them under Sign-in providers.
                 </div>
               </div>
               <Link
@@ -244,7 +164,7 @@ export default async function AuthMethodsPage({
         </section>
 
         {/* 2, Sign-up & access: who can create accounts, org model. */}
-        <section className="space-y-3">
+        <section id="sign-up" className="scroll-mt-28 md:scroll-mt-20 space-y-3">
           <SectionHeader
             title="Sign-up & access"
             description="Who can create accounts, and whether end-users can form multi-user teams."
@@ -335,7 +255,7 @@ export default async function AuthMethodsPage({
         </section>
 
         {/* 2b, Sign-up email rules: which addresses may create an account. */}
-        <section className="space-y-3">
+        <section id="email-rules" className="scroll-mt-28 md:scroll-mt-20 space-y-3">
           <SectionHeader
             title="Sign-up email rules"
             description="Which email addresses may create an account. Existing users always sign in, and users you create or import here are never checked."
@@ -346,9 +266,9 @@ export default async function AuthMethodsPage({
               hint={
                 <>
                   One per line. When any are listed, only these domains can sign up.{' '}
-                  <code className="text-xs">acme.com</code> matches that domain only;{' '}
-                  <code className="text-xs">*.acme.com</code> matches its subdomains, so list both
-                  for both. Leave empty to allow every domain. The person refused sees{' '}
+                  <code className="text-xs">example.com</code> allows only that domain; add{' '}
+                  <code className="text-xs">*.example.com</code> to cover its subdomains. Leave
+                  empty to allow every domain. The person refused sees{' '}
                   <code className="text-xs">SIGNUP_EMAIL_DOMAIN_NOT_ALLOWED</code>, never this
                   list.
                 </>
@@ -364,13 +284,16 @@ export default async function AuthMethodsPage({
             </Field>
             <Field
               label="Blocked domains"
-              hint="One per line, same matching. A blocked domain wins over an allowed one. Up to 500 in each list."
+              hint={
+                <>
+                  One per line. <code className="text-xs">example.com</code> blocks only that
+                  domain; add <code className="text-xs">*.example.com</code> to cover its
+                  subdomains. A blocked domain wins over an allowed one. Up to 500 in each list.
+                </>
+              }
             >
-              <textarea
-                name="blockedDomains"
-                rows={3}
+              <BlockedDomainsInput
                 defaultValue={(signupRestrictions?.blockedDomains ?? []).join('\n')}
-                placeholder="competitor.com"
                 className={`${inputCls} w-full font-mono`}
               />
             </Field>
@@ -381,8 +304,10 @@ export default async function AuthMethodsPage({
               defaultChecked={signupRestrictions?.blockDisposable === true}
               hint={
                 <>
-                  Refuses throwaway-inbox services such as mailinator.com, and their subdomains,
-                  using a list that ships with Rekey and updates with each release. A magic-link
+                  Refuses throwaway-inbox services such as mailinator.com. Unlike the blocked
+                  domains list, this also covers their subdomains, with no{' '}
+                  <code className="text-xs">*.</code> entry needed. The list ships with Rekey and
+                  updates with each release. A magic-link
                   request for a refused address answers as if it sent, so the rules cannot be
                   probed.
                 </>
@@ -391,11 +316,11 @@ export default async function AuthMethodsPage({
           </Card>
         </section>
 
-        {/* 3, Application URL: the origin transactional emails link back to. */}
-        <section className="space-y-3">
+        {/* 3, Where the application lives: email links and allowed redirects. */}
+        <section id="app-urls" className="scroll-mt-28 md:scroll-mt-20 space-y-3">
           <SectionHeader
             title="Your application"
-            description="Where this application lives on the web. Transactional emails link back here."
+            description="Where this application lives on the web: the address emails link back to, and where sign-in may send users afterwards."
           />
           <Card>
             <Field
@@ -438,159 +363,57 @@ export default async function AuthMethodsPage({
             </Field>
 
             <Field
-              label="Your own sign-in page for OpenID Connect"
+              label="Redirect URLs"
               hint={
                 <>
-                  Only relevant when this application acts as an{' '}
-                  <strong>OpenID Connect provider</strong> for another app. Blank, Rekey renders
-                  its own sign-in page, which accepts an <strong>email and password</strong>.
-                  {' '}
-                  <strong>
-                    If your users sign in with Google or GitHub, that page is a dead end for them
-                  </strong>
-                  : they have no password, so the only way through is a reset on an account that
-                  has none.
-                  {' '}
-                  Point this at your own login page and Rekey forwards the request there instead,
-                  with the parameters untouched. Your page signs the user in however it likes, and
-                  a user who is <em>already signed in</em> is not asked to sign in again.
-                  It must still ask for consent: clients register themselves, so a page that
-                  hands out a code on arrival gives the user&apos;s account to whoever sent
-                  the link. Show what{' '}
-                  <code className="font-mono text-xs">
-                    POST /api/v1/mcp/{app.slug}/oauth/authorize/preview
-                  </code>{' '}
-                  returns, and only on Allow call{' '}
-                  <code className="font-mono text-xs">
-                    POST /api/v1/mcp/{app.slug}/oauth/authorize/grant
-                  </code>{' '}
-                  with your secret key (it needs <code className="font-mono text-xs">auth:write</code>)
-                  and the user&apos;s access token, then redirect with the returned code.
+                  Where users can be sent back to after signing in. One URL per line, for example{' '}
+                  <code className="text-xs">https://yourapp.com/callback</code>. Sign-in flows may
+                  only redirect to addresses on this list, which stops attackers bouncing users to
+                  look-alike sites. Invalid URLs are rejected on save.
                 </>
               }
             >
-              <input
-                type="url"
-                name="hostedAuthorizeUrl"
-                defaultValue={hostedAuthorizeUrl}
-                placeholder="https://app.yourcompany.com/oauth/authorize"
+              <textarea
+                name="redirectUrls"
+                rows={3}
+                defaultValue={redirectUrls.join('\n')}
+                placeholder={'https://app.example.com/auth/callback\nhttps://app.example.com/welcome'}
                 className={`${inputCls} w-full font-mono`}
               />
             </Field>
           </Card>
         </section>
 
-        {/* 4, Security policy: MFA, breach check, password rules, redirect allow-list. */}
-        <section className="space-y-3">
+        {/* 4, Passwords and two-factor */}
+        <section id="passwords" className="scroll-mt-28 md:scroll-mt-20 space-y-3">
           <SectionHeader
-            title="Security policy"
-            description="Account-protection rules enforced server-side on every end-user, and what this application asserts about them to anyone else."
+            title="Passwords & two-factor"
+            description="Rules every end-user password meets, and whether a second sign-in step is offered or required."
           />
           <Card className="space-y-5">
             <ToggleRow
               padded={false}
               name="passwordBreachCheckEnabled"
-              label="Breached-password check (HIBP)"
+              label="Refuse breached passwords"
               defaultChecked={breachCheckEnabled}
               hint={
                 <>
-                  Rejects passwords that have appeared in known data breaches, checked whenever a
-                  user sets or changes one. Recommended on: passwords themselves never leave your
-                  server. Only an anonymous partial hash is compared against the public breach
-                  database. Turn off only if this deployment can&apos;t reach the internet.
+                  Refuses a password that has appeared in a known data breach, checked whenever a
+                  user sets or changes one. Recommended on. The password never leaves your server:
+                  only an anonymous fragment of its fingerprint is compared against the public
+                  breach list (
+                  <a
+                    href="https://haveibeenpwned.com/Passwords"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline underline-offset-2"
+                  >
+                    Have I Been Pwned
+                  </a>
+                  ). Turn off only if this deployment can&apos;t reach the internet.
                 </>
               }
             />
-
-            <ToggleRow
-              padded={false}
-              name="requireEmailVerification"
-              label="Require a verified email"
-              defaultChecked={requireEmailVerification}
-              hint={
-                <>
-                  No session until the user clicks their verification link. Sign-up, sign-in and
-                  refresh all answer <code className="text-xs">EMAIL_NOT_VERIFIED</code> (403)
-                  instead, so your app can say why. Sign-up still creates the account and always
-                  sends the link.{' '}
-                  <strong>Applies to existing accounts the moment you save</strong>: anyone who
-                  never confirmed their address is signed out within 15 minutes and stays out until
-                  they do, so make sure the verification email above is going out first. Give your
-                  sign-in screen a &ldquo;send it again&rdquo; button on{' '}
-                  <code className="text-xs">EMAIL_NOT_VERIFIED</code>, wired to{' '}
-                  <code className="text-xs">POST /api/v1/auth/resend-verification</code>. It takes
-                  no session, which is the point. Magic-link sign-in passes the gate rather than
-                  skipping it: clicking the link proves the address, and it is recorded.{' '}
-                  <strong>OAuth does not verify an address by itself</strong>: the account is
-                  marked verified only when the provider asserts it (Google&apos;s{' '}
-                  <code className="text-xs">email_verified</code>, GitHub&apos;s verified-emails
-                  list, Discord&apos;s <code className="text-xs">verified</code>). A provider that
-                  asserts nothing (some generic OIDC servers, Microsoft consumer accounts) leaves
-                  the account unverified, and that user hits this gate like any other. Trusting the
-                  provider&apos;s claim and nothing more is deliberate: an address a provider will
-                  not vouch for is one anybody could have registered.{' '}
-                  <strong>Required for the OpenID Connect `email` scope</strong>. While this is
-                  off, an Application acting as an identity provider will not assert an address it
-                  has no proof of, and omits <code className="text-xs">email</code> from its
-                  discovery document.
-                </>
-              }
-            />
-
-            <ToggleRow
-              padded={false}
-              name="oidcEnabled"
-              label="Act as an OpenID Connect provider"
-              defaultChecked={oidcEnabled}
-              hint={
-                <>
-                  Turns this application into a public <strong>identity provider</strong>: other
-                  products can offer &ldquo;Sign in with {app.name}&rdquo; and your end-users&apos;
-                  accounts here become their accounts there. Switching it on publishes an
-                  unauthenticated
-                  discovery document at{' '}
-                  <code className="text-xs">/.well-known/openid-configuration</code>, starts issuing{' '}
-                  <code className="text-xs">id_token</code>s for the{' '}
-                  <code className="text-xs">openid</code> scope, and exposes{' '}
-                  <code className="text-xs">/oauth/userinfo</code>. Relying parties self-register
-                  themselves by default, so anyone who finds the issuer can put a password prompt
-                  on it. Leave this off unless you actually want to be an identity provider.
-                  Once your relying parties are registered, close registration on the{' '}
-                  <strong>OAuth clients</strong> tab, where you can also see and revoke whatever
-                  has registered. Independent of the MCP server switch on the
-                  MCP tab; either one mounts the shared OAuth endpoints. The{' '}
-                  <code className="text-xs">email</code> claim additionally needs{' '}
-                  <strong>Require a verified email</strong> above.
-                </>
-              }
-            />
-
-            <Field
-              label="End-user token signing"
-              hint={
-                <>
-                  <strong>HS256</strong> signs end-user access tokens with this deployment&apos;s
-                  shared secret. That is fine when only your own backend verifies them, because verifying
-                  requires the secret. <strong>RS256</strong> signs with a keypair and publishes the
-                  public half at <code className="text-xs">/.well-known/jwks.json</code>, so a third
-                  party can verify a token without being able to mint one. This governs the
-                  access tokens your own backend checks. It does not affect OpenID Connect:
-                  id_tokens are always RS256 and always verifiable from the published JWKS,
-                  because a relying party only ever sees that. Changing this invalidates access
-                  tokens signed with the old algorithm, so expect a round of sign-ins.
-                </>
-              }
-            >
-              <select
-                name="tokenAlg"
-                defaultValue={tokenAlg}
-                className="w-full max-w-xs rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
-              >
-                <option value="HS256">HS256: shared secret (default)</option>
-                <option value="RS256">RS256: public keypair, third parties can verify</option>
-              </select>
-            </Field>
-
             <Field
               label="Minimum password length"
               hint="Enforced server-side on sign-up; 8 minimum."
@@ -604,7 +427,6 @@ export default async function AuthMethodsPage({
                 className={`${inputCls} w-32 font-mono`}
               />
             </Field>
-
             <Field
               label="Two-factor authentication (TOTP)"
               hint={
@@ -623,6 +445,79 @@ export default async function AuthMethodsPage({
                 <option value="required">Required: force enrollment at sign-in</option>
               </select>
             </Field>
+          </Card>
+        </section>
+
+        {/* 5, Verification and sessions */}
+        <section id="sessions" className="scroll-mt-28 md:scroll-mt-20 space-y-3">
+          <SectionHeader
+            title="Verification & sessions"
+            description={
+              <>
+                Whether an unverified address gets a session, how sessions are tied to devices, and
+                how access tokens are signed. To sign every end-user out at once, use{' '}
+                <Link href={`/applications/${id}/settings#force-logout`} className="underline">
+                  Sign out all end-users
+                </Link>{' '}
+                in Settings.
+              </>
+            }
+          />
+          <Card className="space-y-5">
+
+            <ToggleRow
+              padded={false}
+              name="requireEmailVerification"
+              label="Require a verified email"
+              defaultChecked={requireEmailVerification}
+              hint={
+                <>
+                  No session until the user clicks their verification link: sign-up, sign-in and
+                  refresh answer <code className="text-xs">EMAIL_NOT_VERIFIED</code> (403) instead.{' '}
+                  <strong>Applies to existing accounts the moment you save</strong>: anyone who
+                  never confirmed is signed out within 15 minutes, so check the verification email
+                  is going out first, and give your sign-in screen a &ldquo;send it again&rdquo;
+                  button wired to{' '}
+                  <code className="text-xs">POST /api/v1/auth/resend-verification</code>. A
+                  magic link counts as proof. A social sign-in counts only when the provider
+                  vouches for the address. Needed to share email addresses over OpenID Connect.{' '}
+                  <a
+                    href="https://github.com/rekey-dev/rekey/blob/main/docs/auth.md"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline underline-offset-2"
+                  >
+                    How verification works
+                  </a>
+                </>
+              }
+            />
+
+            <Field
+              label="End-user token signing"
+              hint={
+                <>
+                  <strong>HS256</strong> signs with this deployment&apos;s shared secret, so checking
+                  a token needs that secret: fine when only your own backend checks them. <strong>RS256</strong> signs with a key pair
+                  and publishes the public half at{' '}
+                  <code className="text-xs">/.well-known/jwks.json</code>, so anyone can check a
+                  token without being able to make one. OpenID Connect ID tokens always use RS256.
+                  Changing this invalidates access tokens signed the old way, so expect a round
+                  of refreshes and sign-ins.
+                </>
+              }
+            >
+              <select
+                name="tokenAlg"
+                defaultValue={tokenAlg}
+                className="w-full max-w-xs rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+              >
+                <option value="HS256">HS256: shared secret (default)</option>
+                <option value="RS256">RS256: public keypair, third parties can verify</option>
+              </select>
+            </Field>
+
+
 
             {/* This setting exists on the schema, on the PATCH body, in the
                 published OpenAPI and in the operator MCP tool, and had no
@@ -655,31 +550,10 @@ export default async function AuthMethodsPage({
               </select>
             </Field>
 
-            <Field
-              label="Redirect URLs"
-              hint={
-                <>
-                  Where users can be sent back to after signing in. One URL per line, e.g.{' '}
-                  <code className="text-xs">https://yourapp.com/callback</code>. Sign-in flows may
-                  only redirect to addresses on this list, which stops attackers bouncing users to
-                  look-alike sites. Invalid URLs are rejected on save.
-                </>
-              }
-            >
-              <textarea
-                name="redirectUrls"
-                rows={3}
-                defaultValue={redirectUrls.join('\n')}
-                placeholder={'https://app.example.com/auth/callback\nhttps://app.example.com/welcome'}
-                className={`${inputCls} w-full font-mono`}
-              />
-            </Field>
           </Card>
         </section>
 
-        {/* This page is 14 controls over ~1970px. A Save that only exists at
-            the very bottom is a Save most of the page cannot see, and until now
-            navigating away threw the edits out without a word. */}
+        {/* A long page with one Save: the bar stays in view and guards unsaved edits. */}
         <StickyFormFooter hint="Changes apply to new sign-ins immediately." />
       </ActionForm>
     </div>

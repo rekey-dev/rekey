@@ -30,12 +30,9 @@ import { eventDetails, humanizeEventType, resolveActorEmails } from '@/lib/secur
  *
  * ## What is NOT here
  *
- * FAILED sign-ins. The API does not record them as security events at all,
- * `auth.service.ts` increments a Redis brute-force counter and throws 401, with
- * no `recordSecurityEvent` on that path; lockout does the same. There is no
- * event type for either, so no amount of panel work can list them. The banner
- * below states that plainly instead of leaving an operator to conclude a user
- * with 7 failed attempts simply did nothing.
+ * Failed password sign-ins against an address that was never registered. The
+ * API records `user.sign_in_failed` and `user.locked_out` only for an end-user
+ * that exists, so attempts against unknown addresses show in the request log.
  */
 
 const inputCls =
@@ -148,11 +145,10 @@ export default async function ActivityPage({
         )}
       </ActionForm>
 
-      {/* Not a caveat we can design away: the events simply do not exist. */}
       <Banner tone="info">
-        Failed sign-ins and lockouts are <strong>not</strong> recorded as events. The API counts
-        them in Redis and discards the detail, so they can&apos;t be listed here or anywhere else.
-        The live counter and lock state for one person are on their end-user page.
+        Failed sign-ins and lockouts are listed for end-users who exist. Attempts against an address
+        that was never registered are not recorded, so credential stuffing shows in Developer,
+        Requests instead. The live lock state for one person is on their Security tab.
       </Banner>
 
       {emailNotFound && (

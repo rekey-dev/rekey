@@ -70,7 +70,7 @@ export async function planCheckoutReadiness(
       provider: null,
       code: 'NO_BILLING_PROVIDER',
       message: 'This Application has no billing provider configured, so nothing can be bought.',
-      fix: 'Connect Stripe, PayPal or Razorpay on the Billing tab. Plans created before that will need registering afterwards.',
+      fix: 'Connect Stripe, PayPal or Razorpay in Panel → Application → Billing → Setup → Providers. Plans created before that will need registering afterwards.',
     };
     for (const plan of plans) out.set(plan.id, { ready: false, blockers: [blocker] });
     return out;

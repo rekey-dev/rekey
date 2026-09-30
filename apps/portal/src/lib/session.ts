@@ -130,6 +130,28 @@ export async function getRefreshToken(): Promise<string | null> {
   return jar.get(REFRESH)?.value ?? null;
 }
 
+export const MFA_CHALLENGE = 'rekey_portal_mfa';
+/** The API's challenge token lives five minutes; the cookie goes with it. */
+const MFA_CHALLENGE_MAX_AGE = 5 * 60;
+
+/**
+ * The MFA challenge token between the password step and the code step. It
+ * rides in a cookie, not the URL, so the signed token never lands in access
+ * logs or browser history. Server Actions only.
+ */
+export async function setMfaChallenge(slug: string, token: string): Promise<void> {
+  (await cookies()).set(MFA_CHALLENGE, token, await cookieOpts(slug, MFA_CHALLENGE_MAX_AGE));
+}
+
+export async function clearMfaChallenge(slug: string): Promise<void> {
+  (await cookies()).set(MFA_CHALLENGE, '', await cookieOpts(slug, 0));
+}
+
+export async function getMfaChallenge(): Promise<string | null> {
+  const value = (await cookies()).get(MFA_CHALLENGE)?.value;
+  return value ? value : null;
+}
+
 /**
  * Refresh exchanges IN FLIGHT, keyed by a SHA-256 digest of the refresh token
  * being spent (never the token itself).

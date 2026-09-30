@@ -10,7 +10,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createServer, type Server } from 'node:http';
 import path from 'node:path';
@@ -240,7 +240,7 @@ describe('rekey CLI', () => {
 
   it('commands still read the admin key and API URL from the environment', async () => {
     stub.reset();
-    const r = await runCli(['apps', 'list', '--json'], { REKEY_URL: stub.url, SUPER_ADMIN_KEY: SENTINEL });
+    const r = await runCli(['apps', 'list', '--json'], { REKEY_URL: stub.url, SUPER_ADMIN_KEY: 'x'.repeat(40) });
     expect(r.code).toBe(0);
     expect(stub.requests.map((q) => q.key)).toEqual(['GET /api/v1/admin/applications']);
   });
@@ -497,6 +497,150 @@ describe('rekey CLI', () => {
     expect(parsed.error.message).toContain('PRODUCTION');
     expect(stub.requests).toEqual([]);
   });
+
+  // ---------- init: the owner gets an invite, not just a label ----------
+
+  const BOUND_INVITE = {
+    id: 'oi_1',
+    tenantId: 'tn_1',
+    email: 'ops@acme.com',
+    role: 'OWNER',
+    expiresAt: '2026-10-05T00:00:00.000Z',
+  };
+
+  function stubInit(
+    inviteUrl: string | null,
+    opts: { invite?: Record<string, unknown>; mode?: string | null } = {},
+  ): void {
+    stub.reset();
+    stub.setResponse('POST /api/v1/admin/tenants', 201, {
+      success: true,
+      data: { id: 'tn_1', name: 'Acme', ownerEmail: 'ops@acme.com' },
+    });
+    stub.setResponse('POST /api/v1/admin/operator-invites', 201, {
+      success: true,
+      data: {
+        invite: opts.invite ?? BOUND_INVITE,
+        rawToken: 'rp_opinv_secret',
+        inviteUrl,
+        warning: 'shown once',
+      },
+    });
+    if (opts.mode === null) {
+      stub.setResponse('GET /api/v1/tenant/auth/signup-mode', 404, { success: false });
+    } else {
+      stub.setResponse('GET /api/v1/tenant/auth/signup-mode', 200, {
+        success: true,
+        data: { mode: opts.mode ?? 'open' },
+      });
+    }
+    stub.setResponse('DELETE /api/v1/admin/operator-invites/oi_1', 200, { success: true, data: {} });
+    stub.setResponse('POST /api/v1/admin/applications', 201, {
+      success: true,
+      data: { id: 'app_1', slug: 'acme-prod', publicKey: 'rp_pub_x' },
+    });
+    stub.setResponse('POST /api/v1/admin/applications/app_1/api-keys', 201, {
+      success: true,
+      data: { apiKey: { id: 'k_1', keyPrefix: 'rp_test_ab' }, rawKey: 'rp_test_secret', warning: 'once' },
+    });
+  }
+
+  const INIT_ARGS = [
+    'init',
+    '--tenant-name', 'Acme',
+    '--owner-email', 'ops@acme.com',
+    '--app-name', 'Acme Prod',
+    '--app-slug', 'acme-prod',
+  ];
+  const INIT_ENV = () => ({ REKEY_URL: stub.url, SUPER_ADMIN_KEY: 'x'.repeat(40) });
+
+  it('init mints an OWNER invite bound to the new tenant, before the app and key', async () => {
+    stubInit('https://panel.acme.test/accept-invite?token=rp_opinv_secret');
+    const r = await runCli([...INIT_ARGS, '--json'], INIT_ENV());
+    expect(r.code, r.stderr).toBe(0);
+    expect(stub.requests.map((q) => q.key)).toEqual([
+      'POST /api/v1/admin/tenants',
+      'POST /api/v1/admin/operator-invites',
+      'GET /api/v1/tenant/auth/signup-mode',
+      'POST /api/v1/admin/applications',
+      'POST /api/v1/admin/applications/app_1/api-keys',
+    ]);
+    expect(stub.requests[1]!.body).toMatchObject({ tenantId: 'tn_1', email: 'ops@acme.com', role: 'OWNER' });
+    const parsed = JSON.parse(r.stdout) as { ownerInvite: Record<string, unknown> };
+    expect(parsed.ownerInvite).toMatchObject({
+      email: 'ops@acme.com',
+      role: 'OWNER',
+      expiresAt: '2026-10-05T00:00:00.000Z',
+      token: 'rp_opinv_secret',
+      url: 'https://panel.acme.test/accept-invite?token=rp_opinv_secret',
+      signupMode: 'open',
+    });
+    expect(parsed.ownerInvite.nextStep).toContain('Send the link to ops@acme.com');
+  });
+
+  it('init prints the invite link, its expiry and what to do next', async () => {
+    stubInit('https://panel.acme.test/accept-invite?token=rp_opinv_secret');
+    const r = await runCli(INIT_ARGS, INIT_ENV());
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain('https://panel.acme.test/accept-invite?token=rp_opinv_secret');
+    expect(r.stdout).toContain('expires 2026-10-05T00:00:00.000Z');
+    expect(r.stdout).toContain('Send the link to ops@acme.com');
+    expect(r.stdout).toContain('create an account from the link');
+    expect(r.stdout).not.toContain('Sign-up is closed');
+  });
+
+  it('init without PANEL_URL on the API still prints a usable path', async () => {
+    stubInit(null);
+    const r = await runCli(INIT_ARGS, INIT_ENV());
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain('<your panel URL>/accept-invite?token=rp_opinv_secret');
+  });
+
+  it('init in closed sign-up mode says only an existing account can accept', async () => {
+    stubInit(null, { mode: 'closed' });
+    const r = await runCli(INIT_ARGS, INIT_ENV());
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain('Sign-up is closed on this deployment');
+    expect(r.stdout).toContain('only an existing account can accept');
+    expect(r.stdout).not.toContain('create an account from the link');
+  });
+
+  it('init words the next step for every mode when the mode cannot be read', async () => {
+    stubInit(null, { mode: null });
+    const r = await runCli([...INIT_ARGS, '--json'], INIT_ENV());
+    expect(r.code, r.stderr).toBe(0);
+    const invite = (JSON.parse(r.stdout) as { ownerInvite: { signupMode: unknown; nextStep: string } }).ownerInvite;
+    expect(invite.signupMode).toBeNull();
+    expect(invite.nextStep).toContain('create an account from the link');
+    expect(invite.nextStep).toContain('If sign-up is closed on this deployment, only an existing account can accept');
+  });
+
+  it('init refuses and revokes an invite an older API minted unbound, before any app or key', async () => {
+    // What a pre-binding API answers: its mint schema drops tenantId/email/role.
+    stubInit(null, {
+      invite: { id: 'oi_1', tokenPrefix: 'rp_opinv_abc', expiresAt: null, status: 'active' },
+    });
+    const r = await runCli([...INIT_ARGS, '--json'], INIT_ENV());
+    expect(r.code).toBe(1);
+    const parsed = JSON.parse(r.stderr) as { error: { code: string; message: string; fix: string } };
+    expect(parsed.error.code).toBe('CLI_INVITE_UNBOUND');
+    expect(parsed.error.message).toContain('The key was revoked');
+    expect(parsed.error.fix).toContain('Upgrade the Rekey API to 2.2.0 or later');
+    expect(parsed.error.fix).toContain('"tenantId": "tn_1"');
+    expect(r.stdout).not.toContain('rp_opinv_secret');
+    expect(stub.requests.map((q) => q.key)).toEqual([
+      'POST /api/v1/admin/tenants',
+      'POST /api/v1/admin/operator-invites',
+      'DELETE /api/v1/admin/operator-invites/oi_1',
+    ]);
+  });
+
+  it('init refuses an invite bound to some other tenant', async () => {
+    stubInit(null, { invite: { ...BOUND_INVITE, tenantId: 'tn_other' } });
+    const r = await runCli([...INIT_ARGS, '--json'], INIT_ENV());
+    expect(r.code).toBe(1);
+    expect((JSON.parse(r.stderr) as { error: { code: string } }).error.code).toBe('CLI_INVITE_UNBOUND');
+  });
 });
 
 /**
@@ -561,5 +705,149 @@ describe('importing the package is inert', () => {
     const r = await runCli(['--version']);
     expect(r.code).toBe(0);
     expect(r.stdout.trim()).toBe(PKG_VERSION);
+  });
+});
+
+describe('rekey lists', () => {
+  let stub: StubServer;
+
+  beforeAll(async () => {
+    stub = await startStubServer();
+  });
+
+  afterAll(async () => {
+    await stub.close();
+  });
+
+  const member = (email: string, extra: Record<string, unknown> = {}) => ({
+    contactId: `c_${email}`,
+    email,
+    name: null,
+    status: 'subscribed',
+    source: 'secret',
+    consentVersion: 1,
+    consentAt: '2026-09-29T00:00:00.000Z',
+    subscribedAt: '2026-09-29T00:00:00.000Z',
+    unsubscribedAt: null,
+    updatedAt: '2026-09-29T00:00:00.000Z',
+    ...extra,
+  });
+
+  it('lists commands need an Application secret key, not the admin key', async () => {
+    const r = await runCli(['lists', 'ls', '--json'], { REKEY_URL: stub.url, SUPER_ADMIN_KEY: 'x'.repeat(40), REKEY_SECRET: '' });
+    expect(r.code).toBe(1);
+    expect((JSON.parse(r.stderr) as { error: { code: string } }).error.code).toBe('CLI_SECRET_KEY_MISSING');
+  });
+
+  it('lists ls sends the secret key and prints the lists', async () => {
+    stub.reset();
+    stub.setResponse('GET /api/v1/lists', 200, {
+      success: true,
+      data: {
+        items: [{ key: 'waitlist', name: 'Waitlist', kind: 'waitlist', publicCapture: true, archived: false, subscribed: 3, unsubscribed: 1 }],
+        page: { total: 1, limit: 1, offset: 0, hasMore: false },
+      },
+    });
+    const r = await runCli(['lists', 'ls', '--json'], { REKEY_URL: stub.url, REKEY_SECRET: 'rp_live_cli' });
+    expect(r.code, r.stderr).toBe(0);
+    expect((JSON.parse(r.stdout) as { lists: Array<{ key: string }> }).lists.map((l) => l.key)).toEqual(['waitlist']);
+  });
+
+  it('lists export follows cursors and writes CSV with formula cells defused', async () => {
+    stub.reset();
+    stub.setResponse('GET /api/v1/lists/waitlist/members?status=all&limit=500', 200, {
+      success: true,
+      data: { items: [member('a@example.com', { name: '=HYPERLINK("x")' })], nextCursor: 'NEXT' },
+    });
+    stub.setResponse('GET /api/v1/lists/waitlist/members?status=all&cursor=NEXT&limit=500', 200, {
+      success: true,
+      data: { items: [member('b@example.com', { name: 'Smith, Jo' })], nextCursor: null },
+    });
+    const r = await runCli(['lists', 'export', 'waitlist', '--status', 'all'], { REKEY_URL: stub.url, REKEY_SECRET: 'rp_live_cli' });
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout.trim().split('\n')).toEqual([
+      'email,name,status,source,consentVersion,consentAt,subscribedAt,unsubscribedAt,updatedAt',
+      `a@example.com,"'=HYPERLINK(""x"")",subscribed,secret,1,2026-09-29T00:00:00.000Z,2026-09-29T00:00:00.000Z,,2026-09-29T00:00:00.000Z`,
+      `b@example.com,"Smith, Jo",subscribed,secret,1,2026-09-29T00:00:00.000Z,2026-09-29T00:00:00.000Z,,2026-09-29T00:00:00.000Z`,
+    ]);
+  });
+
+  it('lists export --format jsonl --out writes the file and a JSON summary', async () => {
+    stub.reset();
+    stub.setResponse('GET /api/v1/lists/news/members?status=subscribed&limit=500', 200, {
+      success: true,
+      data: { items: [member('a@example.com')], nextCursor: null },
+    });
+    const dir = mkdtempSync(path.join(tmpdir(), 'rekey-cli-export-'));
+    try {
+      const file = path.join(dir, 'news.jsonl');
+      const r = await runCli(['lists', 'export', 'news', '--format', 'jsonl', '--out', file, '--json'], {
+        REKEY_URL: stub.url,
+        REKEY_SECRET: 'rp_live_cli',
+      });
+      expect(r.code, r.stderr).toBe(0);
+      expect(JSON.parse(r.stdout)).toEqual({ key: 'news', format: 'jsonl', status: 'subscribed', count: 1, file });
+      expect(JSON.parse(readFileSync(file, 'utf8').trim())).toMatchObject({ email: 'a@example.com' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lists export surfaces the API refusal with its fix', async () => {
+    stub.reset();
+    stub.setResponse('GET /api/v1/lists/news/members?status=subscribed&limit=500', 403, {
+      success: false,
+      error: { code: 'API_KEY_SCOPE_INSUFFICIENT', message: 'needs contacts:read', fix: 'Mint a key with contacts:read.' },
+    });
+    const r = await runCli(['lists', 'export', 'news', '--json'], { REKEY_URL: stub.url, REKEY_SECRET: 'rp_live_cli' });
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.stderr)).toEqual({
+      success: false,
+      error: { code: 'API_KEY_SCOPE_INSUFFICIENT', message: 'needs contacts:read', fix: 'Mint a key with contacts:read.' },
+    });
+  });
+
+
+  // ---------- analytics ----------
+
+  it('analytics users needs an operator token', async () => {
+    stub.reset();
+    const r = await runCli(['analytics', 'users', '--app', 'app_1', '--json'], { REKEY_URL: stub.url, SUPER_ADMIN_KEY: 'x'.repeat(40) });
+    expect(r.code).toBe(1);
+    const parsed = JSON.parse(r.stderr) as { error: { code: string; fix: string } };
+    expect(parsed.error.code).toBe('CLI_OPERATOR_TOKEN_MISSING');
+    expect(parsed.error.fix).toContain('REKEY_OPERATOR_TOKEN');
+    expect(stub.requests).toHaveLength(0);
+  });
+
+  it('analytics users forwards the flags as the query and prints the API data', async () => {
+    stub.reset();
+    const key = 'GET /api/v1/tenant/applications/app_1/analytics/users?range=7d&sections=kpis&platform=ios&createdVia=oauth';
+    const data = {
+      range: { from: '2026-09-24', to: '2026-09-30', days: 7, timezone: 'UTC' },
+      sections: { kpis: { status: 'ok', source: 'live', timezone: 'UTC', data: { totalUsers: { value: 3 } } } },
+    };
+    stub.setResponse(key, 200, { success: true, data });
+    const r = await runCli(
+      ['analytics', 'users', '--app', 'app_1', '--range', '7d', '--sections', 'kpis', '--platform', 'ios', '--created-via', 'oauth', '--json'],
+      { REKEY_URL: stub.url, REKEY_OPERATOR_TOKEN: 'rk_pat_test' },
+    );
+    expect(r.code, r.stderr).toBe(0);
+    expect(stub.requests.map((q) => q.key)).toEqual([key]);
+    expect(JSON.parse(r.stdout)).toEqual(data);
+  });
+
+  it('analytics users passes the API error code and fix through', async () => {
+    stub.reset();
+    stub.setResponse('GET /api/v1/tenant/applications/app_1/analytics/users?range=90d', 400, {
+      success: false,
+      error: { code: 'ANALYTICS_RANGE_TOO_LONG', message: 'too long', fix: 'Shorten the range to 63 days or less.' },
+    });
+    const r = await runCli(['analytics', 'users', '--app', 'app_1', '--range', '90d', '--json'], {
+      REKEY_URL: stub.url,
+      REKEY_OPERATOR_TOKEN: 'rk_pat_test',
+    });
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.stderr)).toMatchObject({ error: { code: 'ANALYTICS_RANGE_TOO_LONG', fix: 'Shorten the range to 63 days or less.' } });
   });
 });

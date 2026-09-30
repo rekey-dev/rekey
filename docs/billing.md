@@ -53,7 +53,10 @@ GET    /api/v1/admin/applications/:id/plans?includeInactive=true
 POST   /api/v1/admin/applications/:id/plans               { slug, name, amount, currency?, interval?, metadata? }
 PATCH  /api/v1/admin/applications/:id/plans/:slug         { active?, name?, amount?, currency?, interval?, metadata? }
 POST   /api/v1/admin/applications/:id/plans/:slug/register
+GET    /api/v1/admin/applications/:id/plans/:slug/entitlements
 ```
+
+The entitlements read returns the plan's rows (`kind`, `key`, `valueType`, `value`) with no subscription override applied. Edit them on the tenant route of the same path.
 
 The create body is **strict**: it builds SUBSCRIPTION plans, and an unknown key (`kind`, `licenseKind`, `creditsAmount`, or a typo) is a 400 `VALIDATION_ERROR` naming the field. It used to drop them and answer 201, so a caller asking for a LICENSE or CREDIT plan got a subscription and a success message. Per-kind plans and `trialDays` live on the tenant route, `POST /api/v1/tenant/applications/:id/plans`.
 
@@ -177,7 +180,7 @@ Nothing changes in your code. `POST /billing/checkout` still answers with a
 response says `"mode": "embedded"`. Pass `"mode": "redirect"` on a checkout to
 force the processor's page for that one checkout.
 
-**Switching it on.** Panel → Application → Billing → **Checkout page**. It is
+**Switching it on.** Panel → Application → Billing → Setup → **Checkout page**. It is
 set separately for **Test** and **Live**: a checkout uses the setting for the
 mode of the credentials its provider runs on, so you can run the Rekey page on
 sandbox credentials while live checkouts stay on PayPal's page. Switching a
@@ -191,9 +194,9 @@ any FAIL; switching back is never refused. The same settings are on the API:
 | Check | FAIL when | WARN when |
 |---|---|---|
 | Portal reachable | no hosted portal on this deployment (`PUBLIC_PORTAL_URL` unset), or the portal did not answer a round-trip probe | the probe took over 2 s |
-| Provider supports the page | the provider cannot take a flow this Application sells on the page | sandbox credentials on a PRODUCTION Application, or live ones on a DEVELOPMENT/STAGING one |
-| Webhook registered and delivering | no webhook registered; in live mode, no webhook verified with the live credentials in the last 30 days and since they were last saved (a sandbox delivery never counts) | the last verified webhook is over 7 days old; in test mode, none yet |
-| Plans ready in this mode | a live paid plan cannot be bought through the provider, or was registered in the other mode | a registration predates mode recording |
+| Provider supports the page | the provider cannot take a flow this Application sells on the page | sandbox credentials on a PRODUCTION Application, or live ones on a DEVELOPMENT/STAGING one; or nothing has shown the credentials work yet. Any one of these counts: a plan registered with the provider in this mode (Stripe), or, since the secret or its mode last changed, a checkout session opened in this mode, a subscription or payment through the provider, or a verified webhook. Editing only enablement or routing does not restart that window |
+| Webhook registered and delivering | no webhook registered; in live mode, no webhook verified with the live credentials in the last 30 days and since their secret was last saved (a sandbox delivery never counts) | the last verified webhook is over 7 days old; in test mode, none yet |
+| Plans ready in this mode | a live paid plan cannot be bought through the provider, or was registered in the other mode | there are no active paid plans to sell; or a registration predates mode recording |
 | Return URL origin registered | the Application has no Application URL and no redirect URLs | |
 | Browser credential | PayPal has no Client ID | |
 | Branding | | no display name or no logo (Panel → Application → Portal → Branding) |
@@ -208,7 +211,7 @@ checks. "Fall back to the provider's page" (the default) serves that checkout
 on PayPal's page and adds a `CHECKOUT_EMBEDDED_FELL_BACK` warning naming the
 check; "Refuse the checkout" answers `409 CHECKOUT_EMBEDDED_NOT_READY` and
 creates nothing. Neither tells the buyer why beyond the check's name: the
-detail is in the Checkout page section and the security log. On the Rekey page an unregistered `successUrl` or `cancelUrl`
+detail is on the Checkout page tab and the security log. On the Rekey page an unregistered `successUrl` or `cancelUrl`
 is always a failed check, never a warning. `CHECKOUT_EMBEDDED_ENABLED=false`
 on the API switches the page off for the whole deployment under the same rules.
 
@@ -299,7 +302,7 @@ is off. The same list is `include=licenses` on `/auth/me` and `/users/me`, as
 `{ items, truncated }`: the first 100 rows, with `truncated: true` when there
 are more to page through here.
 
-`POST /subscribe` puts the caller on the Application's nominated free plan (`billingConfig.defaultPlanSlug`) with no provider involved. When that plan grants CREDIT or LICENSE entitlements, the claim is **once per end-user**, across their personal account and every organization they own or administer, and it survives cancellation: activating it for a second beneficiary answers `409 BILLING_FREE_TIER_ALREADY_CLAIMED`. Cancelling and reactivating for the same beneficiary is allowed and issues nothing new. A free plan carrying only FEATURE or USAGE entitlements has no such limit, because nothing is handed over that outlives the subscription. To give a second organization the plan anyway, grant it as an operator. Credits already issued stay with their beneficiary after a cancel.
+`POST /subscribe` puts the caller on the Application's nominated free plan (`billingConfig.defaultPlanSlug`) with no provider involved. When that plan grants CREDIT or LICENSE entitlements, the claim is **once per end-user**, across their personal account and every organization they own or administer, and it survives cancellation: activating it for a second beneficiary answers `409 BILLING_FREE_TIER_ALREADY_CLAIMED`. Cancelling and reactivating for the same beneficiary is allowed and issues nothing new. Credits already issued stay with their beneficiary after a cancel. A free plan carrying only FEATURE or USAGE entitlements has no such limit, because nothing is handed over that outlives the subscription. A person gets its features and included usage at read time without calling anything. An organization gets them only on an Application that bills per organization, and only once an OWNER or ADMIN has called `POST /subscribe` for it: each such call records the organization's claim (idempotent, one per organization and plan). The claim is read against the current `defaultPlanSlug`, so renominating the free plan carries claimed organizations with it and clearing it removes the fallback. An organization takes the free plan's FEATURE flags and included USAGE quantity, never its per-unit USAGE price, because an organization's credit pool is usually empty. A priced free-plan USAGE row still caps the organization at its included quantity (zero when it includes none) rather than leaving it unmetered. Past that allowance, `POST /usage/record` charges the meter's own `creditsPerUnit` when the meter has one, from the organization's credit pool; with an empty pool that refuses the record, so it acts as a hard cap. A claim survives the deletion of the plan it was made on. A subscription is stored once per end-user and plan, so the first beneficiary gets a subscription row and activating it for another answers `200` with `data: null` (nothing is stored beyond the claim). The response never carries another beneficiary's subscription. Organizations that never claimed, and every organization on an Application that bills per user, get no free-tier fallback. The one organization that holds the free plan's own subscription row is metered by that subscription like any subscriber, its USAGE price included. The body of a `200` or `201` carries `activated`, true when this call activated the plan.
 
 `POST /checkout` asks the **provider first**: it creates the hosted-checkout session, and only once the provider has answered does it upsert the local `PENDING` Subscription (so the row can correlate the eventual webhook). Nothing local is written for a checkout the provider refused. Returns the URL to redirect to and the local Subscription row. **Subscription activation happens via the provider's webhook — not synchronously here.**
 
@@ -659,7 +662,7 @@ version, delivers in the Stripe account's default version. Accounts created
 from 2025-03-31 default to `basil` or later, where the subscription's
 `current_period_end` lives on its items and an invoice's subscription on
 `parent.subscription_details`; Rekey reads both shapes, so those endpoints
-keep working. Re-register anyway (Panel → Application → Billing, **Auto-configure** on the Stripe
+keep working. Re-register anyway (Panel → Application → Billing → Setup → Providers, **Auto-configure** on the Stripe
 row) to pin the version and to subscribe
 `checkout.session.async_payment_succeeded`, without which a buyer who pays by
 a delayed method is never activated, and `charge.refunded`, without which a

@@ -5,7 +5,8 @@ import { plansService } from "./plans.service.js";
 import { applicationsService } from "../applications/applications.service.js";
 import { requireSuperAdmin } from "../../middleware/admin-auth.js";
 import { moneyAmount } from "../../lib/bounded-int.js";
-import { ok, okPage, errs, ref } from "../../lib/openapi.js";
+import { ok, okArray, okPage, errs, ref } from "../../lib/openapi.js";
+import { entitlementsService } from "../billing/entitlements.service.js";
 import {
   PaginationQuery,
   parsePagination,
@@ -258,6 +259,53 @@ export async function plansRoutes(app: FastifyInstance): Promise<void> {
           ...(body.interval !== undefined && { interval: body.interval }),
           ...(body.metadata !== undefined && { metadata: body.metadata }),
         }),
+      };
+    },
+  );
+
+  app.get(
+    "/:id/plans/:slug/entitlements",
+    {
+      schema: {
+        tags: ["Admin · Plans"],
+        security: [{ superAdminKey: [] }],
+        summary: "List a plan's entitlements",
+        description:
+          "The rows the plan grants, as the plan editor stores them, with no subscription " +
+          "overrides applied. Read-only; the tenant route of the same path edits them.",
+        params: {
+          type: "object",
+          properties: { id: { type: "string" }, slug: { type: "string" } },
+          required: ["id", "slug"],
+        },
+        response: {
+          200: okArray(
+            {
+              type: "object",
+              properties: {
+                kind: { type: "string", enum: ["FEATURE", "CREDIT", "LICENSE", "USAGE"] },
+                key: { type: "string", nullable: true },
+                valueType: { type: "string", enum: ["BOOL", "INT", "STRING"], nullable: true },
+                value: { type: "string", nullable: true },
+              },
+              required: ["kind"],
+            },
+            "The plan's entitlement rows.",
+          ),
+          ...errs({
+            ...SUPER_ADMIN_ERRORS,
+            404: "PLAN_NOT_FOUND: no plan with that slug in this application.",
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const { id, slug } = PlanParams.parse(req.params);
+      const plan = await plansService.getBySlug(id, slug);
+      const rows = await entitlementsService.listForPlan(plan.id);
+      return {
+        success: true,
+        data: rows.map((e) => ({ kind: e.kind, key: e.key, valueType: e.valueType, value: e.value })),
       };
     },
   );

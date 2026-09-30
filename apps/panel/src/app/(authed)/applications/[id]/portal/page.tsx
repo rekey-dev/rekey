@@ -6,13 +6,11 @@ import { ApiErrorText } from '@/components/api-error';
 import { SectionHeader } from '@/components/Card';
 import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
+import { StickyFormFooter } from '@/components/StickyFormFooter';
+import { dangerButtonClass } from '@/components/Button';
+import { savedStateKey } from '@/lib/saved-state-key';
 import { Banner } from '@/components/Banner';
-
-// No fallback to Rekey's own hosted portal: on a self-hosted deployment that
-// would show the operator a URL pointing at someone else's infrastructure for
-// THEIR customers. Unset is surfaced to the operator instead.
-const PORTAL_BASE = (process.env.NEXT_PUBLIC_PORTAL_URL || '<set NEXT_PUBLIC_PORTAL_URL>').replace(/\/$/, '');
-const PORTAL_HOST = PORTAL_BASE.replace(/^https?:\/\//, '');
+import { portalBase } from '@/lib/portal-base';
 
 async function patchPortal(applicationId: string, body: Record<string, unknown>, flag: string): Promise<void> {
   await api({
@@ -85,6 +83,15 @@ async function saveDomain(applicationId: string, formData: FormData): Promise<vo
 const inputCls =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
+const STATUS_COPY: Record<'off' | 'live' | 'unserved', { title: string; body: string }> = {
+  off: { title: 'Portal is off', body: 'Turn it on to give customers a self-service billing page.' },
+  live: { title: 'Portal is live', body: 'Customers can sign in and self-serve at the URL below.' },
+  unserved: {
+    title: 'Portal is on, but not served',
+    body: 'It is enabled for this Application, but this deployment runs no hosted portal.',
+  },
+};
+
 const ERR: Record<string, string> = {
   PORTAL_DOMAIN_TAKEN: 'That domain is already used by another application.',
   INVALID_LOGO_URL: 'Logo URL must be a full http(s) link (e.g. https://…/logo.png).',
@@ -111,7 +118,10 @@ export default async function PortalPage({
   const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const app = await getApplication(id);
   const enabled = Boolean(app.hostedPortalEnabled);
-  const portalUrl = `${PORTAL_BASE}/${app.slug}`;
+  const base = portalBase(app);
+  const portalHost = base?.replace(/^https?:\/\//, '') ?? null;
+  const portalUrl = base ? `${base}/${app.slug}` : null;
+  const status = !enabled ? 'off' : portalUrl ? 'live' : 'unserved';
   const b = (app.portalBranding ?? {}) as {
     displayName?: string;
     tagline?: string;
@@ -131,7 +141,7 @@ export default async function PortalPage({
   return (
     <div className="space-y-6">
       <SectionHeader
-        title="Hosted customer portal"
+        title="Portal"
         description={
           <>
             A Rekey-hosted page where <strong>your end-users</strong> sign in and manage their own
@@ -152,18 +162,26 @@ export default async function PortalPage({
       <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-4">
         <div className="flex items-center justify-between gap-4">
           <div className="space-y-0.5">
-            <p className="text-sm font-medium text-[var(--color-fg)]">{enabled ? 'Portal is live' : 'Portal is off'}</p>
-            <p className="text-xs text-[var(--color-muted-fg)]">
-              {enabled ? 'Customers can sign in and self-serve at the URL below.' : 'Turn it on to give customers a self-service billing page.'}
-            </p>
+            <p className="text-sm font-medium text-[var(--color-fg)]">{STATUS_COPY[status].title}</p>
+            <p className="text-xs text-[var(--color-muted-fg)]">{STATUS_COPY[status].body}</p>
           </div>
           <ActionForm action={setPortalEnabled.bind(null, id, !enabled)}>
-            <SubmitButton pendingLabel={enabled ? 'Disabling…' : 'Enabling…'}>
+            <SubmitButton
+              pendingLabel={enabled ? 'Disabling…' : 'Enabling…'}
+              {...(enabled ? { className: dangerButtonClass('sm') } : {})}
+            >
               {enabled ? 'Disable portal' : 'Enable portal'}
             </SubmitButton>
           </ActionForm>
         </div>
-        {enabled && (
+        {status === 'unserved' && (
+          <Banner tone="warning">
+            This deployment has no hosted portal URL, so customers have no page to open. Set{' '}
+            <code>PUBLIC_PORTAL_URL</code> on the API and <code>PORTAL_BASE_URL</code> on the portal to the
+            portal&apos;s public origin (both the same value), then restart both.
+          </Banner>
+        )}
+        {portalUrl && enabled && (
           <div className="flex items-center gap-3 border-t border-[var(--color-border)] pt-4">
             <span className="text-xs font-medium text-[var(--color-muted-fg)]">Portal URL</span>
             <code className="flex-1 break-all rounded-md bg-[var(--color-bg)] px-3 py-2 text-xs font-mono">{portalUrl}</code>
@@ -177,7 +195,11 @@ export default async function PortalPage({
       <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h2 className="mb-1 text-sm font-semibold text-[var(--color-fg)]">Branding</h2>
         <p className="mb-3 text-xs text-[var(--color-muted-fg)]">How the portal looks to your customers. Leave blank to use defaults.</p>
-        <ActionForm action={saveBranding.bind(null, id)} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <ActionForm
+          key={savedStateKey(b)}
+          action={saveBranding.bind(null, id)}
+          className="grid grid-cols-1 gap-3 sm:grid-cols-2"
+        >
           <label className="space-y-1">
             <span className="text-xs font-medium">Display name</span>
             <input name="displayName" defaultValue={b.displayName ?? ''} placeholder={app.name} className={inputCls} />
@@ -229,7 +251,7 @@ export default async function PortalPage({
             Linked from the footer of the Rekey checkout page.
           </p>
           <div className="sm:col-span-2">
-            <SubmitButton pendingLabel="Saving…">Save branding</SubmitButton>
+            <StickyFormFooter label="Save branding" hint="Customers see changes on their next page load." />
           </div>
         </ActionForm>
       </div>
@@ -239,13 +261,13 @@ export default async function PortalPage({
         <h2 className="mb-1 text-sm font-semibold text-[var(--color-fg)]">Custom domain</h2>
         <p className="mb-3 text-xs text-[var(--color-muted-fg)]">
           Serve the portal on your own domain (e.g. <code>billing.yourapp.com</code>) instead of{' '}
-          <code>{PORTAL_HOST}/{app.slug}</code>.
+          {portalHost ? <code>{portalHost}/{app.slug}</code> : 'the shared portal host'}.
         </p>
-        <ActionForm action={saveDomain.bind(null, id)} className="space-y-3">
-          <div className="flex items-center gap-2">
+        <ActionForm key={savedStateKey(domain)} action={saveDomain.bind(null, id)} className="space-y-3">
+          <label className="block space-y-1">
+            <span className="text-xs font-medium">Domain</span>
             <input name="portalDomain" defaultValue={domain} placeholder="billing.yourapp.com" className={inputCls} />
-            <SubmitButton pendingLabel="Saving…">Save</SubmitButton>
-          </div>
+          </label>
           {domain && (
             <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-xs space-y-1.5">
               <p className="font-medium text-[var(--color-fg)]">
@@ -256,17 +278,29 @@ export default async function PortalPage({
                   <span className="text-amber-600">Pending DNS verification</span>
                 )}
               </p>
-              <p className="text-[var(--color-muted-fg)]">Add this DNS record at your domain provider, then verification completes automatically:</p>
-              <code className="block rounded bg-[var(--color-surface)] px-2 py-1 font-mono">
-                CNAME&nbsp;&nbsp;{domain}&nbsp;&nbsp;→&nbsp;&nbsp;{PORTAL_HOST}
-              </code>
+              {portalHost ? (
+                <>
+                  <p className="text-[var(--color-muted-fg)]">Add this DNS record at your domain provider, then verification completes automatically:</p>
+                  <code className="block rounded bg-[var(--color-surface)] px-2 py-1 font-mono">
+                    CNAME&nbsp;&nbsp;{domain}&nbsp;&nbsp;→&nbsp;&nbsp;{portalHost}
+                  </code>
+                </>
+              ) : (
+                <p className="text-[var(--color-muted-fg)]">
+                  The DNS record points at this deployment&apos;s hosted portal, which is not configured. Set{' '}
+                  <code>PUBLIC_PORTAL_URL</code> on the API to see it.
+                </p>
+              )}
               <p className="text-[var(--color-faint-fg)]">TLS is provisioned automatically once the record resolves. Clear the field and save to remove the domain.</p>
             </div>
           )}
+          <StickyFormFooter label="Save domain" />
         </ActionForm>
       </div>
 
-      <p className="text-xs text-[var(--color-muted-fg)]">The portal needs billing enabled on this Application.</p>
+      {!app.billingConfig.enabled && (
+        <p className="text-xs text-[var(--color-muted-fg)]">The portal needs billing enabled on this Application.</p>
+      )}
     </div>
   );
 }

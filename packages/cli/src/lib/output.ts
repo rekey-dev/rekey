@@ -13,11 +13,16 @@ export interface OutputContext {
   json: boolean;
   apiUrl: string | undefined;
   adminKey: string | undefined;
+  /** An Application secret key, for the commands that act as one Application (`lists`). */
+  secretKey: string | undefined;
+  /** An operator personal access token, for the commands that read as a workspace member (`analytics`). */
+  operatorToken?: string | undefined;
 }
 
 /**
- * Read globals (`--json`, `--api-url`, `--admin-key`) from any subcommand.
- * A flag wins over its environment variable (`REKEY_URL`, `SUPER_ADMIN_KEY`).
+ * Read globals (`--json`, `--api-url`, `--admin-key`, `--secret-key`) from any
+ * subcommand. A flag wins over its environment variable (`REKEY_URL`,
+ * `SUPER_ADMIN_KEY`, `REKEY_SECRET`).
  *
  * @example
  * const ctx = readGlobalOpts(this);
@@ -26,11 +31,13 @@ export function readGlobalOpts(cmd: Command): OutputContext {
   // commander attaches global opts to the root program; walk parents.
   let root: Command = cmd;
   while (root.parent) root = root.parent;
-  const opts = root.opts<{ json?: boolean; apiUrl?: string; adminKey?: string }>();
+  const opts = root.opts<{ json?: boolean; apiUrl?: string; adminKey?: string; secretKey?: string; operatorToken?: string }>();
   return {
     json: Boolean(opts.json),
     apiUrl: opts.apiUrl ?? process.env.REKEY_URL,
     adminKey: opts.adminKey ?? process.env.SUPER_ADMIN_KEY,
+    secretKey: opts.secretKey ?? process.env.REKEY_SECRET,
+    operatorToken: opts.operatorToken ?? process.env.REKEY_OPERATOR_TOKEN,
   };
 }
 

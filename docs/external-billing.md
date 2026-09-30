@@ -111,7 +111,7 @@ curl -X POST "$REKEY_URL/api/v1/webhooks/billing/external/$APP_SLUG" \
 |---|---|---|
 | `eventId` | yes | Your unique id for this delivery. Rekey deduplicates on it per Application: a replay is acknowledged with `{"processed": false, "reason": "duplicate"}` and applies nothing. |
 | `type` | yes | One of the event types below. Unknown types are acknowledged, logged and ignored, so you may post your whole catalogue. |
-| `occurredAt` | no | ISO 8601. Used as the cancellation time when `subscription.canceled` carries no `effectiveAt`, and to order a `subscription.activated` against a cancellation already applied: an activation that occurred at or before a cancellation you dated does not reopen the subscription. Send it on both; without it Rekey has no clock of yours to order your events by. |
+| `occurredAt` | no | ISO 8601. Used as the cancellation time when `subscription.canceled` carries no `effectiveAt`, and to order a `subscription.activated` against a cancellation already applied: an activation that occurred at or before a cancellation you dated does not reopen the subscription. Send it on both; without it Rekey has no clock of yours to order your events by. A value more than 5 minutes ahead of Rekey's clock is ignored, the event is treated as undated, and the receipt says so. |
 | `data` | per type | See below. |
 
 The Application is always the one the URL names. The slug selected the secret
@@ -122,6 +122,12 @@ naming the first failing field, and is stored nowhere. A body that verifies
 and validates is stored as a receipt before it is applied; if applying it
 fails, the receipt keeps the error, the response is `500`, and your retry of
 the same `eventId` re-attempts it rather than being skipped as a duplicate.
+An event that names something this Application does not have can never
+apply as sent. It answers with its own `4xx` (`ORGANIZATION_NOT_FOUND` or
+`END_USER_NOT_FOUND` 404, `END_USER_ERASED` 410), the receipt keeps the error,
+and a corrected body re-sent under the same `eventId` is applied. A missing
+organization on an Application that bills per organization stays a retryable
+`500`, because the operator can switch the Application to per-user billing.
 Retry with backoff on any `5xx`; do not retry a `4xx` without changing
 something.
 
@@ -156,7 +162,7 @@ recovery; Rekey works out which it is.
 | `subscription.trialEndsAt` | When the trial your system is running ends. A future value is judged by Rekey's trial ledger under the Application's `trialPolicy`, the same one-per-buyer rule hosted checkout applies: honoured, the row is `TRIALING` until you post an activation with `trialEndsAt` null or past, which converts it to `ACTIVE`; refused, the subscription is still activated, `ACTIVE` and without the trial, and the refusal is kept under the row's `metadata.refusedTrials`. Re-delivering an event never spends a second slot. |
 | `subscriber.email` or `subscriber.endUserId` | Exactly one. An email Rekey does not know creates the end-user (no password, the default role); an unknown `endUserId` fails the event. |
 | `subscriber.emailVerified` | Default `true`. Send `false` if your system has not confirmed the address; an OIDC sign-in will then not auto-link to it. |
-| `subscriber.organizationId` | The beneficiary organization, required for Applications that bill per organization. On an activation for a subscription id Rekey already holds, the beneficiary never changes: omitted or the same, it is simply kept; a different organization is recorded on the receipt as `subject change ignored` and the event still applies to the existing subscription. To move a subscription to another subject, cancel it and activate a new subscription id. |
+| `subscriber.organizationId` | The beneficiary organization, required for Applications that bill per organization when the subscription id is new, or names a different plan or subscriber. On an activation for a subscription id Rekey already holds, the beneficiary never changes: omitted or the same, it is simply kept, so renewals need not repeat it; a different organization is recorded on the receipt as `subject change ignored` and the event still applies to the existing subscription. To move a subscription to another subject, cancel it and activate a new subscription id. |
 
 What happens:
 
@@ -209,7 +215,10 @@ a past date, it is cancelled now and `subscription.canceled` is emitted. Once
 a future date is scheduled, an immediate cancellation posted before that date
 does not shorten it: the buyer was promised the rest of the period and keeps
 it, exactly as with a hosted provider. A cancellation for an id Rekey does not
-hold is logged and ignored.
+hold is logged and ignored. An `occurredAt` more than 5 minutes ahead of
+Rekey's clock is not used as the cancellation time: the subscription is
+cancelled at the time Rekey received the event, and the receipt says so, so a
+sender clock set wrong cannot block every later reactivation.
 
 ### `subscription.past_due`
 
@@ -280,7 +289,10 @@ Stripe sale produces. Each subscription reports `provider: "external"`.
   past is ignored, and a live row's scheduled cancellation is only cleared by
   a period end beyond it. The first of those needs `occurredAt` on both the
   cancellation and the activation, so send it, and post events promptly
-  rather than in batches.
+  rather than in batches. A cancellation delivered late, after a newer
+  renewal, still ends the subscription; post `subscription.activated` again to
+  reopen it, and include `occurredAt` on every event you send so that
+  reactivation is ordered correctly against the cancellation.
 - **Rate limits.** The endpoint shares the API's per-IP limit. A nightly
   reconcile that re-posts every active subscription is fine at a few requests
   per second; spread larger volumes.
@@ -309,10 +321,13 @@ Stripe sale produces. Each subscription reports `provider: "external"`.
   on the API. With a window configured (90 days covers every retry schedule
   and the inbound log), an `eventId` older than that is accepted as new.
 - **Applier failures retry.** A body that fails validation is a `400` and is
-  stored nowhere. An event that validates but cannot be applied (unknown plan
-  slug, unknown `endUserId`, an erased subscriber, a missing organization) is
-  stored with the error, answered `500`, and your retry re-attempts it; fix
-  the cause and let the retry succeed, or stop retrying that event.
+  stored nowhere. An event that validates but cannot be applied yet (an
+  unknown plan slug, the workspace's end-user limit, a missing organization
+  on a new subscription) is stored with the error, answered `500`, and your
+  retry re-attempts it; fix the cause and let the retry succeed.
+  One that can never apply as sent (an unknown `endUserId` or organization, an
+  erased subscriber) is stored with the error and answered with its `4xx`;
+  re-send it under the same `eventId` with the body corrected, or drop it.
 - **Erasure.** When an operator erases an end-user, Rekey does not call your
   system. Remove the customer there as well.
 - **Quota.** Creating a subscriber counts against the workspace's end-user

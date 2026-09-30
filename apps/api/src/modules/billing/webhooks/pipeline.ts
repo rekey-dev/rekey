@@ -56,6 +56,18 @@ import { errs, type JsonSchema } from '../../../lib/openapi.js';
 // deliberately modelled separately from `errs()`.
 // ---------------------------------------------------------------------------
 
+/**
+ * Applier refusals that no retry of the same body can fix. They answer with
+ * their own 4xx instead of the 500 that asks the sender to retry.
+ * BILLING_ORGANIZATION_REQUIRED is not one: the operator can switch the
+ * Application to per-user billing, after which the same body applies.
+ */
+const UNAPPLICABLE_AS_SENT = new Set([
+  'ORGANIZATION_NOT_FOUND',
+  'END_USER_NOT_FOUND',
+  'END_USER_ERASED',
+]);
+
 /** The two shapes a 200 ack can take, see `handleBillingProviderWebhook`. */
 const WebhookAckSuccess: JsonSchema = {
   oneOf: [
@@ -120,7 +132,12 @@ const WEBHOOK_ERRORS = {
     'signature timestamp is outside the five-minute window.',
   404:
     'WEBHOOK_PROVIDER_UNKNOWN — the `:provider` segment is not a registered billing provider; or ' +
-    'APPLICATION_NOT_FOUND — no Application matches the resolved slug/id.',
+    'APPLICATION_NOT_FOUND — no Application matches the resolved slug/id; or ' +
+    'ORGANIZATION_NOT_FOUND or END_USER_NOT_FOUND: the event names an organization or end-user ' +
+    'id this Application does not have. Recorded on the receipt and left unprocessed.',
+  410:
+    'END_USER_ERASED: the event names an end-user who was erased. Recorded on the receipt and ' +
+    'left unprocessed.',
   409:
     'WEBHOOK_MODE_MISMATCH: the event states a test/live mode (Stripe `livemode`) that ' +
     "contradicts the mode of the credential that verified it. Recorded on the receipt and " +
@@ -395,6 +412,16 @@ export async function handleBillingProviderWebhook(
     });
   } catch (err) {
     if (err instanceof RekeyError && err.code === 'WEBHOOK_APPLICATION_MISMATCH') throw err;
+    // Refused as sent: answering 500 would ask for a retry of the same body,
+    // which can never apply. Still unprocessed, so the sender can post a
+    // corrected body under the same event id and it re-attempts.
+    if (err instanceof RekeyError && UNAPPLICABLE_AS_SENT.has(err.code)) {
+      await prisma.webhookEvent.update({
+        where: { id: webhookRow.id },
+        data: { processingError: `${err.code}: ${err.message}` },
+      });
+      throw err;
+    }
     request.log.error(
       { err, provider: module.name, eventId: providerEventId },
       'billing webhook dispatch failed',

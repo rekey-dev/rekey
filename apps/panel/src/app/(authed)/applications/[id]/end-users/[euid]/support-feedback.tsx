@@ -52,6 +52,7 @@ export const SUPPORT_ERR: Record<string, string> = {
   AUTH_METHOD_DISABLED:
     'Password sign-in is turned off for this Application, so a reset link would lead nowhere. Turn it back on under Authentication, or help them in with a magic link.',
   END_USER_ERASED: 'This end-user was erased. Support actions no longer apply.',
+  END_USER_BANNED: 'This end-user is banned, so a sign-in link would not work. Lift the ban on the Access tab first.',
   RATE_LIMITED: 'Too many sends in a short window. Wait a moment and try again.',
   APP_ACCESS_DENIED: 'Your access to this Application is read-only.',
   TENANT_ROLE_INSUFFICIENT: 'Your role cannot perform support actions on this Application.',

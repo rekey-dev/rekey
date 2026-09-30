@@ -563,6 +563,38 @@ silently rots.
 
 ---
 
+## List forms
+
+A newsletter or waitlist signup, and a contact form, for lists (see
+[lists.md](lists.md)). Each renders the list's consent checkbox when its lawful
+basis is consent, and a hidden honeypot.
+
+### `<NewsletterForm>` and `<ContactForm>`
+
+```tsx
+<NewsletterForm list="waitlist" title="Join the waitlist" />
+<ContactForm list="contact" title="Get in touch" />
+```
+
+`<ContactForm>` also renders the list's own fields from its field schema.
+
+| Prop | |
+|---|---|
+| `list` | The list key. |
+| `action` | Your Server Action. The form posts `email`, `name`, `consent`, `consentVersion`, `hp` and each field, which is what `subscribeToList` from `@rekey.dev/nextjs/server` reads. `subscribeToList` always resolves `{ status: 'received' }`; do not return anything more specific to the page. Without it the browser subscribes with the publishable key, which needs Public capture on the list. |
+| `form` | The list's form from `rekey.lists.get(key)` on your server. Needed with `action` when Public capture is off, since the browser cannot load it then. |
+| `title`, `submitLabel`, `successMessage`, `appearance`, `className` | As on the other widgets. |
+
+A browser subscribe always gets the same answer whatever happened to the
+address, so the success message cannot tell a person they were already on
+the list.
+
+### `useListSubscribe(key, form?)`
+
+The hook both components use: `{ form, status, error, submit }`. `submit({
+email, name?, fields?, consent?, hp? })` resolves `true` once the API accepted
+the request.
+
 ## Theming
 
 Every component that renders markup takes `appearance` and `className`. The

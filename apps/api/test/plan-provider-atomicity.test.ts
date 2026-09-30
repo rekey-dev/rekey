@@ -284,6 +284,9 @@ describe('plan provider registration is atomic and repairable', () => {
     expect(dup.statusCode).toBe(409);
     expect(dup.json().error.code).toBe('PLAN_SLUG_TAKEN');
     expect(dup.json().error.fix).toContain('/register');
+    // It was never archived; its registration failed.
+    expect(dup.json().error.message).not.toMatch(/archived/i);
+    expect(dup.json().error.message).toMatch(/registration .*failed/);
 
     // The operator corrects the plan. `amount` is editable precisely because no
     // provider price exists to contradict it.

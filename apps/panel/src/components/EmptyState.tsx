@@ -1,4 +1,5 @@
 import * as React from 'react';
+import Link from '@/components/Link';
 
 /**
  * Zero / empty-state block. Replaces the two slightly-different dashed-border
@@ -40,5 +41,31 @@ export function EmptyState({
       )}
       {action && <div className="mt-5">{action}</div>}
     </div>
+  );
+}
+
+/**
+ * The create button for an empty list, placed inside the empty state. It
+ * opens the page's own create dialog through that dialog's `modalKey` flag,
+ * so there is one form and two ways in.
+ *
+ * @example
+ * <EmptyState title="No meters yet" action={<EmptyStateCreate modalKey="newMeter">New meter</EmptyStateCreate>} />
+ */
+export function EmptyStateCreate({
+  modalKey,
+  children,
+}: {
+  modalKey: string;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <Link
+      href={`?${modalKey}=1`}
+      scroll={false}
+      className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] transition-transform duration-150 ease-out hover:bg-[var(--color-primary-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-primary)] active:scale-[0.97]"
+    >
+      {children}
+    </Link>
   );
 }

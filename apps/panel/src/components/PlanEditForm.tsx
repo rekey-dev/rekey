@@ -27,6 +27,7 @@ import * as React from 'react';
 import { ActionForm } from './ActionForm';
 import { SubmitButton } from './SubmitButton';
 import { Banner } from './Banner';
+import { savedStateKey } from '@/lib/saved-state-key';
 
 const ERR: Record<string, string> = {
   missing: 'Name cannot be empty.',
@@ -63,7 +64,7 @@ export function PlanEditForm({
     'mt-1 w-full rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]';
 
   return (
-    <ActionForm action={action} className="space-y-4">
+    <ActionForm key={savedStateKey(plan)} action={action} className="space-y-4">
       {error && <Banner tone="error">{ERR[error] ?? 'Could not save the plan.'}</Banner>}
 
       <div>

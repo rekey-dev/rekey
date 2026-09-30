@@ -59,6 +59,7 @@ model Tenant {
   applications Application[]
   memberships  TenantMembership[]
   invitations  TenantInvitation[]
+  operatorInvites OperatorInvite[]
   emailLogs    EmailLog[]
   apiTokens    TenantApiToken[]
   // Operator sessions currently in this workspace (TenantRefreshToken.activeTenantId).
@@ -255,9 +256,10 @@ model TenantInvitation {
 // Deploy-time operator-registration control (OPERATOR_SIGNUP_MODE='invite').
 //
 // A single-use key minted by the super-admin via POST
-// /api/v1/admin/operator-invites. Unlike TenantInvitation (which joins an
-// existing workspace), an OperatorInvite authorizes the creation of a brand
-// new operator + workspace when self-serve sign-up is gated.
+// /api/v1/admin/operator-invites. An unbound key authorizes the creation of a
+// brand new operator + workspace when self-serve sign-up is gated. A
+// workspace-bound key (tenantId set) instead joins an existing workspace, like
+// a TenantInvitation minted by the super-admin rather than a workspace owner.
 //
 // Hash-only: the raw key is shown to the super-admin exactly once at mint and
 // never stored. Consumption is atomic — `usedAt`/`usedByTenantUserId` are set
@@ -283,10 +285,19 @@ model OperatorInvite {
   // Set when the super-admin revokes the key before it is used.
   revokedAt          DateTime? @map("revoked_at")
   createdAt          DateTime  @default(now()) @map("created_at")
+  // Workspace binding, all three set together or none. A bound key joins its
+  // holder to this existing workspace at `role` instead of creating one, and
+  // only for an operator whose email is `email` (lowercased). This is how
+  // `rekey init --owner-email` hands its workspace to the owner.
+  tenantId           String?    @map("tenant_id")
+  email              String?
+  role               TenantRole?
 
   usedBy TenantUser? @relation("operatorInviteUsedBy", fields: [usedByTenantUserId], references: [id], onDelete: SetNull)
+  tenant Tenant?     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([expiresAt])
+  @@index([tenantId])
   @@map("operator_invites")
 }
 
@@ -563,6 +574,20 @@ model Application {
   // Application — the per-app "log everyone out now" kill-switch. Not a secret;
   // a plain monotonic counter.
   tokenGeneration Int      @default(1) @map("token_generation")
+  // When end-user activity tracking (sign-in counts, active days) started for
+  // this Application: the deploy that added it for older apps, creation for
+  // new ones. The panel says "since <date>" so a count never reads as lifetime.
+  activityTrackedSince DateTime @default(now()) @map("activity_tracked_since")
+  // IANA zone the daily analytics rollup counts days in. Applies to days
+  // computed after a change; the live activity path is always UTC.
+  reportingTimezone String @default("UTC") @map("reporting_timezone")
+  // The profile fields (onboarding questions) each end user answers into
+  // `EndUser.profile`. Shape: `ProfileSchemaSchema` in shared-types. A column
+  // rather than a key in `authConfig`, for the reason `emailsEnabled` is one.
+  profileSchema Json @default("[]") @map("profile_schema")
+  // Bumped on every write of `profileSchema`. A PUT that names the version it
+  // was edited from is refused when another write landed in between.
+  profileSchemaVersion Int @default(0) @map("profile_schema_version")
 
   // --- Lifecycle: promotion + the disable switch. See docs/specs/app-lifecycle.md ---
 
@@ -674,6 +699,9 @@ model Application {
   emailSuppressions   EmailSuppression[]
   customEmailTemplates        CustomEmailTemplate[]
   customEmailTemplateVersions CustomEmailTemplateVersion[]
+  contactLists        ContactList[]
+  contacts            Contact[]
+  contactErasureTombstones ContactErasureTombstone[]
   subscriptionImports SubscriptionImportRun[]
   webhookEndpoints    WebhookEndpoint[]
   organizations       Organization[]
@@ -685,9 +713,12 @@ model Application {
   applicationGrants   ApplicationGrant[]
   trialRedemptions    TrialRedemption[]
   freeTierClaims      FreeTierClaim[]
+  orgFreeTierClaims   OrganizationFreeTierClaim[]
   checkoutSessions    CheckoutSession[]
 
   @@index([tenantId])
+  activityDays        ApplicationActivityDay[]
+  populationSnapshots ApplicationPopulationSnapshot[]
   @@map("applications")
 }
 
@@ -864,6 +895,178 @@ model EmailSuppression {
   @@unique([applicationId, address])
   @@index([applicationId, createdAt])
   @@map("email_suppressions")
+}
+
+// ============================================================================
+// Lists and contacts: people who asked to hear from an Application (newsletter,
+// waitlist, contact form) without having an account. Joined to EndUser on
+// (applicationId, email) at read time, never by a stored id.
+// ============================================================================
+
+model ContactList {
+  id                      String    @id @default(cuid())
+  applicationId           String    @map("application_id")
+  /**
+   * `^[a-z][a-z0-9_]{2,63}$`, immutable. Public: the SDK names a list by it.
+   */
+  key                     String
+  name                    String
+  description             String?
+  /**
+   * newsletter | waitlist | contact_form | generic. Drives panel copy only.
+   */
+  kind                    String    @default("generic")
+  /**
+   * Array of { name, label, type, required, maxLength?, options? }.
+   */
+  fieldSchema             Json      @default("[]") @map("field_schema")
+  /**
+   * consent | legitimate_interest | contract
+   */
+  lawfulBasis             String    @default("consent") @map("lawful_basis")
+  consentText             String?   @map("consent_text")
+  /**
+   * Bumped on every consent text change; 0 before any text is set.
+   */
+  consentVersion          Int       @default(0) @map("consent_version")
+  /**
+   * Off: a publishable key cannot write to the list.
+   */
+  publicCapture           Boolean   @default(false) @map("public_capture")
+  blockDisposable         Boolean   @default(true) @map("block_disposable")
+  /**
+   * Submissions older than this are deleted by the retention sweep; null keeps them.
+   */
+  submissionRetentionDays Int?      @map("submission_retention_days")
+  archivedAt              DateTime? @map("archived_at")
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
+
+  application     Application                 @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  consentVersions ContactListConsentVersion[]
+  members         ContactListMember[]
+  submissions     ContactSubmission[]
+
+  @@unique([applicationId, key])
+  @@index([applicationId, createdAt])
+  @@map("contact_lists")
+}
+
+/**
+ * The exact consent text a version number stood for, kept as proof.
+ */
+model ContactListConsentVersion {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  listId        String   @map("list_id")
+  version       Int
+  text          String
+  /**
+   * Operator id.
+   */
+  createdBy     String?  @map("created_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  list ContactList @relation(fields: [listId], references: [id], onDelete: Cascade)
+
+  @@unique([listId, version])
+  @@map("contact_list_consent_versions")
+}
+
+model Contact {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  /**
+   * Lowercased and trimmed, like EmailSuppression.address.
+   */
+  email         String
+  name          String?
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  application Application         @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  memberships ContactListMember[]
+  submissions ContactSubmission[]
+
+  @@unique([applicationId, email])
+  @@index([applicationId, createdAt])
+  @@map("contacts")
+}
+
+model ContactListMember {
+  id              String    @id @default(cuid())
+  applicationId   String    @map("application_id")
+  listId          String    @map("list_id")
+  contactId       String    @map("contact_id")
+  /**
+   * subscribed | unsubscribed
+   */
+  status          String
+  /**
+   * publishable | secret | operator
+   */
+  source          String
+  consentVersion  Int?      @map("consent_version")
+  consentAt       DateTime? @map("consent_at")
+  /**
+   * IPv4 /24 or IPv6 /48, never the full address.
+   */
+  consentIpPrefix String?   @map("consent_ip_prefix")
+  /**
+   * Origin and path only; the query string is dropped at write.
+   */
+  sourceUrl       String?   @map("source_url")
+  unsubscribedAt  DateTime? @map("unsubscribed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  list    ContactList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  contact Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@unique([listId, contactId])
+  @@index([applicationId, listId, status, createdAt], map: "contact_list_members_app_list_status_idx")
+  @@index([listId, updatedAt, id])
+  @@index([contactId])
+  @@map("contact_list_members")
+}
+
+/**
+ * Append-only: the fields one post carried. Deleted by the retention sweep and by erasure.
+ */
+model ContactSubmission {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  listId        String   @map("list_id")
+  contactId     String   @map("contact_id")
+  fields        Json
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  list    ContactList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  contact Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([listId, createdAt])
+  @@index([contactId])
+  @@index([createdAt])
+  @@map("contact_submissions")
+}
+
+/**
+ * Keeps a browser from capturing an erased person again for a while. Holds an
+ * HMAC of the address, never the address, and expires; the prune sweep
+ * deletes it after that.
+ */
+model ContactErasureTombstone {
+  id            String   @id @default(cuid())
+  applicationId String   @map("application_id")
+  addressHash   String   @map("address_hash")
+  createdAt     DateTime @default(now()) @map("created_at")
+  expiresAt     DateTime @map("expires_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, addressHash])
+  @@index([expiresAt])
+  @@map("contact_erasure_tombstones")
 }
 
 // ============================================================================
@@ -1185,6 +1388,7 @@ model Organization {
   usageRecords               UsageRecord[]
   licenses                   License[]
   activeInRefreshTokens      RefreshToken[]
+  freeTierClaims             OrganizationFreeTierClaim[]
 
   @@unique([applicationId, slug])
   @@index([applicationId])
@@ -1392,6 +1596,11 @@ model BillingCredentials {
   priority      Int      @default(100)
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
+  // When the secret material or its mode last changed: the start of the
+  // readiness evidence window. `updatedAt` also moves on an enable or routing
+  // edit, which must not reset the evidence; a mode change must, because rows
+  // recorded under a sandbox label prove nothing about live.
+  secretsUpdatedAt DateTime @default(now()) @map("secrets_updated_at")
 
   application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
 
@@ -1413,6 +1622,11 @@ model ApiKey {
   lastUsedAt    DateTime? @map("last_used_at")
   expiresAt     DateTime? @map("expires_at")
   revokedAt     DateTime? @map("revoked_at")
+  // Whether this key reads end-user IP addresses in full: true when whoever
+  // minted it was OWNER or ADMIN holding activity:read (or the super-admin
+  // key), false otherwise (masked to /24 or /48). Null for keys minted before
+  // this was recorded, which keep reading them in full.
+  revealsEndUserIps Boolean? @map("reveals_end_user_ips")
   createdAt     DateTime  @default(now()) @map("created_at")
 
   application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
@@ -1465,6 +1679,17 @@ model EndUser {
   erasedAt      DateTime? @map("erased_at")
   // The operator (TenantUser id) who processed the erasure, for the audit trail.
   erasedBy      String?   @map("erased_by")
+  // Operator ban. Set = every sign-in and every use of an existing token is
+  // refused with END_USER_BANNED until an operator lifts it. Columns on the row
+  // rather than a table because every auth chokepoint already loads this row,
+  // so the check costs no query. Enforcement reads ONLY these columns; the
+  // `end_user.banned` / `end_user.unbanned` security events are the history
+  // and may be pruned by log retention. `banReason` is operator-only free text,
+  // never returned to the end-user, and nulled by erasure. `bannedBy` is the
+  // TenantUser id. No index: the "banned" list filter is a rare operator read.
+  bannedAt      DateTime? @map("banned_at")
+  bannedBy      String?   @map("banned_by")
+  banReason     String?   @map("ban_reason")
   // Access tokens issued before this instant are refused on their next use.
   // Stamped ONLY by revocations that end every session the user holds
   // (password change or reset, sign-out everywhere, refresh-token reuse), so
@@ -1482,6 +1707,41 @@ model EndUser {
   // until then. Claimed with a conditional update, so of several concurrent
   // first sign-ins exactly one reports `firstSignIn: true`.
   firstSignedInAt DateTime? @map("first_signed_in_at")
+  // Sign-in counters, written with the `firstSignedInAt` claim in the
+  // transaction that mints a real sign-in's session. Refresh and org switch
+  // never touch them. Columns rather than derived from security events,
+  // because those are pruned. `signInCount` starts at the deploy that added
+  // it; `Application.activityTrackedSince` says when.
+  lastSignedInAt DateTime? @map("last_signed_in_at")
+  lastSignInVia  String?   @map("last_sign_in_via")
+  signInCount    Int       @default(0) @map("sign_in_count")
+  // Daily activity, claimed at most once per UTC day at sign-in and refresh
+  // (modules/end-users/daily-activity.ts). `activityBits` read as a bigint:
+  // bit n set means active n days before `lastActiveOn`. A bit(63) rather than
+  // a bigint, so a shift drops the oldest day instead of reaching the sign
+  // bit, and so the client sees a string: a bigint on the EndUser type would
+  // break JSON.stringify on every route that returns a row. Written with raw
+  // SQL only. Null until the first active day.
+  lastActiveOn   DateTime? @db.Date @map("last_active_on")
+  activityBits   String?   @db.Bit(63) @map("activity_bits")
+  // Where the user signs in from: the latest sign-in's platform and country,
+  // and every platform seen at a sign-in or a day's first activity. Personal
+  // enough that erasure clears them.
+  lastPlatform   String?   @map("last_platform")
+  platformsSeen  String[]  @default([]) @map("platforms_seen")
+  lastCountry    String?   @db.Char(2) @map("last_country")
+  // Answers to the Application's profile fields, validated against
+  // `Application.profileSchema` on every write. Separate from `metadata`,
+  // which Rekey never interprets. Erasure empties it.
+  profile               Json      @default("{}")
+  onboardingCompletedAt DateTime? @map("onboarding_completed_at")
+  // When the user chose to skip onboarding. Kept after a later completion, as
+  // history. Rekey only records it: nothing is gated on either timestamp.
+  onboardingSkippedAt   DateTime? @map("onboarding_skipped_at")
+  // How the account was created: password, magic_link, oauth:<provider>,
+  // passkey, operator, import or billing. Set in the creating transaction.
+  // Null for rows created before it was recorded; read as `unknown`.
+  createdVia    String?   @map("created_via")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
@@ -1515,6 +1775,14 @@ model EndUser {
   @@index([applicationId, createdAt])
   // Deployment-wide "new in the last N days" (super-admin overview).
   @@index([createdAt])
+  // The end-user list's `sort=lastSignedInAt`. The ascending index serves
+  // `order=asc` (nulls last is the ascending default); the descending one
+  // serves `order=desc`, which the list asks for with NULLS LAST. Prisma cannot
+  // say NULLS LAST, so its migration was edited by hand to add it.
+  @@index([applicationId, lastSignedInAt])
+  // DAU/WAU/MAU and the 30-day active series scan one app's recent actives.
+  @@index([applicationId, lastActiveOn])
+  @@index([applicationId, lastSignedInAt(sort: Desc), id(sort: Desc)], map: "end_users_application_id_last_signed_in_at_desc_id_idx")
   @@map("end_users")
 }
 
@@ -1570,6 +1838,10 @@ model MfaCredential {
   endUserId           String    @unique @map("end_user_id")
   secretCiphertext    String    @map("secret_ciphertext")
   backupCodesCiphertext String  @map("backup_codes_ciphertext")
+  // SHA-256 of each backup code already spent, so sign-in can say "already
+  // used" instead of "wrong code". A spent code unlocks nothing, so these are
+  // not encrypted. Reset whenever new codes are issued.
+  usedBackupCodeHashes String[] @default([]) @map("used_backup_code_hashes")
   // Verified at /mfa/setup-confirm. Sign-in challenges only fire when this is true.
   enrolledAt          DateTime? @map("enrolled_at")
   // DEPRECATED / unused. MFA throttle moved to the Redis brute-force limiter
@@ -1946,6 +2218,15 @@ model RefreshToken {
   // callers may lack them.
   userAgent     String?   @map("user_agent")
   ip            String?   @map("ip")
+  // The client, read once at issue (lib/client-platform.ts) so no reader has
+  // to parse the User-Agent again. `clientPlatform` prefers the sign-in
+  // body's `client` hint; `country` is CF-IPCountry, never for a secret-key
+  // call. Carried across rotations with the rest of the session.
+  clientPlatform   String? @map("client_platform")
+  clientOs         String? @map("client_os")
+  clientBrowser    String? @map("client_browser")
+  clientAppVersion String? @map("client_app_version")
+  country          String? @db.Char(2) @map("country")
   // The Device this session was minted on, when the client identified itself
   // (see Device). Nullable: browser SDKs and older clients send no fingerprint,
   // and nothing about their sessions changes. SetNull rather than Cascade so
@@ -1982,6 +2263,13 @@ model RefreshToken {
   // Without this index the query is a sequential scan over the full token
   // history — grows with sign-in + rotation volume.
   @@index([createdAt])
+  // The analytics rollup counts, per Application, the users with a session
+  // issued or refreshed in a local day's window: one range scan here.
+  @@index([applicationId, createdAt])
+  // The analytics rollup counts live sessions by OS, browser and app version
+  // per Application through `refresh_tokens_app_live_head_idx`, (application_id)
+  // INCLUDE the client columns WHERE replaced_by_id IS NULL AND revoked_at IS
+  // NULL. Partial, so it lives only in migration 20260929230643_refresh_tokens_app_live_head_idx.
   @@map("refresh_tokens")
 }
 
@@ -2194,6 +2482,7 @@ model Plan {
   entitlements  PlanEntitlement[]
   trialRedemptions TrialRedemption[]
   freeTierClaims   FreeTierClaim[]
+  orgFreeTierClaims OrganizationFreeTierClaim[]
 
   @@unique([applicationId, slug])
   @@index([applicationId])
@@ -2883,6 +3172,35 @@ model FreeTierClaim {
   @@map("free_tier_claims")
 }
 
+// An organization an OWNER or ADMIN put on the Application's free tier with
+// POST /billing/subscribe. The org view of entitlements applies the free
+// default plan only to a claimed organization of an org-billed Application,
+// because a subscription row is unique per (end-user, plan) and cannot hold a
+// second organization (#431). The claim is read against whatever plan is the
+// default now; `planId` records the one that was claimed.
+model OrganizationFreeTierClaim {
+  id                 String   @id @default(cuid())
+  applicationId      String   @map("application_id")
+  organizationId     String   @map("organization_id")
+  /// The plan that was the default when claimed; null once that plan is deleted.
+  planId             String?  @map("plan_id")
+  /// The OWNER or ADMIN who claimed it. Not a foreign key: the claim outlives them.
+  claimedByEndUserId String   @map("claimed_by_end_user_id")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  application  Application  @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  // SetNull, not Cascade: the claim is read against the current default, so
+  // deleting the plan that was claimed must not take the organization off
+  // the free tier.
+  plan         Plan?        @relation(fields: [planId], references: [id], onDelete: SetNull)
+
+  @@unique([applicationId, organizationId, planId], map: "org_free_tier_claims_app_org_plan_key")
+  @@index([organizationId], map: "org_free_tier_claims_org_idx")
+  @@index([planId], map: "org_free_tier_claims_plan_idx")
+  @@map("organization_free_tier_claims")
+}
+
 // ============================================================================
 // Webhook events — durable idempotency for inbound provider webhooks.
 //
@@ -3369,4 +3687,75 @@ model TenantMcpRefreshToken {
   @@index([clientId])
   @@index([expiresAt])
   @@map("tenant_mcp_refresh_tokens")
+}
+
+/// One Application's activity for one calendar day, counted in `timezone`
+/// (the Application's reporting timezone when the day was computed). Written
+/// by the hourly rollup job and the backfill script, never on the request
+/// path. See docs/analytics.md.
+model ApplicationActivityDay {
+  applicationId       String   @map("application_id")
+  day                 DateTime @db.Date
+  /// IANA zone the day is counted in. Days of two zones are never joined into one series.
+  timezone            String
+  /// Null where the source cannot answer the day exactly (an old day in a backfill).
+  dau                 Int?
+  wau                 Int?
+  mau                 Int?
+  newUsers            Int      @default(0) @map("new_users")
+  newVerified         Int      @default(0) @map("new_verified")
+  signIns             Int      @default(0) @map("sign_ins")
+  onboardingCompleted Int      @default(0) @map("onboarding_completed")
+  onboardingSkipped   Int      @default(0) @map("onboarding_skipped")
+  /// `{ platform, country, via, createdVia }`, each `{ <key>: { dau?, newUsers?, signIns? } }`.
+  breakdown           Json     @default("{}")
+  /// `{ <meterId>: units }`.
+  usageByMeter        Json     @default("{}") @map("usage_by_meter")
+  /// `job` or `backfill`.
+  source              String   @default("job")
+  /// The day is over and will not be recomputed.
+  final               Boolean  @default(false)
+  computedAt          DateTime @default(now()) @map("computed_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@id([applicationId, day])
+  @@map("application_activity_days")
+}
+
+/// One Application's population as it stood on one calendar day (today's row
+/// is rewritten every hour). Kept per day, so adoption rates have a history
+/// from the day the rollup started.
+model ApplicationPopulationSnapshot {
+  applicationId    String   @map("application_id")
+  takenOn          DateTime @db.Date @map("taken_on")
+  timezone         String
+  total            Int
+  erased           Int
+  verified         Int
+  mfaUsers         Int      @map("mfa_users")
+  passkeyUsers     Int      @map("passkey_users")
+  payingUsers      Int      @map("paying_users")
+  orgs             Int
+  usersInOrg       Int      @map("users_in_org")
+  devicesActive    Int      @map("devices_active")
+  devicesBlocked   Int      @map("devices_blocked")
+  /// `[{ platform, onboarding, verified, mfa, paying, n }]`, at most 192 cells.
+  cube             Json     @default("[]")
+  /// `{ completed, skipped, pending }`.
+  onboarding       Json     @default("{}")
+  byCountry        Json     @default("{}") @map("by_country")
+  byLastVia        Json     @default("{}") @map("by_last_via")
+  byCreatedVia     Json     @default("{}") @map("by_created_via")
+  oauthByProvider  Json     @default("{}") @map("oauth_by_provider")
+  /// Live sessions (not rotated, not revoked, not expired) by client attribute.
+  liveSessions     Json     @default("{}") @map("live_sessions")
+  /// `[{ planId, status, n }]` over ACTIVE, TRIALING and PAST_DUE subscriptions.
+  planDistribution Json     @default("[]") @map("plan_distribution")
+  computedAt       DateTime @default(now()) @map("computed_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@id([applicationId, takenOn])
+  @@map("application_population_snapshots")
 }

@@ -91,6 +91,8 @@ export interface EndUserPaymentDto {
   // to see that some of a charge came back, and showing it as SUCCEEDED or as
   // REFUNDED would each be wrong in a way that costs them a support ticket.
   status: 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'REFUNDED' | 'PARTIALLY_REFUNDED';
+  /** How much of `amount` has been refunded, smallest currency unit. The buyer's own money. */
+  refundedAmount: number;
   description: string | null;
   createdAt: Date;
   subscriptionId: string | null;
@@ -516,7 +518,7 @@ export const billingService = {
         statusCode: 400,
         code: 'BILLING_ORGANIZATION_REQUIRED',
         message: 'This Application bills per organization, but no organization was provided for checkout.',
-        fix: 'Pass `organizationId` of a team the user OWNS or ADMINS (set the session\'s active org via organizations.switch, or pass organizationId to createCheckout). Change the model in Panel → Application → Billing → Subject.',
+        fix: 'Pass `organizationId` of a team the user OWNS or ADMINS (set the session\'s active org via organizations.switch, or pass organizationId to createCheckout). Change the model in Panel → Application → Billing → Setup → Settings.',
       });
     }
 
@@ -540,19 +542,12 @@ export const billingService = {
         statusCode: 400,
         code: 'BILLING_ORGANIZATION_NOT_ACCEPTED',
         message: 'This Application bills individual users, so a checkout cannot name an organization.',
-        fix: 'Drop `organizationId` to bill the user, or switch the Application to organization billing in Panel → Application → Billing → Subject (only possible while nothing is subscribed).',
+        fix: 'Drop `organizationId` to bill the user, or switch the Application to organization billing in Panel → Application → Billing → Setup → Settings (only possible while nothing is subscribed).',
       });
     }
 
     const plan = await plansService.getBySlug(input.application.id, input.planSlug);
-    if (!plan.active) {
-      throw new RekeyError({
-        statusCode: 400,
-        code: 'PLAN_INACTIVE',
-        message: `Plan "${input.planSlug}" is not currently available for new sign-ups.`,
-        fix: `Pick a plan from GET /api/v1/billing/plans, which lists the active ones. The operator can reactivate this one in Panel → Application → Plans (/applications/${input.application.id}/plans) or with PATCH /api/v1/tenant/applications/${input.application.id}/plans/${input.planSlug} and \`{ "active": true }\`.`,
-      });
-    }
+    if (!plan.active) throw planInactive(input.application.id, plan);
 
     // CREDIT packs + perpetual (non-TIMED) licenses are one-off purchases,
     // route them through the provider's one-time payment flow so they DON'T
@@ -803,11 +798,11 @@ export const billingService = {
           message: `This subscriber ${held}, which is ${stillConfigured ? 'disabled' : 'no longer configured'} for this Application. A subscription cannot be moved between payment providers, so no checkout can be issued for them until that is resolved.`,
           fix: unpaidBinder
             ? stillConfigured
-              ? `Re-enable "${boundProvider}" in Panel → Application → Billing so this buyer can open checkouts there again. The one they already started is unaffected either way: completions do not consult whether a provider is enabled, so a payment made at "${boundProvider}" is still recorded while it is disabled. Otherwise leave it until ${unpaidBinderReleasesAt}, when it stops reserving "${boundProvider}" and a checkout elsewhere is allowed, unless a checkout for "${bound.plan.slug}" is opened there again first. No completed payment has been recorded here, so there is nothing for Rekey to cancel.`
-              : `Re-add the "${boundProvider}" credentials in Panel → Application → Billing so a payment completed there can still be recorded: without them the completion is refused and the checkout they started stays open. Otherwise leave it until ${unpaidBinderReleasesAt}, when it stops reserving "${boundProvider}" and a checkout elsewhere is allowed, unless a checkout for "${bound.plan.slug}" is opened there again first. No completed payment has been recorded here, so there is nothing for Rekey to cancel.`
+              ? `Re-enable "${boundProvider}" in Panel → Application → Billing → Setup → Providers so this buyer can open checkouts there again. The one they already started is unaffected either way: completions do not consult whether a provider is enabled, so a payment made at "${boundProvider}" is still recorded while it is disabled. Otherwise leave it until ${unpaidBinderReleasesAt}, when it stops reserving "${boundProvider}" and a checkout elsewhere is allowed, unless a checkout for "${bound.plan.slug}" is opened there again first. No completed payment has been recorded here, so there is nothing for Rekey to cancel.`
+              : `Re-add the "${boundProvider}" credentials in Panel → Application → Billing → Setup → Providers so a payment completed there can still be recorded: without them the completion is refused and the checkout they started stays open. Otherwise leave it until ${unpaidBinderReleasesAt}, when it stops reserving "${boundProvider}" and a checkout elsewhere is allowed, unless a checkout for "${bound.plan.slug}" is opened there again first. No completed payment has been recorded here, so there is nothing for Rekey to cancel.`
             : stillConfigured
-              ? `Re-enable "${boundProvider}" in Panel → Application → Billing so existing subscribers can keep buying, or cancel their "${boundProvider}" subscription, let it terminate, and have them buy again through a provider that is still enabled.`
-              : `Re-add the "${boundProvider}" credentials in Panel → Application → Billing; that restores both cancellation and checkout, because a re-added credential is enabled unless you say otherwise. While they are deleted this subscriber can neither buy nor cancel here, and cancelling in "${boundProvider}"'s own dashboard leaves this subscription live in Rekey. (An unfinished checkout is different: it has no provider-side subscription, so there is nothing to dial and it can still be cancelled.)`,
+              ? `Re-enable "${boundProvider}" in Panel → Application → Billing → Setup → Providers so existing subscribers can keep buying, or cancel their "${boundProvider}" subscription, let it terminate, and have them buy again through a provider that is still enabled.`
+              : `Re-add the "${boundProvider}" credentials in Panel → Application → Billing → Setup → Providers; that restores both cancellation and checkout, because a re-added credential is enabled unless you say otherwise. While they are deleted this subscriber can neither buy nor cancel here, and cancelling in "${boundProvider}"'s own dashboard leaves this subscription live in Rekey. (An unfinished checkout is different: it has no provider-side subscription, so there is nothing to dial and it can still be cancelled.)`,
         });
       }
 
@@ -1439,6 +1434,7 @@ export const billingService = {
         amount: p.amount,
         currency: p.currency,
         status: p.status,
+        refundedAmount: p.refundedAmount,
         description: p.description,
         createdAt: p.createdAt,
         subscriptionId: p.subscriptionId,
@@ -1775,3 +1771,23 @@ export const billingService = {
     return { attempted, failed };
   },
 };
+
+/**
+ * A plan that is off sale. An unregistered one cannot be reactivated by
+ * flipping `active` (that answers PLAN_NOT_REGISTERED_WITH_PROVIDER), so its
+ * fix names registration instead.
+ */
+function planInactive(applicationId: string, plan: Plan): RekeyError {
+  const route = `/api/v1/tenant/applications/${applicationId}/plans/${plan.slug}`;
+  const unregistered = plan.registrationStatus === 'PENDING' || plan.registrationStatus === 'FAILED';
+  return new RekeyError({
+    statusCode: 400,
+    code: 'PLAN_INACTIVE',
+    message: unregistered
+      ? `Plan "${plan.slug}" is not currently available for new sign-ups: it is not registered with the payment provider.`
+      : `Plan "${plan.slug}" is not currently available for new sign-ups.`,
+    fix: unregistered
+      ? `Pick a plan from GET /api/v1/billing/plans, which lists the active ones. The operator can put this one on sale by registering it, which activates it: POST ${route}/register (Panel → Application → Plans → Register). If registration was refused, correct the provider credentials in Panel → Application → Billing → Setup → Providers first.`
+      : `Pick a plan from GET /api/v1/billing/plans, which lists the active ones. The operator can reactivate this one in Panel → Application → Plans (/applications/${applicationId}/plans) or with PATCH ${route} and \`{ "active": true }\`.`,
+  });
+}

@@ -55,6 +55,7 @@ import { SubmitButton } from '@/components/SubmitButton';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { cancelSubscription, grantSubscription, setEntitlementOverrides } from '../actions';
 import { getEndUserBilling, type SubscriptionRow } from '../shared';
+import { savedStateKey } from '@/lib/saved-state-key';
 
 /**
  * Providers that host no checkout and only receive events. A subscription on
@@ -493,7 +494,11 @@ function GrantForm({
       description="Activates a subscription against a plan with no payment provider behind it: an invoiced sale, a bank transfer, a comped account, a migration off a previous billing system. No money is collected and nothing is charged."
       trigger="Grant subscription"
     >
-      <ActionForm action={grantSubscription.bind(null, applicationId, euid)} className="space-y-3">
+      <ActionForm
+        key={savedStateKey({ keptPlanSlug, keptPeriodEnd })}
+        action={grantSubscription.bind(null, applicationId, euid)}
+        className="space-y-3"
+      >
         {error && <Banner tone="error">{errorMessage(GRANT_ERR, error)}</Banner>}
         <Field label="Plan" required hint="Active plans only. Withdrawn plans can still be granted through the API.">
           <select name="planSlug" required defaultValue={keptPlanSlug ?? ""} className={inputCls}>

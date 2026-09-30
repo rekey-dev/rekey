@@ -377,6 +377,50 @@ describe('MFA replay resistance', () => {
       }
       expect(await remainingBackupCodes(ctx)).toBe(9);
     });
+
+    // The sign-in step used to answer a spent backup code with MFA_CODE_INVALID,
+    // whose copy tells the user to try their authenticator. Only a caller who
+    // passed the password step and presents a code this account really was
+    // issued can reach the new answer, so it tells a guesser nothing.
+    it('sign-in names a backup code that was already spent', async () => {
+      const ctx = await enrolledEndUser('eu-backup-spent');
+      const code = ctx.backupCodes[0]!;
+      expect((await mfaVerify(ctx, await challengeFor(ctx), code)).statusCode).toBe(200);
+
+      const again = await mfaVerify(ctx, await challengeFor(ctx), code);
+      expect(again.statusCode).toBe(401);
+      expect(again.json().error.code).toBe('MFA_BACKUP_CODE_USED');
+
+      const neverIssued = await mfaVerify(ctx, await challengeFor(ctx), 'zzzzz-zzzzz');
+      expect(neverIssued.json().error.code).toBe('MFA_CODE_INVALID');
+
+      expect((await mfaVerify(ctx, await challengeFor(ctx), ctx.backupCodes[1]!)).statusCode).toBe(200);
+    });
+
+    it('re-enrolling forgets the old spent backup codes', async () => {
+      const ctx = await enrolledEndUser('eu-backup-reenrol');
+      const code = ctx.backupCodes[0]!;
+      expect((await mfaVerify(ctx, await challengeFor(ctx), code)).statusCode).toBe(200);
+      await prisma.mfaCredential.update({ where: { endUserId: ctx.endUserId }, data: { enrolledAt: null } });
+      const reenrolled = await app
+        .inject({
+          remoteAddress: freshIp(),
+          method: 'POST',
+          url: '/api/v1/auth/mfa/setup',
+          headers: { authorization: `Bearer ${ctx.liveKey}`, 'x-rekey-user-token': ctx.accessToken },
+        })
+        .then((r) => r.json().data as { otpauthUrl: string });
+      const confirm = await app.inject({
+        remoteAddress: freshIp(),
+        method: 'POST',
+        url: '/api/v1/auth/mfa/setup-confirm',
+        headers: { authorization: `Bearer ${ctx.liveKey}`, 'x-rekey-user-token': ctx.accessToken },
+        payload: { code: totpFrom(reenrolled.otpauthUrl).codeAt(0) },
+      });
+      expect(confirm.statusCode).toBe(200);
+      const old = await mfaVerify(ctx, await challengeFor(ctx), code);
+      expect(old.json().error.code).toBe('MFA_CODE_INVALID');
+    });
   });
 
   describe('operator', () => {

@@ -195,6 +195,17 @@ describe('end-user billing portal surface', () => {
     expect(payments[1]!.receiptUrl).toBeNull();
   });
 
+  it('GET /billing/payments says how much of a partially refunded payment came back', async () => {
+    const { accessToken, id } = await signUpUser('refunded@example.com');
+    await prisma.payment.create({
+      data: { applicationId, endUserId: id, amount: 2000, refundedAmount: 500, currency: 'USD', status: 'PARTIALLY_REFUNDED' },
+    });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/billing/payments', headers: userHeaders(accessToken) });
+    expect(res.statusCode).toBe(200);
+    const [row] = (res.json().data as { items: Array<{ amount: number; refundedAmount: number; status: string }> }).items;
+    expect(row).toMatchObject({ amount: 2000, refundedAmount: 500, status: 'PARTIALLY_REFUNDED' });
+  });
+
   it('GET /billing/payments rejects non-https receipt URLs and respects ?limit=', async () => {
     const { accessToken, id } = await signUpUser('limits@example.com');
     await prisma.payment.create({

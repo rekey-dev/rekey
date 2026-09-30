@@ -52,6 +52,9 @@ import type {
   Paged,
   UsageRemainingDto,
   SelfCreditLedgerEntryDto,
+  ContactListPublicDto,
+  ListSubscribeRequest,
+  ProfileStateDto,
 } from '@rekey.dev/shared-types';
 // NOTE the subpath. `RekeyError` is the ONLY value this package imports from
 // shared-types, everything above is a type and erases. Importing it from the
@@ -90,7 +93,9 @@ export interface PortalPaymentDto {
   id: string;
   amount: number;
   currency: string;
-  status: 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'REFUNDED';
+  status: 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'REFUNDED' | 'PARTIALLY_REFUNDED';
+  /** How much of `amount` has been refunded, smallest currency unit. Absent from older servers. */
+  refundedAmount?: number;
   description: string | null;
   createdAt: string;
   subscriptionId: string | null;
@@ -112,6 +117,15 @@ export interface RekeyBrowserConfig {
 // RekeyError is the shared class (imported above), re-exported so the public
 // name is preserved and `instanceof` matches @rekey.dev/node.
 export { RekeyError };
+
+/**
+ * Codes after which this token will never resolve a user again. A banned or
+ * erased account is signed out, not an outage: rethrowing them made every
+ * page throw until the access token expired.
+ */
+function isSignedOutCode(code: string): boolean {
+  return code === 'USER_TOKEN_INVALID' || code === 'END_USER_BANNED' || code === 'END_USER_ERASED';
+}
 
 /**
  * Build the `?limit=&offset=` query for a list method.
@@ -160,8 +174,8 @@ export class RekeyBrowserClient {
 
   /**
    * Fetch the current end-user given an access token. Returns null on
-   * USER_TOKEN_INVALID so callers can render signed-out state without
-   * try/catch noise.
+   * USER_TOKEN_INVALID, END_USER_BANNED or END_USER_ERASED so callers can
+   * render signed-out state without try/catch noise.
    *
    * Hits `GET /api/v1/auth/me`, a user-token-only endpoint: it resolves the
    * end-user from the `X-Rekey-User-Token` JWT alone, with NO Application
@@ -176,7 +190,7 @@ export class RekeyBrowserClient {
       const res = await this.raw<EndUserDto>('GET', meEndpoint, undefined, { accessToken });
       return res.data;
     } catch (err) {
-      if (err instanceof RekeyError && err.code === 'USER_TOKEN_INVALID') {
+      if (err instanceof RekeyError && isSignedOutCode(err.code)) {
         return null;
       }
       throw err;
@@ -191,7 +205,7 @@ export class RekeyBrowserClient {
    * `licenses` (`{ items, truncated }`, the first 100 of `listMyLicenses`). With a
    * literal list (inline or `as const`) the return type gains exactly those
    * properties; with a list typed `MeInclude[]` they are optional. Null on
-   * USER_TOKEN_INVALID, like `getCurrentUser`.
+   * the same codes as `getCurrentUser`.
    *
    * @example
    * ```ts
@@ -208,7 +222,7 @@ export class RekeyBrowserClient {
       const res = await this.raw<CurrentUserDto & MeIncludedFor<L>>('GET', path, undefined, { accessToken });
       return res.data;
     } catch (err) {
-      if (err instanceof RekeyError && err.code === 'USER_TOKEN_INVALID') {
+      if (err instanceof RekeyError && isSignedOutCode(err.code)) {
         return null;
       }
       throw err;
@@ -290,6 +304,33 @@ export class RekeyBrowserClient {
    */
   getPlans(page?: ListPage): Promise<Paged<PublicPlanDto>> {
     return this.bootstrap<Paged<PublicPlanDto>>('GET', `/api/v1/billing/plans${listQuery(page)}`, undefined);
+  }
+
+  /**
+   * A list's form: its fields and the consent text and version to show. The
+   * list needs Public capture on, and the Application a browser origin.
+   *
+   * @example
+   * ```ts
+   * const list = await client.getList('waitlist');
+   * ```
+   */
+  getList(key: string): Promise<ContactListPublicDto> {
+    return this.bootstrap('GET', `/api/v1/lists/${encodeURIComponent(key)}`, undefined);
+  }
+
+  /**
+   * Add the visitor to a list. Always resolves `{ status: 'received' }` when the
+   * API accepted the request, whatever happened to the address, so a page can
+   * never learn who is on a list.
+   *
+   * @example
+   * ```ts
+   * await client.subscribeToList('waitlist', { email, consent: { granted: true, version: list.consent.version } });
+   * ```
+   */
+  subscribeToList(key: string, input: ListSubscribeRequest): Promise<{ status: 'received' }> {
+    return this.bootstrap('POST', `/api/v1/lists/${encodeURIComponent(key)}/subscribe`, input);
   }
 
   /**
@@ -567,12 +608,16 @@ export class RekeyBrowserClient {
    * use {@link createCheckout}; `BILLING_FREE_TIER_ALREADY_CLAIMED` (409) when
    * the plan grants credits or a licence and this user already claimed it for
    * another beneficiary.
+   *
+   * `subscription` is null when the plan carries only FEATURE or USAGE
+   * entitlements and this user already holds it for another beneficiary: the
+   * requested one is on the free tier at read time, with no row of its own.
    */
   async subscribe(
     accessToken: string,
     opts?: { organizationId?: string },
-  ): Promise<{ subscription: SelfSubscriptionDto; activated: boolean }> {
-    const res = await this.selfServiceWithStatus<SelfSubscriptionDto>(
+  ): Promise<{ subscription: SelfSubscriptionDto | null; activated: boolean }> {
+    const res = await this.selfServiceWithStatus<SelfSubscriptionDto | null>(
       'POST',
       '/api/v1/billing/subscribe',
       { ...(opts?.organizationId ? { organizationId: opts.organizationId } : {}) },
@@ -666,6 +711,33 @@ export class RekeyBrowserClient {
       undefined,
       accessToken,
     );
+  }
+
+  // ---------- Onboarding self-service (publishable key + the user's own token) ----------
+
+  /**
+   * Mark the signed-in user's onboarding complete. Every
+   * `requiredForOnboarding` field must be answered, or this rejects with
+   * PROFILE_INCOMPLETE and `details.missing`. Allowed after a skip. Idempotent.
+   *
+   * @example
+   *   const { onboardingStatus } = await client.completeOnboarding(accessToken); // 'completed'
+   */
+  completeOnboarding(accessToken: string): Promise<ProfileStateDto> {
+    return this.selfService<ProfileStateDto>('POST', '/api/v1/users/me/onboarding/complete', undefined, accessToken);
+  }
+
+  /**
+   * Record that the signed-in user skipped onboarding. Rekey only records it
+   * and gates nothing on it: where a skipped user goes is your app's call.
+   * Idempotent, and a no-op once onboarding was completed.
+   *
+   * @example
+   *   await client.skipOnboarding(accessToken);
+   *   router.push('/dashboard');
+   */
+  skipOnboarding(accessToken: string): Promise<ProfileStateDto> {
+    return this.selfService<ProfileStateDto>('POST', '/api/v1/users/me/onboarding/skip', undefined, accessToken);
   }
 
   // ---------- internals ----------
@@ -792,4 +864,10 @@ export type {
   UsageRemainingDto,
   UsageMeterRemainingDto,
   SelfCreditLedgerEntryDto,
+  // What `getList()` resolves to and what `subscribeToList()` takes.
+  ContactListPublicDto,
+  ListSubscribeRequest,
+  // What `completeOnboarding()` and `skipOnboarding()` resolve to.
+  ProfileStateDto,
+  OnboardingStatus,
 } from '@rekey.dev/shared-types';

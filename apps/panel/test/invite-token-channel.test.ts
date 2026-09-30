@@ -40,21 +40,31 @@ const CREDENTIAL_PARAMS = [
   'password',
   'refreshToken',
   'accessToken',
+  'challenge',
+  // A workspace-bound operator invite (`rp_opinv_…`): redeeming it joins a
+  // workspace, as OWNER when minted by `rekey init`.
+  'invite',
 ];
 
 /**
  * Pages the operator reaches BY a link that already contains the token: the
- * accept-invite landing page and the password reset form. The token is in
- * their URL by construction, put there by the email, and these redirects only
+ * accept-invite landing page, the password reset form, and the sign-up form
+ * when accept-invite hands it a workspace-bound operator invite
+ * (`/sign-up?invite=rp_opinv_…`). The token is in their URL by construction,
+ * put there by the email or the invite link, and these redirects only
  * preserve it across a validation failure so the form still works on the
  * second try. There is nothing to move out of the URL, because the token
- * arrived in it. Anything else
- * that wants to be here is the bug this file is about.
+ * arrived in it. Anything else that wants to be here is the bug this file is
+ * about.
+ *
+ * Each entry names the parameters it may carry, so allowlisting a page for
+ * one credential does not quietly allow every other one.
  */
-const ARRIVED_BY_LINK = [
-  path.join('app', 'accept-invite', 'page.tsx'),
-  path.join('app', 'reset-password', 'page.tsx'),
-];
+const ARRIVED_BY_LINK: Readonly<Record<string, readonly string[]>> = {
+  [path.join('app', 'accept-invite', 'page.tsx')]: ['token'],
+  [path.join('app', 'reset-password', 'page.tsx')]: ['token'],
+  [path.join('app', 'sign-up', 'page.tsx')]: ['invite'],
+};
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -65,7 +75,8 @@ function sourceFiles(dir: string): string[] {
 }
 
 /**
- * The argument text of every `redirect(…)` call in a source file, with its
+ * The argument text of every `redirect(…)` and `seeOther(…)` call in a source
+ * file (`seeOther` is the Route Handlers' 303 helper), with its
  * line number. Balanced on parentheses so a target built from
  * `` `…${encodeURIComponent(x)}…` `` is not cut short, and comments are
  * blanked first so a docblock describing the old shape is not scanned.
@@ -73,7 +84,7 @@ function sourceFiles(dir: string): string[] {
 export function redirectTargets(source: string): { arg: string; line: number }[] {
   const text = blankBlockComments(source).replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length));
   const found: { arg: string; line: number }[] = [];
-  const call = /\bredirect\s*\(/g;
+  const call = /\b(?:redirect|seeOther)\s*\(/g;
   let m: RegExpExecArray | null;
   while ((m = call.exec(text)) !== null) {
     const start = m.index + m[0].length;
@@ -83,12 +94,30 @@ export function redirectTargets(source: string): { arg: string; line: number }[]
       if (text[i] === '(') depth += 1;
       else if (text[i] === ')') depth -= 1;
     }
+    const arg = text.slice(start, i - 1);
     found.push({
-      arg: text.slice(start, i - 1),
+      arg: arg + interpolatedInitializers(text, arg),
       line: text.slice(0, m.index).split('\n').length,
     });
   }
   return found;
+}
+
+/**
+ * The initializer text of every `const` a redirect target interpolates. A
+ * query built one line earlier (`const keep = \`&invite=${key}\``) and
+ * spliced in as `${keep}` must count as part of the target, or the scan
+ * passes by indirection.
+ */
+function interpolatedInitializers(text: string, arg: string): string {
+  let extra = '';
+  for (const [, name] of arg.matchAll(/\$\{\s*([A-Za-z_$][\w$]*)\s*\}/g)) {
+    const decl = new RegExp(`\\bconst\\s+${name}\\s*=`).exec(text);
+    if (!decl) continue;
+    const end = text.indexOf(';', decl.index);
+    extra += ' ' + text.slice(decl.index, end === -1 ? undefined : end);
+  }
+  return extra;
 }
 
 describe('credentials never ride in a redirect query', () => {
@@ -96,11 +125,11 @@ describe('credentials never ride in a redirect query', () => {
     const offenders: string[] = [];
     for (const file of sourceFiles(srcDir)) {
       const rel = path.relative(srcDir, file);
-      if (ARRIVED_BY_LINK.includes(rel)) continue;
+      const allowed = ARRIVED_BY_LINK[rel] ?? [];
       const source = readFileSync(file, 'utf8');
-      if (!source.includes('redirect(')) continue;
+      if (!source.includes('redirect(') && !source.includes('seeOther(')) continue;
       for (const { arg, line } of redirectTargets(source)) {
-        for (const param of CREDENTIAL_PARAMS) {
+        for (const param of CREDENTIAL_PARAMS.filter((p) => !allowed.includes(p))) {
           // `?token=` / `&token=`, the only way a value reaches a query.
           if (new RegExp(`[?&]${param}=`).test(arg)) {
             offenders.push(
@@ -111,5 +140,26 @@ describe('credentials never ride in a redirect query', () => {
       }
     }
     expect(offenders, offenders.join('\n')).toEqual([]);
+  });
+
+  it('sees a credential spliced in through a const, not only a literal one', () => {
+    const source = [
+      'const keep = `&email=${e}&invite=${encodeURIComponent(k)}`;',
+      'redirect(`/sign-up?error=missing${keep}`);',
+    ].join('\n');
+    const [target] = redirectTargets(source);
+    expect(target?.arg).toMatch(/[?&]invite=/);
+  });
+
+  it('every allowlisted page exists and really does carry its parameter', () => {
+    for (const [rel, params] of Object.entries(ARRIVED_BY_LINK)) {
+      const source = readFileSync(path.join(srcDir, rel), 'utf8');
+      const carried = redirectTargets(source).map((t) => t.arg).join('\n');
+      for (const param of params) {
+        expect(carried, `${rel} no longer redirects with '${param}'; drop it from ARRIVED_BY_LINK`).toMatch(
+          new RegExp(`[?&]${param}=`),
+        );
+      }
+    }
   });
 });

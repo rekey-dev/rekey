@@ -13,6 +13,7 @@ import { prisma } from '../../../lib/prisma.js';
 import { describeTransport } from '../../../lib/email-transport.js';
 import {
   noFromAddress,
+  previewVariablesInvalid,
   templateInvalid,
   templateKeyTaken,
   templateLimitReached,
@@ -20,7 +21,7 @@ import {
   transportNotCustom,
 } from './errors.js';
 import { publishIssues, undeclaredNames } from './template-rules.js';
-import { readVariableSchema, sampleValues } from './variables.js';
+import { overrideIssues, readVariableSchema, sampleValues } from './variables.js';
 import { renderCustom } from './render-custom.js';
 import { capsForTenant, type SendCaps } from './send-caps.js';
 
@@ -254,6 +255,8 @@ export const customTemplatesService = {
   }> {
     const draft = await findOrThrow(applicationId, key);
     const schema = readVariableSchema(draft.variableSchema);
+    const issues = overrideIssues(schema, draft.linkDomains, overrides);
+    if (issues.length > 0) throw previewVariablesInvalid(key, issues);
     const undeclared = undeclaredNames({ ...draft, variableSchema: schema });
     const values = sampleValues(schema, draft.linkDomains, overrides);
     for (const name of undeclared) values[name] = `{{${name}}}`;

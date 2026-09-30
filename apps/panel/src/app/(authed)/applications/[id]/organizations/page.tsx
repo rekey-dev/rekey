@@ -15,7 +15,7 @@ import type { Page } from '@/lib/paginate';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
-import { EmptyState } from '@/components/EmptyState';
+import { EmptyState, EmptyStateCreate } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
 
 
@@ -150,7 +150,7 @@ export default async function OrganizationsPage({
             return <code className="font-mono text-xs">ORGANIZATIONS_NOT_ENABLED</code> for end-users
             (operator management here still works). Enable it under{' '}
             <Link href={`/applications/${id}/auth`} className="underline hover:no-underline">
-              Auth
+              Authentication, Methods
             </Link>
             .
           </Banner>
@@ -168,11 +168,12 @@ export default async function OrganizationsPage({
             title="No organizations yet"
             description={
               <>
-                Create one if you bill companies/teams rather than individuals. Use “+ New
-                organization”, or let end-users create teams from your app with
+                Create one if you bill companies or teams rather than individuals, or let
+                end-users create teams from your app with
                 <code className="font-mono text-xs"> rekey.organizations.create()</code>.
               </>
             }
+            action={<EmptyStateCreate modalKey="newOrg">New organization</EmptyStateCreate>}
           />
         ) : (
           <Table minWidth="min-w-[48rem]">

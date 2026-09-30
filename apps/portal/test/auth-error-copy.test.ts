@@ -61,6 +61,14 @@ describe('signInErrorCopy', () => {
     expect(signInErrorCopy('EMAIL_NOT_VERIFIED')).toMatch(/confirm/i);
   });
 
+  it('tells a banned customer to contact the business, on either step, without blaming the password', () => {
+    for (const copy of [signInErrorCopy('END_USER_BANNED'), mfaErrorCopy('END_USER_BANNED')]) {
+      expect(copy).toMatch(/cannot sign in/);
+      expect(copy).toMatch(/Contact the business/);
+      expect(copy).not.toMatch(/password/);
+    }
+  });
+
   it('never blames the password for a code it does not recognise', () => {
     const copy = signInErrorCopy('SOME_FUTURE_CODE');
     expect(copy).not.toMatch(/password/i);
@@ -86,6 +94,24 @@ describe('mfaErrorCopy', () => {
 
   it('does not call a service failure a wrong code', () => {
     expect(mfaErrorCopy('INTERNAL_ERROR')).not.toMatch(/didn.t verify/);
+  });
+
+  // Only the API's own code may say a backup code was used; a plain wrong code
+  // keeps the generic line, so the page never claims more than the API did.
+  it('names a spent backup code and asks for another one', () => {
+    const copy = mfaErrorCopy('MFA_BACKUP_CODE_USED');
+    expect(copy).toMatch(/backup code was already used/);
+    expect(copy).toMatch(/different backup code/);
+    expect(copy).not.toMatch(/current code from your app/);
+    expect(mfaErrorCopy('MFA_CODE_INVALID')).not.toMatch(/backup code was already used/);
+  });
+});
+
+describe('a dead MFA challenge on the sign-in page', () => {
+  it('reads as "sign in again", not as a wrong password', () => {
+    expect(signInErrorCopy('MFA_CHALLENGE_INVALID')).toMatch(/expired.*sign in again/);
+    expect(signInErrorCopy('MFA_CHALLENGE_USED')).toMatch(/already completed.*sign in again/);
+    expect(signInErrorCopy('MFA_CHALLENGE_USED')).not.toBe(signInErrorCopy('INVALID_CREDENTIALS'));
   });
 });
 

@@ -15,6 +15,8 @@ export const SIGN_UP_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   OPERATOR_INVITE_INVALID: 'That invite key is not valid. Check it with whoever invited you.',
   OPERATOR_INVITE_USED: 'That invite key has already been used. Ask for a fresh one.',
   OPERATOR_INVITE_EXPIRED: 'That invite key has expired. Ask for a fresh one.',
+  OPERATOR_INVITE_EMAIL_MISMATCH:
+    'That invite was sent to a different email address. Sign up with the address it was sent to.',
   INTERNAL_ERROR: 'Something went wrong creating your workspace. Please try again.',
   BAD_REQUEST:
     'Check the details above. The workspace name, email, or password was rejected. Passwords need at least 8 characters.',

@@ -138,6 +138,7 @@ const ALLOWED_BARE_ARRAYS: ReadonlySet<string> = new Set<string>([
   // A plan's entitlement bundle. Authored by the operator per plan, and a plan
   // with enough entitlements to need paging is a modelling problem.
   'GET /api/v1/tenant/applications/{id}/plans/{slug}/entitlements → 200',
+  'GET /api/v1/admin/applications/{id}/plans/{slug}/entitlements → 200',
   // One row per supported payment provider (three), configured or not.
   'GET /api/v1/tenant/applications/{id}/billing-credentials → 200',
   // Roles are authored per Application, not accumulated by usage. Three

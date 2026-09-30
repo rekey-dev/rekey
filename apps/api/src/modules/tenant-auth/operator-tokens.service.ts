@@ -19,6 +19,7 @@ import { RekeyError } from '../../lib/error.js';
 import {
   generateOperatorToken,
   DEFAULT_OPERATOR_TOKEN_SCOPES,
+  OPERATOR_TOKEN_SCOPES,
   isOperatorTokenScope,
   type OperatorTokenScope,
 } from '../../lib/operator-token.js';
@@ -60,13 +61,14 @@ export interface MintOperatorTokenResult {
  */
 function normaliseScopes(requested: string[]): OperatorTokenScope[] {
   if (requested.length === 0) return [...DEFAULT_OPERATOR_TOKEN_SCOPES];
-  const unknown = requested.filter((s) => !isOperatorTokenScope(s));
+  const unknown = [...new Set(requested.filter((s) => !isOperatorTokenScope(s)))];
   if (unknown.length > 0) {
     throw new RekeyError({
       statusCode: 400,
       code: 'OPERATOR_SCOPE_UNKNOWN',
-      message: `Unknown PAT scope(s): ${unknown.join(', ')}.`,
-      fix: "Allowed scopes are 'read', 'applications:write', 'keys:mint'. Omit scopes for read-only.",
+      message: `Unknown operator token scope${unknown.length === 1 ? '' : 's'}: ${unknown.map((s) => JSON.stringify(s)).join(', ')}.`,
+      fix: `Remove or correct ${unknown.length === 1 ? 'it' : 'them'}. Valid scopes: ${OPERATOR_TOKEN_SCOPES.join(', ')}. Omit \`scopes\` for a read-only token.`,
+      details: { unknown, valid: [...OPERATOR_TOKEN_SCOPES] },
     });
   }
   // De-dupe while preserving the allowed-list order.

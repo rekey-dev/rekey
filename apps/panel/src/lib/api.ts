@@ -23,7 +23,9 @@ import { cache } from 'react';
 import { cookies, headers } from 'next/headers';
 import { forbidden, notFound, redirect } from 'next/navigation';
 import { cookieSecure } from './cookie-secure';
+import { parseBuildInfo, type BuildInfo } from '@/lib/build-info';
 import { CLIENT_IP_SOURCE_HEADER, clientIpFrom } from '@/lib/client-ip';
+import { publicHttpUrl } from '@/lib/public-url';
 import { DEFAULT_RETRY_AFTER_SECONDS, busyDigest, isApiBusyStatus, parseRetryAfter } from '@/lib/api-busy';
 import { neverConnected } from '@rekey.dev/shared-types/transport';
 import {
@@ -797,11 +799,16 @@ export interface WorkspaceLimitsDto {
   limits: {
     maxProductionApps?: number | null;
     maxActiveEndUsers?: number | null;
+    maxContacts?: number | null;
+    maxContactLists?: number | null;
   };
   usage: {
     /** Production applications that are RUNNING, not disabled. */
     productionApps: number;
     activeEndUsers: number;
+    /** Absent from an API older than lists. */
+    contacts?: number;
+    contactLists?: number;
   };
 }
 
@@ -848,6 +855,40 @@ export async function getWorkspaceCreationOpen(now: number = Date.now()): Promis
 /** Test seam: forget the cached creation mode. */
 export function resetWorkspaceCreationModeCache(): void {
   creationModeCache = null;
+}
+
+/**
+ * The operator MCP endpoint's public URL, from the API's own protected-resource
+ * metadata, which derives it from PUBLIC_WEBHOOK_BASE_URL or API_URL. The
+ * panel's REKEY_URL can be an in-cluster host such as `http://api:3030`, so it
+ * is never what an operator is shown. Null when the API does not answer, for
+ * example with operator MCP turned off. A deployment constant, so an answer is
+ * cached for five minutes; a failure is not cached.
+ */
+const OPERATOR_MCP_TTL_MS = 5 * 60_000;
+let operatorMcpCache: { url: string; expiresAt: number } | null = null;
+
+export async function getOperatorMcpUrl(now: number = Date.now()): Promise<string | null> {
+  if (operatorMcpCache && operatorMcpCache.expiresAt > now) return operatorMcpCache.url;
+  try {
+    const res = await fetch(`${apiUrl()}/api/v1/tenant/mcp/.well-known/oauth-protected-resource`, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { resource?: unknown };
+    const url = publicHttpUrl(typeof body.resource === 'string' ? body.resource : undefined);
+    if (url === null) return null;
+    operatorMcpCache = { url, expiresAt: now + OPERATOR_MCP_TTL_MS };
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+/** Test seam: forget the cached operator MCP URL. */
+export function resetOperatorMcpUrlCache(): void {
+  operatorMcpCache = null;
 }
 
 /**
@@ -978,12 +1019,32 @@ export interface ApplicationRow {
   /** Public MCP server URL, computed API-side from PUBLIC_WEBHOOK_BASE_URL/API_URL. */
   mcpUrl?: string;
   /**
+   * Origin of this deployment's hosted portal (the API's PUBLIC_PORTAL_URL),
+   * or null when it runs none. Absent from APIs that predate the field.
+   */
+  portalBaseUrl?: string | null;
+  /**
    * How the caller reached this Application and their effective scopes on it.
    * The panel renders navigation from `scopes`: a section whose scope is
    * absent is not shown, rather than shown and refused. Optional only for the
    * moment between deploys; the API always sends it.
    */
   access?: { level: string; scopes: string[] };
+  /**
+   * IANA zone the Users overview counts days in. Arrives with the analytics
+   * API, so its absence also means that API is not there yet.
+   */
+  reportingTimezone?: string;
+  /**
+   * Only on list rows fetched with `include=summary`. Each field is left out
+   * when the caller may not read it, so absent means "unknown", not zero.
+   */
+  summary?: {
+    /** Keys that authenticate today: not revoked, not expired. */
+    activeApiKeys?: number;
+    /** Last UTC day an end-user was active or a key was used. */
+    lastActiveOn?: string | null;
+  };
   createdAt: string;
 }
 
@@ -1011,6 +1072,9 @@ export interface ApplicationStatsRow {
     creditsOutstanding: number;
     usageLast30d: number;
   };
+  /** Absent from an API older than the activity columns. */
+  activeUsers?: { d1: number; d7: number; d30: number };
+  activitySeries?: Array<{ date: string; count: number }>;
 }
 
 export interface SecurityEventRow {
@@ -1253,7 +1317,20 @@ export interface EndUserRow {
   emailVerified: boolean;
   role: string;
   metadata: Record<string, unknown> | null;
+  /** Absent from an older API. */
+  bannedAt?: string | null;
   createdAt: string;
+  /** Last credential sign-in; null if never. Absent from an API older than the column. */
+  lastSignedInAt?: string | null;
+  /** Platform of the latest sign-in; null if never. Absent from an older API. */
+  lastPlatform?: string | null;
+  /** Profile answers keyed by field key. Absent from an older API. */
+  profile?: Record<string, string | number | boolean>;
+  /** UTC day of the last sign-in or session refresh. Absent from an API older than the field. */
+  lastActiveOn?: string | null;
+  lastCountry?: string | null;
+  /** Derived from the completion and skip times. Absent from an API older than onboarding skip. */
+  onboardingStatus?: 'pending' | 'completed' | 'skipped';
 }
 
 /**
@@ -1599,6 +1676,30 @@ export async function getReadyReport(): Promise<ReadyReport | null> {
     const json = (await res.json().catch(() => null)) as ReadyReport | null;
     if (json === null || typeof json !== 'object') return null;
     return json;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The API's release version and commit, from `/health/live`.
+ *
+ * Cached for five minutes and bounded to 1.5 seconds, because the authed
+ * layout shows it on every page. Null on any failure: the sidebar then shows
+ * no version rather than a wrong one.
+ *
+ * @example
+ * const api = await getApiBuildInfo(); // { version: '2.2.0-rc.4', commit: 'unknown' }
+ */
+export async function getApiBuildInfo(): Promise<BuildInfo | null> {
+  try {
+    const res = await fetch(`${apiUrl()}/health/live`, {
+      headers: await apiCallerHeaders(),
+      next: { revalidate: 300 },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!res.ok) return null;
+    return parseBuildInfo(await res.json().catch(() => null));
   } catch {
     return null;
   }

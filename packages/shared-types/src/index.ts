@@ -69,6 +69,24 @@ export { NEVER_CONNECTED_CODES, neverConnected } from './transport.js';
 
 // Custom transactional email templates and the send route.
 export * from './custom-email.js';
+export * from './contacts.js';
+
+// The client platform a session came from, and the `client` hint that names it.
+export * from './client-platform.js';
+import { ClientHintSchema } from './client-platform.js';
+
+// Profile fields: an Application's onboarding questions and each user's answers.
+export * from './profile.js';
+
+// How an end-user account was created (EndUser.createdVia).
+export * from './created-via.js';
+
+// An Application's reporting timezone and the settings route that sets it.
+export * from './timezone.js';
+
+// The Users overview analytics endpoint: query, sections and response shapes.
+export * from './analytics.js';
+import { ONBOARDING_STATUSES, type EndUserProfile } from './profile.js';
 
 /**
  * The error envelope every Rekey API response uses on failure. The runtime
@@ -284,6 +302,30 @@ export const TenantLimitsSchema = z.object({
    * off, which is every self-host install.
    */
   emailAttribution: z.boolean().nullable().optional(),
+
+  /**
+   * Maximum contacts (people on any list, counted once per Application by
+   * address) across every Application in the workspace. Only a subscribe that
+   * would store a NEW contact is refused, with `CONTACT_QUOTA_EXCEEDED`;
+   * existing contacts can still join or leave lists. Absent or null means
+   * unlimited.
+   */
+  maxContacts: z.number().int().min(0).max(2_147_483_647).nullable().optional(),
+
+  /**
+   * Maximum lists that are not archived, across every Application in the
+   * workspace. Creating or restoring one over the line fails with
+   * `CONTACT_LIST_QUOTA_EXCEEDED`. Absent or null means unlimited.
+   */
+  maxContactLists: z.number().int().min(0).max(2_147_483_647).nullable().optional(),
+
+  /**
+   * Subscribes from browsers (a publishable key, or a secret key that names
+   * the visitor with `X-Rekey-Client-Ip`) per UTC day, across the workspace.
+   * Over it, the subscribe answers `429 CONTACTS_RATE_LIMITED` until the next
+   * UTC day. Absent or null means unlimited.
+   */
+  contactCaptureDailyCap: z.number().int().min(1).max(100_000_000).nullable().optional(),
 });
 export type TenantLimits = z.infer<typeof TenantLimitsSchema>;
 
@@ -746,6 +788,28 @@ export const ApplicationDtoSchema = z.object({
    * older deployments do not return it.
    */
   supportEmail: z.string().email().nullable().optional(),
+  /**
+   * The IANA zone the daily analytics rollup counts days in (`UTC` by default). Set with
+   * `PATCH .../settings`. Optional because older deployments do not return it.
+   */
+  reportingTimezone: z.string().optional(),
+  /**
+   * Only on `GET /api/v1/tenant/applications?include=summary` rows. Each
+   * field is left out when the caller may not read it, so absent means
+   * unknown, not zero.
+   */
+  summary: z
+    .object({
+      /** Keys that authenticate today: not revoked, not expired. Needs `developer:read`. */
+      activeApiKeys: z.number().int().optional(),
+      /**
+       * The last UTC day an end-user was active, or a key was used when the
+       * caller also holds `developer:read`. Null when neither happened.
+       * Needs `overview:read`.
+       */
+      lastActiveOn: z.string().datetime().nullable().optional(),
+    })
+    .optional(),
   createdAt: z.string().datetime(),
 });
 export type ApplicationDto = z.infer<typeof ApplicationDtoSchema>;
@@ -756,7 +820,39 @@ export const EndUserDtoSchema = z.object({
   email: z.string().email(),
   emailVerified: z.boolean(),
   metadata: z.record(z.unknown()).nullable(),
+  /** Set while an operator has banned this end-user; every sign-in is refused with END_USER_BANNED. */
+  bannedAt: z.string().datetime().nullable().optional(),
   createdAt: z.string().datetime(),
+  /** When the user last signed in with a credential (refresh does not count). Null if never. */
+  lastSignedInAt: z.string().datetime().nullable().optional(),
+  /** How that sign-in happened: `password`, `magic_link`, `oauth`, `passkey` or `mfa`. */
+  lastSignInVia: z.string().nullable().optional(),
+  /** Credential sign-ins since the Application's `activityTrackedSince`. */
+  signInCount: z.number().int().optional(),
+  /** The last UTC day the user signed in or refreshed a session (midnight UTC). Null if never. */
+  lastActiveOn: z.string().datetime().nullable().optional(),
+  /** Platform of the latest sign-in (`web`, `ios`, `android`, `macos`, `windows`, `linux`, `server`, `mcp`, `other`). */
+  lastPlatform: z.string().nullable().optional(),
+  /** Every platform the user has signed in or been active from, first seen first. */
+  platformsSeen: z.array(z.string()).optional(),
+  /** ISO 3166 alpha-2 country of the latest browser sign-in, from `CF-IPCountry`. Null when unknown. */
+  lastCountry: z.string().nullable().optional(),
+  /** Answers to the Application's profile fields, keyed by field key. See docs/profile-fields.md. */
+  profile: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
+  /** When onboarding was marked complete. Null until then. */
+  onboardingCompletedAt: z.string().datetime().nullable().optional(),
+  /** When the user skipped onboarding. Kept after a later completion. Null if never skipped. */
+  onboardingSkippedAt: z.string().datetime().nullable().optional(),
+  /**
+   * `completed`, `skipped` or `pending`, derived from the two times above.
+   * Recorded only: Rekey gates nothing on it. See docs/profile-fields.md.
+   */
+  onboardingStatus: z.enum(ONBOARDING_STATUSES).optional(),
+  /**
+   * How the account was created: `password`, `magic_link`, `oauth:<provider>`, `passkey`, `operator`,
+   * `import` or `billing`. `unknown` for accounts created before this was recorded.
+   */
+  createdVia: z.string().optional(),
 });
 export type EndUserDto = z.infer<typeof EndUserDtoSchema>;
 
@@ -783,6 +879,7 @@ export const STANDARD_API_KEY_SCOPES = [
   'billing:read',
   'billing:write',
   'webhooks:read',
+  'contacts:write',
 ] as const;
 
 /**
@@ -799,8 +896,11 @@ export const STANDARD_API_KEY_SCOPES = [
  * - `email:send`: send a published custom template with
  *   `POST /api/v1/email/send`. It mails any address from the operator's own
  *   domain, so a key already deployed must not gain it without anyone choosing.
+ * - `contacts:read`: read every member of a list with
+ *   `GET /api/v1/lists/:key/members`. A bulk export of people who never signed
+ *   up is the privacy risk of lists, so a default key cannot do it.
  */
-export const ELEVATED_API_KEY_SCOPES = ['credits:grant', 'email:send'] as const;
+export const ELEVATED_API_KEY_SCOPES = ['credits:grant', 'email:send', 'contacts:read'] as const;
 
 export type StandardApiKeyScope = (typeof STANDARD_API_KEY_SCOPES)[number];
 export type ElevatedApiKeyScope = (typeof ELEVATED_API_KEY_SCOPES)[number];
@@ -808,6 +908,20 @@ export type ElevatedApiKeyScope = (typeof ELEVATED_API_KEY_SCOPES)[number];
 /** True for a scope that `*` does not grant. */
 export function isElevatedApiKeyScope(scope: string): scope is ElevatedApiKeyScope {
   return (ELEVATED_API_KEY_SCOPES as ReadonlyArray<string>).includes(scope);
+}
+
+/**
+ * Every scope an API key may be minted with: the `*` wildcard, the standard
+ * scopes and the elevated ones. A mint naming anything else is refused with
+ * `API_KEY_SCOPE_UNKNOWN`.
+ */
+export const API_KEY_SCOPES = ['*', ...STANDARD_API_KEY_SCOPES, ...ELEVATED_API_KEY_SCOPES] as const;
+
+export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];
+
+/** True for a scope an API key may be minted with. */
+export function isApiKeyScope(scope: string): scope is ApiKeyScope {
+  return (API_KEY_SCOPES as ReadonlyArray<string>).includes(scope);
 }
 
 // ============================================================================
@@ -835,6 +949,8 @@ export const SignUpRequestSchema = z.object({
   password: z.string().min(1).max(256),
   metadata: z.record(z.unknown()).optional(),
   device: DeviceBindingRequestSchema.optional(),
+  /** What the client is, for the session list and platform stats. See `ClientHintSchema`. */
+  client: ClientHintSchema.optional(),
 });
 export type SignUpRequest = z.infer<typeof SignUpRequestSchema>;
 
@@ -842,6 +958,8 @@ export const SignInRequestSchema = z.object({
   email: z.string().email().max(254),
   password: z.string().min(1).max(256),
   device: DeviceBindingRequestSchema.optional(),
+  /** What the client is, for the session list and platform stats. See `ClientHintSchema`. */
+  client: ClientHintSchema.optional(),
 });
 export type SignInRequest = z.infer<typeof SignInRequestSchema>;
 
@@ -915,6 +1033,8 @@ export const MfaVerifyRequestSchema = z.object({
   mfaChallengeToken: z.string().min(1).max(2048),
   code: z.string().min(1).max(64),
   device: DeviceBindingRequestSchema.optional(),
+  /** What the client is, for the session list and platform stats. See `ClientHintSchema`. */
+  client: ClientHintSchema.optional(),
 });
 export type MfaVerifyRequest = z.infer<typeof MfaVerifyRequestSchema>;
 
@@ -2322,7 +2442,8 @@ export const LicenseVerifyResultDtoSchema = z.discriminatedUnion('ok', [
   z.object({ ok: z.literal(true), license: LicenseDtoSchema }),
   z.object({
     ok: z.literal(false),
-    reason: z.enum(['unknown', 'wrong_application', 'revoked', 'expired', 'seats_exhausted']),
+    // `suspended`: the holder is banned from the Application by an operator.
+    reason: z.enum(['unknown', 'wrong_application', 'revoked', 'expired', 'seats_exhausted', 'suspended']),
     license: LicenseDtoSchema.optional(),
   }),
 ]);
@@ -2509,6 +2630,18 @@ export const WEBHOOK_EVENTS = [
       "An end-user's role, metadata or verified flag changed. `data.changed` names the fields.",
   },
   {
+    name: 'user.onboarding_completed',
+    description:
+      'An end-user finished onboarding: every profile field marked required was answered and onboarding was ' +
+      'marked complete. Sent once per user. Payload: `data.userId`, `completedAt`, `via` (`self`, `server` or `operator`).',
+  },
+  {
+    name: 'user.onboarding_skipped',
+    description:
+      'An end-user skipped onboarding. Sent once per user, and never once onboarding was completed. Rekey records ' +
+      'the skip and gates nothing on it. Payload: `data.userId`, `skippedAt`, `via` (`self`, `server` or `operator`).',
+  },
+  {
     name: 'user.deleted',
     description: 'An end-user account was deleted.',
   },
@@ -2518,9 +2651,19 @@ export const WEBHOOK_EVENTS = [
       'An end-user was erased for GDPR (tombstoned): their PII/auth material was hard-deleted while financial records are retained anonymized, and they can never authenticate again. Propagate the erasure to your own copies of their PII. Payload: `data.user` with `id` + `erasedAt`.',
   },
   {
+    name: 'user.banned',
+    description:
+      'An operator banned an end-user: every session and grant was ended and every sign-in is refused with END_USER_BANNED until the ban is lifted. Subscriptions are not touched. Payload: `data.user` with `id` + `bannedAt`, and `data.sessionsRevoked`. The operator\'s reason is never included.',
+  },
+  {
+    name: 'user.unbanned',
+    description:
+      'An operator lifted an end-user\'s ban. They can sign in again; sessions the ban ended stay ended. Payload: `data.user` with `id` + `bannedAt: null`.',
+  },
+  {
     name: 'session.created',
     description:
-      'An end-user signed in and a session was minted: password (including sign-up), magic link, OAuth, passkey, or MFA completion. Never sent for a refresh or an organization switch. Payload: `data.userId`, `sessionId`, `deviceId`, `via`, and `firstSignIn` (true for the first session the user ever gets).',
+      'An end-user signed in and a session was minted: password (including sign-up), magic link, OAuth, passkey, or MFA completion. Never sent for a refresh or an organization switch. Payload: `data.userId`, `sessionId`, `deviceId`, `via`, `firstSignIn` (true for the first session the user ever gets), `platform` and `country` (CF-IPCountry, null when unknown).',
   },
   {
     name: 'session.revoked',
@@ -2683,6 +2826,21 @@ export const WEBHOOK_EVENTS = [
     name: 'organization.invitation.accepted',
     description:
       'An organization invitation was accepted, once per invitation. Payload: `data.invitation` (id, organizationId, email, role, acceptedAt) and `data.membership` (id, organizationId, endUserId, role).',
+  },
+  {
+    name: 'contact.subscribed',
+    description:
+      'Someone joined a list: a first subscribe, or a secret-key subscribe with consent that added back a person who had left. Never sent for a repeat that changed nothing. Payload: `data.contact` (id, email, name), `data.list` (id, key), `data.member` (status, source, consentVersion, consentAt).',
+  },
+  {
+    name: 'contact.unsubscribed',
+    description:
+      'Someone left a list: a server called DELETE /lists/:key/members/:email, or an operator took them off in the panel. Sent once per change. Payload: `data.contact` (id, email, name), `data.list` (id, key), `data.member` (status, unsubscribedAt).',
+  },
+  {
+    name: 'contact.submission.created',
+    description:
+      'A subscribe carried `fields` and they were stored, for example a contact form message. Payload: `data.contact` (id, email), `data.list` (id, key), `data.submission` (id, fields, createdAt). Erasing the contact scrubs stored deliveries of this event.',
   },
 ] as const;
 
@@ -2880,7 +3038,17 @@ export const TenantEndUserDtoSchema = z.object({
   /** Per-application RBAC role (free-form; default "user"). */
   role: z.string(),
   metadata: z.record(z.unknown()).nullable(),
+  /** Set while an operator has banned this end-user. */
+  bannedAt: z.string().datetime().nullable().optional(),
   createdAt: z.string().datetime(),
+  /** Last credential sign-in. Null if the user never signed in. */
+  lastSignedInAt: z.string().datetime().nullable().optional(),
+  /** Platform of the latest sign-in. Null if never. */
+  lastPlatform: z.string().nullable().optional(),
+  /** Profile answers, keyed by field key. */
+  profile: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
+  /** `completed`, `skipped` or `pending`. Recorded only: Rekey gates nothing on it. */
+  onboardingStatus: z.enum(ONBOARDING_STATUSES).optional(),
 });
 export type TenantEndUserDto = z.infer<typeof TenantEndUserDtoSchema>;
 
@@ -2888,11 +3056,13 @@ export type TenantEndUserDto = z.infer<typeof TenantEndUserDtoSchema>;
 export interface TenantEndUsersListQuery {
   /** Substring match on email (lowercased server-side). */
   search?: string;
+  /** `true`: only banned end-users; `false`: only the rest. */
+  banned?: boolean;
   emailVerified?: boolean;
   /** Only users holding at least one subscription with this status. Closed, you SEND this. */
   subscriptionStatus?: KnownSubscriptionStatus;
-  /** Default `createdAt`. */
-  sort?: 'createdAt' | 'email';
+  /** Default `createdAt`. `lastSignedInAt` puts users who never signed in last, either order. */
+  sort?: 'createdAt' | 'email' | 'lastSignedInAt';
   /** Default `desc`. */
   order?: 'asc' | 'desc';
   /** Default 25, max 100. */
@@ -2958,6 +3128,14 @@ export interface EndUserExportProfile {
    * instead of being a snapshot.
    */
   lockedUntil: string | null;
+  /** When an operator banned this person, or `null`. The operator's reason is never exported. Absent from an older API. */
+  bannedAt?: string | null;
+  /** Profile answers, keyed by field key. */
+  profile?: EndUserProfile;
+  onboardingCompletedAt?: string | null;
+  onboardingSkippedAt?: string | null;
+  /** How the account was created; null when it predates the record. */
+  createdVia?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -3096,4 +3274,33 @@ export interface EndUserExportDocument {
     endedAt: string | null;
     ip: string | null;
   }>;
+  /**
+   * The contact at this user's address, with every list they joined and what
+   * they submitted. Empty when the address is on no list. Absent from a
+   * server older than lists.
+   */
+  contacts?: EndUserExportContact[];
+}
+
+/** A contact inside a DSAR export: list memberships with their consent proof, and submissions. */
+export interface EndUserExportContact {
+  id: string;
+  email: string;
+  name: string | null;
+  createdAt: string;
+  memberships: Array<{
+    listKey: string;
+    listName: string;
+    status: string;
+    source: string;
+    consentVersion: number | null;
+    /** The exact text of `consentVersion`, when the list had one. */
+    consentText: string | null;
+    consentAt: string | null;
+    consentIpPrefix: string | null;
+    sourceUrl: string | null;
+    unsubscribedAt: string | null;
+    createdAt: string;
+  }>;
+  submissions: Array<{ listKey: string; fields: Record<string, unknown>; createdAt: string }>;
 }

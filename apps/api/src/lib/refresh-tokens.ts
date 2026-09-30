@@ -68,6 +68,14 @@ export interface IssueRefreshTokenOptions {
    * different fingerprint for a bound chain (see auth.service `refresh`).
    */
   deviceId?: string | null;
+  /** The client the session was started from (lib/client-platform.ts). Carried across rotations. */
+  client?: {
+    platform: string;
+    os: string | null;
+    browser: string | null;
+    appVersion: string | null;
+    country: string | null;
+  } | null;
 }
 
 /**
@@ -103,6 +111,11 @@ export async function issueRefreshToken(
       activeOrganizationId: options.activeOrganizationId ?? null,
       grantOrganizationId: options.grantOrganizationId ?? null,
       deviceId: options.deviceId ?? null,
+      clientPlatform: options.client?.platform ?? null,
+      clientOs: options.client?.os ?? null,
+      clientBrowser: options.client?.browser ?? null,
+      clientAppVersion: options.client?.appVersion ?? null,
+      country: options.client?.country ?? null,
     },
   });
   return { raw, record };
@@ -184,6 +197,11 @@ export async function rotateRefreshToken(
         // The refresh handler is what refuses a rotation presented from a
         // different fingerprint; here the binding is simply preserved.
         deviceId: presented.deviceId,
+        clientPlatform: presented.clientPlatform,
+        clientOs: presented.clientOs,
+        clientBrowser: presented.clientBrowser,
+        clientAppVersion: presented.clientAppVersion,
+        country: presented.country,
         // Same session: the access token minted from this row carries the
         // same `sid`, so a later single-session revoke reaches it.
         sessionId: presented.sessionId,

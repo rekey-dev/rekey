@@ -2,8 +2,9 @@
  * Operator-invite key helpers (OPERATOR_SIGNUP_MODE='invite').
  *
  * A single-use key the super-admin mints to authorize the creation of ONE new
- * operator + workspace when self-serve sign-up is gated. Distinct from
- * `tenant-invitations.ts` (which joins an existing workspace).
+ * operator + workspace when self-serve sign-up is gated, or, when bound to a
+ * workspace, to join ONE operator to that existing workspace. Distinct from
+ * `tenant-invitations.ts`, which a workspace member mints.
  *
  * Hash-only: only the SHA-256 of the raw key is persisted. The raw key is
  * shown to the super-admin exactly once at mint and encoded into whatever

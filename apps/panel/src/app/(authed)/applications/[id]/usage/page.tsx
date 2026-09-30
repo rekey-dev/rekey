@@ -13,7 +13,7 @@ import { SavedBanner } from '@/components/SavedBanner';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
-import { EmptyState } from '@/components/EmptyState';
+import { EmptyState, EmptyStateCreate } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
 
 interface MeterRow {
@@ -100,7 +100,7 @@ export default async function UsagePage({
     return (
       <div className="space-y-5">
         <SectionHeader
-          title="Usage meters"
+          title="Meters"
           description="Usage meters define what you charge for. Create a meter, then reference it in a usage-based plan."
         />
         <BillingDisabledState applicationId={id} />
@@ -118,7 +118,7 @@ export default async function UsagePage({
       {created && <SavedBanner params={['created']} message={`Meter ${created} created.`} />}
 
       <SectionHeader
-        title="Usage meters"
+        title="Meters"
         count={`(${meters.length})`}
         description={
           <>
@@ -170,6 +170,7 @@ export default async function UsagePage({
               quantity.
             </>
           }
+          action={<EmptyStateCreate modalKey="newMeter">New meter</EmptyStateCreate>}
         />
       ) : (
         <Table minWidth="min-w-[44rem]">

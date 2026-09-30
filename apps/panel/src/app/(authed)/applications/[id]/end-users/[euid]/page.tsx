@@ -7,22 +7,30 @@
  * of every field Rekey stores. The detail lives one click away in the tab it
  * belongs to.
  *
- * The tiles are the four things a ticket is ever about: what they are paying
- * for, how many machines they are on, what they have left to spend, and whether
- * they can get in.
+ * The first row of tiles is the four things a ticket is ever about: what they
+ * are paying for, how many machines they are on, what they have left to spend,
+ * and whether they can get in. The second row is how they use the product
+ * (sign-ins, active days, platforms, security), then their onboarding answers
+ * and where they sign in from.
  */
 
 import * as React from 'react';
 import Link from '@/components/Link';
 import { getApplication } from '@/lib/api';
+import { hasScope } from '@/lib/operator-scopes';
 import { actorLabel, humanizeEventType } from '@/lib/security-events';
 import { formatDate, formatDateTime } from '@/lib/date';
-import { formatMoney } from '@/lib/format';
+import { formatMoney, plural } from '@/lib/format';
 import { Card, SectionHeader } from '@/components/Card';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
 import { SupportFeedback } from './support-feedback';
+import { StatTile } from '@/components/StatTile';
+import { EngagementTiles, SignInSources } from './overview-engagement';
+import { OnboardingAnswers } from './overview-answers';
+import { getEndUserInsights } from './insights';
+import { SignInSummary } from './overview-summary';
 import { Modal } from '@/components/Modal';
 import { Field } from '@/components/Field';
 import { ActionForm } from '@/components/ActionForm';
@@ -45,12 +53,15 @@ import {
   readSupportFlash,
   LOGIN_LOCK_THRESHOLD,
   LOGIN_LOCK_MINUTES,
+  AUTH_EVENT_SCAN,
 } from './shared';
 
 /** Statuses that mean "this subscriber is entitled right now". */
 const LIVE_SUBSCRIPTION = new Set(['ACTIVE', 'PAST_DUE', 'TRIALING']);
 
 const OVERVIEW_EVENTS_SHOWN = 5;
+
+const NOT_VISIBLE = 'not visible to your role';
 
 export default async function EndUserOverviewPage({
   params,
@@ -67,14 +78,19 @@ export default async function EndUserOverviewPage({
   const flash = await readSupportFlash();
   const done = typeof sp.support === 'string' ? sp.support : flash.done;
   const supportError = typeof sp.supportError === 'string' ? sp.supportError : flash.error;
-  const [detail, application, billing, credits, devices, events] = await Promise.all([
+  const application = await getApplication(id);
+  const scopes = application.access?.scopes ?? null;
+  const canReadBilling = hasScope(scopes, 'billing:read');
+  const [detail, billing, credits, devices, events, insights] = await Promise.all([
     getEndUserDetail(id, euid),
-    getApplication(id),
-    getEndUserBilling(id, euid),
-    getEndUserCredits(id, euid),
+    canReadBilling ? getEndUserBilling(id, euid) : Promise.resolve(null),
+    canReadBilling ? getEndUserCredits(id, euid) : Promise.resolve(null),
     getEndUserDeviceCounts(id, euid),
     getEndUserEvents(id, euid),
+    getEndUserInsights(id, euid),
   ]);
+  const canWrite = hasScope(scopes, 'end-users:write');
+  const erased = detail.endUser.erasedAt !== null;
 
   const base = `/applications/${id}/end-users/${euid}`;
   const provenance = provenanceFrom(events);
@@ -95,15 +111,17 @@ export default async function EndUserOverviewPage({
   const defaultPlanSlug = application.billingConfig.defaultPlanSlug ?? null;
 
   const planValue = billing === null ? '—' : live ? live.plan.name : (defaultPlanSlug ?? 'None');
-  const planFooter = live
-    ? `${formatMoney(live.plan.amount, live.plan.currency)}${
-        live.plan.interval ? ` / ${live.plan.interval.toLowerCase()}` : ''
-      } · ${live.status.toLowerCase()}`
-    : billing === null
-      ? 'billing could not be read'
-      : defaultPlanSlug
-        ? "the application's default plan, no subscription"
-        : 'no subscription and no default plan';
+  const planFooter = !canReadBilling
+    ? NOT_VISIBLE
+    : live
+      ? `${formatMoney(live.plan.amount, live.plan.currency)}${
+          live.plan.interval ? ` / ${live.plan.interval.toLowerCase()}` : ''
+        } · ${live.status.toLowerCase()}`
+      : billing === null
+        ? 'billing could not be read'
+        : defaultPlanSlug
+          ? "the application's default plan, no subscription"
+          : 'no subscription and no default plan';
 
   return (
     <div className="space-y-5">
@@ -162,15 +180,16 @@ export default async function EndUserOverviewPage({
                   title={
                     events === null
                       ? 'Listing security events requires the OWNER or ADMIN workspace role, so this cannot be determined for your role.'
-                      : "No creation event for this end-user in the application's most recent events. That is not evidence they signed up: the record may simply be older than the scanned window."
+                      : `No creation event among this user's ${AUTH_EVENT_SCAN} most recent events. Older events may be pruned by log retention, so this is not evidence of how the account was made.`
                   }
                 >
-                  {events === null ? 'not visible to your role' : 'not in the scanned window'}
+                  {events === null ? 'not visible to your role' : 'not on record'}
                 </span>
               )}
             </dd>
           </div>
         </dl>
+        <SignInSummary insights={insights} createdAt={detail.endUser.createdAt} />
         {provenance && (
           <p className="text-[11px] text-[var(--color-muted-fg)]">
             Created from a billing event rather than a sign-up, so it may carry no password and an
@@ -183,14 +202,20 @@ export default async function EndUserOverviewPage({
       <SupportBar
         applicationId={id}
         euid={euid}
-        erased={detail.endUser.erasedAt !== null}
+        erased={erased}
         emailVerified={detail.endUser.emailVerified}
         done={done}
         error={supportError}
       />
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <StatTile title="Plan" value={planValue} footer={planFooter} href={`${base}/subscriptions`} />
+        <StatTile
+          title="Plan"
+          value={planValue}
+          footer={planFooter}
+          href={canReadBilling ? `${base}/subscriptions` : null}
+          muted={!canReadBilling}
+        />
         {/* A tile shows a dash rather than "0" when the read failed. Zero is a
             statement about the account; the request having failed is not. */}
         <StatTile
@@ -212,11 +237,14 @@ export default async function EndUserOverviewPage({
           title="Credits"
           value={credits === null ? '—' : String(credits.balance)}
           footer={
-            credits === null
-              ? 'credit balance could not be read'
-              : plural(credits.ledger.length, 'recent entry', 'recent entries')
+            !canReadBilling
+              ? NOT_VISIBLE
+              : credits === null
+                ? 'credit balance could not be read'
+                : plural(credits.ledger.length, 'recent entry', 'recent entries')
           }
-          href={`${base}/credits`}
+          href={canReadBilling ? `${base}/credits` : null}
+          muted={!canReadBilling}
         />
         <StatTile
           title="Sign-in"
@@ -226,12 +254,27 @@ export default async function EndUserOverviewPage({
               ? `locked until ${formatDateTime(lockedUntil)}`
               : detail.endUser.failedSignInAttempts > 0
                 ? `${detail.endUser.failedSignInAttempts} of ${LOGIN_LOCK_THRESHOLD} failures this window`
-                : `no failures · ${LOGIN_LOCK_THRESHOLD} locks it for ${LOGIN_LOCK_MINUTES} min`
+                : `no failed sign-ins · ${LOGIN_LOCK_THRESHOLD} in a row lock it for ${LOGIN_LOCK_MINUTES} min`
           }
           href={`${base}/security`}
           tone={lockedNow ? 'warn' : undefined}
         />
       </div>
+
+      <EngagementTiles insights={insights} base={base} />
+
+      <OnboardingAnswers
+        applicationId={id}
+        euid={euid}
+        profile={insights?.profile ?? null}
+        metadata={detail.endUser.metadata}
+        canWrite={canWrite}
+        erased={erased}
+        saved={sp.profileSaved === '1'}
+        error={typeof sp.profileError === 'string' ? sp.profileError : undefined}
+      />
+
+      <SignInSources insights={insights} base={base} />
 
       <section className="space-y-3">
         <SectionHeader
@@ -256,7 +299,7 @@ export default async function EndUserOverviewPage({
           <EmptyState
             variant="inline"
             title="No recorded events"
-            description="Nothing for this user in the application's most recent events. Failed sign-ins are counted in Redis and never written as events, so they cannot appear here."
+            description="Nothing for this user in the application's most recent events."
           />
         ) : (
           <Card padded={false}>
@@ -282,43 +325,6 @@ export default async function EndUserOverviewPage({
         )}
       </section>
     </div>
-  );
-}
-
-function plural(n: number, one: string, many?: string): string {
-  return `${n} ${n === 1 ? one : (many ?? `${one}s`)}`;
-}
-
-/** Compact metric tile, same pattern as the Revenue and app Overview tiles. */
-function StatTile({
-  title,
-  value,
-  footer,
-  href,
-  tone,
-}: {
-  title: string;
-  value: string;
-  footer: string;
-  href: string;
-  tone?: 'warn' | undefined;
-}): React.JSX.Element {
-  return (
-    <Link
-      href={href}
-      className="group flex flex-col gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 transition-colors hover:border-neutral-400 dark:hover:border-neutral-600"
-    >
-      <span className="text-xs text-neutral-600 dark:text-neutral-500">{title}</span>
-      <span
-        className={`truncate text-2xl font-semibold tabular-nums ${
-          tone === 'warn' ? 'text-amber-600 dark:text-amber-500' : ''
-        }`}
-        title={value}
-      >
-        {value}
-      </span>
-      <span className="text-xs leading-snug text-[var(--color-muted-fg)]">{footer}</span>
-    </Link>
   );
 }
 
@@ -427,6 +433,7 @@ function SupportBar({
         <ActionForm action={releaseAllDevices.bind(null, applicationId, euid)}>
           <ConfirmButton
             variant="subtle"
+            triggerClassName={supportBtnCls}
             title="Release every device?"
             confirm="Frees every active device slot and signs them out on those machines, so their next sign-in from any machine is admitted. Blocked devices are left blocked."
             confirmLabel="Release all devices"
@@ -438,6 +445,7 @@ function SupportBar({
         <ActionForm action={revokeAllSessions.bind(null, applicationId, euid)}>
           <ConfirmButton
             variant="subtle"
+            triggerClassName={supportBtnCls}
             title="Sign out everywhere?"
             confirm="Revokes every live session. Access tokens already issued keep working until they expire. This stops new ones being obtained."
             confirmLabel="Sign out everywhere"

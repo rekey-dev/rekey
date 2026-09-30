@@ -25,6 +25,7 @@ import { prisma } from '../src/lib/prisma.js';
 import { entitlementsService } from '../src/modules/billing/entitlements.service.js';
 import { licensesService } from '../src/modules/licenses/licenses.service.js';
 import { countQueries } from './query-counter.js';
+import { recordOperations } from './operation-recorder.js';
 
 const PASSWORD = 'pw-one-two-three';
 
@@ -786,9 +787,26 @@ describe("the signed-in user's read surface", () => {
       const u = await signUp('fq@example.com');
       await subscribe(u.endUser.id, planId);
       await feature(u.accessToken, 'reports');
-      const full = await countQueries(() => asUser('GET', '/api/v1/billing/entitlements', u.accessToken));
-      const one = await countQueries(() => feature(u.accessToken, 'reports'));
-      expect(one.count, one.queries.join('\n')).toBe(full.count - 1);
+      // Work outside the request, on the same tables and the same connection
+      // pool, must not reach either window.
+      const noise = () =>
+        Promise.all([
+          prisma.$queryRaw`SELECT 1`,
+          prisma.creditBalance.findMany({ where: { applicationId: appId } }),
+          prisma.subscription.findMany({ where: { applicationId: appId } }),
+        ]);
+      const [full] = await Promise.all([
+        recordOperations(() => asUser('GET', '/api/v1/billing/entitlements', u.accessToken)),
+        noise(),
+      ]);
+      const [one] = await Promise.all([recordOperations(() => feature(u.accessToken, 'reports')), noise()]);
+
+      const readsCredits = (op: string) => /^Credit(Balance|Ledger)\./.test(op);
+      expect(full.filter(readsCredits), full.join('\n')).toHaveLength(1);
+      expect(one.filter(readsCredits), 'the feature check read the credit balance').toEqual([]);
+      // Otherwise the same operations, sorted because the session lookups run
+      // in parallel and start in either order.
+      expect([...one].sort()).toEqual(full.filter((op) => !readsCredits(op)).sort());
     });
 
     it('gates: secret key only on for-user, billing:read, a real end-user, a bounded key', async () => {

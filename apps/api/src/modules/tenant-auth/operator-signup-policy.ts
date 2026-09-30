@@ -11,16 +11,24 @@
  * never creates one, so it needs no gate.)
  *
  * Modes:
- *   open    → no gate (today's behavior). `resolveSignupInvite` returns null.
+ *   open    → no gate. `resolveSignupInvite` returns null, unless the key
+ *             presented is bound to a workspace (see below).
  *   closed  → every new-operator creation is rejected (existing operators are
  *             unaffected; they sign in on a path that never reaches here).
  *   invite  → a valid, unused, unexpired, unrevoked invite key must be
  *             presented. `resolveSignupInvite` validates it and returns its id;
  *             the caller then `consumeSignupInvite` ATOMICALLY inside the same
  *             transaction that creates the operator.
+ *
+ * A workspace-bound key (minted with `tenantId` + `email`, e.g. by
+ * `rekey init --owner-email`) is honoured in open AND invite mode, because
+ * ignoring it in open mode would hand its owner a new, empty workspace, the
+ * exact failure it exists to prevent. Closed still refuses it: a closed
+ * deployment creates no operators, and an existing operator redeems a bound
+ * key through the invitation accept route instead.
  */
 
-import type { Prisma, PrismaClient } from '@prisma/client';
+import type { OperatorInvite, Prisma, PrismaClient, TenantRole } from '@prisma/client';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
 import { RekeyError } from '../../lib/error.js';
@@ -43,9 +51,36 @@ export function operatorSignupMode(): OperatorSignupMode {
   return parsed.success ? parsed.data : env.OPERATOR_SIGNUP_MODE;
 }
 
-/** Opaque handle returned by `resolveSignupInvite`, pass to `consumeSignupInvite`. */
+/** Handle returned by `resolveSignupInvite`, pass to `consumeSignupInvite`. */
 export interface ResolvedSignupInvite {
   inviteId: string;
+  /** Present on a workspace-bound key: join this workspace instead of creating one. */
+  workspace: WorkspaceBinding | null;
+}
+
+export interface WorkspaceBinding {
+  tenantId: string;
+  email: string;
+  role: TenantRole;
+}
+
+function bindingOf(invite: OperatorInvite): WorkspaceBinding | null {
+  if (invite.tenantId === null || invite.email === null || invite.role === null) return null;
+  return { tenantId: invite.tenantId, email: invite.email, role: invite.role };
+}
+
+/**
+ * Refuse a workspace-bound key presented for a different email. Without this a
+ * forwarded or leaked link would let anyone join the workspace at its role.
+ */
+export function assertBoundEmail(binding: WorkspaceBinding, email: string): void {
+  if (binding.email === email.trim().toLowerCase()) return;
+  throw new RekeyError({
+    statusCode: 403,
+    code: 'OPERATOR_INVITE_EMAIL_MISMATCH',
+    message: 'That invite key was issued for a different email address.',
+    fix: 'Sign up with the email address the invite was sent to, or ask the deployment administrator for a key for your address.',
+  });
 }
 
 /**
@@ -62,7 +97,7 @@ export async function resolveSignupInvite(
 ): Promise<ResolvedSignupInvite | null> {
   const mode = operatorSignupMode();
 
-  if (mode === 'open') return null;
+  if (mode === 'open') return resolveBoundInviteInOpenMode(rawKey);
 
   if (mode === 'closed') {
     throw new RekeyError({
@@ -87,6 +122,26 @@ export async function resolveSignupInvite(
   const invite = await prisma.operatorInvite.findUnique({
     where: { tokenHash: hashOperatorInviteToken(key) },
   });
+  return usableInvite(invite);
+}
+
+/**
+ * Open mode needs no key, so an unbound or unknown one is ignored exactly as
+ * before. A workspace-bound key is the exception: it is validated and used.
+ */
+async function resolveBoundInviteInOpenMode(
+  rawKey: string | null | undefined,
+): Promise<ResolvedSignupInvite | null> {
+  const key = (rawKey ?? '').trim();
+  if (!key) return null;
+  const invite = await prisma.operatorInvite.findUnique({
+    where: { tokenHash: hashOperatorInviteToken(key) },
+  });
+  if (!invite || bindingOf(invite) === null) return null;
+  return usableInvite(invite);
+}
+
+function usableInvite(invite: OperatorInvite | null): ResolvedSignupInvite {
   // Uniform error for unknown / revoked so a probe can't distinguish a wrong
   // key from a revoked one.
   if (!invite || invite.revokedAt) {
@@ -114,7 +169,7 @@ export async function resolveSignupInvite(
     });
   }
 
-  return { inviteId: invite.id };
+  return { inviteId: invite.id, workspace: bindingOf(invite) };
 }
 
 type TxClient = Prisma.TransactionClient | PrismaClient;
@@ -134,7 +189,12 @@ export async function consumeSignupInvite(
   tenantUserId: string,
 ): Promise<void> {
   const res = await tx.operatorInvite.updateMany({
-    where: { id: invite.inviteId, usedAt: null, revokedAt: null },
+    where: {
+      id: invite.inviteId,
+      usedAt: null,
+      revokedAt: null,
+      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+    },
     data: { usedAt: new Date(), usedByTenantUserId: tenantUserId },
   });
   if (res.count !== 1) {

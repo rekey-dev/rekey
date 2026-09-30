@@ -64,6 +64,15 @@ export function vouchedClientIp(
 
 export const CALLER_SECRET_HEADER = 'x-rekey-caller-secret';
 export const CLIENT_IP_HEADER = 'x-rekey-client-ip';
+export const CLIENT_USER_AGENT_HEADER = 'x-rekey-client-user-agent';
+export const CLIENT_COUNTRY_HEADER = 'x-rekey-client-country';
+
+/** What the portal knows about the visitor it is calling the API for. */
+export interface VisitorHints {
+  userAgent?: string | null;
+  /** Cloudflare's CF-IPCountry as the portal received it, through our proxy. */
+  country?: string | null;
+}
 
 /**
  * Headers every server-side API call carries.
@@ -76,11 +85,18 @@ export const CLIENT_IP_HEADER = 'x-rekey-client-ip';
  * never holds just what the portal wrote. `X-Forwarded-For` is still sent for
  * the private-network path (docker-compose.prod.yml), where the API trusts
  * the portal by address. With no vouched visitor, neither is sent, and the
- * API treats the call as the portal's own shared address. Pure, for tests.
+ * API treats the call as the portal's own shared address.
+ *
+ * With the caller secret, the visitor's User-Agent and country go along too,
+ * so a session the portal starts records the visitor's browser and country
+ * rather than the portal server's `node` and its host's country. The API
+ * believes them only with the secret, so without it they are not sent. Pure,
+ * for tests.
  */
 export function apiCallHeaders(
   visitorIp: string | null,
   callerSecret: string | undefined,
+  visitor: VisitorHints = {},
 ): Record<string, string> {
   const out: Record<string, string> = {};
   const secret = (callerSecret ?? '').trim();
@@ -89,12 +105,24 @@ export function apiCallHeaders(
     out[CLIENT_IP_HEADER] = visitorIp;
     out['x-forwarded-for'] = visitorIp;
   }
+  if (secret) {
+    const userAgent = visitor.userAgent?.trim().slice(0, 512);
+    if (userAgent) out[CLIENT_USER_AGENT_HEADER] = userAgent;
+    const country = visitor.country?.trim().toUpperCase();
+    if (country && /^[A-Z]{2}$/.test(country)) out[CLIENT_COUNTRY_HEADER] = country;
+  }
   return out;
 }
 
-/** Headers to add to a server-side API call: the caller secret and the vouched visitor IP. */
+/**
+ * Headers to add to a server-side API call: the caller secret, the vouched
+ * visitor IP, the visitor's User-Agent, and their CF-IPCountry when the
+ * request reached the portal through our proxy (anything else could have
+ * written that header itself).
+ */
 export async function forwardedClientHeaders(): Promise<Record<string, string>> {
   let ip: string | null = null;
+  const visitor: VisitorHints = {};
   try {
     const h = await headers();
     ip = vouchedClientIp(h.get('x-forwarded-for'), {
@@ -102,10 +130,14 @@ export async function forwardedClientHeaders(): Promise<Record<string, string>> 
       secret: process.env.PORTAL_PROXY_SECRET,
       presentedSecret: h.get(PROXY_SECRET_HEADER),
     });
+    visitor.userAgent = h.get('user-agent');
+    const proxySecret = (process.env.PORTAL_PROXY_SECRET ?? '').trim();
+    const presented = h.get(PROXY_SECRET_HEADER);
+    if (proxySecret && presented && sameSecret(presented, proxySecret)) visitor.country = h.get('cf-ipcountry');
   } catch {
     // Outside a request (build, tests): no visitor to forward.
   }
-  return apiCallHeaders(ip, process.env.INTERNAL_CALLER_SECRET);
+  return apiCallHeaders(ip, process.env.INTERNAL_CALLER_SECRET, visitor);
 }
 
 /** How long a server-side API call may take before the portal gives up. */

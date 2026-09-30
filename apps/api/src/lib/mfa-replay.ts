@@ -166,13 +166,16 @@ export async function isTotpStepSpent(
  * yet. `spend` is the second phase, and it can still lose a race.
  */
 export type MfaMatch =
-  | { outcome: 'invalid' | 'reused' }
+  | { outcome: 'reused' }
+  | { outcome: 'invalid'; spentBackupCode?: true }
   | { outcome: 'matched'; spend: () => Promise<TotpOutcome> };
 
 /** What `matchMfaCode` needs to know about one enrolled credential. */
 export interface EnrolledFactor {
   base32: string;
   backupCodesCiphertext: string;
+  /** Hashes of backup codes already spent, when the store keeps them. */
+  usedBackupCodeHashes?: readonly string[];
   backupStore: BackupCodeStore;
   /** The brute-force scope failures count against. */
   lockScope: string;
@@ -207,7 +210,8 @@ export async function matchMfaCode(factor: EnrolledFactor, code: string): Promis
     };
   }
   const hashes = decryptJson<string[]>(factor.backupCodesCiphertext);
-  if (hashes.includes(hashBackupCode(code))) {
+  const hash = hashBackupCode(code);
+  if (hashes.includes(hash)) {
     return {
       outcome: 'matched',
       spend: async () => {
@@ -217,6 +221,8 @@ export async function matchMfaCode(factor: EnrolledFactor, code: string): Promis
     };
   }
   await registerFailure(factor.lockScope, MFA_POLICY);
+  // Still counted above: naming a spent code must not make guessing cheaper.
+  if (factor.usedBackupCodeHashes?.includes(hash)) return { outcome: 'invalid', spentBackupCode: true };
   return { outcome: 'invalid' };
 }
 
@@ -297,10 +303,26 @@ export function mfaCodeReusedError(during: keyof typeof CODE_REUSED_FIX): RekeyE
   });
 }
 
+/**
+ * The sign-in error for a backup code this account was issued and has already
+ * spent. Only reachable after the password step, with a real code.
+ */
+export function mfaBackupCodeUsedError(): RekeyError {
+  return new RekeyError({
+    statusCode: 401,
+    code: 'MFA_BACKUP_CODE_USED',
+    message: 'That backup code has already been used. Each backup code works once.',
+    fix: 'Enter a different unused backup code, or the current 6-digit code from the authenticator app.',
+  });
+}
+
 /** Where a credential's backup-code hashes live, for `spendBackupCode`. */
 export interface BackupCodeStore {
-  /** Replace the ciphertext only if it still equals `expected`. True when it did. */
-  swap(expected: string, next: string): Promise<boolean>;
+  /**
+   * Replace the ciphertext only if it still equals `expected`, recording
+   * `spentHash` as used where the store keeps that. True when it did.
+   */
+  swap(expected: string, next: string, spentHash: string): Promise<boolean>;
   /** The current ciphertext, or null once the credential is gone. */
   reload(): Promise<string | null>;
 }
@@ -323,7 +345,7 @@ export async function spendBackupCode(
   for (let attempt = 0; attempt <= BACKUP_CODE_COUNT && current !== null; attempt++) {
     const remaining = consumeBackupCode(decryptJson<string[]>(current), code);
     if (!remaining) return false;
-    if (await store.swap(current, encryptJson(remaining))) return true;
+    if (await store.swap(current, encryptJson(remaining), hashBackupCode(code))) return true;
     current = await store.reload();
   }
   return false;

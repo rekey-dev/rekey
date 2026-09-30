@@ -30,7 +30,7 @@ const ERR: Record<string, string> = {
   PLAN_LICENSE_DURATION_REQUIRED: 'TIMED licenses need a duration in days.',
   PLAN_LICENSE_SEATS_REQUIRED: 'SEATS licenses need a seats-allowed count.',
   PLAN_USAGE_CONFIG_REQUIRED: 'USAGE plans need a meter + per-unit price.',
-  PLAN_USAGE_METER_UNKNOWN: 'That meter is not in this Application. Add it on the Usage tab.',
+  PLAN_USAGE_METER_UNKNOWN: 'That meter is not in this Application. Add it under Billing, Meters.',
   PLAN_CREDITS_AMOUNT_REQUIRED: 'Credit packs need a positive credits amount (credits granted per purchase).',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can create plans.',
 };

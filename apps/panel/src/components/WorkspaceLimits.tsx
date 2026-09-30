@@ -114,7 +114,9 @@ export function WorkspaceLimits({
   const { limits, usage } = data;
   const anyLimitSet =
     (limits.maxProductionApps !== null && limits.maxProductionApps !== undefined) ||
-    (limits.maxActiveEndUsers !== null && limits.maxActiveEndUsers !== undefined);
+    (limits.maxActiveEndUsers !== null && limits.maxActiveEndUsers !== undefined) ||
+    (limits.maxContacts !== null && limits.maxContacts !== undefined) ||
+    (limits.maxContactLists !== null && limits.maxContactLists !== undefined);
 
   return (
     <div className="space-y-4">
@@ -140,6 +142,22 @@ export function WorkspaceLimits({
           used={usage.activeEndUsers}
           max={limits.maxActiveEndUsers}
         />
+        {usage.contacts !== undefined && (
+          <Row
+            label="Contacts"
+            hint="People on any list, counted once per address per application. Only a new address is refused at the limit; people already on a list can still join and leave lists."
+            used={usage.contacts}
+            max={limits.maxContacts}
+          />
+        )}
+        {usage.contactLists !== undefined && (
+          <Row
+            label="Lists"
+            hint="Lists across every application. Archived lists are not counted."
+            used={usage.contactLists}
+            max={limits.maxContactLists}
+          />
+        )}
       </div>
 
       {anyLimitSet && (

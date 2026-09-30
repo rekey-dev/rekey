@@ -322,10 +322,17 @@ being handed a long-lived secret to paste.
 | `recent_webhook_events` | filter by `provider`, `onlyFailed`, `limit` |
 | `recent_failed_webhook_deliveries` | last-N FAILED outbound deliveries |
 | `application_health` | per-app payment success rate (30d) + outbound webhook success rate (24h), sorted by failure count |
+| `get_user_analytics` | one app's Users overview (`overview:read`): the `GET .../analytics/users` sections and filters, counts only |
 | `get_end_user` | one end-user: verification state, app environment, current subscription |
 | `list_devices` | an end-user's devices, newest activity first, optionally filtered by `status` |
 | `list_organization_roles` | an application's organization-role catalog + each role's `baseRole` tier. Also reports `organizationsEnabled`, and when it is false returns a note naming `update_auth_config`, so an agent asking about roles on an app without organizations gets the next step rather than an empty list |
 | `list_organizations` | an application's organizations, newest first, with member and pending-invitation counts. `query` matches name or slug; `limit` (max 100) and `offset` page, with `total` and `hasMore`. Lives in `operator-organization-tools.ts` and needs `organizations:read` |
+| `list_contact_lists` | an application's lists (waitlists, newsletters, contact forms) with member and submission counts, Public capture and archived state. Needs `audience:read`, and a viewer or billing grant is refused as over REST |
+| `get_contact_list_stats` | one list by `key`: members by status, joined and left in the last 7 and 30 days, how people joined, and submissions. Needs `audience:read` |
+
+The list tools return counts and never an address, and there is deliberately no
+tool that exports or erases contacts: bulk personal data should not flow into an
+agent's context, and erasure has no undo. Use the panel or the CSV export route.
 
 No read tool returns refresh tokens, password hashes, license keys, or provider
 credentials.

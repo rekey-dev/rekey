@@ -40,6 +40,8 @@ import {
 const IMPERSONATE_ERR: Record<string, string> = {
   END_USER_NOT_FOUND: 'That end-user no longer exists in this Application.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can impersonate end-users.',
+  END_USER_BANNED: 'This end-user is banned. Lift the ban on the Access tab to impersonate them.',
+  END_USER_ERASED: 'This end-user was erased. There is no account left to impersonate.',
 };
 
 const inputCls =
@@ -85,7 +87,7 @@ export default async function EndUserSecurityPage({
       <Card className="space-y-3">
         <SectionHeader
           title="Sign-in health"
-          description="Lockout state from the API's brute-force limiter. It lives in Redis, not on the end-user row."
+          description="Temporary lockouts after repeated failed sign-ins. They expire on their own and are not part of the end-user's record."
         />
         <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
           <div>

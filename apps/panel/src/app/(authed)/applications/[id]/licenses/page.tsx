@@ -17,7 +17,7 @@ import type { Page } from '@/lib/paginate';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge, type BadgeTone } from '@/components/Badge';
-import { EmptyState } from '@/components/EmptyState';
+import { EmptyState, EmptyStateCreate } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
 
 const LICENSE_STATUS: Record<LicenseRow['status'], { tone: BadgeTone; label: string }> = {
@@ -232,8 +232,8 @@ export default async function LicensesPage({
           <>
             Software licenses tied to end-users. Three kinds:{' '}
             <strong>Perpetual</strong> (no expiry), <strong>Timed</strong> (expires on a date),
-            and <strong>Seats</strong> (N concurrent activations). Raw key shown once on issue;
-            only the SHA-256 hash is stored. Link a license entitlement to a plan to auto-issue
+            and <strong>Seats</strong> (N concurrent activations). The key is shown once when you issue it;
+            Rekey keeps only a one-way fingerprint of it. Link a license entitlement to a plan to auto-issue
             keys on purchase.
           </>
         }
@@ -314,10 +314,11 @@ export default async function LicensesPage({
           title="No licenses issued yet"
           description={
             <>
-              Use “+ Issue license” to bind a key to an end-user. Customer software validates via
+              Issue a license to bind a key to an end-user. Your software checks it with
               <code className="mx-1 font-mono">POST /api/v1/licenses/verify</code>.
             </>
           }
+          action={<EmptyStateCreate modalKey="newLicense">Issue license</EmptyStateCreate>}
         />
       ) : (
         <Table minWidth="min-w-[48rem]">

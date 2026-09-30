@@ -194,7 +194,7 @@ export async function tenantCheckoutRoutes(app: FastifyInstance): Promise<void> 
             statusCode: 409,
             code: 'CHECKOUT_READINESS_FAILED',
             message: `The Rekey checkout page is not ready for ${body.paymentMode} checkouts: ${failed.map((c) => c.message).join(' ')}`,
-            fix: failed[0]!.fix ?? 'Run the checks in Panel → Application → Billing → Checkout page.',
+            fix: failed[0]!.fix ?? 'Run the checks in Panel → Application → Billing → Setup → Checkout page.',
             details: { checks: column },
           });
         }

@@ -43,6 +43,7 @@ import { requireUserSession } from '../../middleware/user-session.js';
 import { refuseWhileImpersonating } from '../../middleware/impersonation.js';
 import { PaginationQuery, parsePagination, paged, paginationJsonSchema } from '../../lib/pagination.js';
 import { ok, okPage, errs, ref, type JsonSchema } from '../../lib/openapi.js';
+import { requestClient } from '../../lib/client-platform.js';
 
 /**
  * The auth errors shared by every route in both plugins below,
@@ -722,10 +723,11 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         // Re-mint on the device the current session is bound to (the `dev`
         // claim), never a new one, switching teams is not a sign-in.
         device: {
-          userAgent: req.headers['user-agent'] ?? null,
+          userAgent: requestClient(req).userAgent,
           ip: req.ip,
           deviceId: req.deviceId ?? null,
           primary: false,
+          client: requestClient(req),
         },
       });
       return { success: true, data: result };
@@ -753,10 +755,11 @@ export async function organizationsAuthenticatedRoutes(app: FastifyInstance): Pr
         activeOrganizationId: null,
         impersonation: req.impersonation,
         device: {
-          userAgent: req.headers['user-agent'] ?? null,
+          userAgent: requestClient(req).userAgent,
           ip: req.ip,
           deviceId: req.deviceId ?? null,
           primary: false,
+          client: requestClient(req),
         },
       });
       return { success: true, data: result };

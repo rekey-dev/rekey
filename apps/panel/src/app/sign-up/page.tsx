@@ -9,6 +9,7 @@ import { AuthCard } from '@/components/AuthCard';
 import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
 import { safeNext } from '@/lib/safe-next';
+import { termsLead } from './terms-lead';
 
 export const metadata: Metadata = { title: 'Create your workspace · Rekey' };
 
@@ -33,18 +34,23 @@ async function signUp(formData: FormData): Promise<void> {
   const password = String(formData.get('password') ?? '');
   const workspaceName = String(formData.get('workspaceName') ?? '').trim();
   const inviteKey = String(formData.get('inviteKey') ?? '').trim();
+  // Set only on the join form, whose key arrived in the invite link itself.
+  const joining = formData.get('joining') === '1' && inviteKey !== '';
   const next = safeNext(formData.get('next'));
-  // Preserve what the operator typed (never the password, never the invite key)
-  // so a failed submit doesn't blank the form, a common first-signup drop-off.
-  // The invite key is deliberately NOT round-tripped through the URL.
-  const keep = `&email=${encodeURIComponent(email)}&name=${encodeURIComponent(workspaceName)}${next ? `&next=${encodeURIComponent(next)}` : ''}`;
-  if (!email || !password || !workspaceName) redirect(`/sign-up?error=missing${keep}`);
+  // Preserve what the operator typed (never the password) so a failed submit
+  // doesn't blank the form, a common first-signup drop-off. A key the
+  // operator typed is NOT round-tripped through the URL; a join key already
+  // was the URL, so it goes back where it came from.
+  const keep = joining
+    ? `&email=${encodeURIComponent(email)}&invite=${encodeURIComponent(inviteKey)}`
+    : `&email=${encodeURIComponent(email)}&name=${encodeURIComponent(workspaceName)}${next ? `&next=${encodeURIComponent(next)}` : ''}`;
+  if (!email || !password || (!workspaceName && !joining)) redirect(`/sign-up?error=missing${keep}`);
 
   try {
     const auth = await publicPost<AuthResponse>('/api/v1/tenant/auth/sign-up', {
       email,
       password,
-      workspaceName,
+      ...(joining ? {} : { workspaceName }),
       ...(inviteKey ? { inviteKey } : {}),
     });
     await setSessionCookies(auth);
@@ -77,6 +83,10 @@ export default async function SignUpPage({
   // Round-tripped through the form so accept-invite (etc.) can resume after
   // sign-up. The server action re-validates it before redirecting.
   const next = typeof params.next === 'string' ? params.next : undefined;
+  // A workspace-bound invite from /accept-invite: this sign-up joins that
+  // workspace, so there is no workspace to name and no key to paste.
+  const joinKey =
+    typeof params.invite === 'string' && params.invite.startsWith('rp_opinv_') ? params.invite : undefined;
   // Per-field errors render at the broken field instead of the page-top
   // banner, the operator's eye is already at the form.
   const emailError = error === 'EMAIL_ALREADY_EXISTS' ? ERROR_MESSAGES[error] : undefined;
@@ -109,15 +119,23 @@ export default async function SignUpPage({
   return (
     <AuthCard
       action={signUp}
-      title="Create your workspace"
+      title={joinKey ? 'Create your account' : 'Create your workspace'}
       subtitle={
-        mode === 'invite'
-          ? 'This deployment issues workspace keys. Paste the key you were given.'
-          : "You'll be the owner. Invite teammates after sign-up."
+        joinKey
+          ? 'Use the email address the invite was sent to. You join the workspace you were invited to.'
+          : mode === 'invite'
+            ? 'This deployment issues workspace keys. Paste the key you were given.'
+            : "You'll be the owner. Invite teammates after sign-up."
       }
     >
       <TrackView event={AnalyticsEvent.RegisterPageView} />
-        {next && <input type="hidden" hidden name="next" value={next} />}
+        {next && !joinKey && <input type="hidden" hidden name="next" value={next} />}
+        {joinKey && (
+          <>
+            <input type="hidden" hidden name="inviteKey" value={joinKey} />
+            <input type="hidden" hidden name="joining" value="1" />
+          </>
+        )}
 
         {bannerError && (
           <p role="alert" className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
@@ -125,7 +143,7 @@ export default async function SignUpPage({
           </p>
         )}
 
-        {mode === 'invite' && signupHelpUrl && (
+        {mode === 'invite' && !joinKey && signupHelpUrl && (
           // A deployment-supplied pointer to wherever IT hands out keys.
           // Unset renders nothing, which is the right default for a self-host:
           // the panel has no idea how a given operator distributes keys, and
@@ -145,7 +163,7 @@ export default async function SignUpPage({
           </p>
         )}
 
-        {mode === 'invite' && (
+        {mode === 'invite' && !joinKey && (
           <label className="block space-y-1.5">
             <span className="text-sm font-medium">Invite key</span>
             <input type="text" name="inviteKey" required autoFocus
@@ -164,13 +182,21 @@ export default async function SignUpPage({
           </label>
         )}
 
-        <label className="block space-y-1.5">
-          <span className="text-sm font-medium">Workspace name</span>
-          <input type="text" name="workspaceName" required autoFocus={mode !== 'invite'}
-            defaultValue={keepName}
-            placeholder="Acme Co"
-            className={INPUT_BASE} />
-        </label>
+        {inviteError && joinKey && (
+          <p role="alert" className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+            {inviteError}
+          </p>
+        )}
+
+        {!joinKey && (
+          <label className="block space-y-1.5">
+            <span className="text-sm font-medium">Workspace name</span>
+            <input type="text" name="workspaceName" required autoFocus={mode !== 'invite'}
+              defaultValue={keepName}
+              placeholder="Acme Co"
+              className={INPUT_BASE} />
+          </label>
+        )}
         <label className="block space-y-1.5">
           <span className="text-sm font-medium">Email</span>
           <input type="email" name="email" required autoComplete="email"
@@ -203,16 +229,16 @@ export default async function SignUpPage({
           )}
         </label>
         <SubmitButton
-          pendingLabel="Creating workspace…"
+          pendingLabel={joinKey ? 'Creating account…' : 'Creating workspace…'}
           className="w-full rounded-md bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] transition-colors disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-primary)]"
         >
-          Create workspace
+          {joinKey ? 'Create account and join' : 'Create workspace'}
         </SubmitButton>
 
         {/* No env var for the marketing host, the panel links rekey.dev
             absolutely elsewhere (docs, MCP guide), so match that. */}
         <p className="text-xs text-[var(--color-muted-fg)] text-center">
-          By creating a workspace you agree to the{' '}
+          {termsLead(Boolean(joinKey))}{' '}
           <a
             href="https://rekey.dev/terms"
             target="_blank"

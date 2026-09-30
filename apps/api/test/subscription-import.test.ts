@@ -281,6 +281,7 @@ describe('subscription import', () => {
     expect(created.passwordHash).toBeNull();
     expect(created.emailVerified).toBe(false);
     expect(created.metadata).toMatchObject({ importRunId: runId });
+    expect(created.createdVia).toBe('import');
 
     // A double-click must not import twice.
     const again = await inject({

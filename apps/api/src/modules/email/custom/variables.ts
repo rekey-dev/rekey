@@ -128,6 +128,19 @@ export function validateVariables(
   return { values, issues };
 }
 
+/**
+ * Check preview values with the same rules a send applies, minus `required`:
+ * a preview may leave any variable to its sample.
+ */
+export function overrideIssues(
+  schema: readonly CustomEmailVariableDef[],
+  linkDomains: readonly string[],
+  overrides: Record<string, unknown>,
+): VariableIssue[] {
+  const optional = schema.map((def) => ({ ...def, required: false }));
+  return validateVariables(optional, linkDomains, overrides).issues;
+}
+
 /** Sample values for the preview and test send: the declared sample, or a typed placeholder. */
 export function sampleValues(
   schema: readonly CustomEmailVariableDef[],

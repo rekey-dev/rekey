@@ -8,6 +8,8 @@ import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { StatusPill } from '@/components/StatusPill';
 import { EmptyState } from '@/components/EmptyState';
+import { StatTile } from '@/components/StatTile';
+import { hasScope } from '@/lib/operator-scopes';
 
 /**
  * Billing Overview, the Billing group's landing tab. Revenue/subscription
@@ -53,7 +55,9 @@ export default async function BillingOverviewPage({
   // Stats + recent payments + open dunning cases in parallel; the page stays
   // useful if one fails.
   const [stats, paymentPage, dunningPage] = await Promise.all([
-    api<BillingStatsRow>({ method: 'GET', path: `${basePath}/billing/stats` }).catch(() => null),
+    api<BillingStatsRow>({ method: 'GET', path: `${basePath}/billing/stats`, interruptOnAccessError: false }).catch(
+      unlessBusy(() => null),
+    ),
     api<Page<PaymentRow>>({ method: 'GET', path: `${basePath}/payments?limit=8` }).catch(unlessBusy(() =>
       emptyPage<PaymentRow>(8),
     )),
@@ -96,7 +100,11 @@ export default async function BillingOverviewPage({
           <StatTile
             title="Past due"
             value={stats.pastDueSubscriptions.toLocaleString()}
-            href={`/applications/${id}/end-users?subscription=PAST_DUE`}
+            href={
+              hasScope(app.access?.scopes ?? null, 'end-users:read')
+                ? `/applications/${id}/end-users?subscription=PAST_DUE`
+                : null
+            }
             footer="Subscriptions in dunning"
             tone={stats.pastDueSubscriptions > 0 ? 'warn' : undefined}
           />
@@ -117,10 +125,18 @@ export default async function BillingOverviewPage({
             title="Dunning"
             value={`${openDunning.length}${openDunning.length >= 100 ? '+' : ''}`}
             href={`/applications/${id}/dunning?status=OPEN`}
-            footer="Open recovery cases · reminders day 0/3/7"
+            footer="Open payment recovery cases"
             tone={openDunning.length > 0 ? 'warn' : undefined}
           />
         </div>
+      )}
+
+      {!stats && (
+        <EmptyState
+          variant="inline"
+          title="Revenue numbers could not be read"
+          description="The billing stats request failed. Reload the page to try again; recent payments below are unaffected."
+        />
       )}
 
       {/* Revenue over the last 12 months, the headline graph. */}
@@ -203,38 +219,6 @@ export default async function BillingOverviewPage({
         )}
       </section>
     </div>
-  );
-}
-
-/** Compact metric tile, same pattern as the app Overview page's tiles. */
-function StatTile({
-  title,
-  value,
-  footer,
-  href,
-  tone,
-}: {
-  title: string;
-  value: string;
-  footer: string;
-  href: string;
-  tone?: 'warn' | undefined;
-}): React.JSX.Element {
-  return (
-    <Link
-      href={href}
-      className="group rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 flex flex-col gap-1 hover:border-neutral-400 dark:hover:border-neutral-600 transition-colors"
-    >
-      <span className="text-xs text-neutral-600 dark:text-neutral-500">{title}</span>
-      <span
-        className={`text-2xl font-semibold tabular-nums ${
-          tone === 'warn' ? 'text-amber-600 dark:text-amber-500' : ''
-        }`}
-      >
-        {value}
-      </span>
-      <span className="text-xs text-[var(--color-muted-fg)] leading-snug">{footer}</span>
-    </Link>
   );
 }
 

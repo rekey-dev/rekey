@@ -161,4 +161,104 @@ describe('Usage — record idempotency', () => {
     expect(total).toBe(1);
     expect(count).toBe(1);
   });
+
+  it('the same key with a different quantity is refused, and the original stands', async () => {
+    const first = await record({ meterSlug: 'api_calls', quantity: 5, idempotencyKey: 'evt-q' });
+    expect(first.statusCode).toBe(201);
+    const reused = await record({ meterSlug: 'api_calls', quantity: 7, idempotencyKey: 'evt-q' });
+    expect(reused.statusCode, reused.body).toBe(409);
+    const error = reused.json().error as { code: string; fix: string };
+    expect(error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect(error.fix).toContain('fresh idempotencyKey');
+    expect(await totalFor()).toEqual({ total: 5, count: 1 });
+    // The identical retry still replays.
+    const replay = await record({ meterSlug: 'api_calls', quantity: 5, idempotencyKey: 'evt-q' });
+    expect(replay.statusCode).toBe(201);
+    expect((replay.json().data as { id: string }).id).toBe((first.json().data as { id: string }).id);
+  });
+
+  it('a retry with a regenerated timestamp in the same month replays; another month is refused', async () => {
+    const first = await record({
+      meterSlug: 'api_calls',
+      quantity: 1,
+      occurredAt: new Date(Date.now() - 1000).toISOString(),
+      idempotencyKey: 'evt-t',
+    });
+    expect(first.statusCode).toBe(201);
+    const retried = await record({
+      meterSlug: 'api_calls',
+      quantity: 1,
+      occurredAt: new Date().toISOString(),
+      idempotencyKey: 'evt-t',
+    });
+    expect(retried.statusCode, retried.body).toBe(201);
+    expect((retried.json().data as { id: string }).id).toBe((first.json().data as { id: string }).id);
+
+    const now = new Date();
+    const lastMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) - 24 * 60 * 60 * 1000);
+    const moved = await record({ meterSlug: 'api_calls', quantity: 1, occurredAt: lastMonth.toISOString(), idempotencyKey: 'evt-t' });
+    expect(moved.statusCode).toBe(409);
+    expect(moved.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect(await totalFor()).toEqual({ total: 1, count: 1 });
+  });
+
+  it('keys are scoped per meter: the same key on another meter is its own record', async () => {
+    await app.inject({
+      method: 'POST',
+      url: `/api/v1/tenant/applications/${appId}/usage-meters`,
+      headers: auth(),
+      payload: { slug: 'exports', name: 'Exports', unit: 'files' },
+    });
+    const a = await record({ meterSlug: 'api_calls', quantity: 2, idempotencyKey: 'shared' });
+    const b = await record({ meterSlug: 'exports', quantity: 3, idempotencyKey: 'shared' });
+    expect(a.statusCode).toBe(201);
+    expect(b.statusCode).toBe(201);
+    expect((b.json().data as { id: string; quantity: number }).quantity).toBe(3);
+    expect((b.json().data as { id: string }).id).not.toBe((a.json().data as { id: string }).id);
+  });
+
+  for (const subject of ['application', 'end-user under a quota'] as const) {
+    it(`eight concurrent records with one key and mixed quantities (${subject}): one wins, mismatches get 409`, async () => {
+      let endUserId: string | undefined;
+      if (subject !== 'application') {
+        endUserId = await makeEndUser(`idemrace-${Math.random().toString(36).slice(2, 7)}@example.com`);
+        await app.inject({
+          method: 'POST',
+          url: `/api/v1/tenant/applications/${appId}/plans`,
+          headers: auth(),
+          payload: { slug: 'racecap', name: 'racecap', amount: 0, kind: 'SUBSCRIPTION' },
+        });
+        await app.inject({
+          method: 'PUT',
+          url: `/api/v1/tenant/applications/${appId}/plans/racecap/entitlements`,
+          headers: auth(),
+          payload: { kind: 'USAGE', key: 'api_calls', quantity: 100 },
+        });
+        const plan = await prisma.plan.findFirstOrThrow({ where: { applicationId: appId, slug: 'racecap' } });
+        await prisma.subscription.create({
+          data: { applicationId: appId, endUserId, planId: plan.id, status: 'ACTIVE', provider: 'stripe' },
+        });
+      }
+      const quantities = [1, 2, 3, 1, 2, 3, 1, 2];
+      const results = await Promise.all(
+        quantities.map((quantity) =>
+          record({ meterSlug: 'api_calls', quantity, idempotencyKey: 'mixed', ...(endUserId && { endUserId }) }),
+        ),
+      );
+      const { total, count } = await totalFor(endUserId);
+      expect(count).toBe(1);
+      const won = results.find((r) => r.statusCode === 201)!;
+      const winner = (won.json().data as { id: string; quantity: number });
+      expect(total).toBe(winner.quantity);
+      results.forEach((r, i) => {
+        if (quantities[i] === winner.quantity) {
+          expect(r.statusCode, r.body).toBe(201);
+          expect((r.json().data as { id: string }).id).toBe(winner.id);
+        } else {
+          expect(r.statusCode, r.body).toBe(409);
+          expect(r.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+        }
+      });
+    });
+  }
 });

@@ -205,13 +205,13 @@ export default tseslint.config(
   // BROWSER even though the file is Node. Without browser globals every
   // `document` and `window` in them reads as undefined.
   {
-    files: ['scripts/**/*.{js,mjs}'],
+    files: ['**/scripts/**/*.{js,mjs}'],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
   },
 
   // Config and scripts are run by tooling, not shipped.
   {
-    files: ['**/*.config.{js,mjs,ts}', 'scripts/**/*.{js,mjs}', 'tools/**/*.js'],
+    files: ['**/*.config.{js,mjs,ts}', '**/scripts/**/*.{js,mjs}', 'tools/**/*.js'],
     rules: { 'no-console': 'off', '@typescript-eslint/no-explicit-any': 'off' },
   },
 );

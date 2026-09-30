@@ -22,6 +22,7 @@ import { api, errorQuery, PanelApiError } from '@/lib/api';
 import { cookieSecure } from '@/lib/cookie-secure';
 import { formatDateTime } from '@/lib/date';
 import type { RevealResult } from '@/lib/one-time-secret';
+import { answersPatch, ProfileFormError } from '@/lib/profile-answers';
 import { SUPPORT_FLASH_COOKIE, SUPPORT_FLASH_MAX_AGE } from './shared';
 
 function tabBase(applicationId: string, euid: string): string {
@@ -509,4 +510,74 @@ export async function unblockDevice(
   deviceId: string,
 ): Promise<void> {
   await deviceAction(applicationId, euid, deviceId, 'unblock');
+}
+
+/**
+ * Ban and unban land on the Access tab. The reason is required by the API as
+ * well; checking it here first keeps the modal's own error in the URL rather
+ * than a round trip that says the same thing.
+ */
+export async function banEndUser(applicationId: string, euid: string, formData: FormData): Promise<void> {
+  const base = `${tabBase(applicationId, euid)}/access`;
+  const reason = String(formData.get('reason') ?? '').trim();
+  if (!reason) redirect(`${base}?banError=BAN_REASON_INVALID`);
+  let data: { alreadyBanned: boolean; sessionsRevoked: number };
+  try {
+    data = await api<{ alreadyBanned: boolean; sessionsRevoked: number }>({
+      method: 'POST',
+      path: `${apiBase(applicationId, euid)}/ban`,
+      body: { reason },
+    });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`${base}?banError=${encodeURIComponent(err.code)}`);
+    }
+    throw err;
+  }
+  redirect(data.alreadyBanned ? `${base}?ban=already` : `${base}?ban=done&revoked=${data.sessionsRevoked}`);
+}
+
+export async function unbanEndUser(applicationId: string, euid: string): Promise<void> {
+  const base = `${tabBase(applicationId, euid)}/access`;
+  try {
+    await api({ method: 'POST', path: `${apiBase(applicationId, euid)}/unban` });
+  } catch (err) {
+    if (err instanceof PanelApiError) {
+      redirect(`${base}?banError=${encodeURIComponent(err.code)}`);
+    }
+    throw err;
+  }
+  redirect(`${base}?ban=lifted`);
+}
+
+/**
+ * Save the onboarding answers from the Overview's edit dialog. Only the fields
+ * the operator changed are sent (`answersPatch`), so an answer the user gave
+ * while the dialog was open, or a select answer that is no longer an option,
+ * is left as it is. The API validates everything again.
+ */
+export async function saveProfileAnswers(
+  applicationId: string,
+  euid: string,
+  formData: FormData,
+): Promise<void> {
+  const base = tabBase(applicationId, euid);
+  let patch: Record<string, unknown>;
+  try {
+    patch = answersPatch(formData);
+  } catch (err) {
+    if (err instanceof ProfileFormError) redirect(`${base}?profileError=${err.code}&editProfile=1`);
+    throw err;
+  }
+  if (Object.keys(patch).length > 0) {
+    try {
+      await api({ method: 'PATCH', path: `${apiBase(applicationId, euid)}/profile`, body: patch });
+    } catch (err) {
+      if (err instanceof PanelApiError) {
+        redirect(`${base}?profileError=${encodeURIComponent(err.code)}&editProfile=1`);
+      }
+      throw err;
+    }
+  }
+  redirect(`${base}?profileSaved=1`);
 }

@@ -2,7 +2,8 @@ import * as React from 'react';
 import { redirect } from 'next/navigation';
 import { errorQuery, readErrorFlash, api, PanelApiError, getMe, getWorkspaceLimits } from '@/lib/api';
 import { ActionForm } from '@/components/ActionForm';
-import { SubmitButton } from '@/components/SubmitButton';
+import { StickyFormFooter } from '@/components/StickyFormFooter';
+import Link from '@/components/Link';
 import { ApiErrorText } from '@/components/api-error';
 import { SavedBanner } from '@/components/SavedBanner';
 import { Banner } from '@/components/Banner';
@@ -12,6 +13,9 @@ import { CopyButton } from '@/components/CopyButton';
 import { Field, fieldInputCls } from '@/components/Field';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { WorkspaceLimits } from '@/components/WorkspaceLimits';
+import { Badge } from '@/components/Badge';
+import { savedStateKey } from '@/lib/saved-state-key';
+import { dangerButtonClass } from '@/components/Button';
 
 interface WorkspaceDto {
   id: string;
@@ -90,7 +94,7 @@ async function requestWorkspaceDeletion(): Promise<void> {
 
 const ERR: Record<string, string> = {
   missing: 'Name is required.',
-  WORKSPACE_NAME_INVALID: 'Workspace name must be 2–80 characters.',
+  WORKSPACE_NAME_INVALID: 'Workspace name must be 2 to 80 characters.',
   TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can rename a workspace.',
 };
 const ERR_MCP: Record<string, string> = {
@@ -143,32 +147,103 @@ export default async function WorkspaceSettingsPage({
         title="Workspace settings"
         description={
           <>
-            Name, usage and lifecycle for{' '}
-            <strong className="text-[var(--color-fg)]">{workspace.name}</strong>.
+            Name, usage, agent access and deletion for{' '}
+            <strong className="font-medium text-[var(--color-fg)]">{workspace.name}</strong>.
           </>
         }
       />
 
       {renamed && <SavedBanner params={['renamed']} message="Workspace renamed." />}
       {savedMcp && <SavedBanner message="Operator MCP setting saved." />}
+      {!canEdit && (
+        <Banner tone="info">
+          You&apos;re a {me.activeRole.toLowerCase()}, so these settings are read-only. Owners and
+          admins can change them.
+        </Banner>
+      )}
 
-      {/* Operator MCP, the per-workspace switch */}
-      <Card className="space-y-3">
+      {/* Identity first: it is what every other section is about. */}
+      <Card className="space-y-4">
         <div>
-          <h2 className="text-sm font-semibold text-[var(--color-fg)]">Operator MCP</h2>
-          <p className="max-w-2xl text-xs text-[var(--color-muted-fg)]">
-            Whether AI agents may act in this workspace through the operator MCP server. Off refuses
-            every connected agent on its next request and grants no new consent. Nothing is revoked:
-            an agent keeps its connection and turning this back on restores it as it was. The
-            end-user MCP server is a separate switch on each application.
+          <h2 className="text-sm font-semibold text-[var(--color-fg)]">General</h2>
+          <p className="mt-1 text-sm text-[var(--color-muted-fg)]">
+            Your whole team sees this name across the panel.
           </p>
         </div>
+        <ActionForm key={savedStateKey(workspace.name)} action={renameWorkspace} className="space-y-4">
+          {error && errorCard === 'general' && (
+            <Banner tone="error">
+              <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
+            </Banner>
+          )}
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field label="Workspace name" required hint={canEdit ? '2 to 80 characters.' : undefined}>
+              <input
+                type="text"
+                name="name"
+                defaultValue={workspace.name}
+                required
+                minLength={2}
+                maxLength={80}
+                disabled={!canEdit}
+                className={`${fieldInputCls} disabled:cursor-not-allowed disabled:opacity-60`}
+              />
+            </Field>
+            <Field label="Workspace ID" hint="Stays the same for the life of the workspace. Quote it when you ask for support.">
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={workspace.id}
+                  readOnly
+                  aria-label="Workspace ID"
+                  className={`${fieldInputCls} bg-[var(--color-surface-muted)] font-mono opacity-70`}
+                />
+                <CopyButton value={workspace.id} label="Copy" />
+              </div>
+            </Field>
+          </div>
+          {canEdit && <StickyFormFooter label="Save name" />}
+        </ActionForm>
+      </Card>
+
+      {/* Usage and limits, read-only for every role. The production figure is
+          what the application Settings tab refuses against. */}
+      {limits !== null && (
+        <Card>
+          <WorkspaceLimits data={limits} />
+        </Card>
+      )}
+
+      {/* Operator MCP, the per-workspace switch */}
+      <div id="operator-mcp" className="scroll-mt-24">
+      <Card className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-sm font-semibold text-[var(--color-fg)]">Operator MCP</h2>
+          <Badge tone={workspace.operatorMcpEnabled ? 'success' : 'neutral'} dot>
+            {workspace.operatorMcpEnabled ? 'allowed' : 'off'}
+          </Badge>
+        </div>
+        <p className="max-w-2xl text-sm text-[var(--color-muted-fg)]">
+          Whether AI agents may act in this workspace through the operator MCP server. Turning it off
+          refuses every connected agent on its next request and grants no new consent. Nothing is
+          revoked: an agent keeps its connection, and turning this back on restores it as it was.
+          Each application has its own switch for the end-user MCP server. To connect an agent,
+          follow the steps on{' '}
+          <Link href="/account/mcp" className="underline underline-offset-2">
+            Operator MCP
+          </Link>{' '}
+          under Account.
+        </p>
         {error && errorCard === 'mcp' && (
           <Banner tone="error">
             <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR_MCP} fallback="Something went wrong. Please try again." />
           </Banner>
         )}
-        <ActionForm action={setOperatorMcp} className="flex flex-wrap items-center gap-3">
+        <ActionForm
+          key={savedStateKey(workspace.operatorMcpEnabled)}
+          action={setOperatorMcp}
+          className="space-y-3"
+        >
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -178,156 +253,91 @@ export default async function WorkspaceSettingsPage({
             />
             Allow operator MCP in this workspace
           </label>
-          {canEdit && (
-            <SubmitButton
-              pendingLabel="Saving…"
-              className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)]"
-            >
-              Save
-            </SubmitButton>
-          )}
+          {canEdit && <StickyFormFooter hint="Applies to every agent's next request." />}
         </ActionForm>
       </Card>
+      </div>
 
-      {/* General, rename */}
-      <Card className="space-y-4">
-        <div>
-          <h2 className="text-sm font-semibold text-[var(--color-fg)]">General</h2>
-          <p className="mt-1 text-sm text-[var(--color-muted-fg)]">
-            The workspace name is shown to your whole team across the panel.
-          </p>
-        </div>
-        <ActionForm action={renameWorkspace} className="space-y-4">
-          {error && errorCard === 'general' && (
-            <Banner tone="error">
-              <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback="Something went wrong. Please try again." />
-            </Banner>
-          )}
-          <Field
-            label="Workspace name"
-            required
-            hint={canEdit ? '2–80 characters.' : undefined}
-          >
-            <input
-              type="text"
-              name="name"
-              defaultValue={workspace.name}
-              required
-              minLength={2}
-              maxLength={80}
-              disabled={!canEdit}
-              className={`${fieldInputCls} disabled:cursor-not-allowed disabled:opacity-60`}
-            />
-          </Field>
-          <Field label="Workspace ID" hint="Stable identifier. Share it with support if you hit an issue.">
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={workspace.id}
-                readOnly
-                aria-label="Workspace ID"
-                className={`${fieldInputCls} bg-[var(--color-surface-muted)] font-mono opacity-70`}
-              />
-              <CopyButton value={workspace.id} label="Copy" />
-            </div>
-          </Field>
-          {canEdit ? (
-            <SubmitButton pendingLabel="Saving…">Save changes</SubmitButton>
-          ) : (
-            <p className="text-xs text-[var(--color-muted-fg)]">
-              You're a {me.activeRole.toLowerCase()}, and only owners and admins can edit workspace
-              settings.
-            </p>
-          )}
-        </ActionForm>
-      </Card>
-
-      {/* Usage and limits, read-only for every role. Placed between identity
-          and the destructive section because "what is this workspace using"
-          is the question an operator arrives with, and because the production
-          figure is what the application Lifecycle tab refuses against. */}
-      {limits !== null && (
-        <Card>
-          <WorkspaceLimits data={limits} />
-        </Card>
-      )}
-
-      {/* Danger zone, owner-only deletion (handled manually by support) */}
+      {/* Danger zone, owner-only deletion */}
       {isOwner && (
-        <div className="rounded-xl border border-red-300 bg-red-50/40 dark:border-red-800 dark:bg-red-950/30">
-          <div className="flex items-start justify-between gap-4 px-5 py-4">
-            <div className="min-w-0">
-              <div className="text-sm font-medium text-red-700 dark:text-red-300">
-                Delete workspace
-              </div>
-              <p className="mt-0.5 text-xs text-[var(--color-muted-fg)]">
-                Deletion removes every application, billing record, end-user, and license.
-                {support === null
-                  ? " There's no self-serve delete in the panel. On a self-hosted deployment it's an operation you run against your own database. Confirm and we'll show you exactly what to run."
-                  : " These are unwound in order, so it's handled manually. Confirm and we'll walk you through the final email step."}{' '}
-                This can't be undone.
-              </p>
-            </div>
-            {!deletionRequested && (
-              <ActionForm action={requestWorkspaceDeletion} className="shrink-0">
-                <TypedConfirmButton
-                  expected={workspace.name}
-                  title="Delete this workspace?"
-                  description={`This unwinds every application, billing row, end-user, and license for "${workspace.name}". It can't be undone.`}
-                  triggerLabel="Delete workspace"
-                  confirmLabel="Continue to delete"
-                />
-              </ActionForm>
-            )}
-          </div>
-
-          {deletionRequested && (
-            <div className="space-y-2 border-t border-red-200 px-5 py-4 dark:border-red-900/60">
-              <p className="text-sm font-medium text-[var(--color-fg)]">
-                {support === null
-                  ? `Delete ${workspace.name} on your own deployment`
-                  : `One last step to delete ${workspace.name}`}
-              </p>
-              {support === null ? (
-                <>
-                  {/* Self-hosted: the data is on the operator's machine. Telling
-                      them to email anyone would be telling them to ask a
-                      stranger to touch a database the stranger cannot reach. */}
-                  <p className="text-xs text-[var(--color-muted-fg)]">
-                    This is your Rekey, so this is your database. Every application, end-user,
-                    subscription, payment, licence, API key, and webhook under this workspace is
-                    removed by foreign-key cascade from the one row below, and nothing has to be
-                    unwound by hand.
-                  </p>
-                  <p className="text-xs font-medium text-red-700 dark:text-red-300">
-                    Take a backup first (<code className="font-mono">pg_dump</code>): this is not
-                    reversible and Rekey keeps no copy.
-                  </p>
-                  <div className="flex items-start gap-2">
-                    <code className="min-w-0 flex-1 overflow-x-auto rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-2 font-mono text-xs text-[var(--color-fg)]">
-                      {deleteSql}
-                    </code>
-                    <CopyButton value={deleteSql} label="Copy" />
-                  </div>
-                  <p className="text-xs text-[var(--color-muted-fg)]">
-                    Run it against the database in <code className="font-mono">DATABASE_URL</code>.
-                    Sign every operator out afterwards if any session for this workspace is still
-                    live.
-                  </p>
-                </>
-              ) : (
-                <p className="text-xs text-[var(--color-muted-fg)]">
-                  Email{' '}
-                  <a href={supportMailto ?? undefined} className="underline hover:text-[var(--color-fg)]">
-                    {support}
-                  </a>{' '}
-                  from the OWNER address. We'll confirm and schedule it within one business day. We
-                  never delete a workspace without that email.
+        <section className="space-y-3" aria-labelledby="danger-heading">
+          <h2 id="danger-heading" className="text-sm font-semibold text-red-700 dark:text-red-300">
+            Danger zone
+          </h2>
+          <div className="rounded-xl border border-red-300 bg-red-50/40 dark:border-red-800 dark:bg-red-950/30">
+            <div className="flex flex-col gap-4 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <h3 className="text-sm font-medium text-[var(--color-fg)]">Delete workspace</h3>
+                <p className="mt-0.5 max-w-2xl text-xs text-[var(--color-muted-fg)]">
+                  Deletion removes every application, billing record, end-user, and license.
+                  {support === null
+                    ? " There's no self-serve delete in the panel. On a self-hosted deployment it's an operation you run against your own database. Confirm and we'll show you exactly what to run."
+                    : " These are unwound in order, so it's handled manually. Confirm and we'll walk you through the final email step."}{' '}
+                  This can&apos;t be undone.
                 </p>
+              </div>
+              {!deletionRequested && (
+                <ActionForm action={requestWorkspaceDeletion} className="shrink-0">
+                  <TypedConfirmButton
+                    expected={workspace.name}
+                    title="Delete this workspace?"
+                    description={`This unwinds every application, billing row, end-user, and license for "${workspace.name}". It can't be undone.`}
+                    triggerLabel="Delete workspace"
+                    confirmLabel="Continue to delete"
+                    triggerClassName={dangerButtonClass('sm')}
+                  />
+                </ActionForm>
               )}
             </div>
-          )}
-        </div>
+
+            {deletionRequested && (
+              <div className="space-y-2 border-t border-red-200 px-5 py-4 dark:border-red-900/60">
+                <p className="text-sm font-medium text-[var(--color-fg)]">
+                  {support === null
+                    ? `Delete ${workspace.name} on your own deployment`
+                    : `One last step to delete ${workspace.name}`}
+                </p>
+                {support === null ? (
+                  <>
+                    {/* Self-hosted: the data is on the operator's machine. Telling
+                        them to email anyone would be telling them to ask a
+                        stranger to touch a database the stranger cannot reach. */}
+                    <p className="text-xs text-[var(--color-muted-fg)]">
+                      This is your Rekey, so this is your database. Every application, end-user,
+                      subscription, payment, licence, API key, and webhook under this workspace is
+                      removed by foreign-key cascade from the one row below, and nothing has to be
+                      unwound by hand.
+                    </p>
+                    <p className="text-xs font-medium text-red-700 dark:text-red-300">
+                      Take a backup first (<code className="font-mono">pg_dump</code>): this is not
+                      reversible and Rekey keeps no copy.
+                    </p>
+                    <div className="flex items-start gap-2">
+                      <code className="min-w-0 flex-1 overflow-x-auto rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-2 font-mono text-xs text-[var(--color-fg)]">
+                        {deleteSql}
+                      </code>
+                      <CopyButton value={deleteSql} label="Copy" />
+                    </div>
+                    <p className="text-xs text-[var(--color-muted-fg)]">
+                      Run it against the database in <code className="font-mono">DATABASE_URL</code>.
+                      Sign every operator out afterwards if any session for this workspace is still
+                      live.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-[var(--color-muted-fg)]">
+                    Email{' '}
+                    <a href={supportMailto ?? undefined} className="underline hover:text-[var(--color-fg)]">
+                      {support}
+                    </a>{' '}
+                    from the OWNER address. We'll confirm and schedule it within one business day. We
+                    never delete a workspace without that email.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        </section>
       )}
     </section>
   );

@@ -1,13 +1,10 @@
 /**
- * Account → Security: MFA enrollment + change password.
+ * Account → Security: two-factor, a passkey summary, live sessions and the
+ * password.
  *
- * MFA flow is presented as numbered steps so the operator can follow
- * along: scan QR → save backup codes → confirm with current 6-digit code.
- *
- * Backup codes are surfaced via a query string for one-time display, then
- * downloadable as a plain text file. (We considered persisting them on
- * the server-rendered page state, but that requires a client store; the
- * QS approach keeps everything server-rendered and stateless.)
+ * Two-factor setup is three numbered steps: scan the QR code, save the backup
+ * codes, confirm with the current 6-digit code. The seed and backup codes
+ * travel in a short-lived cookie, never the URL (see MFA_SETUP_COOKIE).
  */
 
 import * as React from 'react';
@@ -15,7 +12,7 @@ import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { errorMessage } from '@/lib/error-message';
-import { errorQuery, readErrorFlash, api, PanelApiError, type OperatorSessionRow, getMe } from '@/lib/api';
+import { errorQuery, readErrorFlash, api, PanelApiError, type OperatorSessionRow, getMe, unlessBusy, apiGet } from '@/lib/api';
 import { describeUserAgent } from '@/lib/format';
 import { QrCode } from '@/components/QrCode';
 import { ApiErrorText } from '@/components/api-error';
@@ -187,55 +184,91 @@ export default async function SecurityPage({
   const confirmed = sp.confirmed === '1';
   const disabled = sp.disabled === '1';
 
-  const status = await api<MfaStatus>({
-    method: 'GET',
-    path: '/api/v1/tenant/auth/mfa/status',
-  });
-  const { items: sessions } = await api<Page<OperatorSessionRow>>({
-    method: 'GET',
-    path: '/api/v1/tenant/auth/sessions',
-  });
-  // Operator email for the change-password form's hidden username field,
-  // best-effort: the form works without it.
-  const operatorEmail = await getMe()
-    .then((me) => me.user.email)
-    .catch(() => null);
+  const [status, { items: sessions }, operatorEmail, passkeyCount] = await Promise.all([
+    api<MfaStatus>({ method: 'GET', path: '/api/v1/tenant/auth/mfa/status' }),
+    api<Page<OperatorSessionRow>>({ method: 'GET', path: '/api/v1/tenant/auth/sessions' }),
+    // For the change-password form's hidden username field, best-effort: the
+    // form works without it.
+    getMe()
+      .then((me) => me.user.email)
+      .catch(() => null),
+    // Only the count is shown here; the list and its controls live on the
+    // Passkeys page. Null on failure, so a failed read never reads as "none".
+    apiGet<{ passkeys: unknown[] }>('/api/v1/tenant/auth/passkeys', { interruptOnAccessError: false })
+      .then((r) => r.passkeys.length)
+      .catch(unlessBusy(() => null)),
+  ]);
   const sessionRevoked = sp.session_revoked === '1';
   const signedOutAll = sp.signed_out_all === '1';
 
   const setupInProgress = !status.enabled && Boolean(otpauth);
 
   return (
-    <section className="mx-auto max-w-7xl space-y-10 px-6 py-8 lg:px-8">
+    <section className="mx-auto max-w-7xl space-y-6 px-6 py-8 lg:px-8">
       <PageHeader
         title="Account security"
-        description="Two-factor authentication and password management for your operator account."
+        description="How you sign in to the panel, and where you are signed in right now."
       />
 
-      {/* ─── MFA ─────────────────────────────────────────── */}
-      <section className="space-y-4">
-        <SectionHeader
-          title="Two-factor authentication"
-          description="TOTP via any standard authenticator (1Password, Authy, Google Authenticator, …) plus backup codes for lost devices."
-          action={<StatusPill enabled={status.enabled} setupInProgress={setupInProgress} />}
-        />
+      {/* Outcome banners sit at the top because the card that triggered them
+          has usually changed state by the time the page renders: after a
+          confirm the setup steps are gone, after a disable the enabled card is. */}
+      {confirmed && <Banner tone="success">Two-factor authentication is on.</Banner>}
+      {disabled && <Banner tone="success">Two-factor authentication is off.</Banner>}
+      {(sessionRevoked || signedOutAll) && (
+        <Banner tone="success">{signedOutAll ? 'Signed out of all devices.' : 'Session revoked.'}</Banner>
+      )}
 
-        {/* CASE 1: Already enabled */}
+      <nav aria-label="Security summary" className="grid gap-3 sm:grid-cols-3">
+        <SummaryTile
+          href="#two-factor"
+          label="Two-factor"
+          value={status.enabled ? 'On' : setupInProgress ? 'Setting up' : 'Off'}
+          tone={status.enabled ? 'ok' : 'warn'}
+          note={
+            status.enabled
+              ? `${status.remainingBackupCodes ?? 0} backup codes left`
+              : 'Recommended for owners and admins'
+          }
+        />
+        <SummaryTile
+          href="#passkeys"
+          label="Passkeys"
+          value={passkeyCount === null ? "Couldn't load" : String(passkeyCount)}
+          tone={passkeyCount !== null && passkeyCount > 0 ? 'ok' : 'idle'}
+          note={
+            passkeyCount === null
+              ? 'Open Passkeys below to see them'
+              : passkeyCount === 0
+                ? 'None registered'
+                : 'Registered on this account'
+          }
+        />
+        <SummaryTile
+          href="#sessions"
+          label="Active sessions"
+          value={String(sessions.length)}
+          tone="idle"
+          note="Devices signed in to the panel"
+        />
+      </nav>
+
+      {/* ─── MFA ─────────────────────────────────────────── */}
+      <section id="two-factor" className="scroll-mt-6">
         {status.enabled && (
-          <Card className="space-y-3">
-            <div className="flex items-center gap-2 text-sm text-[var(--color-fg)]">
-              <span className="h-2 w-2 rounded-full bg-emerald-500" />
-              <span>MFA is enabled.</span>
-              <span className="text-[var(--color-muted-fg)]">
-                · {status.remainingBackupCodes ?? 0} backup codes remaining
-              </span>
-            </div>
+          <Card className="space-y-4">
+            <CardHeading
+              title="Two-factor authentication"
+              badge={<StatusPill enabled setupInProgress={false} />}
+              description={`A code from your authenticator app is asked for at every sign-in. ${status.remainingBackupCodes ?? 0} backup codes left for a lost device.`}
+            />
             {status.remainingBackupCodes !== null && status.remainingBackupCodes <= 3 && (
-              <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
-                Few backup codes remaining. Consider re-running setup to mint a fresh batch.
-              </p>
+              <Banner tone="warning">
+                Only a few backup codes are left. Turn two-factor off and set it up again to get a
+                fresh set.
+              </Banner>
             )}
-            <ActionForm action={disableMfa} className="border-t border-[var(--color-border)] pt-2">
+            <ActionForm action={disableMfa} className="border-t border-[var(--color-border)] pt-4">
               <TypedConfirmButton
                 expected="disable mfa"
                 title="Disable two-factor authentication?"
@@ -244,23 +277,27 @@ export default async function SecurityPage({
                 confirmLabel="Disable MFA"
               />
             </ActionForm>
-            {disabled && (
-              <p className="text-xs text-[var(--color-muted-fg)]">MFA disabled.</p>
-            )}
           </Card>
         )}
 
-        {/* CASE 2: Setup in progress (have otpauth but not yet confirmed) */}
+        {/* Setup in progress: have otpauth but not yet confirmed */}
         {setupInProgress && (
-          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+          <Card padded={false} className="overflow-hidden">
+            <div className="border-b border-[var(--color-border)] p-5">
+              <CardHeading
+                title="Two-factor authentication"
+                badge={<StatusPill enabled={false} setupInProgress />}
+                description="Three steps. The code and backup codes below are shown only on this screen."
+              />
+            </div>
             {/* Step 1, Scan */}
-            <div className="p-5 border-b border-[var(--color-border)]">
+            <div className="border-b border-[var(--color-border)] p-5">
               <StepHeader n={1} title="Scan with your authenticator app" />
-              <div className="mt-4 grid sm:grid-cols-[auto_1fr] gap-5 items-start">
+              <div className="mt-4 grid items-start gap-5 sm:grid-cols-[auto_1fr]">
                 <QrCode value={otpauth!} size={180} />
                 <div className="space-y-3 text-sm">
                   <p className="text-[var(--color-muted-fg)]">
-                    Open 1Password / Authy / Google Authenticator and scan this QR code.
+                    Open 1Password, Authy or Google Authenticator and scan this QR code.
                   </p>
                   <details className="text-xs text-[var(--color-muted-fg)]">
                     <summary className="cursor-pointer hover:text-[var(--color-fg)]">
@@ -278,10 +315,10 @@ export default async function SecurityPage({
             </div>
 
             {/* Step 2, Backup codes */}
-            <div className="p-5 border-b border-[var(--color-border)] bg-amber-50/40 dark:bg-amber-950/20">
+            <div className="border-b border-[var(--color-border)] bg-amber-50/40 p-5 dark:bg-amber-950/20">
               <StepHeader n={2} title="Save your backup codes" />
-              <p className="text-xs text-amber-900 dark:text-amber-200 mt-1">
-                These are shown <strong>once</strong>. Each works one time if you lose your authenticator. Only SHA-256 hashes are kept on the server.
+              <p className="mt-1 text-xs text-amber-900 dark:text-amber-200">
+                These are shown <strong>once</strong>. Each works one time if you lose your authenticator. Rekey keeps only a one-way fingerprint of each.
               </p>
               {backups && backups.length > 0 && (
                 <div className="mt-3 space-y-2">
@@ -329,27 +366,24 @@ export default async function SecurityPage({
                       autoFocus
                       placeholder="000000"
                       maxLength={6}
-                      className="w-32 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-center text-base font-mono tracking-widest text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]"
+                      className="w-32 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-center font-mono text-base tracking-widest text-[var(--color-fg)] focus:border-[var(--color-primary)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)]"
                     />
                   </label>
                   <SubmitButton pendingLabel="Verifying…">Enable MFA</SubmitButton>
                 </div>
               </ActionForm>
             </div>
-          </div>
+          </Card>
         )}
 
-        {/* CASE 3: Not enabled, no setup in progress */}
+        {/* Not enabled, no setup in progress */}
         {!status.enabled && !setupInProgress && (
-          <Card className="space-y-3">
-            {confirmed && (
-              <Banner tone="success">
-                MFA enabled successfully.
-              </Banner>
-            )}
-            <p className="text-sm text-[var(--color-muted-fg)]">
-              MFA is currently <strong>not enabled</strong>. We strongly recommend enabling it for any operator with workspace owner or admin permissions.
-            </p>
+          <Card className="space-y-4">
+            <CardHeading
+              title="Two-factor authentication"
+              badge={<StatusPill enabled={false} setupInProgress={false} />}
+              description="Ask for a code from an authenticator app (1Password, Authy, Google Authenticator) at every sign-in, with backup codes for a lost device. Turn it on if you are a workspace owner or admin."
+            />
             <ActionForm action={setupMfa}>
               <SubmitButton pendingLabel="Starting setup…">Set up MFA</SubmitButton>
             </ActionForm>
@@ -358,26 +392,36 @@ export default async function SecurityPage({
       </section>
 
       {/* ─── Passkeys ─────────────────────────────────────── */}
-      <section className="space-y-4">
-        <SectionHeader
+      <section id="passkeys" className="scroll-mt-6">
+      <Card className="space-y-4">
+        <CardHeading
           title="Passkeys"
-          description="Sign in with Touch ID, Windows Hello, or a hardware key. Phishing-resistant and stronger than TOTP."
+          badge={
+            passkeyCount !== null ? (
+              <Badge tone={passkeyCount > 0 ? 'success' : 'neutral'} dot>
+                {passkeyCount} registered
+              </Badge>
+            ) : undefined
+          }
+          description="Sign in with Touch ID, Windows Hello or a hardware key instead of a password and code. A passkey cannot be phished."
+          action={
+            <Link
+              href="/account/passkeys"
+              className="inline-flex rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]"
+            >
+              Manage passkeys
+            </Link>
+          }
         />
-        <Card>
-          <Link
-            href="/account/passkeys"
-            className="rounded text-sm font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
-          >
-            Manage passkeys →
-          </Link>
-        </Card>
+      </Card>
       </section>
 
       {/* ─── Active sessions ──────────────────────────────── */}
-      <section className="space-y-4">
+      <section id="sessions" className="scroll-mt-6 space-y-3" aria-labelledby="sessions-heading">
         <SectionHeader
-          title="Active sessions"
-          description="Devices with a live refresh token for your operator account. Revoke any you don't recognize."
+          title={<span id="sessions-heading">Active sessions</span>}
+          count={`(${sessions.length})`}
+          description="Devices signed in to your operator account. Revoke any you don't recognize."
           action={
             sessions.length > 0 ? (
               <ActionForm action={signOutEverywhere} className="shrink-0">
@@ -389,12 +433,6 @@ export default async function SecurityPage({
           }
         />
 
-        {(sessionRevoked || signedOutAll) && (
-          <Banner tone="success">
-            {signedOutAll ? 'Signed out of all devices.' : 'Session revoked.'}
-          </Banner>
-        )}
-
         <Card padded={false} className="divide-y divide-[var(--color-border)]">
           {sessions.length === 0 ? (
             <div className="px-5 py-6 text-center text-sm text-[var(--color-muted-fg)]">
@@ -404,23 +442,23 @@ export default async function SecurityPage({
             sessions.map((s) => {
               const device = describeUserAgent(s.userAgent);
               return (
-              <div key={s.id} className="flex items-center justify-between gap-3 px-5 py-3">
-                <div className="min-w-0">
-                  <div className="truncate text-sm text-[var(--color-fg)]" title={s.userAgent ?? undefined}>
-                    {device.label}
+                <div key={s.id} className="flex items-center justify-between gap-3 px-5 py-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm text-[var(--color-fg)]" title={s.userAgent ?? undefined}>
+                      {device.label}
+                    </div>
+                    <div className="text-xs text-[var(--color-muted-fg)]">
+                      {s.ip ?? 'unknown IP'} · started {formatDateTime(s.createdAt)}
+                    </div>
+                    {device.note && (
+                      <div className="mt-0.5 text-xs text-[var(--color-faint-fg)]">{device.note}</div>
+                    )}
                   </div>
-                  <div className="text-xs text-[var(--color-muted-fg)]">
-                    {s.ip ?? 'unknown IP'} · started {formatDateTime(s.createdAt)}
-                  </div>
-                  {device.note && (
-                    <div className="mt-0.5 text-xs text-[var(--color-faint-fg)]">{device.note}</div>
-                  )}
+                  <ActionForm action={revokeSession} className="shrink-0">
+                    <input type="hidden" name="sessionId" value={s.id} />
+                    <ConfirmButton confirm="Revoke this session? That device is signed out immediately and has to log in again.">Revoke</ConfirmButton>
+                  </ActionForm>
                 </div>
-                <ActionForm action={revokeSession} className="shrink-0">
-                  <input type="hidden" name="sessionId" value={s.id} />
-                  <ConfirmButton confirm="Revoke this session? That device is signed out immediately and has to log in again.">Revoke</ConfirmButton>
-                </ActionForm>
-              </div>
               );
             })
           )}
@@ -428,21 +466,13 @@ export default async function SecurityPage({
       </section>
 
       {/* ─── Change password ─────────────────────────────── */}
-      <section className="space-y-4">
-        <SectionHeader
+      <Card as="section" className="space-y-4">
+        <CardHeading
           title="Change password"
-          description="Other sessions on other devices are signed out on success."
+          description="Every session is signed out when the password changes, this one included, so you sign in again with the new one."
         />
-
-        <ActionForm
-          action={changePassword}
-          className="space-y-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5"
-        >
-          {pwerror && (
-            <Banner tone="error">
-              {errorMessage(ERR, pwerror)}
-            </Banner>
-          )}
+        <ActionForm action={changePassword} className="max-w-md space-y-3">
+          {pwerror && <Banner tone="error">{errorMessage(ERR, pwerror)}</Banner>}
           <label className="block space-y-1">
             <span className="text-xs font-medium text-[var(--color-fg)]">Current password</span>
             <input
@@ -482,14 +512,68 @@ export default async function SecurityPage({
             />
           )}
         </ActionForm>
-      </section>
-
-      <p className="border-t border-[var(--color-border)] pt-4 text-center text-xs text-[var(--color-muted-fg)]">
-        <Link href="/team" className="rounded hover:text-[var(--color-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]">
-          Looking for team management? →
-        </Link>
-      </p>
+      </Card>
     </section>
+  );
+}
+
+/** A card's own title row: heading, status badge, one line of prose, and an optional action. */
+function CardHeading({
+  title,
+  badge,
+  description,
+  action,
+}: {
+  title: string;
+  badge?: React.ReactNode;
+  description: React.ReactNode;
+  action?: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-sm font-semibold text-[var(--color-fg)]">{title}</h2>
+          {badge}
+        </div>
+        <p className="mt-1 max-w-2xl text-sm text-[var(--color-muted-fg)]">{description}</p>
+      </div>
+      {action && <div className="shrink-0">{action}</div>}
+    </div>
+  );
+}
+
+const TILE_DOT: Record<'ok' | 'warn' | 'idle', string> = {
+  ok: 'bg-green-500',
+  warn: 'bg-amber-500',
+  idle: 'bg-neutral-400',
+};
+
+function SummaryTile({
+  href,
+  label,
+  value,
+  note,
+  tone,
+}: {
+  href: string;
+  label: string;
+  value: string;
+  note: string;
+  tone: 'ok' | 'warn' | 'idle';
+}): React.JSX.Element {
+  return (
+    <a
+      href={href}
+      className="group flex flex-col gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 transition-colors hover:border-neutral-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)] dark:hover:border-neutral-600"
+    >
+      <span className="flex items-center gap-1.5 text-xs text-[var(--color-muted-fg)]">
+        <span className={`h-1.5 w-1.5 rounded-full ${TILE_DOT[tone]}`} aria-hidden />
+        {label}
+      </span>
+      <span className="text-2xl font-semibold tabular-nums text-[var(--color-fg)]">{value}</span>
+      <span className="text-xs leading-snug text-[var(--color-muted-fg)]">{note}</span>
+    </a>
   );
 }
 
@@ -503,20 +587,20 @@ function StatusPill({
   if (enabled) {
     return (
       <Badge tone="success" dot>
-        Enabled
+        on
       </Badge>
     );
   }
   if (setupInProgress) {
     return (
       <Badge tone="warning" dot>
-        Setup in progress
+        setting up
       </Badge>
     );
   }
   return (
     <Badge tone="neutral" dot>
-      Not enabled
+      off
     </Badge>
   );
 }

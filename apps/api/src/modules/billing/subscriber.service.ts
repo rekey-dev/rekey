@@ -97,6 +97,7 @@ export const subscriberService = {
       passwordHash: null,
       role: role.name,
       emailVerified: input.subscriber.emailVerified ?? true,
+      createdVia: 'billing',
     };
 
     let created: {

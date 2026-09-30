@@ -12,7 +12,7 @@ import * as React from 'react';
  * Modal trigger, which wraps its child in a clickable span).
  */
 
-export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'destructive';
+export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'destructive' | 'danger';
 export type ButtonSize = 'sm' | 'md';
 
 interface BaseProps {
@@ -26,6 +26,22 @@ type ButtonProps =
   | (BaseProps & React.ButtonHTMLAttributes<HTMLButtonElement> & { as?: 'button' })
   | (BaseProps & React.HTMLAttributes<HTMLSpanElement> & { as: 'span' });
 
+const DANGER_TONE =
+  'border border-red-300 text-red-700 hover:bg-red-50 hover:border-red-400 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/40 disabled:opacity-50';
+
+/**
+ * The one style for a control that destroys, disables or revokes something:
+ * an outlined red button. Confirm dialogs, row actions and danger zones all
+ * use it, so a destructive action looks the same wherever it sits.
+ *
+ * @example
+ * <TypedConfirmButton triggerClassName={dangerButtonClass('sm')} … />
+ */
+export function dangerButtonClass(size: 'xs' | 'sm' = 'sm'): string {
+  const box = size === 'xs' ? 'px-2 py-1 text-xs' : 'px-3 py-1.5 text-sm';
+  return `inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 ${box} ${DANGER_TONE}`;
+}
+
 const VARIANTS: Record<ButtonVariant, string> = {
   primary:
     'bg-[var(--color-primary)] text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-50',
@@ -35,6 +51,7 @@ const VARIANTS: Record<ButtonVariant, string> = {
     'text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline disabled:opacity-50',
   destructive:
     'text-red-600 dark:text-red-400 hover:underline disabled:opacity-50',
+  danger: DANGER_TONE,
 };
 
 const SIZES: Record<ButtonSize, string> = {

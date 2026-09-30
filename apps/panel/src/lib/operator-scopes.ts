@@ -13,6 +13,7 @@ export const SCOPE_DOMAINS = [
   'organizations',
   'activity',
   'overview',
+  'audience',
 ] as const;
 export type ScopeDomain = (typeof SCOPE_DOMAINS)[number];
 export type ScopeLevel = 'read' | 'write';
@@ -35,6 +36,11 @@ export const DOMAIN_LABEL: Record<ScopeDomain, { label: string; hint: string; ri
   organizations: { label: 'Organizations', hint: 'Organizations, their members, and both role catalogs.' },
   activity: { label: 'Activity', hint: 'Request logs and security events.' },
   overview: { label: 'Overview', hint: 'The dashboard tiles: counts across every domain, never amounts.' },
+  audience: {
+    label: 'Lists and contacts',
+    hint: 'Newsletter, waitlist and contact form lists, and the people on them.',
+    risk: 'Holds the addresses of people who never signed up. Viewer and billing grants never include it.',
+  },
 };
 
 /**

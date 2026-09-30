@@ -24,6 +24,7 @@
 import { type NextRequest, NextResponse } from 'next/server';
 import { publicPost, PanelApiError, ACCESS_COOKIE, REFRESH_COOKIE, sessionCookieMaxAges } from '@/lib/api';
 import { cookieSecure } from '@/lib/cookie-secure';
+import { clearMfaChallenge, mfaVerifyPath, writeMfaChallenge } from '@/lib/mfa-challenge';
 import { loginErrorCode } from '../error-messages';
 
 type AssertResult =
@@ -67,11 +68,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // An MFA-enrolled operator still gets the challenge. Federating the primary
   // factor does not dissolve the second one.
   if (result.mfaRequired) {
-    return seeOther(`/mfa-verify?challenge=${encodeURIComponent(result.mfaChallengeToken)}`);
+    const mfa = seeOther(mfaVerifyPath({}));
+    await writeMfaChallenge(mfa.cookies, result.mfaChallengeToken);
+    return mfa;
   }
 
   const secure = await cookieSecure();
   const res = seeOther('/applications?e=login_cloud');
+  clearMfaChallenge(res.cookies);
   const maxAges = sessionCookieMaxAges(result);
   res.cookies.set(ACCESS_COOKIE, result.accessToken, {
     httpOnly: true, sameSite: 'lax', secure, path: '/', maxAge: maxAges.access,

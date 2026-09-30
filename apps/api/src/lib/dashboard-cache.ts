@@ -15,6 +15,9 @@
  * Keys in use, all `rk:` prefixed:
  *   rk:stats:app:<applicationId>   GET /tenant/applications/:id/stats, 60s
  *   rk:admin:overview              GET /admin/metrics/overview, 60s
+ *
+ * The stale-while-revalidate variant with single-flight is in
+ * `swr-cache.ts`; it shares this client and the version scheme below.
  */
 
 import { getRedis } from './redis.js';
@@ -32,6 +35,11 @@ const VERSION_TTL_SECONDS = 3600;
 let testRedis: ReturnType<typeof getRedis> | undefined;
 function redisClient(): ReturnType<typeof getRedis> {
   return testRedis !== undefined ? testRedis : getRedis();
+}
+
+/** The client every dashboard cache uses, honouring `__useRedisForTests`. */
+export function dashboardRedis(): ReturnType<typeof getRedis> {
+  return redisClient();
 }
 
 interface Tagged<T> {

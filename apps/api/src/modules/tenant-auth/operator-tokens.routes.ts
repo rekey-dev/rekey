@@ -17,6 +17,7 @@
  * Mounted under /api/v1/tenant/operator.
  */
 
+import { mayReadRawIps } from '../../lib/ip-mask.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { applicationsService } from '../applications/applications.service.js';
@@ -238,7 +239,8 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
           ...errs({
             400:
               'API_KEY_EXPIRY_IN_PAST — `expiresAt` is not in the future; or ' +
-              'API_KEY_LIMIT_REACHED — the application already has the maximum active keys.',
+              'API_KEY_LIMIT_REACHED: the application already has the maximum active keys; or ' +
+              'API_KEY_SCOPE_UNKNOWN: `scopes` names a scope no route enforces.',
             401: OPERATOR_PAT_ERRORS[401],
             403:
               "TENANT_MEMBERSHIP_REVOKED — the PAT's operator no longer has a membership in " +
@@ -253,11 +255,13 @@ export async function operatorTokenRoutes(app: FastifyInstance): Promise<void> {
       const { id } = AppParam.parse(req.params);
       await ensureAppInTenant(id, req.tenantId!, req.tenantRole);
       const body = MintKeyBody.parse(req.body);
-      await assertMayMintScopes(await accessContextFromRequest(req), id, body.scopes);
+      const minter = await accessContextFromRequest(req);
+      await assertMayMintScopes(minter, id, body.scopes);
       const result = await apiKeysService.create({
         applicationId: id,
         name: body.name,
         scopes: body.scopes,
+        revealsEndUserIps: mayReadRawIps(minter.role, minter.scopes),
         ...(body.expiresAt !== undefined && { expiresAt: new Date(body.expiresAt) }),
       });
       void recordSecurityEvent({

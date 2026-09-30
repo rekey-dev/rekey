@@ -16,7 +16,7 @@ export default function RootPage(): React.JSX.Element {
         Manage your subscription and billing.
       </p>
       <p className="mt-2 text-sm text-[var(--color-muted-fg)]">
-        Open the portal link you were given — it includes the application name, like{' '}
+        Open the portal link you were given. It includes the application name, like{' '}
         <code className="font-mono">/your-app</code>.
       </p>
       <p className="mt-10 text-xs text-[var(--color-muted-fg)]">Powered by Rekey</p>

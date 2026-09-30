@@ -19,6 +19,7 @@
 
 import * as React from 'react';
 import { useActionPending } from './ActionForm';
+import { dangerButtonClass } from './Button';
 import { ModalHeader, dialogChromeCls } from '@/components/Modal';
 
 interface Props {
@@ -32,7 +33,7 @@ interface Props {
   triggerLabel?: string;
   /** Confirm button label (defaults to triggerLabel). */
   confirmLabel?: string;
-  /** Trigger button class (defaults to text-red-600 link). */
+  /** Trigger button class (defaults to the shared outlined danger button). */
   triggerClassName?: string;
 }
 
@@ -90,7 +91,7 @@ export function TypedConfirmButton({
         onClick={open}
         aria-busy={pending || undefined}
         className={
-          triggerClassName ?? 'text-xs text-red-600 dark:text-red-400 hover:underline'
+          triggerClassName ?? dangerButtonClass('xs')
         }
       >
         {triggerLabel}

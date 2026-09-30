@@ -19,7 +19,7 @@ import 'server-only';
 export function rekeyApiUrl(): string {
   const value = process.env.REKEY_URL;
   if (!value) {
-    throw new Error('REKEY_URL is missing — set it in the portal environment (see docs/portal.md).');
+    throw new Error('REKEY_URL is missing. Set it in the portal environment (see docs/portal.md).');
   }
   return value.replace(/\/$/, '');
 }
@@ -37,7 +37,7 @@ export function portalBaseUrl(): string {
   if (!value) {
     if (process.env.NODE_ENV === 'production') {
       throw new Error(
-        'PORTAL_BASE_URL is missing — set it to this portal\'s public origin ' +
+        'PORTAL_BASE_URL is missing. Set it to this portal\'s public origin ' +
           '(e.g. https://portal.example.com). It builds the checkout return URLs, ' +
           'so an unset value strands customers after payment.',
       );

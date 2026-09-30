@@ -6,8 +6,10 @@ the mirror image of [OAuth sign-in](auth.md), where Rekey is the *client* of
 Google/GitHub/an enterprise IdP.
 
 It is off by default. Turn it on per Application in **Panel → Application →
-Auth → Security policy**, with the *Act as an OpenID Connect provider* switch
-(next to *Require a verified email*, which it wants — see below).
+Authentication → OAuth clients → OpenID Connect provider**, with the *Act as an
+OpenID Connect provider* switch. Your own sign-in page (`hostedAuthorizeUrl`)
+is set in the same place. The switch wants *Require a verified email*, under
+Authentication → Methods → Verification & sessions (see below).
 
 Or over the API:
 
@@ -111,8 +113,8 @@ require verified addresses does not offer the scope:
 - When the scope IS granted, `email_verified` is therefore always `true`. A
   relying party that ignores it is now no worse off than one that reads it.
 
-Switch `requireEmailVerification` on (Panel → Application → Auth → Security
-policy) and the scope appears. Read that setting's note first: it applies to
+Switch `requireEmailVerification` on (Panel → Application → Authentication →
+Methods → Verification & sessions) and the scope appears. Read that setting's note first: it applies to
 accounts that already exist.
 
 ### Where `profile` claims come from
@@ -205,6 +207,7 @@ Returns `sub` plus whatever the granted scopes authorise, and nothing else:
 | ID Token used as a bearer token | `401` `invalid_token` |
 | Valid token without `openid` | `403` `insufficient_scope` |
 | End-user erased (GDPR) | `401` `invalid_token` |
+| End-user banned by an operator | `401` `invalid_token` |
 
 An erased end-user is refused at **every** door on this surface, not just here:
 redeeming an authorization code minted before the erasure returns
@@ -282,8 +285,8 @@ Not built (deliberately, listed so nobody assumes otherwise):
   operator-console decision, not an AI-tool one. Same for
   `dynamicClientRegistration`. (The console half of that argument was missing
   when this shipped — there was no panel toggle either, so the only way in was
-  a hand-rolled `PATCH`. The `oidcEnabled` toggle is now on the Auth tab; see
-  the top of this document.)
+  a hand-rolled `PATCH`. The `oidcEnabled` toggle is now under OAuth clients;
+  see the top of this document.)
 
   This is now enforced rather than remembered. Both fields are listed in
   `NOT_IN_MCP` in `apps/api/test/auth-config-surface-parity.test.ts`, which fails if

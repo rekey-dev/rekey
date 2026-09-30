@@ -44,6 +44,17 @@
   --color-fg: #1d1e22;             /* marketing foreground */
   --color-muted-fg: #6f6a66;       /* warm mid */
   --color-faint-fg: #a59f99;       /* warm faint */
+
+  /* Chart series, in order. Every colour, "other" included, clears 3:1
+     against the surface in its theme, so a mark is visible without its
+     legend. "Other" is the neutral bucket, never a named series. */
+  --chart-1: #0f766e;
+  --chart-2: #4f46e5;
+  --chart-3: #b45309;
+  --chart-4: #be123c;
+  --chart-5: #0369a1;
+  --chart-6: #7c3aed;
+  --chart-other: #8c8680;
 }
 
 /* Dark theme, applied when <html> has the `.dark` class (set by ThemeToggle /
@@ -64,6 +75,13 @@
   --color-primary-fg: #0a0a0a;   /* ink: 7.95:1 on rekey-500, see :root */
   --color-primary-soft: #0f2e2a; /* deep teal tint for soft fills */
   --color-primary-soft-fg: #5eead4;
+  --chart-1: #2dd4bf;
+  --chart-2: #818cf8;
+  --chart-3: #fbbf24;
+  --chart-4: #fb7185;
+  --chart-5: #38bdf8;
+  --chart-6: #a78bfa;
+  --chart-other: #737373;
 }
 
 body {

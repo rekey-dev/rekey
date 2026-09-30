@@ -7,9 +7,10 @@
  * panel's credit grant could mint a key with the scope and grant through it.
  * So a key with an elevated scope needs the authority of the thing the scope
  * does: for `credits:grant`, the panel credit grant's own gate (billing-write
- * access to the Application AND the `billing:write` operator scope). The other
- * elevated scope, `email:send`, carries developer authority, which the mint
- * route already checks.
+ * access to the Application AND the `billing:write` operator scope), and for
+ * `contacts:read` the `audience:read` scope that lists themselves need.
+ * `email:send` carries developer authority, which the mint route already
+ * checks.
  *
  * Every operator path that sets key scopes calls this: the tenant route, the
  * operator-PAT route and the MCP `mint_api_key` tool. The super-admin route
@@ -41,6 +42,13 @@ const MINT_GATES: Record<ElevatedApiKeyScope, MintGate> = {
   // Sending only uses templates a developer already published, through the
   // Application's own provider: developer authority, which the mint route checks.
   'email:send': async () => undefined,
+  // Reads every address on a list, so the minter must be able to read lists
+  // in the panel: the `audience:read` scope, which viewer and billing grants
+  // never hold. Checked on the token too, as for `credits:grant`.
+  'contacts:read': async (ctx, applicationId) => {
+    await applicationAccess(ctx, applicationId, 'read', { scope: 'audience:read' });
+    if (!ctx.scopes.has('audience:read')) throw scopeDenied('audience:read');
+  },
 };
 
 export async function assertMayMintScopes(

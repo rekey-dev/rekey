@@ -20,12 +20,18 @@
 
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { api, getApplication } from '@/lib/api';
+import { api, getApplication, readErrorFlash } from '@/lib/api';
 import { CopyButton } from '@/components/CopyButton';
+import Link from '@/components/Link';
 import { SectionHeader } from '@/components/Card';
 import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { Banner } from '@/components/Banner';
+import { ApiErrorText } from '@/components/api-error';
+import { StickyFormFooter } from '@/components/StickyFormFooter';
+import { savedStateKey } from '@/lib/saved-state-key';
+import { saveOidcProvider } from './actions';
+import { dangerButtonClass } from '@/components/Button';
 
 export const dynamic = 'force-dynamic';
 
@@ -50,6 +56,7 @@ async function setRegistrationOpen(
   redirect(`/applications/${applicationId}/oauth-clients?e=${open ? 'reg_open' : 'reg_closed'}`);
 }
 
+
 async function revokeClient(
   applicationId: string,
   clientId: string,
@@ -72,7 +79,15 @@ const FLAGS: Record<string, { tone: 'success' | 'info'; text: string }> = {
     text: 'Open registration is off. Existing clients keep working; no new ones can register.',
   },
   reg_open: { tone: 'info', text: 'Open registration is on. Anyone can register a client.' },
+  oidc_saved: { tone: 'success', text: 'OpenID Connect provider settings saved.' },
 };
+
+const OIDC_ERR: Record<string, string> = {
+  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can change OpenID Connect settings.',
+};
+
+const inputCls =
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 font-mono text-sm text-[var(--color-fg)] focus:border-[var(--color-primary)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)]';
 
 export default async function OAuthClientsPage({
   params,
@@ -82,8 +97,17 @@ export default async function OAuthClientsPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
-  const flag = (await searchParams).e;
+  const sp = await searchParams;
+  const flag = sp.e;
+  const error = typeof sp.error === 'string' ? sp.error : undefined;
+  const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const app = await getApplication(id);
+  // Off unless set: an app saved before the field existed is not an identity provider.
+  const oidcEnabled = app.authConfig.oidcEnabled === true;
+  const hostedAuthorizeUrl =
+    (app.authConfig as { hostedAuthorizeUrl?: string }).hostedAuthorizeUrl ?? '';
+  const emailVerified =
+    (app.authConfig as { requireEmailVerification?: boolean }).requireEmailVerification === true;
 
   const registrationOpen =
     (app.authConfig as { dynamicClientRegistration?: boolean }).dynamicClientRegistration !== false;
@@ -126,8 +150,86 @@ export default async function OAuthClientsPage({
 
       {banner ? <Banner tone={banner.tone}>{banner.text}</Banner> : null}
 
+      <section id="oidc-provider" className="scroll-mt-28 md:scroll-mt-20 rounded-lg border border-[var(--color-border)] p-5">
+        <h2 className="text-sm font-semibold">OpenID Connect provider</h2>
+        <p className="mt-1 max-w-2xl text-sm text-[var(--color-muted-fg)]">
+          Lets other products offer &ldquo;Sign in with {app.name}&rdquo;, so your end-users&apos;
+          accounts here become their accounts there. Leave it off unless you want to be an
+          identity provider.
+        </p>
+        {error ? (
+          <div className="mt-3">
+            <Banner tone="error">
+              <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={OIDC_ERR} fallback={error} />
+            </Banner>
+          </div>
+        ) : null}
+        <ActionForm
+          key={savedStateKey({ oidcEnabled, hostedAuthorizeUrl })}
+          action={saveOidcProvider.bind(null, id)}
+          className="mt-4 space-y-5"
+        >
+          <label className="flex items-start gap-3">
+            <input
+              type="checkbox"
+              name="oidcEnabled"
+              defaultChecked={oidcEnabled}
+              className="mt-0.5 h-4 w-4 shrink-0 rounded border-[var(--color-border)]"
+            />
+            <span className="min-w-0">
+              <span className="block text-sm font-medium text-[var(--color-fg)]">
+                Act as an OpenID Connect provider
+              </span>
+              <span className="mt-0.5 block text-xs text-[var(--color-muted-fg)]">
+                Turning it on publishes a public discovery document at{' '}
+                <code className="text-xs">/.well-known/openid-configuration</code>, issues ID tokens
+                for the <code className="text-xs">openid</code> scope and serves{' '}
+                <code className="text-xs">/oauth/userinfo</code>. Clients can register themselves
+                while open registration (below) is on, so close it once yours are connected. This is
+                separate from the MCP switch; either one turns on the shared sign-in endpoints.{' '}
+                {emailVerified ? (
+                  'Email addresses are shared, because this application requires a verified email.'
+                ) : (
+                  <>
+                    Email addresses are not shared until{' '}
+                    <Link href={`/applications/${id}/auth#sessions`} className="underline underline-offset-2">
+                      Require a verified email
+                    </Link>{' '}
+                    is on.
+                  </>
+                )}
+              </span>
+            </span>
+          </label>
+
+          <label className="block space-y-1.5">
+            <span className="block text-sm font-medium text-[var(--color-fg)]">Your own sign-in page</span>
+            <input
+              type="url"
+              name="hostedAuthorizeUrl"
+              defaultValue={hostedAuthorizeUrl}
+              placeholder="https://app.yourcompany.com/oauth/authorize"
+              className={inputCls}
+            />
+            <span className="block max-w-2xl text-xs text-[var(--color-muted-fg)]">
+              Blank, Rekey shows its own sign-in page, which asks for an email and password. If
+              your users sign in with Google or GitHub they have no password, so point this at your
+              own login page and Rekey forwards the request there unchanged. Your page must still
+              ask for consent: show what{' '}
+              <code className="font-mono text-xs">POST /api/v1/mcp/{app.slug}/oauth/authorize/preview</code>{' '}
+              returns, and only on Allow call{' '}
+              <code className="font-mono text-xs">POST /api/v1/mcp/{app.slug}/oauth/authorize/grant</code>{' '}
+              with your secret key (it needs <code className="font-mono text-xs">auth:write</code>)
+              and the user&apos;s access token, then redirect with the code it returns.
+            </span>
+          </label>
+
+          <StickyFormFooter hint="Applies to the next sign-in request." />
+        </ActionForm>
+      </section>
+
       <section className="rounded-lg border border-[var(--color-border)] p-5">
-        <div className="flex items-start justify-between gap-6">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
           <div>
             <h2 className="text-sm font-semibold">Open registration</h2>
             <p className="mt-1 max-w-2xl text-sm text-[var(--color-muted-fg)]">
@@ -135,7 +237,7 @@ export default async function OAuthClientsPage({
                 <>
                   Anyone can register a client with{' '}
                   <code className="text-xs">POST /oauth/register</code>, with no credential needed.
-                  That is the RFC 7591 behaviour MCP clients rely on to connect themselves. Turn it
+                  MCP clients rely on this to connect themselves. Turn it
                   off once your relying parties are registered: on a public issuer it lets anyone
                   put a sign-in prompt on this Application&apos;s origin.
                 </>
@@ -204,7 +306,7 @@ export default async function OAuthClientsPage({
               <ActionForm action={revokeClient.bind(null, id, c.clientId)} className="shrink-0">
                 <SubmitButton
                   pendingLabel="Revoking…"
-                  className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm text-[var(--color-danger-fg,inherit)] hover:bg-[var(--color-surface-muted)]"
+                  className={dangerButtonClass('sm')}
                 >
                   Revoke
                 </SubmitButton>

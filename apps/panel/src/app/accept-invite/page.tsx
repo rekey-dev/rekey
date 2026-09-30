@@ -5,6 +5,12 @@
  *   2. If signed in: POST /accept directly + persist new session, hop to /applications.
  *   3. If not signed in: route to /login?inviteToken=… so the user can
  *      sign in then come back. (Sign-up here is possible too; deferred.)
+ *
+ * The token may also be a workspace-bound operator invite (`rp_opinv_…`, from
+ * `rekey init --owner-email`). The API previews and accepts it on the same
+ * routes. The one difference is a new account: sign-up itself redeems that
+ * key, so "Create a new account" hands it to /sign-up instead of routing back
+ * here, where a plain sign-up would have made a second workspace.
  */
 
 import * as React from 'react';
@@ -69,6 +75,8 @@ const ERR: Record<string, string> = {
   INVITATION_EXPIRED: 'This invite has expired. Ask whoever invited you to send a new one.',
   INVITATION_ALREADY_ACCEPTED: 'This invite has already been used.',
   INVITATION_NOT_USABLE: 'This invite is no longer usable. Ask for a new one.',
+  INVITATION_EMAIL_MISMATCH:
+    'This invite was sent to a different email address. Sign in with that address to accept it.',
   PREVIEW_FAILED: 'We couldn’t check this invite just now. Please try again in a moment.',
   // Unmapped codes render nothing, so every code the accept action can
   // redirect with must have an entry here or the failure is silent.
@@ -114,6 +122,10 @@ export default async function AcceptInvitePage({
 
   const jar = await cookies();
   const signedIn = Boolean(jar.get(ACCESS_COOKIE)?.value);
+  const signUpHref =
+    token.startsWith('rp_opinv_') && preview
+      ? `/sign-up?invite=${encodeURIComponent(token)}&email=${encodeURIComponent(preview.invitedEmail)}`
+      : `/sign-up?next=${encodeURIComponent(`/accept-invite?token=${token}`)}`;
 
   return (
     <main className="min-h-screen grid place-items-center px-6 bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-950 dark:to-neutral-900">
@@ -172,7 +184,7 @@ export default async function AcceptInvitePage({
                   Sign in
                 </Link>
                 <Link
-                  href={`/sign-up?next=${encodeURIComponent(`/accept-invite?token=${token}`)}`}
+                  href={signUpHref}
                   className="block w-full rounded-md border border-[var(--color-border)] px-4 py-2.5 text-center text-sm font-medium hover:bg-[var(--color-surface-muted)]"
                 >
                   Create a new account

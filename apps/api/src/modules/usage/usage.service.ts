@@ -155,6 +155,29 @@ function rethrowLockTimeoutAsBusy(e: unknown): never {
  */
 const MAX_METERS_PER_REMAINING_READ = 200;
 
+/**
+ * The original record for a retried idempotency key, provided the retry asks
+ * for the same thing: the same quantity in the same billing month. A retry
+ * that regenerates its timestamp within the month is the same event; a
+ * different quantity, or a month the original was not counted in, is not, and
+ * answering it with the original record told the caller it was counted.
+ */
+function replayOf(
+  prior: UsageRecord,
+  args: { quantity: number; occurredAt?: Date | undefined; idempotencyKey?: string | undefined },
+): UsageRecord {
+  const sameMonth =
+    args.occurredAt === undefined ||
+    monthWindowUtc(args.occurredAt).start.getTime() === monthWindowUtc(prior.occurredAt).start.getTime();
+  if (prior.quantity === args.quantity && sameMonth) return prior;
+  throw new RekeyError({
+    statusCode: 409,
+    code: 'IDEMPOTENCY_KEY_REUSED',
+    message: `The idempotencyKey "${args.idempotencyKey}" was already used on this meter for this subject with a different quantity, or for a different billing month. The original record stands and nothing new was recorded.`,
+    fix: 'Send a fresh idempotencyKey for a different usage event. Reuse a key only to retry the identical record.',
+  });
+}
+
 export const usageService = {
   async listMeters(
     applicationId: string,
@@ -344,7 +367,7 @@ export const usageService = {
           },
         },
       });
-      if (prior) return prior;
+      if (prior) return replayOf(prior, args);
     }
 
     // Hard cap (BILLING_MODEL §7): when the subject's plan bundles an included
@@ -411,7 +434,7 @@ export const usageService = {
           },
         },
         });
-        if (prior) return prior;
+        if (prior) return replayOf(prior, args);
       }
       throw e;
     };

@@ -111,7 +111,7 @@ export const GET: APIRoute = async ({ cookies, request }) => {
 ```astro
 ---
 // src/pages/sign-in.astro
-import { rekey, setSession, safePath, cookieSecureFor } from '@rekey.dev/astro';
+import { visitorClient, setSession, safePath, cookieSecureFor } from '@rekey.dev/astro';
 import { RekeyError } from '@rekey.dev/node';
 
 const next = safePath(Astro.url.searchParams.get('next'), '/dashboard');
@@ -121,7 +121,9 @@ if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
   let result;
   try {
-    result = await rekey().auth.signIn({
+    // visitorClient forwards the visitor's address and User-Agent, so rate
+    // limits and the session list describe the visitor, not this server.
+    result = await visitorClient(Astro).auth.signIn({
       email: String(form.get('email')),
       password: String(form.get('password')),
     });

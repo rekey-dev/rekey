@@ -49,7 +49,7 @@ export default function GlobalError({
           </h1>
           <p style={{ marginTop: '0.75rem', fontSize: '0.875rem', color: '#52525b', lineHeight: 1.6 }}>
             Something went wrong on our side, not yours. Nothing has been charged or changed.
-            Try again in a moment — if it keeps happening, contact the business you bought from.
+            Try again in a moment. If it keeps happening, contact the business you bought from.
           </p>
           <button
             type="button"

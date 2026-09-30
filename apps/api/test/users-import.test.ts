@@ -101,6 +101,7 @@ describe('user import and bcrypt verify-and-rehash', () => {
       include: { oauthIdentities: true },
     });
     expect(social.passwordHash).toBeNull();
+    expect(social.createdVia).toBe('import');
     expect(social.oauthIdentities.map((i) => i.providerAccountId)).toEqual(['g-123']);
 
     // Re-importing is a no-op that says so.

@@ -180,8 +180,12 @@ rather than hardcoding this table.
 | Event | When |
 |---|---|
 | `user.created` | An end-user account was created. `data.user` describes it and `data.via` says how (see below). |
-| `user.updated` | An end-user's role, metadata or verified flag changed. `data.changed` lists the field names that changed, never their values, and `data.user` is the record after the change. See below. |
+| `user.updated` | An end-user's role, metadata, verified flag or profile answers changed. `data.changed` lists the field names that changed, never their values, and `data.user` is the record after the change. See below. |
+| `user.onboarding_completed` | Onboarding was marked complete, once per user. `data.userId`, `data.completedAt` and `data.via` (`self`, `server` or `operator`). See [profile-fields.md](profile-fields.md). |
+| `user.onboarding_skipped` | The user skipped onboarding, once per user and never after completion. `data.userId`, `data.skippedAt` and `data.via` (`self`, `server` or `operator`). Rekey records the skip and blocks nothing. See [profile-fields.md](profile-fields.md#onboarding). |
 | `user.deleted` | An end-user account was deleted. |
+| `user.banned` | An operator banned an end-user: every session, OAuth/MCP grant and sign-in link was ended, and every sign-in is refused until the ban is lifted. Subscriptions are not touched. `data.user` carries `id` + `bannedAt`; `data.sessionsRevoked` counts the sessions ended. Never carries the operator's reason. A sign-in racing the ban can deliver `session.created` after this event, so order by the event timestamp. |
+| `user.unbanned` | An operator lifted a ban. The person can sign in again; sessions the ban ended stay ended. `data.user` carries `id` + `bannedAt: null`. |
 | `user.erased` | An end-user was erased for GDPR: PII and auth material hard-deleted, financial rows retained anonymized, and they can never authenticate again. **Propagate this to your own copies of their PII.** `data.user` carries `id` + `erasedAt`. See [data-erasure.md](data-erasure.md). |
 | `session.created` | An end-user signed in and a session was minted. See below. |
 | `session.revoked` | A refresh token was revoked — sign-out, per-session revoke, or kill-switch. |
@@ -206,8 +210,9 @@ rather than hardcoding this table.
 
 | `via` | Change | Fields |
 |---|---|---|
-| `self` | The end-user's own `PATCH /api/v1/users/me`. | `metadata` |
-| `operator` | An operator's `PATCH /api/v1/tenant/applications/:id/end-users/:euid`. | any of `role`, `emailVerified`, `metadata` |
+| `self` | The end-user's own `PATCH /api/v1/users/me`, or `PATCH /api/v1/users/me/profile`. | `metadata`, or `profile.<key>` per answer |
+| `server` | A secret key's `PATCH /api/v1/users/:id/profile`. | `profile.<key>` per answer |
+| `operator` | An operator's `PATCH /api/v1/tenant/applications/:id/end-users/:euid`, or `.../end-users/:euid/profile`. | any of `role`, `emailVerified`, `metadata`, or `profile.<key>` |
 | `email_verification` | The first successful `POST /api/v1/auth/verify-email`. | `emailVerified` |
 | `magic_link` | A magic-link sign-in that proved an unverified address. | `emailVerified` |
 
@@ -226,7 +231,9 @@ the session, so a sign-in whose event cannot be recorded gets no session:
   "sessionId": "clx...",
   "deviceId": null,
   "via": "password",
-  "firstSignIn": true
+  "firstSignIn": true,
+  "platform": "web",
+  "country": "DE"
 }
 ```
 
@@ -234,7 +241,12 @@ the session, so a sign-in whose event cannot be recorded gets no session:
 `mfa` when the session was minted by completing a second factor (the password
 step before it mints nothing, so it emits nothing). A refresh, or switching the
 active organization, re-mints a session and never emits it. `sessionId` is the
-id `session.revoked` carries when that session ends.
+id `session.revoked` carries when that session ends. The same sign-ins, and
+only those, move the user's `signInCount` and `lastSignedInAt` (see
+[analytics.md](analytics.md)). `platform` is where the session came from
+(`web`, `ios`, `android`, `macos`, `windows`, `linux`, `server`, `mcp`, `other`)
+and `country` the visitor's country when the deployment trusts Cloudflare's
+(`TRUST_CF_IPCOUNTRY`, see [analytics.md](analytics.md#country)), else null. Erasure nulls `country` in stored deliveries.
 
 `firstSignIn` is true for the first session the user ever gets, exactly once
 even when several first sign-ins race. That is the sign-up session for a
@@ -253,6 +265,20 @@ carries the invitation token.
 |---|---|
 | `organization.invitation.created` | An invitation was created. `data.invitation`: id, organizationId, email, role, invitedById, expiresAt, createdAt. |
 | `organization.invitation.accepted` | An invitation was accepted, once per invitation however many accepts race. `data.invitation` (id, organizationId, email, role, acceptedAt) and `data.membership` (id, organizationId, endUserId, role). |
+
+### Lists
+
+People joining and leaving a list, and what they typed (see
+[lists.md](lists.md)). Each is written in the transaction that changed the
+membership or stored the submission, and a call that changes nothing emits
+nothing. Erasing a contact scrubs its stored deliveries (see
+[data-erasure.md](data-erasure.md)).
+
+| Event | When |
+|---|---|
+| `contact.subscribed` | Someone joined a list: a first subscribe, or a secret-key subscribe with `consent` that added back a person who had left. `data.contact` (id, email, name), `data.list` (id, key), `data.member` (status, source, consentVersion, consentAt). |
+| `contact.unsubscribed` | Someone left a list: your server called `DELETE /api/v1/lists/:key/members/:email`, or an operator took them off in the panel. Sent once per change. `data.contact` (id, email, name), `data.list` (id, key), `data.member` (status, unsubscribedAt). |
+| `contact.submission.created` | A subscribe carried `fields` and they were stored, for example a contact form message. `data.contact` (id, email), `data.list` (id, key), `data.submission` (id, fields, createdAt). |
 
 ### Devices
 

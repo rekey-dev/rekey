@@ -79,3 +79,27 @@ describe('apiCallHeaders', () => {
     expect(apiCallHeaders(null, '  ')).toEqual({});
   });
 });
+
+describe('apiCallHeaders: the visitor behind a sign-in', () => {
+  const visitor = { userAgent: 'Mozilla/5.0 (iPhone) Safari/604.1', country: 'DE' };
+
+  it("forwards the visitor's User-Agent and country with the caller secret", () => {
+    expect(apiCallHeaders('198.51.100.7', 'internal-caller-secret-1', visitor)).toEqual({
+      'x-rekey-caller-secret': 'internal-caller-secret-1',
+      'x-rekey-client-ip': '198.51.100.7',
+      'x-forwarded-for': '198.51.100.7',
+      'x-rekey-client-user-agent': 'Mozilla/5.0 (iPhone) Safari/604.1',
+      'x-rekey-client-country': 'DE',
+    });
+  });
+
+  it('forwards neither without the caller secret, which is what makes the API believe them', () => {
+    expect(apiCallHeaders(null, undefined, visitor)).toEqual({});
+  });
+
+  it('caps the User-Agent and drops a country that is not two letters', () => {
+    const out = apiCallHeaders(null, 's', { userAgent: 'x'.repeat(600), country: 'XX1' });
+    expect(out['x-rekey-client-user-agent']).toHaveLength(512);
+    expect(out).not.toHaveProperty('x-rekey-client-country');
+  });
+});

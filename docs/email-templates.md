@@ -103,7 +103,7 @@ Publish checks the content and refuses with `400 EMAIL_TEMPLATE_INVALID`, listin
 
 ## Preview and test send
 
-The template page shows a preview of the draft rendered with each variable's `sample` (or a typed placeholder). A variable the draft uses without declaring it is shown as its `{{name}}` token, highlighted, with a warning listing it. The operator API equivalent is `POST .../custom-email-templates/:key/preview`, which returns the rendered `subject`, `html` and `text` plus an `undeclared` list. Nothing is sent.
+The template page shows a preview of the draft rendered with each variable's `sample` (or a typed placeholder). A variable the draft uses without declaring it is shown as its `{{name}}` token, highlighted, with a warning listing it. The operator API equivalent is `POST .../custom-email-templates/:key/preview`, which returns the rendered `subject`, `html` and `text` plus an `undeclared` list. Nothing is sent. Values passed in its optional `variables` object replace the samples and are checked exactly as a send checks them, apart from `required`, so a `url` outside the link domains is refused with `400 EMAIL_VARIABLES_INVALID`.
 
 **Send test to me** sends the draft with sample values to the signed-in operator's own address, with `[TEST]` before the subject. It needs the Application's own provider, honours the suppression list (`409 EMAIL_ADDRESS_SUPPRESSED`) and counts toward the send caps.
 

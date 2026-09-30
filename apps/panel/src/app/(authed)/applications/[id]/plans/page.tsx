@@ -1,4 +1,5 @@
 import * as React from 'react';
+import Link from '@/components/Link';
 import { redirect } from 'next/navigation';
 import { errorMessage } from '@/lib/error-message';
 import { errorQuery, api, PanelApiError, type PlanRow, type UsageMeterRow, type PlanEntitlementRow, getApplication, unlessBusy } from '@/lib/api';
@@ -256,9 +257,9 @@ const ERR: Record<string, string> = {
   // rather than leaving the operator with the bare code and no idea whether
   // anything was saved.
   BILLING_PROVIDER_ERROR:
-    'Your payment provider refused to register this plan, so it was saved but is not on sale. Check the credentials under Billing → Providers, then use “Retry registration” on the plan.',
+    'Your payment provider refused to register this plan, so it was saved but is not on sale. Check the credentials under Billing → Setup → Providers, then use “Retry registration” on the plan.',
   BILLING_CREDENTIALS_NOT_CONFIGURED:
-    'No payment provider is configured yet. Add one under Billing → Providers before creating plans.',
+    'No payment provider is configured yet. Add one under Billing → Setup → Providers before creating plans.',
 };
 
 export default async function PlansPage({
@@ -392,7 +393,11 @@ export default async function PlansPage({
             </p>
           ) : (
             <p className="mt-2 text-xs">
-              Connect a billing provider on the <strong>Providers</strong> tab first. Until one is
+              Connect a billing provider in{' '}
+              <Link href={`/applications/${id}/billing/providers`} className="underline">
+                Billing, Setup, Providers
+              </Link>{' '}
+              first. Until one is
               configured there is nothing to register these plans with, so <strong>Register</strong>{' '}
               is not offered on the rows below.
             </p>

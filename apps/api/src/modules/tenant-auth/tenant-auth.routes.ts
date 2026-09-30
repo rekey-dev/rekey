@@ -34,7 +34,7 @@ const SignUpBody = z.object({
   email: z.string().email().max(254),
   password: z.string().min(1).max(256),
   name: z.string().min(1).max(120).optional(),
-  workspaceName: z.string().min(1).max(120),
+  workspaceName: z.string().min(1).max(120).optional(),
   // Single-use invite key, required only when OPERATOR_SIGNUP_MODE='invite'.
   inviteKey: z.string().min(1).max(512).optional(),
 });
@@ -93,8 +93,8 @@ const MfaVerifyBody = z.object({
 const MintApiTokenBody = z.object({
   name: z.string().min(1).max(120),
   // Default-deny: empty/absent ⇒ ['read'] (applied in the service). Unknown
-  // scopes are rejected there too.
-  scopes: z.array(z.enum(OPERATOR_TOKEN_SCOPES)).default([]),
+  // scopes are refused there, with the valid list in the `fix`.
+  scopes: z.array(z.string().max(64)).default([]),
   expiresAt: z.string().datetime().optional(),
 });
 
@@ -242,20 +242,30 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
         summary: 'Self-serve sign-up — creates an operator account, a Tenant, and an OWNER membership',
         description:
           'Gated by OPERATOR_SIGNUP_MODE: open (anyone), invite (requires a single-use `inviteKey`), ' +
-          'or closed (rejected). Mode is advertised at GET /signup-mode.',
+          'or closed (rejected). Mode is advertised at GET /signup-mode. An `inviteKey` bound to an ' +
+          'existing workspace (minted with `tenantId`, e.g. by `rekey init --owner-email`) is honoured in ' +
+          'open and invite mode: the new operator joins that workspace at the key\'s role instead of ' +
+          'creating one, `workspaceName` is ignored, and `email` must be the address the key was minted for.',
         body: {
           type: 'object',
-          required: ['email', 'password', 'workspaceName'],
+          required: ['email', 'password'],
           properties: {
             email: { type: 'string', format: 'email', maxLength: 254 },
             password: { type: 'string', minLength: 8, maxLength: 256 },
             name: { type: 'string', minLength: 1, maxLength: 120 },
-            workspaceName: { type: 'string', minLength: 1, maxLength: 120 },
+            workspaceName: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 120,
+              description: 'Name of the workspace sign-up creates. Required unless `inviteKey` is bound to a workspace.',
+            },
             inviteKey: {
               type: 'string',
               minLength: 1,
               maxLength: 512,
-              description: 'Single-use invite key. Required when the deployment is in invite mode.',
+              description:
+                'Single-use invite key. Required when the deployment is in invite mode. A key bound to a ' +
+                'workspace is also honoured in open mode.',
             },
           },
         },
@@ -264,12 +274,14 @@ export async function tenantAuthRoutes(app: FastifyInstance): Promise<void> {
           ...errs({
             400:
               'PASSWORD_TOO_SHORT — password shorter than 8 characters; or PASSWORD_BREACHED — ' +
-              'found in a known breach corpus (unless HIBP_BREACH_CHECK_DISABLED).',
+              'found in a known breach corpus (unless HIBP_BREACH_CHECK_DISABLED); or ' +
+              'WORKSPACE_NAME_REQUIRED: no `workspaceName` and no workspace-bound `inviteKey`.',
             403:
               'OPERATOR_SIGNUP_CLOSED — sign-up is disabled on this deployment; or ' +
               'OPERATOR_INVITE_REQUIRED — invite mode requires `inviteKey`; or ' +
               'OPERATOR_INVITE_INVALID — the invite key does not match a pending invite; or ' +
-              'OPERATOR_INVITE_EXPIRED — the invite has expired.',
+              'OPERATOR_INVITE_EXPIRED: the invite has expired; or ' +
+              'OPERATOR_INVITE_EMAIL_MISMATCH: the key is bound to a workspace for a different email.',
             409:
               'EMAIL_ALREADY_EXISTS — an operator with that email already exists; or ' +
               'OPERATOR_INVITE_USED — the invite was already consumed (race lost).',
@@ -944,7 +956,11 @@ export async function tenantAuthAuthenticatedRoutes(app: FastifyInstance): Promi
             name: { type: 'string', minLength: 1, maxLength: 120 },
             scopes: {
               type: 'array',
-              items: { type: 'string', enum: [...OPERATOR_TOKEN_SCOPES] },
+              // No `enum` on items: schema validation would answer a typo with a
+              // generic BAD_REQUEST, and the service's OPERATOR_SCOPE_UNKNOWN
+              // names the valid scopes.
+              items: { type: 'string', maxLength: 64 },
+              description: `Any of: ${OPERATOR_TOKEN_SCOPES.join(', ')}. Anything else is refused with OPERATOR_SCOPE_UNKNOWN.`,
             },
             expiresAt: { type: 'string', format: 'date-time' },
           },

@@ -71,7 +71,7 @@ export async function resolveCheckoutPresentation(args: {
       statusCode: 409,
       code: 'CHECKOUT_EMBEDDED_NOT_READY',
       message: 'This checkout cannot be taken right now.',
-      fix: `The Application's operator can see which check failed ("${failed.id}") in Panel → Application → Billing → Checkout page, or switch the failure behaviour to fall back to the provider's page.`,
+      fix: `The Application's operator can see which check failed ("${failed.id}") in Panel → Application → Billing → Setup → Checkout page, or switch the failure behaviour to fall back to the provider's page.`,
       details: { check: failed.id },
     });
   }

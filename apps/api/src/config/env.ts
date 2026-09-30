@@ -122,6 +122,23 @@ export const env = createEnv({
     // mistake fails the deploy instead of degrading it to one warning line.
     // Do not relax that back to `:-`.
     API_PROXY_SECRET: z.string().min(16).optional(),
+    // Record the visitor's country from Cloudflare's CF-IPCountry on end-user
+    // sessions. Set `true` ONLY when the proxy that sends API_PROXY_SECRET
+    // receives nothing but Cloudflare traffic (its origin is locked to
+    // Cloudflare's ranges or authenticated origin pulls): anyone who reaches
+    // the proxy another way writes the header themselves. Off by default, and
+    // then no country is ever recorded. See docs/analytics.md.
+    TRUST_CF_IPCOUNTRY: z
+      .union([z.literal('true'), z.literal('false'), z.literal('')])
+      .optional()
+      .transform((v) => v === 'true'),
+    // The hourly analytics rollup (modules/analytics/rollup). On unless set to
+    // `false`: without it the Users overview can only answer the last 63 days
+    // and loses a day of per-day history every day. See docs/analytics.md.
+    ANALYTICS_ROLLUP_ENABLED: z
+      .union([z.literal('true'), z.literal('false'), z.literal('')])
+      .optional()
+      .transform((v) => v !== 'false'),
     API_PROXY_HOPS: z.coerce.number().int().min(1).max(5).default(1),
     // Proves a request came from OUR panel or portal whatever path it took
     // (the hosted units call the public API origin through the CDN). They send

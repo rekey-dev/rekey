@@ -282,11 +282,34 @@ interface AuthorizeParams {
  * and "let this site sign me in", which are not the same decision.
  */
 const SCOPE_DESCRIPTIONS: Record<string, string> = {
-  openid: 'Confirm who you are (sign you in)',
-  profile: 'Your profile details (name, picture)',
-  email: 'Your email address',
-  'mcp:account': 'Read-only access to your account (profile, subscription, usage)',
+  openid: 'Know which account is yours',
+  profile: 'See your name and profile picture',
+  email: 'See your email address',
+  'mcp:account':
+    'Read your account details, subscription, credits, devices and licences. It can read them but not change them.',
 };
+
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/**
+ * Where Allow or Deny sends the browser, named the way the person can check
+ * it: the host of the registered redirect URI, or scheme and host for a custom
+ * scheme, whose host alone says nothing about which program opens it. The
+ * client picked its own name, so this is the part of the screen to trust.
+ */
+function consentDestination(redirectUri: string): { destination: string; isLocal: boolean } | null {
+  let uri: URL;
+  try {
+    uri = new URL(redirectUri);
+  } catch {
+    return null;
+  }
+  const web = uri.protocol === 'https:' || uri.protocol === 'http:';
+  return {
+    destination: web ? uri.host : `${uri.protocol}//${uri.host}`,
+    isLocal: web && LOOPBACK_HOSTS.has(uri.hostname),
+  };
+}
 
 /** Minimal server-rendered login + consent page for the authorization endpoint. */
 /**
@@ -359,7 +382,8 @@ function authorizePageCsp(redirectUri: string, nonce: string): string {
 function renderAuthorizePage(opts: {
   actionUrl: string;
   appName: string;
-  clientName: string;
+  /** The name the client registered itself under, unverified, or null when it gave none. */
+  clientName: string | null;
   /**
    * The Application's own site, when the operator has set one. Used for the
    * password-reset link, without it this screen is a dead end for anyone who
@@ -462,10 +486,21 @@ function renderAuthorizePage(opts: {
       <label for="password">Password</label>
       <input id="password" type="password" name="password" required autocomplete="current-password">
       ${opts.mfa ? '<label for="mfaCode">Authenticator code</label><input id="mfaCode" type="text" name="mfaCode" inputmode="numeric" autocomplete="one-time-code">' : ''}`;
-  const heading = choice ? `Choose an account for ${esc(opts.clientName)}` : `Sign in to ${esc(shown)}`;
+  const client = opts.clientName ? esc(opts.clientName) : 'An app';
+  const clientInSentence = opts.clientName ? esc(opts.clientName) : 'the app';
+  const heading = choice ? `Choose an account for ${client}` : `Sign in to ${esc(shown)}`;
   const who = choice
-    ? `You are signed in to ${esc(shown)}. Choose whether ${esc(opts.clientName)} acts for you personally or for one of your organizations. It sees that account's subscription, credits and licences.`
-    : `${esc(opts.clientName)} is asking for access. Sign in with your ${esc(shown)} account, the one you use for ${esc(shown)} itself. An administrator login will not work here.`;
+    ? `You are signed in to ${esc(shown)}. Choose whether ${clientInSentence} acts for you personally or for one of your organizations. It sees that account's subscription, credits and licences.`
+    : `${client} wants to use your ${esc(shown)} account. Sign in with the account you use on ${esc(shown)} itself. An administrator login will not work here. Nothing is shared unless you choose Allow.`;
+  const dest = consentDestination(opts.params.redirect_uri);
+  const asking = `<p class="who">${
+    opts.clientName
+      ? `The app calls itself &ldquo;${client}&rdquo;. Apps choose their own names and nobody checks them, so go by the address below.`
+      : 'The app did not give a name, so go by the address below.'
+  } Whichever button you press, you are sent to:</p>
+    ${dest ? `<p class="dest">${esc(dest.destination)}</p>` : ''}
+    ${dest?.isLocal ? '<p class="who">That is a program on this computer. Desktop apps and AI tools sign in this way.</p>' : ''}
+    <p class="who">If you did not just start this from an app you trust, choose Deny.</p>`;
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sign in to ${esc(shown)}</title>
 <style>
@@ -478,6 +513,7 @@ body{font-family:system-ui,-apple-system,sans-serif;margin:0;min-height:100vh;di
 h1{font-size:1.125rem;line-height:1.4;margin:0 0 .25rem}
 .logo{max-height:2rem;max-width:9rem;display:block;margin:0 0 1rem}
 .who{font-size:.8125rem;color:#78716c;margin:0 0 1.25rem}
+.dest{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.875rem;word-break:break-all;margin:-.75rem 0 1.25rem}
 .grants{margin:0 0 1.25rem;padding:.75rem .875rem;border-radius:.5rem;background:#f5f5f4;font-size:.8125rem;color:#57534e}
 @media(prefers-color-scheme:dark){.grants{background:#292524;color:#a8a29e}.who{color:#a8a29e}}
 .grants p{margin:0 0 .375rem;font-weight:500}
@@ -515,10 +551,12 @@ button{flex:1;padding:.5625rem 1rem;border-radius:.375rem;border:0;cursor:pointe
          own panel the reader assumes it means their operator login. It does
          not: this is the end-user account for this Application. -->
     <p class="who">${who}</p>
+    ${asking}
     <div class="grants">
-      <p>It will be able to:</p>
+      <p>If you allow it, ${opts.clientName ? client : 'it'} can:</p>
       <ul>${grants}</ul>
     </div>
+    <p class="who">Deny sends you back to ${clientInSentence} with nothing shared.</p>
     ${opts.error ? `<p class="err">${esc(opts.error)}</p>` : ''}
     <form method="post" action="${esc(opts.actionUrl)}">
       ${hidden}
@@ -1007,7 +1045,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           branding: (application.portalBranding ?? null) as
             | { displayName?: string; logoUrl?: string; primaryColor?: string }
             | null,
-          clientName: client.clientName ?? 'An application',
+          clientName: client.clientName ?? null,
           params: q.data,
           grantedScopes: granted.split(' '),
         }),
@@ -1096,7 +1134,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
             nonce: pageNonce,
             actionUrl: `/api/v1/mcp/${slug}/oauth/authorize`,
             appName: application.name,
-            clientName: client.clientName ?? 'An application',
+            clientName: client.clientName ?? null,
             params,
             grantedScopes: granted.split(' '),
             error,
@@ -1119,7 +1157,7 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
               nonce: pageNonce,
               actionUrl: `/api/v1/mcp/${slug}/oauth/authorize`,
               appName: application.name,
-              clientName: client.clientName ?? 'An application',
+              clientName: client.clientName ?? null,
               params,
               grantedScopes: granted.split(' '),
               organizationChoice: { consentToken, options },
@@ -1149,12 +1187,13 @@ export async function mcpRoutes(app: FastifyInstance): Promise<void> {
           consent.nonce === params.nonce
             ? await prisma.endUser.findFirst({
                 where: { id: consent.sub, applicationId: application.id },
-                select: { id: true, sessionsInvalidBefore: true },
+                select: { id: true, sessionsInvalidBefore: true, bannedAt: true },
               })
             : null;
         // A password change or sign-out everywhere since the first step ends
-        // the sign-in it proved, exactly as it ends a session.
-        if (!consent || !user || sessionIssuedBefore(consent, user.sessionsInvalidBefore)) {
+        // the sign-in it proved, exactly as it ends a session. A ban placed in
+        // between refuses here too, rather than only at code redemption.
+        if (!consent || !user || user.bannedAt || sessionIssuedBefore(consent, user.sessionsInvalidBefore)) {
           return renderErr('Your sign-in expired. Sign in again to continue.');
         }
         const options = await consentOrganizationChoices(application, user.id, granted);

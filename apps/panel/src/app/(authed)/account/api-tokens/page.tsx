@@ -95,7 +95,7 @@ async function mintToken(formData: FormData): Promise<RevealResult> {
       title: 'Your new API token',
       value: result.rawToken,
       notes: [
-        `Prefix ${result.apiToken.tokenPrefix}. Store it like a database password: only its SHA-256 hash is kept on the server, so it cannot be recovered.`,
+        `Prefix ${result.apiToken.tokenPrefix}. Store it like a database password: Rekey keeps only a one-way fingerprint, so it cannot be shown again.`,
       ],
     },
   };

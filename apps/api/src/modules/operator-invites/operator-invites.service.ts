@@ -2,11 +2,12 @@
  * Super-admin management of operator-invite keys (OPERATOR_SIGNUP_MODE='invite').
  *
  * Mint / list / revoke. The consume-at-signup half lives in
- * `tenant-auth/operator-signup-policy.ts`, this module never issues sessions
- * or creates operators; it only manages the keys.
+ * `tenant-auth/operator-signup-policy.ts`, and an existing operator redeems a
+ * workspace-bound key through `workspace-invite-redemption.ts`. This file
+ * never issues sessions or creates operators; it only manages the keys.
  */
 
-import type { OperatorInvite } from '@prisma/client';
+import type { OperatorInvite, TenantRole } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { generateOperatorInviteToken } from '../../lib/operator-invite.js';
@@ -24,7 +25,16 @@ export interface PublicOperatorInvite {
   usedByTenantUserId: string | null;
   revokedAt: string | null;
   createdAt: string;
+  /** Set on a workspace-bound key: the workspace it joins. */
+  tenantId: string | null;
+  /** Set on a workspace-bound key: the only operator email that may redeem it. */
+  email: string | null;
+  /** Set on a workspace-bound key: the role the redeemer gets. */
+  role: TenantRole | null;
 }
+
+/** A workspace-bound key lives this long unless the mint names an expiry. */
+export const WORKSPACE_INVITE_DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function deriveStatus(row: OperatorInvite, now: number): OperatorInviteStatus {
   if (row.revokedAt) return 'revoked';
@@ -45,6 +55,9 @@ export function toPublicOperatorInvite(row: OperatorInvite): PublicOperatorInvit
     usedByTenantUserId: row.usedByTenantUserId,
     revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
     createdAt: row.createdAt.toISOString(),
+    tenantId: row.tenantId,
+    email: row.email,
+    role: row.role,
   };
 }
 
@@ -56,6 +69,12 @@ export const operatorInvitesService = {
   async mint(input: {
     note?: string | undefined;
     expiresAt?: Date | undefined;
+    /**
+     * Bind the key to an existing workspace. Redeeming it then joins that
+     * workspace at `role` instead of creating one, and only for `email`.
+     * A bound key always expires: 7 days unless `expiresAt` says otherwise.
+     */
+    workspace?: { tenantId: string; email: string; role: TenantRole } | undefined;
   }): Promise<{ invite: PublicOperatorInvite; rawToken: string }> {
     if (input.expiresAt !== undefined && input.expiresAt.getTime() <= Date.now()) {
       throw new RekeyError({
@@ -65,6 +84,21 @@ export const operatorInvitesService = {
         fix: 'Pass a future expiresAt, or omit it for a non-expiring key.',
       });
     }
+    const workspace = input.workspace;
+    if (workspace !== undefined) {
+      const tenant = await prisma.tenant.findUnique({ where: { id: workspace.tenantId }, select: { id: true } });
+      if (!tenant) {
+        throw new RekeyError({
+          statusCode: 404,
+          code: 'TENANT_NOT_FOUND',
+          message: `Tenant "${workspace.tenantId}" not found.`,
+          fix: 'List tenants with GET /api/v1/admin/tenants to see valid ids.',
+        });
+      }
+    }
+    const expiresAt =
+      input.expiresAt ??
+      (workspace !== undefined ? new Date(Date.now() + WORKSPACE_INVITE_DEFAULT_TTL_MS) : undefined);
     const { raw, hash, prefix } = generateOperatorInviteToken();
     const row = await prisma.operatorInvite.create({
       data: {
@@ -72,7 +106,12 @@ export const operatorInvitesService = {
         tokenHash: hash,
         createdByAdmin: true,
         ...(input.note !== undefined && { note: input.note }),
-        ...(input.expiresAt !== undefined && { expiresAt: input.expiresAt }),
+        ...(expiresAt !== undefined && { expiresAt }),
+        ...(workspace !== undefined && {
+          tenantId: workspace.tenantId,
+          email: workspace.email.trim().toLowerCase(),
+          role: workspace.role,
+        }),
       },
     });
     return { invite: toPublicOperatorInvite(row), rawToken: raw };

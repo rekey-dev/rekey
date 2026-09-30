@@ -33,16 +33,27 @@
 export const KNOWN_WEBHOOK_EVENTS = [
   'user.created',
   'user.updated',
+  // Onboarding marked complete, once per user, after every required profile
+  // field was answered (docs/profile-fields.md).
+  'user.onboarding_completed',
+  // Onboarding skipped, once per user, never after completion. Recorded only:
+  // Rekey gates nothing on it.
+  'user.onboarding_skipped',
   'user.deleted',
   // GDPR erasure (roadmap §10). Distinct from `user.deleted`: the end-user is
   // tombstoned (PII/auth hard-deleted, financial rows retained anonymized) and
   // can never authenticate again, consumers should propagate the erasure to
   // their own copies of the user's PII. Payload: `data.user` (id + erasedAt).
   'user.erased',
+  // Operator ban and its lifting. Payload: `data.user` (id + bannedAt, null on
+  // unban) and, on ban, `data.sessionsRevoked`. Never the operator's reason.
+  'user.banned',
+  'user.unbanned',
   // One per real sign-in (password, magic link, OAuth, passkey, MFA
   // completion), written with the session's refresh row. Never for a refresh
   // or an organization switch, which re-mint a session rather than start one.
-  // `data.firstSignIn` is true for the first session the user ever gets.
+  // `data.firstSignIn` is true for the first session the user ever gets;
+  // `data.platform` and `data.country` say where it came from.
   'session.created',
   'session.revoked',
   'mfa.enabled',
@@ -109,6 +120,12 @@ export const KNOWN_WEBHOOK_EVENTS = [
   // the invitation. The raw invitation token is never in the payload.
   'organization.invitation.created',
   'organization.invitation.accepted',
+  // Lists. Written in the transaction that changed the membership or stored
+  // the submission. `contact.submission.created` carries what the person
+  // typed, so erasure scrubs it by `data.contact.id`.
+  'contact.subscribed',
+  'contact.unsubscribed',
+  'contact.submission.created',
 ] as const;
 
 /**

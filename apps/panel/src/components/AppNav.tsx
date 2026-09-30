@@ -3,20 +3,20 @@
 /**
  * Two-level application nav.
  *
- *   ┌───────────────────────────────────────────────────────┐
- *   │  Overview  Users  Authentication  [Billing]  Developer │  ← primary group pills
- *   ├───────────────────────────────────────────────────────┤
- *   │  Methods   OAuth   MCP                                  │  ← sub-tabs of the active group
- *   └───────────────────────────────────────────────────────┘
+ *   ┌──────────────────────────────────────────────────────────────────┐
+ *   │  Overview  Users  Audience  Authentication  [Billing]  Developer  │  ← primary group pills
+ *   ├──────────────────────────────────────────────────────────────────┤
+ *   │  Methods   Sign-in providers   OAuth clients   MCP               │  ← sub-tabs of the active group
+ *   └──────────────────────────────────────────────────────────────────┘
  *
  * The active group is derived from the current path's first segment under
  * `/applications/{id}`. Clicking a group jumps to its first sub-tab; clicking
  * the already-active group is a no-op (links to the current path). Groups with
- * a single sub-tab (Overview, Users) render no second row, the primary row
+ * a single sub-tab (Overview, Audience) render no second row, the primary row
  * carries the bottom border instead.
  *
  * When the application has billing disabled the Billing group keeps its FULL
- * child list but retargets the group pill at the Providers page, the only
+ * child list but retargets the group pill at the Setup page, the only
  * place billing can be turned back on. Only the link target changes; the
  * children stay, which is what makes `/plans`, `/payments`, `/coupons` &c.
  * still resolve to the Billing group while billing is off.
@@ -30,6 +30,9 @@
  * page: the app Overview's Configuration list and the get-started checklist
  * both link into billing children while billing is off.
  *
+ * The groups themselves are defined in `lib/app-sections.ts`, shared with the
+ * command palette.
+ *
  * Both rows scroll horizontally. `main` is `overflow-x: hidden`, so a primary
  * row wider than the viewport (457px of pills at a 375px viewport) is not
  * merely clipped, the whole Developer group becomes unreachable on a phone.
@@ -39,78 +42,17 @@ import * as React from 'react';
 import Link from '@/components/Link';
 import { LinkPending } from '@/components/LinkPending';
 import { usePathname } from 'next/navigation';
-import { hasScope, type Scope } from '@/lib/operator-scopes';
-
-interface SubTab {
-  /** Path segment under `/applications/{id}`. Empty string = the group landing. */
-  seg: string;
-  label: string;
-}
-
-/**
- * Which scope a section needs to be worth showing. Mirrors the API's route
- * declarations (`config.access` on each route), a section whose reads would
- * all 403 is not offered. `null` = always shown: the landing page and
- * Lifecycle, which floor themselves.
- *
- * This is presentation, not enforcement (see Sidebar.tsx). The API refuses
- * on its own; this stops the panel showing somebody a door that will slam.
- */
-export const SEG_SCOPE: Record<string, Scope | null> = {
-  '': null,
-  'end-users': 'end-users:read',
-  roles: 'organizations:read',
-  organizations: 'organizations:read',
-  activity: 'activity:read',
-  auth: 'auth-config:read',
-  oauth: 'auth-config:read',
-  'oauth-clients': 'auth-config:read',
-  mcp: 'auth-config:read',
-  revenue: 'billing:read',
-  billing: 'billing:read',
-  plans: 'billing:read',
-  payments: 'billing:read',
-  dunning: 'billing:read',
-  'unapplied-payments': 'billing:read',
-  imports: 'billing:read',
-  coupons: 'billing:read',
-  licenses: 'billing:read',
-  usage: 'billing:read',
-  portal: 'auth-config:read',
-  'api-keys': 'developer:read',
-  webhooks: 'developer:read',
-  requests: 'activity:read',
-  access: 'auth-config:read',
-  lifecycle: null,
-  email: 'developer:read',
-};
-
-/**
- * Billing children the API gates behind `requireBillingEnabled`. While billing
- * is off they stay in the group (so their paths resolve and get a sub-row) but
- * are hidden from the row unless you're standing on one.
- */
-const BILLING_GATED_SEGS = [
-  'revenue',
-  'plans',
-  'payments',
-  'dunning',
-  'unapplied-payments',
-  'imports',
-  'coupons',
-  'licenses',
-  'usage',
-  'portal',
-] as const;
+import { hasScope } from '@/lib/operator-scopes';
+import { APP_SECTION_GROUPS, BILLING_GATED_SEGS, SEG_SCOPE, type AppSection } from '@/lib/app-sections';
 
 interface Group {
   key: string;
   label: React.ReactNode;
-  children: SubTab[];
+  children: AppSection[];
   /**
    * Segment the group PILL links to, when it isn't the first child. Used by
    * Billing-while-disabled: every child stays in the list (so paths still
-   * resolve to this group) but the pill points at Providers, the one page
+   * resolve to this group) but the pill points at Setup, the one page
    * that isn't server-gated.
    */
   entrySeg?: string;
@@ -122,13 +64,17 @@ export function AppNav({
   id,
   billingEnabled,
   scopes = null,
+  usersOverview = true,
 }: {
   id: string;
   billingEnabled: boolean;
   /** The caller's effective scopes on this Application; null = unrestricted. */
   scopes?: string[] | null;
+  /** False when the API predates the Users overview, so the tab is not offered. */
+  usersOverview?: boolean;
 }): React.JSX.Element {
   const visible = (seg: string): boolean => {
+    if (seg === 'users' && !usersOverview) return false;
     const need = SEG_SCOPE[seg];
     return need === null || need === undefined || hasScope(scopes, need);
   };
@@ -137,85 +83,29 @@ export function AppNav({
   const suffix = pathname.startsWith(base) ? pathname.slice(base.length) : '';
   const currentSeg = suffix.replace(/^\//, '').split('/')[0] ?? '';
 
-  const groups: Group[] = [
-    { key: 'overview', label: 'Overview', children: [{ seg: '', label: 'Overview' }] },
-    {
-      key: 'users',
-      label: 'Users',
-      children: [
-        { seg: 'end-users', label: 'End-users' },
-        // Both role catalogs live here rather than on the two pages they
-        // govern. Splitting them put the word "roles" on End-users and on
-        // Organizations meaning different things, with no place to see the
-        // difference; one page carries the distinction and both tables.
-        { seg: 'roles', label: 'Roles' },
-        { seg: 'organizations', label: 'Organizations' },
-        { seg: 'activity', label: 'Activity' },
-      ],
-    },
-    {
-      key: 'auth',
-      label: 'Authentication',
-      children: [
-        { seg: 'auth', label: 'Methods' },
-        // Two directions, and the labels are the only thing that keeps them
-        // apart: "Sign-in providers" is outbound (who your users may sign in
-        // WITH); "OAuth clients" is inbound (apps that sign users in USING this
-        // Application). Naming both of them "OAuth" is what made an operator
-        // paste a client id into the provider form.
-        { seg: 'oauth', label: 'Sign-in providers' },
-        { seg: 'oauth-clients', label: 'OAuth clients' },
-        { seg: 'mcp', label: 'MCP' },
-      ],
-    },
-    {
-      key: 'billing',
-      label: billingEnabled ? (
-        'Billing'
-      ) : (
-        <span className="inline-flex items-center gap-1.5">
-          Billing
-          <span className="rounded bg-[var(--color-surface-muted)] px-1 py-px text-[10px] font-medium uppercase tracking-wide text-[var(--color-muted-fg)]">
-            off
-          </span>
-        </span>
-      ),
-      // The child list is IDENTICAL in both states, see the note at the top of
-      // the file. Only `entrySeg` and `hiddenSegs` differ, so a billing child
-      // path always resolves to this group and always gets a way back.
-      children: [
-        // Revenue dashboard is the group landing, stat tiles + the
-        // 12-month revenue chart live at /applications/{id}/revenue.
-        { seg: 'revenue', label: 'Overview' },
-        { seg: 'billing', label: 'Providers' },
-        { seg: 'plans', label: 'Plans' },
-        { seg: 'payments', label: 'Payments' },
-        { seg: 'dunning', label: 'Dunning' },
-        { seg: 'unapplied-payments', label: 'Unapplied' },
-        { seg: 'imports', label: 'Imports' },
-        { seg: 'coupons', label: 'Coupons' },
-        { seg: 'licenses', label: 'Licenses' },
-        { seg: 'usage', label: 'Usage' },
-        { seg: 'portal', label: 'Portal' },
-      ],
-      // Billing off: the pill goes to Providers (where the enable toggle is),
-      // and the sub-row shows Providers plus whichever gated page you are
-      // actually on, so the row still renders and still offers a way out.
-      ...(billingEnabled ? {} : { entrySeg: 'billing', hiddenSegs: BILLING_GATED_SEGS }),
-    },
-    {
-      key: 'developer',
-      label: 'Developer',
-      children: [
-        { seg: 'api-keys', label: 'API keys' },
-        { seg: 'webhooks', label: 'Webhooks' },
-        { seg: 'requests', label: 'Requests' },
-        { seg: 'access', label: 'Access' },
-        { seg: 'lifecycle', label: 'Lifecycle' },
-        { seg: 'email', label: 'Email' },
-      ],
-    },
-  ];
+  const billingLabel = billingEnabled ? (
+    'Billing'
+  ) : (
+    <span className="inline-flex items-center gap-1.5">
+      Billing
+      <span className="rounded bg-[var(--color-surface-muted)] px-1 py-px text-[10px] font-medium uppercase tracking-wide text-[var(--color-muted-fg)]">
+        off
+      </span>
+    </span>
+  );
+  // The billing child list is IDENTICAL in both states, see the note at the
+  // top of the file. Only `entrySeg` and `hiddenSegs` differ, so a billing
+  // child path always resolves to this group and always gets a way back.
+  const groups: Group[] = APP_SECTION_GROUPS.map((g) =>
+    g.key === 'billing'
+      ? {
+          key: g.key,
+          label: billingLabel,
+          children: g.sections,
+          ...(billingEnabled ? {} : { entrySeg: 'billing', hiddenSegs: BILLING_GATED_SEGS }),
+        }
+      : { key: g.key, label: g.label, children: g.sections },
+  );
 
   const hrefFor = (seg: string): string => (seg === '' ? base : `${base}/${seg}`);
 

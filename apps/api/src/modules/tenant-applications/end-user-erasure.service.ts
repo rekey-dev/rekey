@@ -21,6 +21,8 @@
  *      received: email logs (rows kept, recipient tombstoned), email
  *      suppressions (deleted), outbound webhook delivery payloads and inbound
  *      billing receipts (rows kept, personal fields rewritten).
+ *   5. ERASES the contact at the same address (lists), with its memberships,
+ *      submissions and webhook payloads.
  *
  * WHY tombstone instead of hard-delete + null FKs: the retained financial
  * rows FK to EndUser with `onDelete: Cascade`. Deleting the EndUser would
@@ -36,6 +38,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { enqueueEvent, kickDeliveries } from '../webhooks/webhook.service.js';
 import { clearFailures, euLoginLockScope } from '../../lib/brute-force.js';
+import { eraseContactsByAddress } from '../contacts/contact-erasure.service.js';
 
 /** Non-routable tombstone address. `.invalid` is reserved (RFC 2606) so it can never deliver. */
 export function tombstoneEmail(endUserId: string): string {
@@ -67,7 +70,43 @@ export interface EraseResult {
     emailSuppressionsDeleted: number;
     webhookDeliveriesScrubbed: number;
     webhookEventsScrubbed: number;
+    contactsErased: number;
   };
+}
+
+/**
+ * The addresses one end user has been mailed at: their current address, plus
+ * any an outstanding verification or magic-link token names (an email change
+ * mails the NEW address before the account holds it), minus any another end
+ * user of this Application holds now. Erasure scrubs exactly these, and the
+ * DSAR export reports the contacts at exactly these.
+ */
+export async function personAddresses(
+  db: Prisma.TransactionClient,
+  applicationId: string,
+  endUserId: string,
+  email: string,
+): Promise<string[]> {
+  const tokenAddresses = (
+    await Promise.all([
+      db.emailVerificationToken.findMany({ where: { endUserId }, select: { email: true } }),
+      db.magicLinkToken.findMany({ where: { endUserId }, select: { email: true } }),
+    ])
+  )
+    .flat()
+    .map((t) => t.email)
+    .filter((e): e is string => typeof e === 'string' && e.length > 0)
+    .map((e) => e.toLowerCase());
+  const candidates = [...new Set([email.toLowerCase(), ...tokenAddresses])];
+  const heldByOthers = new Set(
+    (
+      await db.endUser.findMany({
+        where: { applicationId, id: { not: endUserId }, email: { in: candidates } },
+        select: { email: true },
+      })
+    ).map((u) => u.email.toLowerCase()),
+  );
+  return candidates.filter((a) => !heldByOthers.has(a));
 }
 
 /** Rows loaded, rewritten and written back per statement when scrubbing payloads. */
@@ -78,9 +117,10 @@ const SCRUB_CHUNK = 500;
  * subject. These payloads are shapes Rekey writes itself (auth, device and
  * billing emit sites), so the keys are known: `email` becomes the tombstone,
  * a device `fingerprint` is erased the way LicenseActivation's is, and the
- * free-form fields are nulled the way erasure nulls them on the source rows.
+ * free-form fields and `session.created`'s `country` are nulled the way
+ * erasure nulls them on the source rows.
  */
-const DELIVERY_NULLED_KEYS = new Set(['metadata', 'label', 'description']);
+const DELIVERY_NULLED_KEYS = new Set(['metadata', 'label', 'description', 'country']);
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -210,6 +250,7 @@ export async function eraseEndUser(args: {
           creditLedgerScrubbed: 0, usageRecordsScrubbed: 0,
           emailLogsScrubbed: 0, emailSuppressionsDeleted: 0,
           webhookDeliveriesScrubbed: 0, webhookEventsScrubbed: 0,
+          contactsErased: 0,
         },
       } satisfies EraseResult;
     }
@@ -220,26 +261,7 @@ export async function eraseEndUser(args: {
     // account holds it). Read now: step 1 deletes those tokens. An address
     // another end-user of this Application currently holds is not theirs to
     // erase, so it is dropped; the current address is unique per Application.
-    const tokenAddresses = (
-      await Promise.all([
-        tx.emailVerificationToken.findMany({ where: { endUserId }, select: { email: true } }),
-        tx.magicLinkToken.findMany({ where: { endUserId }, select: { email: true } }),
-      ])
-    )
-      .flat()
-      .map((t) => t.email)
-      .filter((e): e is string => typeof e === 'string' && e.length > 0)
-      .map((e) => e.toLowerCase());
-    const candidates = [...new Set([user.email.toLowerCase(), ...tokenAddresses])];
-    const heldByOthers = new Set(
-      (
-        await tx.endUser.findMany({
-          where: { applicationId, id: { not: endUserId }, email: { in: candidates } },
-          select: { email: true },
-        })
-      ).map((u) => u.email.toLowerCase()),
-    );
-    const addresses = candidates.filter((a) => !heldByOthers.has(a));
+    const addresses = await personAddresses(tx, applicationId, endUserId, user.email);
 
     // ── 1. HARD-DELETE pure PII / auth-credential rows ──────────────────────
     const [
@@ -397,6 +419,11 @@ export async function eraseEndUser(args: {
       where: { applicationId, address: { in: addresses } },
     });
 
+    // Contacts: the same person when they joined a list at one of these
+    // addresses. Deleted with their memberships and submissions, and their
+    // webhook deliveries scrubbed, see contacts/contact-erasure.service.ts.
+    const contacts = await eraseContactsByAddress(tx, applicationId, addresses);
+
     // Outbound deliveries: rows and status KEPT, payload scrubbed. Matched by
     // the end-user id at the fixed places Rekey's own emit sites put it, not
     // by searching payloads for the address, so another user's event that
@@ -459,11 +486,29 @@ export async function eraseEndUser(args: {
         passwordHash: null,
         // Null the free-form profile PII (display name, avatar, custom fields).
         metadata: Prisma.DbNull,
+        // Where they signed in from. The sign-in counters stay: they are not personal.
+        lastPlatform: null,
+        platformsSeen: [],
+        lastCountry: null,
+        // Onboarding answers are the user's own words about themselves.
+        profile: {},
+        onboardingSkippedAt: null,
         role: 'user',
         erasedAt,
         erasedBy: operatorUserId,
+        // Free text an operator wrote about this person. `bannedAt` and
+        // `bannedBy` stay: they say nothing about the person.
+        banReason: null,
       },
     });
+    // The same operator notes copied into the audit trail. Only the `reason`
+    // key goes; the events themselves stay as the record of who did what.
+    await tx.$executeRaw`
+      UPDATE security_events SET metadata = metadata - 'reason'
+      WHERE application_id = ${applicationId}
+        AND subject_end_user_id = ${endUserId}
+        AND type IN ('end_user.banned', 'end_user.device_blocked')
+        AND metadata ? 'reason'`;
 
     // Outbound webhook, only on a real transition (the no-op returned above).
     // Enqueued AFTER the delivery scrub in step 2, so this row is not one the
@@ -500,8 +545,9 @@ export async function eraseEndUser(args: {
         usageRecordsScrubbed: usage.count,
         emailLogsScrubbed: emailLogs,
         emailSuppressionsDeleted: suppressions.count,
-        webhookDeliveriesScrubbed: deliveriesScrubbed,
+        webhookDeliveriesScrubbed: deliveriesScrubbed + contacts.deliveriesScrubbed,
         webhookEventsScrubbed: eventsScrubbed,
+        contactsErased: contacts.contactIds.length,
       },
     } satisfies EraseResult;
     // Prisma's 5-second default is sized for a handful of statements. A

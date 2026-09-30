@@ -564,10 +564,11 @@ export const adminMetricsService = {
       prisma.tenant.count({ where }),
       prisma.tenant.findMany({
         where,
-        orderBy:
-          query.sort === 'name'
-            ? { name: query.order ?? 'asc' }
-            : { createdAt: query.order ?? 'desc' },
+        // `id` breaks ties so offset paging never skips or repeats a row.
+        orderBy: [
+          query.sort === 'name' ? { name: query.order ?? 'asc' } : { createdAt: query.order ?? 'desc' },
+          { id: query.order ?? (query.sort === 'name' ? 'asc' : 'desc') },
+        ],
         skip: fetchSkip,
         take: fetchTake,
         include: {
@@ -760,10 +761,10 @@ export const adminMetricsService = {
       prisma.endUser.count({ where }),
       prisma.endUser.findMany({
         where,
-        orderBy:
-          query.sort === 'email'
-            ? { email: query.order ?? 'asc' }
-            : { createdAt: query.order ?? 'desc' },
+        orderBy: [
+          query.sort === 'email' ? { email: query.order ?? 'asc' } : { createdAt: query.order ?? 'desc' },
+          { id: query.order ?? (query.sort === 'email' ? 'asc' : 'desc') },
+        ],
         skip: fetchSkip,
         take: fetchTake,
         include: {
@@ -1125,7 +1126,7 @@ export const adminMetricsService = {
       prisma.subscription.count({ where }),
       prisma.subscription.findMany({
         where,
-        orderBy: { createdAt: query.order ?? 'desc' },
+        orderBy: [{ createdAt: query.order ?? 'desc' }, { id: query.order ?? 'desc' }],
         skip: offset,
         take: limit,
         include: {

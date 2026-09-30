@@ -202,6 +202,18 @@ if (!result.applied) {
 
 Retry semantics: a repeat with the same key (timeout retry, queue redelivery, double-click) is a no-op that returns the original result with `applied: false` — never a double charge and never an error. Keys never expire (the ledger is append-only for the life of the subject), so derive them from the operation, not from a timestamp or a random UUID minted per attempt — a fresh UUID per retry defeats the whole mechanism.
 
+### `rekey.lists` (waitlists, newsletters, contact forms)
+| Method | Description |
+| --- | --- |
+| `list()` | Every list with member counts. `contacts:write` (in `*`). |
+| `get(key)` | The list's form: `fieldSchema`, and the consent text and version to show. |
+| `subscribe(key, { email, name?, fields?, consent?, sourceUrl?, hp? })` | Add someone. For your own purposes it resolves `{ status, contactId }`, status `subscribed \| already_subscribed \| previously_unsubscribed \| suppressed \| ignored`. Relaying a visitor's form, call it through `rekey.with({ clientIp })` and pass `{ relay: 'browser' }` as the third argument: it then follows the browser rules and always resolves `{ status: 'received' }`. `contacts:write`. |
+| `members(key, { status?, updatedSince?, cursor?, limit? })` | One page, oldest change first. Needs a key minted with the **elevated** `contacts:read`. |
+| `iterateMembers(key, options?)` | Every member, following cursors. |
+| `unsubscribe(key, email)` | Take someone off a list. Idempotent. `contacts:write`. |
+
+Rekey sends no email to a list. See [docs/lists.md](https://github.com/rekey-dev/rekey/blob/main/docs/lists.md).
+
 ### `rekey.email` (custom templates)
 | Method | Description |
 | --- | --- |
@@ -357,7 +369,7 @@ Prefer a namespace method wherever one exists — those carry the endpoint's rea
 ## Gotchas
 
 - **Entitlements are resolved server-side.** Never gate features from client state — always read `rekey.billing.getEntitlements(...)` on the server.
-- **`billingSubject: 'org'` needs an `organizationId`.** When the Application bills per-team (Panel → Application → Billing → Subject), an individual can't hold a subscription — pass `organizationId` (a team the user owns/admins) to `createCheckout`. Omitting it throws `BILLING_ORGANIZATION_REQUIRED`. Read the live config via `rekey.applications.me()` (`billingConfig.billingSubject`) and drive your UI from it.
+- **`billingSubject: 'org'` needs an `organizationId`.** When the Application bills per-team (Panel → Application → Billing → Setup → Settings), an individual can't hold a subscription — pass `organizationId` (a team the user owns/admins) to `createCheckout`. Omitting it throws `BILLING_ORGANIZATION_REQUIRED`. Read the live config via `rekey.applications.me()` (`billingConfig.billingSubject`) and drive your UI from it.
 - **Checkout is async.** `createCheckout` returns a *PENDING* subscription + a redirect URL; the subscription flips to ACTIVE only when the **provider's webhook to Rekey** lands (Stripe/PayPal → Rekey — configured by the operator in the panel; your code never receives or verifies it). To react to activation, re-fetch `getSubscription` / `getEntitlements` when the user returns to your `successUrl`. `verifyWebhookSignature` is for the *other* direction — webhooks Rekey sends to your app (user-lifecycle events); see [docs/billing.md](https://github.com/rekey-dev/rekey/blob/main/docs/billing.md).
 - **Switching active org returns new tokens.** `organizations.switch` / `clearActive` return a fresh `{ accessToken, refreshToken }` pair — persist both, or later reads use the stale org view.
 - **Pagination is `{ limit, offset }`.** Defaults to 50 everywhere; max is 100 for org lists and 200 for the credit ledger — see the [Pagination](#pagination) table.

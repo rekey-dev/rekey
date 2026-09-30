@@ -10,7 +10,7 @@
  * `OPERATOR_TOKEN_SCOPES` already has (`lib/operator-token.ts`): the *shape*
  * is generic, the *set* is closed and versioned with the code.
  *
- * ## Seven domains, deliberately coarse
+ * ## Eight domains, deliberately coarse
  *
  * Merge aggressively; split only when somebody needs it. `LINEAGE` is what
  * makes splitting safe later: a stored scope is never invalidated by a
@@ -41,6 +41,7 @@ export const SCOPE_DOMAINS = [
   'organizations',
   'activity',
   'overview',
+  'audience',
 ] as const;
 export type ScopeDomain = (typeof SCOPE_DOMAINS)[number];
 
@@ -126,6 +127,13 @@ export function invalidScopes(input: readonly string[]): string[] {
 }
 
 /**
+ * `audience` holds the addresses of people who never signed up, so the
+ * read-only presets leave it out and a viewer or billing grant never reaches
+ * it. Workspace admins and APP_ADMIN grants hold it.
+ */
+const GRANT_PRESET_DOMAINS = SCOPE_DOMAINS.filter((d) => d !== 'audience');
+
+/**
  * The three existing grant roles, as the scope sets they always meant.
  *
  * `APP_BILLING` excluding `auth-config` is not new behaviour: it is
@@ -140,12 +148,12 @@ export function presetScopes(role: 'APP_ADMIN' | 'APP_BILLING' | 'APP_VIEWER'): 
     case 'APP_ADMIN':
       return UNRESTRICTED;
     case 'APP_VIEWER':
-      return new Set(SCOPE_DOMAINS.map((d) => `${d}:read` as Scope));
+      return new Set(GRANT_PRESET_DOMAINS.map((d) => `${d}:read` as Scope));
     case 'APP_BILLING':
       return new Set<Scope>([
         'billing:read',
         'billing:write',
-        ...SCOPE_DOMAINS.filter((d) => d !== 'billing' && d !== 'auth-config').map(
+        ...GRANT_PRESET_DOMAINS.filter((d) => d !== 'billing' && d !== 'auth-config').map(
           (d) => `${d}:read` as Scope,
         ),
       ]);

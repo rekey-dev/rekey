@@ -451,13 +451,13 @@ describe('hosted checkout sessions', () => {
       expect(data.mode).toBe('redirect');
       expect(data.warnings).toEqual([expect.objectContaining({ code: 'CHECKOUT_EMBEDDED_FELL_BACK', check: 'webhook' })]);
       // The buyer-facing warning names only the check; the operator's log has the detail.
-      expect(res.body).not.toContain('Billing providers → PayPal');
+      expect(res.body).not.toContain('Billing → Setup → Providers → PayPal');
       expect(res.body).not.toContain('Auto-configure');
-      expect(data.warnings[0]!.fix).toContain('Panel → Application → Billing → Checkout page');
+      expect(data.warnings[0]!.fix).toContain('Panel → Application → Billing → Setup → Checkout page');
       const events = await securityEvents('app.checkout_embedded_fallback');
       expect(events).toHaveLength(1);
       expect(events[0]!.metadata).toMatchObject({ check: 'webhook', provider: 'paypal', paymentMode: 'test' });
-      expect(String((events[0]!.metadata as { fix?: string }).fix)).toContain('Billing providers → PayPal');
+      expect(String((events[0]!.metadata as { fix?: string }).fix)).toContain('Billing → Setup → Providers → PayPal');
     });
 
     it('falls back when the PayPal client ID the buttons need is missing', async () => {
@@ -639,7 +639,105 @@ describe('hosted checkout sessions', () => {
       expect(data.live).toEqual([expect.objectContaining({ status: 'N/A' })]);
       expect(data.live[0]!.fix).toContain('Add live credentials');
       const byId = Object.fromEntries(data.test.map((c) => [c.id, c.status]));
-      expect(byId).toMatchObject({ portal: 'PASS', provider: 'PASS', webhook: 'WARN', plans: 'PASS', return_urls: 'PASS', browser_credential: 'PASS', branding: 'PASS', csp_reports: 'PASS' });
+      // Nothing has shown these sandbox credentials working yet: no plan is
+      // registered with PayPal and no webhook has arrived.
+      expect(byId).toMatchObject({ portal: 'PASS', provider: 'WARN', webhook: 'WARN', plans: 'PASS', return_urls: 'PASS', browser_credential: 'PASS', branding: 'PASS', csp_reports: 'PASS' });
+    });
+
+    it('PASSes the provider only on evidence: a verified webhook, or a plan registered in this mode', async () => {
+      const providerStatus = async () => {
+        await prisma.application.update({ where: { id: applicationId }, data: { checkoutReadinessAt: null } });
+        const data = (await operator('GET', '/checkout/readiness')).json().data as { test: Array<{ id: string; status: string; message: string; fix: string }> };
+        return data.test.find((c) => c.id === 'provider')!;
+      };
+      const unproven = await providerStatus();
+      expect(unproven.status).toBe('WARN');
+      expect(unproven.message).toContain('has not yet seen these sandbox PayPal credentials work');
+      // PayPal records no plan registration up front, so the wording never asks for one.
+      expect(unproven.message).not.toMatch(/regist/i);
+      expect(unproven.fix).not.toMatch(/regist/i);
+      expect(unproven.fix).toContain("checkout on the provider's page");
+
+      await prisma.plan.update({
+        where: { applicationId_slug: { applicationId, slug: 'standard' } },
+        data: { metadata: { paypal: { planId: 'P-REGISTERED', mode: 'live' } } },
+      });
+      expect((await providerStatus()).status).toBe('WARN');
+      await prisma.plan.update({
+        where: { applicationId_slug: { applicationId, slug: 'standard' } },
+        data: { metadata: { paypal: { planId: 'P-REGISTERED', mode: 'test' } } },
+      });
+      expect((await providerStatus()).status).toBe('PASS');
+
+      await prisma.plan.update({ where: { applicationId_slug: { applicationId, slug: 'standard' } }, data: { metadata: {} } });
+      await prisma.webhookEvent.create({
+        data: { applicationId, provider: 'paypal', providerEventId: `WH-${randomUUID()}`, eventType: 'PAYMENT.SALE.COMPLETED', payload: {}, mode: 'test' },
+      });
+      expect((await providerStatus()).status).toBe('PASS');
+    });
+
+    it('PASSes a PayPal provider that already has a subscription, and a routing edit keeps the evidence', async () => {
+      const providerStatus = async () => {
+        await prisma.application.update({ where: { id: applicationId }, data: { checkoutReadinessAt: null } });
+        const data = (await operator('GET', '/checkout/readiness')).json().data as { test: Array<{ id: string; status: string }> };
+        return data.test.find((c) => c.id === 'provider')!.status;
+      };
+      const eu = await prisma.endUser.findFirstOrThrow({ where: { applicationId } });
+      const plan = await prisma.plan.findFirstOrThrow({ where: { applicationId, slug: 'standard' } });
+      await prisma.subscription.create({
+        data: { applicationId, endUserId: eu.id, planId: plan.id, provider: 'paypal', providerSubId: 'I-EXISTING', status: 'ACTIVE' },
+      });
+      expect(await providerStatus()).toBe('PASS');
+
+      // Priority and enablement are not the secret: the evidence stays.
+      await billingCredentialsService.setRouting(applicationId, 'paypal', [], 5);
+      await billingCredentialsService.setEnabled(applicationId, 'paypal', true);
+      expect(await providerStatus()).toBe('PASS');
+
+      // A webhook verified before a routing edit still counts toward the webhook check too.
+      await prisma.subscription.deleteMany({ where: { applicationId } });
+      await prisma.webhookEvent.create({
+        data: { applicationId, provider: 'paypal', providerEventId: `WH-${randomUUID()}`, eventType: 'PAYMENT.SALE.COMPLETED', payload: {}, mode: 'test' },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      await billingCredentialsService.setRouting(applicationId, 'paypal', ['US'], 7);
+      expect(await providerStatus()).toBe('PASS');
+
+      // Replacing the secret does restart the window.
+      const current = await billingCredentialsService.loadDecrypted(applicationId, 'paypal');
+      await billingCredentialsService.upsertRaw(applicationId, 'paypal', { ...(current as object), clientSecret: 'rotated-secret' }, { mode: 'test' });
+      expect(await providerStatus()).toBe('WARN');
+    });
+
+    for (const relabel of ['setMode', 'an upsert changing only the mode'] as const) {
+      it(`does not count sandbox rows as live evidence after a relabel through ${relabel}`, async () => {
+        await prisma.application.update({ where: { id: applicationId }, data: { environment: 'PRODUCTION' } });
+        const eu = await prisma.endUser.findFirstOrThrow({ where: { applicationId } });
+        const plan = await prisma.plan.findFirstOrThrow({ where: { applicationId, slug: 'standard' } });
+        await prisma.subscription.create({
+          data: { applicationId, endUserId: eu.id, planId: plan.id, provider: 'paypal', providerSubId: 'I-SANDBOX', status: 'ACTIVE' },
+        });
+        await new Promise((r) => setTimeout(r, 20));
+        if (relabel === 'setMode') {
+          await billingCredentialsService.setMode(applicationId, 'paypal', 'live');
+        } else {
+          const current = await billingCredentialsService.loadDecrypted(applicationId, 'paypal');
+          await billingCredentialsService.upsertRaw(applicationId, 'paypal', current, { mode: 'live' });
+        }
+        await prisma.application.update({ where: { id: applicationId }, data: { checkoutReadinessAt: null } });
+        const data = (await operator('GET', '/checkout/readiness')).json().data as { live: Array<{ id: string; status: string; message: string }> };
+        const provider = data.live.find((c) => c.id === 'provider')!;
+        expect(provider.status).toBe('WARN');
+        expect(provider.message).toContain('has not yet seen these live PayPal credentials work');
+      });
+    }
+
+    it('WARNs "no plans to sell" when no paid plan is in scope', async () => {
+      await prisma.plan.updateMany({ where: { applicationId }, data: { active: false } });
+      const data = (await operator('GET', '/checkout/readiness')).json().data as { test: Array<{ id: string; status: string; message: string }> };
+      const plans = data.test.find((c) => c.id === 'plans')!;
+      expect(plans.status).toBe('WARN');
+      expect(plans.message).toContain('no plans to sell');
     });
 
     it('FAILs live webhook evidence where the test column only WARNs', async () => {
@@ -652,7 +750,7 @@ describe('hosted checkout sessions', () => {
       const webhook = data.live.find((c) => c.id === 'webhook')!;
       expect(webhook.status).toBe('FAIL');
       expect(webhook.fix).toBe(
-        "Check the webhook in Panel → Application → Billing → Billing providers → PayPal, then complete one checkout on the provider's page so an event arrives.",
+        "Check the webhook in Panel → Application → Billing → Setup → Providers → PayPal, then complete one checkout on the provider's page so an event arrives.",
       );
       const refused = await operator('PATCH', '/checkout', { paymentMode: 'live', checkoutMode: 'EMBEDDED' });
       expect(refused.statusCode).toBe(409);

@@ -37,6 +37,6 @@ export function planNotRegisteredError(args: {
     statusCode: 409,
     code: 'PLAN_NOT_REGISTERED_WITH_PROVIDER',
     message: `Plan "${args.planSlug}" is not registered with ${args.provider}, so it cannot be purchased.`,
-    fix: `The Application operator must register it: POST ${path} (Panel → Application → Plans → Register). If registration was refused because the ${args.provider} credentials were wrong, correct them under Panel → Application → Billing first. Plan details can be corrected with PATCH on the same plan while it is unregistered.`,
+    fix: `The Application operator must register it: POST ${path} (Panel → Application → Plans → Register). If registration was refused because the ${args.provider} credentials were wrong, correct them under Panel → Application → Billing → Setup → Providers first. Plan details can be corrected with PATCH on the same plan while it is unregistered.`,
   });
 }

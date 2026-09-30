@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import { ActionForm } from '@/components/ActionForm';
-import { SubmitButton } from '@/components/SubmitButton';
+import { StickyFormFooter } from '@/components/StickyFormFooter';
 
 type Provider = 'resend' | 'smtp';
 
@@ -99,9 +99,11 @@ export function EmailCredentialsForm({
         </p>
       </div>
 
-      <SubmitButton pendingLabel="Saving credentials…">
-        {hasCustomCredentials ? 'Update credentials' : 'Save credentials'}
-      </SubmitButton>
+      <StickyFormFooter
+        label={hasCustomCredentials ? 'Update credentials' : 'Save credentials'}
+        pendingLabel="Saving credentials…"
+        hint="Saved credentials are never shown again."
+      />
     </ActionForm>
   );
 }

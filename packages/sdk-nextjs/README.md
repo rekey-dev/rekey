@@ -43,7 +43,7 @@ before wiring keys.
 | Import | Runtime | Credential | Use case |
 | --- | --- | --- | --- |
 | `@rekey.dev/nextjs/middleware` | **Edge** | none (cookie presence) | Gate routes in `middleware.ts` (cheap, no network). |
-| `@rekey.dev/nextjs/server` | **Node** | secret key | `auth()`, `signIn()`, `signUp()`, `createSession()`, `rekeyRefreshHandler()` + your `@rekey.dev/node` API calls. |
+| `@rekey.dev/nextjs/server` | **Node** | secret key | `auth()`, `signIn()`, `signUp()`, `createSession()`, `rekeyRefreshHandler()`, `subscribeToList()` + your `@rekey.dev/node` API calls. |
 | `@rekey.dev/nextjs/client` | **Browser** | publishable key | `rekeyBrowser()` — sign-in/up, magic-link, passkey, license verify, plans from a Client Component, no backend round-trip. |
 | `@rekey.dev/nextjs/cookies` | **anywhere** | none | `ACCESS_COOKIE` / `REFRESH_COOKIE` / `*_OPTS` / `cookieSecureFrom()`. Zero dependencies — import cookie names from **here**, not from the root barrel. |
 | `@rekey.dev/nextjs/errors` | **anywhere** | none | `classifySignInError()` + its types. Zero dependencies, safe from a Client Component rendering a failure a server action returned. |

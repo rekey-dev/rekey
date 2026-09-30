@@ -43,6 +43,7 @@
 
 import type { Application, TenantRole } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
+import { maskIp, mayReadRawIps } from '../../lib/ip-mask.js';
 import { env } from '../../config/env.js';
 import { RekeyError } from '../../lib/error.js';
 import type { SecurityEventType } from '@rekey.dev/shared-types';
@@ -65,7 +66,7 @@ import {
 import { getModule, registryNames } from '../billing/providers/registry.js';
 import { tenantWorkspacesService } from '../tenant-workspaces/tenant-workspaces.service.js';
 import { organizationRolesService } from '../organization-roles/organization-roles.service.js';
-import { AuthConfigSchema, SIGNUP_DOMAIN_LIST_MAX, SignupRestrictionsSchema } from '@rekey.dev/shared-types';
+import { API_KEY_SCOPES, AuthConfigSchema, SIGNUP_DOMAIN_LIST_MAX, SignupRestrictionsSchema } from '@rekey.dev/shared-types';
 import { devicesService } from '../devices/devices.service.js';
 import { assertEndUserInApplication } from '../../lib/end-users.js';
 import {
@@ -222,7 +223,7 @@ async function loadEndUserInApp(
   return app;
 }
 
-function deviceView(d: {
+function deviceView(ctx: OperatorToolContext, d: {
   id: string;
   fingerprint: string;
   label: string | null;
@@ -241,7 +242,7 @@ function deviceView(d: {
     status: d.status,
     firstSeenAt: d.firstSeenAt.toISOString(),
     lastSeenAt: d.lastSeenAt.toISOString(),
-    lastSeenIp: d.lastSeenIp,
+    lastSeenIp: mayReadRawIps(ctx.role, accessContextFromTool(ctx).scopes) ? d.lastSeenIp : maskIp(d.lastSeenIp),
     releasedAt: d.releasedAt?.toISOString() ?? null,
     blockedAt: d.blockedAt?.toISOString() ?? null,
     blockedReason: d.blockedReason,
@@ -274,7 +275,7 @@ export const operatorWriteTools: OperatorTool[] = [
       const app = await loadEndUserInApp(ctx, String(args.applicationId), String(args.endUserId));
       const status = args.status === undefined ? undefined : (String(args.status) as 'ACTIVE' | 'RELEASED' | 'BLOCKED');
       const { items, total } = await devicesService.listForEndUser(app.id, String(args.endUserId), { status, take: 100 });
-      return { total, devices: items.map(deviceView) };
+      return { total, devices: items.map((d) => deviceView(ctx, d)) };
     },
   },
   {
@@ -297,7 +298,7 @@ export const operatorWriteTools: OperatorTool[] = [
         deviceId: String(args.deviceId),
         actor: { type: 'operator', id: ctx.tenantUserId },
       });
-      return { device: deviceView(r.device), sessionsRevoked: r.sessionsRevoked };
+      return { device: deviceView(ctx, r.device), sessionsRevoked: r.sessionsRevoked };
     },
   },
   {
@@ -321,7 +322,7 @@ export const operatorWriteTools: OperatorTool[] = [
         reason: args.reason === undefined ? undefined : String(args.reason),
         operatorUserId: ctx.tenantUserId,
       });
-      return { device: deviceView(r.device), sessionsRevoked: r.sessionsRevoked };
+      return { device: deviceView(ctx, r.device), sessionsRevoked: r.sessionsRevoked };
     },
   },
   {
@@ -344,7 +345,7 @@ export const operatorWriteTools: OperatorTool[] = [
         deviceId: String(args.deviceId),
         operatorUserId: ctx.tenantUserId,
       });
-      return { device: deviceView(device) };
+      return { device: deviceView(ctx, device) };
     },
   },
   {
@@ -741,7 +742,8 @@ export const operatorWriteTools: OperatorTool[] = [
     description:
       'Mint a server-side API key (rp_live_… / rp_test_…) for an Application. Returns the ' +
       'raw key EXACTLY ONCE, it is hashed at rest and cannot be retrieved again. Scopes ' +
-      'default to full access; pass a narrower list to restrict the key. Optional ' +
+      'default to full access; pass a narrower list to restrict the key. Valid scopes: ' +
+      `${API_KEY_SCOPES.join(', ')}; any other value is refused with API_KEY_SCOPE_UNKNOWN. Optional ` +
       '`expiresAt` is an ISO-8601 datetime in the future.',
     write: true,
     // Admin tier, for the same reason `configure_billing_provider` is: a secret
@@ -794,6 +796,7 @@ export const operatorWriteTools: OperatorTool[] = [
         applicationId: app.id,
         name: String(args.name),
         scopes,
+        revealsEndUserIps: mayReadRawIps(ctx.role, accessContextFromTool(ctx).scopes),
         ...(expiresAt !== undefined && { expiresAt }),
       });
 

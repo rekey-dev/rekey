@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { CLIENT_IP_HEADER, Rekey, normalizeClientIp } from '../src/index.js';
+import { CLIENT_IP_HEADER, CLIENT_USER_AGENT_HEADER, Rekey, normalizeClientIp } from '../src/index.js';
 
 function ok(): Response {
   return new Response(JSON.stringify({ success: true, data: {} }), {
@@ -62,5 +62,29 @@ describe('clientIp', () => {
     ['evil.example', null],
   ])('normalizeClientIp(%j) is %j', (input, expected) => {
     expect(normalizeClientIp(input)).toBe(expected);
+  });
+});
+
+describe('clientUserAgent', () => {
+  it('is the exact header name the API reads', () => {
+    expect(CLIENT_USER_AGENT_HEADER.toLowerCase()).toBe('x-rekey-client-user-agent');
+  });
+
+  it('with({ clientUserAgent }) sends it beside the address', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(ok());
+    const rekey = new Rekey({ apiUrl: 'https://api.test', secretKey: 'rp_test_x', fetch: fetchImpl });
+    await rekey
+      .with({ clientIp: '203.0.113.9', clientUserAgent: 'Mozilla/5.0 (iPhone) Safari/604.1' })
+      .auth.signIn({ email: 'a@b.co', password: 'pw' });
+    const sent = sentHeaders(fetchImpl);
+    expect(sent.get(CLIENT_USER_AGENT_HEADER)).toBe('Mozilla/5.0 (iPhone) Safari/604.1');
+    expect(sent.get(CLIENT_IP_HEADER)).toBe('203.0.113.9');
+  });
+
+  it('is not sent when not configured or blank', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(ok());
+    const rekey = new Rekey({ apiUrl: 'https://api.test', secretKey: 'rp_test_x', fetch: fetchImpl });
+    await rekey.with({ clientUserAgent: '   ' }).auth.signIn({ email: 'a@b.co', password: 'pw' });
+    expect(sentHeaders(fetchImpl).has(CLIENT_USER_AGENT_HEADER)).toBe(false);
   });
 });

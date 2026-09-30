@@ -71,6 +71,16 @@ describe('WorkspaceLimits', () => {
     expect(meterWidths(html)).toHaveLength(1);
   });
 
+  it('shows contacts and lists against their limits when the API reports them', () => {
+    const html = render({
+      limits: { maxContacts: 500, maxContactLists: 1 },
+      usage: { productionApps: 0, activeEndUsers: 0, contacts: 120, contactLists: 1 },
+    });
+    expect(text(html)).toContain('Contacts 120 of 500');
+    expect(text(html)).toContain('Lists 1 of 1');
+    expect(meterWidths(html)).toHaveLength(2);
+  });
+
   it('does not divide by zero on a ceiling of 0, which is a legal configuration', () => {
     const html = render({
       limits: { maxProductionApps: 0, maxActiveEndUsers: 0 },

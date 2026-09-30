@@ -2,20 +2,29 @@ import * as React from 'react';
 import Link from '@/components/Link';
 import { Pager, readPageSize, DEFAULT_PAGE_SIZE } from '@/components/Pager';
 import { ApiErrorText } from '@/components/api-error';
-import type { Page } from '@/lib/paginate';
+import { emptyPage, type Page } from '@/lib/paginate';
 import { redirect } from 'next/navigation';
-import { errorQuery, readErrorFlash, api, PanelApiError, type EndUserRow, type ApplicationRoleRow, type OrganizationRow } from '@/lib/api';
+import { OnboardingBadge } from './onboarding-badge';
+import { errorQuery, readErrorFlash, api, getApplication, unlessBusy, PanelApiError, type EndUserRow, type ApplicationRoleRow, type OrganizationRow } from '@/lib/api';
+import { hasScope, type Scope } from '@/lib/operator-scopes';
+import type { ProfileField } from '@rekey.dev/shared-types';
+import { platformLabel } from './[euid]/insights';
+import { isAnswered } from '@/lib/profile-answers';
 import { Modal } from '@/components/Modal';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
-import { formatDate } from '@/lib/date';
+import { formatDate, formatDateTime, formatRelative } from '@/lib/date';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD, readSort, sortToggleHref } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
+import { savedStateKey } from '@/lib/saved-state-key';
 
+
+/** Most profile fields shown as list columns, so the table stays readable. */
+const MAX_PROFILE_COLUMNS = 3;
 
 async function createUser(applicationId: string, formData: FormData): Promise<void> {
   'use server';
@@ -149,6 +158,43 @@ const ERR: Record<string, string> = {
 };
 
 
+/** List filters the API accepts that the form here does not edit, kept when linked in. */
+const LINKED_FILTERS = [
+  'activeFrom',
+  'activeTo',
+  'inactiveForDays',
+  'createdFrom',
+  'createdTo',
+  'minSignIns',
+  'platform',
+  'country',
+  'lastSignInVia',
+  'createdVia',
+  'mfa',
+  'plan',
+  'org',
+] as const;
+const LINKED_VALUE = /^[A-Za-z0-9:_,.-]{1,64}$/;
+/** The same scope checks the API applies, so a link never costs the caller the whole list. */
+const LINKED_SCOPE: Partial<Record<(typeof LINKED_FILTERS)[number], Scope>> = {
+  plan: 'billing:read',
+  org: 'organizations:read',
+};
+function linkedLabel(k: string): string {
+  const label = LINKED_LABEL[k];
+  return label === undefined ? k : label;
+}
+const LINKED_LABEL: Record<string, string> = {
+  activeFrom: 'active since',
+  activeTo: 'active until',
+  inactiveForDays: 'inactive days',
+  createdFrom: 'created since',
+  createdTo: 'created until',
+  minSignIns: 'at least sign-ins',
+  lastSignInVia: 'last sign-in',
+  createdVia: 'sign-up source',
+};
+
 export default async function EndUsersPage({
   params,
   searchParams,
@@ -178,15 +224,38 @@ export default async function EndUsersPage({
     (SUB_STATUSES as readonly string[]).includes(sp.subscription)
       ? sp.subscription
       : '';
-  const filtered = Boolean(search || verified || subscription);
+  const onboarding =
+    typeof sp.onboarding === 'string' && ['pending', 'completed', 'skipped'].includes(sp.onboarding) ? sp.onboarding : '';
+  // Filters other pages link here with (Users > Overview's "At risk"), passed
+  // straight to the API, which validates them.
+  const app = await getApplication(id);
+  const scopes = app.access?.scopes ?? null;
+  const dropped: string[] = [];
+  const linked = LINKED_FILTERS.flatMap((k) => {
+    const v = sp[k];
+    if (typeof v !== 'string' || !LINKED_VALUE.test(v)) return [];
+    // The API refuses these with a 403 for a caller without the scope, which
+    // would take the whole list down; drop them and say so instead.
+    const need = LINKED_SCOPE[k];
+    if (need !== undefined && !hasScope(scopes, need)) {
+      dropped.push(`${linkedLabel(k)} (needs ${need.split(':')[0]} read access)`);
+      return [];
+    }
+    return [[k, v] as [string, string]];
+  });
+  const banned = sp.banned === 'true' ? 'true' : sp.banned === 'false' ? 'false' : '';
+  const filtered = Boolean(search || verified || subscription || banned || onboarding || linked.length);
 
   const PAGE_SIZE = readPageSize(sp);
   const offset = typeof sp.offset === 'string' ? Math.max(0, parseInt(sp.offset, 10) || 0) : 0;
-  const sorted = readSort(sp, ['email', 'createdAt'] as const);
+  const sorted = readSort(sp, ['email', 'createdAt', 'lastSignedInAt', 'lastActiveOn'] as const);
   const qs = new URLSearchParams();
   if (search) qs.set('search', search);
   if (verified) qs.set('emailVerified', verified);
   if (subscription) qs.set('subscriptionStatus', subscription);
+  if (banned) qs.set('banned', banned);
+  if (onboarding) qs.set('onboarding', onboarding);
+  for (const [k, v] of linked) qs.set(k, v);
   if (sorted) {
     qs.set('sort', sorted.sort);
     qs.set('order', sorted.order);
@@ -198,10 +267,13 @@ export default async function EndUsersPage({
     ...(search ? { search } : {}),
     ...(verified ? { verified } : {}),
     ...(subscription ? { subscription } : {}),
+    ...(banned ? { banned } : {}),
+    ...(onboarding ? { onboarding } : {}),
+    ...Object.fromEntries(linked),
   };
   const basePath = `/applications/${id}/end-users`;
   // Sort links preserve filters + page size; offset resets on re-sort.
-  const sortTH = (column: 'email' | 'createdAt') =>
+  const sortTH = (column: 'email' | 'createdAt' | 'lastSignedInAt' | 'lastActiveOn') =>
     sortToggleHref({
       basePath,
       column,
@@ -212,10 +284,20 @@ export default async function EndUsersPage({
       },
     });
 
-  const [usersPage, roles, orgsPage] = await Promise.all([
+  let refused: PanelApiError | null = null;
+  const [usersPage, roles, orgsPage, profileSchema] = await Promise.all([
     api<Page<EndUserRow>>({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/end-users?${qs.toString()}`,
+      // A linked filter the API rejects (a bad date, an id from elsewhere)
+      // is a banner on this page, not an error page in place of the list.
+      interruptOnAccessError: linked.length === 0,
+    }).catch((err: unknown) => {
+      if (linked.length > 0 && err instanceof PanelApiError && (err.statusCode === 400 || err.statusCode === 403 || err.statusCode === 404)) {
+        refused = err;
+        return emptyPage<EndUserRow>(PAGE_SIZE);
+      }
+      throw err;
     }),
     // Role catalog, for the role pickers in the new-user and edit-user modals.
     // Managing the catalog itself moved to the Roles tab. Bare array: this
@@ -229,12 +311,33 @@ export default async function EndUsersPage({
       method: 'GET',
       path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/organizations`,
     }),
+    // Profile fields marked `showInList` become columns. An older API has no
+    // such route, and the list is still the list without them.
+    api<{ fields: ProfileField[] }>({
+      method: 'GET',
+      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/profile-schema`,
+    }).catch(unlessBusy(() => ({ fields: [] as ProfileField[] }))),
   ]);
   const { items: users, page } = usersPage;
+  const listFields = profileSchema.fields.filter((f) => f.showInList).slice(0, MAX_PROFILE_COLUMNS);
   const organizations = orgsPage.items;
+
+  const listRefusal = refused as PanelApiError | null;
 
   return (
     <div className="space-y-8">
+      {listRefusal && (
+        <Banner tone="error">
+          These filters could not be applied: <strong className="font-medium">{listRefusal.message}</strong>
+          {listRefusal.fix ? ` ${listRefusal.fix}` : ''}{' '}
+          <Link href={`/applications/${id}/end-users`} className="font-medium underline underline-offset-2">
+            Clear filters
+          </Link>
+        </Banner>
+      )}
+      {dropped.length > 0 && (
+        <Banner tone="info">Ignored {dropped.length === 1 ? 'filter' : 'filters'}: {dropped.join(', ')}.</Banner>
+      )}
       {orgError && (
         <Banner tone="warning">
           End-user{createdEmail ? ` ${createdEmail}` : ''} was created, but adding them to the
@@ -279,6 +382,20 @@ export default async function EndUsersPage({
             <option value="false">Unverified only</option>
           </select>
           <select
+            name="onboarding"
+            defaultValue={onboarding}
+            aria-label="Filter by onboarding status"
+            className={filterSelectCls}
+          >
+            <option value="">Onboarding: any</option>
+            <option value="pending">Pending</option>
+            <option value="completed">Completed</option>
+            <option value="skipped">Skipped</option>
+          </select>
+          {linked.map(([k, v]) => (
+            <input key={k} type="hidden" name={k} value={v} />
+          ))}
+          <select
             name="subscription"
             defaultValue={subscription}
             aria-label="Filter by subscription status"
@@ -291,12 +408,27 @@ export default async function EndUsersPage({
               </option>
             ))}
           </select>
+          <select
+            name="banned"
+            defaultValue={banned}
+            aria-label="Filter by ban"
+            className={filterSelectCls}
+          >
+            <option value="">Access: any</option>
+            <option value="true">Banned only</option>
+            <option value="false">Not banned</option>
+          </select>
           <button
             type="submit"
             className="rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-[var(--color-surface-muted)]"
           >
             Apply
           </button>
+          {linked.length > 0 && (
+            <span className="text-xs text-[var(--color-muted-fg)]">
+              Also filtered by {linked.map(([k, v]) => `${linkedLabel(k)} ${v}`).join(', ')}
+            </span>
+          )}
           {filtered && (
             <a
               href={`/applications/${id}/end-users`}
@@ -324,7 +456,7 @@ export default async function EndUsersPage({
             }
           />
         ) : (
-          <Table minWidth="min-w-[52rem]">
+          <Table minWidth="min-w-[70rem]">
             <THead>
               <TR>
                 <TH sort={sortTH('email')}>Email</TH>
@@ -332,6 +464,13 @@ export default async function EndUsersPage({
                 <TH>Verified</TH>
                 <TH>User ID</TH>
                 <TH sort={sortTH('createdAt')}>Joined</TH>
+                <TH sort={sortTH('lastSignedInAt')}>Last sign-in</TH>
+                <TH sort={sortTH('lastActiveOn')}>Last active</TH>
+                <TH>Platform</TH>
+                <TH>Onboarding</TH>
+                {listFields.map((f) => (
+                  <TH key={f.key}>{f.label}</TH>
+                ))}
                 <TH align="right"> </TH>
               </TR>
             </THead>
@@ -339,7 +478,14 @@ export default async function EndUsersPage({
               {users.map((u) => (
                 <TR key={u.id} hover>
                   <TD>
-                    {u.email}
+                    <span className="inline-flex items-center gap-2">
+                      {u.email}
+                      {u.bannedAt && (
+                        <Badge tone="danger" dot>
+                          banned
+                        </Badge>
+                      )}
+                    </span>
                   </TD>
                   <TD>
                     <Badge tone="neutral" mono>{u.role}</Badge>
@@ -352,9 +498,29 @@ export default async function EndUsersPage({
                     )}
                   </TD>
                   <TD mono muted className="max-w-[12rem] truncate" title={u.id}>{u.id}</TD>
-                  <TD muted className="text-xs">
+                  <TD muted className="whitespace-nowrap text-xs">
                     {formatDate(u.createdAt)}
                   </TD>
+                  <TD muted className="whitespace-nowrap text-xs" title={u.lastSignedInAt ? formatDateTime(u.lastSignedInAt) : undefined}>
+                    {u.lastSignedInAt ? formatRelative(u.lastSignedInAt) : 'Never'}
+                  </TD>
+                  <TD muted className="whitespace-nowrap text-xs">
+                    {u.lastActiveOn ?? '—'}
+                  </TD>
+                  <TD muted className="text-xs">
+                    {u.lastPlatform ? platformLabel(u.lastPlatform) : '—'}
+                  </TD>
+                  <TD>
+                    <OnboardingBadge status={u.onboardingStatus} />
+                  </TD>
+                  {listFields.map((f) => {
+                    const v = isAnswered(u.profile, f.key) ? u.profile![f.key] : undefined;
+                    return (
+                      <TD key={f.key} muted className="max-w-[10rem] truncate text-xs">
+                        {v === undefined ? '—' : typeof v === 'boolean' ? (v ? 'Yes' : 'No') : String(v)}
+                      </TD>
+                    );
+                  })}
                   <TD align="right">
                     <div className="flex items-center justify-end gap-3">
                       <Link
@@ -520,7 +686,15 @@ function EditUserModal({
       trigger="Edit"
       triggerClassName="text-xs text-[var(--color-fg)] font-medium hover:underline cursor-pointer"
     >
-      <ActionForm action={updateUser.bind(null, applicationId, user.id)} className="space-y-3">
+      <ActionForm
+        key={savedStateKey({
+          role: user.role,
+          metadata: user.metadata,
+          emailVerified: user.emailVerified,
+        })}
+        action={updateUser.bind(null, applicationId, user.id)}
+        className="space-y-3"
+      >
         {error && (
           <Banner tone="error">
             <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />

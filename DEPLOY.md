@@ -61,6 +61,34 @@ three `PORTAL_HOST` references, as the note on it in the compose file explains.
   requires from 2.2.0 on, without which the stack will not start.
 - Bootstrap the first tenant via `/api/v1/admin/*` using `SUPER_ADMIN_KEY`, or sign up at the panel.
 
+- **After upgrading to the release with sign-in counters**, fill the last
+  sign-in of existing end users once, from the stored sign-in events. It is
+  batched, never overwrites a newer sign-in, and a re-run is a no-op:
+
+  ```bash
+  docker compose exec api node apps/api/dist/scripts/backfill-last-sign-in.js
+  ```
+
+  Until it runs, older users show "Never" under Last sign-in. See
+  [docs/analytics.md](docs/analytics.md#backfilling-the-last-sign-in-after-upgrading).
+- **After upgrading to the release with the analytics rollup**, fill its
+  past days once. It writes only days that have no row yet (so a re-run is a
+  no-op) and every backfilled day is a UTC day:
+
+  ```bash
+  docker compose exec api node apps/api/dist/scripts/backfill-analytics-rollup.js
+  ```
+
+  Run it soon after the upgrade: each day it waits, the oldest day of
+  per-day active users falls out of the 63 the activity bits hold. It exits
+  non-zero when an Application failed (logged and skipped); re-run it. The
+  release's two `refresh_tokens` indexes build `CONCURRENTLY` during
+  `migrate deploy`; if one is interrupted, see
+  [docs/analytics.md](docs/analytics.md#daily-rollup) for the INVALID-index recovery.
+- **The same release requires `INTERNAL_CALLER_SECRET`** in the `.env` of a
+  `docker-compose.prod.yml` stack (API and portal); generate it with
+  `openssl rand -hex 32`. See [Customer portal](#customer-portal-portalexamplecom).
+
 ## 4. Verify
 - `https://api.example.com/docs` → Swagger.
 - `https://panel.example.com` → panel login.
@@ -167,7 +195,16 @@ Operators turn it on per-Application in **Panel → Application → Billing →
 Portal** — no deploy, no key wiring. Nothing to set in Dokploy for a new app.
 
 > The API needs `PUBLIC_PORTAL_URL` (derived from `PORTAL_HOST` in the `api`
-> service env) so publishable-key calls from the portal origin are allowed.
+> service env) so publishable-key calls from the portal origin are allowed and
+> portal password-reset links are accepted. It must be the same origin as the
+> portal's `PORTAL_BASE_URL`; if you override one, override both.
+
+> `INTERNAL_CALLER_SECRET` must be set, to the same value, on the API and the
+> portal (in `docker-compose.prod.yml` both read it from `.env`, and compose
+> refuses to start without it). It is how the API knows a sign-in came through
+> the portal and believes the visitor's browser and country the portal
+> forwards; without it every portal sign-in is recorded as the portal server
+> (`node`, platform `server`). See [docs/analytics.md](docs/analytics.md).
 
 Operators who want to **self-host** their own single-app portal should follow
 `docs/portal.md`. (A worked reference app previously lived at

@@ -4,6 +4,551 @@ Notable changes to Rekey, covering the self-hosted stack as well as the
 `@rekey.dev/*` SDK packages. The packages share one version and release together
 with the API, panel and portal.
 
+## 2.2.0-rc.5
+
+A release candidate on the 2.2.0 line. It adds contact lists (waitlists,
+newsletters and contact forms, with consent proof, erasure and an export for
+your email tool), end-user profile questions with onboarding completion and
+skip, sign-in and activity tracking per end user, a Users overview with
+analytics kept in a daily rollup, and a ban that shuts one person out of an
+Application. End-user IP addresses are masked for callers below OWNER and
+ADMIN. It fixes billing regressions found in
+pre-release testing, makes portal password resets work, and keeps MFA
+challenge tokens out of URLs in the panel and the portal.
+
+**Upgrading an existing deployment:** twenty-one migrations run on boot, all
+additive for existing data; two of them build indexes on `refresh_tokens`
+concurrently. `docker-compose.prod.yml` now refuses to start without
+`INTERNAL_CALLER_SECRET` in `.env`. After the API is live, run the
+analytics rollup backfill soon and the last-sign-in backfill once. See **Upgrade notes** at the end of this section.
+
+### Changed
+
+Every item here changes a behaviour an existing 2.2.0-rc.4 deployment or
+integration can see. Read this list before you upgrade.
+
+- **Breaking for self-hosters on `docker-compose.prod.yml`: it requires
+  `INTERNAL_CALLER_SECRET`.** The compose passes it to the `api` and `portal`
+  services and fails to render without it, with a message naming the key.
+  The panel already read the same `.env` key. The secret is what lets the API
+  believe the visitor's browser and country that the portal forwards on a
+  sign-in; without it every portal sign-in was recorded as `node`. Generate
+  one with `openssl rand -hex 32`. The split Dokploy compose files already
+  required it.
+
+The next seven items are the billing fixes that were written up as the 2.2.0
+release notes. They fix regressions found in pre-release testing: external
+renewals on org-billed Applications, the organization free tier, usage
+idempotency keys, checkout readiness evidence and refund amounts in the
+portal.
+
+- **`billing.subscribe()` can return `subscription: null`** (`@rekey.dev/node`
+  and `@rekey.dev/react`; the SDK types are now `SelfSubscriptionDto | null`).
+  `POST /billing/subscribe` answers `200` with `data: null` when a FEATURE or
+  USAGE-only free plan is asked for an organization while the caller's one
+  subscription to it is billed to another beneficiary. It used to answer with
+  that other beneficiary's subscription. Row answers now carry `activated`.
+- **Organizations get the free tier only when claimed.** On an Application
+  that bills per organization, `POST /billing/subscribe` naming an
+  organization records its claim, and the org view of entitlements then
+  applies the free plan's FEATURE flags and included USAGE quantity to it (not
+  its per-unit USAGE price; a priced row caps at its included quantity).
+  Admins claiming one organization at once are serialised, so it gets one
+  subscription row. Claims survive deletion of the claimed plan. Unclaimed
+  organizations, and organizations on a per-user Application, are unchanged.
+  The credit and licence variant still answers `409
+  BILLING_FREE_TIER_ALREADY_CLAIMED`.
+- **External billing renewals keep their organization.** A same-id
+  `subscription.activated` that omits `subscriber.organizationId` on an
+  org-billed Application applies to the existing subscription instead of
+  failing on every retry. An event naming an unknown organization or end user
+  answers `404`, an erased end user `410`, instead of `500`; a new
+  subscription with no organization still answers a retryable `500`.
+- **A sender `occurredAt` more than 5 minutes ahead** is ignored for dating a
+  cancellation or ordering an activation, and noted on the receipt. A delayed
+  older cancellation can still end a newer renewal, so send `occurredAt` on
+  every event.
+- **`POST /usage/record` refuses a reused `idempotencyKey`** with a different
+  quantity or in another UTC month (`409 IDEMPOTENCY_KEY_REUSED`). A retry in
+  the same month with a regenerated `occurredAt` still replays.
+  `rekey.usage.record()` in `@rekey.dev/node` now accepts `idempotencyKey`.
+- **Checkout readiness** warns when there are no paid plans to sell and when
+  nothing has shown the provider credentials work (a registered plan, a
+  checkout, subscription or payment through the provider, or a verified
+  webhook since its secret or mode last changed). Routing and enablement edits
+  no longer restart the webhook evidence window; a mode change does. Fresh
+  credentials show a provider WARN until one of those happens.
+- **`GET /billing/payments` items carry `refundedAmount`**, and the portal
+  shows how much of a partially refunded payment came back.
+
+Other changes:
+
+- **Unknown API key scopes are refused.** Minting a key with a scope outside
+  the known list answers `400 API_KEY_SCOPE_UNKNOWN`, with the valid scopes in
+  `fix` and the rejected ones in `details.unknown`. It used to return 201 with
+  a scope that matched nothing. This covers the super-admin, tenant, operator
+  token and operator MCP mint paths. Stored keys are untouched.
+- **Operator token mints with an unknown scope** answer
+  `OPERATOR_SCOPE_UNKNOWN` with `details.unknown` and `details.valid`, instead
+  of `BAD_REQUEST`.
+- **Every `*` key gains `contacts:write`,** the new standard scope for list
+  subscribes. It reaches only lists, and no list exists until an operator
+  creates one. `contacts:read` is elevated, so no existing key gains it.
+- **Token-link checks run before the account lookup** on password reset,
+  magic link and verification re-send. A caller that sends a disallowed
+  `resetUrl`, `signInUrl` or `verifyUrl` for an unknown address now gets `400
+  AUTH_URL_NOT_ALLOWED` too, where it used to get the constant 200. A token
+  URL with a username or password in it
+  (`https://attacker.example@app.example.com`) is refused even when its origin
+  is registered.
+- **A spent backup code at end-user MFA sign-in** answers
+  `MFA_BACKUP_CODE_USED`, so the user is told the code was already used. It
+  still counts toward the MFA lockout. Step-up, disable and operator sign-in
+  keep their existing answers.
+- **Custom template previews validate `variables`.** A preview override with
+  a bad value, such as a `javascript:` URL, answers `400
+  EMAIL_VARIABLES_INVALID`, using the send rules minus `required`.
+- **Operator sign-up without a workspace name** answers
+  `WORKSPACE_NAME_REQUIRED` instead of `BAD_REQUEST`. The name is optional
+  when signing up with a workspace-bound invite key.
+- **Portal MFA moves to a cookie.** The code step is `?step=mfa` and reads
+  the challenge from the httpOnly `rekey_portal_mfa` cookie. Old
+  `/<slug>/login?mfa=...` links no longer open the code step, so a user who is
+  on that step during the deploy signs in again.
+- **Panel MFA moves to a cookie.** `/mfa-verify` reads the challenge from
+  `rk_mfa_challenge`; an old bookmarked `?challenge=` URL is ignored. A
+  missing or expired challenge shows "Sign in again" instead of redirecting
+  to `/login`.
+- **The portal's `PORTAL_BASE_URL` and the API's `PUBLIC_PORTAL_URL` must
+  name the same origin.** Portal password resets are refused with
+  `AUTH_URL_NOT_ALLOWED` when they differ, and when the API has no
+  `PUBLIC_PORTAL_URL`.
+- **The API's hosted authorize page** (served when an Application has no
+  `hostedAuthorizeUrl`) uses plainer scope wording, shows the host both
+  buttons send you to, and says what Deny does. An unnamed client is called
+  "An app" instead of "An application".
+- **Session rows record the visitor, not your server.** When a secret-key
+  caller sends `X-Rekey-Client-User-Agent`, that value becomes the session's
+  `userAgent`, so server-side sign-ins stop showing `node` once you upgrade
+  `@rekey.dev/nextjs` or use `visitorClient` in `@rekey.dev/astro`.
+- **`session.created` carries `platform` and `country`,** and `user.updated`
+  has a new `via` value, `server`, for secret-key profile writes.
+- **`@rekey.dev/nextjs`, `@rekey.dev/astro` and `@rekey.dev/react` treat
+  `END_USER_BANNED` and `END_USER_ERASED` as signed out** and clear the
+  session cookies, instead of throwing on every page until the token expires.
+- **Billing `fix` strings name the new panel paths.** They point at Billing,
+  Setup, Providers (`/applications/:id/billing/providers`), Setup, Status and
+  Setup, Settings instead of the old single Billing page. If you match on
+  `fix` text, update it; match on `code` instead.
+- **`PLAN_SLUG_TAKEN` and `PLAN_INACTIVE`** name a failed or unfinished
+  registration correctly. An unregistered plan's `PLAN_INACTIVE` fix names
+  `POST .../register`.
+- **Profile schema writes are versioned.** `GET
+  /tenant/applications/:id/profile-schema` returns `version`; a PUT that sends
+  a stale `version` answers `409 PROFILE_SCHEMA_CHANGED`. Removing a select
+  option that users picked answers `409 PROFILE_OPTION_IN_USE`.
+- **`PUT /admin/tenants/:id/limits`** now records a
+  `workspace.limits_set_by_admin` security event with the previous and new
+  limits.
+- **End-user IP addresses are masked below OWNER and ADMIN.** Only OWNER
+  and ADMIN operators whose credential holds `activity:read` see them in
+  full. Everyone else (grant holders, restricted members, and an OWNER or
+  ADMIN using a PAT or MCP token without `activity:read`) gets the network:
+  IPv4 as `/24`, IPv6 as `/48` in canonical CIDR form. This covers session
+  lists, impersonation audits, the device list and its block, unblock and
+  release responses, and the operator MCP device tools. Secret keys record
+  `revealsEndUserIps` at mint: a key minted by an OWNER or ADMIN holding
+  `activity:read` (or with the super-admin key) reads full addresses on `GET
+  /api/v1/devices` and `POST /api/v1/devices/:id/release`, and a key minted by
+  anyone else reads them masked. Keys minted before this release have no
+  record and keep reading full addresses; to mask one, mint a replacement as
+  a member and revoke the old key.
+- **Overview and Billing Overview numbers are cached.** `GET
+  /tenant/applications/:id/stats` and `.../billing/stats` are served from a
+  stale-while-revalidate cache: fresh for 60 seconds, then served stale for
+  up to 15 minutes while one request refreshes them. Each computation runs
+  read-only under a 4 second statement budget, and at most two dashboard
+  computations run at once per API process. Under a cold burst a request can
+  get `503 ANALYTICS_BUSY` with `Retry-After`, or `503 ANALYTICS_TIMEOUT`,
+  instead of queueing on the database pool.
+- **`get_workspace_overview` MRR is computed in SQL.** It used to load at
+  most 10,000 subscriptions and counted non-recurring plans, so it could
+  disagree with Billing Overview. It now counts only `SUBSCRIPTION` plans,
+  yearly plans as `floor(amount / 12)`, per currency, with no cap, and matches
+  Billing Overview. `activeSubscriptions` is an uncapped count.
+  `list_applications` reads end-user counts and DAU and MAU from the rollup
+  when it has them (`endUserCountAsOf`, `activityDay`, `activityTimezone`).
+- **Panel:** Billing is split into routed Setup tabs (Status, Providers,
+  Checkout page, Events, Settings); old `/billing?edit=` and `?webhook=` links
+  redirect. Team has Members, Application access and Invitations tabs. Lists
+  sit under a new Audience group. Users has an Onboarding tab that replaces
+  Profile fields (`/profile-fields` redirects). "Usage" is labelled Meters,
+  and "Force-logout all end-users" is now Sign out all end-users. Email is its
+  own nav group, and a new Settings tab holds Promote, Sign out all end-users
+  and Disable (`/lifecycle` redirects there). The OpenID Connect provider
+  switch and "Your own sign-in page" moved to OAuth clients; Developer, Access
+  is now "Allowed origins & IPs". The Applications list hides disabled
+  applications until you turn on "Show disabled". Destructive actions share
+  one outlined red button, settings forms save through one sticky bar, and
+  wide tables scroll inside their card on a phone. The sidebar shows the
+  running Rekey version.
+
+### Added
+
+- **Contact lists.** Collect waitlist, newsletter and contact-form sign-ups
+  into lists that belong to an Application, with versioned consent text and
+  consent proof (version, time, network prefix, source page).
+  - Operator routes under `/api/v1/tenant/applications/:id/lists` to create,
+    edit, archive and restore lists, read members and submissions,
+    unsubscribe a member, and export CSV (`export.csv`, workspace OWNER or
+    ADMIN only, audited). A new `audience` operator scope guards them;
+    viewer and billing grants never reach contacts.
+  - `GET /api/v1/lists/:key` returns a list's form, and `POST
+    /api/v1/lists/:key/subscribe` takes sign-ups. A publishable key (only on
+    a list with Public capture on, and only for an Application with allowed
+    origins) always gets `202 { status: "received" }`. A secret key with
+    `contacts:write` gets the real outcome. A browser can never re-subscribe
+    someone who left, and a secret key that names a visitor
+    (`X-Rekey-Client-Ip` or `X-Rekey-Relay: browser`) is treated as the
+    browser it relays. Browser traffic is rate limited per visitor, per list
+    and per workspace day, and fails closed.
+  - `GET /api/v1/lists/:key/members` with the elevated `contacts:read`
+    scope, keyset-paged with `updatedSince` for incremental sync, for your
+    email tool. `GET /api/v1/lists` returns lists with counts.
+    `DELETE /api/v1/lists/:key/members/:email` unsubscribes.
+  - Webhooks `contact.subscribed`, `contact.submission.created` and
+    `contact.unsubscribed`. Rekey sends no email from a list.
+  - Erasure: erasing an end user also erases their contact in that
+    Application, `DELETE /tenant/applications/:id/contacts/:contactId`
+    (workspace OWNER only) erases a contact who never signed up, and an
+    erased address cannot be re-captured from a browser for 30 days. DSAR
+    exports gain `contacts`. Submissions older than a list's
+    `submissionRetentionDays` are pruned.
+  - Workspace limits `maxContacts`, `maxContactLists` and
+    `contactCaptureDailyCap`, reported in both limits views.
+  - SDKs and tools: `rekey.lists` in `@rekey.dev/node` (`list`, `get`,
+    `subscribe`, `members`, `iterateMembers`, `unsubscribe`);
+    `subscribeToList` in `@rekey.dev/nextjs/server`; `<NewsletterForm>`,
+    `<ContactForm>` and `useListSubscribe` in `@rekey.dev/react`, which work
+    through a Server Action with no provider; `rekey lists ls` and `rekey
+    lists export --format csv|jsonl` in `@rekey.dev/cli`; operator MCP read
+    tools `list_contact_lists` and `get_contact_list_stats` (counts only).
+  - Panel: Audience, Lists with Members, Submissions, Settings and Embed
+    tabs. See docs/lists.md.
+- **Profile questions and onboarding.** Define up to 50 profile fields per
+  Application (`text`, `select`, `number`, `boolean`, `url`, `date`), each
+  writable by the user or only by your server.
+  - `GET|PUT /tenant/applications/:id/profile-schema`, `GET
+    /api/v1/profile-schema`, `PATCH /api/v1/users/me/profile`, `PATCH
+    /api/v1/users/:id/profile` and the operator equivalent.
+  - `POST .../onboarding/complete` (refuses with `PROFILE_INCOMPLETE` until
+    every required field is answered) and `POST .../onboarding/skip`, for the
+    user, your server and the operator. Rekey records what happened and never
+    blocks a user; `onboardingStatus` is `pending`, `completed` or
+    `skipped`.
+  - Webhooks `user.onboarding_completed` and `user.onboarding_skipped`.
+  - `rekey.users.updateProfile`, `completeOnboarding` and `skipOnboarding` in
+    `@rekey.dev/node`; `skipOnboarding` and `completeOnboarding` on
+    `RekeyBrowserClient` in `@rekey.dev/react`; `onboardingStatus()` and the
+    profile types in `@rekey.dev/shared-types`. See docs/profile-fields.md.
+- **Sign-in and activity per end user.** `lastSignedInAt`, `lastSignInVia`,
+  `signInCount` (counted from this deploy), `lastActiveOn`, `lastPlatform`,
+  `platformsSeen` and `lastCountry` on the end-user record, plus each
+  session's platform, OS, browser, app version and country. Clients can say
+  what they are with an optional `client: { platform, appVersion }` on
+  sign-up, sign-in, MFA verify, magic-link verify, passkey complete and the
+  OAuth callback. `GET /tenant/applications/:id/stats` gains `activeUsers`
+  (`d1`, `d7`, `d30`) and a 30-day `activitySeries`. `GET
+  .../end-users/:euid/insights` returns one user's sign-ins, active days,
+  platforms, places and profile answers. The operator end-user list sorts by
+  `lastSignedInAt`. `@rekey.dev/node` gains `clientUserAgent`, and
+  `@rekey.dev/astro` gains `visitorClient(Astro)`. See docs/analytics.md.
+- **Ban an end user.** `GET|POST
+  /api/v1/tenant/applications/:id/end-users/:euid/ban` and `POST .../unban`,
+  with a required reason. A ban ends every session and MCP grant, deletes
+  outstanding links and codes, and answers `403 END_USER_BANNED` on every
+  sign-in path, refresh and live access token, after the credential
+  verifies. Licence verify answers `reason: "suspended"`. Webhooks
+  `user.banned` and `user.unbanned`, a `banned` filter on the end-user list,
+  and an Access tab in the panel. Subscriptions keep billing, and apps
+  verifying RS256 tokens offline see the ban only when the access token
+  expires. See docs/auth.md.
+- **`rekey init --owner-email` hands over the workspace.** `POST
+  /api/v1/admin/operator-invites` accepts `tenantId`, `email` and `role`, and
+  returns `inviteUrl`. A bound invite joins its redeemer to that workspace at
+  sign-up (password or OAuth) or through the panel's accept-invite page, and
+  only for the bound email. `rekey init` prints the link and, under
+  `--json`, `ownerInvite`. Against an older API it revokes the unbound key
+  and stops with `CLI_INVITE_UNBOUND`.
+- **`GET /tenant/applications/:id` returns `portalBaseUrl`,** and the panel
+  Portal page warns when the API has no portal base instead of showing a
+  placeholder URL as live.
+- **`GET /api/v1/admin/applications/:id/plans/:slug/entitlements`,** a
+  super-admin read of a plan's rows.
+- **Users overview.** `GET /api/v1/tenant/applications/:id/analytics/users`
+  (`overview:read`) returns counts, rates and dates, never a person, in
+  sections that succeed or fail on their own: `kpis`, `activity`, `mix`,
+  `onboarding`, `retention`, `security`, `billing` and `usage` (the last two
+  need `billing:read`). It takes `range` (7d, 30d, 90d, 12m or custom),
+  `compare` and filters for platform, country, sign-in method, sign-up source,
+  onboarding, verified, MFA, plan, paying, organization and one profile
+  question. Each section is cached like `/stats`. The route allows 120
+  requests a minute per operator per Application, of which at most 30 may
+  compute an uncached section; cache hits do not count, and the operator MCP
+  tool draws on the same allowance (`429 RATE_LIMITED` with `Retry-After`
+  past either). The panel's new Users, Overview tab shows it, with the
+  filters in the URL, and Users, Onboarding shows completed, skipped and
+  pending counts. See docs/analytics.md.
+- **Daily analytics rollup.** Once an hour one API replica rolls each
+  Application's yesterday and today into `application_activity_days` and a
+  daily population snapshot, in the Application's reporting timezone. Once
+  the rollup holds days, the Users overview answers ranges up to 366 days
+  from it (unfiltered, or filtered on one of platform, country or sign-in
+  method); other requests use live data and are capped at 63 days. Set
+  `ANALYTICS_ROLLUP_ENABLED=false` to turn the job off.
+- **Reporting timezone per Application.** `PATCH
+  /api/v1/tenant/applications/:id/settings` with `{ "reportingTimezone":
+  "Asia/Kolkata" }` (write access and `overview:write`) sets the zone the
+  rollup counts days in; the default is `UTC`. A zone the database does not
+  know, such as a legacy alias like `Asia/Calcutta`, answers `400
+  REPORTING_TIMEZONE_UNSUPPORTED`; send the current name. Days already rolled
+  up keep their zone, and a change rolls the Application up at once. `GET
+  /tenant/applications/:id` returns `reportingTimezone`.
+- **How each account was created.** End users carry `createdVia`:
+  `password`, `magic_link`, `oauth:<provider>`, `operator`, `import` or
+  `billing`. Accounts created before this release read `unknown`. It is on
+  the end-user object, the operator list and detail, the insights endpoint
+  and the DSAR export.
+- **End-user list filters.** `GET /tenant/applications/:id/end-users` takes
+  `activeFrom`, `activeTo`, `inactiveForDays`, `minSignIns`, `createdFrom`,
+  `createdTo`, `createdVia`, `platform`, `country`, `lastSignInVia`,
+  `onboarding`, `mfa`, `plan` and `org`, sorts by `lastActiveOn`, and returns
+  `lastActiveOn` and `lastCountry` on each row. `plan` needs `billing:read`
+  and `org` needs `organizations:read` (403 otherwise, never ignored).
+- **Users analytics for agents and scripts.** Operator MCP tool
+  `get_user_analytics` (`overview:read`) and `rekey analytics users --app
+  <id>` in `@rekey.dev/cli`, which takes an operator token through
+  `--operator-token` or `REKEY_OPERATOR_TOKEN`.
+- **Applications list filters.** `GET /api/v1/tenant/applications` takes
+  `status`, `environment`, `q`, `sort` (`created`, `name`, `activity`) and
+  `include=summary` (active API keys and last active day, each left out when
+  the caller cannot read it). With no parameters it behaves as before.
+
+### Fixed
+
+- **Portal password reset works.** The portal's reset link was refused on
+  every portal app because the portal origin was never an allowed token-link
+  destination, and the link carried no `{token}`. The app's own portal pages
+  are now allowed while the portal is on (scoped to the app's slug on a
+  shared host, or a verified custom domain). Nothing is written into
+  `redirectUrls`. An email transport is still needed.
+- **A new `pnpm dev` stack gets a working portal password reset:** the root
+  `.env.example` sets `PUBLIC_PORTAL_URL`.
+- **`rekey init --owner-email` left the new workspace unreachable.** The
+  named owner got a second, empty workspace. See **Added**.
+- **Panel selects show the saved value after a save,** and a second save no
+  longer reverts an earlier select change (auth methods, team roles and
+  scopes, end-user role, organization role, billing provider mode, template
+  category, plan interval, audit log filter).
+- **Panel:** "MFA enabled" and "MFA disabled" banners now appear; the
+  member role select has an accessible name; the Account security summary
+  says when the passkey read failed; the Operator MCP page takes its address
+  from the API instead of showing `<set NEXT_PUBLIC_API_URL>`; the "Mint your
+  first API key" step ticks when any of the three newest applications has a
+  key; a damaged profile answers form reports "Nothing was saved" instead of
+  a false success; list and onboarding snippets are valid, copy-paste ready
+  code; copy that said failed sign-ins are not recorded, and several stale
+  cross-links, are corrected. Success banners no longer vanish a moment
+  after an action, and the Overview pages say "not visible to your role" or
+  "could not be read" instead of showing zeros.
+- **Trial eligibility on an external-only Application** no longer says the
+  provider "cannot host a checkout".
+- **Sign-up email rules explain apex versus subdomain.** `example.com`
+  matches only that domain and `*.example.com` its subdomains; the panel
+  notes an apex listed without its wildcard. Matching is unchanged.
+
+### Security
+
+- **End-user IP addresses are no longer readable in full by every member.**
+  A member with a viewer, billing or admin grant read raw addresses from
+  sessions, devices and the MCP device tools, an APP_ADMIN could mint a
+  secret key to read them, and an OWNER token narrowed below `activity:read`
+  still got them. All three now get the masked network (see **Changed**).
+- **Dashboard reads cannot exhaust the database pool.** Analytics and
+  Overview computations run read-only, under a statement budget, through a
+  small per-process slot pool, and uncached computations are rate limited
+  per operator.
+- **An account-existence oracle on token links is closed.** A publishable
+  key sending a disallowed reset, magic-link or verification URL got 400 for
+  a known address and 200 for an unknown one. Both now get the same refusal.
+- **Portal reset links are scoped to the app's own pages.** Every app shares
+  the portal host, so the allowance is the app's `/<slug>/` path only, with
+  dot segments, encoded separators, backslashes and empty segments refused
+  both raw and parsed.
+- **MFA challenge tokens no longer travel in URLs** in the panel (after
+  password, magic link, OAuth and the Cloud handoff) or the portal. They were
+  visible in access logs and browser history.
+- **Token URLs with userinfo are refused,** so
+  `https://attacker.example@app.example.com` cannot pass as a registered
+  origin.
+- **`X-Rekey-Client-User-Agent` is believed only from a secret key** or a
+  proven internal caller, and a session's country only when
+  `TRUST_CF_IPCOUNTRY` is on and the request came through the proven proxy or
+  the portal (see **Upgrade notes**).
+- **A bound operator invite is single-use, hashed and expiring,** and needs
+  the bound email at sign-up and at accept.
+- **Erasure** now also clears the new fields: profile answers, onboarding
+  skip time, platform and country roll-ups, ban reasons, and `country` in
+  stored `session.created` deliveries.
+
+### Upgrade notes
+
+Migrations, applied on boot or with `pnpm db:migrate:deploy`. All are
+additive for existing data:
+
+- `20260928095906_operator_invite_workspace_binding`: three nullable columns,
+  a foreign key and an index on `operator_invites`.
+- `20260928100124_mfa_used_backup_code_hashes`: a defaulted column on the MFA
+  credential.
+- `20260928102404_org_free_tier_claims` and
+  `20260928114500_org_free_tier_claim_survives_plan_delete`: the
+  `organization_free_tier_claims` table, its `plan_id` nullable with `ON
+  DELETE SET NULL`.
+- `20260928102922_billing_credentials_secrets_updated_at`: a defaulted
+  `billing_credentials.secrets_updated_at`, backfilled from `updated_at`.
+- `20260929022614_end_user_sign_in_counters`: sign-in columns on
+  `end_users`, an index, and `applications.activity_tracked_since`, which is
+  the deploy time for existing Applications.
+- `20260929022615_end_user_last_sign_in_desc_index`: an index on `end_users`
+  for the last-sign-in sort. It is a plain `CREATE INDEX`, so writes to
+  `end_users` wait while it builds; on a very large table, plan for that.
+- `20260929022650_end_user_ban`: three nullable ban columns.
+- `20260929024139_end_user_daily_activity`: `last_active_on`,
+  `activity_bits` and an index.
+- `20260929025448_session_client_platform`: client columns on
+  `refresh_tokens` and roll-up columns on `end_users`.
+- `20260929030658_end_user_profile_fields` and
+  `20260929030659_profile_schema_version`: `applications.profile_schema`
+  (default `[]`), its version, `end_users.profile` (default `{}`) and
+  `onboarding_completed_at`.
+- `20260929041500_contact_lists`: five new tables for lists, consent
+  versions, contacts, members and submissions.
+- `20260929050545_contact_erasure_tombstones`: a new table of hashed,
+  30-day erasure markers.
+- `20260929211359_onboarding_skipped_at`: one nullable column.
+- `20260929222101_end_user_created_via`: one nullable column, no backfill.
+- `20260929223019_application_reporting_timezone`: `reporting_timezone`,
+  default `UTC`.
+- `20260929230642_analytics_rollups`: the `application_activity_days` and
+  `application_population_snapshots` tables.
+- `20260929230643_refresh_tokens_app_live_head_idx` and
+  `20260929234841_refresh_tokens_app_created_at_idx`: two indexes on
+  `refresh_tokens`, each in a migration of its own and built with `CREATE
+  INDEX CONCURRENTLY IF NOT EXISTS`, so sign-ins and refreshes keep writing
+  while they build. An interrupted build leaves an INVALID index that `IF NOT
+  EXISTS` then skips. Check with `SELECT indexrelid::regclass, indisvalid
+  FROM pg_index WHERE NOT indisvalid;`, and recover with `DROP INDEX
+  CONCURRENTLY IF EXISTS "<name>";`, then `prisma migrate resolve
+  --rolled-back <migration>` and another `prisma migrate deploy`. See
+  docs/analytics.md, "Daily rollup".
+- `20260930043535_api_key_reveals_end_user_ips`: one nullable column on
+  `api_keys`; existing keys stay null and keep reading full addresses.
+
+**Breaking, `docker-compose.prod.yml`:** set `INTERNAL_CALLER_SECRET` in
+`.env` before you pull this release (`openssl rand -hex 32`). The same value
+is used by the API, panel and portal. Without it `docker compose up` fails
+on `services.api.environment.INTERNAL_CALLER_SECRET`.
+
+**Soon after the API is live, backfill the analytics rollup:**
+
+```bash
+docker compose exec api node apps/api/dist/scripts/backfill-analytics-rollup.js
+```
+
+Do not put this off. The activity bits it reads hold 63 days, so each day
+you wait loses one more day of per-day history. It writes UTC days only,
+never yesterday or today, and never a day that already has a row, so a
+re-run does nothing. An Application that fails is logged and skipped, and
+the script exits non-zero so a re-run picks it up.
+
+**Known limits of the Users overview.** Requests the rollup cannot answer
+(filters such as verified or onboarding, or several dimensions at once) are
+computed live over the whole population. With about 20 operators forcing
+such computations at once on a large Application, they can take 9 to 12
+seconds, or answer `503 ANALYTICS_BUSY` or a `pending` section. Repeat views
+are served from the cache.
+
+**After the API is live, backfill the last sign-in** once, on each API:
+
+```bash
+docker compose exec api node apps/api/dist/scripts/backfill-last-sign-in.js
+```
+
+It fills `lastSignedInAt` and `lastSignInVia` from each user's newest stored
+`user.signed_in` event, in batches, only where they are empty. It is safe to
+re-run and to stop half way. `signInCount` is not backfilled and counts from
+the deploy.
+
+**`TRUST_CF_IPCOUNTRY` is opt-in and off by default.** With it off, no
+country is ever recorded. Turn it on only when the API sits behind a proxy
+that sends `API_PROXY_SECRET` and that proxy receives nothing but Cloudflare
+traffic (its origin locked to Cloudflare's address ranges, or authenticated
+origin pulls). Anyone who can reach that proxy another way can write
+`CF-IPCountry` themselves. Requests that skip the proxy are ignored either
+way. The hosted portal forwards its visitor's country only when it is proven
+by `INTERNAL_CALLER_SECRET`. See docs/analytics.md.
+
+**Contact-list limits.** Workspaces have three new limit keys in
+`Tenant.limits`: `maxContacts`, `maxContactLists` and
+`contactCaptureDailyCap`. Absent or `null` means unlimited, so nothing
+changes until you set them, with `PUT /api/v1/admin/tenants/:id/limits` or
+`DEFAULT_TENANT_LIMITS` for new workspaces. On Rekey Cloud they come from the
+plan entitlements `max_contacts`, `max_contact_lists` and
+`contact_capture_daily_cap` (FEATURE, INT). Without rows, Free falls back to
+500 contacts and 1 list and Standard to 25,000 contacts with unlimited
+lists. Existing workspaces keep their limits until their next billing
+webhook or `/plan-change`.
+
+New environment variables:
+
+- `TRUST_CF_IPCOUNTRY` (API), default off. See above.
+- `ANALYTICS_ROLLUP_ENABLED` (API), default on. `false` turns the hourly
+  rollup off.
+- `PUBLIC_PORTAL_URL` is not new, but must now be the same origin as the
+  portal's `PORTAL_BASE_URL` for portal password resets to work.
+- `INTERNAL_CALLER_SECRET` is required by `docker-compose.prod.yml`.
+
+New webhook events: `user.banned`, `user.unbanned`,
+`user.onboarding_completed`, `user.onboarding_skipped`,
+`contact.subscribed`, `contact.submission.created` and
+`contact.unsubscribed`. New scopes: `contacts:write` (standard, in `*`),
+`contacts:read` (elevated; minting it needs `audience:read` on the
+Application) and the operator scope `audience`.
+
+New error codes. The API codes are listed in docs/errors.md:
+
+- Lists: `LIST_NOT_FOUND`, `LIST_KEY_TAKEN`, `LIST_CAPTURE_UNPROTECTED`,
+  `LIST_MEMBER_NOT_FOUND`, `CONTACT_LIST_QUOTA_EXCEEDED`,
+  `CONTACT_QUOTA_EXCEEDED`, `CONTACT_NOT_FOUND`, `CONTACT_CURSOR_INVALID`,
+  `CONTACT_CONSENT_REQUIRED`, `CONTACT_CONSENT_STALE`,
+  `CONTACT_FIELDS_INVALID`, `CONTACT_EMAIL_DOMAIN_NOT_ALLOWED`,
+  `CONTACTS_RATE_LIMITED`.
+- Profile: `PROFILE_SCHEMA_INVALID`, `PROFILE_SCHEMA_CHANGED`,
+  `PROFILE_FIELD_KEY_IMMUTABLE`, `PROFILE_OPTION_IN_USE`,
+  `PROFILE_FIELD_UNKNOWN`, `PROFILE_FIELD_READ_ONLY`,
+  `PROFILE_FIELD_INVALID`, `PROFILE_TOO_LARGE`, `PROFILE_INCOMPLETE`.
+- Auth and keys: `END_USER_BANNED`, `BAN_REASON_INVALID`,
+  `MFA_BACKUP_CODE_USED`, `API_KEY_SCOPE_UNKNOWN`,
+  `OPERATOR_INVITE_EMAIL_MISMATCH`, `OPERATOR_INVITE_TENANT_REQUIRED`,
+  `OPERATOR_INVITE_EMAIL_REQUIRED`, `WORKSPACE_NAME_REQUIRED`.
+- Analytics: `ANALYTICS_BUSY`, `ANALYTICS_TIMEOUT`,
+  `ANALYTICS_RANGE_INVALID`, `ANALYTICS_RANGE_TOO_LONG`,
+  `ANALYTICS_FILTER_UNSUPPORTED`, `REPORTING_TIMEZONE_UNSUPPORTED`.
+- Thrown by the SDK and CLI themselves: `CLIENT_IP_MISSING`
+  (`subscribeToList` without a visitor address), `CLI_INVITE_UNBOUND`,
+  `CLI_SECRET_KEY_MISSING`, `CLI_LISTS_FORMAT_INVALID`,
+  `CLI_LISTS_STATUS_INVALID`, `CLI_OPERATOR_TOKEN_MISSING`.
+
 ## 2.2.0-rc.4
 
 A release candidate on the 2.2.0 line. It adds a Rekey-hosted checkout page

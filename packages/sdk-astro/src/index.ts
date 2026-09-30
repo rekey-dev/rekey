@@ -50,6 +50,15 @@ const ACCESS_MAX_AGE = 60 * 15;
 const REFRESH_MAX_AGE = 60 * 60 * 24 * 30;
 
 /**
+ * The account itself can no longer sign in: an operator banned it, or it was
+ * erased. Every token it holds is dead, so this is a signed-out verdict that
+ * clears the cookies, not an API failure to rethrow on every page load.
+ */
+function isAccountClosed(code: string): boolean {
+  return code === 'END_USER_BANNED' || code === 'END_USER_ERASED';
+}
+
+/**
  * Does this code mean the token itself is finished, as opposed to the request
  * having failed? Only a verdict justifies throwing the session away.
  *
@@ -69,6 +78,7 @@ const REFRESH_MAX_AGE = 60 * 60 * 24 * 30;
  */
 function isTokenVerdict(code: string): boolean {
   return (
+    isAccountClosed(code) ||
     code.startsWith('REFRESH_TOKEN_') ||
     code === 'USER_TOKEN_INVALID' ||
     code === 'USER_TOKEN_MISSING' ||
@@ -123,6 +133,7 @@ async function racedMark(token: string): Promise<string> {
  */
 function isAccessTokenSpent(code: string): boolean {
   return (
+    isAccountClosed(code) ||
     code === 'USER_TOKEN_INVALID' ||
     code === 'USER_TOKEN_MISSING' ||
     code === 'USER_TOKEN_WRONG_APPLICATION'
@@ -293,6 +304,38 @@ export function rekey(config: RekeyAstroConfig = {}): Rekey {
       `@rekey.dev/astro: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+}
+
+/**
+ * The server client for a call made on the visitor's behalf (sign-in,
+ * sign-up, MFA): it forwards the visitor's address as `X-Rekey-Client-Ip`, so
+ * the API's per-IP sign-in limits count the visitor rather than this server,
+ * and their User-Agent as `X-Rekey-Client-User-Agent`, so the session records
+ * their browser and platform rather than this server's runtime.
+ *
+ * @example
+ *   // src/pages/api/sign-in.ts
+ *   export const POST: APIRoute = async (context) => {
+ *     const result = await visitorClient(context).auth.signIn({ email, password });
+ *   };
+ */
+export function visitorClient(
+  context: { request: Request; clientAddress?: string | undefined },
+  config: RekeyAstroConfig = {},
+): Rekey {
+  let clientIp: string | undefined;
+  try {
+    clientIp = context.clientAddress;
+  } catch {
+    // Astro throws from `clientAddress` on a prerendered page or an adapter
+    // without it; there is no visitor address to send then.
+    clientIp = undefined;
+  }
+  const clientUserAgent = context.request.headers.get('user-agent') ?? undefined;
+  return rekey(config).with({
+    ...(clientIp ? { clientIp } : {}),
+    ...(clientUserAgent ? { clientUserAgent } : {}),
+  });
 }
 
 /**

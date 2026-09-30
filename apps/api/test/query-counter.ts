@@ -5,7 +5,12 @@
  * subscribes once and records only inside a `countQueries` window. BEGIN,
  * COMMIT and the fire-and-forget request-log / security-event inserts are
  * reported but not counted: the first two are transaction framing, the last
- * two are written off the request path and can land in any window.
+ * two are written off the request path and can land in any window. The pool's
+ * idle-connection `SELECT 1` is not counted for the same reason.
+ *
+ * The window is not attributed to a caller: anything else on the shared client
+ * lands in it too. A test that must ignore concurrent work uses
+ * `recordOperations` (operation-recorder.ts) instead.
  *
  * The webhook delivery CLAIM is not counted either. It is the first statement
  * of `attemptDelivery`, which only the delivery scheduler, the BullMQ worker
@@ -47,6 +52,12 @@ function subscribe(): void {
 
 const NOT_COUNTED = [
   /^(BEGIN|COMMIT|ROLLBACK)\b/i,
+  // lib/read-budget.ts: the read-only and statement-timeout framing of a
+  // dashboard transaction, part of BEGIN in all but syntax.
+  /^SELECT set_config\('statement_timeout', \$1, true\), set_config\('transaction_read_only', 'on', true\), set_config\('jit', 'off', true\)$/,
+  // Prisma's pool pings a connection that sat idle for about 15 seconds with
+  // this before handing it out, so it lands in whichever request drew it.
+  /^SELECT 1$/,
   /INSERT INTO "public"\."api_request_logs"/i,
   /INSERT INTO "public"\."security_events"/i,
   /^UPDATE "public"\."webhook_deliveries" SET "next_attempt_at" = \$1, "updated_at" = \$2 WHERE .*"webhook_deliveries"\."status" = CAST/i,

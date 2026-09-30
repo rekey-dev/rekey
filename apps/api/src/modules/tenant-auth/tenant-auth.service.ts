@@ -22,7 +22,7 @@ import { invalidateOperatorAuth } from '../../lib/operator-auth-cache.js';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
 import { hashPassword, verifyPassword, verifyPasswordOrDecoy } from '../../lib/passwords.js';
-import { resolveNewTenantLimits } from '../../lib/tenant-limits.js';
+import { joinOrCreateWorkspace } from './workspace-join.js';
 import {
   assertNotLocked,
   registerFailure,
@@ -86,7 +86,11 @@ function echoAuthTokensInDev(): boolean {
   if (env.NODE_ENV === 'test') return true;
   return env.NODE_ENV === 'development' && process.env.REKEY_DEV_ECHO_AUTH_TOKENS === 'true';
 }
-import { resolveSignupInvite, consumeSignupInvite } from './operator-signup-policy.js';
+import {
+  assertBoundEmail,
+  consumeSignupInvite,
+  resolveSignupInvite,
+} from './operator-signup-policy.js';
 import { recordSecurityEvent } from '../../lib/security-events.js';
 
 const PASSWORD_MIN_LENGTH = 8;
@@ -410,6 +414,8 @@ export const tenantAuthService = {
   /**
    * Self-serve sign-up. Atomically creates a TenantUser + a Tenant + an
    * OWNER Membership, then issues a session scoped to the new workspace.
+   * With a workspace-bound invite key it joins that workspace at the key's
+   * role instead, and `workspaceName` is not used.
    *
    * If the email already exists, returns EMAIL_ALREADY_EXISTS, sign-in
    * is the right action there.
@@ -418,7 +424,8 @@ export const tenantAuthService = {
     email: string;
     password: string;
     name?: string | undefined;
-    workspaceName: string;
+    /** Required unless `inviteKey` is bound to a workspace. */
+    workspaceName?: string | undefined;
     /** Single-use invite key, required when OPERATOR_SIGNUP_MODE='invite'. */
     inviteKey?: string | undefined;
     device?: TenantDeviceContext;
@@ -428,6 +435,16 @@ export const tenantAuthService = {
     // the key is consumed atomically inside the creation transaction below, so
     // a later failure (e.g. duplicate email) does not burn it.
     const invite = await resolveSignupInvite(input.inviteKey);
+    if (invite?.workspace) assertBoundEmail(invite.workspace, input.email);
+    const workspaceName = input.workspaceName?.trim();
+    if (!invite?.workspace && !workspaceName) {
+      throw new RekeyError({
+        statusCode: 400,
+        code: 'WORKSPACE_NAME_REQUIRED',
+        message: 'Sign-up creates a workspace, and no `workspaceName` was given.',
+        fix: 'Pass `workspaceName` (1 to 120 characters). It is only optional with an invite key bound to an existing workspace.',
+      });
+    }
     const existing = await prisma.tenantUser.findUnique({
       where: { email: input.email.toLowerCase() },
     });
@@ -442,16 +459,6 @@ export const tenantAuthService = {
 
     const passwordHash = await hashPassword(input.password);
     const result = await prisma.$transaction(async (tx) => {
-      const tenant = await tx.tenant.create({
-        // `resolveNewTenantLimits()` stamps the deployment's
-        // DEFAULT_TENANT_LIMITS on the workspace. Unset = no `limits` key at
-        // all = unlimited, i.e. what self-serve sign-up has always produced.
-        data: {
-          name: input.workspaceName,
-          ownerEmail: input.email.toLowerCase(),
-          ...resolveNewTenantLimits(),
-        },
-      });
       const user = await tx.tenantUser.create({
         data: {
           email: input.email.toLowerCase(),
@@ -459,11 +466,15 @@ export const tenantAuthService = {
           ...(input.name !== undefined && { name: input.name }),
         },
       });
-      await tx.tenantMembership.create({
-        data: { tenantUserId: user.id, tenantId: tenant.id, role: 'OWNER' },
+      const joined = await joinOrCreateWorkspace(tx, {
+        userId: user.id,
+        email: user.email,
+        invite,
+        // Checked above: only a bound invite gets here without a name.
+        workspaceName: workspaceName ?? '',
       });
       if (invite) await consumeSignupInvite(tx, invite, user.id);
-      return { tenant, user };
+      return { ...joined, user };
     });
 
     // Audit the invite→operator linkage (the most useful operator-creation
@@ -473,15 +484,19 @@ export const tenantAuthService = {
         type: 'operator.invite_redeemed',
         actorType: 'operator',
         actorId: result.user.id,
-        tenantId: result.tenant.id,
+        tenantId: result.tenantId,
         ip: input.device?.ip ?? null,
         userAgent: input.device?.userAgent ?? null,
-        metadata: { inviteId: invite.inviteId, via: 'password' },
+        metadata: {
+          inviteId: invite.inviteId,
+          via: 'password',
+          ...(invite.workspace && { joinedAs: invite.workspace.role }),
+        },
       });
     }
 
     const memberships = await loadMemberships(result.user.id);
-    return issueSession(result.user, result.tenant.id, 'OWNER', memberships, input.device);
+    return issueSession(result.user, result.tenantId, result.role, memberships, input.device);
   },
 
   /**
@@ -519,16 +534,8 @@ export const tenantAuthService = {
     }
     // This branch creates a brand-new operator → enforce OPERATOR_SIGNUP_MODE.
     const invite = await resolveSignupInvite(input.inviteKey);
+    if (invite?.workspace) assertBoundEmail(invite.workspace, email);
     const created = await prisma.$transaction(async (tx) => {
-      const tenant = await tx.tenant.create({
-        // Same deployment default as the password path, an operator must not
-        // land in a wider workspace by choosing the OAuth button.
-        data: {
-          name: deriveWorkspaceName(input.name, email),
-          ownerEmail: email,
-          ...resolveNewTenantLimits(),
-        },
-      });
       const user = await tx.tenantUser.create({
         data: {
           email,
@@ -536,11 +543,14 @@ export const tenantAuthService = {
           ...(input.name !== undefined && { name: input.name }),
         },
       });
-      await tx.tenantMembership.create({
-        data: { tenantUserId: user.id, tenantId: tenant.id, role: 'OWNER' },
+      const { tenantId } = await joinOrCreateWorkspace(tx, {
+        userId: user.id,
+        email,
+        invite,
+        workspaceName: deriveWorkspaceName(input.name, email),
       });
       if (invite) await consumeSignupInvite(tx, invite, user.id);
-      return { user, tenantId: tenant.id };
+      return { user, tenantId };
     });
     if (invite) {
       void recordSecurityEvent({
@@ -550,7 +560,11 @@ export const tenantAuthService = {
         tenantId: created.tenantId,
         ip: input.device?.ip ?? null,
         userAgent: input.device?.userAgent ?? null,
-        metadata: { inviteId: invite.inviteId, via: 'oauth' },
+        metadata: {
+          inviteId: invite.inviteId,
+          via: 'oauth',
+          ...(invite.workspace && { joinedAs: invite.workspace.role }),
+        },
       });
     }
     return created.user;

@@ -20,6 +20,8 @@ import { registerInitCommand } from './commands/init.js';
 import { registerDoctorCommand } from './commands/doctor.js';
 import { registerAppsCommand } from './commands/apps.js';
 import { registerPlansCommand } from './commands/plans.js';
+import { registerListsCommand } from './commands/lists.js';
+import { registerAnalyticsCommand } from './commands/analytics.js';
 import { registerVersionCommand } from './commands/version.js';
 import { VERSION } from './lib/version.js';
 import { isEntryPoint } from './lib/entry-point.js';
@@ -47,6 +49,8 @@ export function buildProgram(): Command {
     // readGlobalOpts falls back to the environment instead.
     .option('--api-url <url>', 'Rekey API URL (env: REKEY_URL)')
     .option('--admin-key <key>', 'Super-admin key (env: SUPER_ADMIN_KEY)')
+    .option('--secret-key <key>', 'Application secret key, for `lists` (env: REKEY_SECRET)')
+    .option('--operator-token <token>', 'Operator personal access token, for `analytics` (env: REKEY_OPERATOR_TOKEN)')
     .option('--json', 'Emit machine-readable JSON on stdout (errors still go to stderr).')
     .showHelpAfterError();
 
@@ -55,6 +59,8 @@ export function buildProgram(): Command {
   registerDoctorCommand(program);
   registerAppsCommand(program);
   registerPlansCommand(program);
+  registerListsCommand(program);
+  registerAnalyticsCommand(program);
 
   return program;
 }
@@ -87,7 +93,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     if (err instanceof CommanderError) {
       if (err.exitCode === 0) process.exit(0);
       fail(
-        { json, apiUrl: undefined, adminKey: undefined },
+        { json, apiUrl: undefined, adminKey: undefined, secretKey: undefined },
         { code: 'CLI_USAGE_ERROR', message: usageErrorMessage(err), fix: USAGE_ERROR_FIX },
       );
     }

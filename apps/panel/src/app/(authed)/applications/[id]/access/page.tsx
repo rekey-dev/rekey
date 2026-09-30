@@ -1,8 +1,8 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
+import Link from '@/components/Link';
 import { errorQuery, readErrorFlash, api, PanelApiError, getApplication } from '@/lib/api';
 import { ActionForm } from '@/components/ActionForm';
-import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { ApiErrorText } from '@/components/api-error';
 import { SavedBanner } from '@/components/SavedBanner';
 import { StickyFormFooter } from '@/components/StickyFormFooter';
@@ -36,24 +36,8 @@ async function saveAccess(applicationId: string, formData: FormData): Promise<vo
   redirect(`/applications/${applicationId}/access?saved=1`);
 }
 
-async function rotateSessions(applicationId: string): Promise<void> {
-  'use server';
-  try {
-    const r = await api<{ sessionsRevoked: number }>({
-      method: 'POST',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/rotate-sessions`,
-    });
-    redirect(`/applications/${applicationId}/access?rotated=${r.sessionsRevoked}`);
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/access?${await errorQuery(err)}`);
-    }
-    throw err;
-  }
-}
-
 const ERR: Record<string, string> = {
-  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can change access settings.',
+  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can change allowed origins and IPs.',
   FST_ERR_VALIDATION: 'One or more entries are invalid. IPs must be IP/CIDR; origins like https://app.example.com.',
 };
 
@@ -109,7 +93,6 @@ export default async function AccessPage({
   // panel's own error banner.
   const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const saved = sp.saved === '1';
-  const rotated = typeof sp.rotated === 'string' ? sp.rotated : undefined;
 
   const app = await getApplication(id);
   const ipAllowlist = (app.ipAllowlist ?? []).join('\n');
@@ -119,17 +102,20 @@ export default async function AccessPage({
     <div className="space-y-5">
       <PageHeader
         level={2}
-        title="Access controls"
-        description="Restrict which IPs your server-side secret keys may call from, which browser origins may call the API, and force every end-user to re-authenticate."
+        title="Allowed origins & IPs"
+        description={
+          <>
+            Which addresses your secret keys may call from, and which websites may call the API
+            from a browser. To sign every end-user out after an incident, use{' '}
+            <Link href={`/applications/${id}/settings#force-logout`} className="underline underline-offset-2">
+              Settings
+            </Link>
+            .
+          </>
+        }
       />
 
-      {saved && <SavedBanner message="Access settings saved." />}
-      {rotated !== undefined && (
-        <SavedBanner
-          params={['rotated']}
-          message={`Sessions rotated. Every end-user access token is now invalid and ${rotated} refresh token(s) were revoked.`}
-        />
-      )}
+      {saved && <SavedBanner message="Allowed origins and IPs saved." />}
       {error && (
         <Banner tone="error">
           <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
@@ -192,29 +178,6 @@ export default async function AccessPage({
           <StickyFormFooter hint="Applies to new requests immediately." />
         </div>
       </ActionForm>
-
-      <div className="rounded-xl border border-red-300 dark:border-red-800 bg-red-50/40 dark:bg-red-950/30">
-        <div className="flex items-start justify-between gap-4 px-5 py-4">
-          <div className="min-w-0">
-            <div className="text-sm font-medium text-red-700 dark:text-red-300">
-              Force-logout all end-users
-            </div>
-            <p className="mt-0.5 text-xs text-[var(--color-muted-fg)]">
-              Session kill-switch. Instantly invalidates every live end-user access token for this
-              app and revokes all refresh tokens. Use after a leak or incident. Irreversible.
-            </p>
-          </div>
-          <ActionForm action={rotateSessions.bind(null, id)} className="shrink-0">
-            <TypedConfirmButton
-              expected={app.slug}
-              title="Force-logout all end-users?"
-              description="Every live end-user access token for this application is invalidated and all refresh tokens are revoked, so every user must sign in again. This cannot be undone."
-              triggerLabel="Rotate sessions"
-              confirmLabel="Rotate sessions"
-            />
-          </ActionForm>
-        </div>
-      </div>
     </div>
   );
 }

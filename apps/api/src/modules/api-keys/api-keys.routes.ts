@@ -135,7 +135,8 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
             400:
               "BAD_REQUEST — the body failed schema validation; or API_KEY_EXPIRY_IN_PAST — " +
               "`expiresAt` is not in the future; or API_KEY_LIMIT_REACHED — the application " +
-              "already has 25 active keys.",
+              "already has 25 active keys; or API_KEY_SCOPE_UNKNOWN: `scopes` names a scope " +
+              "no route enforces.",
             ...SUPER_ADMIN_ERRORS,
             404: "APPLICATION_NOT_FOUND — no application with that id.",
           }),
@@ -151,6 +152,7 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
         applicationId: id,
         name: body.name,
         scopes: body.scopes,
+        revealsEndUserIps: true,
         ...(body.expiresAt !== undefined && {
           expiresAt: new Date(body.expiresAt),
         }),

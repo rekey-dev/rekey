@@ -36,6 +36,7 @@ import {
   lookupRefreshToken,
   rotateRefreshToken,
 } from '../../lib/refresh-tokens.js';
+import { recordActivitySafely } from '../end-users/daily-activity.js';
 import {
   OIDC_SCOPES_SUPPORTED,
   OPENID_SCOPE,
@@ -367,6 +368,9 @@ async function liveGrantSubject(
   // authenticate anywhere else either, so every token naming it reads as
   // invalid.
   if (!user || user.erasedAt !== null) return null;
+  // Operator ban, the same rule `assertEndUserNotBanned` enforces on the
+  // session API: every grant naming a banned user reads as invalid.
+  if (user.bannedAt !== null) return null;
 
   // `requireEmailVerification` has to hold here too. It was enforced at every
   // door on the first-party auth surface and at none on this one, so an
@@ -696,6 +700,7 @@ export const mcpOAuthService = {
     } catch {
       throw new OAuthError('invalid_grant', 'Refresh token could not be rotated (possible reuse).');
     }
+    await recordActivitySafely(outcome.token.endUserId, 'mcp');
     const access = issueMcpAccessToken({
       endUserId: outcome.token.endUserId,
       applicationId: args.application.id,
@@ -752,6 +757,7 @@ export const mcpOAuthService = {
       scope,
       grantOrganizationId: organizationId,
     });
+    await recordActivitySafely(user, 'mcp');
     const response: Record<string, unknown> = {
       access_token: access.token,
       token_type: 'Bearer',

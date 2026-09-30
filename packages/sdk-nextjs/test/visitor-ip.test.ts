@@ -32,6 +32,8 @@ const refresh = vi.fn();
 const getCurrentUser = vi.fn();
 /** The `clientIp` each scoped client was made with, in order. */
 const scopedWith: Array<string | undefined> = [];
+/** The `clientUserAgent` each scoped client was made with, in order. */
+const scopedUa: Array<string | undefined> = [];
 
 vi.mock('next/headers', () => ({
   cookies: async () => cookieJar,
@@ -41,8 +43,9 @@ vi.mock('next/navigation', () => ({ redirect: vi.fn() }));
 vi.mock('@rekey.dev/node', () => ({
   Rekey: class {
     auth = { signIn, signUp, mfaVerify, refresh, getCurrentUser };
-    with(opts: { clientIp?: string }) {
-      scopedWith.push(opts.clientIp);
+    with(opts: { clientIp?: string; clientUserAgent?: string }) {
+      if (opts.clientIp !== undefined) scopedWith.push(opts.clientIp);
+      if (opts.clientUserAgent !== undefined) scopedUa.push(opts.clientUserAgent);
       return this;
     }
   },
@@ -56,6 +59,7 @@ const session = { accessToken: 'a', refreshToken: 'r', endUser: { id: 'u' } };
 beforeEach(() => {
   jar.clear();
   scopedWith.length = 0;
+  scopedUa.length = 0;
   for (const f of [signIn, signUp, mfaVerify, refresh, getCurrentUser]) f.mockReset();
   signIn.mockResolvedValue({ ...session, mfaRequired: false });
   signUp.mockResolvedValue(session);
@@ -110,6 +114,17 @@ describe('signIn, signUp and mfaVerify forward the visitor', () => {
 
   it('sends none when the request carries no address', async () => {
     await server.signIn({ email: 'a@b.co', password: 'pw' });
+    expect(scopedWith).toEqual([]);
+  });
+
+  it.each([
+    ['signIn', () => server.signIn({ email: 'a@b.co', password: 'pw' })],
+    ['signUp', () => server.signUp({ email: 'a@b.co', password: 'pw' })],
+    ['mfaVerify', () => server.mfaVerify({ mfaChallengeToken: 't', code: '123456' })],
+  ])('%s forwards the visitor User-Agent', async (_name, call) => {
+    requestHeaders = new Headers({ 'user-agent': 'Mozilla/5.0 (iPhone) Safari/604.1' });
+    await call();
+    expect(scopedUa).toEqual(['Mozilla/5.0 (iPhone) Safari/604.1']);
     expect(scopedWith).toEqual([]);
   });
 });

@@ -107,3 +107,16 @@ describe('a wrong-application access token refreshes instead of looping', () => 
     await expect(auth()).resolves.toMatchObject({ user: { id: 'u1' } });
   });
 });
+
+describe('a banned or erased account signs out instead of crashing the page', () => {
+  it.each(['END_USER_BANNED', 'END_USER_ERASED'])('%s on the access token clears both cookies', async (code) => {
+    jar.set('rekey_access', 'a1');
+    jar.set('rekey_refresh', R1);
+    getCurrentUser.mockRejectedValue(new FakeRekeyError(code));
+    refresh.mockRejectedValue(new FakeRekeyError(code));
+
+    await expect(auth()).resolves.toBeNull();
+    expect(jar.has('rekey_access')).toBe(false);
+    expect(jar.has('rekey_refresh')).toBe(false);
+  });
+});

@@ -19,6 +19,7 @@ import { WhileUrlHas } from '@/components/WhileUrlHas';
 import { SubmitButton } from '@/components/SubmitButton';
 import { formatDate } from '@/lib/date';
 import { Banner } from '@/components/Banner';
+import { savedStateKey } from '@/lib/saved-state-key';
 
 // Organization roles are a per-Application catalog, not this fixed list. These
 // three are only the built-ins every Application is seeded with, kept as a
@@ -329,7 +330,11 @@ export default async function OrganizationDetailPage({
                 <TR key={m.id} hover>
                   <TD>{m.email}</TD>
                   <TD>
-                    <ActionForm action={setMemberRole.bind(null, id, orgId, m.endUserId)} className="flex items-center gap-2">
+                    <ActionForm
+                      key={savedStateKey(m.role)}
+                      action={setMemberRole.bind(null, id, orgId, m.endUserId)}
+                      className="flex items-center gap-2"
+                    >
                       <select name="role" defaultValue={m.role} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)]">
                         {roleOptionsFor(m.role).map((r) => (
                           <option key={r} value={r}>

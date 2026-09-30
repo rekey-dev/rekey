@@ -16,9 +16,9 @@
 import type { Application } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { RekeyError } from '../../lib/error.js';
-import { AuthConfigSchema } from '@rekey.dev/shared-types';
+import { AuthConfigSchema, createdViaOAuth } from '@rekey.dev/shared-types';
 import { assertSignupAllowed, type AuthKind } from '../../lib/signup-policy.js';
-import { assertDeviceBindingSatisfiable } from '../auth/auth.service.js';
+import { assertDeviceBindingSatisfiable, assertEndUserNotBanned } from '../auth/auth.service.js';
 import { deliverVerificationEmail } from '../auth/auth.service.js';
 import { assertEndUserQuota } from '../../lib/tenant-limits.js';
 import { encryptJson, decryptJson } from '../../lib/secrets.js';
@@ -232,6 +232,9 @@ export const oauthService = {
         },
       });
       if (matchedByEmail) {
+        // Refuse before the link is written, so a banned account does not
+        // gain a provider identity it will keep after the ban is lifted.
+        assertEndUserNotBanned(matchedByEmail);
         await prisma.oAuthIdentity.create({
           data: {
             applicationId: args.application.id,
@@ -309,6 +312,7 @@ export const oauthService = {
           // which silently laundered unverified emails into trusted state.
           emailVerified: identity.emailVerified,
           welcomeEmailPending: welcome === 'pending',
+          createdVia: createdViaOAuth(args.providerName),
         },
       });
       await tx.oAuthIdentity.create({

@@ -18,6 +18,7 @@ import { RekeyError } from '../../lib/error.js';
 import { generateSecretKey, hashKey } from '../../lib/keys.js';
 import { forgetVerifiedKey } from '../../lib/rate-limit.js';
 import type { ApiKey, Application } from '@prisma/client';
+import { API_KEY_SCOPES, isApiKeyScope } from '@rekey.dev/shared-types';
 
 /**
  * Public-safe shape of an API key, `keyHash` stripped. The hash isn't
@@ -37,6 +38,11 @@ export interface CreateApiKeyInput {
   name: string;
   scopes: string[];
   expiresAt?: Date;
+  /**
+   * Whether the key reads end-user IP addresses in full: whoever mints it must
+   * be allowed to (lib/ip-mask.ts `mayReadRawIps`). Otherwise they are masked.
+   */
+  revealsEndUserIps: boolean;
 }
 
 export interface CreateApiKeyResult {
@@ -56,6 +62,23 @@ const DEFAULT_SCOPES = ['*'];
  */
 export const MAX_KEYS_PER_APP = 25;
 
+/**
+ * Refuse a scope no route enforces. Stored as-is it would never match, so a
+ * typo would mint a key with less authority than the caller believes it has.
+ * Checked on create only: keys already stored are not re-validated.
+ */
+function assertKnownScopes(scopes: readonly string[]): void {
+  const unknown = [...new Set(scopes.filter((s) => !isApiKeyScope(s)))];
+  if (unknown.length === 0) return;
+  throw new RekeyError({
+    statusCode: 400,
+    code: 'API_KEY_SCOPE_UNKNOWN',
+    message: `Unknown API key scope${unknown.length === 1 ? '' : 's'}: ${unknown.map((s) => JSON.stringify(s)).join(', ')}.`,
+    fix: `Remove or correct ${unknown.length === 1 ? 'it' : 'them'}. Valid scopes: ${API_KEY_SCOPES.join(', ')}. Omit \`scopes\` for a key with \`*\`.`,
+    details: { unknown, valid: [...API_KEY_SCOPES] },
+  });
+}
+
 export const apiKeysService = {
   async listForApplication(applicationId: string): Promise<PublicApiKey[]> {
     const keys = await prisma.apiKey.findMany({
@@ -66,6 +89,7 @@ export const apiKeysService = {
   },
 
   async create(input: CreateApiKeyInput): Promise<CreateApiKeyResult> {
+    assertKnownScopes(input.scopes);
     // A non-future expiry would mint a key that `verify()` immediately rejects
     // as expired, a dead-on-arrival credential the operator was told was
     // "created". Fail fast with a clear error instead.
@@ -117,6 +141,7 @@ export const apiKeysService = {
         keyPrefix: prefix,
         keyHash: hash,
         scopes: input.scopes.length > 0 ? input.scopes : DEFAULT_SCOPES,
+        revealsEndUserIps: input.revealsEndUserIps,
         ...(input.expiresAt !== undefined && { expiresAt: input.expiresAt }),
       },
     });

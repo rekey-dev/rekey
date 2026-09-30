@@ -1,7 +1,9 @@
 /**
- * Format helpers, kept tiny and dependency-free. Tailwind handles styling;
- * this module just turns server data into display strings.
+ * Format helpers, kept tiny. Tailwind handles styling; this module just turns
+ * server data into display strings.
  */
+
+import { describeClientUserAgent } from '@rekey.dev/shared-types';
 
 /**
  * Format an integer amount in the smallest currency unit as a human price
@@ -61,35 +63,16 @@ export function describeUserAgent(ua: string | null): DescribedUserAgent {
     };
   }
 
-  const os = /Windows NT/i.test(raw)
-    ? 'Windows'
-    : /iPhone|iPad|iOS/i.test(raw)
-      ? 'iOS'
-      : /Android/i.test(raw)
-        ? 'Android'
-        : /Mac OS X|Macintosh/i.test(raw)
-          ? 'macOS'
-          : /Linux/i.test(raw)
-            ? 'Linux'
-            : null;
-
-  // Order matters: Edge and Chrome both claim "Chrome"; Safari is claimed by
-  // everything Chromium.
-  const browser = /Edg\//i.test(raw)
-    ? 'Edge'
-    : /OPR\/|Opera/i.test(raw)
-      ? 'Opera'
-      : /Firefox\//i.test(raw)
-        ? 'Firefox'
-        : /Chrome\//i.test(raw)
-          ? 'Chrome'
-          : /Safari\//i.test(raw)
-            ? 'Safari'
-            : null;
+  const { os, browser } = describeClientUserAgent(raw);
 
   if (browser && os) return { label: `${browser} on ${os}` };
   if (browser) return { label: browser };
   if (os) return { label: os };
   // Unrecognised: show it, truncated, rather than inventing a label.
   return { label: raw.length > 60 ? `${raw.slice(0, 57)}…` : raw };
+}
+
+/** `plural(3, 'device')` is "3 devices"; pass `many` for irregular nouns. */
+export function plural(n: number, one: string, many?: string): string {
+  return `${n} ${n === 1 ? one : (many ?? `${one}s`)}`;
 }

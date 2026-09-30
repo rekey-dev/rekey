@@ -782,6 +782,35 @@ describe('custom email templates', () => {
       expect(h.sends).toHaveLength(0);
     });
 
+    it('checks preview overrides with the rules send and publish apply', async () => {
+      const w = await world();
+      await createTemplate(w);
+      const preview = (variables: Record<string, string>) =>
+        inject({
+          method: 'POST',
+          url: `${base(w)}/custom-email-templates/order_shipped/preview`,
+          headers: auth(w.ownerToken),
+          payload: { variables },
+        });
+
+      for (const trackingUrl of ['javascript:alert(1)', 'https://evil.test/x', 'http://track.acme.test/x']) {
+        const res = await preview({ trackingUrl });
+        expect(res.statusCode, trackingUrl).toBe(400);
+        expect(res.json().error.code).toBe('EMAIL_VARIABLES_INVALID');
+        expect(res.json().error.details.issues[0].path).toBe('variables.trackingUrl');
+      }
+      const undeclared = await preview({ notDeclared: 'x' });
+      expect(undeclared.statusCode).toBe(400);
+      expect(undeclared.json().error.details.issues[0].path).toBe('variables.notDeclared');
+      const badDate = await preview({ shippedOn: 'yesterday' });
+      expect(badDate.statusCode).toBe(400);
+
+      const ok = await preview({ trackingUrl: 'https://track.acme.test/A-1042', orderNumber: 'A-1042' });
+      expect(ok.statusCode, ok.body).toBe(200);
+      expect(ok.json().data.html).toContain('href="https://track.acme.test/A-1042"');
+      expect(ok.json().data.subject).toBe('Order A-1042 shipped');
+    });
+
     it('shows an undeclared variable as its token and lists it, instead of rendering it empty', async () => {
       const w = await world();
       await createTemplate(w, {

@@ -46,9 +46,9 @@ For an erasure of end-user `E` in application `A`:
 
 | Model | Action | Detail |
 |---|---|---|
-| `EndUser` | **anonymize (tombstone)** | `email` → `erased+<id>@deleted.invalid`, `emailVerified` → false, `passwordHash` → null, `metadata` → null, `role` → `"user"`, `erasedAt`/`erasedBy` set. Row **kept**. |
+| `EndUser` | **anonymize (tombstone)** | `email` → `erased+<id>@deleted.invalid`, `emailVerified` → false, `passwordHash` → null, `metadata` → null, `lastPlatform` / `lastCountry` → null, `platformsSeen` → empty, `profile` (onboarding answers) → `{}`, `onboardingSkippedAt` → null, `role` → `"user"`, `erasedAt`/`erasedBy` set. The sign-in counters and active-day window are kept: they are not personal data. Row **kept**. |
 | `OAuthIdentity` | **delete** | All of E's provider links removed. |
-| `RefreshToken` | **delete** | All sessions (session + mcp kinds) removed → existing sessions die. |
+| `RefreshToken` | **delete** | All sessions (session + mcp kinds) removed → existing sessions die, with the User-Agent, IP, platform and country each recorded. |
 | `MfaCredential` | **delete** | TOTP secret + backup codes gone. |
 | `WebAuthnCredential` | **delete** | All passkeys removed. |
 | `MagicLinkToken` | **delete** | Any outstanding magic links removed. |
@@ -67,10 +67,13 @@ For an erasure of end-user `E` in application `A`:
 | `SecurityEvent` | **retain, bounded** | Security audit trail (including the erasure event itself) is retained for forensics indefinitely by default, or for `LOG_RETENTION_DAYS` when that is set, then pruned. Erasure does not scrub these rows, so their `ip` and `user_agent` go to the log archive when one is configured. See "The log archive" below. |
 | `EmailLog` | **retain + scrub** | Rows kept: send counts and outcomes are operational data. On every row of A sent to one of E's addresses, `to_address` becomes the tombstone address, `subject` becomes `[erased]` (templates interpolate variables into it, so it can hold a name), and any copy of the address inside `error` is replaced with the tombstone. `event_key`, `via`, `status`, `message_id` and timestamps untouched. |
 | `EmailSuppression` | **delete** | Suppression rows for E's addresses in A are deleted. See "Suppressions" below for why they are not kept as a hash. |
-| `WebhookDelivery` | **retain + scrub** | Rows, status, attempts and response kept. Deliveries are matched by E's **id** at the places Rekey's own events put it (`data.user.id`, `data.userId`, `data.endUserId`, and `endUserId` under `data.device`, `data.subscription`, `data.payment`, `data.dunningCase`, `data.license`, `data.credit`), never by searching payloads for text. In a matched payload: `email` becomes the tombstone address, a device `fingerprint` becomes `erased`, `metadata` / `label` / `description` become null, and any other copy of the address is replaced. `updated_at` is not bumped, so the retention clock is unchanged. |
+| `WebhookDelivery` | **retain + scrub** | Rows, status, attempts and response kept. Deliveries are matched by E's **id** at the places Rekey's own events put it (`data.user.id`, `data.userId`, `data.endUserId`, and `endUserId` under `data.device`, `data.subscription`, `data.payment`, `data.dunningCase`, `data.license`, `data.credit`), never by searching payloads for text. In a matched payload: `email` becomes the tombstone address, a device `fingerprint` becomes `erased`, `metadata` / `label` / `description` / `country` become null, and any other copy of the address is replaced. `updated_at` is not bumped, so the retention clock is unchanged. |
 | `WebhookEvent` | **retain + scrub** | Inbound billing receipts (the provider's own event body). They carry no Rekey end-user id, so they are matched by E's address within A, and only occurrences of that address are replaced with the tombstone; other fields the provider sent (a billing name or postal address) are not interpreted. Set `WEBHOOK_EVENT_RETENTION_DAYS` to bound how long those survive. Nothing replays a stored receipt, so the rewrite changes no billing state. |
 | `ImpersonationAudit` | **retain** | Operator-accountability trail — retained. |
 | `DunningCase` | **retain** | Denormalized `endUserId` (no FK); part of the billing record. |
+| `Contact` (lists) | **delete** | The contact at one of E's addresses in A, with every `ContactListMember` (consent proof included) and `ContactSubmission`, is hard-deleted. Nothing financial hangs off a contact, so there is nothing to keep a tombstone for. Counted as `contactsErased` in the `end_user.erased` metadata. |
+| `ContactErasureTombstone` (lists) | **create** | One row per erased address: an HMAC-SHA256 of the Application id and the address, keyed by `JWT_SECRET`, never the address. For 30 days a browser subscribe, or your server relaying one, at that address stores nothing, so a stranger cannot put the person straight back on a list. Your own server speaking for itself is not blocked. The prune sweep deletes the row when it expires. Operator contact erasure writes one too. |
+| `WebhookDelivery` (lists) | **retain + scrub** | `contact.*` deliveries are matched by the contact's **id** at `data.contact.id`. `data.contact.email` becomes `erased+<contactId>@deleted.invalid`, `data.contact.name` becomes null, and `data.submission.fields` becomes null. `updated_at` is not bumped. |
 | Redis brute-force lock | **delete** | `bf:fail:` / `bf:lock:eu:login:<appId>:<email>` for the erased address. The key embeds the email in plaintext and the super-admin locked-accounts dashboard enumerates those keys, so a surviving lock would keep the address readable for the rest of its 15-minute TTL. Best-effort, outside the transaction (Redis can't join it). |
 
 > Erasure is **idempotent**: erasing an already-tombstoned user is a no-op (the
@@ -86,6 +89,18 @@ address another end-user of A currently holds is excluded. An address E used and
 changed away from before any of those tokens existed is not known to Rekey any
 more, so rows sent to it are not matched. Every match is scoped to A: the same
 address in another Application is a different data subject and is not touched.
+
+## Contacts that are not end users
+
+Someone on a list (see [lists.md](lists.md)) who never signed up has no end-user
+row to erase. `DELETE /api/v1/tenant/applications/:id/contacts/:contactId`
+erases one: it hard-deletes the contact with its memberships and submissions,
+and scrubs `contact.*` webhook deliveries exactly as in the matrix above. It
+requires the **workspace OWNER** role, like end-user erasure, and records a
+`contact.erased` security event. An end user at the same address is not
+touched. The DSAR export of an end user includes the contact at their address
+under `contacts`, for every address erasure would cover (a pending email
+change included).
 
 ## Suppressions
 
@@ -159,6 +174,12 @@ END_USER_ERASED` would be indistinguishable from a bug:
 ## Observability
 
 - **Security event:** `end_user.erased` (actor = operator) with per-model counts.
+- **Operator notes:** the ban reason on the row (`banReason`) is nulled, and the
+  `reason` key is removed from this user's `end_user.banned` and
+  `end_user.device_blocked` security events. `bannedAt` and `bannedBy` stay:
+  they say nothing about the person. A ban and an erasure are different tools:
+  a ban is reversible and keeps the account, erasure is permanent and frees the
+  email for a new sign-up.
 - **Outbound webhook:** `user.erased` — payload `data.user` = `{ id, erasedAt }`.
   Use it to propagate the erasure to your own copies of the user's PII. (See the
   webhook events registry — `WEBHOOK_EVENTS` from `@rekey.dev/node` — and

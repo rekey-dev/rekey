@@ -98,7 +98,7 @@ function pullNotConfigured(): RekeyError {
     statusCode: 400,
     code: 'EXTERNAL_PULL_NOT_CONFIGURED',
     message: 'This Application has no subscriptions endpoint configured for the external provider.',
-    fix: 'Set the subscriptions URL and pull token in Panel → Application → Billing → Providers, then run the import again.',
+    fix: 'Set the subscriptions URL and pull token in Panel → Application → Billing → Setup → Providers, then run the import again.',
   });
 }
 

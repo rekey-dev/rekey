@@ -187,6 +187,11 @@ COPY --from=build --chown=node:node /app/apps/panel/.next/standalone ./
 # them to the path Next expects. (panel has no public/ dir.)
 COPY --from=build --chown=node:node /app/apps/panel/.next/static apps/panel/.next/static
 
+# The commit this image was built from, shown in the sidebar next to the API's
+# (apps/panel/src/lib/build-info.ts). Unset reads as `unknown`.
+ARG REKEY_COMMIT=
+ENV REKEY_COMMIT=$REKEY_COMMIT
+
 EXPOSE 3031
 # Run as the unprivileged `node` user. --chown above gives it ownership of the
 # app tree so Next can write its runtime cache.

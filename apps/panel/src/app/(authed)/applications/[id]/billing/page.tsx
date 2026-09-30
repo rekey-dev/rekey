@@ -1,268 +1,35 @@
 import * as React from 'react';
 import { redirect } from 'next/navigation';
-import { errorQuery, readErrorFlash, api, PanelApiError, type PlanRow, type BillingCredentialRow, type BillingProviderDescriptor, type BillingProviderName, type SecurityEventRow, getApplication, unlessBusy } from '@/lib/api';
-import { CopyButton } from '@/components/CopyButton';
+import type { CheckoutStatusPanel } from '@rekey.dev/shared-types';
+import Link from '@/components/Link';
+import { apiGet, getApplication, readErrorFlash, unlessBusy } from '@/lib/api';
+import { hasScope } from '@/lib/operator-scopes';
 import { ApiErrorText } from '@/components/api-error';
 import { ConfirmButton } from '@/components/ConfirmButton';
-import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { ActionForm } from '@/components/ActionForm';
 import { SubmitButton } from '@/components/SubmitButton';
 import { SavedBanner } from '@/components/SavedBanner';
-import { formatDateTime } from '@/lib/date';
-import { publicHttpUrl } from '@/lib/public-url';
-import { emptyPage, type Page } from '@/lib/paginate';
-import { Modal } from '@/components/Modal';
-import { BillingModeAutodetect } from '@/components/BillingModeAutodetect';
-import { BillingModeNotice } from '@/components/BillingModeBanner';
-import { ExternalIngressSetup } from '@/components/ExternalIngressSetup';
 import { Card, SectionHeader } from '@/components/Card';
-import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
-import { Badge, type BadgeTone } from '@/components/Badge';
-import { EmptyState } from '@/components/EmptyState';
+import { Badge } from '@/components/Badge';
 import { Banner } from '@/components/Banner';
-import { CheckoutPageSection } from './checkout-page-section';
+import { setBillingEnabled } from './actions';
+import { LegacyHashRedirect } from './legacy-hash-redirect';
+import { ReturnUrlNotice, UnbuyablePlansNotice } from './notices';
+import {
+  BILLING_ERR,
+  billingBase,
+  getBillingProviders,
+  getPlans,
+  getReturnUrlEvents,
+  isInboundOnly,
+  soldExternally,
+  unbuyablePlans,
+  unregisteredOrigins,
+} from './shared';
 
-interface WebhookEventRow {
-  id: string;
-  provider: string;
-  providerEventId: string;
-  eventType: string;
-  status: 'processed' | 'error' | 'received';
-  receivedAt: string;
-  processedAt: string | null;
-  processingError: string | null;
-}
+type Health = 'ok' | 'warn' | 'idle';
 
-/** How far back the unregistered-return-URL notice looks. */
-const RETURN_URL_NOTICE_DAYS = 7;
-
-/** Distinct origins named by the unregistered-return-URL events in view. */
-function unregisteredOrigins(events: SecurityEventRow[]): string[] {
-  const origins = new Set<string>();
-  for (const e of events) {
-    const listed = e.metadata.origins;
-    if (!Array.isArray(listed)) continue;
-    for (const o of listed) if (typeof o === 'string') origins.add(o);
-  }
-  return [...origins];
-}
-
-const WEBHOOK_STATUS_TONE: Record<WebhookEventRow['status'], BadgeTone> = {
-  processed: 'success',
-  received: 'warning',
-  error: 'danger',
-};
-
-/**
- * The ONE generic credentials action (P4), replaces the per-provider
- * upsertStripe/upsertPaypal/upsertRazorpay trio. `fieldKeys` is bound from
- * the provider's discovery `credentialFields`, so the collected `data` shape
- * always matches what the module's registry-derived PUT route expects. The
- * API re-validates everything (pattern prefixes, required fields) and raises
- * BILLING_CREDENTIALS_INVALID, surfaced via the ?error banner.
- */
-async function saveProviderCredentials(
-  applicationId: string,
-  provider: BillingProviderName,
-  fieldKeys: string[],
-  isEdit: boolean,
-  formData: FormData,
-): Promise<void> {
-  'use server';
-  const data: Record<string, string> = {};
-  for (const key of fieldKeys) {
-    const value = String(formData.get(key) ?? '').trim();
-    // On an EDIT, a blank input is "I did not touch this", so the key is
-    // omitted and the API keeps the stored value. That is what this dialog has
-    // always said it does; before the API learned to merge, sending the blank
-    // through overwrote the stored secret and the request was rejected.
-    //
-    // On first configuration there is nothing to keep, so blanks are sent and
-    // the API reports which required field is missing.
-    //
-    // Clearing a stored field is deliberately not reachable from here: send an
-    // explicit empty string over the API or MCP for that.
-    if (isEdit && value === '') continue;
-    data[key] = value;
-  }
-  const countries = parseCountries(formData.get('countries'));
-  const priority = parsePriority(formData.get('priority'));
-  const mode = parseMode(formData.get('mode'));
-  try {
-    await api({
-      method: 'PUT',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${encodeURIComponent(provider)}`,
-      body: { data, countries, priority, mode },
-    });
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(
-        `/applications/${applicationId}/billing?${await errorQuery(err, { edit: provider })}`,
-      );
-    }
-    throw err;
-  }
-  redirect(`/applications/${applicationId}/billing?saved=${encodeURIComponent(provider)}`);
-}
-
-async function toggleEnabled(
-  applicationId: string,
-  provider: BillingProviderName,
-  enabled: boolean,
-): Promise<void> {
-  'use server';
-  await api({
-    method: 'PATCH',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${encodeURIComponent(provider)}`,
-    body: { enabled },
-  });
-  redirect(`/applications/${applicationId}/billing`);
-}
-
-/**
- * Master billing switch for the whole application. Off (default for new apps)
- * gates the entire public billing surface server-side (checkout, subscriptions,
- * plans, coupons, credits, licenses, usage) and hides the Billing tab group.
- */
-async function setBillingEnabled(applicationId: string, enabled: boolean): Promise<void> {
-  'use server';
-  try {
-    await api({
-      method: 'PATCH',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-config`,
-      body: { enabled },
-    });
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/billing?${await errorQuery(err)}`);
-    }
-    throw err;
-  }
-  redirect(`/applications/${applicationId}/billing?saved=billing`);
-}
-
-/**
- * Failed-payment recovery (dunning) opt-in. When on, a subscription that goes
- * PAST_DUE opens a dunning case: reminder emails on day 0/3/7 and an automatic
- * cancel on day 14 (local + provider-side). Off by default, turning it off
- * only stops NEW cases; any case already in flight runs to completion.
- */
-async function setDunningEnabled(applicationId: string, dunningEnabled: boolean): Promise<void> {
-  'use server';
-  try {
-    await api({
-      method: 'PATCH',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-config`,
-      body: { dunningEnabled },
-    });
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/billing?${await errorQuery(err)}`);
-    }
-    throw err;
-  }
-  redirect(`/applications/${applicationId}/billing?saved=dunning`);
-}
-
-async function setBillingSubject(applicationId: string, billingSubject: 'user' | 'org'): Promise<void> {
-  'use server';
-  try {
-    await api({
-      method: 'PATCH',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-config`,
-      body: { billingSubject },
-    });
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/billing?${await errorQuery(err)}`);
-    }
-    throw err;
-  }
-  redirect(`/applications/${applicationId}/billing?saved=subject`);
-}
-
-async function removeProvider(
-  applicationId: string,
-  provider: BillingProviderName,
-): Promise<void> {
-  'use server';
-  await api({
-    method: 'DELETE',
-    path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${encodeURIComponent(provider)}`,
-  });
-  redirect(`/applications/${applicationId}/billing`);
-}
-
-async function registerWebhook(
-  applicationId: string,
-  provider: BillingProviderName,
-): Promise<void> {
-  'use server';
-  try {
-    await api({
-      method: 'POST',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(applicationId)}/billing-credentials/${encodeURIComponent(provider)}/register-webhook`,
-    });
-  } catch (err) {
-    if (err instanceof PanelApiError) {
-      redirect(`/applications/${applicationId}/billing?${await errorQuery(err)}`);
-    }
-    throw err;
-  }
-  redirect(`/applications/${applicationId}/billing?webhook=${provider}`);
-}
-
-function parseCountries(raw: FormDataEntryValue | null): string[] {
-  if (typeof raw !== 'string') return [];
-  return raw
-    .split(/[,\s]+/)
-    .map((c) => c.trim().toUpperCase())
-    .filter((c) => c.length === 2);
-}
-
-function parsePriority(raw: FormDataEntryValue | null): number {
-  if (typeof raw !== 'string' || raw === '') return 100;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n < 0 || n > 1000) return 100;
-  return Math.round(n);
-}
-
-function parseMode(raw: FormDataEntryValue | null): 'test' | 'live' {
-  return raw === 'live' ? 'live' : 'test';
-}
-
-const ERR: Record<string, string> = {
-  BILLING_CREDENTIALS_INVALID: 'Credentials format invalid for this provider. Check key prefixes.',
-  TENANT_ROLE_INSUFFICIENT: 'Only owners and admins can configure billing.',
-  BILLING_CREDENTIALS_NOT_CONFIGURED: 'Save the provider credentials first, then auto-configure the webhook.',
-  BILLING_WEBHOOK_BASE_NOT_PUBLIC:
-    'Webhook auto-config needs a public API URL. Set PUBLIC_WEBHOOK_BASE_URL on the API deployment (or an ngrok tunnel in dev).',
-  BILLING_WEBHOOK_AUTOCONFIG_UNSUPPORTED:
-    'This provider has no webhook-create API. Configure its webhook manually in the dashboard.',
-  BILLING_WEBHOOK_REGISTRATION_FAILED:
-    'The provider rejected webhook setup, usually wrong credentials or the wrong mode (live keys with mode=test). Re-check the API key/secret + mode, then retry.',
-  INTERNAL_ERROR: 'Something went wrong. Check the API logs for the request id.',
-  CHECKOUT_READINESS_FAILED:
-    'The Rekey checkout page is not ready for that mode. Fix each FAIL in the Checkout page section, then switch again.',
-};
-
-/**
- * Built-in fallback labels (P4): the discovery endpoint's `label` is the
- * source of truth; this map only covers banner lookups for names that fall
- * outside the fetched registry (e.g. a stale `?saved=` param). Unknown names
- * degrade to a capitalized spelling.
- */
-const FALLBACK_LABEL: Record<string, string> = {
-  stripe: 'Stripe',
-  paypal: 'PayPal',
-  razorpay: 'Razorpay',
-};
-
-function capitalize(name: string): string {
-  return name.length === 0 ? name : name[0]!.toUpperCase() + name.slice(1);
-}
-
-export default async function BillingPage({
+export default async function BillingStatusPage({
   params,
   searchParams,
 }: {
@@ -271,841 +38,230 @@ export default async function BillingPage({
 }): Promise<React.JSX.Element> {
   const { id } = await params;
   const sp = await searchParams;
+  // Links from before the tabs opened a provider's dialog with `?edit=` and
+  // reported an auto-configured webhook with `?webhook=`. Both belong to the
+  // Providers tab now, so a bookmark still lands on the dialog it named.
+  if (typeof sp.edit === 'string' || typeof sp.webhook === 'string') {
+    redirect(`${billingBase(id)}/providers?${legacyQuery(sp)}`);
+  }
   const error = typeof sp.error === 'string' ? sp.error : undefined;
-  // The API's own message and fix for this failure, left by `errorQuery`
-  // in a short-lived httpOnly cookie. Not in the URL: a query parameter is
-  // written by whoever composes the link, and this text renders inside the
-  // panel's own error banner.
   const { detail: errorDetail, fix: errorFix } = await readErrorFlash(error);
   const saved = typeof sp.saved === 'string' ? sp.saved : undefined;
-  const edit = typeof sp.edit === 'string' ? sp.edit : undefined;
-  const webhook = typeof sp.webhook === 'string' ? sp.webhook : undefined;
 
-  const returnUrlSince = new Date(Date.now() - RETURN_URL_NOTICE_DAYS * 24 * 60 * 60 * 1000);
-  const [app, discovery, webhookEventPage, planPage, returnUrlEventPage] = await Promise.all([
+  const [app, providers, planPage, returnUrlEvents, checkout] = await Promise.all([
     getApplication(id),
-    // P4 discovery: every registered provider module + this app's configured
-    // status in one call, drives the provider table, labels, and the
-    // autogenerated credential forms.
-    api<{ providers: BillingProviderDescriptor[] }>({
-      method: 'GET',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/billing/providers`,
-    }),
-    api<Page<WebhookEventRow>>({
-      method: 'GET',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/billing-credentials/webhook-events?limit=25`,
-    }).catch(unlessBusy(() => emptyPage<WebhookEventRow>(25))),
-    // Read here because THIS is the page where the damage is done. Connecting a
-    // provider does not reach back and register the plans that already exist,
-    // and the operator who just pasted a secret key has every reason to believe
-    // billing now works. It does not, for exactly the plans they created first.
-    api<Page<PlanRow>>({
-      method: 'GET',
-      path: `/api/v1/tenant/applications/${encodeURIComponent(id)}/plans`,
-    }).catch(unlessBusy(() => emptyPage<PlanRow>())),
-    // Checkouts that sent buyers to an origin this Application never
-    // registered. Allowed today, refused from the next minor, so this is the
-    // operator's warning. The security log is OWNER/ADMIN only; anyone else
-    // simply sees no notice.
-    api<Page<SecurityEventRow>>({
-      method: 'GET',
-      path: `/api/v1/tenant/security-events?${new URLSearchParams({
-        applicationId: id,
-        type: 'app.checkout_return_url_unregistered',
-        from: returnUrlSince.toISOString(),
-        limit: '50',
-      }).toString()}`,
-    }).catch(() => emptyPage<SecurityEventRow>(50)),
+    getBillingProviders(id),
+    getPlans(id),
+    getReturnUrlEvents(id),
+    apiGet<CheckoutStatusPanel>(
+      `/api/v1/tenant/applications/${encodeURIComponent(id)}/checkout/status`,
+      { interruptOnAccessError: false },
+    ).catch(unlessBusy(() => null)),
   ]);
-  const returnUrlWarnings = returnUrlEventPage.page.total;
-  const returnUrlOrigins = unregisteredOrigins(returnUrlEventPage.items);
 
-  // Active plans no configured provider will honour. PENDING and FAILED are
-  // excluded: those already have their own state and their own repair on the
-  // Plans page, and this notice is about the ones that look healthy.
-  const unbuyablePlans = planPage.items.filter(
-    (p) =>
-      p.active &&
-      p.checkout?.ready === false &&
-      p.registrationStatus !== 'PENDING' &&
-      p.registrationStatus !== 'FAILED',
-  );
-
-  const webhookEvents = webhookEventPage.items;
-  const providers = discovery.providers;
-  // Configured-credential rows, reconstructed from the discovery statuses,
-  // same shape `GET /billing-credentials` returns (BillingModeNotice reads it).
-  const list: BillingCredentialRow[] = providers
-    .filter((d) => d.status !== null)
-    .map((d) => ({ provider: d.name, configured: true, ...d.status! }));
-  const labelOf = (name: string): string =>
-    providers.find((d) => d.name === name)?.label ?? FALLBACK_LABEL[name] ?? capitalize(name);
+  const base = billingBase(id);
   const billingEnabled = app.billingConfig.enabled;
   const dunningEnabled = app.billingConfig.dunningEnabled ?? false;
-
-  // This URL is PASTED INTO the provider dashboard, so it must be the PUBLIC
-  // API origin the provider can reach, not the in-cluster REKEY_URL
-  // (e.g. `http://api:3030`), which would show an unreachable `api:3030`-style
-  // host. Prefer NEXT_PUBLIC_API_URL (the public origin); fall back to
-  // REKEY_URL only for local dev where they're the same, and only after
-  // publicHttpUrl() confirms it looks public (dotted host or localhost), so an
-  // in-cluster value never leaks into the HTML. When neither passes, apiBase is
-  // null and the row renders a "configure NEXT_PUBLIC_API_URL" warning so the
-  // operator catches it before pasting (Stripe silently rejects relative/bad
-  // hosts and the webhook then fails forever, UX-AUDIT MEDIUM #24).
-  const apiBase =
-    publicHttpUrl(process.env.NEXT_PUBLIC_API_URL) ?? publicHttpUrl(process.env.REKEY_URL);
-  // Module-name-driven (P4): the shared webhook pipeline route is
-  // /billing/webhook/:provider/:slug for every registered module.
-  const webhookUrlFor = (name: string): string | null =>
-    apiBase ? `${apiBase}/api/v1/billing/webhook/${encodeURIComponent(name)}/${app.slug}` : null;
-  // An inbound-only module has no legacy alias URL; it lives on the generic
-  // pipeline route only.
-  const ingressUrlFor = (name: string): string | null =>
-    apiBase ? `${apiBase}/api/v1/webhooks/billing/${encodeURIComponent(name)}/${app.slug}` : null;
-  const inboundOnly = (d: BillingProviderDescriptor): boolean => d.capabilities.checkout === false;
-  const checkoutProviders = providers.filter((d) => !inboundOnly(d));
-  const inboundProviders = providers.filter(inboundOnly);
-  // Every live plan blocked for the one reason "this Application sells through
-  // an external system" is a configuration, not a broken registration, and
-  // gets a note rather than the red banner.
-  const soldExternally =
-    unbuyablePlans.length > 0 &&
-    unbuyablePlans.every((p) =>
-      (p.checkout?.blockers ?? []).every((b) => b.code === 'PROVIDER_INBOUND_ONLY'),
-    );
+  const plans = planPage?.items ?? [];
+  const blocked = unbuyablePlans(plans);
+  const configured = providers.filter((d) => d.status !== null);
+  const active = configured.filter((d) => d.status!.enabled);
+  const live = active.filter((d) => d.status!.mode === 'live');
+  const missingWebhook = active.filter((d) => !d.status!.webhookConfigured);
+  const activePlans = plans.filter((p) => p.active).length;
+  const canWrite = hasScope(app.access?.scopes ?? null, 'billing:write');
+  const rekeyPageModes = checkout
+    ? (['test', 'live'] as const).filter((m) =>
+        (m === 'test' ? checkout.settings.checkoutModeTest : checkout.settings.checkoutModeLive) === 'EMBEDDED',
+      )
+    : [];
 
   return (
     <div className="space-y-5">
-      {billingEnabled && <BillingModeNotice rows={list} />}
-      {returnUrlWarnings > 0 && (
-        <Banner tone="warning">
-          <p className="font-medium">
-            {returnUrlWarnings === 1
-              ? `One checkout in the last ${RETURN_URL_NOTICE_DAYS} days returned the buyer to an origin this Application has not registered.`
-              : `${returnUrlWarnings} checkouts in the last ${RETURN_URL_NOTICE_DAYS} days returned buyers to origins this Application has not registered.`}
-          </p>
-          <p className="mt-1 text-xs">
-            They still work today. The next minor release refuses a checkout whose success or cancel
-            URL is on an unregistered origin, so{' '}
-            <a className="underline" href={`/applications/${encodeURIComponent(id)}/auth`}>
-              add these to the redirect URLs or set the Application URL
-            </a>{' '}
-            before upgrading.
-          </p>
-          {returnUrlOrigins.length > 0 && (
-            <p className="mt-1.5 font-mono text-[11px]">{returnUrlOrigins.join(', ')}</p>
-          )}
-        </Banner>
-      )}
-      {soldExternally && (
-        <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-2.5 text-sm text-[var(--color-fg)]">
-          <p className="font-medium">Plans are sold through your external billing system.</p>
-          <p className="mt-1 text-xs text-[var(--color-muted-fg)]">
-            Rekey checkout is off for {unbuyablePlans.length === 1 ? 'the one live plan' : `all ${unbuyablePlans.length} live plans`}:
-            subscriptions are activated by the events that system posts. Connect{' '}
-            {checkoutProviders.map((d) => d.label).join(', ')} as well if you also want self-serve
-            checkout here.
-          </p>
-        </div>
-      )}
-      {unbuyablePlans.length > 0 && !soldExternally && (
-        <div className="rounded-md border border-[var(--color-danger)] bg-[color-mix(in_srgb,var(--color-danger)_8%,transparent)] px-3 py-2.5 text-sm text-[var(--color-fg)]">
-          <p className="font-medium">
-            {unbuyablePlans.length === 1
-              ? 'One live plan is not registered with your payment provider.'
-              : `${unbuyablePlans.length} live plans are not registered with your payment provider.`}
-          </p>
-          <p className="mt-1 text-xs text-[var(--color-muted-fg)]">
-            Plans register when they are created, so anything created before these credentials
-            existed has no price behind it. It still lists, it is still active, and a buyer who
-            clicks Buy is refused. Changing or adding a provider has the same effect on plans that
-            were already there.{' '}
-            <a
-              className="underline"
-              href={`/applications/${encodeURIComponent(id)}/plans`}
-            >
-              Register them on the Plans tab
-            </a>
-            .
-          </p>
-          <p className="mt-1.5 font-mono text-[11px] text-[var(--color-muted-fg)]">
-            {unbuyablePlans.map((p) => p.slug).join(', ')}
-          </p>
-        </div>
-      )}
+      <LegacyHashRedirect hash="#checkout-page" to={`${billingBase(id)}/checkout`} />
       {saved === 'billing' && (
         <SavedBanner message={`Billing ${billingEnabled ? 'enabled' : 'disabled'} for this application.`} />
       )}
-      {saved === 'subject' && <SavedBanner message="Billing subject updated." />}
-      {saved === 'dunning' && (
-        <SavedBanner message={`Failed-payment recovery ${dunningEnabled ? 'enabled' : 'disabled'} for this application.`} />
+      {error && (
+        <Banner tone="error">
+          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={BILLING_ERR} fallback={error} />
+        </Banner>
       )}
-      {saved === 'checkout' && <SavedBanner message="Checkout page setting saved." />}
-      {saved === 'checkout_checks' && <SavedBanner message="Checkout page checks ran. Results are in the Checkout page section." />}
-      {saved && !['billing', 'subject', 'dunning', 'checkout', 'checkout_checks'].includes(saved) && (
-        <SavedBanner
-          message={`${labelOf(saved)} credentials saved. Encrypted at rest.`}
-        />
-      )}
-      {webhook && (
-        <SavedBanner
-          params={['webhook']}
-          message={`${labelOf(webhook)} webhook configured automatically. No dashboard paste needed.`}
-        />
-      )}
-      {/* `?edit=<provider>` reopens that provider's modal (ProviderEditModal
-          below), which renders the error inside itself. Rendering it here too
-          would say the same thing twice, once behind the backdrop. */}
-      {error && !edit && (
-        <p role="alert" className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-          <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
-        </p>
-      )}
+      <ReturnUrlNotice
+        applicationId={id}
+        count={returnUrlEvents.page.total}
+        origins={unregisteredOrigins(returnUrlEvents.items)}
+      />
+      <UnbuyablePlansNotice
+        applicationId={id}
+        plans={blocked}
+        soldExternally={soldExternally(blocked)}
+        checkoutProviderLabels={providers.filter((d) => !isInboundOnly(d)).map((d) => d.label)}
+      />
 
-      {/* Master switch, gates the whole billing surface + the Billing tab group. */}
-      <Card className="flex items-start justify-between gap-4">
-        <div>
+      {/* The master switch. Off gates the whole public billing surface on the
+          API and hides the Billing tab group. */}
+      <Card className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-semibold text-[var(--color-fg)]">Billing</h2>
             <Badge tone={billingEnabled ? 'success' : 'neutral'} dot>
-              {billingEnabled ? 'enabled' : 'disabled'}
+              {billingEnabled ? 'on' : 'off'}
             </Badge>
           </div>
           <p className="mt-1 max-w-prose text-sm text-[var(--color-muted-fg)]">
             {billingEnabled
               ? 'Plans, checkout, subscriptions, coupons, credits, licenses and usage are live for this application.'
-              : 'Billing is off. The public billing API returns 403 and the Plans / Coupons / Licenses / Usage tabs are hidden until you enable it.'}
+              : 'The public billing API returns 403 and every billing tab except Setup stays hidden until you turn billing on. You can connect providers first.'}
           </p>
         </div>
-        <ActionForm action={setBillingEnabled.bind(null, id, !billingEnabled)} className="shrink-0">
-          {billingEnabled ? (
-            <ConfirmButton
-              confirm="Disable billing? The public billing API (checkout, subscriptions, plans, coupons, credits, licenses, usage) will immediately return 403 and the Billing tab group will be hidden. Existing subscriptions are not cancelled, and you can re-enable any time."
-              variant="danger"
-            >
-              Disable billing
-            </ConfirmButton>
-          ) : (
-            <SubmitButton pendingLabel="Enabling…" className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60">Enable billing</SubmitButton>
-          )}
-        </ActionForm>
-      </Card>
-
-      {/* Failed-payment recovery (dunning), opt-in per app. Only meaningful
-          while billing is enabled; off by default. */}
-      {billingEnabled && (
-        <Card className="flex items-start justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold text-[var(--color-fg)]">Failed-payment recovery</h2>
-              <Badge tone={dunningEnabled ? 'success' : 'neutral'} dot>
-                {dunningEnabled ? 'on' : 'off'}
-              </Badge>
-            </div>
-            <p className="mt-1 max-w-prose text-sm text-[var(--color-muted-fg)]">
-              {dunningEnabled
-                ? 'When a subscription goes past due, Rekey emails the customer reminders on day 0, 3 and 7, then cancels the subscription on day 14 if it’s still unpaid (and cancels it provider-side too). A successful payment in between closes the case.'
-                : 'Off. A past-due subscription gets no reminder emails and is not auto-cancelled, though the provider’s own retries still run. Turn this on to have Rekey chase failed payments and auto-cancel after 14 days.'}
-            </p>
-          </div>
-          <ActionForm action={setDunningEnabled.bind(null, id, !dunningEnabled)} className="shrink-0">
-            {dunningEnabled ? (
+        {canWrite ? (
+          <ActionForm action={setBillingEnabled.bind(null, id, !billingEnabled)} className="shrink-0">
+            {billingEnabled ? (
               <ConfirmButton
-                confirm="Turn off failed-payment recovery? New past-due subscriptions will get no reminder emails and won’t be auto-cancelled. Cases already in progress finish on their existing schedule."
+                confirm="Disable billing? The public billing API (checkout, subscriptions, plans, coupons, credits, licenses, usage) will immediately return 403 and the Billing tab group will be hidden. Existing subscriptions are not cancelled, and you can re-enable any time."
                 variant="danger"
               >
-                Turn off
+                Disable billing
               </ConfirmButton>
-            ) : (
-              <SubmitButton pendingLabel="Enabling…" className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60">Turn on</SubmitButton>
-            )}
-          </ActionForm>
-        </Card>
-      )}
-
-      {/* Billing subject, who a subscription bills + benefits by default. Only
-          meaningful when organizations are enabled. */}
-      {app.authConfig.organizationsEnabled === true && (
-        <Card className="space-y-3">
-          <div>
-            <h2 className="text-sm font-semibold text-[var(--color-fg)]">Who pays?</h2>
-            <p className="mt-1 max-w-prose text-sm text-[var(--color-muted-fg)]">
-              Bill each end-user individually, or bill the organization they belong to.{' '}
-              <strong>Organizations</strong> share a team pool (members share feature access +
-              credits; the buyer is the owner/payer). Checkout can always override per call with{' '}
-              <code className="text-xs">organizationId</code>.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {(['user', 'org'] as const).map((s) => {
-              const current = (app.billingConfig.billingSubject ?? 'user') === s;
-              return (
-                <ActionForm key={s} action={setBillingSubject.bind(null, id, s)}>
-                  {current ? (
-                    <button
-                      type="button"
-                      disabled
-                      className="rounded-md border px-3 py-1.5 text-sm cursor-default border-[var(--color-primary)] bg-[color-mix(in_srgb,var(--color-primary)_5%,transparent)] text-[var(--color-primary)]"
-                    >
-                      {s === 'user' ? 'Individual users' : 'Organizations'} ✓
-                    </button>
-                  ) : (
-                    <SubmitButton
-                      pendingLabel="Switching…"
-                      className="rounded-md border px-3 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] border-[var(--color-border)] text-[var(--color-fg)] hover:bg-[var(--color-surface-muted)] disabled:opacity-60"
-                    >
-                      {s === 'user' ? 'Individual users' : 'Organizations'}
-                    </SubmitButton>
-                  )}
-                </ActionForm>
-              );
-            })}
-          </div>
-        </Card>
-      )}
-
-      {billingEnabled && <CheckoutPageSection applicationId={id} />}
-
-      {/* Providers, configurable any time; only effective while billing is enabled. */}
-      <div className={billingEnabled ? '' : 'opacity-60'}>
-        <SectionHeader
-          title="Billing providers"
-          description={
-            <>
-              Configure any subset of {checkoutProviders.map((d) => d.label).join(' / ')}. End-users pick one
-              at checkout, or the geo router picks based on their country (CF-IPCountry header). After
-              payment, checkout returns to the <code className="text-xs">successUrl</code> /{' '}
-              <code className="text-xs">cancelUrl</code> your app passes on each checkout call. Set
-              those to your production URLs (a localhost value sends users to localhost).
-              {inboundProviders.length > 0 && (
-                <>
-                  {' '}
-                  {inboundProviders.map((d) => d.label).join(' / ')} is different: it hosts no checkout.
-                  Your own billing system posts signed events and Rekey activates, renews and cancels
-                  subscriptions from them, creating the subscriber when it has not seen them yet.
-                </>
-              )}
-            </>
-          }
-        />
-      </div>
-
-      {/* Summary table */}
-      <Table minWidth="min-w-[56rem]">
-        <THead>
-          <TR>
-            <TH>Provider</TH>
-            <TH>Status</TH>
-            <TH>Mode</TH>
-            <TH>Countries</TH>
-            <TH align="right">Priority</TH>
-            <TH>Webhook</TH>
-            <TH align="right"> </TH>
-          </TR>
-        </THead>
-        <TBody>
-          {providers.map((d) => {
-            const p = d.name;
-            const row = d.status;
-            return (
-              <TR key={p} hover>
-                <TD className="font-medium">
-                  {d.label}
-                  {inboundOnly(d) && (
-                    <span className="mt-0.5 block text-[11px] font-normal text-[var(--color-muted-fg)]">
-                      inbound only, no checkout
-                    </span>
-                  )}
-                </TD>
-                <TD>
-                  {!row ? (
-                    <span className="text-xs text-[var(--color-muted-fg)]">not configured</span>
-                  ) : row.enabled ? (
-                    <Badge tone="success" dot>active</Badge>
-                  ) : (
-                    <Badge tone="neutral" dot>disabled</Badge>
-                  )}
-                </TD>
-                <TD className="text-xs">
-                  {!row ? (
-                    <span className="text-[var(--color-muted-fg)]">—</span>
-                  ) : row.mode === 'live' ? (
-                    <Badge tone="warning" dot>live</Badge>
-                  ) : (
-                    <Badge tone="neutral">test</Badge>
-                  )}
-                </TD>
-                <TD muted className="text-xs">
-                  {!row || inboundOnly(d) ? '—' : row.countries.length === 0 ? 'all (global)' : row.countries.join(', ')}
-                </TD>
-                <TD align="right" muted className="text-xs">
-                  {row && !inboundOnly(d) ? row.priority : '—'}
-                </TD>
-                <TD className="text-xs">
-                  {!row ? (
-                    <span className="text-[var(--color-muted-fg)]">—</span>
-                  ) : row.webhookConfigured ? (
-                    <Badge tone="success" dot>configured</Badge>
-                  ) : !d.capabilities.autoWebhookRegister ? (
-                    // Capability-driven (P4): no webhook-create API (Razorpay)
-                    // → always a manual dashboard paste, so no Auto-configure.
-                    // The "how" + the why live in the Edit modal; the tooltip
-                    // hints it here.
-                    <span
-                      title={
-                        inboundOnly(d)
-                          ? 'Save a signing secret in Configure; your billing system signs its events with it.'
-                          : `${d.label} has no webhook API. Set it up manually in Edit (no Auto-configure).`
-                      }
-                    >
-                      <Badge tone="warning" dot>not set up</Badge>
-                    </span>
-                  ) : (
-                    <ActionForm action={registerWebhook.bind(null, id, p)} className="inline">
-                      <SubmitButton
-                        pendingLabel="Configuring…"
-                        className="rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
-                        title="Create the webhook via the provider API and store the secret automatically"
-                      >
-                        Auto-configure
-                      </SubmitButton>
-                    </ActionForm>
-                  )}
-                </TD>
-                <TD align="right">
-                  <div className="flex items-center justify-end gap-3">
-                    <ProviderEditModal
-                      descriptor={d}
-                      applicationId={id}
-                      webhookUrl={inboundOnly(d) ? ingressUrlFor(p) : webhookUrlFor(p)}
-                      error={edit === p ? error : undefined}
-                      errorDetail={errorDetail}
-                      errorFix={errorFix}
-                    />
-                    {row && (
-                      <>
-                        <ActionForm action={toggleEnabled.bind(null, id, p, !row.enabled)} className="inline">
-                          <SubmitButton
-                            pendingLabel={row.enabled ? 'Disabling…' : 'Enabling…'}
-                            className="rounded text-xs text-[var(--color-muted-fg)] hover:text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)] disabled:opacity-60"
-                          >
-                            {row.enabled ? 'Disable' : 'Enable'}
-                          </SubmitButton>
-                        </ActionForm>
-                        <ActionForm action={removeProvider.bind(null, id, p)} className="inline">
-                          <TypedConfirmButton
-                            expected={d.label.toLowerCase()}
-                            title={`Remove ${d.label} credentials?`}
-                            description={
-                              inboundOnly(d)
-                                ? 'Existing subscriptions keep running, but events from your billing system are refused (503) until a signing secret is saved again.'
-                                : `Existing subscriptions keep running but no new checkouts can use ${d.label}. You'll need to re-paste the API keys from the ${d.label} dashboard to restore.`
-                            }
-                            triggerLabel="Remove"
-                            confirmLabel={`Remove ${d.label}`}
-                          />
-                        </ActionForm>
-                      </>
-                    )}
-                  </div>
-                </TD>
-              </TR>
-            );
-          })}
-        </TBody>
-      </Table>
-
-      {/* Inbound provider webhook log, events Rekey received from the providers. */}
-      <section className="space-y-3">
-        <SectionHeader
-          title="Inbound webhook events"
-          description="Events Rekey received from your billing providers (subscription activated, payment captured, …). Newest first, and distinct from your app's own outbound webhooks."
-        />
-        {webhookEvents.length === 0 ? (
-          <EmptyState
-            variant="inline"
-            title="No provider webhook events yet"
-            description="They appear here once a provider posts to your webhook URL (use “Auto-configure webhook” above first)."
-          />
+          ) : (
+            <SubmitButton
+              pendingLabel="Enabling…"
+              className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)] hover:bg-[var(--color-primary-hover)] disabled:opacity-60"
+            >
+              Enable billing
+            </SubmitButton>
+          )}
+        </ActionForm>
         ) : (
-          <Table minWidth="min-w-[48rem]">
-            <THead>
-              <TR>
-                <TH>When</TH>
-                <TH>Provider</TH>
-                <TH>Event</TH>
-                <TH>Status</TH>
-                <TH>Provider event id</TH>
-              </TR>
-            </THead>
-            <TBody>
-              {webhookEvents.map((e) => (
-                <TR key={e.id} hover className="align-top">
-                  <TD muted className="whitespace-nowrap text-xs">{formatDateTime(e.receivedAt)}</TD>
-                  <TD className="text-xs">{labelOf(e.provider)}</TD>
-                  <TD mono>{e.eventType}</TD>
-                  <TD>
-                    <Badge tone={WEBHOOK_STATUS_TONE[e.status]} dot>{e.status}</Badge>
-                    {e.processingError && (
-                      <span className="mt-1 block max-w-[16rem] truncate text-[11px] text-red-600 dark:text-red-400" title={e.processingError}>
-                        {e.processingError}
-                      </span>
-                    )}
-                  </TD>
-                  <TD muted mono className="max-w-[12rem] truncate text-[11px]">{e.providerEventId}</TD>
-                </TR>
-              ))}
-            </TBody>
-          </Table>
+          <p className="shrink-0 text-xs text-[var(--color-muted-fg)]">
+            Turning billing on or off needs billing write access.
+          </p>
         )}
+      </Card>
+
+      <section className="space-y-3" aria-labelledby="billing-health-heading">
+        <SectionHeader
+          title={<span id="billing-health-heading">Checklist</span>}
+          description="What a buyer needs in place to pay. Each row opens the tab that fixes it."
+        />
+        <Card padded={false} className="divide-y divide-[var(--color-border)]">
+          <HealthRow
+            href={`${base}/providers`}
+            label="Payment providers"
+            status={active.length > 0 ? 'ok' : billingEnabled ? 'warn' : 'idle'}
+            value={
+              configured.length === 0
+                ? 'None configured'
+                : `${active.map((d) => d.label).join(', ') || 'None active'}${live.length > 0 ? ' · live' : active.length > 0 ? ' · test mode' : ''}`
+            }
+          />
+          <HealthRow
+            href={`${base}/providers`}
+            label="Provider webhooks"
+            status={active.length === 0 ? 'idle' : missingWebhook.length === 0 ? 'ok' : 'warn'}
+            value={
+              active.length === 0
+                ? 'No active provider'
+                : missingWebhook.length === 0
+                  ? 'All configured'
+                  : `Not set up for ${missingWebhook.map((d) => d.label).join(', ')}`
+            }
+          />
+          <HealthRow
+            href={`/applications/${id}/plans`}
+            label="Plans"
+            status={
+              !billingEnabled || planPage === null
+                ? 'idle'
+                : activePlans === 0 || (blocked.length > 0 && !soldExternally(blocked))
+                  ? 'warn'
+                  : 'ok'
+            }
+            value={
+              planPage === null
+                ? 'Could not be read'
+                : activePlans === 0
+                ? 'No active plans'
+                : blocked.length > 0 && !soldExternally(blocked)
+                  ? `${blocked.length} of ${activePlans} not payable`
+                  : `${activePlans} active`
+            }
+          />
+          <HealthRow
+            href={`${base}/checkout`}
+            label="Checkout page"
+            status={!billingEnabled || checkout === null ? 'idle' : 'ok'}
+            value={
+              checkout === null
+                ? 'Not available'
+                : rekeyPageModes.length === 0
+                  ? "Provider's page"
+                  : `Rekey page in ${rekeyPageModes.join(' and ')}`
+            }
+          />
+          <HealthRow
+            href={`${base}/settings`}
+            label="Failed-payment recovery"
+            status={!billingEnabled ? 'idle' : dunningEnabled ? 'ok' : 'idle'}
+            value={dunningEnabled ? 'On' : 'Off'}
+          />
+        </Card>
       </section>
     </div>
   );
 }
 
-const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
-
-function Field({ label, hint, children }: { label: string; hint?: React.ReactNode; children: React.ReactNode }): React.JSX.Element {
-  return (
-    <label className="block space-y-1">
-      <span className="text-xs font-medium text-[var(--color-fg)]">{label}</span>
-      {children}
-      {hint && <span className="block text-xs text-[var(--color-muted-fg)]">{hint}</span>}
-    </label>
-  );
+function legacyQuery(sp: Record<string, string | string[] | undefined>): string {
+  const q = new URLSearchParams();
+  for (const [key, value] of Object.entries(sp)) {
+    if (typeof value === 'string') q.set(key, value);
+  }
+  return q.toString();
 }
 
-interface WebhookMeta {
-  dashboardPath: string;
-  events: string[];
-  /** What the operator pastes back into Rekey after creating the webhook. */
-  returnLabel: string;
-  /** Intro copy for manual-only providers (capabilities.autoWebhookRegister: false). */
-  manualIntro?: string;
-}
-
-/**
- * Per-provider webhook setup COPY for the built-in three, dashboard click
- * paths and event lists live in the panel, not the registry (they're prose,
- * not contract). Whether a provider is auto-configurable comes from the
- * discovery `capabilities.autoWebhookRegister`, and unknown providers fall
- * back to a generic docsUrl-driven recipe (`webhookMetaFor`).
- */
-const WEBHOOK_META: Record<string, WebhookMeta> = {
-  stripe: {
-    dashboardPath: 'Stripe Dashboard → Developers → Webhooks → Add endpoint',
-    events: [
-      'checkout.session.completed',
-      'checkout.session.async_payment_succeeded',
-      'customer.subscription.updated',
-      'customer.subscription.deleted',
-      'invoice.paid',
-      'invoice.payment_failed',
-    ],
-    returnLabel: 'Copy the signing secret (whsec_…) Stripe shows, paste it below.',
-  },
-  paypal: {
-    dashboardPath: 'PayPal Developer Dashboard → your App → Webhooks',
-    events: [
-      'BILLING.SUBSCRIPTION.ACTIVATED',
-      'BILLING.SUBSCRIPTION.CANCELLED',
-      'BILLING.SUBSCRIPTION.SUSPENDED',
-      'BILLING.SUBSCRIPTION.EXPIRED',
-      'PAYMENT.SALE.COMPLETED',
-      'PAYMENT.SALE.DENIED',
-    ],
-    returnLabel: 'Copy the generated Webhook ID, paste it below.',
-  },
-  razorpay: {
-    dashboardPath: 'Razorpay Dashboard → Settings → Webhooks → Add New Webhook',
-    events: [
-      'subscription.activated',
-      'subscription.charged',
-      'subscription.cancelled',
-      'subscription.completed',
-      'subscription.halted',
-      'payment_link.paid',
-    ],
-    returnLabel: 'Set a secret on the webhook, then enter the SAME secret below.',
-    manualIntro:
-      'Unlike Stripe and PayPal, Razorpay has no API to create webhooks, so there’s no Auto-configure button for it. It’s a quick one-time setup in the Razorpay dashboard:',
-  },
+const DOT: Record<Health, string> = {
+  ok: 'bg-green-500',
+  warn: 'bg-amber-500',
+  idle: 'bg-neutral-400',
 };
 
-/** Webhook copy for a provider, panel-curated where we have it, docsUrl-generic otherwise. */
-function webhookMetaFor(d: BillingProviderDescriptor): WebhookMeta {
-  return (
-    WEBHOOK_META[d.name] ?? {
-      dashboardPath: `the ${d.label} dashboard's webhook settings (see ${d.docsUrl})`,
-      events: [],
-      returnLabel: `Paste the webhook secret / id ${d.label} gives you into the field above.`,
-      manualIntro: `${d.label} has no API to create webhooks, so there’s no Auto-configure button for it. It’s a quick one-time setup in the ${d.label} dashboard:`,
-    }
-  );
-}
+const SR_STATUS: Record<Health, string> = {
+  ok: 'OK',
+  warn: 'Needs attention',
+  idle: 'Off',
+};
 
-/**
- * Webhook setup guidance for one provider. Replaces the old raw URL + inline
- * event-code dump with a numbered, copy-first flow. Pure server component,
- * the auto/manual split uses a native <details> so it needs no client JS.
- */
-function WebhookSetup({
-  descriptor,
-  webhookUrl,
-  configured,
+/** Same shape as the Application overview's configuration rows. */
+function HealthRow({
+  href,
+  label,
+  value,
+  status,
 }: {
-  descriptor: BillingProviderDescriptor;
-  webhookUrl: string | null;
-  configured: boolean;
+  href: string;
+  label: string;
+  value: string;
+  status: Health;
 }): React.JSX.Element {
-  const label = descriptor.label;
-  const meta = webhookMetaFor(descriptor);
-
-  // No public base URL → no usable endpoint to paste. Surface the blocker.
-  if (!webhookUrl) {
-    return (
-      <div className="rounded-lg border border-amber-300 dark:border-amber-500/60 bg-amber-50 dark:bg-amber-950/40 px-3 py-2.5">
-        <p className="text-xs font-medium text-amber-900 dark:text-amber-200">
-          Webhook endpoint unavailable
-        </p>
-        <p className="mt-1 text-xs text-amber-800 dark:text-amber-300/90">
-          <code className="font-mono">NEXT_PUBLIC_API_URL</code> (the public API origin) isn’t set on
-          the panel deployment, so the {label} webhook URL can’t be built. Ask your admin to set it to
-          your public API origin (e.g. <code className="font-mono">https://api.yourdomain.com</code>)
-          and redeploy, then return here.
-        </p>
-      </div>
-    );
-  }
-
-  const manualSteps = (
-    <ol className="space-y-2 text-xs text-[var(--color-muted-fg)]">
-      <li className="flex gap-2">
-        <StepDot n={1} />
-        <span>
-          Open <span className="font-medium text-[var(--color-fg)]">{meta.dashboardPath}</span>.
-        </span>
-      </li>
-      <li className="flex gap-2">
-        <StepDot n={2} />
-        <div className="min-w-0 flex-1 space-y-1">
-          <span>Paste this as the endpoint / callback URL:</span>
-          <div className="flex items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded bg-[var(--color-surface-muted)] px-2 py-1.5 text-[11px] font-mono" title={webhookUrl}>
-              {webhookUrl}
-            </code>
-            <CopyButton value={webhookUrl} label="Copy" />
-          </div>
-        </div>
-      </li>
-      <li className="flex gap-2">
-        <StepDot n={3} />
-        <span>{meta.returnLabel}</span>
-      </li>
-      {meta.events.length > 0 && (
-        <li className="flex gap-2">
-          <StepDot n={4} />
-          <div className="min-w-0 flex-1 space-y-1.5">
-            <span>Subscribe to these events:</span>
-            <div className="flex flex-wrap gap-1">
-              {meta.events.map((e) => (
-                <code
-                  key={e}
-                  className="rounded bg-[var(--color-surface-muted)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--color-fg)]"
-                >
-                  {e}
-                </code>
-              ))}
-            </div>
-          </div>
-        </li>
-      )}
-    </ol>
-  );
-
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-surface-muted)_40%,transparent)] p-3 space-y-2.5">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-semibold text-[var(--color-fg)]">Webhook</span>
-        {configured ? (
-          <Badge tone="success" dot>configured</Badge>
-        ) : (
-          <Badge tone="warning" dot>not set up</Badge>
-        )}
-      </div>
-      <p className="text-xs text-[var(--color-muted-fg)]">
-        {label} tells Rekey when payments succeed or subscriptions change. Without a webhook,
-        checkouts complete but nothing is fulfilled.
-      </p>
-
-      {descriptor.capabilities.autoWebhookRegister ? (
-        <>
-          <div className="rounded-md border border-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] bg-[color-mix(in_srgb,var(--color-primary)_5%,transparent)] px-2.5 py-2">
-            <p className="text-xs font-medium text-[var(--color-fg)]">Recommended: one click</p>
-            <p className="mt-0.5 text-xs text-[var(--color-muted-fg)]">
-              Save your API keys below, then hit <span className="font-medium">Auto-configure</span>{' '}
-              in the providers table. Rekey creates the webhook and stores its secret for you. No
-              dashboard steps, so leave the secret field blank.
-            </p>
-          </div>
-          <details className="group">
-            <summary className="cursor-pointer list-none text-xs font-medium text-[var(--color-primary)] hover:underline">
-              Prefer to set it up by hand?
-            </summary>
-            <div className="mt-2 border-t border-[var(--color-border)] pt-2.5">{manualSteps}</div>
-          </details>
-        </>
-      ) : (
-        <>
-          <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-2.5 py-2">
-            <p className="text-xs font-medium text-[var(--color-fg)]">Manual setup only</p>
-            <p className="mt-0.5 text-xs text-[var(--color-muted-fg)]">
-              {meta.manualIntro ??
-                `${label} has no API to create webhooks. Set it up once in the ${label} dashboard:`}
-            </p>
-          </div>
-          {manualSteps}
-        </>
-      )}
-    </div>
-  );
-}
-
-function StepDot({ n }: { n: number }): React.JSX.Element {
-  return (
-    <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--color-primary)_10%,transparent)] text-[10px] font-semibold text-[var(--color-primary)]">
-      {n}
-    </span>
-  );
-}
-
-/**
- * Per-provider configure / rotate Modal. Same chrome (Modal trigger button +
- * label + hint Field rows) matches the rest of the panel. Trigger label
- * flips between "Configure" and "Edit" based on whether creds exist.
- *
- * Fully discovery-driven (P4): the credential inputs render from the
- * module's `credentialFields`, secret fields become password inputs, the
- * field `help` (or `pattern.message`) becomes the hint, and the submit
- * action is the ONE generic `saveProviderCredentials`.
- */
-function ProviderEditModal({
-  descriptor,
-  applicationId,
-  webhookUrl,
-  error, errorDetail, errorFix,
-}: {
-  descriptor: BillingProviderDescriptor;
-  applicationId: string;
-  webhookUrl: string | null;
-  error: string | undefined;
-  errorDetail?: string | undefined;
-  errorFix?: string | undefined;
-}): React.JSX.Element {
-  const { name: provider, label, credentialFields } = descriptor;
-  const inbound = descriptor.capabilities.checkout === false;
-  const existing = descriptor.status;
-  const action = saveProviderCredentials.bind(
-    null,
-    applicationId,
-    provider,
-    credentialFields.map((f) => f.key),
-    Boolean(existing),
-  );
-
-  return (
-    <Modal
-      size="lg"
-      modalKey="edit"
-      modalValue={provider}
-      title={`${existing ? 'Edit' : 'Configure'} ${label}`}
-      description={
-        inbound
-          ? existing
-            ? 'Rotate the signing secret. Leave it blank to keep the stored value.'
-            : 'Connect your own billing system. It signs every event with this secret, which is AES-256-GCM encrypted at rest and never returned by any API response.'
-          : existing
-            ? 'Rotate keys or change routing. Leave a field blank to keep its stored value.'
-            : `Connect your ${label} account. Credentials are AES-256-GCM encrypted at rest; never returned in any API response.`
-      }
-      trigger={existing ? 'Edit' : 'Configure'}
-      triggerClassName="cursor-pointer rounded text-xs font-medium text-[var(--color-fg)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--color-primary)_50%,transparent)]"
+    <Link
+      href={href}
+      className="group flex items-center justify-between gap-3 px-5 py-3 transition-colors hover:bg-[var(--color-surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-primary)]"
     >
-      <ActionForm action={action} className="space-y-3">
-        {error && (
-          <p role="alert" className="rounded-md border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-            <ApiErrorText code={error} detail={errorDetail} fix={errorFix} map={ERR} fallback={error} />
-          </p>
-        )}
-
-        {credentialFields.map((f) => (
-          <Field key={f.key} label={f.label} hint={f.help ?? f.pattern?.message}>
-            <input
-              type={f.secret ? 'password' : 'text'}
-              name={f.key}
-              // Nothing is required on an edit: a blank field means "keep the
-              // stored value", and marking it required blocks submission in the
-              // browser before the request is ever made.
-              required={!f.optional && !existing}
-              autoComplete="off"
-              {...(f.placeholder !== undefined && { placeholder: f.placeholder })}
-              className={`${inputCls} font-mono`}
-            />
-          </Field>
-        ))}
-
-        {/* Webhook setup, numbered, copy-first; auto-configure where supported.
-            An inbound-only provider has no dashboard, so it gets the ingress
-            recipe instead. */}
-        {inbound ? (
-          <ExternalIngressSetup
-            descriptor={descriptor}
-            ingressUrl={webhookUrl}
-            configured={existing?.webhookConfigured ?? false}
-          />
-        ) : (
-          <WebhookSetup
-            descriptor={descriptor}
-            webhookUrl={webhookUrl}
-            configured={existing?.webhookConfigured ?? false}
-          />
-        )}
-
-        {/* Routing (countries, priority) only means something for a provider
-            buyers can be sent to; an inbound-only one keeps just the mode. */}
-        <div className={`grid ${inbound ? 'grid-cols-1' : 'grid-cols-3'} gap-3 pt-2 border-t border-[var(--color-border)]`}>
-          <Field
-            label="Mode"
-            hint={
-              inbound
-                ? 'live = the events describe real sales; test = a sandbox of your billing system. Revenue views read it.'
-                : "live = real charges; test = sandbox, no real money. Stay in test until you're ready. Auto-detected from the key prefix."
-            }
-          >
-            <select name="mode" defaultValue={existing?.mode ?? 'test'} className={inputCls}>
-              <option value="test">Test</option>
-              <option value="live">Live</option>
-            </select>
-          </Field>
-          {!inbound && (
-            <>
-              <BillingModeAutodetect names={credentialFields.map((f) => f.key)} />
-              <Field label="Countries" hint="Empty = global">
-                <input type="text" name="countries" defaultValue={existing?.countries.join(', ') ?? ''}
-                  placeholder="US, CA" className={`${inputCls} font-mono`} />
-              </Field>
-              <Field label="Priority" hint="Lower = first">
-                <input type="number" name="priority" min={0} max={1000} step={1}
-                  defaultValue={existing?.priority ?? 100} className={`${inputCls} font-mono`} />
-              </Field>
-            </>
-          )}
-        </div>
-
-        <SubmitButton pendingLabel="Saving…">{existing ? 'Save changes' : 'Save credentials'}</SubmitButton>
-      </ActionForm>
-    </Modal>
+      <span className="flex min-w-0 items-center gap-2 text-sm text-[var(--color-fg)]">
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT[status]}`} aria-hidden />
+        <span className="sr-only">{SR_STATUS[status]}:</span>
+        {label}
+      </span>
+      <span className="flex min-w-0 items-center gap-1.5">
+        <span className="truncate text-xs text-[var(--color-muted-fg)] group-hover:text-[var(--color-fg)]">
+          {value}
+        </span>
+        <span aria-hidden className="text-xs text-neutral-400 group-hover:text-[var(--color-fg)]">
+          →
+        </span>
+      </span>
+    </Link>
   );
 }

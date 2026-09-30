@@ -52,6 +52,7 @@ export function MemberRoleSelect({
       <select
         ref={selectRef}
         name="role"
+        aria-label={`Role for ${email}`}
         defaultValue={currentRole}
         onChange={onChange}
         className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)]"

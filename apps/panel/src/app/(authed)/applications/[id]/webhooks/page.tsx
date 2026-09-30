@@ -16,7 +16,7 @@ import { SavedBanner } from '@/components/SavedBanner';
 import { SectionHeader } from '@/components/Card';
 import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
-import { EmptyState } from '@/components/EmptyState';
+import { EmptyState, EmptyStateCreate } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
 
 interface EndpointRow {
@@ -271,7 +271,7 @@ export default async function WebhooksPage({
   return (
     <div className="space-y-5">
       <SectionHeader
-        title="Webhook endpoints"
+        title="Webhooks"
         description={
           <>
             Events Rekey sends to your backend when things happen (sign-ups, payments, dunning).
@@ -372,7 +372,8 @@ export default async function WebhooksPage({
       {endpoints.length === 0 ? (
         <EmptyState
           title="No webhook endpoints yet"
-          description="Add one above to start receiving user lifecycle events."
+          description="Add an endpoint to start receiving user lifecycle events."
+          action={<EmptyStateCreate modalKey="newWebhook">Add endpoint</EmptyStateCreate>}
         />
       ) : (
         <Table minWidth="min-w-[44rem]">

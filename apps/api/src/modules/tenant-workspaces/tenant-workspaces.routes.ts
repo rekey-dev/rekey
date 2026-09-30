@@ -1,8 +1,13 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ApplicationGrantRole, TenantRole } from '@prisma/client';
 import { tenantWorkspacesService, workspaceCreationMode } from './tenant-workspaces.service.js';
 import { tenantsService } from '../tenants/tenants.service.js';
+import {
+  isOperatorInviteToken,
+  previewWorkspaceInvite,
+  redeemWorkspaceInvite,
+} from '../operator-invites/workspace-invite-redemption.js';
 import { emailService } from '../email/email.service.js';
 import {
   requireTenantSession,
@@ -298,6 +303,19 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
                         'Maximum non-erased end-users across every application in the ' +
                         'workspace. Absent or null means unlimited.',
                     },
+                    maxContacts: {
+                      type: 'integer',
+                      nullable: true,
+                      description:
+                        'Maximum contacts across every application. Absent or null means unlimited.',
+                    },
+                    maxContactLists: {
+                      type: 'integer',
+                      nullable: true,
+                      description:
+                        'Maximum lists that are not archived, across every application. Absent or ' +
+                        'null means unlimited.',
+                    },
                   },
                 },
                 usage: {
@@ -313,8 +331,16 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
                       description:
                         'Non-erased end-users across every application in the workspace.',
                     },
+                    contacts: {
+                      type: 'integer',
+                      description: 'Contacts across every application, one per address per application.',
+                    },
+                    contactLists: {
+                      type: 'integer',
+                      description: 'Lists that are not archived, across every application.',
+                    },
                   },
-                  required: ['productionApps', 'activeEndUsers'],
+                  required: ['productionApps', 'activeEndUsers', 'contacts', 'contactLists'],
                 },
               },
               required: ['limits', 'usage'],
@@ -987,6 +1013,27 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
 }
 
 /**
+ * Redeem a workspace-bound operator invite (`rp_opinv_…`, minted by the
+ * super-admin, e.g. by `rekey init --owner-email`) and audit it against the
+ * workspace joined.
+ */
+async function redeemBoundOperatorInvite(
+  req: FastifyRequest,
+  rawToken: string,
+): ReturnType<typeof redeemWorkspaceInvite> {
+  const result = await redeemWorkspaceInvite({ rawToken, tenantUserId: req.tenantUser!.id });
+  void recordSecurityEvent({
+    type: 'operator.invite_redeemed',
+    actorType: 'operator',
+    actorId: req.tenantUser!.id,
+    tenantId: result.membership.tenantId,
+    ...requestContext(req),
+    metadata: { inviteId: result.inviteId, via: 'accept', joinedAs: result.membership.role },
+  });
+  return result;
+}
+
+/**
  * Endpoints for accepting / previewing an invitation token.
  *
  * - GET /preview is unauthenticated, the recipient can see the workspace
@@ -994,6 +1041,9 @@ export async function tenantWorkspacesRoutes(app: FastifyInstance): Promise<void
  * - POST /accept requires a valid tenant session (the invitee must already
  *   have an account). The panel flow is: visit the invite URL → if not
  *   signed in, sign up or sign in → POST the token to accept.
+ *
+ * Both also take a workspace-bound operator invite (`rp_opinv_…`) and answer
+ * with the same shapes and codes, so one panel page serves both links.
  */
 export async function tenantInvitationPublicRoutes(app: FastifyInstance): Promise<void> {
   app.get(
@@ -1003,6 +1053,10 @@ export async function tenantInvitationPublicRoutes(app: FastifyInstance): Promis
         tags: ['Tenant · Workspace'],
         security: [],
         summary: 'Preview an invitation by token (unauthenticated)',
+        description:
+          'Also takes a workspace-bound operator invite key (`rp_opinv_…`, minted by the super-admin ' +
+          'with `tenantId`), with the same response and codes. An unbound operator invite key reads as ' +
+          'INVITATION_NOT_FOUND: it is redeemed at sign-up, not here.',
         querystring: {
           type: 'object',
           required: ['token'],
@@ -1035,7 +1089,9 @@ export async function tenantInvitationPublicRoutes(app: FastifyInstance): Promis
     },
     async (req) => {
       const { token } = PreviewQuery.parse(req.query);
-      const result = await tenantWorkspacesService.previewInvitation(token);
+      const result = isOperatorInviteToken(token)
+        ? await previewWorkspaceInvite(token)
+        : await tenantWorkspacesService.previewInvitation(token);
       return { success: true, data: result };
     },
   );
@@ -1052,6 +1108,10 @@ export async function tenantInvitationAuthRoutes(app: FastifyInstance): Promise<
         tags: ['Tenant · Workspace'],
         security: [{ tenantSession: [] }],
         summary: 'Accept an invitation. Returns a session scoped to the joined workspace.',
+        description:
+          'Also redeems a workspace-bound operator invite key (`rp_opinv_…`), for an operator who ' +
+          'already has an account: the signed-in email must be the one the key was minted for, and the ' +
+          'key is consumed once.',
         body: {
           type: 'object',
           required: ['token'],
@@ -1091,10 +1151,12 @@ export async function tenantInvitationAuthRoutes(app: FastifyInstance): Promise<
     },
     async (req) => {
       const body = AcceptBody.parse(req.body);
-      const result = await tenantWorkspacesService.acceptInvitation({
-        rawToken: body.token,
-        tenantUserId: req.tenantUser!.id,
-      });
+      const result = isOperatorInviteToken(body.token)
+        ? await redeemBoundOperatorInvite(req, body.token)
+        : await tenantWorkspacesService.acceptInvitation({
+            rawToken: body.token,
+            tenantUserId: req.tenantUser!.id,
+          });
       return {
         success: true,
         data: {

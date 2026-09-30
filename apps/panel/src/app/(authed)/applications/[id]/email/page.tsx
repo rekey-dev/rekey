@@ -9,6 +9,9 @@ import { ApiErrorText } from '@/components/api-error';
 import { SavedBanner } from '@/components/SavedBanner';
 import { EmailCredentialsForm } from './EmailCredentialsForm';
 import { Banner } from '@/components/Banner';
+import { dangerButtonClass } from '@/components/Button';
+import { StickyFormFooter } from '@/components/StickyFormFooter';
+import { savedStateKey } from '@/lib/saved-state-key';
 
 type Transport = 'byo_resend' | 'byo_smtp' | 'default_resend' | 'none';
 
@@ -251,7 +254,15 @@ export default async function EmailPage({
             to clear it. Saving credentials below never changes these.
           </p>
         </div>
-        <ActionForm action={saveSender.bind(null, id)} className="space-y-4">
+        <ActionForm
+          key={savedStateKey({
+            fromName: config.emailConfig.fromName,
+            replyTo: config.emailConfig.replyTo,
+            supportEmail: config.emailConfig.supportEmail,
+          })}
+          action={saveSender.bind(null, id)}
+          className="space-y-4"
+        >
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <label className="block space-y-1.5">
               <span className="text-sm font-medium">From name</span>
@@ -296,7 +307,7 @@ export default async function EmailPage({
               </span>
             </label>
           </div>
-          <SubmitButton pendingLabel="Saving sender…">Save sender</SubmitButton>
+          <StickyFormFooter label="Save sender" pendingLabel="Saving sender…" />
         </ActionForm>
       </section>
 
@@ -312,7 +323,10 @@ export default async function EmailPage({
           </div>
           {config.hasCustomCredentials && (
             <ActionForm action={removeCredsBound}>
-              <ConfirmButton confirm="Remove BYO credentials? The Application will fall back to the default transport.">
+              <ConfirmButton
+                confirm="Remove BYO credentials? The Application will fall back to the default transport."
+                triggerClassName={dangerButtonClass('sm')}
+              >
                 Remove
               </ConfirmButton>
             </ActionForm>
@@ -371,7 +385,7 @@ export default async function EmailPage({
               Workspace mail (operator invitations and the like) is unaffected. And this does{' '}
               <strong>not</strong> hand you the tokens instead: a suppressed send withholds the
               reset or magic-link token rather than returning it. If your own backend delivers
-              those, leave email on and remove the transport credentials below.
+              those, leave email on and remove the transport credentials above.
             </p>
           </div>
           <ActionForm action={setEmailsEnabled.bind(null, id, !control.emailsEnabled)}>
@@ -380,6 +394,7 @@ export default async function EmailPage({
                 confirm="Stop every email this Application sends to its end-users? Password resets, verification and magic links stop arriving. Events that a live sign-in method depends on are protected individually, but this switch overrides all of them."
                 title="Turn all email off?"
                 confirmLabel="Turn email off"
+                triggerClassName={dangerButtonClass('sm')}
               >
                 Turn email off
               </ConfirmButton>

@@ -373,7 +373,7 @@ export async function customEmailTemplateRoutes(app: FastifyInstance): Promise<v
         summary: 'Render the draft with sample values (no email is sent)',
         description:
           'Requires **read** access to this Application. Uses each variable’s `sample`, a typed ' +
-          'placeholder, or the values passed here. A variable the draft uses but does not declare ' +
+          'placeholder, or the values passed here, which are checked exactly as a send checks them. A variable the draft uses but does not declare ' +
           'renders as its literal `{{name}}` token and is listed in `undeclared`; publish refuses ' +
           'such a draft. Show the HTML only in a sandboxed frame: it is operator-authored and not sanitised.',
         body: {
@@ -400,7 +400,13 @@ export async function customEmailTemplateRoutes(app: FastifyInstance): Promise<v
             },
             'The rendered draft.',
           ),
-          ...errs({ 400: 'VALIDATION_ERROR: the body does not match.', ...READ_ERRORS, 404: NOT_FOUND }),
+          ...errs({
+            400:
+              'VALIDATION_ERROR: the body does not match. EMAIL_VARIABLES_INVALID: a value in `variables` ' +
+              'fails the rules a send applies (undeclared name, wrong type, too long, or a `url` outside the link domains).',
+            ...READ_ERRORS,
+            404: NOT_FOUND,
+          }),
         },
       },
     },

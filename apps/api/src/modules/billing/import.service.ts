@@ -677,6 +677,7 @@ export const subscriptionImportService = {
                   passwordHash: null,
                   emailVerified: false,
                   role: role.name,
+                  createdVia: 'import',
                   metadata: { importedFrom: run.provider, importRunId: run.id },
                 },
                 select: { id: true, email: true, emailVerified: true, role: true, createdAt: true },

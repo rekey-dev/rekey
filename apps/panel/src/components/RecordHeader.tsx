@@ -37,6 +37,7 @@ export function RecordHeader({
   description,
   meta,
   action,
+  summary,
   segments,
   segmentsLabel,
   segmentsFallbackHref,
@@ -56,6 +57,8 @@ export function RecordHeader({
   meta?: React.ReactNode;
   /** Right-aligned control for the record as a whole (copy link, menu). */
   action?: React.ReactNode;
+  /** The record's state at a glance, between the identity and the switcher. */
+  summary?: React.ReactNode;
   /** The record's view switcher. Omit for a record with a single view. */
   segments?: Segment[];
   segmentsLabel?: string;
@@ -86,6 +89,8 @@ export function RecordHeader({
           </div>
           {action && <div className="shrink-0">{action}</div>}
         </div>
+
+        {summary}
 
         {segments && segments.length > 0 && (
           <SegmentedNav

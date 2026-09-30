@@ -252,7 +252,7 @@ async function verify(
       statusCode: 503,
       code: 'BILLING_CREDENTIALS_NOT_CONFIGURED',
       message: 'This Application has no signing secret for the external billing provider.',
-      fix: 'Save a signing secret on the Billing tab, then resend.',
+      fix: 'Save a signing secret in Panel → Application → Billing → Setup → Providers → External billing system, then resend.',
     };
   }
   const expected = createHmac('sha256', creds.webhookSecret)

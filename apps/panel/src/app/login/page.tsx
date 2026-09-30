@@ -14,6 +14,7 @@ import { TrackView } from '@/components/analytics/track-view';
 import { AnalyticsEvent } from '@/lib/analytics';
 import { cookieSecure } from '@/lib/cookie-secure';
 import { safeNext } from '@/lib/safe-next';
+import { clearMfaChallenge, mfaVerifyPath, writeMfaChallenge } from '@/lib/mfa-challenge';
 import { LOGIN_ERROR_MESSAGES, loginErrorCode } from './error-messages';
 
 
@@ -26,6 +27,8 @@ async function signIn(formData: FormData): Promise<void> {
   // make the operator retype it, and the `next` target so a retry still
   // round-trips back (e.g. accept-invite).
   const keep = `&email=${encodeURIComponent(email)}${next ? `&next=${encodeURIComponent(next)}` : ''}`;
+  const jar = await cookies();
+  clearMfaChallenge(jar);
   if (!email || !password) redirect(`/login?error=missing${keep}`);
 
   let result: SignInResponse;
@@ -38,14 +41,10 @@ async function signIn(formData: FormData): Promise<void> {
     throw err;
   }
 
-  // MFA enrolled, redirect to the verify page carrying the challenge
-  // token in the URL. The token is single-use, 5-min-lifetime, and bound
-  // to this operator + this sign-in attempt.
   if (result.mfaRequired) {
+    await writeMfaChallenge(jar, result.mfaChallengeToken);
     // Carry `next` through the MFA hop so an invite round-trip survives it.
-    redirect(
-      `/mfa-verify?challenge=${encodeURIComponent(result.mfaChallengeToken)}${next ? `&next=${encodeURIComponent(next)}` : ''}`,
-    );
+    redirect(mfaVerifyPath({ next }));
   }
 
   await setSessionCookies(result);
@@ -99,6 +98,7 @@ async function completePasskeyLogin(formData: FormData): Promise<void> {
     }
     throw err;
   }
+  clearMfaChallenge(await cookies());
   await setSessionCookies(result);
   if (next) redirect(`${next}${next.includes('?') ? '&' : '?'}e=login_passkey`);
   redirect('/applications?e=login_passkey');

@@ -92,6 +92,20 @@ describe('a bad afternoon must not cost everyone their session', () => {
     expect(jar.has('rekey_refresh')).toBe(false);
   });
 
+  it.each(['END_USER_BANNED', 'END_USER_ERASED'])(
+    'signs a %s account out instead of throwing on every request',
+    async (code) => {
+      jar.set('rekey_access', 'a1');
+      jar.set('rekey_refresh', 'r1');
+      getCurrentUser.mockRejectedValue(new FakeRekeyError(code));
+      refresh.mockRejectedValue(new FakeRekeyError(code));
+
+      await expect(getSession(cookies, req(), cfg, { refresh: true })).resolves.toBeNull();
+      expect(jar.has('rekey_access')).toBe(false);
+      expect(jar.has('rekey_refresh')).toBe(false);
+    },
+  );
+
   it('refreshes on a wrong-application access token instead of looping forever', async () => {
     jar.set('rekey_access', 'a1');
     jar.set('rekey_refresh', 'r1');

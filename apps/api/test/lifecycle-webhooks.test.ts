@@ -231,6 +231,8 @@ describe('Lifecycle webhooks and welcome timing', () => {
         deviceId: null,
         via: 'password',
         firstSignIn: true,
+        platform: 'other',
+        country: null,
       });
       expect(rows[1]).toMatchObject({ userId: user.id, via: 'password', firstSignIn: false });
       expect(rows[0]!.sessionId).not.toBe(rows[1]!.sessionId);

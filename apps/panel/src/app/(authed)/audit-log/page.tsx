@@ -17,6 +17,7 @@ import {
   humanizeEventType,
   resolveActorEmails,
 } from '@/lib/security-events';
+import { savedStateKey } from '@/lib/saved-state-key';
 
 const ACTOR_TYPES = ['operator', 'end_user', 'system'] as const;
 
@@ -134,7 +135,11 @@ export default async function AuditLogPage({
         }
       />
 
-      <ActionForm action={applyFilters} className="flex flex-wrap items-end gap-2">
+      <ActionForm
+        key={savedStateKey({ type, actorType, from, to })}
+        action={applyFilters}
+        className="flex flex-wrap items-end gap-2"
+      >
         <label className="block space-y-1">
           <span className="block text-xs font-medium text-[var(--color-fg)]">Event type</span>
           <select name="type" defaultValue={type} className={inputCls}>

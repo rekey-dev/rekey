@@ -137,6 +137,7 @@ export interface VerifyResult {
     | 'revoked'
     | 'expired'
     | 'seats_exhausted'
+    | 'suspended'
     | 'wrong_application';
 }
 
@@ -343,6 +344,18 @@ export const licensesService = {
     }
     if (license.status === 'REVOKED' || license.revokedAt !== null) {
       return { ok: false, reason: 'revoked', license: redactLicense(license) };
+    }
+    // A licence key is a credential of its own, used without a session, so the
+    // holder's ban has to be checked here too or banned users keep activating
+    // machines. `suspended` says no more than that: the reason stays with the
+    // operator. An org-pooled licence belongs to the organization, not to the
+    // member it was issued through, so one member's ban does not suspend it.
+    if (license.organizationId === null) {
+      const holder = await prisma.endUser.findUnique({
+        where: { id: license.endUserId },
+        select: { bannedAt: true },
+      });
+      if (holder?.bannedAt) return { ok: false, reason: 'suspended', license: redactLicense(license) };
     }
     if (license.expiresAt !== null && license.expiresAt <= new Date()) {
       // Mark EXPIRED on the way through if not already.

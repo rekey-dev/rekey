@@ -466,13 +466,15 @@ export const plansService = {
         // NEW plan inherit an OLD one's public identity, silently changing what
         // `pro` means for every existing caller, a worse failure than this
         // refusal. Reported as #30.
-        const archived = existing?.active === false;
+        const archived = !broken && existing?.active === false;
         throw new RekeyError({
           statusCode: 409,
           code: 'PLAN_SLUG_TAKEN',
-          message: archived
-            ? `An ARCHIVED plan with slug "${input.slug}" already exists in this application. Archiving a plan does not release its slug.`
-            : `A plan with slug "${input.slug}" already exists in this application.`,
+          message: broken
+            ? `A plan with slug "${input.slug}" already exists in this application. Its registration with the payment provider ${existing?.registrationStatus === 'FAILED' ? 'failed' : 'did not finish'}, so it is inactive and off the public catalogue.`
+            : archived
+              ? `An ARCHIVED plan with slug "${input.slug}" already exists in this application. Archiving a plan does not release its slug.`
+              : `A plan with slug "${input.slug}" already exists in this application.`,
           fix: broken
             ? `That plan exists but is not registered with the payment provider, so it is off the public catalogue. Fix the provider credentials if they were the problem, then repair it in place: PATCH /api/v1/tenant/applications/${input.applicationId}/plans/${input.slug} to correct name/price, and POST .../plans/${input.slug}/register to retry registration. You do not need a new slug.`
             : archived
@@ -788,7 +790,7 @@ async function registerAndSettle(
       statusCode: mapped.statusCode,
       code: mapped.code,
       message: mapped.message,
-      fix: `The plan was created (id ${current.id}) but is inactive and not on sale, because registering it with Stripe failed. Do not create it again: the slug is taken. Correct the Stripe credentials in Panel → Application → Billing if they are the cause, then retry registration with POST /api/v1/tenant/applications/${application.id}/plans/${current.slug}/register (Panel → Application → Plans → Register; with the super-admin key, the same path under /api/v1/admin/applications). Name and price can be corrected first with PATCH on the same plan.`,
+      fix: `The plan was created (id ${current.id}) but is inactive and not on sale, because registering it with Stripe failed. Do not create it again: the slug is taken. Correct the Stripe credentials in Panel → Application → Billing → Setup → Providers if they are the cause, then retry registration with POST /api/v1/tenant/applications/${application.id}/plans/${current.slug}/register (Panel → Application → Plans → Register; with the super-admin key, the same path under /api/v1/admin/applications). Name and price can be corrected first with PATCH on the same plan.`,
       details: { planId: current.id, planSlug: current.slug, registrationStatus: 'FAILED' },
       cause: e,
     });

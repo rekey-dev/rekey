@@ -30,6 +30,7 @@ import { ApiErrorText } from '@/components/api-error';
 import { EmailEditorClient } from '@/components/EmailEditorClient';
 import { Field, fieldInputCls } from '@/components/Field';
 import { VariableSchemaEditor } from '@/components/VariableSchemaEditor';
+import { savedStateKey } from '@/lib/saved-state-key';
 
 interface Preview {
   subject: string;
@@ -261,7 +262,17 @@ export default async function CustomTemplatePage({
 
       <Card className="space-y-4">
         <h3 className="text-sm font-semibold">Details</h3>
-        <ActionForm action={saveDetails.bind(null, id, key)} className="space-y-4">
+        <ActionForm
+          key={savedStateKey({
+            name: template.name,
+            category: template.category,
+            fromName: template.fromName,
+            linkDomains: template.linkDomains,
+            variableSchema: template.variableSchema,
+          })}
+          action={saveDetails.bind(null, id, key)}
+          className="space-y-4"
+        >
           <div className="grid items-start gap-3 sm:grid-cols-3">
             <Field label="Name" required>
               <input name="name" required maxLength={120} defaultValue={template.name} className={inputCls} />

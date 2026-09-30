@@ -65,6 +65,16 @@ Email is normalised to lowercase before storage. Email is unique per Application
 
 Authenticates an existing EndUser. Same response shape as sign-up, with `isNewUser: false`. Errors: `INVALID_CREDENTIALS` (401) for any auth failure (wrong email *or* wrong password *or* user signed up via OAuth). One code on purpose, so it never discloses which.
 
+### Saying what the client is
+
+Every route that starts a session (sign-up, sign-in, MFA verify, magic-link verify, passkey complete, OAuth callback) accepts an optional `client` object:
+
+```json
+{ "email": "…", "password": "…", "client": { "platform": "ios", "appVersion": "4.2.0" } }
+```
+
+`platform` is one of `web`, `ios`, `android`, `macos`, `windows`, `linux`, `server`, `mcp`, `other`; `appVersion` is up to 32 characters. Without it the platform comes from the User-Agent, which for a browser is enough and for a native app usually is not, so mobile and desktop apps should send it. A server that signs visitors in with a secret key should forward the visitor's User-Agent in `X-Rekey-Client-User-Agent` (the Next and Astro SDKs do); it is ignored from a publishable key. What is recorded, and where it shows, is in [analytics.md](analytics.md#where-they-sign-in-from).
+
 ### MFA: `POST /api/v1/auth/mfa-verify` and single-use codes
 
 When the user has TOTP enrolled, sign-in answers `{ mfaRequired: true, mfaChallengeToken }` instead of a session. Exchange the token and a code at `POST /api/v1/auth/mfa-verify` `{ mfaChallengeToken, code }`. The operator panel has the same flow at `POST /api/v1/tenant/auth/mfa-verify`.
@@ -73,7 +83,7 @@ Every second-factor credential works once:
 
 - **A challenge token completes one sign-in.** A second `mfa-verify` with the same token answers 401 `MFA_CHALLENGE_USED`, even with a different valid code. Start again from sign-in. A wrong code does not spend the token, so the user can retry within its 5-minute life, up to the usual MFA lockout. Neither does a refusal the session itself would get (`DEVICE_LIMIT_REACHED`, `DEVICE_BLOCKED`, `DEVICE_FINGERPRINT_REQUIRED`, `EMAIL_NOT_VERIFIED`, or `NO_TENANT_MEMBERSHIPS` for operators): those are decided after the code matches but before it is spent, so after releasing a device the user resubmits the same challenge and code. A wrong or reused code is answered as such and never reaches them, so the device list is only ever shown to someone who proved the second factor.
 - **A TOTP code is accepted once** (RFC 6238 section 5.2). Once a code is accepted for a user, that code and any older one are refused, on every route that takes one: sign-in verify, step-up (`/auth/mfa/challenge`), `/auth/mfa/setup-confirm`, `/auth/mfa/disable`, and the operator equivalents. The code that confirmed enrolment cannot also complete the first sign-in, so the user waits for the next code (up to 30 seconds). Sign-in verify answers 401 `MFA_CODE_REUSED` and setup-confirm answers 422 `MFA_CODE_REUSED`. The step-up routes that answer with an error (browser re-enrol and disable, passkey enrolment, and the operator setup, disable and passkey enrolment) answer 401 `MFA_CODE_REUSED`, unless a valid password was sent where the route accepts one. `/auth/mfa/challenge` keeps its documented `{ ok: false }` for any code that does not verify, reused or not. A reused code does not count toward the lockout.
-- **A backup code is consumed** on success, and concurrent requests carrying the same backup code cannot both succeed.
+- **A backup code is consumed** on success, and concurrent requests carrying the same backup code cannot both succeed. Presenting a spent backup code again at sign-in verify answers 401 `MFA_BACKUP_CODE_USED` so the user knows to pick another one; it still counts toward the lockout. Re-enrolling issues new codes and forgets the spent ones. This is end-user sign-in only: operator sign-in still answers `MFA_CODE_INVALID` for a spent backup code.
 
 The records behind this live in Redis (spent challenge tokens until they expire, the last accepted TOTP step for 120 seconds, which covers the 90-second window plus 30 seconds of clock skew between replicas). Like the lockout counters, they fail closed: if Redis is unreachable, MFA verification answers 503 `DEPENDENCY_UNAVAILABLE` rather than accepting a code it cannot record.
 
@@ -604,7 +614,9 @@ browser can never enumerate accounts through them):
 - `GET /api/v1/users/:id` — by id, scoped to the Application. SDK:
   `rekey.users.get(id)`.
 
-Both return the same shape as `GET /users/me`. For what that user is entitled
+Both return the same shape as `GET /users/me`, including the sign-in counters
+`lastSignedInAt`, `lastSignInVia` and `signInCount` (see
+[analytics.md](analytics.md)). For what that user is entitled
 to, `GET /api/v1/billing/entitlements/for-user?endUserId=` returns the same
 union as `/billing/entitlements` (SDK: `rekey.billing.getEntitlementsFor(id)`).
 
@@ -628,6 +640,28 @@ the whole batch is validated before any row is written.
 Operators manage end-users from the panel (or the `/api/v1/tenant/applications/:id/end-users*` routes): seed users manually, edit role/metadata/verified flag, grant credits, impersonate (audited, 5-minute token), and delete.
 
 Impersonation is bounded twice over. It is **revocable**: `POST /api/v1/tenant/applications/:id/end-users/:euid/impersonate/end` stamps `endedAt` on every open audit row for that user and invalidates the tokens they issued on the spot (`IMPERSONATION_SESSION_ENDED`), for any operator, not just the one who started it. And it **cannot change credentials or mint a session**: password change, MFA setup/disable, passkey enrolment/removal, linking or unlinking an OAuth provider, the MCP session handoff, and the two routes that re-mint a token pair (`POST /users/me/organizations/:id/switch` and `POST /users/me/organizations/clear-active-organization`) answer 403 `IMPERSONATION_ACTION_FORBIDDEN` for an impersonated session. Each of those would outlive the five-minute token: a re-minted pair is an ordinary 30-day session with no `imp` claim, which would keep working after the impersonation ended. Everything else the user can do (reads, billing, organization membership, profile edits) is unchanged.
+
+### Banning an end-user
+
+```
+POST /api/v1/tenant/applications/:id/end-users/:euid/ban     { reason }
+POST /api/v1/tenant/applications/:id/end-users/:euid/unban
+GET  /api/v1/tenant/applications/:id/end-users/:euid/ban     → { state, history }
+```
+
+A ban stops the person, where a device block stops one machine. It needs write access to the Application, and a reason of 1 to 500 characters that only operators ever see. In one transaction it records who banned and why, ends every session and OAuth/MCP grant, ends open impersonations, deletes outstanding password-reset links, and expires outstanding magic-link and verification links (kept, so a later erasure and the data export still find an address an email change was pending for). From then on:
+
+- password, magic-link, OAuth, passkey and MFA sign-in and every live access token answer `403 END_USER_BANNED`, always after the credential has been checked, so the code tells nothing to someone without it;
+- refresh with a token the ban revoked answers `401 REFRESH_TOKEN_REVOKED`, like any ended session; only a session minted by a sign-in that raced the ban answers `403 END_USER_BANNED` on refresh;
+- magic-link and forgot-password requests send nothing and answer exactly as for an unknown address;
+- licence keys the person holds verify as `{ ok: false, reason: "suspended" }` (organization-pooled licences are not affected);
+- operator impersonation and support mail are refused until the ban is lifted.
+
+Subscriptions keep billing. Cancel them separately if the person should stop paying. Banning a banned user returns the original ban with `alreadyBanned: true`; to change the reason, lift and ban again. Unbanning restores nothing: sessions the ban ended stay ended.
+
+Two windows remain. An app that verifies RS256 access tokens offline with `verifyAccessToken` cannot see any revocation, so a banned user's access token keeps passing there until it expires (15 minutes by default). And erasing a banned user frees their email, so the same person can sign up again afterwards.
+
+Every ban and lift is an `end_user.banned` / `end_user.unbanned` security event (with the reason and which operator credential acted) and a `user.banned` / `user.unbanned` webhook (without the reason). The person's data export carries `bannedAt` and the `end_user.banned` event, but never the reason. In the panel: end-user detail page → Access tab. The end-user list filters with `?banned=true`; an erased end-user counts as not banned there.
 
 ### Data export (DSAR)
 
@@ -713,12 +747,12 @@ The auth module enforces:
 `signupRestrictions` decides which email addresses may **self sign-up**. It is checked after `signupMode`, in the same place, on every path that creates an end-user from a sign-up: password sign-up, consuming a magic link for a new address, and a first OAuth sign-in. Set it in Panel → Application → Auth → Sign-up email rules, with `PATCH /api/v1/tenant/applications/:id/auth-config`, or with the operator MCP tool `update_auth_config`.
 
 ```json
-{ "signupRestrictions": { "allowedDomains": ["acme.com", "*.acme.com"], "blockedDomains": ["contractors.acme.com"], "blockDisposable": true } }
+{ "signupRestrictions": { "allowedDomains": ["acme.com", "*.acme.com"], "blockedDomains": ["competitor.com", "*.competitor.com"], "blockDisposable": true } }
 ```
 
 - **`allowedDomains`**: when non-empty, only these domains may sign up.
-- **`blockedDomains`**: these domains may never sign up. A blocked domain wins over an allowed one.
-- **`blockDisposable`**: refuses throwaway-inbox domains, and their subdomains, from a list vendored with the release ([disposable-email-domains](https://github.com/disposable-email-domains/disposable-email-domains), CC0). Nothing is fetched at runtime. Maintainers refresh it with `pnpm --filter @rekey.dev/api disposable:refresh`, which rewrites `apps/api/src/lib/disposable-domains.data.ts` and records the source commit.
+- **`blockedDomains`**: these domains may never sign up. A blocked domain wins over an allowed one. Blocking `competitor.com` alone still lets `mail.competitor.com` sign up; add `*.competitor.com` to cover its subdomains, as above. The panel flags an apex listed without its wildcard.
+- **`blockDisposable`**: refuses throwaway-inbox domains and their subdomains (no `*.` entry needed, unlike the two lists), from a list vendored with the release ([disposable-email-domains](https://github.com/disposable-email-domains/disposable-email-domains), CC0). Nothing is fetched at runtime. Maintainers refresh it with `pnpm --filter @rekey.dev/api disposable:refresh`, which rewrites `apps/api/src/lib/disposable-domains.data.ts` and records the source commit.
 
 Matching: `acme.com` matches that domain only; `*.acme.com` matches any subdomain of it and **not** `acme.com` itself, so list both to admit both. No other wildcard is accepted. Entries are trimmed, lowercased and stored with internationalised names converted to punycode (`bücher.de` becomes `xn--bcher-kva.de`), duplicates are dropped, and each list holds at most 500 entries. The PATCH replaces the whole object; send `null` to remove the rules.
 
@@ -786,6 +820,13 @@ the same `AuthResultDto`, so `result.isNewUser` is there too. A server that
 wants the signal out of band can use the `session.created` webhook instead, whose
 `firstSignIn` is also true for the first sign-in of an operator-created or
 imported user (see [webhooks.md](webhooks.md#users)).
+
+Rekey never holds a user in onboarding. Sign-in, refresh and every other route
+behave the same whether onboarding is `pending`, `completed` or `skipped`.
+Whether to send a returning user back to your form is your app's call: read
+`onboardingStatus` on the user (`GET /users/me`, `GET /auth/me`) and decide.
+If you offer a "skip" button, call `POST /api/v1/users/me/onboarding/skip` so
+the choice is recorded. See [profile-fields.md](profile-fields.md#onboarding).
 
 ## What's deliberately not here yet
 

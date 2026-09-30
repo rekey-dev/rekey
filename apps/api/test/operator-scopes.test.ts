@@ -288,7 +288,7 @@ describe('operator scopes', () => {
     });
     const od = asOwner.json().data as { access: { level: string; scopes: string[] }; authConfig: Record<string, unknown> };
     expect(od.access.level).toBe('workspace-admin');
-    expect(od.access.scopes.length).toBe(14);
+    expect(od.access.scopes.length).toBe(16);
     expect(Object.keys(od.authConfig).length).toBeGreaterThan(0);
   });
 

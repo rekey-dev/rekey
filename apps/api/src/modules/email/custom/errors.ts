@@ -81,6 +81,16 @@ export function variablesInvalid(key: string, version: number, issues: VariableI
   });
 }
 
+export function previewVariablesInvalid(key: string, issues: VariableIssue[]): RekeyError {
+  return new RekeyError({
+    statusCode: 400,
+    code: 'EMAIL_VARIABLES_INVALID',
+    message: `${issues.length} variable problem${issues.length === 1 ? '' : 's'} in the preview values for template "${key}".`,
+    fix: 'Correct each entry in `details.issues`, or omit `variables` to preview with each variable\'s sample.',
+    details: { issues },
+  });
+}
+
 export function templateInvalid(issues: VariableIssue[]): RekeyError {
   return new RekeyError({
     statusCode: 400,

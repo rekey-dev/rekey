@@ -205,8 +205,11 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
               minLength: 1,
               maxLength: 255,
               description:
-                'Optional. A retried record with the same (meter, key) returns the original ' +
-                'UsageRecord instead of double-counting. Omit for each-call-counts behavior.',
+                'Optional. A retried record with the same (meter, subject, key) returns the ' +
+                'original UsageRecord instead of double-counting, including when the retry carries ' +
+                'a regenerated `occurredAt` in the same UTC month. The same key with a different ' +
+                '`quantity`, or an `occurredAt` in another month, is refused with 409 ' +
+                'IDEMPOTENCY_KEY_REUSED. Keys are scoped per meter. Omit for each-call-counts behavior.',
             },
           },
         },
@@ -228,8 +231,9 @@ export async function usagePublicRoutes(app: FastifyInstance): Promise<void> {
               'this application.',
             409:
               'IDEMPOTENCY_KEY_IN_FLIGHT — a request with this Idempotency-Key is still being ' +
-              'processed; or IDEMPOTENCY_KEY_REUSED — the key was already used for a different ' +
-              'method, path, or body.',
+              'processed; or IDEMPOTENCY_KEY_REUSED: the Idempotency-Key header was already used ' +
+              'for a different method, path, or body, or the body `idempotencyKey` was already used ' +
+              'on this meter for this subject with a different `quantity` or in another month.',
             503:
               'USAGE_RECORD_BUSY: another record for the same subject held the quota lock past ' +
               'the wait limit; nothing was recorded or charged, retry after `Retry-After`.',

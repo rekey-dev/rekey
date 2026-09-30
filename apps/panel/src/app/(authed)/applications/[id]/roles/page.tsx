@@ -35,13 +35,14 @@ import { Table, THead, TBody, TR, TH, TD } from '@/components/Table';
 import { Badge } from '@/components/Badge';
 import { EmptyState } from '@/components/EmptyState';
 import { Banner } from '@/components/Banner';
+import { dangerButtonClass } from '@/components/Button';
 
 const inputCls =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--color-primary)_30%,transparent)] focus:border-[var(--color-primary)]';
 
 const rowAction =
   'text-xs font-medium text-[var(--color-fg)] hover:underline disabled:opacity-60';
-const rowDanger = 'text-xs text-red-600 dark:text-red-400 hover:underline cursor-pointer';
+const rowDanger = dangerButtonClass('xs');
 
 const pageUrl = (id: string): string => `/applications/${id}/roles`;
 

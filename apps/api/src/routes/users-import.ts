@@ -209,6 +209,7 @@ export async function usersImportRoutes(app: FastifyInstance): Promise<void> {
                 // that requires verification would otherwise trust every
                 // imported address on the strength of an omitted field.
                 emailVerified: u.emailVerified ?? false,
+                createdVia: 'import',
                 ...(u.metadata !== undefined && { metadata: u.metadata as never }),
               },
               select: { id: true, email: true },

@@ -86,6 +86,8 @@ const RAW_FORM_ALLOWLIST: Record<string, string> = {
   // runs the same `useCommitNudge` ActionForm does (checked below). The
   // `action` attribute is only the no-JavaScript fallback.
   [path.join('components', 'EmailEditorClient.tsx')]: 'posts by hand, nudges itself',
+  // Copy-paste code shown on a list's Embed tab: text in a string, never rendered as a form.
+  [path.join('lib', 'lists.ts')]: 'code samples for the operator to copy',
 };
 
 describe('rule 2: every form that posts to a Server Action is an ActionForm', () => {

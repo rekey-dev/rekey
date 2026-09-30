@@ -1,11 +1,11 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { getPortalUser } from '@/lib/session';
+import { getMfaChallenge, getPortalUser } from '@/lib/session';
 import { signInAction, mfaVerifyAction } from '@/lib/actions';
 import { Banner } from '@/components/banner';
 import { SubmitButton } from '@/components/submit-button';
-import { mfaErrorCopy, parseRetryAfter, signInErrorCopy } from '@/lib/auth-error-copy';
+import { MFA_EXPIRED_COPY, mfaErrorCopy, parseRetryAfter, signInErrorCopy } from '@/lib/auth-error-copy';
 
 const inputCls =
   'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm';
@@ -24,12 +24,14 @@ export default async function LoginPage({
 
   const error = typeof sp.error === 'string' ? sp.error : undefined;
   const reason = typeof sp.reason === 'string' ? sp.reason : undefined;
-  const mfaChallenge = typeof sp.mfa === 'string' ? sp.mfa : undefined;
+  const mfaStep = sp.step === 'mfa';
   const lastEmail = typeof sp.email === 'string' ? sp.email : undefined;
   const retryAfterSeconds = parseRetryAfter(sp.retry);
 
-  // MFA code step: sign-in succeeded, account is MFA-enrolled.
-  if (mfaChallenge) {
+  // MFA code step: sign-in succeeded, account is MFA-enrolled. The challenge
+  // itself stays in its httpOnly cookie; without it there is nothing to verify.
+  if (mfaStep) {
+    if (!(await getMfaChallenge())) redirect(`/${slug}/login?reason=mfa_expired`);
     return (
       <div className="mx-auto max-w-sm space-y-5 pt-10">
         <h1 className="text-lg font-semibold text-[var(--color-fg)]">Two-factor authentication</h1>
@@ -38,7 +40,6 @@ export default async function LoginPage({
         </p>
         {error && <Banner tone="error">{mfaErrorCopy(error, retryAfterSeconds)}</Banner>}
         <form action={mfaVerifyAction.bind(null, slug)} className="space-y-3">
-          <input type="hidden" name="challenge" value={mfaChallenge} />
           <label className="block space-y-1.5">
             <span className="text-sm font-medium text-[var(--color-fg)]">Code</span>
             <input
@@ -69,6 +70,7 @@ export default async function LoginPage({
     <div className="mx-auto max-w-sm space-y-5 pt-10">
       <h1 className="text-lg font-semibold text-[var(--color-fg)]">Sign in</h1>
       {reason === 'expired' && <Banner tone="info">Your session expired. Sign in again.</Banner>}
+      {reason === 'mfa_expired' && <Banner tone="info">{MFA_EXPIRED_COPY}</Banner>}
       {reason === 'session_interrupted' && (
         <Banner tone="info">
           Your session was interrupted while it renewed, so it was signed out to keep your account safe. Sign in again

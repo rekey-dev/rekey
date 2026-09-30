@@ -19,7 +19,8 @@
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { DeviceBindingRequestSchema } from '@rekey.dev/shared-types';
+import { ClientHintSchema, CLIENT_PLATFORMS, DeviceBindingRequestSchema } from '@rekey.dev/shared-types';
+import { requestClient } from '../../lib/client-platform.js';
 import { oauthService } from './oauth.service.js';
 import {
   requirePublishableOrSecretKey,
@@ -37,6 +38,7 @@ const StartBody = z.object({ state: z.string().min(1).max(512) });
 const CallbackBody = z.object({
   code: z.string().min(1).max(4096),
   device: DeviceBindingRequestSchema.optional(),
+  client: ClientHintSchema.optional(),
 });
 
 /**
@@ -153,6 +155,14 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
                 label: { type: 'string', minLength: 1, maxLength: 120 },
               },
             },
+            client: {
+              type: 'object',
+              description: 'What the client is, recorded on the session. See docs/analytics.md.',
+              properties: {
+                platform: { type: 'string', enum: [...CLIENT_PLATFORMS] },
+                appVersion: { type: 'string', pattern: '^[\\w.+-]{1,32}$' },
+              },
+            },
           },
         },
         security: [{ apiKey: [] }, { publishableKey: [] }],
@@ -190,16 +200,17 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
     async (req) => {
       const { provider } = ProviderParam.parse(req.params);
       const body = CallbackBody.parse(req.body);
-      const ua = req.headers['user-agent'];
+      const client = requestClient(req, body.client);
       const outcome = await oauthService.handleCallback({
         application: req.application!,
         providerName: provider,
         code: body.code,
         device: {
-          userAgent: typeof ua === 'string' && ua.length > 0 ? ua : null,
+          userAgent: client.userAgent,
           ip: req.ip || null,
           fingerprint: body.device?.fingerprint ?? null,
           label: body.device?.label ?? null,
+          client,
         },
         // Signup policy: refuse OAuth-first user creation via a pub key in
         // `secret_only` apps (and entirely in `invite_only`).

@@ -62,6 +62,10 @@ export type {
   UsageRemainingDto,
   UsageMeterRemainingDto,
   SelfCreditLedgerEntryDto,
+  ContactListPublicDto,
+  ListSubscribeRequest,
+  ProfileStateDto,
+  OnboardingStatus,
 } from './client.js';
 export { mcpConnectionInfo } from './mcp.js';
 export type { McpConnectionInfo } from './mcp.js';
@@ -120,6 +124,10 @@ export type {
   CheckoutButtonProps,
   PricingPlan,
 } from './billing-components.js';
+
+// List forms: a newsletter or waitlist signup and a contact form.
+export { NewsletterForm, ContactForm, useListSubscribe } from './list-components.js';
+export type { ListFormProps, ListSubscribeValues, UseListSubscribe } from './list-components.js';
 
 // Provider picker, let the end-user choose a billing provider ("Pay with…").
 export { ProviderPicker } from './provider-picker.js';

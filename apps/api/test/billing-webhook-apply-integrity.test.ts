@@ -248,7 +248,7 @@ describe('billing webhook apply integrity', () => {
       expect(row.beneficiaryOrgId).toBe(org1);
     });
 
-    it('a feature-only free plan activated for a second organization stays the idempotent no-op', async () => {
+    it('a feature-only free plan activated for a second organization does not answer with the first one\'s row', async () => {
       const r = await app.inject({
         method: 'POST',
         url: `/api/v1/tenant/applications/${appId}/plans`,
@@ -279,7 +279,29 @@ describe('billing webhook apply integrity', () => {
         organizationId: org2,
       });
       expect(second.activated).toBe(false);
-      expect(second.subscription.beneficiaryOrgId).toBe(org1);
+      expect(second.subscription).toBeNull();
+    });
+
+    it('eight racing operator grants for eight organizations: one wins, the losers get 409, never its row', async () => {
+      const euId = await endUser('racegrant@example.com');
+      const orgs: string[] = [];
+      for (let i = 0; i < 8; i++) orgs.push(await org(`rg${i}`));
+      const results = await Promise.all(
+        orgs.map((organizationId) =>
+          app.inject({
+            method: 'POST',
+            url: `/api/v1/tenant/applications/${appId}/end-users/${euId}/subscriptions`,
+            headers: auth(),
+            payload: { planSlug: 'pro', organizationId },
+          }),
+        ),
+      );
+      expect(results.filter((r) => r.statusCode === 201)).toHaveLength(1);
+      const losers = results.filter((r) => r.statusCode !== 201);
+      expect(losers.map((r) => r.statusCode)).toEqual(Array(7).fill(409));
+      for (const r of losers) {
+        expect((r.json() as { error: { code: string } }).error.code).toBe('BILLING_SUBSCRIPTION_SUBJECT_CONFLICT');
+      }
     });
 
     it('the operator grant for a second organization answers 409 instead of the first one\'s row', async () => {
@@ -299,6 +321,90 @@ describe('billing webhook apply integrity', () => {
       expect((res.json() as { error: { code: string } }).error.code).toBe('BILLING_SUBSCRIPTION_SUBJECT_CONFLICT');
       // Same subject again is still the idempotent no-op.
       expect((await grant(org1)).statusCode).toBe(200);
+    });
+  });
+
+  describe('an Application billed per organization', () => {
+    beforeEach(async () => {
+      const application = await prisma.application.findUniqueOrThrow({ where: { id: appId } });
+      await prisma.application.update({
+        where: { id: appId },
+        data: {
+          billingConfig: { ...(application.billingConfig as Record<string, unknown>), billingSubject: 'org' },
+        },
+      });
+    });
+
+    it('applies a renewal under the same subscription id that omits the organization', async () => {
+      const euId = await endUser('orgrenew@example.com');
+      const org1 = await org('or1');
+      await post(
+        activated('ext_orgrenew', { endUserId: euId, organizationId: org1 }, { currentPeriodEnd: daysFromNow(30).toISOString() }),
+      );
+      const end = daysFromNow(60);
+      const renewal = activated('ext_orgrenew', { endUserId: euId }, { currentPeriodEnd: end.toISOString() });
+      const res = await post(renewal);
+
+      expect(res.statusCode, res.body).toBe(200);
+      expect((await receiptOf(renewal.eventId)).processingError).toBeNull();
+      const row = await prisma.subscription.findFirstOrThrow({ where: { applicationId: appId } });
+      expect(row.beneficiaryOrgId).toBe(org1);
+      expect(row.currentPeriodEnd?.toISOString()).toBe(end.toISOString());
+      expect(await creditsService.getBalance(appId, { organizationId: org1 })).toBe(1000);
+    });
+
+    it('keeps the organization when a cancelled subscription is reactivated under its id without one', async () => {
+      const euId = await endUser('orgback@example.com');
+      const org1 = await org('ob1');
+      await post(activated('ext_orgback', { email: 'orgback@example.com', organizationId: org1 }));
+      await post(event('subscription.canceled', { subscription: { id: 'ext_orgback' } }));
+      const res = await post(activated('ext_orgback', { email: 'orgback@example.com' }));
+
+      expect(res.statusCode, res.body).toBe(200);
+      const row = await prisma.subscription.findFirstOrThrow({ where: { applicationId: appId, endUserId: euId } });
+      expect(row.status).toBe('ACTIVE');
+      expect(row.beneficiaryOrgId).toBe(org1);
+    });
+
+    it('fails a new subscription without an organization retryably, and a corrected re-send applies', async () => {
+      const euId = await endUser('orgnew@example.com');
+      const org1 = await org('on1');
+      const body = activated('ext_orgnew', { endUserId: euId });
+      const res = await post(body);
+
+      // 500, so the sender retries: the operator can fix this by billing per user.
+      expect(res.statusCode, res.body).toBe(500);
+      const receipt = await receiptOf(body.eventId);
+      expect(receipt.processingError).toContain('bills per organization');
+      expect(receipt.processedAt).toBeNull();
+
+      const fixed = { ...body, data: { ...(body.data as Record<string, unknown>), subscriber: { endUserId: euId, organizationId: org1 } } };
+      const retry = await post(fixed);
+      expect(retry.statusCode, retry.body).toBe(200);
+      const row = await prisma.subscription.findFirstOrThrow({ where: { applicationId: appId } });
+      expect(row.beneficiaryOrgId).toBe(org1);
+    });
+
+    it('still requires the organization when the same id arrives for a different subscriber', async () => {
+      const owner = await endUser('orgowner@example.com');
+      const other = await endUser('orgother@example.com');
+      const org1 = await org('oo1');
+      await post(activated('ext_orgmove', { endUserId: owner, organizationId: org1 }));
+      const res = await post(activated('ext_orgmove', { endUserId: other }));
+
+      expect(res.statusCode, res.body).toBe(500);
+      expect((await prisma.webhookEvent.findFirstOrThrow({ where: { applicationId: appId, processedAt: null } })).processingError).toContain('organization');
+      const rows = await prisma.subscription.findMany({ where: { applicationId: appId } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.status).toBe('ACTIVE');
+      expect(rows[0]!.endUserId).toBe(owner);
+    });
+
+    it('answers 404 for an organization the Application does not have', async () => {
+      const euId = await endUser('orgmissing@example.com');
+      const res = await post(activated('ext_orgmissing', { endUserId: euId, organizationId: 'org_does_not_exist' }));
+      expect(res.statusCode, res.body).toBe(404);
+      expect((res.json() as { error: { code: string } }).error.code).toBe('ORGANIZATION_NOT_FOUND');
     });
   });
 
@@ -347,6 +453,38 @@ describe('billing webhook apply integrity', () => {
       await post(event('subscription.canceled', { subscription: { id: 'ext_back' } }, new Date(t0 - 2000)));
       await post(activated('ext_back', { endUserId: euId }, {}, new Date(t0 - 1000)));
       expect((await prisma.subscription.findFirstOrThrow({ where: { applicationId: appId } })).status).toBe('ACTIVE');
+    });
+
+    it('a cancellation dated far in the future is dated now, so a genuine reactivation still reopens it', async () => {
+      const euId = await endUser('future@example.com');
+      await post(activated('ext_future', { endUserId: euId }, {}, new Date(Date.now() - 60_000)));
+      const cancel = event('subscription.canceled', { subscription: { id: 'ext_future' } }, daysFromNow(365));
+      await post(cancel);
+
+      const row = await prisma.subscription.findFirstOrThrow({ where: { applicationId: appId } });
+      expect(row.status).toBe('CANCELED');
+      expect(row.canceledAt!.getTime()).toBeLessThanOrEqual(Date.now());
+      expect((await receiptOf(cancel.eventId)).processingError).toMatch(/ahead of Rekey's clock/);
+
+      await post(activated('ext_future', { endUserId: euId }, {}, new Date(Date.now() - 1000)));
+      expect((await prisma.subscription.findFirstOrThrow({ where: { applicationId: appId } })).status).toBe('ACTIVE');
+    });
+
+    it('a cancellation dated a minute ahead is still the sender\'s date', async () => {
+      const euId = await endUser('drift@example.com');
+      await post(activated('ext_drift', { endUserId: euId }));
+      const at = new Date(Date.now() + 60_000);
+      await post(event('subscription.canceled', { subscription: { id: 'ext_drift' } }, at));
+      const row = await prisma.subscription.findFirstOrThrow({ where: { applicationId: appId } });
+      expect(row.canceledAt?.toISOString()).toBe(at.toISOString());
+    });
+
+    it('an activation dated far in the future is applied as undated and noted', async () => {
+      const euId = await endUser('futureact@example.com');
+      const body = activated('ext_futureact', { endUserId: euId }, {}, daysFromNow(30));
+      await post(body);
+      expect((await prisma.subscription.findFirstOrThrow({ where: { applicationId: appId } })).status).toBe('ACTIVE');
+      expect((await receiptOf(body.eventId)).processingError).toMatch(/ahead of Rekey's clock/);
     });
 
     it('a period end restated a few seconds later is the same period: no second refill', async () => {

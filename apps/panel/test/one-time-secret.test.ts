@@ -39,7 +39,7 @@ const MINTS: { action: string; file: string; form: string }[] = [
   { action: 'createKey', file: app('applications', '[id]', 'api-keys', 'page.tsx'), form: app('applications', '[id]', 'api-keys', 'page.tsx') },
   { action: 'createEndpoint', file: app('applications', '[id]', 'webhooks', 'page.tsx'), form: app('applications', '[id]', 'webhooks', 'page.tsx') },
   { action: 'rotateSecret', file: app('applications', '[id]', 'webhooks', '[endpointId]', 'page.tsx'), form: app('applications', '[id]', 'webhooks', '[endpointId]', 'page.tsx') },
-  { action: 'invite', file: app('team', 'page.tsx'), form: app('team', 'page.tsx') },
+  { action: 'invite', file: app('team', 'invitations', 'page.tsx'), form: app('team', 'invitations', 'page.tsx') },
   { action: 'issueLicense', file: app('applications', '[id]', 'licenses', 'page.tsx'), form: app('applications', '[id]', 'licenses', 'page.tsx') },
   { action: 'revealOrgLicenseKey', file: app('applications', '[id]', 'organizations', '[orgId]', 'page.tsx'), form: app('applications', '[id]', 'organizations', '[orgId]', 'page.tsx') },
   { action: 'mintToken', file: app('account', 'api-tokens', 'page.tsx'), form: app('account', 'api-tokens', 'page.tsx') },
@@ -202,7 +202,7 @@ describe('a successful mint clears the refusal before it', () => {
   });
 
   it('leaves the URL alone when the action refused (it redirected, nothing returned)', async () => {
-    window.history.replaceState(null, '', '/team?error=missing');
+    window.history.replaceState(null, '', '/team/invitations?error=missing');
     await mint(undefined);
     expect(new URLSearchParams(window.location.search).get('error')).toBe('missing');
   });

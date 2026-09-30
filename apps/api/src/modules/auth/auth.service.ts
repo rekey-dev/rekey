@@ -81,7 +81,7 @@ import {
   LOGIN_POLICY,
 } from '../../lib/brute-force.js';
 import type { WebAuthnCredential } from '@prisma/client';
-import { AuthConfigSchema } from '@rekey.dev/shared-types';
+import { AuthConfigSchema, onboardingStatus, type OnboardingStatus } from '@rekey.dev/shared-types';
 import { assertNoReservedMetadataKey } from '../../lib/oidc-profile.js';
 import { assertSignupAllowed, signupAllowed, type AuthKind } from '../../lib/signup-policy.js';
 import { assertEndUserQuota } from '../../lib/tenant-limits.js';
@@ -90,6 +90,7 @@ import { mfaService } from '../mfa/mfa.service.js';
 import {
   claimMfaChallenge,
   isMfaChallengeSpent,
+  mfaBackupCodeUsedError,
   mfaChallengeUsedError,
   mfaCodeReusedError,
 } from '../../lib/mfa-replay.js';
@@ -108,6 +109,8 @@ import {
   userSnapshot,
   welcomeTiming,
 } from './user-lifecycle.js';
+import { recordActivitySafely } from '../end-users/daily-activity.js';
+import type { ClientContext } from '../../lib/client-platform.js';
 
 export interface SignUpInput {
   application: Application;
@@ -176,12 +179,37 @@ const PUBLISHABLE_MAGIC_LINK_RESPONSE = {
 /** Public-safe shape of an EndUser, `passwordHash` and internal bookkeeping stripped. */
 export type PublicEndUser = Omit<
   EndUser,
-  'passwordHash' | 'sessionsInvalidBefore' | 'welcomeEmailPending' | 'firstSignedInAt'
->;
+  | 'passwordHash'
+  | 'sessionsInvalidBefore'
+  | 'welcomeEmailPending'
+  | 'firstSignedInAt'
+  | 'activityBits'
+  | 'bannedAt'
+  | 'bannedBy'
+  | 'banReason'
+  | 'createdVia'
+> & { onboardingStatus: OnboardingStatus; createdVia: string };
+
+/** The secret-key view: the customer's own backend also sees whether the user is banned. */
+export type ServerEndUser = PublicEndUser & Pick<EndUser, 'bannedAt'>;
 
 function redact(user: EndUser): PublicEndUser {
-  const { passwordHash, sessionsInvalidBefore, welcomeEmailPending, firstSignedInAt, ...rest } = user;
-  return rest;
+  const {
+    passwordHash,
+    sessionsInvalidBefore,
+    welcomeEmailPending,
+    firstSignedInAt,
+    activityBits,
+    // Operator-only: who banned and why never leave through an end-user or
+    // secret-key payload. `bannedAt` is added back for the secret-key lookup
+    // only (`getByIdForServer`); the end-user's own payloads never carry it.
+    bannedAt,
+    bannedBy,
+    banReason,
+    createdVia,
+    ...rest
+  } = user;
+  return { ...rest, onboardingStatus: onboardingStatus(user), createdVia: createdVia ?? 'unknown' };
 }
 
 /**
@@ -234,6 +262,34 @@ function assertEndUserNotErased(user: Pick<EndUser, 'erasedAt'>): void {
       fix: 'The account was permanently erased on an operator data-subject request. It cannot be restored or signed into; create a fresh account if needed.',
     });
   }
+}
+
+/**
+ * Operator ban gate. Runs beside the erasure gate at every session chokepoint,
+ * and only AFTER the primary factor has succeeded, so the distinct code tells
+ * nothing to someone who does not already hold the credential. The operator's
+ * reason is never part of the error.
+ *
+ * The OAuth/OIDC surface enforces the same rule in `liveGrantSubject`
+ * (modules/mcp/oauth.service.ts). Change one, change both.
+ */
+export function assertEndUserNotBanned(user: Pick<EndUser, 'bannedAt'>): void {
+  if (user.bannedAt !== null) throw endUserBannedError();
+}
+
+export function endUserBannedError(): RekeyError {
+  return new RekeyError({
+    statusCode: 403,
+    code: 'END_USER_BANNED',
+    message: 'This account cannot sign in to this app. Contact the app\'s support team.',
+    fix: 'Show the person a suspended-account message with your support contact. Do not retry; an operator has to lift the ban.',
+  });
+}
+
+/** Both terminal refusals, erased first: an erased user's ban no longer matters. */
+function assertEndUserCanAuthenticate(user: Pick<EndUser, 'erasedAt' | 'bannedAt'>): void {
+  assertEndUserNotErased(user);
+  assertEndUserNotBanned(user);
 }
 
 export interface AuthResult {
@@ -299,6 +355,8 @@ export interface DeviceContext {
    * primary; `refresh` and org switch pass `false`.
    */
   primary?: boolean;
+  /** The client the session is started from, recorded on its refresh row (lib/client-platform.ts). */
+  client?: ClientContext | null;
 }
 
 /**
@@ -645,6 +703,10 @@ async function issuePair(
   if ('session' in origin && origin.session.impersonation) {
     throw impersonationForbidden('mint a new session');
   }
+  // Backstop for the doors that reach here without `issueSessionOrMfaChallenge`:
+  // passkey sign-in, MFA verification (a ban can land inside the challenge's
+  // five minutes) and org switching.
+  assertEndUserCanAuthenticate(endUser);
   // Email-verification chokepoint. THE place a session comes into existence in
   // this service, sign-up, sign-in, MFA verification and org switching all end
   // up here, which is why the gate lives here rather than beside each caller.
@@ -667,6 +729,7 @@ async function issuePair(
     ip: device?.ip ?? null,
     activeOrganizationId: activeOrganizationId ?? null,
     deviceId,
+    client: device?.client ?? null,
   };
   const { refresh, deliveryIds } =
     'credential' in origin
@@ -677,6 +740,7 @@ async function issuePair(
             sessionId: issued.record.sessionId,
             deviceId,
             via: origin.credential.via,
+            client: device?.client ?? null,
           });
           return { refresh: issued, deliveryIds: ids };
         })
@@ -713,10 +777,11 @@ export async function issueSessionOrMfaChallenge(
   credential: SignInCredential,
   device?: DeviceContext,
 ): Promise<SignInOutcome> {
-  // GDPR erasure chokepoint: every primary-factor success (password,
+  // Erasure and ban chokepoint: every primary-factor success (password,
   // magic-link, OAuth sign-in, OAuth link) funnels through here before a
-  // session/challenge is minted, so an erased user is rejected uniformly.
-  assertEndUserNotErased(endUser);
+  // session/challenge is minted, so an erased or banned user is rejected
+  // uniformly and no MFA challenge is handed out.
+  assertEndUserCanAuthenticate(endUser);
   // Same gate `issuePair` runs, repeated here for the branch that returns
   // BEFORE it: an MFA-enrolled user with an unconfirmed address would otherwise
   // be asked for a TOTP code and only then told to go and read their email.
@@ -986,6 +1051,7 @@ export const authService = {
             email: input.email.toLowerCase(),
             passwordHash,
             role: defaultRole.name,
+            createdVia: 'password',
             welcomeEmailPending: welcome === 'pending',
             ...(input.metadata !== undefined && {
               metadata: input.metadata as never,
@@ -1216,6 +1282,9 @@ export const authService = {
       });
     }
     const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: claims.sub } });
+    // Before the code is matched, so a ban placed after the challenge was
+    // issued spends no backup code.
+    assertEndUserCanAuthenticate(endUser);
     ensureEmailVerified(input.application, endUser);
     if (await isMfaChallengeSpent(input.mfaChallengeToken)) throw mfaChallengeUsedError();
     const codeRefused = (outcome: 'invalid' | 'reused'): RekeyError =>
@@ -1233,6 +1302,7 @@ export const authService = {
     // user at the limit can release a device and resubmit the same challenge
     // and code. Only then spend the code and claim the challenge.
     const match = await mfaService.match({ endUserId: claims.sub, code: input.code });
+    if (match.outcome === 'invalid' && match.spentBackupCode) throw mfaBackupCodeUsedError();
     if (match.outcome !== 'matched') throw codeRefused(match.outcome);
     const plan = await planDeviceBinding(input.application, endUser, input.device);
     if (plan) {
@@ -1346,10 +1416,11 @@ export const authService = {
     // blocked device and an unverified address are ordinary refusals, not
     // compromise signals, and must cost the client nothing but this request.
     const endUser = await prisma.endUser.findUniqueOrThrow({ where: { id: outcome.token.endUserId } });
-    // GDPR erasure: a refresh token issued before erasure must not mint a fresh
-    // access token. (Erasure also revokes all refresh tokens, but a token
-    // rotated in a concurrent request could still reach here, belt and braces.)
-    assertEndUserNotErased(endUser);
+    // Erasure and ban: a refresh token issued before either must not mint a
+    // fresh access token. Both also revoke every refresh token, but a sign-in
+    // racing the ban can commit a new one after that revoke, and this read is
+    // what stops it.
+    assertEndUserCanAuthenticate(endUser);
     // Email-verification gate, re-checked rather than trusted from issue time.
     // A refresh chain lasts 30 days: without this, an operator who switches
     // `requireEmailVerification` on is switching it on for future sign-ins
@@ -1475,6 +1546,7 @@ export const authService = {
       });
       deviceId = rebound;
     }
+    await recordActivitySafely(endUser, replacement.record.clientPlatform);
     const access = await issueUserAccessTokenForApp(application, endUser.id, {
       ...(oid && { activeOrganizationId: oid }),
       ...(deviceId && { deviceId }),
@@ -1578,6 +1650,9 @@ export const authService = {
     resetToken: string | null;
   }> {
     ensurePasswordMethodEnabled(input.application);
+    // Before the lookup: refusing only for a known address would tell a
+    // publishable-key caller which addresses have accounts.
+    assertAllowedTokenUrl(input.application, input.resetUrl, 'resetUrl');
     const endUser = await prisma.endUser.findUnique({
       where: {
         applicationId_email: {
@@ -1586,7 +1661,9 @@ export const authService = {
         },
       },
     });
-    if (!endUser) {
+    // A banned account gets exactly the unknown-address answer: no mail, and
+    // nothing in the response that tells a caller the address is banned.
+    if (!endUser || endUser.bannedAt !== null) {
       // Sleep a tiny constant amount to flatten timing attacks against the
       // existence-of-email side channel. Not bulletproof (requires lots more
       // work to fully neutralise), but raises the bar without much cost.
@@ -1595,7 +1672,6 @@ export const authService = {
       if (input.authKind === 'publishable') return PUBLISHABLE_SEND_RESPONSE;
       return { delivered: false, emailSent: false, resetToken: null };
     }
-    assertAllowedTokenUrl(input.application, input.resetUrl, 'resetUrl');
     const issued = await issueResetToken(input.application.id, endUser.id);
 
     const outcome = await emailService.dispatch({
@@ -1718,6 +1794,16 @@ export const authService = {
         fix: 'Request a fresh token under the correct Application.',
       });
     }
+
+    // Only the mailbox owner holds this token, so naming the ban tells nobody
+    // anything new. Checked before the token is spent so a lifted ban leaves
+    // it usable. The ban also deletes outstanding reset tokens; this catches
+    // one issued by a request that raced it.
+    const owner = await prisma.endUser.findUniqueOrThrow({
+      where: { id: outcome.token.endUserId },
+      select: { erasedAt: true, bannedAt: true },
+    });
+    assertEndUserCanAuthenticate(owner);
 
     const consumed = await consumeResetToken(outcome.token);
     if (!consumed) {
@@ -1890,6 +1976,8 @@ export const authService = {
   }> {
     ensureMagicLinkMethodEnabled(input.application);
     const config = AuthConfigSchema.parse(input.application.authConfig);
+    // Before the lookup, for the same reason as requestPasswordReset.
+    assertAllowedTokenUrl(input.application, input.signInUrl, 'signInUrl');
 
     const email = input.email.toLowerCase();
     const endUser = await prisma.endUser.findUnique({
@@ -1901,12 +1989,14 @@ export const authService = {
     // a publishable key, or an email domain the sign-up rules refuse). Existing
     // users still get a sign-in link.
     //
-    // With `public` sign-up and no domain rules this branch is unreachable, so a
-    // known and an unknown address are genuinely indistinguishable. Otherwise
-    // it is reachable, and for a SECRET key `delivered` differs on existence,
-    // the same caveat as requestPasswordReset. Silent refusal and padded timing
-    // narrow it; they do not close it.
-    if (!endUser && !signupAllowed(config, input.authKind, email)) {
+    // A banned account is answered the same way: no link is minted or mailed.
+    //
+    // For a publishable key every refusal here returns the constant reply, so
+    // it cannot tell a known, unknown or banned address apart. For a SECRET key
+    // `delivered` differs: a refused or banned address reads `false`, a sent
+    // link `true`. That is the same caveat as requestPasswordReset, and a
+    // secret key belongs to the operator's own backend, which may know.
+    if ((!endUser && !signupAllowed(config, input.authKind, email)) || endUser?.bannedAt) {
       // Sleep to flatten the timing side channel. A publishable caller gets the
       // constant response so this refusal is indistinguishable from a real send.
       await new Promise((r) => setTimeout(r, 50));
@@ -1914,7 +2004,6 @@ export const authService = {
       return { delivered: false, emailSent: false, magicLinkToken: null };
     }
 
-    assertAllowedTokenUrl(input.application, input.signInUrl, 'signInUrl');
     const issued = await issueMagicLinkToken({
       applicationId: input.application.id,
       endUserId: endUser?.id ?? null,
@@ -2030,6 +2119,18 @@ export const authService = {
       });
     }
 
+    // Before the token is consumed, so a banned account's link leaves no trace:
+    // no `emailVerified` promotion, no `user.updated`, no welcome mail. The ban
+    // deletes outstanding links; this catches one minted by a racing request.
+    // `issueSessionOrMfaChallenge` still gates whatever slips past this read.
+    const holder = await prisma.endUser.findFirst({
+      where: outcome.token.endUserId
+        ? { id: outcome.token.endUserId }
+        : { applicationId: input.application.id, email: outcome.token.email },
+      select: { erasedAt: true, bannedAt: true },
+    });
+    if (holder) assertEndUserCanAuthenticate(holder);
+
     // Read BEFORE the transaction, as sign-up does: `getDefault` goes through
     // the global client, so inside the callback it checked out a second pool
     // connection while the transaction held the first. N concurrent verifies
@@ -2124,6 +2225,7 @@ export const authService = {
               email: outcome.token.email,
               emailVerified: true,
               role: defaultRole.name,
+              createdVia: 'magic_link',
             },
           }),
         );
@@ -2255,6 +2357,8 @@ export const authService = {
     /** Which credential the caller presented; a publishable key gets the constant. */
     authKind?: AuthKind;
   }): Promise<{ emailSent: boolean; verificationToken: string | null }> {
+    // Before the lookup, for the same reason as requestPasswordReset.
+    assertAllowedTokenUrl(input.application, input.verifyUrl, 'verifyUrl');
     const endUser = await prisma.endUser.findUnique({
       where: {
         applicationId_email: {
@@ -2265,7 +2369,7 @@ export const authService = {
     });
     // No account, or nothing to verify. Same flattening sleep and the same
     // answer for both, see the docblock.
-    if (!endUser || endUser.emailVerified || endUser.erasedAt !== null) {
+    if (!endUser || endUser.emailVerified || endUser.erasedAt !== null || endUser.bannedAt !== null) {
       await new Promise((r) => setTimeout(r, 50));
       if (input.authKind === 'publishable') return PUBLISHABLE_VERIFICATION_SEND_RESPONSE;
       return { emailSent: false, verificationToken: null };
@@ -2347,7 +2451,11 @@ export const authService = {
     // tokens with it (`EmailVerificationToken.endUser` is `onDelete: Cascade`),
     // so the lookup misses and the caller already gets
     // EMAIL_VERIFICATION_TOKEN_INVALID.
-    assertEndUserNotErased(endUser);
+    //
+    // A ban refuses here too: verifying would still promote the address, fire
+    // `email.verified` and possibly the welcome mail for an account that
+    // cannot sign in.
+    assertEndUserCanAuthenticate(endUser);
     if (endUser.email !== outcome.token.email) {
       // Email changed since token was issued, verification belongs to a
       // stale address. Refuse rather than retroactively trust the old one.
@@ -2736,6 +2844,29 @@ export const authService = {
     return { deleted: result.count === 1 };
   },
 
+  /**
+   * `getById` for the secret-key routes: the same lookup plus `bannedAt`.
+   *
+   * @example
+   *   const user = await authService.getByIdForServer(appId, userId);
+   *   if (user.bannedAt) showSuspended();
+   */
+  async getByIdForServer(applicationId: string, endUserId: string): Promise<ServerEndUser> {
+    const endUser = await prisma.endUser.findUnique({ where: { id: endUserId } });
+    if (!endUser || endUser.applicationId !== applicationId) {
+      throw new RekeyError({
+        statusCode: 404,
+        code: 'END_USER_NOT_FOUND',
+        message: `EndUser "${endUserId}" not found in this application.`,
+        fix: 'Verify the user id and that the calling secret key belongs to the right Application.',
+      });
+    }
+    // Erased only, not banned: the customer's backend has to be able to read
+    // a banned user.
+    assertEndUserNotErased(endUser);
+    return { ...redact(endUser), bannedAt: endUser.bannedAt };
+  },
+
   async getById(applicationId: string, endUserId: string): Promise<PublicEndUser> {
     const endUser = await prisma.endUser.findUnique({ where: { id: endUserId } });
     if (!endUser || endUser.applicationId !== applicationId) {
@@ -2746,9 +2877,8 @@ export const authService = {
         fix: 'Verify the user id and that the calling secret key belongs to the right Application.',
       });
     }
-    // GDPR erasure chokepoint: `requireUserSession` resolves the current user
-    // through here on EVERY end-user-scoped route, so a still-unexpired access
-    // token minted before erasure is rejected the moment it's used.
+    // Erased only. Sessions resolve through `getByIdForSession`, which also
+    // refuses a ban; this serves `updateSelf`, reached only through one.
     assertEndUserNotErased(endUser);
     return redact(endUser);
   },
@@ -2759,7 +2889,7 @@ export const authService = {
    * session is over (`sid` head revoked, or `dev` no longer ACTIVE, see
    * lib/session-stamp.ts). The session and device rows are read in parallel
    * with the user row, each by an index and only when the claim is present.
-   * Same 404 and erasure rules as `getById`.
+   * Same 404 as `getById`, and it refuses banned users as well as erased ones.
    */
   async getByIdForSession(
     applicationId: string,
@@ -2789,7 +2919,7 @@ export const authService = {
         fix: 'Verify the user id and that the calling secret key belongs to the right Application.',
       });
     }
-    assertEndUserNotErased(row);
+    assertEndUserCanAuthenticate(row);
     return {
       endUser: redact(row),
       sessionsInvalidBefore: row.sessionsInvalidBefore,

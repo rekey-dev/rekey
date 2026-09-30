@@ -253,7 +253,7 @@ export async function checkoutProbeRoutes(app: FastifyInstance): Promise<void> {
           statusCode: 404,
           code: 'CHECKOUT_PROBE_NOT_FOUND',
           message: 'No readiness probe is waiting for this nonce.',
-          fix: 'Run the checks again in Panel → Application → Billing → Checkout page.',
+          fix: 'Run the checks again in Panel → Application → Billing → Setup → Checkout page.',
         });
       }
       return { success: true, data: { slug } };

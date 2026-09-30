@@ -41,6 +41,7 @@ import { CopyButton } from '@/components/CopyButton';
 import { Pager, readOffset, readPageSize } from '@/components/Pager';
 import { blockDevice, releaseAllDevices, releaseDevice, unblockDevice } from '../actions';
 import { getEndUserDevices, shortFingerprint, type DeviceRow, type DeviceStatus } from '../shared';
+import { dangerButtonClass } from '@/components/Button';
 
 const STATUS_TONE: Record<DeviceStatus, BadgeTone> = {
   ACTIVE: 'success',
@@ -330,7 +331,7 @@ function DeviceActions({
           title="Block this device"
           description="Sign-in from this fingerprint is refused until you unblock it, and every session on it is revoked now. The reason is operator-facing only, and the end-user never sees it."
           trigger="Block"
-          triggerClassName="text-xs text-red-600 dark:text-red-400 hover:underline"
+          triggerClassName={dangerButtonClass('xs')}
         >
           <ActionForm
             action={blockDevice.bind(null, applicationId, euid, device.id)}

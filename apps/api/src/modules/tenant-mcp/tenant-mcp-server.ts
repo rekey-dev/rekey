@@ -15,12 +15,20 @@ import { RekeyError } from '../../lib/error.js';
 import { effectiveToolScopes, operatorTools, type OperatorTool, type OperatorToolContext } from './operator-tools.js';
 import { operatorWriteTools } from './operator-write-tools.js';
 import { operatorOrganizationTools } from './operator-organization-tools.js';
+import { operatorContactTools } from './operator-contact-tools.js';
+import { operatorAnalyticsTools } from './operator-analytics-tools.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const SERVER_INFO = { name: 'rekey-operator', version: '1.0.0' };
 
 /** All operator tools, read tools first, then the write tools. */
-export const allOperatorTools: readonly OperatorTool[] = [...operatorTools, ...operatorWriteTools, ...operatorOrganizationTools];
+export const allOperatorTools: readonly OperatorTool[] = [
+  ...operatorTools,
+  ...operatorWriteTools,
+  ...operatorOrganizationTools,
+  ...operatorContactTools,
+  ...operatorAnalyticsTools,
+];
 
 /**
  * Scope each application-scoped tool needs. The REST twin of every tool
@@ -32,6 +40,7 @@ export const allOperatorTools: readonly OperatorTool[] = [...operatorTools, ...o
 export const TOOL_SCOPES: Readonly<Record<string, Scope>> = {
   get_workspace_overview: 'overview:read',
   application_health: 'overview:read',
+  get_user_analytics: 'overview:read',
   recent_payments: 'billing:read',
   recent_subscriptions: 'billing:read',
   cancel_subscription: 'billing:write',
@@ -66,6 +75,8 @@ export const TOOL_SCOPES: Readonly<Record<string, Scope>> = {
   add_organization_member: 'organizations:write',
   set_organization_member_role: 'organizations:write',
   update_auth_config: 'auth-config:write',
+  list_contact_lists: 'audience:read',
+  get_contact_list_stats: 'audience:read',
 };
 
 /** Tools that are workspace-level floors: role-gated, scoped by nothing. */

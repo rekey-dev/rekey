@@ -45,6 +45,7 @@ import {
 } from './refresh-guard.js';
 
 export { DEFAULT_REFRESH_PATH, DEFAULT_SIGN_IN_PATH } from './paths.js';
+export { subscribeToList, subscribeInputFromForm } from './lists.js';
 
 /**
  * The cookie options to actually write with, `secure` resolved against THIS
@@ -122,13 +123,23 @@ export function visitorIpFrom(h: Headers, hops: number = trustedProxyHops()): st
 /**
  * The client for a call made on the visitor's behalf: sign-in, sign-up, MFA.
  * Carries the visitor's address in `X-Rekey-Client-Ip` so the API's per-IP
- * sign-in limit counts the visitor rather than this server. `clientIp`
+ * sign-in limit counts the visitor rather than this server, and the visitor's
+ * User-Agent in `X-Rekey-Client-User-Agent` so the session records their
+ * browser and platform rather than this server's runtime. `clientIp`
  * overrides the header-derived address; `null` sends none. `@rekey.dev/node`
  * sends it only when it is exactly one IP address.
+ *
+ * @internal Exported for `./lists.ts` only; stripped from the published types.
  */
-async function visitorClient(clientIp?: string | null): Promise<Rekey> {
-  const ip = clientIp === undefined ? visitorIpFrom(await headers()) : clientIp;
-  return ip ? client().with({ clientIp: ip }) : client();
+export async function visitorClient(clientIp?: string | null): Promise<Rekey> {
+  const h = await headers();
+  const ip = clientIp === undefined ? visitorIpFrom(h) : clientIp;
+  const userAgent = h.get('user-agent');
+  if (!ip && !userAgent) return client();
+  return client().with({
+    ...(ip ? { clientIp: ip } : {}),
+    ...(userAgent ? { clientUserAgent: userAgent } : {}),
+  });
 }
 
 /** The per-call address override every visitor-facing helper accepts. */
@@ -216,6 +227,15 @@ export interface SessionDeviceOptions {
 }
 
 /**
+ * The account itself can no longer sign in: an operator banned it, or it was
+ * erased. Every token it holds is dead, so this is a signed-out verdict that
+ * clears the cookies, not an API failure to rethrow on every page load.
+ */
+function isAccountClosed(code: string): boolean {
+  return code === 'END_USER_BANNED' || code === 'END_USER_ERASED';
+}
+
+/**
  * Does this code mean the token itself is finished, as opposed to the request
  * having failed? Only a verdict justifies throwing the session away.
  *
@@ -233,6 +253,7 @@ export interface SessionDeviceOptions {
  */
 function isTokenVerdict(code: string): boolean {
   return (
+    isAccountClosed(code) ||
     code.startsWith('REFRESH_TOKEN_') ||
     code === 'USER_TOKEN_INVALID' ||
     code === 'USER_TOKEN_MISSING' ||
@@ -335,6 +356,7 @@ function classifyRefreshFailure(err: RekeyError): RefreshFailure {
  */
 function isAccessTokenSpent(code: string): boolean {
   return (
+    isAccountClosed(code) ||
     code === 'USER_TOKEN_INVALID' ||
     code === 'USER_TOKEN_MISSING' ||
     code === 'USER_TOKEN_WRONG_APPLICATION'

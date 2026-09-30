@@ -34,6 +34,7 @@
 import type { Application } from '@prisma/client';
 import { env } from '../config/env.js';
 import { RekeyError } from './error.js';
+import { hostedPortalUrl } from './portal-origins.js';
 
 /**
  * Parse a candidate as an absolute http(s) URL and normalise it to an origin
@@ -143,6 +144,60 @@ export function registeredOrigins(application: { authConfig?: unknown }): Set<st
   return allowed;
 }
 
+/** What the token-URL guard reads from an Application. */
+export type TokenUrlApplication = { authConfig?: unknown } & Partial<
+  Pick<Application, 'slug' | 'hostedPortalEnabled' | 'portalDomain' | 'portalDomainVerifiedAt'>
+>;
+
+/**
+ * Path shapes a server or browser could resolve to a different route than the
+ * one the prefix check saw: dot segments (plain or percent-encoded), encoded
+ * slashes and backslashes, raw backslashes and empty segments.
+ */
+const AMBIGUOUS_PATH = /%2e|%2f|%5c|\\|\/\/|(^|\/)\.{1,2}(\/|$)/i;
+
+/** The path of an absolute URL string as written, before the URL parser resolves it. */
+function rawPath(url: string): string {
+  const withoutAuthority = url.trim().replace(/^[a-z][a-z0-9+.-]*:\/\/[^/?#\\]*/i, '');
+  return withoutAuthority.split(/[?#]/, 1)[0] ?? '';
+}
+
+/**
+ * Whether `url` points inside THIS Application's own hosted portal, while the
+ * portal is on.
+ *
+ * The shared portal host serves every Application under `/<slug>`, so its
+ * origin alone would let one app mail a live token into another app's portal
+ * pages. The check is scoped to this app's slug, and the path must be exactly
+ * what the parser produced (nothing resolved away) with no dot segment,
+ * encoded separator or empty segment, so `/<slug>/../<other>` and its encoded
+ * forms are refused instead of normalised into a pass.
+ *
+ * A verified custom portal domain belongs to this app alone, so its origin is
+ * enough. An unverified one could still be pointed anywhere, so it is not.
+ */
+function isOwnPortalUrl(application: TokenUrlApplication, url: string, candidate: URL): boolean {
+  if (application.hostedPortalEnabled !== true) return false;
+
+  if (
+    application.portalDomain &&
+    application.portalDomainVerifiedAt &&
+    candidate.origin === `https://${application.portalDomain}`
+  ) {
+    return true;
+  }
+
+  if (!application.slug) return false;
+  const portal = hostedPortalUrl({ slug: application.slug, hostedPortalEnabled: true });
+  if (portal === null) return false;
+  const root = new URL(portal);
+  if (candidate.origin !== root.origin) return false;
+
+  const path = rawPath(url);
+  if (path !== candidate.pathname || AMBIGUOUS_PATH.test(path)) return false;
+  return path === root.pathname || path.startsWith(`${root.pathname}/`);
+}
+
 /**
  * Refuse a caller-supplied email link that points somewhere this Application
  * has not declared.
@@ -163,14 +218,18 @@ export function registeredOrigins(application: { authConfig?: unknown }): Set<st
  * `authConfig.redirectUrls` already existed for exactly this and was enforced
  * nowhere: its only reader treated it as a source of defaults.
  *
- * The allowlist is the Application's own `appUrl` plus its `redirectUrls`,
- * compared by ORIGIN, so an operator can keep using per-environment paths
- * without registering each one. An Application that has declared neither has
- * nothing to compare against, so a caller-supplied URL is refused outright,
- * fail closed, because the alternative is the hole above.
+ * Allowed destinations:
+ * - the Application's own `appUrl` and `redirectUrls`, compared by ORIGIN, so
+ *   an operator can keep using per-environment paths without registering each;
+ * - its own hosted portal while the portal is on (see `isOwnPortalUrl`). Rekey
+ *   runs those pages, so the operator never has to register them.
+ *
+ * An Application with none of these has nothing to compare against, so a
+ * caller-supplied URL is refused outright, fail closed, because the
+ * alternative is the hole above.
  */
 export function assertAllowedTokenUrl(
-  application: { authConfig?: unknown },
+  application: TokenUrlApplication,
   url: string | undefined,
   field: string,
 ): void {
@@ -199,15 +258,28 @@ export function assertAllowedTokenUrl(
     });
   }
 
-  if (!registeredOrigins(application).has(candidate.origin)) {
+  // `https://attacker.tld@app.example.com` keeps the registered origin but
+  // reads as another host to the person clicking it. Checked before either
+  // allowance, so a portal URL cannot carry credentials either.
+  if (candidate.username !== '' || candidate.password !== '') {
     throw new RekeyError({
       statusCode: 400,
       code: 'AUTH_URL_NOT_ALLOWED',
-      message: `\`${field}\` points at ${candidate.origin}, which this Application has not registered.`,
-      fix:
-        'Add the origin to the Application\'s redirect URLs (Panel → Application → Auth methods), ' +
-        'or set its App URL. This link is emailed to your users carrying a login token, so it is ' +
-        'refused rather than sent somewhere unrecognised.',
+      message: `\`${field}\` must not contain credentials (a user or password before the host).`,
+      fix: 'Remove everything between `://` and `@`, and pass the plain URL on a registered origin.',
     });
   }
+
+  if (registeredOrigins(application).has(candidate.origin)) return;
+  if (isOwnPortalUrl(application, url, candidate)) return;
+
+  throw new RekeyError({
+    statusCode: 400,
+    code: 'AUTH_URL_NOT_ALLOWED',
+    message: `\`${field}\` points at ${candidate.origin}, which this Application has not registered.`,
+    fix:
+      'Add the origin to the Application\'s redirect URLs (Panel → Application → Auth methods), ' +
+      'or set its App URL. This link is emailed to your users carrying a login token, so it is ' +
+      'refused rather than sent somewhere unrecognised.',
+  });
 }

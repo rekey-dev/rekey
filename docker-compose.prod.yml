@@ -180,7 +180,8 @@ services:
       # yours — see the header.
       PUBLIC_WEBHOOK_BASE_URL: ${PUBLIC_WEBHOOK_BASE_URL:-https://${API_HOST}}
       # Hosted customer portal origin — auto-allowed for publishable-key calls
-      # from portal-enabled apps (CORS + per-app origin check).
+      # from portal-enabled apps (CORS + per-app origin check). Must be the
+      # same origin as the portal's PORTAL_BASE_URL.
       PUBLIC_PORTAL_URL: ${PUBLIC_PORTAL_URL:-https://${PORTAL_HOST}}
       # Kill switch for the Rekey-hosted checkout page: `false` sends every
       # checkout to the provider's page (or refuses it, per Application).
@@ -226,10 +227,19 @@ services:
       # openssl rand -hex 32
       API_PROXY_SECRET: ${API_PROXY_SECRET:?set API_PROXY_SECRET in .env, e.g. openssl rand -hex 32}
       API_PROXY_HOPS: ${API_PROXY_HOPS:-1}
-      # Not needed in this file: the panel and portal reach the API over
-      # rekey-edge and are trusted by address. Set it (on the API and on both
-      # of them) only if they call the API some other way.
-      INTERNAL_CALLER_SECRET: ${INTERNAL_CALLER_SECRET:-}
+      # Record end users' country from Cloudflare's CF-IPCountry. Only `true`
+      # when the proxy above receives nothing but Cloudflare traffic; see
+      # docs/analytics.md. Unset: no country is recorded.
+      TRUST_CF_IPCOUNTRY: ${TRUST_CF_IPCOUNTRY:-}
+      # The hourly analytics rollup; on unless `false`. See docs/analytics.md.
+      ANALYTICS_ROLLUP_ENABLED: ${ANALYTICS_ROLLUP_ENABLED:-}
+      # The panel and portal reach the API over rekey-edge and are trusted by
+      # address for rate limiting. This secret is what additionally lets the
+      # API believe the visitor's User-Agent and country the portal forwards,
+      # so a portal sign-in records the visitor's browser and platform rather
+      # than the portal's own `node` (docs/analytics.md). Same value on the
+      # API, panel and portal; all three read it from this .env.
+      INTERNAL_CALLER_SECRET: ${INTERNAL_CALLER_SECRET:?set INTERNAL_CALLER_SECRET in .env, e.g. openssl rand -hex 32}
 
       # ── Transactional email (Resend) ─────────────────────────────────────
       # Unset = Rekey sends no mail and returns raw tokens to the caller
@@ -477,7 +487,12 @@ services:
       # for all of them. Generate with: openssl rand -hex 32
       PORTAL_TRUSTED_PROXY_HOPS: ${PORTAL_TRUSTED_PROXY_HOPS:-1}
       PORTAL_PROXY_SECRET: ${PORTAL_PROXY_SECRET:?set PORTAL_PROXY_SECRET in .env, e.g. openssl rand -hex 32}
-      # Public URL of this portal — checkout success/cancel return links.
+      # Sent to the API as X-Rekey-Caller-Secret, which is what makes the API
+      # believe the visitor's User-Agent and country the portal forwards on a
+      # sign-in. Must equal the api service's value (the same .env key).
+      INTERNAL_CALLER_SECRET: ${INTERNAL_CALLER_SECRET:?set INTERNAL_CALLER_SECRET in .env, e.g. openssl rand -hex 32}
+      # Public URL of this portal: checkout return links and password-reset
+      # links. Must be the same origin as the api's PUBLIC_PORTAL_URL.
       PORTAL_BASE_URL: ${PORTAL_BASE_URL:-https://${PORTAL_HOST}}
       # Leave empty — see the panel service above.
       REKEY_COOKIE_SECURE: ${REKEY_COOKIE_SECURE:-}

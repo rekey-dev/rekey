@@ -39,12 +39,12 @@ export default async function ApplicationDetailLayout({
             </h1>
             {/* In the identity row rather than on a settings tab: it is what the
                 application IS. It is now promotable (once, one-way) from the
-                Lifecycle tab, but it is still not a field you edit in place. */}
+                Settings tab, but it is still not a field you edit in place. */}
             <EnvironmentBadge environment={app.environment} />
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <span className="font-mono text-xs text-[var(--color-muted-fg)]">{app.slug}</span>
-            <span aria-hidden="true" className="text-[var(--color-faint-fg)]">
+            <span aria-hidden="true" className="hidden text-[var(--color-faint-fg)] sm:inline">
               ·
             </span>
             {/* --color-muted-fg, not --color-faint-fg: this is a value the
@@ -55,9 +55,10 @@ export default async function ApplicationDetailLayout({
 
                 Still not ellipsised, for the same reason. Moving it off the
                 title's line is what buys it room; shortening it would trade one
-                legibility problem for another. */}
-            <span className="font-mono text-xs text-[var(--color-muted-fg)]">{app.publicKey}</span>
-            <CopyButton value={app.publicKey} label="Copy" />
+                legibility problem for another. On a phone it is left to the Copy
+                button: at 375px it wrapped over three lines above the nav. */}
+            <span className="hidden font-mono text-xs text-[var(--color-muted-fg)] sm:inline">{app.publicKey}</span>
+            <CopyButton value={app.publicKey} label="Copy public key" />
           </div>
         </div>
       </header>
@@ -66,18 +67,19 @@ export default async function ApplicationDetailLayout({
         id={id}
         billingEnabled={app.billingConfig.enabled}
         scopes={app.access?.scopes ?? null}
+        usersOverview={app.reportingTimezone !== undefined}
       />
 
       {/* In the LAYOUT, not on one page. A disabled application looks entirely
           normal on every tab, the plans are there, the end-users are there,
           the keys are there, and an operator debugging "why is sign-in
-          failing" would otherwise have to guess to visit Lifecycle. It renders
+          failing" would otherwise have to guess to visit Settings. It renders
           above the tab content on all of them. */}
       {app.disabledAt != null && (
         <Banner tone="warning">
           <strong>This application is disabled</strong> and is refusing all end-user requests.
           Everything below is intact and unchanged.{' '}
-          <Link href={`/applications/${id}/lifecycle`} className="underline underline-offset-2">
+          <Link href={`/applications/${id}/settings`} className="underline underline-offset-2">
             Enable it
           </Link>{' '}
           to resume traffic.

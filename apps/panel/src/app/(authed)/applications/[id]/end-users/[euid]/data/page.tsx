@@ -29,6 +29,7 @@ import { Banner } from '@/components/Banner';
 import { TypedConfirmButton } from '@/components/TypedConfirmButton';
 import { eraseUser } from '../actions';
 import { getEndUserDetail } from '../shared';
+import { dangerButtonClass } from '@/components/Button';
 
 const ERASE_ERR: Record<string, string> = {
   END_USER_NOT_FOUND: 'That end-user no longer exists in this Application.',
@@ -115,7 +116,7 @@ export default async function EndUserDataPage({
                 }
                 triggerLabel="Erase (GDPR)"
                 confirmLabel="Erase permanently"
-                triggerClassName="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-red-300 px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
+                triggerClassName={dangerButtonClass('sm')}
               />
             </ActionForm>
           ) : (

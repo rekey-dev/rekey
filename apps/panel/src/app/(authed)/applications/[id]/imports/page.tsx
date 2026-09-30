@@ -53,7 +53,7 @@ const START_ERR: Record<string, string> = {
   PROVIDER_CANNOT_LIST_SUBSCRIPTIONS:
     'That provider has no list API, so there is nothing to import from. Only a billing system that exposes its subscriptions can be read.',
   EXTERNAL_PULL_NOT_CONFIGURED:
-    'No subscriptions endpoint is configured for the external provider. Set the URL and pull token under Billing → Providers.',
+    'No subscriptions endpoint is configured for the external provider. Set the URL and pull token under Billing → Setup → Providers.',
   EXTERNAL_PULL_URL_REFUSED:
     'That subscriptions endpoint is not a permitted target. It must be a public HTTPS URL.',
   EXTERNAL_PULL_UNREACHABLE: 'The subscriptions endpoint did not respond in time.',
@@ -109,7 +109,7 @@ export default async function ImportsPage({
   return (
     <div className="space-y-5">
       <SectionHeader
-        title="Import subscriptions"
+        title="Imports"
         description="Bring in what a billing system already sold, before it was connected to Rekey. Starting an import previews it; nothing is written until you apply."
         action={<StartButton applicationId={id} error={startError} />}
       />
@@ -137,8 +137,17 @@ export default async function ImportsPage({
             Unmapped rows are reported so you can fix the mapping and run again.
           </li>
           <li>
-            For your own billing system, the endpoint Rekey reads is specified in{' '}
-            <code className="font-mono">docs/external-billing-pull.md</code>.
+            Importing from your own billing system? Rekey reads one endpoint you host, described
+            in the{' '}
+            <a
+              href="https://github.com/rekey-dev/rekey/blob/main/docs/external-billing-pull.md"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline underline-offset-2"
+            >
+              external billing import guide
+            </a>
+            .
           </li>
         </ul>
       </Card>
@@ -215,7 +224,7 @@ function StartButton({
   return (
     <Modal
       modalKey="start"
-      title="Import subscriptions"
+      title="Imports"
       description="This reads your billing system and shows you what it found. Nothing is written until you review the result and apply it."
       trigger="Import subscriptions"
     >

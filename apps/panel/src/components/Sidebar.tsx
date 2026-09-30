@@ -169,7 +169,7 @@ const NAV: NavSection[] = [
     heading: 'Logs',
     items: [
       { href: '/audit-log', label: 'Audit log', icon: ICONS.audit, minRole: 'ADMIN' },
-      { href: '/email-logs', label: 'Email logs', icon: ICONS.mail, minRole: 'ADMIN' },
+      { href: '/email-logs', label: 'Email delivery', icon: ICONS.mail, minRole: 'ADMIN' },
       { href: '/account/activity', label: 'My requests', icon: ICONS.activity },
     ],
   },
@@ -196,6 +196,7 @@ export function Sidebar({
   switchAction,
   createWorkspaceAction,
   signOutAction,
+  buildVersion,
 }: {
   memberships: Membership[];
   activeTenantId: string;
@@ -205,6 +206,8 @@ export function Sidebar({
   /** Omitted when this deployment does not allow additional workspaces. */
   createWorkspaceAction?: ((formData: FormData) => Promise<void>) | undefined;
   signOutAction: () => Promise<void>;
+  /** The muted release line, rendered by the server (`BuildVersion`). */
+  buildVersion?: React.ReactNode;
 }): React.JSX.Element {
   const pathname = usePathname();
 
@@ -288,6 +291,7 @@ export function Sidebar({
           </ActionForm>
           <ThemeToggle />
         </div>
+        {buildVersion}
       </div>
     </aside>
   );

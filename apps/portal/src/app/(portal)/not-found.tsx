@@ -25,8 +25,7 @@ export default function NotFound(): React.JSX.Element {
         </h1>
         <p className="mt-3 text-sm text-[var(--color-muted-fg)]">
           The link you followed doesn&apos;t open a billing portal. Check that you copied the
-          whole address, or contact the business you bought from — they can send you a working
-          link.
+          whole address, or ask the business you bought from to send you a working link.
         </p>
       </Card>
       <p className="mt-8 text-center text-xs text-[var(--color-muted-fg)]">Powered by Rekey</p>

@@ -3,6 +3,22 @@ import { Badge } from './Badge';
 import { authConfigVisible, portalDomainUnverified, signInReachable } from '@/lib/auth-config';
 import type { ApplicationRow } from '@/lib/api';
 
+type StatusFields = Pick<
+  ApplicationRow,
+  | 'authConfig'
+  | 'oauthConfig'
+  | 'disabledAt'
+  | 'disabledReason'
+  | 'hostedPortalEnabled'
+  | 'portalDomain'
+  | 'portalDomainVerifiedAt'
+>;
+
+/** True when `ApplicationStatusBadges` renders something for this application. */
+export function hasApplicationStatus(app: StatusFields): boolean {
+  return Boolean(app.disabledAt) || portalDomainUnverified(app) || (authConfigVisible(app) && !signInReachable(app));
+}
+
 /**
  * The states that stop an application serving its end-users, for the list row.
  *
@@ -49,16 +65,7 @@ import type { ApplicationRow } from '@/lib/api';
 export function ApplicationStatusBadges({
   app,
 }: {
-  app: Pick<
-    ApplicationRow,
-    | 'authConfig'
-    | 'oauthConfig'
-    | 'disabledAt'
-    | 'disabledReason'
-    | 'hostedPortalEnabled'
-    | 'portalDomain'
-    | 'portalDomainVerifiedAt'
-  >;
+  app: StatusFields;
 }): React.JSX.Element | null {
   const badges: React.JSX.Element[] = [];
 

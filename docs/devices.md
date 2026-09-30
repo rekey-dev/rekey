@@ -63,6 +63,8 @@ that it is.
   release their way out of it. Unblocking returns the device to RELEASED, not
   ACTIVE: it takes a slot again only when it next signs in, and only if the
   limit allows, so unblocking is never a way past `max_devices`.
+  A block stops one machine. To stop the person on every machine, ban the
+  end-user instead ([auth.md → Banning an end-user](auth.md#banning-an-end-user)).
 
 Rows are never deleted by the API. A released device is history the operator
 can still see.

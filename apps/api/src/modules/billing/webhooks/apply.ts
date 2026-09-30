@@ -384,6 +384,10 @@ export async function applyBillingEvent(ev: DomainBillingEvent, ctx: ApplyContex
  * because the sender has told us the subscription now means something else:
  * a plan change, or an account the subscription moved to.
  *
+ * An event for the subscription id a row already holds, for the same plan and
+ * subscriber, may omit the organization: it keeps the row's. Only a new sale
+ * must name one on an org-billed Application.
+ *
  * A period end already in the past is stale news and is ignored, loudly. A
  * grant for it would be refused with SUBSCRIPTION_PERIOD_END_IN_PAST, the
  * pipeline would answer 5xx, and the sender would retry an event that can
@@ -407,10 +411,24 @@ export async function applySubscriptionGranted(
     return;
   }
 
+  ev = withSenderClockChecked(ev, now, ctx);
+
   const application = await prisma.application.findUniqueOrThrow({
     where: { id: ev.applicationId },
   });
   const plan = await plansService.getBySlug(application.id, ev.planSlug);
+  const holder = await prisma.subscription.findUnique({
+    where: {
+      applicationId_providerSubId: {
+        applicationId: application.id,
+        providerSubId: ev.providerSubscriptionId,
+      },
+    },
+  });
+  if (ev.organizationId === undefined) {
+    const kept = await organizationKeptBy(holder, plan.id, ev);
+    if (kept !== null) ev = { ...ev, organizationId: kept };
+  }
   // The organization preconditions `grantSubscription` enforces, checked here
   // BEFORE anything is written: an event that would fail them must not first
   // create the subscriber or retire the row its subscription id was bound to.
@@ -445,14 +463,6 @@ export async function applySubscriptionGranted(
     log: ctx.log,
   });
 
-  const holder = await prisma.subscription.findUnique({
-    where: {
-      applicationId_providerSubId: {
-        applicationId: application.id,
-        providerSubId: ev.providerSubscriptionId,
-      },
-    },
-  });
   // The sender's id already names a subscription ANOTHER provider created.
   // Stripe ids are printed on invoices; a sender that reuses one, by accident
   // or otherwise, must not be able to retire the hosted row. Recorded and
@@ -707,6 +717,80 @@ function ignoredSubjectChange(existing: Subscription, ev: SubscriptionGrantedEve
     existing.providerSubId === ev.providerSubscriptionId &&
     ev.organizationId !== undefined &&
     existing.beneficiaryOrgId !== ev.organizationId
+  );
+}
+
+/**
+ * The organization an event keeps when it omits one: the beneficiary of the
+ * row already bound to its subscription id, for the same plan and subscriber.
+ * Null when the id is new, or names another plan, provider or subscriber;
+ * those are new sales and must name their organization.
+ *
+ * Without this an org-billed Application refused every renewal that did not
+ * repeat `subscriber.organizationId`, and each retry failed the same way.
+ */
+async function organizationKeptBy(
+  holder: Subscription | null,
+  planId: string,
+  ev: SubscriptionGrantedEvent,
+): Promise<string | null> {
+  if (!holder || holder.beneficiaryOrgId === null || holder.planId !== planId) return null;
+  if (holder.provider !== null && holder.provider !== ev.provider) return null;
+  const endUserId =
+    'endUserId' in ev.subscriber
+      ? ev.subscriber.endUserId
+      : (
+          await prisma.endUser.findUnique({
+            where: {
+              applicationId_email: { applicationId: ev.applicationId, email: ev.subscriber.email.toLowerCase() },
+            },
+            select: { id: true },
+          })
+        )?.id;
+  return endUserId === holder.endUserId ? holder.beneficiaryOrgId : null;
+}
+
+/**
+ * How far ahead of Rekey's clock a sender's `occurredAt` may run and still be
+ * trusted. A few minutes covers ordinary clock drift; a date beyond it is a
+ * bug in the sender, and trusted it would date a cancellation in the future
+ * and refuse every genuine reactivation until then.
+ */
+const SENDER_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+function beyondSenderSkew(at: Date, now: Date): boolean {
+  return at.getTime() > now.getTime() + SENDER_CLOCK_SKEW_MS;
+}
+
+/** An activation whose `occurredAt` is too far ahead is treated as undated. */
+function withSenderClockChecked(
+  ev: SubscriptionGrantedEvent,
+  now: Date,
+  ctx: ApplyContext,
+): SubscriptionGrantedEvent {
+  if (ev.occurredAt === undefined || !beyondSenderSkew(ev.occurredAt, now)) return ev;
+  ctx.note?.(senderClockNote(ev.occurredAt, 'activation'));
+  const { occurredAt: _ignored, ...undated } = ev;
+  return undated;
+}
+
+/** A cancellation the sender dated too far ahead is dated by Rekey's clock. */
+function withSenderCancelDateChecked(
+  ev: SubscriptionStatusEvent,
+  now: Date,
+  ctx: ApplyContext,
+): SubscriptionStatusEvent {
+  if (ev.canceledAtFromSender !== true || !(ev.canceledAt instanceof Date) || !beyondSenderSkew(ev.canceledAt, now)) {
+    return ev;
+  }
+  ctx.note?.(senderClockNote(ev.canceledAt, 'cancellation'));
+  return { ...ev, canceledAt: now, cancelAt: now, canceledAtFromSender: false };
+}
+
+function senderClockNote(at: Date, what: 'activation' | 'cancellation'): string {
+  return (
+    `occurredAt ${at.toISOString()} is more than 5 minutes ahead of Rekey's clock, so it was ignored and ` +
+    `the ${what} was dated by Rekey's clock instead. Check the clock of the system sending these events.`
   );
 }
 
@@ -1839,6 +1923,7 @@ async function applySubscriptionStatusMirror(
   ev: SubscriptionStatusEvent,
   ctx: ApplyContext,
 ): Promise<void> {
+  ev = withSenderCancelDateChecked(ev, new Date(), ctx);
   // No identifier, no write. `localSubscriptionWhere` returns null only when
   // the event carries neither a provider subscription id nor a checkout
   // session id, nothing that names a row.

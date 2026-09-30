@@ -54,7 +54,7 @@ const CHECKOUT_ERR: Record<string, string> = {
     'The payment provider holding your subscription or unfinished checkout isn’t available here any more, so a new one can’t be started. Contact support.',
   BILLING_SUBSCRIPTION_SUBJECT_CONFLICT:
     'You already have this plan on another account of yours. It has to be canceled and finish before you can start it here.',
-  SUBSCRIPTION_NOT_FOUND: 'We couldn’t find that subscription — it may already be canceled.',
+  SUBSCRIPTION_NOT_FOUND: 'We couldn’t find that subscription. It may already be canceled.',
   SUBSCRIPTION_MANAGED_EXTERNALLY:
     'This subscription is managed through your billing account, not here. Cancel it there and this page updates shortly after.',
 };
@@ -149,7 +149,7 @@ export default async function DashboardPage({
 
   return (
     <div className="space-y-6">
-      {checkout === 'success' && <Banner tone="success">Checkout complete — your subscription will activate shortly.</Banner>}
+      {checkout === 'success' && <Banner tone="success">Checkout complete. Your subscription will activate shortly.</Banner>}
       {checkout === 'canceled' && <Banner tone="info">Checkout canceled.</Banner>}
       {/* Reports what happened, rather than assuming the request was granted:
           the same redirect lands here after an immediate cancellation, where
@@ -307,7 +307,13 @@ export default async function DashboardPage({
                   <span className="font-medium text-[var(--color-fg)]">
                     {formatMoney(p.amount, p.currency)}
                   </span>
-                  <StatusBadge status={p.status} />
+                  {p.status === 'PARTIALLY_REFUNDED' && p.refundedAmount !== undefined ? (
+                    <span className="text-xs text-[var(--color-muted-fg)]">
+                      Refunded {formatMoney(p.refundedAmount, p.currency)} of {formatMoney(p.amount, p.currency)}
+                    </span>
+                  ) : (
+                    <StatusBadge status={p.status} />
+                  )}
                   {p.receiptUrl && (
                     <a
                       href={p.receiptUrl}

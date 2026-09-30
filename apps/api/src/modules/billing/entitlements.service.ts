@@ -74,6 +74,24 @@ async function loadDefaultPlan(applicationId: string): Promise<Plan | null> {
   return plan;
 }
 
+/**
+ * The free-tier default for an organization: only on an org-billed
+ * Application, and only once an OWNER or ADMIN claimed it with
+ * `POST /billing/subscribe`. Any claim counts against the CURRENT default, so
+ * renominating the free plan carries claimed organizations with it and
+ * clearing it removes the fallback for everyone.
+ */
+async function loadClaimedDefaultPlan(applicationId: string, organizationId: string): Promise<Plan | null> {
+  const app = await prisma.application.findUnique({ where: { id: applicationId }, select: { billingConfig: true } });
+  const parsed = BillingConfigSchema.safeParse(app?.billingConfig);
+  if (!parsed.success || parsed.data.billingSubject !== 'org') return null;
+  const claim = await prisma.organizationFreeTierClaim.findFirst({
+    where: { applicationId, organizationId },
+    select: { id: true },
+  });
+  return claim ? loadDefaultPlan(applicationId) : null;
+}
+
 const IGNORED_DEFAULT_REPORT_INTERVAL_MS = 60 * 60 * 1000;
 const ignoredDefaultReportedAt = new Map<string, number>();
 
@@ -716,8 +734,9 @@ export const entitlementsService = {
    * user's personal pool.
    *
    * With `organizationId`: the **org view**, only subs whose beneficiary is
-   * that org; credit balance is the shared org pool. (Membership must be
-   * checked by the caller/route.)
+   * that org, plus the free-tier default when the org claimed it on an
+   * org-billed Application; credit balance is the shared org pool.
+   * (Membership must be checked by the caller/route.)
    *
    * Feature flags merge: booleans OR-true, numbers max, strings last-wins.
    *
@@ -832,7 +851,8 @@ export const entitlementsService = {
     // Free-tier fallback (#36): the Application's default plan applies on top of
     // what the subject's subscriptions grant, for feature gating without a $0
     // checkout. FEATURE only, CREDIT/LICENSE are stateful and need a real
-    // sub. The org view never falls back to a per-user free tier.
+    // sub. The org view falls back only for an organization that claimed the
+    // free tier on an org-billed Application (`loadClaimedDefaultPlan`).
     //
     // A BASE LAYER, not another voter in the merge below. That merge unions
     // across sources, booleans OR-true, numbers take the max, which is right
@@ -848,8 +868,10 @@ export const entitlementsService = {
     // USAGE plans, so the reachable case is a subject holding only a CREDIT pack
     // or a licence. Keyed rather than all-or-nothing, so a default key the
     // subscription says nothing about still applies.
-    if (!suppressesFreeTier(subs) && !opts?.organizationId) {
-      const def = await loadDefaultPlan(applicationId);
+    if (!suppressesFreeTier(subs)) {
+      const def = opts?.organizationId
+        ? await loadClaimedDefaultPlan(applicationId, opts.organizationId)
+        : await loadDefaultPlan(applicationId);
       if (def) {
         // Keys an OVERRIDE answered, and that RESOLVE to something.
         //
@@ -989,10 +1011,18 @@ export const entitlementsService = {
     // One query for every plan, same reason as resolveForEndUser: this runs on
     // the usage.record hot path, once per recorded event.
     const byPlan = await this.resolveForPlans(subs.map((s) => s.plan));
-    // The free-tier default applies only to a personal subject whose
-    // subscriptions do not suppress it; loaded once for every meter.
-    const defaultPlan =
-      !suppressesFreeTier(subs) && !subject.organizationId ? await loadDefaultPlan(applicationId) : null;
+    // The free-tier default applies to a subject whose subscriptions do not
+    // suppress it, the same rule `resolveGrants` applies: a person always, an
+    // organization only once it claimed the free tier. Loaded once.
+    const defaultPlan = suppressesFreeTier(subs)
+      ? null
+      : subject.organizationId
+        ? await loadClaimedDefaultPlan(applicationId, subject.organizationId)
+        : await loadDefaultPlan(applicationId);
+    // An organization takes the default's included quantity but never its
+    // per-unit price: its credit pool is usually empty, so a priced free tier
+    // would refuse or charge an org that only ever asked for the allowance.
+    const defaultRateApplies = !subject.organizationId;
     const defaultEntitlements = defaultPlan ? await this.resolveForPlan(defaultPlan) : null;
 
     const quotaFor = (meterSlug: string): { included: number; creditsPerUnit: number | null } | null => {
@@ -1045,9 +1075,9 @@ export const entitlementsService = {
   // A legal `0` override always sits on a PRICED row, because `validate`
       // refuses a zero quantity without a price, so `consider` has already capped
       // it. Nothing extra is needed to make zero mean zero.
-      // Free-tier fallback (#36): a personal subject honours the default plan's
-      // included USAGE quota for this meter, so a free tier can cap consumption
-      // without a $0 subscription. Org subjects don't fall back.
+      // Free-tier fallback (#36): a person, or an organization that claimed
+      // the free tier, honours the default plan's included USAGE quota for this
+      // meter, so a free tier can cap consumption without a $0 subscription.
       //
       // Two things are decided separately here, because they fail in opposite
       // directions.
@@ -1077,9 +1107,11 @@ export const entitlementsService = {
       // always considered even when its quantity is not.
       for (const e of defaultEntitlements ?? []) {
         if (e.kind !== 'USAGE' || e.key !== meterSlug) continue;
+        // A priced row caps an organization too, at its included quantity,
+        // or it would be unmetered; only the rate is withheld.
         if (e.creditsPerUnit != null) {
           capped = true;
-          rate = rate === null ? e.creditsPerUnit : Math.min(rate, e.creditsPerUnit);
+          if (defaultRateApplies) rate = rate === null ? e.creditsPerUnit : Math.min(rate, e.creditsPerUnit);
         }
         if (!meterOverridden && e.quantity != null && e.quantity > 0) {
           total += e.quantity;

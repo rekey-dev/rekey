@@ -46,6 +46,7 @@ Semantics:
 - **OWNER/ADMIN never consult grants** — implicit full access to every Application (unchanged).
 - A `MEMBER` with **zero grants sees no Application at all.** This is the default a freshly accepted invitation lands in: `GET /tenant/applications` returns `[]`, and every `/tenant/applications/:id/*` route answers `404 APPLICATION_NOT_FOUND`. **Grants are additive from nothing** — a member has exactly the Applications somebody granted them, and no others.
 - Grants are always authoritative: an Application without a grant disappears from `GET /tenant/applications` (which also feeds the panel sidebar and command palette) and returns `404 APPLICATION_NOT_FOUND` on direct access — deliberately the same answer an absent Application gives, so a denied app is not an enumeration oracle. Insufficient grant *level* on a granted app → `403 APP_ACCESS_DENIED`.
+- The list's filters (`status`, `environment`, `q`, `sort`) run inside the same grant scope, and so does its `total`, so "Show disabled (N)" in the panel counts only what the member can open. `include=summary` adds `activeApiKeys` only where the member holds `developer:read` and `lastActiveOn` only where they hold `overview:read`. `lastActiveOn` counts end-user activity, plus an API key's last use only where the member also holds `developer:read`. `sort=activity` orders by the same figure the member may read, so the order cannot reveal what the field hides.
 - Removing a member's **last** grant leaves them with nothing, not with workspace-wide read. De-scoping a member never widens their access.
 - Grants survive role changes but are only consulted while the role is `MEMBER` (promote to ADMIN → inert; demote back → re-armed). Setting a grant on an OWNER/ADMIN membership is rejected with `APP_GRANT_MEMBER_ONLY`.
 - Workspace-level surfaces are unaffected: team/workspace/audit-log writes stay OWNER/ADMIN-only, and the extra-sensitive per-app routes (request log, end-user DSAR export, impersonation, and granting or cancelling a subscription) remain OWNER/ADMIN-only even for `APP_ADMIN` grant holders.
@@ -78,7 +79,7 @@ Enforcement lives in `apps/api/src/lib/app-access.ts` (`ensureAppAccess(req, app
 ## Scopes (narrowing a MEMBER inside their grants)
 
 A grant says *which* Applications a member reaches and at what level. Scopes
-say *what kinds of data* they may touch there, workspace-wide. Seven domains,
+say *what kinds of data* they may touch there, workspace-wide. Eight domains,
 each at `read` or `write` (`write` implies `read`):
 
 | Domain | Covers |
@@ -90,10 +91,14 @@ each at `read` or `write` (`write` implies `read`):
 | `organizations` | organizations, roles, memberships |
 | `activity` | security events for the application |
 | `overview` | dashboard counts (never money) |
+| `audience` | lists and the contacts on them (newsletter, waitlist, contact form) |
 
 The grant roles are presets over the same vocabulary: `APP_VIEWER` is every
-domain at read, `APP_ADMIN` every domain at write, `APP_BILLING` is
-`billing:write` plus every read except `auth-config`. A request's effective
+domain at read except `audience`, `APP_ADMIN` every domain at write,
+`APP_BILLING` is `billing:write` plus every read except `auth-config` and
+`audience`. Contacts are people who never signed up, so a viewer or billing
+grant never reaches them; give someone `APP_ADMIN` on the Application to let
+them see its lists. A request's effective
 set is the **intersection** of the grant preset on that Application and the
 membership's scopes, so neither can widen the other. A personal access token
 or MCP token is capped by its holder's scopes at request time.

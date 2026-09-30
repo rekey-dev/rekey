@@ -38,10 +38,10 @@ interface SetupResult {
 
 function backupStore(endUserId: string): BackupCodeStore {
   return {
-    swap: async (expected, next) => {
+    swap: async (expected, next, spentHash) => {
       const { count } = await prisma.mfaCredential.updateMany({
         where: { endUserId, backupCodesCiphertext: expected },
-        data: { backupCodesCiphertext: next },
+        data: { backupCodesCiphertext: next, usedBackupCodeHashes: { push: spentHash } },
       });
       return count === 1;
     },
@@ -83,6 +83,7 @@ export const mfaService = {
       update: {
         secretCiphertext: encryptJson({ base32: secret.base32 }),
         backupCodesCiphertext: encryptJson(backups.hashes),
+        usedBackupCodeHashes: [],
         enrolledAt: null,
       },
     });
@@ -187,6 +188,7 @@ export const mfaService = {
       {
         base32,
         backupCodesCiphertext: cred.backupCodesCiphertext,
+        usedBackupCodeHashes: cred.usedBackupCodeHashes,
         backupStore: backupStore(args.endUserId),
         lockScope: `eu:mfa:${args.endUserId}`,
       },

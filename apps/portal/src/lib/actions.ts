@@ -8,12 +8,21 @@
 
 import { redirect } from 'next/navigation';
 import { RekeyError } from '@rekey.dev/react';
-import { portalClientFor, setSession, clearSession, getRefreshToken, getAccessToken } from './session';
+import {
+  portalClientFor,
+  setSession,
+  clearSession,
+  getRefreshToken,
+  getAccessToken,
+  setMfaChallenge,
+  getMfaChallenge,
+  clearMfaChallenge,
+} from './session';
 import { getPortalConfig } from './config';
 import { checkoutRefusalCode, resolveCheckoutProvider } from './provider-capabilities';
 import { portalBaseUrl, rekeyApiUrl } from './env';
 import { API_TIMEOUT_MS, forwardedClientHeaders } from './client-ip';
-import { retryQuery } from './auth-error-copy';
+import { isMfaRestartCode, retryQuery } from './auth-error-copy';
 
 export async function signInAction(slug: string, formData: FormData): Promise<void> {
   const email = String(formData.get('email') ?? '').trim();
@@ -23,9 +32,8 @@ export async function signInAction(slug: string, formData: FormData): Promise<vo
   try {
     const out = await client.signIn({ email, password });
     if (out.mfaRequired) {
-      // MFA-enrolled user: hand the single-use, short-lived challenge token to
-      // the code step (same pattern the operator panel uses).
-      redirect(`/${slug}/login?mfa=${encodeURIComponent(out.mfaChallengeToken)}`);
+      await setMfaChallenge(slug, out.mfaChallengeToken);
+      redirect(`/${slug}/login?step=mfa`);
     }
     await setSession(slug, out.accessToken, out.refreshToken, out);
   } catch (err) {
@@ -42,19 +50,25 @@ export async function signInAction(slug: string, formData: FormData): Promise<vo
 }
 
 export async function mfaVerifyAction(slug: string, formData: FormData): Promise<void> {
-  const challenge = String(formData.get('challenge') ?? '').trim();
   const code = String(formData.get('code') ?? '').trim();
   const client = await portalClientFor(slug);
   if (!client) redirect(`/${slug}`);
-  if (!challenge || !code) redirect(`/${slug}/login`);
+  const challenge = await getMfaChallenge();
+  if (!challenge) redirect(`/${slug}/login?reason=mfa_expired`);
+  if (!code) redirect(`/${slug}/login?step=mfa`);
   try {
     const out = await client.mfaVerify({ mfaChallengeToken: challenge, code });
+    await clearMfaChallenge(slug);
     await setSession(slug, out.accessToken, out.refreshToken, out);
   } catch (err) {
     if (err instanceof RekeyError) {
+      if (isMfaRestartCode(err.code)) {
+        await clearMfaChallenge(slug);
+        redirect(`/${slug}/login?error=${encodeURIComponent(err.code)}`);
+      }
       // Keep the challenge so a mistyped code doesn't force a fresh sign-in.
       redirect(
-        `/${slug}/login?mfa=${encodeURIComponent(challenge)}&error=${encodeURIComponent(err.code)}${retryQuery(err.retryAfterSeconds)}`,
+        `/${slug}/login?step=mfa&error=${encodeURIComponent(err.code)}${retryQuery(err.retryAfterSeconds)}`,
       );
     }
     throw err;
@@ -110,7 +124,7 @@ export async function forgotPasswordAction(slug: string, formData: FormData): Pr
   // request never ran. Only a success may tell the customer a link is coming.
   const result = await publishablePost(slug, '/api/v1/auth/forgot-password', {
     email,
-    resetUrl: `${portalBaseUrl()}/${slug}/reset-password`,
+    resetUrl: `${portalBaseUrl()}/${slug}/reset-password?token={token}`,
   });
   if (!result.ok) {
     redirect(
@@ -143,6 +157,7 @@ export async function signOutAction(slug: string): Promise<void> {
     await client.signOut(refresh).catch(() => undefined);
   }
   await clearSession(slug);
+  await clearMfaChallenge(slug);
   redirect(`/${slug}/login`);
 }
 

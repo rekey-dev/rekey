@@ -43,7 +43,11 @@ An entitlement is a row saying "this subject may have this thing". Resolution un
 
 **The Application's free tier, and exactly how much of a base layer it is.**
 `billingConfig.defaultPlanSlug` names a plan whose FEATURE entitlements and
-included USAGE quota apply on top of what a subject's subscriptions grant. The
+included USAGE quota apply on top of what a subject's subscriptions grant. For
+a person always; for an organization only on an org-billed Application, once
+an OWNER or ADMIN claimed it with `POST /billing/subscribe`
+(`OrganizationFreeTierClaim`), and without the default's per-unit USAGE price.
+The
 plan must cost nothing (`amount` 0, no `pricePerUnitCents`): writes refuse a
 priced one, and `loadDefaultPlan` ignores one that got there anyway, so a
 repriced default cannot hand a paid plan to every signed-in user. A

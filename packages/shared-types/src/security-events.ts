@@ -54,12 +54,14 @@ export const SECURITY_EVENT_LABEL = {
   // ── Application configuration ──
   'app.created': 'Application created',
   'app.auth_config_updated': 'Auth settings updated',
+  'app.profile_schema_updated': 'Profile fields updated',
   'app.access_updated': 'Access controls updated',
   'app.api_key.created': 'API key created',
   'app.api_key.revoked': 'API key revoked',
   'app.sessions_rotated': 'App sessions rotated (kill-switch)',
   'app.public_key.rotated': 'Publishable key rotated',
   'app.portal_config_updated': 'Hosted portal settings updated',
+  'app.settings_updated': 'Application settings updated',
   // Lifecycle. All three are workspace-billing-relevant as well as
   // operationally significant: promotion consumes a production slot and cannot
   // be undone, and disable/enable release and re-take one.
@@ -138,6 +140,22 @@ export const SECURITY_EVENT_LABEL = {
   'app.webhook_endpoint_created': 'Webhook endpoint created',
   'app.webhook_endpoint_updated': 'Webhook endpoint updated',
 
+  // ── Lists and contacts ──
+  // Settings changes are in the trail because `publicCapture` decides whether
+  // a browser can write to the list at all. Metadata carries `listId`, `key`
+  // and `changed` (field names, never values).
+  'app.contact_list.created': 'List created',
+  'app.contact_list.updated': 'List settings updated',
+  'app.contact_list.archived': 'List archived',
+  'app.contact_list.restored': 'List restored from the archive',
+  // A browser subscribe that would have added a contact past `maxContacts`.
+  // The browser still got its constant answer, so this is how the operator
+  // finds out. At most one per workspace per hour; metadata carries `listKey`.
+  'app.contact_quota_reached': 'Subscribe dropped at the contact limit',
+  // Every address on a list left the building as a CSV. Metadata carries
+  // `listId`, `key` and `count`.
+  'app.contacts_exported': 'List members exported',
+
   // ── End-user actions (the end-user is the actor) ──
   'user.signed_up': 'End-user signed up',
   'user.signed_in': 'End-user signed in',
@@ -185,12 +203,20 @@ export const SECURITY_EVENT_LABEL = {
   // answer. The actor is the system; `metadata.provider` names the module.
   'end_user.created_by_billing_webhook': 'End-user created by a billing webhook',
   'end_user.erased': 'End-user erased (GDPR)',
+  // A contact (someone on a list, not an account) erased by an operator.
+  // Erasing an end user also erases their contact; that is counted in the
+  // `end_user.erased` metadata, not recorded twice.
+  'contact.erased': 'Contact erased (GDPR)',
   'end_user.delete_blocked': 'End-user deletion blocked',
   'end_user.deleted': 'End-user deleted',
   'end_user.data_exported': 'End-user data exported',
   'end_user.device_released': 'Device released by an operator or the application server',
   'end_user.device_blocked': 'Device blocked',
   'end_user.device_unblocked': 'Device unblocked',
+  // Whole-account ban. `metadata.reason` on `banned` is operator-only and is
+  // removed by erasure; `via` says whether a panel session or an API token acted.
+  'end_user.banned': 'End-user banned',
+  'end_user.unbanned': 'End-user ban lifted',
   'end_user.devices_released_by_operator': 'All devices released by an operator',
   'end_user.created_by_import': 'End-user created by a subscription import',
 
@@ -220,6 +246,9 @@ export const SECURITY_EVENT_LABEL = {
   // `workspace.member_invited` on purpose: a member appearing with no
   // invitation behind them should be explicable from the log alone.
   'workspace.member_added_by_admin': 'Teammate added by deployment automation',
+  // A workspace's ceilings replaced through the super-admin surface, with the
+  // limits before and after, so a changed quota can be traced to when it moved.
+  'workspace.limits_set_by_admin': 'Workspace limits set by deployment automation',
 
   // ── Deployment administration ──
   'admin.operator_invite.minted': 'Operator invite minted',

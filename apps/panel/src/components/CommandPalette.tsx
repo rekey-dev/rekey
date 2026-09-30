@@ -15,8 +15,8 @@
  *     palette first opens, via the panel's own /api/palette/applications
  *     proxy (the operator JWT lives in httpOnly cookies; see that route).
  *  3. Section jumps for the *current* application when the route is under
- *     /applications/{id} (mirrors AppNav's groups, flattened; billing
- *     sections are gated on the app's billingConfig.enabled).
+ *     /applications/{id} (AppNav's groups from lib/app-sections, flattened;
+ *     billing-gated sections are left out while billing is off).
  *
  * Filtering is a case-insensitive includes-then-subsequence match. Keyboard:
  * arrows + Enter, Home/End. A11y: role="combobox" input controlling a
@@ -28,7 +28,7 @@
  */
 
 import * as React from 'react';
-import { SEG_SCOPE } from '@/components/AppNav';
+import { APP_SECTION_GROUPS, BILLING_GATED_SEGS, SEG_SCOPE } from '@/lib/app-sections';
 import { hasScope } from '@/lib/operator-scopes';
 import { useRouter, usePathname } from 'next/navigation';
 
@@ -65,38 +65,27 @@ interface PaletteItem {
 /** Mirrors Sidebar's NAV, keep in sync when nav entries change. */
 const NAV_DESTINATIONS: Array<{ label: string; href: string; keywords?: string }> = [
   { label: 'Applications', href: '/applications', keywords: 'apps' },
-  { label: 'Team', href: '/team', keywords: 'members invitations invite' },
+  { label: 'Team', href: '/team', keywords: 'members roles' },
+  { label: 'Team: application access', href: '/team/access', keywords: 'grants scopes permissions' },
+  { label: 'Team: invitations', href: '/team/invitations', keywords: 'invite teammate' },
   { label: 'Workspace settings', href: '/workspace', keywords: 'settings tenant workspace' },
   { label: 'Audit log', href: '/audit-log', keywords: 'security events export' },
-  { label: 'Email logs', href: '/email-logs', keywords: 'mail delivery' },
+  { label: 'Email delivery', href: '/email-logs', keywords: 'mail logs sent bounced' },
   { label: 'Account security', href: '/account/security', keywords: 'account security mfa password sessions passkeys' },
   { label: 'API tokens', href: '/account/api-tokens', keywords: 'account keys personal' },
   { label: 'Operator MCP', href: '/account/mcp', keywords: 'account model context protocol ai agents' },
   { label: 'My requests', href: '/account/activity', keywords: 'account activity log' },
 ];
 
-/** Mirrors AppNav's groups, flattened. `billing: true` rows are gated. */
-const APP_SECTIONS: Array<{ seg: string; label: string; billing?: boolean; keywords?: string }> = [
-  { seg: '', label: 'Overview', keywords: 'dashboard stats' },
-  { seg: 'end-users', label: 'End-users', keywords: 'users customers' },
-  { seg: 'organizations', label: 'Organizations', keywords: 'orgs teams' },
-  { seg: 'activity', label: 'Activity', keywords: 'security events' },
-  { seg: 'auth', label: 'Auth methods', keywords: 'authentication password sign-in mfa' },
-  { seg: 'oauth', label: 'OAuth', keywords: 'google microsoft providers social' },
-  { seg: 'mcp', label: 'MCP', keywords: 'model context protocol' },
-  { seg: 'revenue', label: 'Revenue', billing: true, keywords: 'billing overview mrr chart' },
-  { seg: 'billing', label: 'Billing providers', billing: true, keywords: 'stripe paypal razorpay credentials' },
-  { seg: 'plans', label: 'Plans', billing: true, keywords: 'pricing billing subscription' },
-  { seg: 'payments', label: 'Payments', billing: true, keywords: 'billing charges refunds' },
-  { seg: 'coupons', label: 'Coupons', billing: true, keywords: 'discounts billing promo' },
-  { seg: 'licenses', label: 'Licenses', billing: true, keywords: 'keys seats billing' },
-  { seg: 'usage', label: 'Usage', billing: true, keywords: 'meters credits billing' },
-  { seg: 'api-keys', label: 'API keys', keywords: 'developer secret keys' },
-  { seg: 'webhooks', label: 'Webhooks', keywords: 'developer endpoints deliveries events' },
-  { seg: 'requests', label: 'Requests', keywords: 'developer request logs' },
-  { seg: 'access', label: 'Access', keywords: 'developer ip allowlist cors' },
-  { seg: 'email', label: 'Email', keywords: 'developer templates smtp resend' },
-];
+/** AppNav's groups, flattened. The group name is part of the label so "Overview" is not ambiguous. */
+const APP_SECTIONS = APP_SECTION_GROUPS.flatMap((g) =>
+  g.sections.map((s) => ({
+    seg: s.seg,
+    label: g.sections.length === 1 || s.label === g.label ? s.label : `${g.label}: ${s.label}`,
+    keywords: [g.label.toLowerCase(), s.keywords].filter(Boolean).join(' '),
+    billingGated: BILLING_GATED_SEGS.includes(s.seg),
+  })),
+);
 
 /** Case-insensitive includes, falling back to in-order subsequence. */
 function fuzzyMatch(query: string, text: string): boolean {
@@ -201,7 +190,7 @@ export function CommandPalette(): React.JSX.Element {
         // Billing sections are server-gated when billing is disabled, don't
         // offer dead links. (When the list hasn't loaded yet we can't know;
         // omit until it has.)
-        if (s.billing && !currentApp?.billingEnabled) continue;
+        if (s.billingGated && !currentApp?.billingEnabled) continue;
         // Same rule AppNav applies: a section whose reads would all 403 is
         // not offered. Presentation, not enforcement.
         const need = SEG_SCOPE[s.seg];

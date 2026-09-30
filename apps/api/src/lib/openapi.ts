@@ -568,6 +568,20 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
           metadata: { type: 'object', nullable: true, additionalProperties: true },
           failedSignInAttempts: { type: 'integer' },
           lockedUntil: { type: 'string', format: 'date-time', nullable: true },
+          bannedAt: {
+            type: 'string',
+            format: 'date-time',
+            nullable: true,
+            description: 'When an operator banned this person. The reason is never exported.',
+          },
+          profile: { type: 'object', additionalProperties: true, description: 'Profile answers, keyed by field key.' },
+          onboardingCompletedAt: { type: 'string', format: 'date-time', nullable: true },
+          onboardingSkippedAt: { type: 'string', format: 'date-time', nullable: true },
+          createdVia: {
+            type: 'string',
+            nullable: true,
+            description: 'How the account was created (password, magic_link, oauth:<provider>, passkey, operator, import, billing). Null when it predates the record.',
+          },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
         },
@@ -608,6 +622,13 @@ const HAND_WRITTEN_COMPONENTS: Record<string, JsonSchema> = {
       usageRecords: { type: 'array', items: { type: 'object' } },
       securityEvents: { type: 'array', items: { type: 'object' } },
       impersonations: { type: 'array', items: { type: 'object' } },
+      contacts: {
+        type: 'array',
+        description:
+          'The contact at this address, if they joined any list: each membership with its consent ' +
+          'proof (version, the exact text, time, network prefix) and every submission. Empty when none.',
+        items: { type: 'object' },
+      },
     },
     required: [
       'exportVersion',

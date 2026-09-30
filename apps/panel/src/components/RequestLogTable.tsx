@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { formatDateTime } from '@/lib/date';
 import type { ApiRequestLogRow } from '@/lib/api';
+import { TableScroller } from '@/components/TableScroller';
 
 /**
  * Read-only table for the per-request access log. Shared by the per-Application
@@ -46,7 +47,7 @@ export function RequestLogTable({
 }): React.JSX.Element {
   const scope = showScope ?? rows.some((r) => r.admittedScope);
   return (
-    <div className="overflow-x-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+    <TableScroller className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
       <table className="w-full text-sm">
         <thead className="bg-[var(--color-surface-muted)] text-left text-xs text-neutral-600 dark:text-neutral-400">
           <tr>
@@ -96,6 +97,6 @@ export function RequestLogTable({
           ))}
         </tbody>
       </table>
-    </div>
+    </TableScroller>
   );
 }

@@ -507,6 +507,18 @@ export const billingCredentialsService = {
     const ciphertext = encryptJson(data);
     const countries = (options?.countries ?? []).map((c) => c.toUpperCase().trim()).filter(Boolean);
     const mode = resolveMode(provider, data, options?.mode);
+    const previous = await this.loadDecrypted(applicationId, provider).catch(() => null);
+    const previousMode = (
+      await prisma.billingCredentials.findUnique({
+        where: { applicationId_provider: { applicationId, provider } },
+        select: { mode: true },
+      })
+    )?.mode;
+    // A relabelled mode restarts the window too: a PayPal sandbox and live
+    // client id look alike, so rows recorded under the old label prove nothing
+    // about the new one.
+    const secretsChanged =
+      previous === null || canonicalJson(previous) !== canonicalJson(data) || previousMode !== mode;
     await prisma.billingCredentials.upsert({
       where: { applicationId_provider: { applicationId, provider } },
       create: {
@@ -521,6 +533,7 @@ export const billingCredentialsService = {
       update: {
         ciphertext,
         mode,
+        ...(secretsChanged && { secretsUpdatedAt: new Date() }),
         ...(options?.countries !== undefined && { countries }),
         ...(options?.priority !== undefined && { priority: options.priority }),
         ...(options?.enabled !== undefined && { enabled: options.enabled }),
@@ -559,9 +572,13 @@ export const billingCredentialsService = {
       });
     }
     const resolved = resolveMode(provider, current, mode);
+    const row = await prisma.billingCredentials.findUnique({
+      where: { applicationId_provider: { applicationId, provider } },
+      select: { mode: true },
+    });
     await prisma.billingCredentials.update({
       where: { applicationId_provider: { applicationId, provider } },
-      data: { mode: resolved },
+      data: { mode: resolved, ...(row?.mode !== resolved && { secretsUpdatedAt: new Date() }) },
     });
   },
 
@@ -612,3 +629,12 @@ export const billingCredentialsService = {
     });
   },
 };
+
+/** JSON with object keys sorted, so two equal credential objects compare equal. */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) =>
+    v !== null && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)))
+      : v,
+  );
+}

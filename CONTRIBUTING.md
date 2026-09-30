@@ -44,6 +44,11 @@ separate build step. Running an app's own `dev` script directly (`pnpm --filter
 
 - API: `http://localhost:3030` — interactive docs at `/docs`
 - Operator panel: `http://localhost:3031`
+- Customer portal: `http://localhost:3050/<slug>`. The API's `PUBLIC_PORTAL_URL`
+  and the portal's `PORTAL_BASE_URL` must name this same origin; `.env.example`
+  sets both. Leave `PUBLIC_PORTAL_URL` out and the API treats the stack as
+  having no hosted portal, so portal password resets fail with
+  `AUTH_URL_NOT_ALLOWED`.
 
 Redis is required infrastructure, not just a rate-limiter: the outbound-webhook
 delivery queue runs on it and the API refuses to start if Redis is unreachable.
