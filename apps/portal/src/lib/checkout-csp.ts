@@ -1,10 +1,10 @@
 /**
  * The Content-Security-Policy for the checkout page.
  *
- * Nonce-based and per request: only scripts carrying this request's nonce, and
- * the active processor's own origins, may run. Nothing else loads on a page
- * that hosts a payment form, which is the SAQ A condition that no script on
- * the page can tamper with the processor's frames.
+ * Nonce-based and per request: only scripts carrying this request's nonce,
+ * and the processors' own origins for the token's mode, may run. Nothing else
+ * loads on a page that hosts a payment form, which is the SAQ A condition that
+ * no script on the page can tamper with the processor's frames.
  *
  * The processor origins come from the same table the API's provider module
  * declares (`@rekey.dev/shared-types/checkout`). The payment mode is read from
@@ -25,20 +25,38 @@ export const CSP_REPORT_PATH = '/checkout-csp-report';
 export const CHECKOUT_CSP_HEADER: string = 'Content-Security-Policy-Report-Only';
 const ENFORCING = CHECKOUT_CSP_HEADER === 'Content-Security-Policy';
 
-const NONE: CheckoutBrowserOrigins = { scriptSrc: [], frameSrc: [], connectSrc: [], imgSrc: [], styleSrc: [] };
+const NONE: CheckoutBrowserOrigins = { scriptSrc: [], frameSrc: [], connectSrc: [], imgSrc: [], styleSrc: [], formAction: [] };
+
+function originsFor(providers: readonly string[], mode: CheckoutPaymentMode): CheckoutBrowserOrigins {
+  const lists = providers.map((p) => CHECKOUT_BROWSER_ORIGINS[p]?.[mode] ?? NONE);
+  const merge = (pick: (o: CheckoutBrowserOrigins) => readonly string[]): string[] => [
+    ...new Set(lists.flatMap(pick)),
+  ];
+  return {
+    scriptSrc: merge((o) => o.scriptSrc),
+    frameSrc: merge((o) => o.frameSrc),
+    connectSrc: merge((o) => o.connectSrc),
+    imgSrc: merge((o) => o.imgSrc),
+    styleSrc: merge((o) => o.styleSrc),
+    formAction: merge((o) => o.formAction),
+  };
+}
 
 /**
+ * `provider` is one processor, or several when the request does not say which
+ * one the session uses; each contributes only its list for `mode`.
+ *
  * @example
  * buildCheckoutCsp({ nonce: 'abc', provider: 'paypal', mode: 'test' });
  * // "default-src 'none'; script-src 'self' 'nonce-abc' https://*.paypal.com …; frame-ancestors 'none'; …"
  */
 export function buildCheckoutCsp(args: {
   nonce: string;
-  provider: string | null;
+  provider: string | readonly string[] | null;
   mode: CheckoutPaymentMode | null;
 }): string {
-  const origins =
-    args.provider !== null && args.mode !== null ? (CHECKOUT_BROWSER_ORIGINS[args.provider]?.[args.mode] ?? NONE) : NONE;
+  const providers = args.provider === null ? [] : typeof args.provider === 'string' ? [args.provider] : args.provider;
+  const origins = args.mode === null ? NONE : originsFor(providers, args.mode);
   const nonce = `'nonce-${args.nonce}'`;
   const directives: Array<[string, readonly string[]]> = [
     ['default-src', ["'none'"]],
@@ -48,7 +66,7 @@ export function buildCheckoutCsp(args: {
     ['img-src', ["'self'", 'data:', 'https:']],
     ['style-src', ["'self'", nonce, ...origins.styleSrc]],
     ['font-src', ["'self'"]],
-    ['form-action', ["'self'"]],
+    ['form-action', ["'self'", ...origins.formAction]],
     ['frame-ancestors', ["'none'"]],
     ['base-uri', ["'none'"]],
     ['object-src', ["'none'"]],

@@ -13,7 +13,8 @@ import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { configureSandboxPaypal } from './fakes/billing-credentials.js';
 import { fakePaypal } from './fakes/billing-providers.js';
-import { MAX_REFUSED_CONFIRMATIONS } from '../src/modules/billing/checkout/paypal-approval.js';
+import { MAX_REFUSED_CONFIRMATIONS } from '../src/modules/billing/checkout/confirm-approval.js';
+import { waitForSecurityEvents } from './wait-for-security-events.js';
 
 const PASSWORD = 'pw-one-two-three';
 const REGISTERED = 'https://app.example';
@@ -183,7 +184,7 @@ describe('PayPal approval on the checkout page', () => {
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe('CHECKOUT_CONFIRMATION_REFUSED');
     expect((await sessionRow(mine.sessionId)).status).toBe('OPEN');
-    const events = await prisma.securityEvent.findMany({ where: { applicationId, type: 'app.checkout_confirmation_refused' } });
+    const events = await waitForSecurityEvents({ applicationId, type: 'app.checkout_confirmation_refused' });
     expect(events.map((e) => (e.metadata as { reason: string }).reason)).toEqual(['subscription_id_mismatch']);
   });
 

@@ -9,6 +9,7 @@
  */
 
 import type { Application, CheckoutSession, PaymentMode, Prisma } from '@prisma/client';
+import type { FastifyBaseLogger } from 'fastify';
 import type { CheckoutPageClient, CheckoutPageView } from '@rekey.dev/shared-types';
 import { prisma } from '../../../lib/prisma.js';
 import { RekeyError } from '../../../lib/error.js';
@@ -18,6 +19,8 @@ import { CHECKOUT_SESSION_LIFETIME_MS } from '../checkout-sessions.js';
 import type { BillingMode } from '../credentials.service.js';
 import { lookupHashFor } from './token.js';
 import { safeColor, safeText, safeUrl } from '../../../lib/branding.js';
+import { stripeFallbackUrl } from './stripe-fallback.js';
+import { expectedChargeOf, type ExpectedCharge } from './order-match.js';
 
 /**
  * Metadata stored on an EMBEDDED session. `client` is sent to the page;
@@ -26,10 +29,22 @@ import { safeColor, safeText, safeUrl } from '../../../lib/branding.js';
  */
 export interface EmbeddedSessionMetadata {
   client: CheckoutPageClient;
-  fallbackUrl: string;
-  providerPlanId: string;
+  /** Null until the provider has a hosted page for this order (Stripe issues one on demand). */
+  fallbackUrl: string | null;
+  providerPlanId: string | null;
   discountAmount: number;
   trialDays: number;
+  /**
+   * One-time only: what the provider was asked to charge. Checked again on
+   * confirmation and before capture, and what the page shows, since an
+   * unregistered one-time plan can be re-priced while the order stays fixed.
+   */
+  expectedCharge?: ExpectedCharge;
+}
+
+/** Metadata stored on a REDIRECT session: for a one-time order, what it charges, checked before capture. */
+export interface RedirectSessionMetadata {
+  expectedCharge?: ExpectedCharge;
 }
 
 export function toPaymentMode(mode: BillingMode): PaymentMode {
@@ -78,7 +93,7 @@ export async function recordCheckoutSession(input: {
   successUrl: string;
   cancelUrl: string;
   tokenHash: string | null;
-  metadata: EmbeddedSessionMetadata | Record<string, never>;
+  metadata: EmbeddedSessionMetadata | RedirectSessionMetadata;
 }): Promise<CheckoutSession> {
   return prisma.checkoutSession.create({
     data: {
@@ -259,7 +274,10 @@ export async function checkoutPageView(token: string): Promise<CheckoutPageView>
   const meta = session.metadata as unknown as EmbeddedSessionMetadata;
   const plan = detail.subscription.plan;
   const oneTime = session.kind === 'ONE_TIME';
-  const totalDueToday = meta.trialDays > 0 ? 0 : Math.max(0, plan.amount - meta.discountAmount);
+  const charged = oneTime ? expectedChargeOf(meta) : null;
+  const amount = charged !== null ? charged.amount + meta.discountAmount : plan.amount;
+  const currency = charged !== null ? charged.currency : plan.currency;
+  const totalDueToday = charged !== null ? charged.amount : meta.trialDays > 0 ? 0 : Math.max(0, plan.amount - meta.discountAmount);
   return {
     ...base,
     status: session.status === 'CONFIRMING' ? 'confirming' : 'open',
@@ -268,8 +286,8 @@ export async function checkoutPageView(token: string): Promise<CheckoutPageView>
       merchant: merchantOf(session.application),
       plan: {
         name: plan.name,
-        amount: plan.amount,
-        currency: plan.currency,
+        amount,
+        currency,
         interval: oneTime ? null : plan.interval,
         kind: oneTime ? 'one_time' : 'recurring',
       },
@@ -310,17 +328,21 @@ function parseUrl(value: unknown): URL | null {
 /** Where the "Continue on {provider}" link may send a buyer, per provider. */
 const FALLBACK_HOSTS: Record<string, readonly string[]> = {
   paypal: ['www.paypal.com', 'www.sandbox.paypal.com'],
+  // A subscription's `short_url`. An order has no link; the page posts it to
+  // Razorpay Hosted Checkout instead.
+  razorpay: ['rzp.io'],
 };
 
 /**
  * The provider's own hosted page for this same order, for the fallback link.
- * Only an https URL on the provider's own host is ever returned, so a
- * tampered row cannot turn the link into an open redirect.
+ * A stored URL is only returned when it is https on the provider's own host,
+ * so a tampered row cannot turn the link into an open redirect; Stripe's is
+ * read from Stripe each time.
  *
  * @example
  * const { url } = await checkoutFallbackUrl('chk_live_…'); // https://www.paypal.com/checkoutnow?ba_token=…
  */
-export async function checkoutFallbackUrl(token: string): Promise<{ url: string }> {
+export async function checkoutFallbackUrl(token: string, log?: FastifyBaseLogger): Promise<{ url: string }> {
   const session = await settle(await sessionForToken(token));
   if (session.status !== 'OPEN') {
     throw new RekeyError({
@@ -330,6 +352,9 @@ export async function checkoutFallbackUrl(token: string): Promise<{ url: string 
       fix: 'Return to the app you were buying in.',
     });
   }
+  // Stripe's URL comes straight from Stripe's API on every call, never from
+  // the row, so it is trusted as is, including a Checkout custom domain.
+  if (session.provider === 'stripe') return { url: await stripeFallbackUrl(session, token, log) };
   const parsed = parseUrl((session.metadata as unknown as Partial<EmbeddedSessionMetadata>).fallbackUrl);
   const hosts = FALLBACK_HOSTS[session.provider] ?? [];
   if (parsed === null || parsed.protocol !== 'https:' || !hosts.includes(parsed.hostname)) {

@@ -10,6 +10,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import Stripe from 'stripe';
+import { STRIPE_API_VERSION } from '../src/modules/billing/providers/stripe-api-version.js';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
@@ -22,7 +23,7 @@ const SLUG = 'w-app';
 const WEBHOOK_SECRET = 'whsec_test_secret_for_ci_only';
 
 const stripe = new Stripe('sk_for_signing_only', {
-  apiVersion: '2024-11-20.acacia' as Stripe.LatestApiVersion,
+  apiVersion: STRIPE_API_VERSION,
 });
 
 function signedRequest(body: object): { payload: string; headers: Record<string, string> } {

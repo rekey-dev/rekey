@@ -82,9 +82,15 @@ describe('billing provider-module registry', () => {
   });
 
   it('stripe credentialSchema matches the stored credential JSON keys exactly', () => {
-    // StripeCredentials in credentials.service.ts is { apiKey, webhookSecret }.
-    // A key rename here would strand every existing encrypted blob.
-    expect(stripeModule.credentialSchema.map((f) => f.key)).toEqual(['apiKey', 'webhookSecret']);
+    // StripeCredentials in credentials.service.ts is { apiKey, webhookSecret,
+    // publishableKey? }. A key rename here would strand every existing
+    // encrypted blob; the publishable key is optional so older blobs still load.
+    expect(stripeModule.credentialSchema.map((f) => f.key)).toEqual(['apiKey', 'webhookSecret', 'publishableKey']);
+    expect(stripeModule.credentialSchema.find((f) => f.key === 'publishableKey')).toMatchObject({
+      secret: false,
+      optional: true,
+      pattern: { prefix: 'pk_' },
+    });
     const webhookField = stripeModule.credentialSchema.find((f) => f.webhookRole);
     expect(webhookField?.key).toBe('webhookSecret');
     expect(webhookField?.webhookRole).toBe('secret');
@@ -349,7 +355,7 @@ describe('discovery projection (P4)', () => {
           ...(name === 'external' ? [] : ['refunds']),
           // Which providers the Rekey checkout page can take payment through,
           // so the panel's Checkout page setting can say so per provider.
-          ...(name === 'paypal' ? ['embeddedCheckout'] : []),
+          ...(name === 'external' ? [] : ['embeddedCheckout']),
           'trials',
         ].sort(),
       );

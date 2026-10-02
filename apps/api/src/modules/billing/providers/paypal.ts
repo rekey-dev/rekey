@@ -22,6 +22,7 @@ import type {
   CheckoutSessionResult,
   EmbeddedCheckoutInput,
   EmbeddedCheckoutResult,
+  ProviderOrderSnapshot,
   ProviderPlanRef,
   ProviderSubscriptionSnapshot,
   RefundPaymentInput,
@@ -31,103 +32,12 @@ import { discountUnsupported } from './discount.js';
 import type { PaypalCredentials, BillingMode } from '../credentials.service.js';
 import { RekeyError } from '../../../lib/error.js';
 import { paypalMajorString, paypalMinorFromMajor } from './paypal-money.js';
-
-const SANDBOX_BASE = 'https://api-m.sandbox.paypal.com';
-const LIVE_BASE = 'https://api-m.paypal.com';
-
-/**
- * Hard ceiling on any outbound PayPal call.
- *
- * Node's undici has NO default request timeout, so a bare `fetch()` to a
- * wedged host hangs until the OS gives up on the socket, minutes, or never.
- * Every call in this file used to be a bare `fetch()`.
- *
- * 10s matches the outbound budget the OAuth providers and the webhook
- * dispatcher already use. These are operator-initiated management calls
- * (register a plan, create a checkout, cancel a subscription) where the caller
- * is a human waiting on an HTTP response.
- */
-const PAYPAL_TIMEOUT_MS = 10_000;
-
-/**
- * Tighter ceiling for the calls on the INBOUND WEBHOOK request path
- * (`verifyPaypalWebhook`: a token mint plus the verify POST, so the worst case
- * is 2× this).
- *
- * That path is the sharp one. It runs synchronously inside the Fastify handler
- * for every webhook PayPal sends; with no timeout at all, a wedged
- * api-m.paypal.com held a handler open indefinitely, PayPal retried and opened
- * another, and the process ran out of connections while `/health/live`, which
- * touches neither PayPal nor the handler pool, stayed green. Failing a
- * webhook fast costs one provider retry; holding it costs the API.
- */
-const PAYPAL_WEBHOOK_TIMEOUT_MS = 4_000;
-
-/**
- * `fetch` with a deadline. The signal stays armed after the response
- * resolves, so it covers the body read too, a server that returns headers
- * promptly and then trickles the body still hits the deadline.
- */
-function paypalFetch(
-  url: string,
-  init: RequestInit = {},
-  timeoutMs: number = PAYPAL_TIMEOUT_MS,
-): Promise<Response> {
-  return fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
-}
-
-/**
- * Why the online verification is still on the request path.
- *
- * PayPal's signature check IS the authentication for the webhook route (there
- * is no bearer token; see pipeline.ts). Deferring it means either acting on an
- * unverified payload, or persisting one to a quarantine and building a second
- * pipeline to drain it, a new trust boundary and a new failure mode to buy
- * latency we do not otherwise have a problem with. The timeout above bounds
- * the damage, and an unreachable PayPal now answers 503 rather than 401 (see
- * `PaypalVerifyOutcome`) so the provider retries instead of being told its
- * signature was bad.
- */
+import { LIVE_BASE, SANDBOX_BASE, paypalError, paypalFetch } from './paypal-http.js';
+import { capturePaypalOrder, createPaypalOrder, readPaypalOrder, type CreatedPaypalOrder, type PaypalApi } from './paypal-orders.js';
 
 interface AccessToken {
   access_token: string;
   expires_at: number; // ms epoch
-}
-
-/**
- * Turn a PayPal refusal into an answer the caller can act on.
- *
- * These were plain Errors, so every one became `500 INTERNAL_ERROR` with "an
- * unexpected error occurred". PayPal had said why, we kept it in the log, and
- * the buyer whose payment had just failed was told nothing. On the money path
- * that is the worst place to be vague: the person cannot tell whether to retry,
- * use another card, or contact anyone.
- *
- * The `name` PayPal returns is a fixed, documented vocabulary
- * (INSTRUMENT_DECLINED, PAYER_ACTION_REQUIRED, ...). It is safe to pass on and
- * is the part that decides what the buyer should do. The `message` and
- * `details` are not forwarded: they can name the account, and this reaches a
- * browser.
- */
-function paypalError(operation: string, status: number, body: string): RekeyError {
-  let name: string | null = null;
-  try {
-    const parsed = JSON.parse(body) as { name?: unknown };
-    if (typeof parsed.name === 'string') name = parsed.name;
-  } catch {
-    // Not JSON. Nothing to forward, so the status carries the meaning.
-  }
-  return new RekeyError({
-    statusCode: 502,
-    code: 'BILLING_PROVIDER_REFUSED',
-    message: name
-      ? `PayPal refused the ${operation} (${name}).`
-      : `PayPal refused the ${operation} (HTTP ${status}).`,
-    fix:
-      name === 'INSTRUMENT_DECLINED'
-        ? 'The payment method was declined. Ask the customer to use another one.'
-        : 'Check the billing credentials configured for this Application, then retry. The full provider response is in the server log.',
-  });
 }
 
 export class RealPaypalProvider implements BillingProvider {
@@ -139,6 +49,10 @@ export class RealPaypalProvider implements BillingProvider {
   constructor(creds: PaypalCredentials, mode: BillingMode) {
     this.creds = creds;
     this.base = mode === 'live' ? LIVE_BASE : SANDBOX_BASE;
+  }
+
+  private async api(): Promise<PaypalApi> {
+    return { base: this.base, token: await this.accessToken() };
   }
 
   private async accessToken(): Promise<string> {
@@ -250,22 +164,23 @@ export class RealPaypalProvider implements BillingProvider {
   }
 
   /**
-   * The Rekey-hosted page's subscription: created here, server-side, exactly
-   * as for the redirect, but PayPal returns the buyer to the Rekey page, which
-   * is also where a cancelled approval lands. The page's Buttons only hand
-   * this id back through `createSubscription`, so the browser cannot change
-   * the plan, the price or `custom_id`.
+   * The Rekey-hosted page's subscription or order: created here, server-side,
+   * exactly as for the redirect, but PayPal returns the buyer to the Rekey
+   * page, which is also where a cancelled approval lands. The page's Buttons
+   * only hand this id back through `createSubscription` / `createOrder`, so
+   * the browser cannot change the plan, the price or `custom_id`.
    */
   async createEmbeddedCheckout(input: EmbeddedCheckoutInput): Promise<EmbeddedCheckoutResult> {
-    if (input.discount) throw discountUnsupported(this.name, 'recurring');
-    if (input.kind !== 'recurring') {
-      throw new RekeyError({
-        statusCode: 400,
-        code: 'CHECKOUT_EMBEDDED_UNSUPPORTED',
-        message: 'The Rekey checkout page takes PayPal subscriptions only; one-time PayPal purchases use the PayPal page.',
-        fix: "Keep the provider's page for one-time purchases, or pass `mode: 'redirect'` for this checkout.",
-      });
+    if (input.kind === 'one_time') {
+      const order = await this.createOrder(input, input.returnUrl, input.returnUrl);
+      return {
+        sessionId: order.id,
+        client: { provider: 'paypal', clientId: this.creds.clientId, orderId: order.id, sdk: 'v5-order', currency: order.currency },
+        fallbackUrl: order.approveUrl,
+        providerPlanId: null,
+      };
     }
+    if (input.discount) throw discountUnsupported(this.name, 'recurring');
     const created = await this.createSubscription(input, input.returnUrl, input.returnUrl);
     return {
       sessionId: created.id,
@@ -297,6 +212,14 @@ export class RealPaypalProvider implements BillingProvider {
       planId: typeof sub.plan_id === 'string' ? sub.plan_id : null,
       customId: typeof sub.custom_id === 'string' ? sub.custom_id : null,
     };
+  }
+
+  /**
+   * PayPal's own record of one Orders v2 order, from this credential set's
+   * REST base, so a sandbox order is never read from the live API.
+   */
+  async getOrder(providerOrderId: string): Promise<ProviderOrderSnapshot | null> {
+    return readPaypalOrder(await this.api(), providerOrderId);
   }
 
   private async createSubscription(
@@ -371,102 +294,31 @@ export class RealPaypalProvider implements BillingProvider {
    * `item_total - discount === amount.value`, or PayPal rejects the order.
    */
   async createOneTimeCheckout(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
-    const token = await this.accessToken();
-    const requestId = `REKEY-ORDER-${randomUUID()}`;
-    const currency = input.plan.currency;
-    const discountMinor = input.discount?.amount ?? 0;
-    // Scaled by what PayPal accepts for THIS currency. These three used to
-    // hardcode `/ 100` and `.toFixed(2)`, so a plan in a currency PayPal takes
-    // no decimals on was both priced at a hundredth of its value and rejected
-    // outright for carrying a decimal point.
-    const grossMajor = paypalMajorString(input.plan.amount, input.plan.currency);
-    const discountMajor = paypalMajorString(discountMinor, input.plan.currency);
-    const valueMajor = paypalMajorString(input.plan.amount - discountMinor, input.plan.currency);
-    // PayPal has no free-form metadata on a purchase unit, so the code goes
-    // where the buyer and the operator will both see it.
-    const description = (
-      input.discount ? `${input.plan.name} (coupon ${input.discount.code})` : input.plan.name
-    ).slice(0, 127);
-    const res = await paypalFetch(`${this.base}/v2/checkout/orders`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'PayPal-Request-Id': requestId,
-      },
-      body: JSON.stringify({
-        intent: 'CAPTURE',
-        purchase_units: [
-          {
-            custom_id: `${input.application.id}:${input.endUser.id}`,
-            description,
-            amount: {
-              currency_code: currency,
-              value: valueMajor,
-              ...(input.discount && {
-                breakdown: {
-                  item_total: { currency_code: currency, value: grossMajor },
-                  discount: { currency_code: currency, value: discountMajor },
-                },
-              }),
-            },
-            ...(input.discount && {
-              items: [
-                {
-                  name: input.plan.name.slice(0, 127),
-                  quantity: '1',
-                  unit_amount: { currency_code: currency, value: grossMajor },
-                },
-              ],
-            }),
-          },
-        ],
-        application_context: {
-          return_url: input.successUrl,
-          cancel_url: input.cancelUrl,
-          user_action: 'PAY_NOW',
-          shipping_preference: 'NO_SHIPPING',
-        },
-      }),
-    });
-    if (!res.ok) {
-      {
-      const body = await res.text();
-      console.error(`paypal order failed`, res.status, body);
-      throw paypalError('order', res.status, body);
-    }
-    }
-    const order = (await res.json()) as { id: string; links: Array<{ rel: string; href: string }> };
-    const approve = order.links.find((l) => l.rel === 'approve' || l.rel === 'payer-action');
-    if (!approve) throw new Error('PayPal order response missing approve link');
-    return { url: approve.href, sessionId: order.id };
+    const order = await this.createOrder(input, input.successUrl, input.cancelUrl);
+    return { url: order.approveUrl, sessionId: order.id };
+  }
+
+  private async createOrder(
+    input: CheckoutSessionInput,
+    returnUrl: string,
+    cancelUrl: string,
+  ): Promise<CreatedPaypalOrder> {
+    return createPaypalOrder(await this.api(), input, returnUrl, cancelUrl);
   }
 
   /**
-   * Capture an approved one-time order. Idempotent: a re-capture of an
-   * already-captured order (HTTP 422 ORDER_ALREADY_CAPTURED) counts as success
-   * so webhook replays don't error.
+   * Capture an approved one-time order. Idempotent: an already-captured order
+   * counts as success so webhook replays don't error.
    */
   async captureOneTime(orderId: string): Promise<{ captured: boolean }> {
-    const token = await this.accessToken();
-    const res = await paypalFetch(`${this.base}/v2/checkout/orders/${orderId}/capture`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      if (res.status === 422 && text.includes('ORDER_ALREADY_CAPTURED')) return { captured: true };
-      console.error('paypal capture failed', res.status, text);
-      throw paypalError('capture', res.status, text);
-    }
-    const data = (await res.json()) as { status?: string };
-    return { captured: data.status === 'COMPLETED' };
+    return capturePaypalOrder(await this.api(), orderId);
   }
 
   /**
    * Create (or reuse) a PayPal webhook at `publicUrl` subscribed to the events
    * our handler consumes. Returns the webhook id (needed for signature
-   * verification). Reuses the existing webhook on WEBHOOK_URL_ALREADY_EXISTS.
+   * verification). On WEBHOOK_URL_ALREADY_EXISTS the existing webhook is
+   * reused and its event types replaced with this set.
    */
   async registerWebhook(publicUrl: string): Promise<{ webhookId?: string }> {
     const token = await this.accessToken();
@@ -480,9 +332,8 @@ export class RealPaypalProvider implements BillingProvider {
       'PAYMENT.SALE.DENIED',
       'PAYMENT.SALE.REVERSED',
       'PAYMENT.CAPTURE.COMPLETED',
-      // Reversals on the Orders v2 side. Existing tenants keep their current
-      // subscription until their credential is next saved, `registerWebhook`
-      // deletes and recreates, so this only takes effect on the next save.
+      // Reversals on the Orders v2 side. An existing webhook picks these up the
+      // next time this runs (auto-configure, or saving the credentials).
       'PAYMENT.CAPTURE.REVERSED',
       'PAYMENT.CAPTURE.REFUNDED',
     ].map((name) => ({ name }));
@@ -497,14 +348,26 @@ export class RealPaypalProvider implements BillingProvider {
       return { webhookId: json.id };
     }
     const text = await res.text();
-    // Already registered for this URL → look it up and return its id.
+    // Already registered for this URL: reuse it, and bring its events up to
+    // the set above. A webhook created before one-time checkout existed lacks
+    // the order events, and reusing it as-is left approved orders uncaptured.
     if (text.includes('WEBHOOK_URL_ALREADY_EXISTS')) {
       const listRes = await paypalFetch(`${this.base}/v1/notifications/webhooks`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const list = (await listRes.json()) as { webhooks?: Array<{ id: string; url: string }> };
       const match = list.webhooks?.find((w) => w.url === publicUrl);
-      if (match) return { webhookId: match.id };
+      if (match) {
+        const patch = await paypalFetch(`${this.base}/v1/notifications/webhooks/${encodeURIComponent(match.id)}`, {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify([{ op: 'replace', path: '/event_types', value: eventTypes }]),
+        });
+        if (patch.ok) return { webhookId: match.id };
+        const patchText = await patch.text();
+        console.error('paypal webhook event update failed', patch.status, patchText);
+        throw paypalError('webhook event update', patch.status, patchText);
+      }
     }
     console.error('paypal webhook register failed', res.status, text);
     throw paypalError('webhook registration', res.status, text);
@@ -724,147 +587,4 @@ export class RealPaypalProvider implements BillingProvider {
   }
 }
 
-/**
- * The three ways an online verification can end.
- *
- * `unreachable` is separated from `invalid` deliberately. Both used to be
- * `false`, so a PayPal outage or a timeout surfaced as HTTP 401
- * WEBHOOK_SIGNATURE_INVALID, telling PayPal its own signature was bad. PayPal
- * disables an endpoint that keeps rejecting, so an outage on OUR side of the
- * call could cost the operator their webhook. `unreachable` maps to 503, which
- * is retried and reads correctly in the logs.
- *
- * Both are still fail-CLOSED: nothing is processed either way.
- */
-export type PaypalVerifyOutcome =
-  | { ok: true }
-  | { ok: false; reason: 'invalid' }
-  | { ok: false; reason: 'unreachable' };
-
-/**
- * The verify-webhook-signature request with the event spliced in as the bytes
- * PayPal signed. PayPal's signature covers a CRC32 of the body, so a
- * re-serialised event (reordered keys, `1.0` becoming `1`, dropped
- * whitespace) is not what was signed, and the check no longer binds to the
- * exact bytes we act on.
- */
-function verificationRequestBody(fields: Record<string, string>, rawEvent: string): string | null {
-  // Only a single JSON value may be spliced: raw text such as
-  // `{},"webhook_id":"..."` would otherwise add or override request fields.
-  try {
-    JSON.parse(rawEvent);
-  } catch {
-    return null;
-  }
-  const withoutEvent = JSON.stringify(fields);
-  return `${withoutEvent.slice(0, -1)},"webhook_event":${rawEvent}}`;
-}
-
-/**
- * Verify an inbound PayPal webhook signature.
- *
- * PayPal verification is ONLINE (unlike Stripe's offline HMAC): we POST the
- * transmission headers + the event body as received + our webhook id to
- * `/v1/notifications/verify-webhook-signature` and trust the
- * `verification_status`. Requires a fresh access token minted from the
- * Application's PayPal client credentials.
- *
- * `{ ok: true }` only on `verification_status === 'SUCCESS'`. A missing
- * transmission header or an explicit non-SUCCESS is `invalid`; a timeout,
- * network error or 5xx from PayPal is `unreachable`.
- *
- * Both calls carry PAYPAL_WEBHOOK_TIMEOUT_MS, see the constant for why this
- * is the sharpest of the eleven calls in this file.
- */
-export async function verifyPaypalWebhook(args: {
-  creds: PaypalCredentials;
-  mode: BillingMode;
-  headers: Record<string, string | string[] | undefined>;
-  /**
-   * The webhook body exactly as received. Must already have parsed as one
-   * JSON value: it is embedded verbatim in the verification request.
-   */
-  rawEvent: string;
-}): Promise<PaypalVerifyOutcome> {
-  const base = args.mode === 'live' ? LIVE_BASE : SANDBOX_BASE;
-
-  const header = (k: string): string | undefined => {
-    const v = args.headers[k.toLowerCase()];
-    return Array.isArray(v) ? v[0] : typeof v === 'string' ? v : undefined;
-  };
-  const transmissionId = header('paypal-transmission-id');
-  const transmissionTime = header('paypal-transmission-time');
-  const certUrl = header('paypal-cert-url');
-  const authAlgo = header('paypal-auth-algo');
-  const transmissionSig = header('paypal-transmission-sig');
-  if (!transmissionId || !transmissionTime || !certUrl || !authAlgo || !transmissionSig) {
-    // Nothing was sent to verify with, that is the caller's problem, not
-    // PayPal's availability.
-    return { ok: false, reason: 'invalid' };
-  }
-  const verifyBody = verificationRequestBody(
-    {
-      transmission_id: transmissionId,
-      transmission_time: transmissionTime,
-      cert_url: certUrl,
-      auth_algo: authAlgo,
-      transmission_sig: transmissionSig,
-      webhook_id: args.creds.webhookId,
-    },
-    args.rawEvent,
-  );
-  if (verifyBody === null) return { ok: false, reason: 'invalid' };
-
-  // Mint an access token (basic-auth client_credentials).
-  const auth = Buffer.from(`${args.creds.clientId}:${args.creds.clientSecret}`).toString('base64');
-  let token: string;
-  try {
-    const tokenRes = await paypalFetch(
-      `${base}/v1/oauth2/token`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Basic ${auth}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: 'grant_type=client_credentials',
-      },
-      PAYPAL_WEBHOOK_TIMEOUT_MS,
-    );
-    // 401/403 here means the operator's stored client credentials are wrong,
-    // which is a configuration fault they must fix; anything else is PayPal
-    // failing to answer.
-    if (!tokenRes.ok) {
-      return tokenRes.status === 401 || tokenRes.status === 403
-        ? { ok: false, reason: 'invalid' }
-        : { ok: false, reason: 'unreachable' };
-    }
-    token = ((await tokenRes.json()) as { access_token: string }).access_token;
-  } catch {
-    // Timeout / DNS / connection reset.
-    return { ok: false, reason: 'unreachable' };
-  }
-
-  try {
-    const verifyRes = await paypalFetch(
-      `${base}/v1/notifications/verify-webhook-signature`,
-      {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: verifyBody,
-      },
-      PAYPAL_WEBHOOK_TIMEOUT_MS,
-    );
-    if (!verifyRes.ok) {
-      return verifyRes.status >= 500
-        ? { ok: false, reason: 'unreachable' }
-        : { ok: false, reason: 'invalid' };
-    }
-    const json = (await verifyRes.json()) as { verification_status?: string };
-    return json.verification_status === 'SUCCESS'
-      ? { ok: true }
-      : { ok: false, reason: 'invalid' };
-  } catch {
-    return { ok: false, reason: 'unreachable' };
-  }
-}
+export { verifyPaypalWebhook, type PaypalVerifyOutcome } from './paypal-webhook-verify.js';

@@ -49,6 +49,35 @@ describe('buildCheckoutCsp', () => {
   });
 });
 
+describe('buildCheckoutCsp for Razorpay', () => {
+  it('admits checkout.js, its frames and the Hosted Checkout form target, in both modes', () => {
+    for (const mode of ['test', 'live'] as const) {
+      const csp = buildCheckoutCsp({ nonce: 'n', provider: 'razorpay', mode });
+      expect(directive(csp, 'script-src')).toBe("script-src 'self' 'nonce-n' https://checkout.razorpay.com");
+      expect(directive(csp, 'frame-src')).toContain('https://api.razorpay.com');
+      expect(directive(csp, 'frame-src')).toContain('https://checkout.razorpay.com');
+      expect(directive(csp, 'connect-src')).toContain('https://lumberjack.razorpay.com');
+      expect(directive(csp, 'form-action')).toBe("form-action 'self' https://api.razorpay.com");
+      expect(csp).not.toContain('paypal');
+    }
+  });
+
+  it('keeps form-action to self for a processor that posts no form', () => {
+    expect(directive(buildCheckoutCsp({ nonce: 'n', provider: 'paypal', mode: 'live' }), 'form-action')).toBe("form-action 'self'");
+  });
+
+  it("merges several processors' lists for one mode without letting live admit a sandbox host", () => {
+    const live = buildCheckoutCsp({ nonce: 'n', provider: ['paypal', 'razorpay'], mode: 'live' });
+    expect(directive(live, 'script-src')).toContain('https://www.paypal.com');
+    expect(directive(live, 'script-src')).toContain('https://checkout.razorpay.com');
+    expect(live).not.toContain('sandbox');
+    expect(live).not.toContain('*.');
+    const test = buildCheckoutCsp({ nonce: 'n', provider: ['paypal', 'razorpay'], mode: 'test' });
+    expect(directive(test, 'script-src')).toContain('https://www.sandbox.paypal.com');
+    expect(directive(test, 'script-src')).toContain('https://checkout.razorpay.com');
+  });
+});
+
 describe('middleware on checkout paths', () => {
   function run(path: string) {
     return middleware(new NextRequest(`https://portal.example${path}`));
@@ -72,6 +101,7 @@ describe('middleware on checkout paths', () => {
   it('never names a sandbox host for a live token', () => {
     const csp = run(`/acme/checkout/${LIVE_TOKEN}`).headers.get('content-security-policy-report-only') ?? '';
     expect(csp).toContain('https://www.paypal.com');
+    expect(csp).toContain('https://checkout.razorpay.com');
     expect(csp).not.toContain('sandbox');
     expect(csp).not.toContain('*.paypal.com');
   });

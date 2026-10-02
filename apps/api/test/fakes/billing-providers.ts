@@ -20,6 +20,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Plan } from '@prisma/client';
 import { discountUnsupported } from '../../src/modules/billing/providers/discount.js';
+import { RekeyError } from '../../src/lib/error.js';
 import { ExternalBillingProvider } from '../../src/modules/billing/providers/external.js';
 import type {
   BillingProvider,
@@ -28,6 +29,10 @@ import type {
   CheckoutSessionResult,
   EmbeddedCheckoutInput,
   EmbeddedCheckoutResult,
+  HostedFallbackInput,
+  ProviderCheckoutSessionSnapshot,
+  ProviderOrderSnapshot,
+  ProviderPaymentSnapshot,
   ProviderPlanRef,
   ProviderSubscriptionSnapshot,
 } from '../../src/modules/billing/providers/types.js';
@@ -85,6 +90,57 @@ export class FakeStripeProvider implements BillingProvider {
     return { sessionId, url: `https://checkout.stripe.example/onetime/${sessionId}` };
   }
 
+  lastEmbedded: EmbeddedCheckoutInput | null = null;
+  /** Stripe's side of each Checkout Session this fake created, for the page's checks. Tests edit it. */
+  readonly sessions = new Map<string, ProviderCheckoutSessionSnapshot>();
+  /** Every hosted fallback asked for, with the embedded session it replaced. */
+  readonly fallbacks: HostedFallbackInput[] = [];
+
+  async createEmbeddedCheckout(input: EmbeddedCheckoutInput): Promise<EmbeddedCheckoutResult> {
+    this.lastEmbedded = input;
+    const sessionId = `cs_test_embed${randomUUID().replace(/-/g, '')}`;
+    this.sessions.set(sessionId, {
+      id: sessionId,
+      status: 'open',
+      paymentStatus: 'unpaid',
+      clientReferenceId: `${input.application.id}:${input.endUser.id}`,
+      metadata: { applicationId: input.application.id, endUserId: input.endUser.id, planId: input.plan.id },
+      amountTotal: input.trial ? 0 : input.plan.amount - (input.discount?.amount ?? 0),
+      currency: input.plan.currency.toUpperCase(),
+      url: null,
+    });
+    return {
+      sessionId,
+      client: { provider: 'stripe', publishableKey: 'pk_test_ci_only', clientSecret: `${sessionId}_secret_ci`, sdk: 'elements' },
+      fallbackUrl: null,
+      providerPlanId: input.kind === 'recurring' ? 'price_ci' : null,
+    };
+  }
+
+  async getCheckoutSession(id: string): Promise<ProviderCheckoutSessionSnapshot | null> {
+    return this.sessions.get(id) ?? null;
+  }
+
+  async expireCheckoutSession(id: string): Promise<void> {
+    const current = this.sessions.get(id);
+    if (current) this.sessions.set(id, { ...current, status: 'expired' });
+  }
+
+  /** Mirrors the real one: a paid embedded session is refused, an open one is expired first. */
+  async createHostedFallback(input: HostedFallbackInput): Promise<CheckoutSessionResult> {
+    const embedded = this.sessions.get(input.embeddedSessionId);
+    if (!embedded) throw new Error(`no such Checkout Session ${input.embeddedSessionId}`);
+    if (embedded.status === 'complete') {
+      throw new RekeyError({ statusCode: 409, code: 'CHECKOUT_SESSION_COMPLETE', message: 'paid', fix: 'none' });
+    }
+    this.sessions.set(embedded.id, { ...embedded, status: 'expired' });
+    this.fallbacks.push(input);
+    const sessionId = `cs_test_hosted${createHash('sha256').update(input.idempotencyKey).digest('hex').slice(0, 24)}`;
+    const url = `https://checkout.stripe.com/c/pay/${sessionId}`;
+    this.sessions.set(sessionId, { ...embedded, id: sessionId, status: 'open', url });
+    return { sessionId, url };
+  }
+
   async registerWebhook(publicUrl: string): Promise<{ secret?: string; webhookId?: string }> {
     return {
       webhookId: deterministicId('we', publicUrl),
@@ -118,8 +174,18 @@ export class FakePaypalProvider implements BillingProvider {
   async createOneTimeCheckout(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
     this.lastCheckout = input;
     const sessionId = `ORDER-stub-${randomUUID()}`;
+    this.recordOrder(sessionId, input);
     const url = `${input.successUrl}${input.successUrl.includes('?') ? '&' : '?'}stub_provider=paypal&stub_order=${sessionId}`;
     return { url, sessionId };
+  }
+  private recordOrder(orderId: string, input: CheckoutSessionInput): void {
+    this.orders.set(orderId, {
+      id: orderId,
+      status: 'APPROVED',
+      customId: `${input.application.id}:${input.endUser.id}`,
+      amount: input.plan.amount - (input.discount?.amount ?? 0),
+      currency: input.plan.currency.toUpperCase(),
+    });
   }
   lastEmbedded: EmbeddedCheckoutInput | null = null;
   /** PayPal's side of each subscription this fake created, for approval checks. Tests edit it. */
@@ -127,9 +193,25 @@ export class FakePaypalProvider implements BillingProvider {
   async getSubscription(id: string): Promise<ProviderSubscriptionSnapshot | null> {
     return this.subscriptions.get(id) ?? null;
   }
+  /** PayPal's side of each one-time order this fake created. Tests edit it. */
+  readonly orders = new Map<string, ProviderOrderSnapshot>();
+  async getOrder(id: string): Promise<ProviderOrderSnapshot | null> {
+    return this.orders.get(id) ?? null;
+  }
   async createEmbeddedCheckout(input: EmbeddedCheckoutInput): Promise<EmbeddedCheckoutResult> {
-    if (input.discount) throw discountUnsupported(this.name, 'recurring');
     this.lastEmbedded = input;
+    if (input.kind === 'one_time') {
+      const orderId = `ORDEREMBED${randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`;
+      this.recordOrder(orderId, input);
+      this.orders.set(orderId, { ...this.orders.get(orderId)!, status: 'CREATED' });
+      return {
+        sessionId: orderId,
+        client: { provider: 'paypal', clientId: 'client_ci_only', orderId, sdk: 'v5-order', currency: input.plan.currency.toUpperCase() },
+        fallbackUrl: `https://www.sandbox.paypal.com/checkoutnow?token=${orderId}`,
+        providerPlanId: null,
+      };
+    }
+    if (input.discount) throw discountUnsupported(this.name, 'recurring');
     const sessionId = `I-EMBED${randomUUID().replace(/-/g, '').slice(0, 12).toUpperCase()}`;
     this.subscriptions.set(sessionId, {
       id: sessionId,
@@ -174,6 +256,7 @@ export class FakeRazorpayProvider implements BillingProvider {
     if (input.discount) throw discountUnsupported(this.name, 'recurring');
     this.lastCheckout = input;
     const sessionId = `sub_stub_${randomUUID().replace(/-/g, '').slice(0, 14)}`;
+    this.subscriptions.set(sessionId, { id: sessionId, status: 'created', planId: `plan_stub_${input.plan.slug}`, customId: null });
     const url = `${input.successUrl}${input.successUrl.includes('?') ? '&' : '?'}stub_provider=razorpay&stub_session=${sessionId}`;
     return { url, sessionId };
   }
@@ -182,6 +265,45 @@ export class FakeRazorpayProvider implements BillingProvider {
     const sessionId = `plink_stub_${randomUUID().replace(/-/g, '').slice(0, 14)}`;
     const url = `${input.successUrl}${input.successUrl.includes('?') ? '&' : '?'}stub_provider=razorpay&stub_plink=${sessionId}`;
     return { url, sessionId };
+  }
+  lastEmbedded: EmbeddedCheckoutInput | null = null;
+  /** Razorpay's side of each payment, for approval checks. Tests write it. */
+  readonly payments = new Map<string, ProviderPaymentSnapshot>();
+  readonly captured: Array<{ id: string; amount: number; currency: string }> = [];
+  /** Razorpay's side of each subscription this fake created. Tests edit it. */
+  readonly subscriptions = new Map<string, ProviderSubscriptionSnapshot>();
+  async getSubscription(id: string): Promise<ProviderSubscriptionSnapshot | null> {
+    return this.subscriptions.get(id) ?? null;
+  }
+  async createEmbeddedCheckout(input: EmbeddedCheckoutInput): Promise<EmbeddedCheckoutResult> {
+    this.lastEmbedded = input;
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 14);
+    if (input.kind === 'recurring') {
+      if (input.discount) throw discountUnsupported(this.name, 'recurring');
+      const id = `sub_${suffix}`;
+      this.subscriptions.set(id, { id, status: 'created', planId: `plan_stub_${input.plan.slug}`, customId: null });
+      return {
+        sessionId: id,
+        client: { provider: 'razorpay', keyId: 'rzp_test_ci', sdk: 'razorpay-checkout', target: { kind: 'subscription', subscriptionId: id } },
+        fallbackUrl: `https://rzp.io/i/${suffix}`,
+        providerPlanId: `plan_stub_${input.plan.slug}`,
+      };
+    }
+    const id = `order_${suffix}`;
+    return {
+      sessionId: id,
+      client: { provider: 'razorpay', keyId: 'rzp_test_ci', sdk: 'razorpay-checkout', target: { kind: 'order', orderId: id } },
+      fallbackUrl: '',
+      providerPlanId: null,
+    };
+  }
+  async getPayment(id: string): Promise<ProviderPaymentSnapshot | null> {
+    return this.payments.get(id) ?? null;
+  }
+  async capturePayment(id: string, amount: number, currency: string): Promise<void> {
+    this.captured.push({ id, amount, currency });
+    const current = this.payments.get(id);
+    if (current) this.payments.set(id, { ...current, status: 'captured' });
   }
   async cancelSubscription(_input: CancelSubscriptionInput): Promise<void> {
     /* no-op */

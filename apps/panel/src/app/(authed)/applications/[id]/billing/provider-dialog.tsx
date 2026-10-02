@@ -47,6 +47,7 @@ const WEBHOOK_META: Record<string, WebhookMeta> = {
     events: [
       'checkout.session.completed',
       'checkout.session.async_payment_succeeded',
+      'checkout.session.async_payment_failed',
       'customer.subscription.updated',
       'customer.subscription.deleted',
       'invoice.paid',
@@ -75,6 +76,7 @@ const WEBHOOK_META: Record<string, WebhookMeta> = {
       'subscription.completed',
       'subscription.halted',
       'payment_link.paid',
+      'order.paid',
     ],
     returnLabel: 'Set a secret on the webhook, then enter the SAME secret below.',
     manualIntro:

@@ -1,12 +1,12 @@
 /**
- * What the checkout page does after PayPal has said yes in its window.
+ * What the checkout page does after the provider has said yes in its window.
  *
- * Once PayPal has approved, the subscription exists at PayPal and will
- * activate from PayPal's webhook whatever Rekey's confirmation call answers.
- * Telling the buyer "you have not been charged" at that point invites a second
- * attempt and a second subscription. So only one answer stops the page from
- * waiting for the webhook: Rekey checked with PayPal and PayPal does not
- * confirm this approval for this checkout. Everything else (a timeout, a 5xx,
+ * Once the provider has approved, the subscription or order exists there and
+ * completes from the provider's webhook whatever Rekey's confirmation call
+ * answers. Telling the buyer "you have not been charged" at that point invites
+ * a second attempt and a second purchase. So only one answer stops the page
+ * from waiting for the webhook: Rekey checked with the provider and the
+ * provider does not confirm this approval for this checkout. Everything else (a timeout, a 5xx,
  * a refusal limit, a network error) waits and then returns the buyer to the
  * app, as a successful confirmation does.
  */
@@ -39,6 +39,13 @@ export function afterPolling(lastStatus: string | undefined): 'finish' | 'unconf
   return lastStatus === 'expired' ? 'unconfirmed' : 'finish';
 }
 
-/** Shown when PayPal does not confirm. Never claims the buyer was not charged. */
-export const UNCONFIRMED_MESSAGE =
-  'We could not confirm this payment with PayPal. Please do not pay again: if PayPal took the payment, your account updates within a few minutes. Otherwise, contact the business you are buying from.';
+/**
+ * Shown when the provider does not confirm. Never claims the buyer was not
+ * charged. `provider` is the name from the page's provider copy.
+ *
+ * @example
+ * unconfirmedMessage('Razorpay'); // 'We could not confirm this payment with Razorpay. …'
+ */
+export function unconfirmedMessage(provider: string): string {
+  return `We could not confirm this payment with ${provider}. Please do not pay again: if ${provider} took the payment, your account updates within a few minutes. Otherwise, contact the business you are buying from.`;
+}

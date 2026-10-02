@@ -92,9 +92,13 @@ describe('Stripe webhook registration', () => {
     expect(result).toEqual({ webhookId: 'we_fake', secret: 'whsec_fake' });
     expect(spy.endpoints).toHaveLength(1);
     expect(spy.endpoints[0]).toMatchObject({ api_version: STRIPE_API_VERSION });
-    expect(STRIPE_API_VERSION).toBe('2024-11-20.acacia');
+    expect(STRIPE_API_VERSION).toBe('2026-09-30.endive');
     expect(spy.endpoints[0]!.enabled_events).toEqual(
-      expect.arrayContaining(['checkout.session.completed', 'checkout.session.async_payment_succeeded']),
+      expect.arrayContaining([
+        'checkout.session.completed',
+        'checkout.session.async_payment_succeeded',
+        'checkout.session.async_payment_failed',
+      ]),
     );
   });
 });

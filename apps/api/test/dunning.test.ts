@@ -19,6 +19,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import Stripe from 'stripe';
+import { STRIPE_API_VERSION } from '../src/modules/billing/providers/stripe-api-version.js';
 import { randomUUID } from 'node:crypto';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
@@ -34,7 +35,7 @@ const WEBHOOK_SECRET = 'whsec_test_secret_for_ci_only';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const stripe = new Stripe('sk_for_signing_only', {
-  apiVersion: '2024-11-20.acacia' as Stripe.LatestApiVersion,
+  apiVersion: STRIPE_API_VERSION,
 });
 
 function stripeSigned(body: object): { payload: string; headers: Record<string, string> } {
@@ -403,7 +404,8 @@ describe('Dunning', () => {
           applicationId: b.applicationId,
           providerSubId: 'sub_dun_bump',
           eventId: `evt_dun_bump_${n}`,
-          invoiceId: `in_dun_bump_${n}`,
+          // Stripe retries the SAME invoice, each failed attempt a new event.
+          invoiceId: 'in_dun_bump',
         }),
       );
     }
@@ -481,21 +483,21 @@ describe('Dunning', () => {
         applicationId: b.applicationId,
         providerSubId: 'sub_dun_rec',
         eventId: 'evt_dun_rec_fail',
-        invoiceId: 'in_dun_rec_fail',
+        invoiceId: 'in_dun_rec',
       }),
     );
     expect(
       (await prisma.dunningCase.findFirstOrThrow({ where: { subscriptionId: sub.id } })).status,
     ).toBe('OPEN');
 
-    // Stripe's retry succeeds → invoice.paid arrives.
+    // Stripe's retry of the same invoice succeeds → invoice.paid arrives.
     await fireStripe(slug, {
       id: 'evt_dun_rec_paid',
       object: 'event',
       type: 'invoice.paid',
       data: {
         object: {
-          id: 'in_dun_rec_paid',
+          id: 'in_dun_rec',
           subscription: 'sub_dun_rec',
           amount_paid: 999,
           currency: 'usd',
@@ -508,6 +510,10 @@ describe('Dunning', () => {
       where: { subscriptionId: sub.id },
     });
     expect(dunningCase.status).toBe('RECOVERED');
+    const payments = await prisma.payment.findMany({
+      where: { applicationId: b.applicationId, providerPaymentId: 'in_dun_rec' },
+    });
+    expect(payments.map((p) => p.status)).toEqual(['SUCCEEDED']);
     expect(dunningCase.closedAt).not.toBeNull();
     expect(dunningCase.nextActionAt).toBeNull();
     expect(

@@ -11,16 +11,24 @@
  * a Stripe test account, configure BYO via the panel, and run end-to-end.
  */
 
-import Stripe from 'stripe';
+import type Stripe from 'stripe';
 import { RekeyError } from '../../../lib/error.js';
-import { planNotRegisteredError } from '../../plans/plan-registration.js';
 import { STRIPE_API_VERSION } from './stripe-api-version.js';
+import { createStripeClient } from './stripe-client.js';
+import { paidInvoicePayments, type StripeRefundTarget } from './stripe-invoice-payments.js';
+import { paymentPurchase, stripePriceIdFor, subscriptionPurchase } from './stripe-session-params.js';
+import { embeddedSessionParams, requirePublishableKey, retrieveCheckoutSnapshot } from './stripe-embedded.js';
+import { replaceWithHostedSession } from './stripe-hosted-fallback.js';
 import type {
   BillingProvider,
   CancelSubscriptionInput,
   CheckoutDiscount,
   CheckoutSessionInput,
   CheckoutSessionResult,
+  EmbeddedCheckoutInput,
+  EmbeddedCheckoutResult,
+  HostedFallbackInput,
+  ProviderCheckoutSessionSnapshot,
   ProviderPlanRef,
   RefundPaymentInput,
   RefundPaymentResult,
@@ -30,6 +38,8 @@ import type { Plan } from '@prisma/client';
 interface RealStripeCreds {
   apiKey: string;
   webhookSecret: string;
+  /** Only the Rekey checkout page needs it; blank on credentials saved before it existed. */
+  publishableKey?: string;
 }
 
 /**
@@ -46,26 +56,12 @@ interface RealStripeCreds {
  */
 const CHECKOUT_COUPON_TTL_SECONDS = 25 * 60 * 60;
 
-/** Hard ceiling on any Stripe API call. See the constructor for why. */
-const STRIPE_TIMEOUT_MS = 10_000;
-
 export class RealStripeProvider implements BillingProvider {
   readonly name = 'stripe';
   private readonly stripe: Stripe;
 
   constructor(private readonly creds: RealStripeCreds) {
-    this.stripe = new Stripe(creds.apiKey, {
-      apiVersion: STRIPE_API_VERSION as Stripe.LatestApiVersion,
-      // The SDK default is 80 seconds. Every call from this class is made
-      // while an operator or an end-user is waiting on an HTTP response, and
-      // 80s of holding a handler open is indistinguishable from an outage
-      // from the caller's side. 10s matches the budget the PayPal/Razorpay
-      // providers and the OAuth exchanges use.
-      timeout: STRIPE_TIMEOUT_MS,
-      // One retry, which the SDK only applies to requests it knows are safe to
-      // repeat (it sends an idempotency key on writes). Default is 0.
-      maxNetworkRetries: 1,
-    });
+    this.stripe = createStripeClient(creds.apiKey);
   }
 
   /**
@@ -190,119 +186,90 @@ export class RealStripeProvider implements BillingProvider {
   }
 
   async createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
-    const priceId = (input.plan.metadata as { stripe?: { priceId?: string } } | null)?.stripe?.priceId;
-    if (!priceId) {
-      // Reachable, and it was reached: a plan whose eager registration was
-      // refused used to be committed active anyway, so it sat on the pricing
-      // page until a buyer clicked it and arrived here. `plansService` now
-      // keeps such a plan off the catalogue, and a legacy row from before that
-      // fix still lands here, with a named 409 and the operator's repair
-      // instead of the bare `Error` that became "An unexpected error occurred",
-      // 500, and a cause visible only in a server log.
-      throw planNotRegisteredError({
-        planSlug: input.plan.slug,
-        provider: 'Stripe',
-        applicationId: input.application.id,
-      });
-    }
-
-    const minted = input.discount ? await this.createDiscount(input.discount) : undefined;
-
-    let session: Stripe.Checkout.Session;
-    try {
-      // No `payment_method_types`: Checkout offers what the account enables
-      // (Link, wallets, local methods). Delayed methods complete unpaid, which
-      // the webhook translator holds until `async_payment_succeeded`.
-      session = await this.stripe.checkout.sessions.create({
-        mode: 'subscription',
-        line_items: [{ price: priceId, quantity: 1 }],
-        customer_email: input.endUser.email,
+    const priceId = stripePriceIdFor(input);
+    const session = await this.withDiscount(input, (discounts) =>
+      this.stripe.checkout.sessions.create({
+        ...subscriptionPurchase(input, priceId, discounts),
         success_url: input.successUrl,
         cancel_url: input.cancelUrl,
-        ...(minted && { discounts: minted.discounts }),
-        // Embed applicationId so our webhook handler can route the event
-        // back to the right local Subscription. metadata propagates to the
-        // resulting subscription/invoice events automatically.
-        metadata: {
-          applicationId: input.application.id,
-          endUserId: input.endUser.id,
-          planId: input.plan.id,
-        },
-        subscription_data: {
-          // Stripe runs the clock and charges when it ends, reporting
-          // `trialing` until then, which `mapStripeSubStatus` now surfaces as
-          // TRIALING instead of folding into ACTIVE.
-          ...(input.trial && { trial_period_days: input.trial.days }),
-          metadata: {
-            applicationId: input.application.id,
-            endUserId: input.endUser.id,
-            planId: input.plan.id,
-          },
-        },
-      });
-    } catch (e) {
-      await this.discardDiscount(minted?.couponId);
-      throw e;
-    }
-
-    if (!session.url) {
-      await this.discardDiscount(minted?.couponId);
-      throw new Error('Stripe returned a checkout session without a `url`.');
-    }
+      }),
+    );
+    if (!session.url) throw new Error('Stripe returned a checkout session without a `url`.');
     return { sessionId: session.id, url: session.url };
   }
 
   async createOneTimeCheckout(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
-    // One-off charge, `mode: 'payment'`, inline price_data (no recurring
-    // Price). `checkout.session.completed` fires on success and our existing
-    // webhook handler grants credits / issues the license by plan.kind.
-    //
-    // The discount rides as a Coupon rather than being subtracted from
-    // `unit_amount`: the line item stays the plan's real price, so the buyer
-    // sees a subtotal and a discount line instead of a mystery number, and
-    // the operator's Stripe records carry the coupon that explains it.
-    const minted = input.discount ? await this.createDiscount(input.discount) : undefined;
-
-    let session: Stripe.Checkout.Session;
-    try {
-      session = await this.stripe.checkout.sessions.create({
-        mode: 'payment',
-        line_items: [
-          {
-            quantity: 1,
-            price_data: {
-              currency: input.plan.currency.toLowerCase(),
-              unit_amount: input.plan.amount,
-              product_data: { name: input.plan.name },
-            },
-          },
-        ],
-        customer_email: input.endUser.email,
+    // `checkout.session.completed` fires on success and the webhook handler
+    // grants credits / issues the license by plan.kind.
+    const session = await this.withDiscount(input, (discounts) =>
+      this.stripe.checkout.sessions.create({
+        ...paymentPurchase(input, discounts),
         success_url: input.successUrl,
         cancel_url: input.cancelUrl,
-        ...(minted && { discounts: minted.discounts }),
-        metadata: {
-          applicationId: input.application.id,
-          endUserId: input.endUser.id,
-          planId: input.plan.id,
-        },
-        payment_intent_data: {
-          metadata: {
-            applicationId: input.application.id,
-            endUserId: input.endUser.id,
-            planId: input.plan.id,
-          },
-        },
-      });
+      }),
+    );
+    if (!session.url) throw new Error('Stripe returned a one-time checkout session without a `url`.');
+    return { sessionId: session.id, url: session.url };
+  }
+
+  /**
+   * Mint the checkout's coupon, create the session with it, and delete the
+   * coupon again when no usable session came back.
+   */
+  private async withDiscount(
+    input: CheckoutSessionInput,
+    create: (discounts: Stripe.Checkout.SessionCreateParams.Discount[] | undefined) => Promise<Stripe.Checkout.Session>,
+  ): Promise<Stripe.Checkout.Session> {
+    const minted = input.discount ? await this.createDiscount(input.discount) : undefined;
+    let session: Stripe.Checkout.Session;
+    try {
+      session = await create(minted?.discounts);
     } catch (e) {
       await this.discardDiscount(minted?.couponId);
       throw e;
     }
-    if (!session.url) {
-      await this.discardDiscount(minted?.couponId);
-      throw new Error('Stripe returned a one-time checkout session without a `url`.');
+    const usable = session.ui_mode === 'elements' ? session.client_secret : session.url;
+    if (!usable) await this.discardDiscount(minted?.couponId);
+    return session;
+  }
+
+  /**
+   * The same Checkout Session as `createCheckoutSession` /
+   * `createOneTimeCheckout`, in `ui_mode: 'elements'` for the Rekey page.
+   *
+   * @example
+   * const { client } = await provider.createEmbeddedCheckout({ ...input, kind: 'recurring', returnUrl });
+   */
+  async createEmbeddedCheckout(input: EmbeddedCheckoutInput): Promise<EmbeddedCheckoutResult> {
+    const publishableKey = requirePublishableKey(this.creds.publishableKey);
+    const priceId = input.kind === 'recurring' ? stripePriceIdFor(input) : null;
+    const session = await this.withDiscount(input, (discounts) =>
+      this.stripe.checkout.sessions.create(embeddedSessionParams(input, priceId, discounts)),
+    );
+    if (!session.client_secret) {
+      throw new Error('Stripe returned an elements checkout session without a `client_secret`.');
     }
-    return { sessionId: session.id, url: session.url };
+    return {
+      sessionId: session.id,
+      client: { provider: 'stripe', publishableKey, clientSecret: session.client_secret, sdk: 'elements' },
+      fallbackUrl: null,
+      providerPlanId: priceId,
+    };
+  }
+
+  /** @example const snapshot = await provider.getCheckoutSession('cs_test_…'); */
+  async getCheckoutSession(providerSessionId: string): Promise<ProviderCheckoutSessionSnapshot | null> {
+    return retrieveCheckoutSnapshot(this.stripe, providerSessionId);
+  }
+
+  /** @example await provider.expireCheckoutSession('cs_test_…'); */
+  async expireCheckoutSession(providerSessionId: string): Promise<void> {
+    await this.stripe.checkout.sessions.expire(providerSessionId);
+  }
+
+  /** @example const { url } = await provider.createHostedFallback({ ...input, kind, embeddedSessionId, idempotencyKey, priceId, expiresAt }); */
+  async createHostedFallback(input: HostedFallbackInput): Promise<CheckoutSessionResult> {
+    return replaceWithHostedSession(this.stripe, input);
   }
 
   /**
@@ -318,6 +285,9 @@ export class RealStripeProvider implements BillingProvider {
       // one (bank debits, vouchers) completes the session unpaid. This is
       // when its money actually arrives.
       'checkout.session.async_payment_succeeded',
+      // And when it does not: the checkout is closed so the buyer can start
+      // another.
+      'checkout.session.async_payment_failed',
       'customer.subscription.updated',
       'customer.subscription.deleted',
       'invoice.paid',
@@ -360,9 +330,7 @@ export class RealStripeProvider implements BillingProvider {
    * kind Stripe adds later fails as an unrecognised id instead of being
    * silently posted as a payment intent.
    */
-  private async resolveRefundTarget(
-    providerPaymentId: string,
-  ): Promise<{ payment_intent: string } | { charge: string }> {
+  private async resolveRefundTarget(providerPaymentId: string): Promise<StripeRefundTarget> {
     if (providerPaymentId.startsWith('pi_')) return { payment_intent: providerPaymentId };
     if (providerPaymentId.startsWith('ch_')) return { charge: providerPaymentId };
 
@@ -375,11 +343,26 @@ export class RealStripeProvider implements BillingProvider {
       });
 
     if (providerPaymentId.startsWith('in_')) {
-      const invoice = await this.stripe.invoices.retrieve(providerPaymentId);
-      const pi = invoice.payment_intent;
-      const id = typeof pi === 'string' ? pi : (pi?.id ?? null);
-      if (!id) throw unpaid('invoice');
-      return { payment_intent: id };
+      const { targets, outsideStripe } = await paidInvoicePayments(this.stripe, providerPaymentId);
+      if (outsideStripe > 0) {
+        throw new RekeyError({
+          statusCode: 409,
+          code: 'BILLING_PAYMENT_NOT_REFUNDABLE',
+          message: "This payment's Stripe invoice was paid partly or wholly outside Stripe, so Stripe cannot refund it.",
+          fix: 'Refund it from the invoice in the Stripe dashboard, and settle any part paid outside Stripe with the buyer directly.',
+        });
+      }
+      const [only, ...rest] = targets;
+      if (!only) throw unpaid('invoice');
+      if (rest.length > 0) {
+        throw new RekeyError({
+          statusCode: 409,
+          code: 'BILLING_PAYMENT_NOT_REFUNDABLE',
+          message: `This payment's Stripe invoice was settled by ${targets.length} separate payments, so Rekey cannot tell which one to refund.`,
+          fix: "Refund the right payment from the invoice in the Stripe dashboard. Rekey records each refunded charge's own running total against this payment and does not add separate charges together, so check its refunded amount in Rekey afterwards.",
+        });
+      }
+      return only;
     }
     if (providerPaymentId.startsWith('cs_')) {
       const session = await this.stripe.checkout.sessions.retrieve(providerPaymentId);

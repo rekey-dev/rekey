@@ -53,6 +53,8 @@ export type BillingProviderName = 'stripe' | 'paypal' | 'razorpay' | 'external';
 export type StripeCredentials = {
   apiKey: string;
   webhookSecret: string;
+  /** Optional, for the Rekey checkout page only; blank on rows saved before it existed. */
+  publishableKey?: string;
 };
 
 export type PaypalCredentials = {

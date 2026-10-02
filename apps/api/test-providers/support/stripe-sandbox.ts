@@ -33,6 +33,7 @@
  */
 
 import Stripe from 'stripe';
+import { STRIPE_API_VERSION } from '../../src/modules/billing/providers/stripe-api-version.js';
 import { HARNESS_PREFIX } from './naming.js';
 
 /** How old a leftover must be before the entry sweep will remove it. */
@@ -50,7 +51,7 @@ const STALE_AFTER_MS = 60 * 60 * 1000; // 1 hour
 const SWEEP_SCAN_LIMIT = 300;
 
 /** Stripe API version this harness pins, the one `stripe-real.ts` uses. */
-const API_VERSION = '2024-11-20.acacia' as Stripe.LatestApiVersion;
+const API_VERSION = STRIPE_API_VERSION;
 
 export function stripeClient(apiKey: string): Stripe {
   return new Stripe(apiKey, { apiVersion: API_VERSION, timeout: 20_000, maxNetworkRetries: 2 });

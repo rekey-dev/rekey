@@ -110,6 +110,10 @@ export const SECURITY_EVENT_LABEL = {
   // for that checkout: a different subscription, plan or buyer, or not yet
   // approved. Metadata carries `reason` and the presented id.
   'app.checkout_confirmation_refused': 'Checkout approval refused after checking with the provider',
+  // A one-time order's approval webhook was not captured because the
+  // provider's record of the order (buyer, amount or currency) does not match
+  // what the checkout charged. No money moved. Metadata carries `reason`.
+  'app.checkout_capture_refused': 'One-time order not captured: it does not match its checkout',
   'app.plan_created': 'Plan created',
   'app.plan_updated': 'Plan updated',
   'app.plan_active_changed': 'Plan activated or deactivated',

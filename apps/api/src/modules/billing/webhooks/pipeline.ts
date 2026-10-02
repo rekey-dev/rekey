@@ -350,10 +350,11 @@ export async function handleBillingProviderWebhook(
   // receipt so an operator reading the event log sees it.
   const notes: string[] = [];
   try {
-    const events = module.webhook.translate(req.payload, {
+    const events = await module.webhook.translate(req.payload, {
       log: request.log,
       applicationId: application.id,
       providerEventId,
+      credentials: creds,
     });
     if (events === null) {
       // Unhandled event type: deliberately conservative, receipt is still

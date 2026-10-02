@@ -12,20 +12,17 @@
  * contains**, because those are the assumptions the translator is built on and
  * a hand-written fixture can only ever confirm:
  *
- *   - `invoice.metadata.applicationId`, the ONLY thing that routes an
- *     invoice event to an Application. `stripe-real.ts` sets metadata on the
- *     subscription and comments that it "propagates to the resulting
- *     subscription/invoice events automatically". If that inheritance is not
- *     real, every `invoice.paid` is dropped with "cannot route" and no payment
- *     is ever recorded, while the money moved.
+ *   - The invoice's `applicationId`, the ONLY thing that routes an invoice
+ *     event to an Application. `stripe-real.ts` sets it on the subscription,
+ *     and Stripe snapshots that onto the invoice's subscription details
+ *     (`parent.subscription_details.metadata` from basil on). If that snapshot
+ *     is not real, every `invoice.paid` is dropped with "cannot route" and no
+ *     payment is ever recorded, while the money moved.
  *
- *   - `invoice.subscription`, read as a string by the translator. Stripe
- *     moved this field under `parent` in the 2025 API versions, and an EVENT
- *     is rendered in the ACCOUNT's default API version, not the one the SDK
- *     client asks for. `registerWebhook` does not pin `api_version` on the
- *     endpoints it creates, so a sandbox (or a production account) on a newer
- *     default renders payloads our translator cannot read. The version is
- *     asserted here so that failure is diagnosed rather than mysterious.
+ *   - The invoice's subscription id, `parent.subscription_details.subscription`
+ *     from basil on. An EVENT is rendered in its endpoint's (or the
+ *     account's) API version, not the one the SDK client asks for, so the
+ *     translator reads both that and the acacia `invoice.subscription`.
  */
 
 import { afterAll, beforeAll, expect, it } from 'vitest';
@@ -47,9 +44,6 @@ import {
   type SandboxFixture,
 } from './support/fixture.js';
 import { createLiveSubscription, linkProviderSubscription } from './support/stripe-lifecycle.js';
-
-/** The API version `RealStripeProvider` and the translator are written against. */
-const PINNED_API_VERSION = '2024-11-20.acacia';
 
 describeSandbox('stripe', 'Stripe sandbox · webhook → subscription → entitlement', stripeSandbox, (creds) => {
   let stripe: Stripe;
@@ -165,22 +159,15 @@ describeSandbox('stripe', 'Stripe sandbox · webhook → subscription → entitl
     // Both are assertions about STRIPE, not about us, and both are the kind
     // that a fixture written from our own reading of the docs would have
     // confirmed whether or not they were true.
-    expect(
-      invoicePaid!.api_version,
-      'Stripe renders events in the ACCOUNT default API version, not the SDK client version. ' +
-        `This account renders ${invoicePaid!.api_version}; the translator is written for ` +
-        `${PINNED_API_VERSION}. registerWebhook does not pin api_version on the endpoints it ` +
-        'creates, so production has the same exposure.',
-    ).toBe(PINNED_API_VERSION);
-
     const invoice = invoicePaid!.data.object as Stripe.Invoice;
+    const details = invoice.parent?.subscription_details;
+    const legacy = invoice as unknown as { subscription?: unknown; subscription_details?: { metadata?: Record<string, string> } };
     expect(
-      invoice.metadata?.applicationId,
-      'invoice.metadata.applicationId is the only field that routes an invoice event to an ' +
-        'Application. stripe-real.ts relies on subscription metadata propagating onto the ' +
-        'invoice; if it does not, every invoice.paid is dropped as unroutable.',
+      details?.metadata?.applicationId ?? legacy.subscription_details?.metadata?.applicationId ?? invoice.metadata?.applicationId,
+      `This account renders ${invoicePaid!.api_version}. The invoice must carry the subscription's ` +
+        'applicationId in its subscription details, or every invoice.paid is dropped as unroutable.',
     ).toBe(buyer.fixture.applicationId);
-    expect(typeof invoice.subscription).toBe('string');
+    expect(typeof (details?.subscription ?? legacy.subscription)).toBe('string');
 
     // --- Now put it through the pipeline, signed ---------------------------
     const res = await deliverStripeEvent(buyer.fixture, invoicePaid!);

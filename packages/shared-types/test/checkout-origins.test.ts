@@ -31,8 +31,31 @@ describe('CHECKOUT_BROWSER_ORIGINS', () => {
     expect(CHECKOUT_BROWSER_ORIGINS.paypal!.test.frameSrc).toContain('https://www.sandbox.paypal.com');
   });
 
+  it('stripe: allows Stripe.js, its 3-D Secure frames and its API in both modes, from Stripe hosts only', () => {
+    for (const mode of ['test', 'live'] as const) {
+      const origins = CHECKOUT_BROWSER_ORIGINS.stripe![mode];
+      expect(origins.scriptSrc).toContain('https://js.stripe.com');
+      expect(origins.frameSrc).toEqual(expect.arrayContaining(['https://js.stripe.com', 'https://hooks.stripe.com']));
+      expect(origins.connectSrc).toContain('https://api.stripe.com');
+      for (const list of Object.values(origins)) {
+        for (const source of list) expect(source).toMatch(/^https:\/\/(\*\.)?([a-z]+\.)*(stripe\.com|link\.com)$/);
+      }
+    }
+  });
+
   it('paypal: live still allows the production script and frame host', () => {
     expect(CHECKOUT_BROWSER_ORIGINS.paypal!.live.scriptSrc).toContain('https://www.paypal.com');
     expect(CHECKOUT_BROWSER_ORIGINS.paypal!.live.frameSrc).toContain('https://www.paypal.com');
+  });
+
+  it('razorpay: the checkout script, the modal frames and the Hosted Checkout form target', () => {
+    for (const mode of ['test', 'live'] as const) {
+      const origins = CHECKOUT_BROWSER_ORIGINS.razorpay![mode];
+      expect(origins.scriptSrc).toEqual(['https://checkout.razorpay.com']);
+      expect(origins.frameSrc).toEqual(expect.arrayContaining(['https://api.razorpay.com', 'https://checkout.razorpay.com']));
+      expect(origins.connectSrc).toEqual(expect.arrayContaining(['https://api.razorpay.com', 'https://lumberjack.razorpay.com']));
+      expect(origins.formAction).toEqual(['https://api.razorpay.com']);
+      for (const list of Object.values(origins)) for (const source of list) expect(source).not.toContain('*');
+    }
   });
 });

@@ -20,6 +20,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHmac } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import Stripe from 'stripe';
+import { STRIPE_API_VERSION } from '../src/modules/billing/providers/stripe-api-version.js';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
 import { billingCredentialsService } from '../src/modules/billing/credentials.service.js';
@@ -32,7 +33,7 @@ const SECRET = 'external-billing-signing-secret-for-tests-0123456789';
 const STRIPE_SECRET = 'whsec_apply_integrity';
 
 const stripe = new Stripe('sk_for_signing_only', {
-  apiVersion: '2024-11-20.acacia' as Stripe.LatestApiVersion,
+  apiVersion: STRIPE_API_VERSION,
 });
 
 function daysFromNow(days: number): Date {

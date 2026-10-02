@@ -156,8 +156,8 @@ checkout takes no return or cancel URL, so a buyer who pays for a recurring
 Razorpay plan finishes on Razorpay's page and is not sent back to your app;
 `successUrl` and `cancelUrl` are unused for them. Show the buyer how to get
 back (the activation still arrives by webhook). One-time Razorpay purchases do
-return to `successUrl`. The planned fix is the Rekey checkout page (below)
-opening Razorpay's modal on our page and so keeping the buyer there.
+return to `successUrl`. The Rekey checkout page (below) fixes this: Razorpay's
+modal opens on that page, and the page sends the buyer to `successUrl`.
 
 **Stripe payment methods.** Stripe Checkout offers whatever payment methods the
 operator's Stripe account has enabled (cards, Link, Apple Pay and Google Pay,
@@ -172,8 +172,8 @@ in the Stripe Dashboard (Settings → Payment methods).
 Instead of sending the buyer to the processor's own page, a checkout can land
 on a Rekey-hosted page at `<portal>/<slug>/checkout/chk_…` that carries your
 name, logo and colours, the order summary and the renewal terms, with the
-processor's own payment buttons in it. Today that is **PayPal subscriptions**;
-other processors and one-time purchases stay on the processor's page.
+processor's own payment buttons in it. Today that is **PayPal**,
+**Razorpay** and **Stripe**, for subscriptions and one-time purchases.
 
 Nothing changes in your code. `POST /billing/checkout` still answers with a
 `url` to redirect to; when the page is on, `url` is the Rekey page and the
@@ -195,10 +195,10 @@ any FAIL; switching back is never refused. The same settings are on the API:
 |---|---|---|
 | Portal reachable | no hosted portal on this deployment (`PUBLIC_PORTAL_URL` unset), or the portal did not answer a round-trip probe | the probe took over 2 s |
 | Provider supports the page | the provider cannot take a flow this Application sells on the page | sandbox credentials on a PRODUCTION Application, or live ones on a DEVELOPMENT/STAGING one; or nothing has shown the credentials work yet. Any one of these counts: a plan registered with the provider in this mode (Stripe), or, since the secret or its mode last changed, a checkout session opened in this mode, a subscription or payment through the provider, or a verified webhook. Editing only enablement or routing does not restart that window |
-| Webhook registered and delivering | no webhook registered; in live mode, no webhook verified with the live credentials in the last 30 days and since their secret was last saved (a sandbox delivery never counts) | the last verified webhook is over 7 days old; in test mode, none yet |
+| Webhook registered and delivering | no webhook registered; in live mode, no webhook verified with the live credentials in the last 30 days and since their secret was last saved (a sandbox delivery never counts) | the last verified webhook is over 7 days old; in test mode, none yet; for Razorpay with one-time plans, no `order.paid` delivered yet |
 | Plans ready in this mode | a live paid plan cannot be bought through the provider, or was registered in the other mode | there are no active paid plans to sell; or a registration predates mode recording |
 | Return URL origin registered | the Application has no Application URL and no redirect URLs | |
-| Browser credential | PayPal has no Client ID | |
+| Browser credential | PayPal has no Client ID; Razorpay has no Key ID; Stripe has no publishable key, or its mode differs from the secret key's | |
 | Branding | | no display name or no logo (Panel → Application → Portal → Branding) |
 | CSP reports | | the portal does not receive the page's CSP reports |
 
@@ -220,10 +220,87 @@ for while it can still be paid, and never after it is paid or expired. In test
 mode a banner says "Test mode: no real money moves." It is never shown in live
 mode. The buyer approves in PayPal's own window (the PayPal wallet, or "Debit
 or Credit Card"), and the page waits for PayPal's webhook, then sends the buyer
-to `successUrl`. The browser's word activates nothing: the subscription
-activates only from PayPal's verified webhook, as it does on PayPal's page. If
+to `successUrl`. The browser's word activates nothing: a subscription
+activates only from PayPal's verified `BILLING.SUBSCRIPTION.ACTIVATED` webhook,
+and a one-time order is captured and fulfilled only from its verified
+`CHECKOUT.ORDER.APPROVED` webhook, as on PayPal's page. If
 PayPal's script does not load, the page offers "Continue on PayPal", the same
-PayPal page as before.
+PayPal page as before. One-time purchases need `CHECKOUT.ORDER.APPROVED` and
+`PAYMENT.CAPTURE.COMPLETED` on the PayPal webhook. Auto-configure in Billing →
+Setup → Providers → PayPal registers both, and when a webhook already exists at
+Rekey's URL it replaces that webhook's event list with the full set, so run it
+once on an Application set up before one-time checkout. A webhook you pasted by
+id and never auto-configured keeps whatever events you gave it at PayPal.
+Before capturing, Rekey reads the order back from PayPal and captures only an
+order for the buyer, amount and currency the checkout created; anything else is
+left uncaptured and logged as `app.checkout_capture_refused`.
+
+**Razorpay on the page.** The page shows its own "Pay" button in your accent
+colour; it opens Razorpay's Standard Checkout modal (cards, UPI, netbanking,
+wallets) with your display name, logo and colour, UPI first for an INR
+one-time purchase (Razorpay does not reorder methods for a subscription). Card and
+UPI details are entered only in Razorpay's modal. A subscription is the same
+Razorpay subscription as on Razorpay's page; a one-time purchase is a Razorpay
+Order rather than a Payment Link, because the modal cannot open a link. When
+Razorpay says paid, Rekey checks Razorpay's signature on it (and, for an order,
+reads the payment back from Razorpay and captures it if your account is set to
+manual capture), then waits for the webhook: `subscription.activated` /
+`subscription.authenticated` for a subscription, `order.paid` for a one-time
+order. **Add `order.paid` to your Razorpay webhook** (Razorpay Dashboard →
+Settings → Webhooks) before selling one-time plans on the page; without it the
+buyer pays and the order is never fulfilled. The readiness check warns until
+one has arrived. Keep automatic capture on (Razorpay Dashboard → Account &
+Settings → Capture settings, the default): with manual capture, a payment whose
+page closed before reporting back is never captured, and Razorpay refunds it.
+If Razorpay's script does not load, "Continue on Razorpay"
+opens the subscription's Razorpay page, or posts the same order to Razorpay
+Hosted Checkout, which returns the buyer to the page: waiting for the webhook
+after a payment, or saying nothing was charged after a failed one. While a
+buyer's earlier Razorpay subscription for the same plan is authorised and
+waiting for its webhook, a new checkout for it answers
+`409 CHECKOUT_PAYMENT_IN_PROGRESS`, as for PayPal.
+
+**Stripe on the page.** The page shows Stripe's Payment Element (cards, Link,
+Apple Pay, Google Pay and the other methods your Stripe account enables) under
+the order summary, themed with your accent and surface colours, with a Pay
+button that names the amount. It is the same Checkout Session the redirect
+flow creates, in `ui_mode: 'elements'`, so trials, coupons and payment methods
+behave exactly as on Stripe's page, and the purchase still completes only from
+the verified `checkout.session.completed` (or
+`checkout.session.async_payment_succeeded`) webhook. Card details stay inside
+Stripe's frames. Setup:
+
+- Add the **publishable key** in Panel → Application → Billing → Setup →
+  Providers → Stripe → Edit (`pk_test_…` with a `sk_test_…` secret key,
+  `pk_live_…` with `sk_live_…`; a key in the other mode is refused). It is a
+  public value, sent only to the checkout page. The redirect flow does not
+  need it.
+- **Wallets need the page's domain registered** on your Stripe account:
+  Stripe Dashboard → Settings → Payment method domains, add the portal's host
+  (`portal.rekey.dev` on Rekey Cloud, or your own portal host). Until then
+  Apple Pay and Google Pay do not appear; cards and Link still do.
+- A card that asks for 3-D Secure may send the buyer to their bank and back to
+  the page, which checks the payment with Stripe and carries on waiting for
+  the webhook.
+- A bank debit (SEPA, ACH, Bacs) finishes on the page as "confirming": the
+  money arrives days later and the purchase completes on
+  `checkout.session.async_payment_succeeded`. Until then a new checkout for
+  the same plan answers `409 CHECKOUT_PAYMENT_IN_PROGRESS`, so the buyer
+  cannot pay twice. If the debit fails, `checkout.session.async_payment_failed`
+  closes the checkout and the buyer can start another. Stripe leaves a
+  subscription whose first debit failed `active` with its invoice voided, so
+  Rekey also cancels that Stripe subscription; otherwise it would bill the
+  next period for a checkout that never activated. Auto-configure
+  subscribes both events; add them to a webhook you registered by hand.
+
+"Continue on Stripe" (shown if Stripe.js does not load or the payment fails)
+closes the session on the page and opens Stripe's own checkout page for the
+same order, at the same price, with the same coupon and trial, so the buyer
+can never pay twice. Stripe's page expires with the Rekey checkout. In the
+checkout's last half hour the link is still shown but answers
+`409 CHECKOUT_FALLBACK_UNAVAILABLE` and returns the buyer to the page, whose
+form keeps working. A Checkout custom domain works: each click asks Stripe for
+the page's address.
 
 **Links on the page.** Set Terms, Privacy and Refund policy URLs in Panel →
 Application → Portal → Branding to show them in the page's footer. The hosted
@@ -235,7 +312,7 @@ to work.
 `CHECKOUT_LIMIT_PER_IP_HOUR` (default 20) an hour, and one Application
 `CHECKOUT_LIMIT_PER_APP_HOUR` (default 1000) an hour. The next answers
 `429 CHECKOUT_RATE_LIMITED` with the time to retry. While a buyer's earlier
-PayPal checkout for the same plan is approved and waiting for its webhook, a
+subscription checkout for the same plan is approved and waiting for its webhook, a
 new one answers `409 CHECKOUT_PAYMENT_IN_PROGRESS` instead of starting a
 second subscription. A checkout page link expires with its checkout, after 24 hours.
 
@@ -632,7 +709,7 @@ Stripe ──signed event──> Rekey  (POST /webhook/stripe/<app-slug>)
 
 The signature is the auth — no `Authorization` header on this route. The raw body is preserved by `fastify-raw-body` (HMAC verification breaks if you reserialize the JSON).
 
-**Application identification.** The app is identified by the URL slug, and the slug is trusted because the signing secret that validated the request is that app's own — a Stripe account can't sign payloads for another app's endpoint. (The dispatch handler still reads `metadata.applicationId` to scope its DB writes; Rekey-created checkout sessions embed it and subscription/invoice events inherit it.)
+**Application identification.** The app is identified by the URL slug, and the slug is trusted because the signing secret that validated the request is that app's own — a Stripe account can't sign payloads for another app's endpoint. (The dispatch handler still reads `metadata.applicationId` to scope its DB writes; Rekey-created checkout sessions and subscriptions embed it, and an invoice is routed by the subscription metadata Stripe snapshots onto it.)
 
 **Today's coverage:**
 
@@ -640,12 +717,55 @@ The signature is the auth — no `Authorization` header on this route. The raw b
 |---|---|
 | `checkout.session.completed` | Local PENDING Subscription matched on `metadata.checkoutSessionId` → ACTIVE; persists `providerSubId`. Skipped when `payment_status` is `unpaid` (a delayed payment method) |
 | `checkout.session.async_payment_succeeded` | The same activation, for a delayed payment method once its money arrives |
+| `checkout.session.async_payment_failed` | A delayed payment method's money did not arrive: the checkout is closed and its coupon and trial reservations are released, so the buyer can start another. Nothing was activated |
 | `customer.subscription.updated` | Mirrors status, currentPeriodEnd, cancelAt, canceledAt |
 | `customer.subscription.deleted` | → CANCELED |
 | `invoice.paid` / `invoice.payment_succeeded` | Inserts SUCCEEDED Payment + ensures Subscription ACTIVE |
 | `invoice.payment_failed` | Inserts FAILED Payment + sets Subscription PAST_DUE |
-| `charge.refunded` | Sets the matching Payment's `refundedAmount` to the charge's cumulative `amount_refunded` and its status to PARTIALLY_REFUNDED or REFUNDED. Matched by the charge's invoice (a subscription charge) or payment intent (a one-time checkout). Entitlements are not revoked. Disputes are not consumed |
+| `charge.refunded` | Sets the matching Payment's `refundedAmount` to the charge's cumulative `amount_refunded` and its status to PARTIALLY_REFUNDED or REFUNDED. Matched by the charge's invoice (a subscription charge) or payment intent (a one-time checkout); in the basil-or-later shape a charge with no Rekey metadata has its invoice looked up through Stripe's Invoice Payments API. Entitlements are not revoked. Disputes are not consumed |
 | anything else | Logged + recorded as processed (no-op) |
+
+**Invoice routing.** A subscription invoice does not carry Rekey's
+`applicationId` on its own `metadata`; Stripe snapshots the subscription's
+metadata onto it (`parent.subscription_details.metadata`, or
+`subscription_details.metadata` on acacia endpoints), and Rekey routes
+`invoice.paid` and `invoice.payment_failed` by that snapshot when the invoice
+has none of its own. That is what records renewal payments and opens dunning
+for Stripe subscriptions.
+
+- Renewals from before this release are not backfilled: Stripe already
+  delivered those events and Rekey acknowledged them, so they stay unrecorded.
+  Resending one from the Stripe dashboard does not help either, because the
+  resend carries the same event id and Rekey skips it as a duplicate.
+- Stripe retries a failed renewal on the same invoice. Each failed attempt
+  counts on the open dunning case, and when a retry succeeds the invoice's
+  FAILED payment becomes SUCCEEDED, the subscription returns to ACTIVE and
+  the case closes as recovered.
+- A subscription's first invoice can arrive before `checkout.session.completed`
+  (or, for a delayed payment method, before
+  `checkout.session.async_payment_succeeded`). Until the checkout links the
+  subscription, that invoice answers 500 and Stripe redelivers it. After 24
+  hours (by the event's `created` time) it stops waiting and is filed as an
+  unapplied payment, so a checkout that never reached Rekey still reaches the
+  operator.
+- A first invoice that charged nothing (a trial's) records no payment. A $0
+  renewal (covered by a customer balance or a 100%-off coupon) records a $0
+  SUCCEEDED payment and sends `payment.succeeded` with amount 0, because that
+  is what refills credits and extends a TIMED licence for the new period. A
+  payment never ends a trial; the status mirror does.
+- A failed payment for a canceled or expired subscription is recorded, but it
+  does not move the subscription to PAST_DUE or open dunning.
+
+**Applications sharing one Stripe account.** A Stripe webhook endpoint
+receives every event in its account. When two Applications use the same
+Stripe account, each one's endpoint also receives the other's checkout,
+subscription and (now) invoice events, signed with its own secret but naming
+the other Application. Rekey answers those `400 WEBHOOK_APPLICATION_MISMATCH`,
+applies nothing, and records why on the receipt; the other Application's own
+endpoint receives the same event and applies it. Stripe retries the refused
+deliveries and shows them as failures on the endpoint. To avoid the noise,
+give each Application its own Stripe account (or sandbox), which also keeps
+their payouts and disputes apart.
 
 **Mode.** A Stripe event carries `livemode`. One that contradicts the mode of
 the credential that verified it (a live event under test keys, or the reverse)
@@ -654,20 +774,27 @@ applied. It means the saved signing secret belongs to the other mode's
 endpoint. The receipt stays unprocessed, so once the credential is corrected,
 Stripe's next retry of the event applies it.
 
-**Stripe API version.** Rekey registers its Stripe endpoint pinned to the
-API version its client uses (`STRIPE_API_VERSION` in
-`providers/stripe-api-version.ts`), so events arrive in the shape Rekey reads.
-An endpoint registered before that pin, or created by hand without choosing a
-version, delivers in the Stripe account's default version. Accounts created
-from 2025-03-31 default to `basil` or later, where the subscription's
-`current_period_end` lives on its items and an invoice's subscription on
-`parent.subscription_details`; Rekey reads both shapes, so those endpoints
-keep working. Re-register anyway (Panel → Application → Billing → Setup → Providers, **Auto-configure** on the Stripe
-row) to pin the version and to subscribe
+**Stripe API version.** Rekey's Stripe client speaks `2026-09-30.endive`
+(`STRIPE_API_VERSION` in `providers/stripe-api-version.ts`, on `stripe@^23`),
+and the endpoint it registers is pinned to the same version, so events arrive
+in the shape Rekey reads. An endpoint registered by an earlier Rekey is pinned
+to `2024-11-20.acacia`, and one created by hand without choosing a version
+delivers in the Stripe account's default. Rekey reads both the acacia shape
+and the basil-or-later one (`2025-03-31.basil` moved the subscription's
+`current_period_end` onto its items, an invoice's subscription and its
+metadata onto `parent.subscription_details`, and removed the invoice from a
+charge), so those endpoints keep working. For a refunded charge in the newer
+shape, Rekey asks Stripe's Invoice Payments API, with the Application's own
+key, which invoice the charge paid; if Stripe cannot be reached the event
+answers 500 and Stripe retries it.
+
+Re-register anyway (Panel → Application → Billing → Setup → Providers,
+**Auto-configure** on the Stripe row) to pin the version and to subscribe
 `checkout.session.async_payment_succeeded`, without which a buyer who pays by
 a delayed method is never activated, and `charge.refunded`, without which a
-refund made in the Stripe dashboard never reaches Rekey's books. A hand-made endpoint should pick
-`2024-11-20.acacia` and subscribe the events in the table above.
+refund made in the Stripe dashboard never reaches Rekey's books. A hand-made
+endpoint should pick `2026-09-30.endive` and subscribe the events in the table
+above.
 
 See `apps/api/src/modules/billing/webhooks/` for the full module rules.
 

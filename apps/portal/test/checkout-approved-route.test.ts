@@ -29,7 +29,22 @@ describe('POST …/approved', () => {
   it('forwards a same-origin JSON approval', async () => {
     const res = await POST(request({ origin: 'https://portal.example', 'content-type': 'application/json' }, { subscriptionId: 'I-ABC123' }), params);
     expect(res.status).toBe(200);
-    expect(confirm).toHaveBeenCalledWith(TOKEN, 'I-ABC123');
+    expect(confirm).toHaveBeenCalledWith(TOKEN, { subscriptionId: 'I-ABC123' });
+  });
+
+  it('forwards a one-time order approval', async () => {
+    const res = await POST(request({ origin: 'https://portal.example', 'content-type': 'application/json' }, { orderId: '5O190127TN364715T' }), params);
+    expect(res.status).toBe(200);
+    expect(confirm).toHaveBeenCalledWith(TOKEN, { orderId: '5O190127TN364715T' });
+  });
+
+  it('refuses both ids at once, an unknown key and a non-object body', async () => {
+    const json = { origin: 'https://portal.example', 'content-type': 'application/json' };
+    const bodies = [{ subscriptionId: 'I-ABC123', orderId: '5O1' }, { paymentId: 'PAY-1' }, ['I-ABC123'], 'I-ABC123', {}];
+    const statuses = [];
+    for (const body of bodies) statuses.push((await POST(request(json, JSON.stringify(body)), params)).status);
+    expect(statuses).toEqual([400, 400, 400, 400, 400]);
+    expect(confirm).not.toHaveBeenCalled();
   });
 
   it('refuses another origin, a missing origin, a form post and a malformed id without calling the API', async () => {

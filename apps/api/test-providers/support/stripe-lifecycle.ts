@@ -145,5 +145,15 @@ export async function advanceClock(
  * disagree with.
  */
 export function periodEnd(subscription: Stripe.Subscription): Date {
-  return new Date(subscription.current_period_end * 1000);
+  return new Date(periodEndSeconds(subscription) * 1000);
+}
+
+/**
+ * The same, in Stripe's epoch seconds. The client is pinned to a basil-or-later
+ * version, where the period lives on the subscription's items.
+ */
+export function periodEndSeconds(subscription: Stripe.Subscription): number {
+  const item = subscription.items.data[0];
+  if (!item) throw new Error(`Stripe subscription ${subscription.id} has no items.`);
+  return item.current_period_end;
 }

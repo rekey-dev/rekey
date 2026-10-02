@@ -2,8 +2,8 @@
  * Razorpay module `translate` unit tests, fixture payloads in, normalized
  * DomainBillingEvents out. No DB writes: translate is pure mapping (the
  * appliers own persistence, pinned by razorpay-webhook.test.ts through the
- * pipeline). These fixtures pin the mapping itself: the 7-event coverage
- * (incl. the payment_link.paid one-time path), the checkoutSessionId
+ * pipeline). These fixtures pin the mapping itself: the event coverage
+ * (incl. the payment_link.paid and order.paid one-time paths), the checkoutSessionId
  * OR-matcher + requireLocalSubscription posture, the paid_count-driven
  * firstPeriod flag, the current_end period mirror, and the header-borne
  * event id.
@@ -12,7 +12,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FastifyBaseLogger } from 'fastify';
 import { razorpayModule } from '../src/modules/billing/providers/modules/razorpay/index.js';
-import type { RawWebhookReq, TranslateCtx } from '../src/modules/billing/providers/module-types.js';
+import type { DomainBillingEvent, RawWebhookReq, TranslateCtx } from '../src/modules/billing/providers/module-types.js';
 
 const APP_ID = 'app_rzp';
 const EVENT_ID = 'evt_rzp_hdr_1';
@@ -27,7 +27,9 @@ function ctx(): TranslateCtx & { log: { warn: ReturnType<typeof vi.fn> } } {
   } as never;
 }
 
-const translate = razorpayModule.webhook.translate.bind(razorpayModule.webhook);
+// This translator is synchronous; the module contract also admits async ones.
+const translate = (payload: unknown, c: TranslateCtx): DomainBillingEvent[] | null =>
+  razorpayModule.webhook.translate(payload, c) as DomainBillingEvent[] | null;
 
 describe('razorpay module translate', () => {
   it('subscription.activated → checkout.completed carrying providerSubId + current_end', () => {
@@ -183,6 +185,72 @@ describe('razorpay module translate', () => {
         firstPeriod: true,
       },
     ]);
+  });
+
+  it('order.paid for an order Rekey marked embedded → checkout.completed carrying its charge', () => {
+    const events = translate(
+      {
+        event: 'order.paid',
+        payload: {
+          order: { entity: { id: 'order_1', amount: 19900, amount_paid: 19900, notes: { rekey_checkout: 'embedded', rekey_plan_id: 'p' } } },
+          payment: { entity: { id: 'pay_order_1', amount: 19900, currency: 'INR' } },
+        },
+      },
+      ctx(),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'checkout.completed',
+        checkoutSessionId: 'order_1',
+        providerSubscriptionId: null,
+        payment: { providerPaymentId: 'pay_order_1', amount: 19900, currency: 'INR', description: null },
+      }),
+    ]);
+  });
+
+  it.each([
+    ['no notes', undefined],
+    ['notes without the marker (a Payment Link order)', { rekey_plan_id: 'p' }],
+    ['an empty notes array, as Razorpay sends it', []],
+    ['another marker value', { rekey_checkout: 'link' }],
+  ])('order.paid with %s → null, left to payment_link.paid', (_label, notes) => {
+    expect(
+      translate(
+        {
+          event: 'order.paid',
+          payload: {
+            order: { entity: { id: 'order_2', ...(notes !== undefined && { notes }) } },
+            payment: { entity: { id: 'pay_2', amount: 100, currency: 'INR' } },
+          },
+        },
+        ctx(),
+      ),
+    ).toBeNull();
+  });
+
+  it('order.paid for an order not paid in full → no events + warning', () => {
+    const c = ctx();
+    expect(
+      translate(
+        {
+          event: 'order.paid',
+          payload: {
+            order: { entity: { id: 'order_4', amount: 19900, amount_paid: 100, notes: { rekey_checkout: 'embedded' } } },
+            payment: { entity: { id: 'pay_4', amount: 100, currency: 'INR' } },
+          },
+        },
+        c,
+      ),
+    ).toEqual([]);
+    expect(c.log.warn).toHaveBeenCalled();
+  });
+
+  it('order.paid missing its payment → no events + warning', () => {
+    const c = ctx();
+    expect(
+      translate({ event: 'order.paid', payload: { order: { entity: { id: 'order_3', notes: { rekey_checkout: 'embedded' } } } } }, c),
+    ).toEqual([]);
+    expect(c.log.warn).toHaveBeenCalled();
   });
 
   it('missing entities → no events (cannot apply, never guess) + warning', () => {

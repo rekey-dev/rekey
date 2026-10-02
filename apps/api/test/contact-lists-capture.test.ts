@@ -3,7 +3,7 @@
  * Error codes: docs/errors.md, "Lists and contacts".
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
@@ -30,7 +30,22 @@ describe('list capture', () => {
   });
 
   beforeEach(() => setDeliveryScheduler(() => undefined));
-  afterEach(() => setDeliveryScheduler(null));
+  afterEach(() => {
+    setDeliveryScheduler(null);
+    vi.useRealTimers();
+  });
+
+  /**
+   * The capture limits count in fixed minute windows, so a burst that crosses
+   * a minute boundary lands in two buckets and is never refused. Pin the clock
+   * a few seconds into the next minute for the rest of the test. Only `Date`
+   * is faked; timers and I/O run normally.
+   */
+  function freezeInsideOneMinute(): void {
+    const nextMinute = (Math.floor(Date.now() / 60_000) + 1) * 60_000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(nextMinute + 5_000);
+  }
 
   interface Open extends ContactsWorld {
     listId: string;
@@ -272,6 +287,7 @@ describe('list capture', () => {
       expect((await prisma.contact.findFirstOrThrow({ where: { applicationId: w.appId } })).name).toBe('Real Name');
 
       const codes: number[] = [];
+      freezeInsideOneMinute();
       for (let i = 0; i < CAPTURE_PER_LIST_MINUTE + 1; i++) {
         codes.push((await server(w.secret, { email: `r${i}@example.com`, consent }, marker)).statusCode);
       }
@@ -395,6 +411,8 @@ describe('list capture', () => {
   });
 
   describe('rate limits', () => {
+    beforeEach(freezeInsideOneMinute);
+
     it('holds a browser to 5 a minute per address', async () => {
       const w = await openWorld();
       const codes: number[] = [];

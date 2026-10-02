@@ -11,7 +11,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FastifyBaseLogger } from 'fastify';
 import { paypalModule } from '../src/modules/billing/providers/modules/paypal/index.js';
-import type { TranslateCtx } from '../src/modules/billing/providers/module-types.js';
+import type { DomainBillingEvent, TranslateCtx } from '../src/modules/billing/providers/module-types.js';
 
 const APP_ID = 'app_pp';
 
@@ -24,7 +24,9 @@ function ctx(): TranslateCtx & { log: { warn: ReturnType<typeof vi.fn> } } {
   } as never;
 }
 
-const translate = paypalModule.webhook.translate.bind(paypalModule.webhook);
+// This translator is synchronous; the module contract also admits async ones.
+const translate = (payload: unknown, c: TranslateCtx): DomainBillingEvent[] | null =>
+  paypalModule.webhook.translate(payload, c) as DomainBillingEvent[] | null;
 
 describe('paypal module translate', () => {
   it('BILLING.SUBSCRIPTION.ACTIVATED → checkout.completed, un-pinned firstPeriod', () => {

@@ -1,7 +1,7 @@
 /**
  * The checkout page, rendered on the server from the API's view of one
  * session. Everything the buyer reads before paying is here and needs no
- * JavaScript; only the payment region waits on PayPal's script.
+ * JavaScript; only the payment region waits on the provider's script.
  *
  * Operator branding arrives already filtered by the API and is filtered again
  * here: colours through `safeCssColor` and a contrast check, URLs through
@@ -14,7 +14,15 @@ import * as React from 'react';
 import type { CheckoutPageOrder, CheckoutPageView } from '@rekey.dev/shared-types';
 import { safeCssColor, safeHttpUrl } from '@/lib/config';
 import { formatMoney, intervalWord, readableAccent, readableSurface, type CheckoutLocale } from '@/lib/checkout-format';
+import { checkoutProviderCopy } from '@/lib/checkout-provider-copy';
+import type { RazorpayReturn } from '@/lib/checkout-razorpay-return';
+import { portalBaseUrl } from '@/lib/env';
 import { PaypalPayment } from './paypal-payment';
+import { RazorpayFallback, type RazorpayFallbackTarget } from './razorpay-fallback';
+import { RazorpayPayment } from './razorpay-payment';
+import { stripeAppearance } from '@/lib/stripe-appearance';
+import { payButtonLabel } from '@/lib/stripe-elements';
+import { StripePayment } from './stripe-payment';
 
 function brandCss(order: CheckoutPageOrder | null): string {
   const accent = readableAccent(safeCssColor(order?.merchant.primaryColor ?? undefined) ?? null);
@@ -23,10 +31,10 @@ function brandCss(order: CheckoutPageOrder | null): string {
   return `:root{--ck-accent:${accent};${bg ? `--ck-bg:${bg};` : ''}${surface ? `--ck-surface:${surface};` : ''}}`;
 }
 
-function TestBanner(): React.JSX.Element {
+function TestBanner({ hint = '' }: { hint?: string }): React.JSX.Element {
   return (
     <div role="note" className="bg-[#fef3c7] px-4 py-2 text-center text-sm font-medium text-[#78350f]">
-      Test mode: no real money moves. Pay with a PayPal sandbox account.
+      Test mode: no real money moves.{hint && ` ${hint}`}
     </div>
   );
 }
@@ -101,6 +109,135 @@ function CancelSentence({ order }: { order: CheckoutPageOrder }): React.JSX.Elem
   return <>You can cancel any time from your {order.merchant.displayName} account; cancelling stops the next renewal.</>;
 }
 
+/**
+ * Razorpay's fallback, which works with scripts blocked: a subscription's own
+ * Razorpay page through the host-checked `continue` route, or the same order
+ * posted to Razorpay Hosted Checkout. `prefill[contact]` is optional there and
+ * Rekey holds no phone number, so the buyer enters one on Razorpay's page.
+ */
+function razorpayFallback(order: CheckoutPageOrder, basePath: string, logo: string | undefined): RazorpayFallbackTarget {
+  const client = order.client;
+  if (client.provider !== 'razorpay' || client.target.kind === 'subscription') return { kind: 'link', href: `${basePath}/continue` };
+  const page = new URL(basePath, portalBaseUrl()).href;
+  return {
+    kind: 'hosted',
+    fields: [
+      ['key_id', client.keyId],
+      ['order_id', client.target.orderId],
+      ['amount', String(order.totalDueToday)],
+      ['currency', order.plan.currency],
+      ['name', order.merchant.displayName],
+      ['description', order.plan.name],
+      ...(logo ? [['image', logo] as const] : []),
+      ['prefill[email]', order.buyerEmail],
+      ['callback_url', `${page}/razorpay/return`],
+      ['cancel_url', page],
+    ],
+  };
+}
+
+/** The one part of the page that differs per provider: its own payment component, and its no-script fallback. */
+function PaymentRegion({
+  order,
+  nonce,
+  basePath,
+  fallbackLabel,
+  providerName,
+  initialPhase,
+  razorpayReturn,
+  total,
+}: {
+  order: CheckoutPageOrder;
+  nonce: string;
+  basePath: string;
+  fallbackLabel: string;
+  providerName: string;
+  initialPhase: 'loading' | 'confirming';
+  razorpayReturn: RazorpayReturn | null;
+  total: string;
+}): React.JSX.Element {
+  const client = order.client;
+  switch (client.provider) {
+    case 'paypal':
+      return (
+        <>
+          <PaypalPayment
+            nonce={nonce}
+            client={client}
+            basePath={basePath}
+            successUrl={order.successUrl}
+            initialPhase={initialPhase}
+            fallbackLabel={fallbackLabel}
+          />
+          <noscript>
+            <p className="mt-2 text-sm">
+              <a className="ck-link" href={`${basePath}/continue`}>
+                {fallbackLabel}
+              </a>
+            </p>
+          </noscript>
+        </>
+      );
+    case 'razorpay': {
+      const logo = safeHttpUrl(order.merchant.logoUrl ?? undefined);
+      const fallback = razorpayFallback(order, basePath, logo);
+      const returned = razorpayReturn === 'paid' ? 'claimed' : razorpayReturn;
+      return (
+        <>
+          <RazorpayPayment
+            nonce={nonce}
+            keyId={client.keyId}
+            target={client.target}
+            basePath={basePath}
+            successUrl={order.successUrl}
+            initialPhase={initialPhase === 'confirming' ? 'confirming' : (returned ?? 'loading')}
+            merchant={{
+              name: order.merchant.displayName,
+              image: logo ?? null,
+              color: readableAccent(safeCssColor(order.merchant.primaryColor ?? undefined) ?? null),
+            }}
+            buyerEmail={order.buyerEmail}
+            description={order.plan.name}
+            upiFirst={client.target.kind === 'order' && order.plan.currency.toUpperCase() === 'INR'}
+            payLabel={`Pay ${total}`}
+            providerName={providerName}
+            fallbackLabel={fallbackLabel}
+            fallback={fallback}
+          />
+          <noscript>
+            <div className="mt-2 text-sm">
+              <RazorpayFallback target={fallback} label={fallbackLabel} />
+            </div>
+          </noscript>
+        </>
+      );
+    }
+    case 'stripe':
+      return (
+        <>
+          <StripePayment
+            nonce={nonce}
+            client={client}
+            appearance={stripeAppearance(order.merchant)}
+            payLabel={payButtonLabel(order, total)}
+            basePath={basePath}
+            successUrl={order.successUrl}
+            initialPhase={initialPhase}
+            providerName={providerName}
+            fallbackLabel={fallbackLabel}
+          />
+          <noscript>
+            <p className="mt-2 text-sm">
+              <a className="ck-link" href={`${basePath}/continue`}>
+                {fallbackLabel}
+              </a>
+            </p>
+          </noscript>
+        </>
+      );
+  }
+}
+
 function SummaryLines({
   order,
   price,
@@ -143,12 +280,15 @@ export function CheckoutView({
   nonce,
   basePath,
   locale,
+  razorpayReturn = null,
 }: {
   view: CheckoutPageView;
   order: CheckoutPageOrder;
   nonce: string;
   basePath: string;
   locale: CheckoutLocale;
+  /** What Razorpay Hosted Checkout reported on the way back, from the return route's flag. */
+  razorpayReturn?: RazorpayReturn | null;
 }): React.JSX.Element {
   const testMode = view.paymentMode === 'test';
   const m = order.merchant;
@@ -157,6 +297,7 @@ export function CheckoutView({
   const price = formatMoney(order.plan.amount, order.plan.currency, locale);
   const total = formatMoney(order.totalDueToday, order.plan.currency, locale);
   const renewal = renewalSentence(order, locale);
+  const copy = checkoutProviderCopy(order.client.provider);
   const footerLinks = [
     { href: safeHttpUrl(m.termsUrl ?? undefined), label: 'Terms' },
     { href: safeHttpUrl(m.privacyUrl ?? undefined), label: 'Privacy' },
@@ -169,7 +310,7 @@ export function CheckoutView({
       {/* Every value in brandCss passed safeCssColor's allowlist and a contrast check. */}
       {/* eslint-disable-next-line react/no-danger */}
       <style nonce={nonce} dangerouslySetInnerHTML={{ __html: brandCss(order) }} />
-      {testMode && <TestBanner />}
+      {testMode && <TestBanner hint={copy.testHint} />}
       <div className="mx-auto max-w-5xl px-4 py-6 sm:py-10">
         <header className="flex items-center justify-between gap-4">
           <div className="flex min-w-0 items-center gap-3">
@@ -187,7 +328,7 @@ export function CheckoutView({
         <main className="mt-6 grid gap-8 md:mt-10 md:grid-cols-2 md:gap-12">
           <section aria-labelledby="summary-heading">
             <h1 id="summary-heading" className="text-sm font-medium text-[var(--ck-muted-fg)]">
-              Subscribe to {order.plan.name}
+              {order.plan.kind === 'recurring' ? 'Subscribe to' : 'Buy'} {order.plan.name}
             </h1>
             <p className="mt-2 text-3xl font-semibold tracking-tight">
               {price}
@@ -218,27 +359,24 @@ export function CheckoutView({
               </p>
             )}
             <div className="mt-4" aria-describedby={renewal ? 'renewal-disclosure' : undefined}>
-              <PaypalPayment
+              <PaymentRegion
+                order={order}
                 nonce={nonce}
-                clientId={order.client.clientId}
-                subscriptionId={order.client.subscriptionId}
                 basePath={basePath}
-                successUrl={order.successUrl}
+                fallbackLabel={`Continue on ${copy.name}`}
+                providerName={copy.name}
                 initialPhase={view.status === 'confirming' ? 'confirming' : 'loading'}
+                razorpayReturn={razorpayReturn}
+                total={total}
               />
-              <noscript>
-                <p className="mt-2 text-sm">
-                  <a className="ck-link" href={`${basePath}/continue`}>
-                    Continue on PayPal
-                  </a>
-                </p>
-              </noscript>
             </div>
           </section>
         </main>
 
         <footer className="mt-12 border-t border-[var(--ck-border)] pt-4 text-xs text-[var(--ck-muted-fg)]">
-          <p>Payments are processed securely by PayPal. {m.displayName} never sees your full card number.</p>
+          <p>
+            Payments are processed securely by {copy.name}. {m.displayName} never sees your full card number.
+          </p>
           {footerLinks.length > 0 && (
             <ul className="mt-2 flex flex-wrap gap-x-4">
               {footerLinks.map((l) => (

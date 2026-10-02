@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { rejectMalformedActionOrigin } from '@rekey.dev/nextjs/middleware';
-import { checkoutTokenMode } from '@rekey.dev/shared-types/checkout';
+import { CHECKOUT_PAGE_PROVIDERS, checkoutTokenMode } from '@rekey.dev/shared-types/checkout';
 import { RETURN_TO_HEADER, returnPathOf, staleSessionRedirect } from '@/lib/session-refresh';
 import {
   buildCheckoutCsp,
@@ -14,10 +14,12 @@ const ACCESS_COOKIE = 'rekey_portal_access';
 const REFRESH_COOKIE = 'rekey_portal_refresh';
 
 /**
- * Phase 1 serves PayPal only, and the token does not name its processor. The
- * page itself refuses to load processor scripts for any other provider.
+ * The token names its payment mode but not its processor, and the session is
+ * only read once the page renders, after this header is set. So the policy
+ * allows every processor the page hosts, in the token's mode only: a live page
+ * still never admits a sandbox host. The page loads only its own session's
+ * processor script.
  */
-const CHECKOUT_PAGE_PROVIDER = 'paypal';
 
 /**
  * The checkout page gets its own treatment: no portal session handling (the
@@ -26,7 +28,7 @@ const CHECKOUT_PAGE_PROVIDER = 'paypal';
  */
 function checkoutResponse(req: NextRequest, token: string): NextResponse {
   const nonce = btoa(crypto.randomUUID());
-  const csp = buildCheckoutCsp({ nonce, provider: CHECKOUT_PAGE_PROVIDER, mode: checkoutTokenMode(token) });
+  const csp = buildCheckoutCsp({ nonce, provider: CHECKOUT_PAGE_PROVIDERS, mode: checkoutTokenMode(token) });
   const headers = new Headers(req.headers);
   headers.set(NONCE_HEADER, nonce);
   // Next reads the nonce for its own scripts from the REQUEST's

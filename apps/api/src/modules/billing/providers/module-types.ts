@@ -183,6 +183,20 @@ export interface CheckoutApprovedEvent extends DomainEventBase {
   provider: string;
 }
 
+/**
+ * A checkout the buyer finished whose delayed payment then failed (Stripe
+ * `checkout.session.async_payment_failed`, a bank debit that bounced). The
+ * applier closes the checkout and gives its reservations back; nothing was
+ * activated, so nothing is revoked.
+ */
+export interface CheckoutPaymentFailedEvent extends DomainEventBase {
+  type: 'checkout.payment_failed';
+  /** Provider checkout-session id, matches the CheckoutSession row. */
+  checkoutSessionId: string;
+  /** The provider subscription the session created, which the applier cancels. Null for a one-time session. */
+  providerSubscriptionId: string | null;
+}
+
 interface PaymentEventBase extends DomainEventBase {
   providerPaymentId: string;
   providerSubscriptionId: string | null;
@@ -230,6 +244,14 @@ export interface PaymentSucceededEvent extends PaymentEventBase {
    * renewal grant anchors on the NEW period, as the bespoke handler did.
    */
   currentPeriodEnd?: Date;
+  /**
+   * The payment belongs to a subscription whose checkout has not been applied
+   * yet (Stripe's first invoice can arrive before `checkout.session.completed`
+   * or `async_payment_succeeded`). When no local subscription matches, the
+   * applier throws instead of filing it as unapplied, so the event answers 500
+   * and the provider redelivers it after the checkout lands.
+   */
+  deferUntilLinked?: boolean;
 }
 
 export interface PaymentFailedEvent extends PaymentEventBase {
@@ -370,6 +392,7 @@ export type DomainBillingEvent =
   | SubscriptionGrantedEvent
   | CheckoutCompletedEvent
   | CheckoutApprovedEvent
+  | CheckoutPaymentFailedEvent
   | PaymentSucceededEvent
   | PaymentFailedEvent
   | PaymentRefundedEvent
@@ -392,6 +415,13 @@ export interface TranslateCtx {
    * Payload-carried ids (Stripe, PayPal) don't need it.
    */
   providerEventId?: string;
+  /**
+   * The decrypted credentials that verified this request, in the mode the
+   * event was checked against, for a translator that has to ask the provider
+   * for something the payload no longer carries (Stripe: the invoice behind a
+   * refunded charge from `2025-03-31.basil` on). Absent outside the pipeline.
+   */
+  credentials?: Readonly<Record<string, string>>;
 }
 
 /** Context threaded into `verify`, the credential row's test/live mode. */
@@ -616,7 +646,14 @@ export interface ProviderModule {
      * or null for a payload that does not say, and nothing is compared.
      */
     eventMode?(payload: unknown): 'test' | 'live' | null;
-    /** null = unhandled event type (logged + acked, receipt marked). */
-    translate(payload: unknown, ctx: TranslateCtx): DomainBillingEvent[] | null;
+    /**
+     * null = unhandled event type (logged + acked, receipt marked). May be
+     * async for a module that needs a provider read to finish translating;
+     * a throw answers 500 so the provider retries.
+     */
+    translate(
+      payload: unknown,
+      ctx: TranslateCtx,
+    ): DomainBillingEvent[] | null | Promise<DomainBillingEvent[] | null>;
   };
 }
